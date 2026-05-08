@@ -33,9 +33,13 @@ jobs:
     name: test262 conformance (advisory)
     runs-on: ubuntu-latest
     needs: build-and-test
-    # Advisory: a fail would mean the harness crashed, not that the
-    # score regressed. Score regressions are reviewed in PRs against
-    # test262-results.md.
+    # Advisory: a fail would mean the harness crashed (panic / SEGV
+    # / OOM), not that the score regressed. Score regressions are
+    # reviewed in PRs against test262-results.md.
+    #
+    # Runtime mode is the meaningful signal — parser is uniformly
+    # ≥95% across areas. ReleaseFast + 4 workers (matching the
+    # GitHub-hosted runner's vCPUs) keeps wall-time around a minute.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,5 +51,5 @@ jobs:
         with:
           version: master
 
-      - name: Run test262 (parser-only)
-        run: zig build test262 -- --quiet
+      - name: Run test262 (runtime, parallel)
+        run: zig build test262 -- --mode=runtime --threads=4 --quiet
