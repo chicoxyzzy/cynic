@@ -23,6 +23,12 @@ pub fn build(b: *std.Build) void {
         },
         .flags = &.{
             "-std=c11",
+            // _GNU_SOURCE exposes the POSIX symbols cutils.h reaches
+            // for (`clock_gettime` / `CLOCK_MONOTONIC`, `readlink`,
+            // `pthread_condattr_setclock`, `alloca` via stdlib.h)
+            // under glibc's `-std=c11` feature gating. No-op on
+            // Darwin/BSD where these are visible by default.
+            "-D_GNU_SOURCE",
             "-Wno-unused-parameter",
             "-Wno-implicit-fallthrough",
             "-Wno-sign-compare",
