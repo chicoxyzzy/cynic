@@ -310,9 +310,12 @@ fn coerceThisToJSString(realm: *Realm, this_value: Value) NativeError!*JSString 
 fn stringCharAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const idx_v = coerceToNumber(argOr(args, 0, Value.fromInt32(0)));
+    // §7.1.5 ToIntegerOrInfinity — NaN → 0; +Inf / -Inf are
+    // out-of-range; finite values truncate toward zero.
     const idx: i64 = if (idx_v.isInt32()) idx_v.asInt32() else blk: {
         const d = idx_v.asDouble();
-        if (std.math.isNan(d) or std.math.isInf(d)) break :blk -1;
+        if (std.math.isNan(d)) break :blk 0;
+        if (std.math.isInf(d)) break :blk if (d > 0) std.math.maxInt(i32) else -1;
         break :blk @intFromFloat(@trunc(d));
     };
     if (idx < 0 or @as(usize, @intCast(idx)) >= s.bytes.len) {
@@ -327,9 +330,11 @@ fn stringCharAt(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 fn stringCharCodeAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const idx_v = coerceToNumber(argOr(args, 0, Value.fromInt32(0)));
+    // §7.1.5 ToIntegerOrInfinity — see stringCharAt for the rule.
     const idx: i64 = if (idx_v.isInt32()) idx_v.asInt32() else blk: {
         const d = idx_v.asDouble();
-        if (std.math.isNan(d) or std.math.isInf(d)) break :blk -1;
+        if (std.math.isNan(d)) break :blk 0;
+        if (std.math.isInf(d)) break :blk if (d > 0) std.math.maxInt(i32) else -1;
         break :blk @intFromFloat(@trunc(d));
     };
     if (idx < 0 or @as(usize, @intCast(idx)) >= s.bytes.len) {
@@ -447,10 +452,61 @@ fn stringToLowerCase(realm: *Realm, this_value: Value, args: []const Value) Nati
     return Value.fromString(out);
 }
 
+/// §11.2 WhiteSpace + §11.3 LineTerminator productions —
+/// the codepoint set that String.prototype.trim* strips. Notably
+/// includes U+00A0 NBSP, U+FEFF ZWNBSP, the Space_Separator
+/// (Zs) category, and the LS / PS line separators in addition
+/// to the ASCII controls.
+fn isStringWhitespace(cp: u21) bool {
+    return switch (cp) {
+        // ASCII WhiteSpace + LineTerminator.
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20 => true,
+        // Other named whitespace.
+        0x00A0, 0xFEFF => true,
+        // Unicode Zs (Space_Separator) — enumerated to avoid
+        // pulling in the full UCD; this covers the spec set as
+        // of Unicode 15.
+        0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x202F, 0x205F, 0x3000 => true,
+        // LineTerminator: LS / PS.
+        0x2028, 0x2029 => true,
+        else => false,
+    };
+}
+
+/// Walk `bytes` forward, returning the first byte index whose
+/// codepoint isn't WhiteSpace/LineTerminator (or `bytes.len` if
+/// all-whitespace). Bytes are UTF-8 — invalid sequences stop
+/// the walk, leaving them alone.
+fn skipLeadingWhitespace(bytes: []const u8) usize {
+    var view = std.unicode.Utf8View.initUnchecked(bytes).iterator();
+    while (true) {
+        const before = view.i;
+        const cp = view.nextCodepoint() orelse return bytes.len;
+        if (!isStringWhitespace(cp)) return before;
+    }
+}
+
+/// Walk `bytes` forward, returning the byte index ONE PAST the
+/// last non-whitespace codepoint (so a slice `[..end]` is the
+/// trailing-trimmed string). Returns 0 for an all-whitespace
+/// string.
+fn endAfterTrailingWhitespace(bytes: []const u8) usize {
+    var view = std.unicode.Utf8View.initUnchecked(bytes).iterator();
+    var last_nonws_end: usize = 0;
+    while (true) {
+        const before = view.i;
+        const cp = view.nextCodepoint() orelse return last_nonws_end;
+        if (!isStringWhitespace(cp)) last_nonws_end = view.i;
+        _ = before;
+    }
+}
+
 fn stringTrim(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const s = try coerceThisToJSString(realm, this_value);
-    const trimmed = std.mem.trim(u8, s.bytes, " \t\n\r\x0b\x0c");
+    const start = skipLeadingWhitespace(s.bytes);
+    const end = endAfterTrailingWhitespace(s.bytes);
+    const trimmed = if (start >= end) s.bytes[0..0] else s.bytes[start..end];
     const out = realm.heap.allocateString(trimmed) catch return error.OutOfMemory;
     return Value.fromString(out);
 }
@@ -534,15 +590,21 @@ fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) NativeErro
         return regexSplit(realm, s, regex_obj, limit, out);
     }
 
-    if (!sep_v.isString()) {
-        return error.NativeThrew;
-    }
-    const sep: *JSString = @ptrCast(@alignCast(sep_v.asString()));
+    // §22.1.3.21 step 6 — separator that's neither a regex nor
+    // a string gets ToString'd. Booleans, numbers, BigInts, and
+    // most objects (with the regex-like fast path already taken
+    // above) all flow through here.
+    const sep_str_v: Value = if (sep_v.isString())
+        sep_v
+    else
+        Value.fromString(stringifyArg(realm, sep_v) catch return error.OutOfMemory);
+    const sep: *JSString = @ptrCast(@alignCast(sep_str_v.asString()));
 
-    // Empty separator — split into chars.
+    // Empty separator — split into chars. Honour `limit`.
     if (sep.bytes.len == 0) {
         var idx: usize = 0;
         for (s.bytes) |c| {
+            if (idx >= @as(usize, @intCast(limit))) break;
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
             const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
@@ -554,10 +616,12 @@ fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) NativeErro
         return heap_mod.taggedObject(out);
     }
 
-    // Generic split.
+    // Generic split. Stop as soon as we've collected `limit`
+    // pieces — the spec caps the result, not the work.
     var i: usize = 0;
     var idx: usize = 0;
     while (i <= s.bytes.len) {
+        if (idx >= @as(usize, @intCast(limit))) break;
         const remaining = s.bytes[i..];
         if (std.mem.indexOf(u8, remaining, sep.bytes)) |pos| {
             const part = remaining[0..pos];
@@ -1047,26 +1111,14 @@ fn stringReplaceAll(realm: *Realm, this_value: Value, args: []const Value) Nativ
 fn stringTrimStart(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const s = try coerceThisToJSString(realm, this_value);
-    var i: usize = 0;
-    while (i < s.bytes.len) : (i += 1) {
-        switch (s.bytes[i]) {
-            ' ', '\t', '\n', '\r', 0x0b, 0x0c => {},
-            else => break,
-        }
-    }
-    const out = realm.heap.allocateString(s.bytes[i..]) catch return error.OutOfMemory;
+    const start = skipLeadingWhitespace(s.bytes);
+    const out = realm.heap.allocateString(s.bytes[start..]) catch return error.OutOfMemory;
     return Value.fromString(out);
 }
 fn stringTrimEnd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const s = try coerceThisToJSString(realm, this_value);
-    var end: usize = s.bytes.len;
-    while (end > 0) : (end -= 1) {
-        switch (s.bytes[end - 1]) {
-            ' ', '\t', '\n', '\r', 0x0b, 0x0c => {},
-            else => break,
-        }
-    }
+    const end = endAfterTrailingWhitespace(s.bytes);
     const out = realm.heap.allocateString(s.bytes[0..end]) catch return error.OutOfMemory;
     return Value.fromString(out);
 }
