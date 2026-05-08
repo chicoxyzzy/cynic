@@ -1,0 +1,1122 @@
+//! §20 Object — extracted from `intrinsics.zig`. Covers four
+//! related sections that all hang off the global `Object`:
+//! • Static methods (`keys`, `values`, `entries`,
+//! `getOwnPropertyDescriptor`, `assign`, `defineProperty`,
+//! `defineProperties`, etc.).
+//! • Property descriptor machinery (§6.2.5
+//! ToPropertyDescriptor + §10.1.6.3
+//! ValidateAndApplyPropertyDescriptor — non-configurable
+//! redefine guard).
+//! • Object extensibility statics (`freeze`, `seal`,
+//! `isFrozen`, `isExtensible`, `preventExtensions`,
+//! `create`).
+//! • `Object.prototype` instance methods (`hasOwnProperty`,
+//! `propertyIsEnumerable`, `isPrototypeOf`, `toString`,
+//! `valueOf`).
+
+const std = @import("std");
+
+const Realm = @import("../realm.zig").Realm;
+const Value = @import("../value.zig").Value;
+const JSString = @import("../string.zig").JSString;
+const JSObject = @import("../object.zig").JSObject;
+const JSFunction = @import("../function.zig").JSFunction;
+const NativeError = @import("../function.zig").NativeError;
+const heap_mod = @import("../heap.zig");
+const ObjMod = @import("../object.zig");
+const intrinsics = @import("../intrinsics.zig");
+
+const installNativeMethod = intrinsics.installNativeMethod;
+const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
+const setNonEnumerable = intrinsics.setNonEnumerable;
+const argOr = intrinsics.argOr;
+const throwTypeError = intrinsics.throwTypeError;
+const stringifyArg = intrinsics.stringifyArg;
+const toBoolean = intrinsics.toBoolean;
+const sameValueZero = intrinsics.sameValueZero;
+const getPropertyChain = intrinsics.getPropertyChain;
+
+/// Wire `Object.*` statics and `Object.prototype` instance
+/// methods. Caller arranges that `realm.intrinsics.object_prototype`
+/// + the `Object` global stub already exist; this fn pours the
+/// methods in.
+pub fn install(realm: *Realm) !void {
+    if (heap_mod.valueAsFunction(realm.globals.get("Object").?)) |obj_ctor| {
+        try installNativeMethod(realm, obj_ctor, "keys", objectKeys, 1);
+        try installNativeMethod(realm, obj_ctor, "values", objectValues, 1);
+        try installNativeMethod(realm, obj_ctor, "entries", objectEntries, 1);
+        try installNativeMethod(realm, obj_ctor, "getPrototypeOf", objectGetPrototypeOf, 1);
+        try installNativeMethod(realm, obj_ctor, "hasOwn", objectHasOwn, 2);
+        try installNativeMethod(realm, obj_ctor, "defineProperty", objectDefineProperty, 3);
+        try installNativeMethod(realm, obj_ctor, "defineProperties", objectDefineProperties, 2);
+        try installNativeMethod(realm, obj_ctor, "getOwnPropertyDescriptor", objectGetOwnPropertyDescriptor, 2);
+        try installNativeMethod(realm, obj_ctor, "getOwnPropertyDescriptors", objectGetOwnPropertyDescriptors, 1);
+        try installNativeMethod(realm, obj_ctor, "getOwnPropertyNames", objectGetOwnPropertyNames, 1);
+        try installNativeMethod(realm, obj_ctor, "create", objectCreate, 2);
+        try installNativeMethod(realm, obj_ctor, "assign", objectAssign, 2);
+        try installNativeMethod(realm, obj_ctor, "freeze", objectFreeze, 1);
+        try installNativeMethod(realm, obj_ctor, "isFrozen", objectIsFrozen, 1);
+        try installNativeMethod(realm, obj_ctor, "seal", objectSeal, 1);
+        try installNativeMethod(realm, obj_ctor, "isSealed", objectIsSealed, 1);
+        try installNativeMethod(realm, obj_ctor, "preventExtensions", objectPreventExtensions, 1);
+        try installNativeMethod(realm, obj_ctor, "isExtensible", objectIsExtensible, 1);
+        try installNativeMethod(realm, obj_ctor, "fromEntries", objectFromEntries, 1);
+        try installNativeMethod(realm, obj_ctor, "setPrototypeOf", objectSetPrototypeOf, 2);
+        try installNativeMethod(realm, obj_ctor, "groupBy", objectGroupBy, 2);
+    }
+    if (realm.intrinsics.object_prototype) |obj_proto| {
+        try installNativeMethodOnProto(realm, obj_proto, "hasOwnProperty", objectHasOwnProperty, 1);
+        try installNativeMethodOnProto(realm, obj_proto, "toString", objectProtoToString, 0);
+        try installNativeMethodOnProto(realm, obj_proto, "valueOf", objectProtoValueOf, 0);
+        try installNativeMethodOnProto(realm, obj_proto, "propertyIsEnumerable", objectProtoPropertyIsEnumerable, 1);
+        try installNativeMethodOnProto(realm, obj_proto, "isPrototypeOf", objectProtoIsPrototypeOf, 1);
+    }
+}
+
+// ── Object static methods ───────────────────────────────────────────────────
+
+/// §7.1.21 CanonicalNumericIndexString — a string `s` is an
+/// integer-indexed key iff `s == String(ToUint32(s))` and the
+/// numeric value is in [0, 2^32 - 1]. The simplification used
+/// here: the canonical form has no leading zeros except for
+/// `"0"` itself, contains only ASCII digits, and parses to a
+/// number that round-trips. Returns the numeric value or
+/// `null` for non-integer keys.
+fn canonicalIntegerIndex(s: []const u8) ?u32 {
+    if (s.len == 0) return null;
+    if (s.len > 10) return null; // u32 max is 10 digits
+    if (s[0] == '0' and s.len > 1) return null; // no leading zero
+    var n: u64 = 0;
+    for (s) |c| {
+        if (c < '0' or c > '9') return null;
+        n = n * 10 + (c - '0');
+        if (n > std.math.maxInt(u32)) return null;
+    }
+    return @intCast(n);
+}
+
+/// §10.1.11 OrdinaryOwnPropertyKeys ordering. Returns own
+/// property keys in spec order: integer-indexed in ascending
+/// numeric order, then string keys in insertion order, then
+/// (eventually) symbol keys. Skips internal `__cynic_*` slots.
+/// Caller owns the returned slice (allocated via `realm.allocator`).
+pub fn ownPropertyKeysOrdered(
+    realm: *Realm,
+    obj: *JSObject,
+) NativeError![]const []const u8 {
+    const KeyEntry = struct { idx: u32, key: []const u8 };
+    var integer_keys: std.ArrayListUnmanaged(KeyEntry) = .empty;
+    defer integer_keys.deinit(realm.allocator);
+    var string_keys: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer string_keys.deinit(realm.allocator);
+
+    var it = obj.properties.iterator();
+    while (it.next()) |entry| {
+        const k = entry.key_ptr.*;
+        if (std.mem.startsWith(u8, k, "__cynic_")) continue;
+        if (canonicalIntegerIndex(k)) |i| {
+            integer_keys.append(realm.allocator, .{ .idx = i, .key = k }) catch return error.OutOfMemory;
+        } else {
+            string_keys.append(realm.allocator, k) catch return error.OutOfMemory;
+        }
+    }
+    // Accessors live in a separate map; include their keys too.
+    var ait = obj.accessors.iterator();
+    while (ait.next()) |entry| {
+        const k = entry.key_ptr.*;
+        if (std.mem.startsWith(u8, k, "__cynic_")) continue;
+        if (obj.properties.contains(k)) continue; // already counted
+        if (canonicalIntegerIndex(k)) |i| {
+            integer_keys.append(realm.allocator, .{ .idx = i, .key = k }) catch return error.OutOfMemory;
+        } else {
+            string_keys.append(realm.allocator, k) catch return error.OutOfMemory;
+        }
+    }
+
+    std.mem.sort(KeyEntry, integer_keys.items, {}, struct {
+        fn lessThan(_: void, a: KeyEntry, b: KeyEntry) bool {
+            return a.idx < b.idx;
+        }
+    }.lessThan);
+
+    const total = integer_keys.items.len + string_keys.items.len;
+    const out = realm.allocator.alloc([]const u8, total) catch return error.OutOfMemory;
+    var i: usize = 0;
+    for (integer_keys.items) |e| {
+        out[i] = e.key;
+        i += 1;
+    }
+    for (string_keys.items) |k| {
+        out[i] = k;
+        i += 1;
+    }
+    return out;
+}
+
+/// §10.5.11 Proxy [[OwnPropertyKeys]] — when `obj` is a proxy
+/// with an `ownKeys` handler trap, call it and convert the
+/// returned Array into a `[]const []const u8` slice. The caller
+/// owns the slice and frees it via `realm.allocator`. Returns
+/// `null` when no trap fires; the caller falls back to walking
+/// the target's own keys directly.
+fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []const u8 {
+    const proxy_target = obj.proxy_target orelse return null;
+    const handler = obj.proxy_handler orelse return null;
+    const trap_v = handler.get("ownKeys");
+    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
+        // Fall through to the target.
+        return try ownPropertyKeysOrdered(realm, proxy_target);
+    };
+    const interpreter = @import("../interpreter.zig");
+    const trap_args = [_]Value{heap_mod.taggedObject(proxy_target)};
+    const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const result_v = switch (outcome) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+    const result = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "'ownKeys' on proxy must return an array-like");
+    const len = lengthOfArrayLocal(result);
+    var out: std.ArrayListUnmanaged([]const u8) = .empty;
+    var i: i64 = 0;
+    while (i < len) : (i += 1) {
+        var ibuf: [24]u8 = undefined;
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+        const k_v = result.get(islice);
+        const key_str = if (k_v.isString())
+            (@as(*JSString, @ptrCast(@alignCast(k_v.asString())))).bytes
+        else blk: {
+            const s = stringifyArg(realm, k_v) catch return error.OutOfMemory;
+            break :blk s.bytes;
+        };
+        out.append(realm.allocator, key_str) catch return error.OutOfMemory;
+    }
+    return out.toOwnedSlice(realm.allocator) catch return error.OutOfMemory;
+}
+
+fn lengthOfArrayLocal(obj: *JSObject) i64 {
+    const len_v = obj.get("length");
+    if (len_v.isInt32()) {
+        const n = len_v.asInt32();
+        return if (n < 0) 0 else n;
+    }
+    if (len_v.isDouble()) {
+        const d = len_v.asDouble();
+        if (std.math.isNan(d) or d <= 0) return 0;
+        if (d > @as(f64, @floatFromInt(std.math.maxInt(i64)))) return std.math.maxInt(i64);
+        return @intFromFloat(d);
+    }
+    return 0;
+}
+
+fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.keys called on non-object");
+    const keys = if (try proxyOwnKeysOrNull(realm, obj)) |k| k else try ownPropertyKeysOrdered(realm, obj);
+    defer realm.allocator.free(keys);
+    const result = realm.heap.allocateObject() catch return error.OutOfMemory;
+    result.prototype = realm.intrinsics.array_prototype;
+    var idx: usize = 0;
+    for (keys) |key| {
+        if (!obj.flagsFor(key).enumerable) continue;
+        const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+        var ibuf: [16]u8 = undefined;
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
+        const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+        result.set(realm.allocator, owned.bytes, Value.fromString(key_str)) catch return error.OutOfMemory;
+        idx += 1;
+    }
+    result.set(realm.allocator, "length", Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(result);
+}
+
+fn objectValues(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.values called on non-object");
+    const keys = try ownPropertyKeysOrdered(realm, obj);
+    defer realm.allocator.free(keys);
+    const result = realm.heap.allocateObject() catch return error.OutOfMemory;
+    result.prototype = realm.intrinsics.array_prototype;
+    var idx: usize = 0;
+    for (keys) |key| {
+        if (!obj.flagsFor(key).enumerable) continue;
+        var ibuf: [16]u8 = undefined;
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
+        const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+        const v = try getPropertyChain(realm, obj, key);
+        result.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+        idx += 1;
+    }
+    result.set(realm.allocator, "length", Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(result);
+}
+
+fn objectEntries(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.entries called on non-object");
+    const keys = try ownPropertyKeysOrdered(realm, obj);
+    defer realm.allocator.free(keys);
+    const result = realm.heap.allocateObject() catch return error.OutOfMemory;
+    result.prototype = realm.intrinsics.array_prototype;
+    var idx: usize = 0;
+    for (keys) |key| {
+        if (!obj.flagsFor(key).enumerable) continue;
+        const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
+        pair.prototype = realm.intrinsics.array_prototype;
+        const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+        const v = try getPropertyChain(realm, obj, key);
+        pair.set(realm.allocator, "0", Value.fromString(key_str)) catch return error.OutOfMemory;
+        pair.set(realm.allocator, "1", v) catch return error.OutOfMemory;
+        pair.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
+        var ibuf: [16]u8 = undefined;
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
+        const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+        result.set(realm.allocator, owned.bytes, heap_mod.taggedObject(pair)) catch return error.OutOfMemory;
+        idx += 1;
+    }
+    result.set(realm.allocator, "length", Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(result);
+}
+
+pub fn objectGetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    _ = realm;
+    const arg = argOr(args, 0, Value.undefined_);
+    if (heap_mod.valueAsPlainObject(arg)) |obj| {
+        if (obj.prototype) |p| return heap_mod.taggedObject(p);
+        return Value.null_;
+    }
+    if (heap_mod.valueAsFunction(arg)) |fn_obj| {
+        // §10.2.4 — a Function's `[[Prototype]]` is `fn.proto`,
+        // typically `%Function.prototype%` (or
+        // `%GeneratorFunction.prototype%` for generators, etc.).
+        // The function's `.prototype` slot is a SEPARATE thing
+        // (the proto-of-instances-from-`new`); test262 fixtures
+        // and `testTypedArray.js` rely on the [[Prototype]]
+        // semantics here.
+        if (fn_obj.proto) |p| return heap_mod.taggedObject(p);
+        return Value.null_;
+    }
+    return error.NativeThrew;
+}
+
+fn objectHasOwn(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    _ = realm;
+    const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse {
+        return error.NativeThrew;
+    };
+    const key_v = argOr(args, 1, Value.undefined_);
+    if (!key_v.isString()) return Value.false_;
+    const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+    return Value.fromBool(obj.hasOwn(key_s.bytes));
+}
+
+// ── Property descriptors (§20.1.2) ──────────────────────────────────────────
+
+fn descriptorKey(realm: *Realm, v: Value) NativeError![]const u8 {
+    if (v.isString()) {
+        const s: *JSString = @ptrCast(@alignCast(v.asString()));
+        return s.bytes;
+    }
+    if (heap_mod.valueAsSymbol(v)) |sym| {
+        if (sym.description) |d| return d;
+        return "@@anon-symbol";
+    }
+    // §7.1.19 ToPropertyKey — fall back to ToString for numbers,
+    // booleans, etc.
+    const s = stringifyArg(realm, v) catch return error.OutOfMemory;
+    return s.bytes;
+}
+
+/// §6.2.5.5 ToPropertyDescriptor result. Each `has_*` flag
+/// records *presence* of the field on the descriptor object
+/// (chain-walked via §7.3.12 HasProperty); the value alongside
+/// is set only when present. `null` getter/setter means
+/// `undefined` (legitimate per §6.2.5.4 — "no setter, throws on
+/// write").
+const ParsedDescriptor = struct {
+    has_value: bool = false,
+    value: Value = Value.undefined_,
+    has_writable: bool = false,
+    writable: bool = false,
+    has_enumerable: bool = false,
+    enumerable: bool = false,
+    has_configurable: bool = false,
+    configurable: bool = false,
+    has_get: bool = false,
+    getter: ?*JSFunction = null,
+    has_set: bool = false,
+    setter: ?*JSFunction = null,
+
+    fn isAccessor(self: ParsedDescriptor) bool {
+        return self.has_get or self.has_set;
+    }
+    fn isData(self: ParsedDescriptor) bool {
+        return self.has_value or self.has_writable;
+    }
+    fn isGeneric(self: ParsedDescriptor) bool {
+        return !self.isAccessor() and !self.isData();
+    }
+};
+
+/// §6.2.5.5 ToPropertyDescriptor. Throws TypeError if:
+/// • `get` is present and not callable / undefined.
+/// • `set` is present and not callable / undefined.
+/// • Both data fields (`value`/`writable`) and accessor fields
+/// (`get`/`set`) are present (descriptors must be one shape).
+fn parseDescriptor(realm: *Realm, desc: *@import("../object.zig").JSObject) NativeError!ParsedDescriptor {
+    var out: ParsedDescriptor = .{};
+
+    if (desc.hasProperty("enumerable")) {
+        out.has_enumerable = true;
+        out.enumerable = toBoolean(desc.get("enumerable"));
+    }
+    if (desc.hasProperty("configurable")) {
+        out.has_configurable = true;
+        out.configurable = toBoolean(desc.get("configurable"));
+    }
+    if (desc.hasProperty("value")) {
+        out.has_value = true;
+        out.value = desc.get("value");
+    }
+    if (desc.hasProperty("writable")) {
+        out.has_writable = true;
+        out.writable = toBoolean(desc.get("writable"));
+    }
+    if (desc.hasProperty("get")) {
+        out.has_get = true;
+        const get_v = desc.get("get");
+        if (!get_v.isUndefined()) {
+            out.getter = heap_mod.valueAsFunction(get_v) orelse return throwTypeError(realm, "Object.defineProperty: getter must be callable or undefined");
+        }
+    }
+    if (desc.hasProperty("set")) {
+        out.has_set = true;
+        const set_v = desc.get("set");
+        if (!set_v.isUndefined()) {
+            out.setter = heap_mod.valueAsFunction(set_v) orelse return throwTypeError(realm, "Object.defineProperty: setter must be callable or undefined");
+        }
+    }
+    if (out.isAccessor() and out.isData()) {
+        return throwTypeError(realm, "Object.defineProperty: cannot mix accessor and data fields");
+    }
+    return out;
+}
+
+/// §10.1.6.3 ValidateAndApplyPropertyDescriptor — non-configurable
+/// redefine guard. Returns true if the requested change is
+/// permitted; false → caller throws TypeError.
+fn isCompatibleRedefine(
+    cur_is_accessor: bool,
+    cur_flags: @import("../object.zig").PropertyFlags,
+    cur_value: Value,
+    cur_getter: ?*JSFunction,
+    cur_setter: ?*JSFunction,
+    new_desc: ParsedDescriptor,
+) bool {
+    // 4. If current.[[Configurable]] is false:
+    if (!cur_flags.configurable) {
+        // 4.a. desc must not set configurable to true.
+        if (new_desc.has_configurable and new_desc.configurable) return false;
+        // 4.b. desc must not toggle enumerable.
+        if (new_desc.has_enumerable and new_desc.enumerable != cur_flags.enumerable) return false;
+        // 4.c. desc must not be a generic descriptor + new_desc.has_value or has_get etc.
+        // 5. If !IsGenericDescriptor(Desc):
+        if (!new_desc.isGeneric()) {
+            // 5.a. If IsDataDescriptor(current) != IsDataDescriptor(Desc):
+            if (cur_is_accessor != new_desc.isAccessor()) return false;
+            // 6. Else if both data:
+            if (!cur_is_accessor and new_desc.isData()) {
+                // 6.a. !current.[[Writable]] → desc must not toggle writable to true
+                if (!cur_flags.writable) {
+                    if (new_desc.has_writable and new_desc.writable) return false;
+                    // 6.b. desc must not change value (sameValue).
+                    if (new_desc.has_value and !sameValueZero(cur_value, new_desc.value)) return false;
+                }
+            }
+            // 7. Else (both accessor):
+            if (cur_is_accessor and new_desc.isAccessor()) {
+                // 7.a. desc must not change get / set.
+                if (new_desc.has_get and new_desc.getter != cur_getter) return false;
+                if (new_desc.has_set and new_desc.setter != cur_setter) return false;
+            }
+        }
+    }
+    return true;
+}
+
+pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const target_v = argOr(args, 0, Value.undefined_);
+    const key = descriptorKey(realm, argOr(args, 1, Value.undefined_)) catch return error.OutOfMemory;
+    const desc_v = argOr(args, 2, Value.undefined_);
+    // §10.5.6 Proxy [[DefineOwnProperty]] — dispatch through the
+    // handler's `defineProperty` trap before falling back.
+    if (heap_mod.valueAsPlainObject(target_v)) |obj_in| {
+        if (obj_in.proxy_target) |proxy_target| {
+            if (obj_in.proxy_handler) |handler| {
+                const trap_v = handler.get("defineProperty");
+                if (heap_mod.valueAsFunction(trap_v)) |trap_fn| {
+                    const interpreter = @import("../interpreter.zig");
+                    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                    const trap_args = [_]Value{ heap_mod.taggedObject(proxy_target), Value.fromString(key_str), desc_v };
+                    const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => return error.NativeThrew,
+                    };
+                    switch (outcome) {
+                        .value, .yielded => |v| {
+                            if (!intrinsics.toBoolean(v)) return throwTypeError(realm, "'defineProperty' on proxy returned falsy");
+                            return target_v;
+                        },
+                        .thrown => |ex| {
+                            realm.pending_exception = ex;
+                            return error.NativeThrew;
+                        },
+                    }
+                }
+            }
+            // Fall through to the proxy target.
+            const inner_args = [_]Value{ heap_mod.taggedObject(proxy_target), argOr(args, 1, Value.undefined_), desc_v };
+            return objectDefineProperty(realm, Value.undefined_, &inner_args);
+        }
+    }
+    const desc = heap_mod.valueAsPlainObject(desc_v) orelse return throwTypeError(realm, "Object.defineProperty descriptor is not an object");
+
+    const parsed = try parseDescriptor(realm, desc);
+
+    if (heap_mod.valueAsPlainObject(target_v)) |target| {
+        // Snapshot the current descriptor (or `null` if absent).
+        const had_own = target.hasOwn(key) or target.accessors.contains(key);
+        const cur_flags = target.flagsFor(key);
+        const cur_is_accessor = target.accessors.contains(key);
+        const cur_value: Value = if (cur_is_accessor) Value.undefined_ else target.properties.get(key) orelse Value.undefined_;
+        var cur_getter: ?*JSFunction = null;
+        var cur_setter: ?*JSFunction = null;
+        if (target.accessors.get(key)) |a| {
+            cur_getter = a.getter;
+            cur_setter = a.setter;
+        }
+
+        // Non-configurable redefine guard.
+        if (had_own and !isCompatibleRedefine(cur_is_accessor, cur_flags, cur_value, cur_getter, cur_setter, parsed)) {
+            return throwTypeError(realm, "Object.defineProperty: cannot redefine non-configurable property");
+        }
+
+        // Compute the final flags. Missing fields preserve the
+        // existing values (§10.1.6.3 step 1 — defaults absorbed).
+        const default_for_new: @import("../object.zig").PropertyFlags = if (had_own) cur_flags else .{
+            .writable = false,
+            .enumerable = false,
+            .configurable = false,
+        };
+        var flags = default_for_new;
+        if (parsed.has_writable) flags.writable = parsed.writable;
+        if (parsed.has_enumerable) flags.enumerable = parsed.enumerable;
+        if (parsed.has_configurable) flags.configurable = parsed.configurable;
+
+        if (parsed.isAccessor()) {
+            // Replace any existing data slot.
+            _ = target.properties.swapRemove(key);
+            const entry = target.accessors.getOrPut(realm.allocator, key) catch return error.OutOfMemory;
+            // Preserve the half not specified in the new desc.
+            const new_getter: ?*JSFunction = if (parsed.has_get) parsed.getter else if (cur_is_accessor) cur_getter else null;
+            const new_setter: ?*JSFunction = if (parsed.has_set) parsed.setter else if (cur_is_accessor) cur_setter else null;
+            entry.value_ptr.* = .{ .getter = new_getter, .setter = new_setter };
+            // Accessors don't honor `writable`; clear that bit.
+            flags.writable = false;
+            target.property_flags.put(realm.allocator, key, flags) catch return error.OutOfMemory;
+            return target_v;
+        }
+
+        // Data descriptor (or generic — preserves the existing
+        // shape).
+        if (parsed.isData() or !cur_is_accessor) {
+            // Drop any previous accessor.
+            _ = target.accessors.swapRemove(key);
+            const value: Value = if (parsed.has_value) parsed.value else cur_value;
+            target.setWithFlags(realm.allocator, key, value, flags) catch return error.OutOfMemory;
+            return target_v;
+        }
+
+        // Generic descriptor on an existing accessor — keep the
+        // accessor pair, just update flags.
+        target.property_flags.put(realm.allocator, key, flags) catch return error.OutOfMemory;
+        return target_v;
+    }
+
+    if (heap_mod.valueAsFunction(target_v)) |target_fn| {
+        const had_own = target_fn.hasOwn(key);
+        const cur_flags = target_fn.flagsForOwn(key);
+        const cur_value: Value = target_fn.get(key);
+        if (had_own and !isCompatibleRedefine(false, cur_flags, cur_value, null, null, parsed)) {
+            return throwTypeError(realm, "Object.defineProperty: cannot redefine non-configurable property");
+        }
+
+        const default_for_new: @import("../object.zig").PropertyFlags = if (had_own) cur_flags else .{
+            .writable = false,
+            .enumerable = false,
+            .configurable = false,
+        };
+        var flags = default_for_new;
+        if (parsed.has_writable) flags.writable = parsed.writable;
+        if (parsed.has_enumerable) flags.enumerable = parsed.enumerable;
+        if (parsed.has_configurable) flags.configurable = parsed.configurable;
+
+        const value: Value = if (parsed.has_value) parsed.value else cur_value;
+        target_fn.setWithFlags(realm.allocator, key, value, flags) catch return error.OutOfMemory;
+        return target_v;
+    }
+
+    return throwTypeError(realm, "Object.defineProperty target is not an object");
+}
+
+fn objectDefineProperties(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.defineProperties target is not an object");
+    const props = heap_mod.valueAsPlainObject(argOr(args, 1, Value.undefined_)) orelse return throwTypeError(realm, "Object.defineProperties properties is not an object");
+
+    var it = props.properties.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        if (!props.flagsFor(key).enumerable) continue;
+        const desc_v = entry.value_ptr.*;
+        const inner_args = [_]Value{ heap_mod.taggedObject(target), blk: {
+            const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+            break :blk Value.fromString(k_str);
+        }, desc_v };
+        _ = try objectDefineProperty(realm, Value.undefined_, &inner_args);
+    }
+    return heap_mod.taggedObject(target);
+}
+
+pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const target = argOr(args, 0, Value.undefined_);
+    const key = descriptorKey(realm, argOr(args, 1, Value.undefined_)) catch return error.OutOfMemory;
+
+    // §10.5.5 Proxy [[GetOwnProperty]] — when target is a proxy,
+    // dispatch through `handler.getOwnPropertyDescriptor` if
+    // defined; missing trap falls through to the proxy target.
+    if (heap_mod.valueAsPlainObject(target)) |obj_in| {
+        if (obj_in.proxy_target) |proxy_target| {
+            if (obj_in.proxy_handler) |handler| {
+                const trap_v = handler.get("getOwnPropertyDescriptor");
+                if (heap_mod.valueAsFunction(trap_v)) |trap_fn| {
+                    const interpreter = @import("../interpreter.zig");
+                    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                    const trap_args = [_]Value{ heap_mod.taggedObject(proxy_target), Value.fromString(key_str) };
+                    const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => return error.NativeThrew,
+                    };
+                    switch (outcome) {
+                        .value, .yielded => |v| return v,
+                        .thrown => |ex| {
+                            realm.pending_exception = ex;
+                            return error.NativeThrew;
+                        },
+                    }
+                }
+            }
+            // Fall through to the target.
+            const inner_args = [_]Value{ heap_mod.taggedObject(proxy_target), argOr(args, 1, Value.undefined_) };
+            return objectGetOwnPropertyDescriptor(realm, Value.undefined_, &inner_args);
+        }
+    }
+
+    if (heap_mod.valueAsPlainObject(target)) |obj| {
+        // Accessor descriptor first.
+        if (obj.accessors.get(key)) |acc| {
+            const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
+            desc.prototype = realm.intrinsics.object_prototype;
+            const get_v: Value = if (acc.getter) |g| heap_mod.taggedFunction(g) else Value.undefined_;
+            const set_v: Value = if (acc.setter) |s| heap_mod.taggedFunction(s) else Value.undefined_;
+            desc.set(realm.allocator, "get", get_v) catch return error.OutOfMemory;
+            desc.set(realm.allocator, "set", set_v) catch return error.OutOfMemory;
+            const flags = obj.flagsFor(key);
+            desc.set(realm.allocator, "enumerable", Value.fromBool(flags.enumerable)) catch return error.OutOfMemory;
+            desc.set(realm.allocator, "configurable", Value.fromBool(flags.configurable)) catch return error.OutOfMemory;
+            return heap_mod.taggedObject(desc);
+        }
+
+        // Data descriptor.
+        if (!obj.hasOwn(key)) return Value.undefined_;
+        const value = obj.get(key);
+        const flags = obj.flagsFor(key);
+        const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
+        desc.prototype = realm.intrinsics.object_prototype;
+        desc.set(realm.allocator, "value", value) catch return error.OutOfMemory;
+        desc.set(realm.allocator, "writable", Value.fromBool(flags.writable)) catch return error.OutOfMemory;
+        desc.set(realm.allocator, "enumerable", Value.fromBool(flags.enumerable)) catch return error.OutOfMemory;
+        desc.set(realm.allocator, "configurable", Value.fromBool(flags.configurable)) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(desc);
+    }
+
+    // §17 — built-in functions are also ordinary objects.
+    // Without this branch every `verifyProperty(builtin, "name",
+    // …)` test falls through to the type-error path. Currently
+    // we only support data descriptors on functions (no
+    // accessors via `Object.defineProperty` on a function).
+    if (heap_mod.valueAsFunction(target)) |fn_obj| {
+        if (!fn_obj.hasOwn(key)) return Value.undefined_;
+        const value = fn_obj.get(key);
+        const flags = fn_obj.flagsForOwn(key);
+        const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
+        desc.prototype = realm.intrinsics.object_prototype;
+        desc.set(realm.allocator, "value", value) catch return error.OutOfMemory;
+        desc.set(realm.allocator, "writable", Value.fromBool(flags.writable)) catch return error.OutOfMemory;
+        desc.set(realm.allocator, "enumerable", Value.fromBool(flags.enumerable)) catch return error.OutOfMemory;
+        desc.set(realm.allocator, "configurable", Value.fromBool(flags.configurable)) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(desc);
+    }
+
+    return throwTypeError(realm, "Object.getOwnPropertyDescriptor target is not an object");
+}
+
+fn objectGetOwnPropertyDescriptors(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.getOwnPropertyDescriptors target is not an object");
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    out.prototype = realm.intrinsics.object_prototype;
+    var it = obj.properties.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+        const inner_args = [_]Value{ heap_mod.taggedObject(obj), Value.fromString(k_str) };
+        const desc = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &inner_args);
+        out.set(realm.allocator, k_str.bytes, desc) catch return error.OutOfMemory;
+    }
+    return heap_mod.taggedObject(out);
+}
+
+fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.getOwnPropertyNames target is not an object");
+    const keys = try ownPropertyKeysOrdered(realm, obj);
+    defer realm.allocator.free(keys);
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    out.prototype = realm.intrinsics.array_prototype;
+    var len: i32 = 0;
+    for (keys) |key| {
+        var ibuf: [16]u8 = undefined;
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
+        const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+        const k_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
+        out.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
+        len += 1;
+    }
+    out.set(realm.allocator, "length", Value.fromInt32(len)) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(out);
+}
+
+// ── Object extensibility + creation (§20.1.2 statics, later) ────────────────
+
+fn objectCreate(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const proto_v = argOr(args, 0, Value.undefined_);
+    const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+    if (proto_v.isNull()) {
+        obj.prototype = null;
+    } else if (heap_mod.valueAsPlainObject(proto_v)) |p| {
+        obj.prototype = p;
+    } else if (heap_mod.valueAsFunction(proto_v)) |fn_obj| {
+        obj.prototype = fn_obj.prototype;
+    } else {
+        return throwTypeError(realm, "Object.create prototype must be an Object or null");
+    }
+    // Optional second arg: properties descriptor.
+    if (args.len > 1 and !args[1].isUndefined()) {
+        const props = heap_mod.valueAsPlainObject(args[1]) orelse return throwTypeError(realm, "Object.create properties must be an object");
+        var it = props.properties.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (!props.flagsFor(key).enumerable) continue;
+            const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+            const inner = [_]Value{ heap_mod.taggedObject(obj), Value.fromString(k_str), entry.value_ptr.* };
+            _ = try objectDefineProperty(realm, Value.undefined_, &inner);
+        }
+    }
+    return heap_mod.taggedObject(obj);
+}
+
+fn objectAssign(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.assign target must be an object");
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const src_v = args[i];
+        if (src_v.isUndefined() or src_v.isNull()) continue;
+        const src = heap_mod.valueAsPlainObject(src_v) orelse continue;
+        var it = src.properties.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (std.mem.startsWith(u8, key, "__cynic_")) continue;
+            if (!src.flagsFor(key).enumerable) continue;
+            target.set(realm.allocator, key, entry.value_ptr.*) catch return error.OutOfMemory;
+        }
+    }
+    return heap_mod.taggedObject(target);
+}
+
+fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const arg = argOr(args, 0, Value.undefined_);
+    const obj = heap_mod.valueAsPlainObject(arg) orelse return arg; // §20.1.2.5 — primitives pass through
+    obj.extensible = false;
+    // Mark every existing data property non-writable +
+    // non-configurable per §10.1.4.1 SetIntegrityLevel(O, frozen).
+    var it = obj.properties.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const cur = obj.flagsFor(key);
+        obj.property_flags.put(realm.allocator, key, .{
+            .writable = false,
+            .enumerable = cur.enumerable,
+            .configurable = false,
+        }) catch return error.OutOfMemory;
+    }
+    return arg;
+}
+
+fn objectIsFrozen(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = this_value;
+    const arg = argOr(args, 0, Value.undefined_);
+    const obj = heap_mod.valueAsPlainObject(arg) orelse return Value.true_; // primitives are frozen
+    if (obj.extensible) return Value.false_;
+    var it = obj.properties.iterator();
+    while (it.next()) |entry| {
+        const flags = obj.flagsFor(entry.key_ptr.*);
+        if (flags.writable or flags.configurable) return Value.false_;
+    }
+    return Value.true_;
+}
+
+fn objectSeal(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const arg = argOr(args, 0, Value.undefined_);
+    const obj = heap_mod.valueAsPlainObject(arg) orelse return arg;
+    obj.extensible = false;
+    var it = obj.properties.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const cur = obj.flagsFor(key);
+        obj.property_flags.put(realm.allocator, key, .{
+            .writable = cur.writable,
+            .enumerable = cur.enumerable,
+            .configurable = false,
+        }) catch return error.OutOfMemory;
+    }
+    return arg;
+}
+
+fn objectIsSealed(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = this_value;
+    const arg = argOr(args, 0, Value.undefined_);
+    const obj = heap_mod.valueAsPlainObject(arg) orelse return Value.true_;
+    if (obj.extensible) return Value.false_;
+    var it = obj.properties.iterator();
+    while (it.next()) |entry| {
+        if (obj.flagsFor(entry.key_ptr.*).configurable) return Value.false_;
+    }
+    return Value.true_;
+}
+
+pub fn objectPreventExtensions(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = this_value;
+    const arg = argOr(args, 0, Value.undefined_);
+    if (heap_mod.valueAsPlainObject(arg)) |obj| obj.extensible = false;
+    return arg;
+}
+
+fn objectIsExtensible(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = this_value;
+    const arg = argOr(args, 0, Value.undefined_);
+    const obj = heap_mod.valueAsPlainObject(arg) orelse return Value.false_;
+    return Value.fromBool(obj.extensible);
+}
+
+fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const interpreter = @import("../interpreter.zig");
+    const iter = interpreter.openIterator(realm.allocator, realm, argOr(args, 0, Value.undefined_)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return throwTypeError(realm, "Object.fromEntries argument is not iterable"),
+    };
+    const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return throwTypeError(realm, "Object.fromEntries argument is not iterable");
+    const next_v = iter_obj.get("next");
+    const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "iterator.next is not callable");
+
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    out.prototype = realm.intrinsics.object_prototype;
+
+    const max_iter: i64 = 1 << 24;
+    var i: i64 = 0;
+    while (i < max_iter) : (i += 1) {
+        const step = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        const result_v = switch (step) {
+            .value, .yielded => |v| v,
+            .thrown => return error.NativeThrew,
+        };
+        const result = heap_mod.valueAsPlainObject(result_v) orelse break;
+        if (toBoolean(result.get("done"))) break;
+        const pair_v = result.get("value");
+        const pair = heap_mod.valueAsPlainObject(pair_v) orelse return throwTypeError(realm, "Object.fromEntries entry must be an object");
+        const k = pair.get("0");
+        const v = pair.get("1");
+        const key_str = if (k.isString())
+            (@as(*JSString, @ptrCast(@alignCast(k.asString())))).bytes
+        else blk: {
+            const s = stringifyArg(realm, k) catch return error.OutOfMemory;
+            break :blk s.bytes;
+        };
+        out.set(realm.allocator, key_str, v) catch return error.OutOfMemory;
+    }
+    return heap_mod.taggedObject(out);
+}
+
+fn objectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const target_v = argOr(args, 0, Value.undefined_);
+    const proto_v = argOr(args, 1, Value.undefined_);
+    if (heap_mod.valueAsPlainObject(target_v)) |obj| {
+        if (proto_v.isNull()) {
+            obj.prototype = null;
+        } else if (heap_mod.valueAsPlainObject(proto_v)) |p| {
+            obj.prototype = p;
+        } else if (heap_mod.valueAsFunction(proto_v)) |fn_obj| {
+            obj.prototype = fn_obj.prototype;
+        } else {
+            return throwTypeError(realm, "prototype must be an Object or null");
+        }
+    }
+    return target_v;
+}
+
+/// §22.1.2.5 Object.groupBy(items, callbackfn) — partition `items`
+/// into a null-prototype object keyed by `callbackfn(item, index)`.
+/// Each bucket is an Array of the items that produced that key.
+fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const interpreter = @import("../interpreter.zig");
+    const items_v = argOr(args, 0, Value.undefined_);
+    const cb_v = argOr(args, 1, Value.undefined_);
+    const cb = heap_mod.valueAsFunction(cb_v) orelse return throwTypeError(realm, "Object.groupBy callback is not callable");
+
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    out.prototype = null; // null-prototype per spec
+
+    const iter = interpreter.openIterator(realm.allocator, realm, items_v) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return throwTypeError(realm, "Object.groupBy items is not iterable"),
+    };
+    const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return throwTypeError(realm, "Object.groupBy items is not iterable");
+    const next_v = iter_obj.get("next");
+    const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "iterator.next is not callable");
+
+    const max_iter: i64 = 1 << 24;
+    var i: i64 = 0;
+    while (i < max_iter) : (i += 1) {
+        const step = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        const result_v = switch (step) {
+            .value, .yielded => |v| v,
+            .thrown => return error.NativeThrew,
+        };
+        const result = heap_mod.valueAsPlainObject(result_v) orelse break;
+        if (toBoolean(result.get("done"))) break;
+        const item = result.get("value");
+        const cb_args = [_]Value{ item, Value.fromInt32(@intCast(i)) };
+        const key_outcome = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &cb_args) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        const key_v = switch (key_outcome) {
+            .value, .yielded => |v| v,
+            .thrown => return error.NativeThrew,
+        };
+        const key_str = if (key_v.isString())
+            (@as(*JSString, @ptrCast(@alignCast(key_v.asString())))).bytes
+        else blk: {
+            const s = stringifyArg(realm, key_v) catch return error.OutOfMemory;
+            break :blk s.bytes;
+        };
+        // Look up or create the bucket array.
+        var bucket: *JSObject = undefined;
+        if (out.properties.get(key_str)) |existing| {
+            bucket = heap_mod.valueAsPlainObject(existing) orelse return error.NativeThrew;
+        } else {
+            bucket = realm.heap.allocateObject() catch return error.OutOfMemory;
+            bucket.prototype = realm.intrinsics.array_prototype;
+            bucket.set(realm.allocator, "length", Value.fromInt32(0)) catch return error.OutOfMemory;
+            out.set(realm.allocator, key_str, heap_mod.taggedObject(bucket)) catch return error.OutOfMemory;
+        }
+        const cur_len = bucket.get("length");
+        const len_i: i32 = if (cur_len.isInt32()) cur_len.asInt32() else 0;
+        var idx_buf: [16]u8 = undefined;
+        const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{len_i}) catch return error.OutOfMemory;
+        // The property bag holds the key by reference, so the
+        // bytes must outlive this stack frame — intern via the
+        // heap.
+        const idx_owned = realm.heap.allocateString(idx_slice) catch return error.OutOfMemory;
+        bucket.set(realm.allocator, idx_owned.bytes, item) catch return error.OutOfMemory;
+        bucket.set(realm.allocator, "length", Value.fromInt32(len_i + 1)) catch return error.OutOfMemory;
+    }
+    return heap_mod.taggedObject(out);
+}
+
+// ── Object.prototype methods ────────────────────────────────────────────────
+
+fn objectHasOwnProperty(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    const key_v = argOr(args, 0, Value.undefined_);
+    if (!key_v.isString()) return Value.false_;
+    const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+    if (heap_mod.valueAsPlainObject(this_value)) |obj| {
+        return Value.fromBool(obj.hasOwn(key_s.bytes));
+    }
+    if (heap_mod.valueAsFunction(this_value)) |fn_obj| {
+        return Value.fromBool(fn_obj.hasOwn(key_s.bytes));
+    }
+    return Value.false_;
+}
+
+/// §20.1.3.4 Object.prototype.propertyIsEnumerable. Returns
+/// `true` iff `key` is an own property of the receiver and its
+/// [[Enumerable]] attribute is `true`.
+fn objectProtoPropertyIsEnumerable(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    const key_v = argOr(args, 0, Value.undefined_);
+    if (!key_v.isString()) return Value.false_;
+    const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+    if (heap_mod.valueAsPlainObject(this_value)) |obj| {
+        if (!obj.hasOwn(key_s.bytes)) return Value.false_;
+        return Value.fromBool(obj.flagsFor(key_s.bytes).enumerable);
+    }
+    if (heap_mod.valueAsFunction(this_value)) |fn_obj| {
+        if (!fn_obj.hasOwn(key_s.bytes)) return Value.false_;
+        return Value.fromBool(fn_obj.flagsForOwn(key_s.bytes).enumerable);
+    }
+    return Value.false_;
+}
+
+/// §20.1.3.3 Object.prototype.isPrototypeOf. Returns `true` iff
+/// `this_value` appears anywhere in `arg`'s prototype chain.
+fn objectProtoIsPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    const target_v = argOr(args, 0, Value.undefined_);
+    const target = heap_mod.valueAsPlainObject(target_v) orelse return Value.false_;
+    const this_obj = heap_mod.valueAsPlainObject(this_value) orelse return Value.false_;
+    var p: ?*@import("../object.zig").JSObject = target.prototype;
+    while (p) |proto| {
+        if (proto == this_obj) return Value.true_;
+        p = proto.prototype;
+    }
+    return Value.false_;
+}
+
+/// §22.1.3.5 Object.prototype.toString. Spec walk:
+/// 1. If receiver is `undefined` → `"[object Undefined]"`.
+/// 2. If receiver is `null` → `"[object Null]"`.
+/// 3. ToObject the receiver.
+/// 4. Pick a built-in tag based on the internal-slot family
+/// (`isArray`, `Map`-with-mapdata, `arguments`, etc.).
+/// 5. If the receiver has a `Symbol.toStringTag` own- or
+/// inherited-string property, override the built-in tag
+/// with that string.
+/// 6. Format `"[object " + tag + "]"`.
+fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    if (this_value.isUndefined()) {
+        const s = realm.heap.allocateString("[object Undefined]") catch return error.OutOfMemory;
+        return Value.fromString(s);
+    }
+    if (this_value.isNull()) {
+        const s = realm.heap.allocateString("[object Null]") catch return error.OutOfMemory;
+        return Value.fromString(s);
+    }
+
+    // Step 4 — built-in default tag. Drives every "[object X]"
+    // shape that doesn't go through Symbol.toStringTag.
+    const builtin_tag: []const u8 = blk: {
+        if (heap_mod.isFunction(this_value)) break :blk "Function";
+        if (this_value.isString()) break :blk "String";
+        if (this_value.isNumber()) break :blk "Number";
+        if (this_value.isBool()) break :blk "Boolean";
+        if (heap_mod.isSymbol(this_value)) break :blk "Symbol";
+        if (heap_mod.isBigInt(this_value)) break :blk "BigInt";
+        if (heap_mod.valueAsPlainObject(this_value)) |obj| {
+            // Array detection: prototype === %Array.prototype%.
+            if (obj.prototype != null and obj.prototype == realm.intrinsics.array_prototype) {
+                break :blk "Array";
+            }
+            // Argument object: later (no tag yet).
+            // Otherwise: default "Object".
+            break :blk "Object";
+        }
+        break :blk "Object";
+    };
+
+    // Step 5 — Symbol.toStringTag override. Looked up under the
+    // synthetic `@@toStringTag` key (well-known-Symbol property
+    // identity, later wiring). Prototype chain walked because
+    // built-in installations live on the prototype, not the
+    // instance.
+    const tag_v = lookupToStringTag(realm, this_value);
+    var tag_slice: []const u8 = builtin_tag;
+    if (tag_v) |v| {
+        if (v.isString()) {
+            const ts: *JSString = @ptrCast(@alignCast(v.asString()));
+            tag_slice = ts.bytes;
+        }
+    }
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(realm.allocator);
+    try buf.appendSlice(realm.allocator, "[object ");
+    try buf.appendSlice(realm.allocator, tag_slice);
+    try buf.append(realm.allocator, ']');
+    const s = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
+    return Value.fromString(s);
+}
+
+/// Walk the receiver's prototype chain looking for a string
+/// `Symbol.toStringTag` slot (under the synthetic `@@toStringTag`
+/// key). Plain objects, functions, and primitive wrappers all
+/// route here. `null` means "no override; use built-in tag."
+fn lookupToStringTag(realm: *Realm, this_value: Value) ?Value {
+    _ = realm;
+    if (heap_mod.valueAsPlainObject(this_value)) |obj| {
+        const v = obj.get("@@toStringTag");
+        if (v.isString()) return v;
+        return null;
+    }
+    if (heap_mod.valueAsFunction(this_value)) |fn_obj| {
+        const v = fn_obj.get("@@toStringTag");
+        if (v.isString()) return v;
+        return null;
+    }
+    return null;
+}
+
+fn objectProtoValueOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = args;
+    return this_value;
+}
+

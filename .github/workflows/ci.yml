@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: Build & unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.16.0
+
+      - name: Show Zig version
+        run: zig version
+
+      - name: Build
+        run: zig build
+
+      - name: Unit tests
+        run: zig build test --summary all
+
+  test262:
+    name: test262 conformance (advisory)
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    # Advisory: a fail would mean the harness crashed, not that the
+    # score regressed. Score regressions are reviewed in PRs against
+    # test262-results.md.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.16.0
+
+      - name: Run test262 (parser-only)
+        run: zig build test262 -- --quiet

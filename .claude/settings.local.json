@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rtk find *)",
+      "Bash(rtk curl *)",
+      "Bash(rtk ls *)",
+      "Bash(rtk read *)",
+      "Bash(zig test *)",
+      "Bash(zig build *)",
+      "Bash(wait)",
+      "Bash(echo \"EXIT $?\")",
+      "Bash(rtk wc *)",
+      "Bash(rtk grep *)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(rtk ps *)",
+      "Bash(pkill -9 -f cynic)",
+      "Bash(pkill -9 -f \"zig-cache.*cynic\")",
+      "Bash(pkill -9 -f \"zig-out.*cynic\")",
+      "Bash(git -C /Users/chicoxyzzy/dev/opensource/cynic/cynic rev-parse --git-dir)",
+      "Bash(rtk git *)",
+      "Bash(pkill -f \"zig build\")",
+      "Bash(pkill -9 -f \"55e5758c3c5856b06bb209\")",
+      "Bash(cat > *)",
+      "Bash(./zig-out/bin/cynic run *)",
+      "Bash(echo \"exit=$?\")"
+    ]
+  }
+}

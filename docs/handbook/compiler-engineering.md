@@ -1,0 +1,217 @@
+# Compiler engineering — design vocabulary
+
+Pointers to techniques and tradeoffs you'll meet building Cynic.
+Not a textbook — a checklist with citations. Use it as a "have I
+considered this?" pass before committing to a design.
+
+## Lexer ↔ parser boundary
+
+Cynic's lexer scans `InputElementDiv` by default and exposes
+`rescanAsRegex(slash_start)` so the parser can re-enter scanning
+when it sees `/` in expression-start position (§12.9.5). Template
+continuations work the same way: the parser hands `}` back to
+`Lexer.nextTemplateContinuationAfterBrace` to resume template
+scanning.
+
+The general lesson: the lexer is *parser-driven* for any
+production where the same source byte can mean different tokens
+in different syntactic contexts. Don't try to disambiguate in the
+lexer alone — V8, JSC, and SpiderMonkey all carry a parser→lexer
+mode hint for the same reason.
+
+## Cover grammars
+
+ECMAScript's grammar overlaps in two places where the same prefix
+admits two productions:
+
+- `CoverParenthesizedExpressionAndArrowParameterList` — `(x, y)`
+  is either a parenthesised comma-expression or arrow parameters,
+  decided when the parser sees `=>` (or doesn't).
+- `CoverCallExpressionAndAsyncArrowHead` — `async(x)` is either a
+  call to `async` or the head of an async arrow.
+
+Cynic resolves these *post hoc*: parse the prefix as the
+expression form, then reinterpret if the disambiguating token
+appears. `expressionAsBindingTarget` is the workhorse. V8 and JSC
+do the same. Don't try to predict; commit and reshape.
+
+## Pratt-style precedence climbing
+
+Cynic uses a single-function precedence climber for binary
+operators (`parseBinary(min_prec)`), keyed by token kind.
+Variants worth knowing:
+
+- One function per precedence level (recursive descent) — clearer
+  but more code; what most LR-style generators emit.
+- Operator-precedence tables driving a generic loop — what we use.
+- Pratt parsing with prefix / infix / postfix dispatch — slightly
+  more general; useful when the same token has multiple roles
+  (e.g. unary `-` vs binary `-`).
+
+## Diagnostic recovery
+
+Two strategies, often combined:
+
+- **Synchronize on statement boundaries.** On parse error, skip
+  tokens until the next `;`, `}`, or known statement-starter
+  keyword. Cynic uses this. Quality is good when the grammar has
+  clear sync points; poor inside expressions.
+- **Phrase-level recovery** (panic-mode with FIRST/FOLLOW sets) —
+  more sophisticated, much more code. Most production engines
+  don't bother.
+
+The harness reads `diagnostic.severity == .err` to detect failure
+even when parsing returned a partial AST. Recovery exists so we
+can score multiple errors per file in test262, not just the
+first.
+
+## AST design
+
+Cynic uses tagged unions (Zig `union(enum)`) with arena
+allocation. Pointers for self-referential cases (e.g. the
+`BindingTarget ↔ ArrayPattern.rest` cycle resolved via
+`*BindingTarget`). Alternatives:
+
+- **Class hierarchy with virtual dispatch** — what V8 and JSC do
+  in C++. Worse cache behavior, harder to add operations
+  (visitor required).
+- **Sealed sum types** — what we use; what Boa uses.
+- **Pure structural** (every node is `Map<String, Any>`) —
+  flexible, slow, error-prone.
+
+The S-expression printer (`ast.printer.dump`) is the stable
+serialization used in golden tests. Spans on every node make
+errors point at source text.
+
+## Early errors vs runtime errors
+
+ECMA-262 distinguishes:
+
+- **Early errors** (§16.1.1, §16.2.2, §15.x.x) — detected at
+  parse time. Examples: duplicate parameter names in strict
+  mode, `super` outside a method, `return` outside a function.
+- **Runtime errors** — `ReferenceError`, `TypeError`, `RangeError`
+  thrown during execution.
+
+Parser-time context flags drive early errors: `in_async`,
+`in_generator`, `is_module`, `allow_in`. These save / restore
+across function and arrow boundaries; arrows inherit some of them
+(`+Await` for body, `+NewTarget` if enclosed in a function) and
+override others (`~Yield` always).
+
+`Code.errorClass()` mechanically maps every diagnostic to its
+JavaScript error class so test262 negative scoring matches the
+spec's `negative.type`.
+
+## Bytecode design
+
+When later lands, the open questions:
+
+- **Stack-only vs register-file vs accumulator + register.**
+  Ignition and Hermes use register file with accumulator; JSC
+  LLInt is register-file; QuickJS is stack. Register-file is
+  faster, stack is smaller and simpler.
+- **One-byte vs two-byte ops.** Ignition uses one-byte with a
+  `Wide` / `ExtraWide` prefix for >256 registers. JSC uses two
+  bytes throughout.
+- **Op count.** Ignition has ~150 opcodes; QuickJS ~250; JSC
+  several hundred (with macro expansion).
+
+Reference reading: V8 Ignition design (v8.dev posts), Hermes
+bytecode reference, JSC bytecode in
+`Source/JavaScriptCore/bytecode/`.
+
+## Value representation
+
+The two dominant strategies:
+
+- **NaN-boxing** — store all values as 64-bit, with non-numbers
+  encoded as NaN bit patterns. JSC, SpiderMonkey, Hermes use this
+  on 64-bit. Doubles are unboxed.
+- **Pointer-tagged Smis** — 31- or 32-bit immediate integers in
+  the bottom-tag region of a pointer. V8 uses this; doubles boxed
+  on the heap (or compressed via pointer compression).
+
+The choice interacts with everything else: GC barriers, IC
+shape, JIT codegen. Make this decision *before* writing the
+runtime — it's hard to retrofit. Pizlo, "Speculation in
+JavaScriptCore" (2020) is the most accessible exposition.
+
+## Object model
+
+Cynic will need shapes / hidden classes (Self / V8 lineage):
+property keys map to fixed offsets within a shape; property
+addition transitions to a new shape; ICs cache the shape and
+offset. Without shapes, every property access is a hashtable
+lookup — orders of magnitude slower.
+
+Reference reading: Chambers & Ungar (Self), Hölzle Chambers
+Ungar (1991, polymorphic inline caches), V8 blog "Fast properties
+in V8".
+
+## GC strategies
+
+Roughly in order of complexity:
+
+1. **Bump-allocator + mark-sweep** — what to start with. Simple,
+   correct, slow for long-running programs.
+2. **Generational moving** — ~80% of allocations die young.
+   Bump-allocate in a young space, copy survivors to an old
+   space, only old-space gets the heavy collector. Lieberman /
+   Hewitt (1983), Ungar (1984).
+3. **Concurrent marking** — mark on a separate thread, with
+   write barriers to track mutations. V8 Orinoco, JSC Riptide.
+4. **Mark-region (Immix)** — survivors evacuated within blocks,
+   no full copying collector needed. Hermes uses RegionTrees,
+   a relative.
+
+Barriers cost in JIT'd code: every GC change touches the JIT.
+
+## JIT tiering
+
+Don't add the next tier until measurement says it's worth it.
+The tiers exist because each is better at a different point on
+the speed / startup-cost / memory tradeoff:
+
+- **Interpreter** — fastest startup, slowest steady-state.
+- **Baseline JIT** (V8 Sparkplug, JSC Baseline) — cheap
+  compilation directly from bytecode, no IR. Good for code that
+  runs warm but not hot.
+- **Optimizing JIT** (V8 TurboFan / Maglev, JSC DFG / FTL) — IR,
+  inline-cache feedback, type speculation, deopt. Good for hot
+  code; expensive to compile.
+
+V8 *Sparkplug* (Sander, 2021) is the cheapest possible baseline:
+one machine-code handler per bytecode, register-allocated by
+hand. A good model for Cynic's eventual second tier.
+
+## Inline caches and deoptimization
+
+ICs cache the result of a runtime lookup (property offset, method
+target) keyed on the operand's shape. Polymorphic chains handle
+multiple shapes; megamorphic falls back to the slow path.
+
+Optimizing JITs *speculate* on IC observations: "this site is
+always monomorphic on shape X, generate code that assumes X and
+deopt if not." Deopt sites need on-stack replacement (OSR) state
+to reconstruct the interpreter frame. Hard to retrofit; design
+the bytecode and IR with deopt points in mind from day one.
+
+## IR design
+
+For the optimizing tier:
+
+- **CFG-of-blocks** with explicit phi nodes — classic SSA. Clear
+  structure, more passes are textbook.
+- **Sea of Nodes** — Click (1995). Used by TurboFan and DFG. No
+  basic-block ordering until scheduling; effects encoded as
+  edges. More compact, more abstract.
+
+Reference reading: Click & Paleczny, "A Simple Graph-Based
+Intermediate Representation" (1995); V8 TurboFan blog posts.
+
+## Where Cynic stands
+
+Lexer + parser complete (M2). Bytecode + interpreter is later. The
+choices in this doc are open until we get there; cite this file
+when arguing for a particular design.

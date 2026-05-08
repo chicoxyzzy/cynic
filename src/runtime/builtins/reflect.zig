@@ -1,0 +1,263 @@
+//! §28 Reflect — extracted from `intrinsics.zig`. Provides a
+//! method-style alternative to operators / Object statics for
+//! introspection: `Reflect.has`, `.get`, `.set`,
+//! `.deleteProperty`, `.ownKeys`, `.getPrototypeOf`,
+//! `.setPrototypeOf`, `.isExtensible`, `.apply`, `.construct`.
+//!
+//! `pub fn install(realm)` allocates the `Reflect` global and
+//! wires every method via the `installNativeMethodOnProto`
+//! helper from `intrinsics.zig` (Reflect itself is a plain
+//! object, but the methods all install with the §17
+//! built-in-method flag set).
+
+const std = @import("std");
+
+const Realm = @import("../realm.zig").Realm;
+const Value = @import("../value.zig").Value;
+const JSString = @import("../string.zig").JSString;
+const JSObject = @import("../object.zig").JSObject;
+const JSFunction = @import("../function.zig").JSFunction;
+const NativeError = @import("../function.zig").NativeError;
+const heap_mod = @import("../heap.zig");
+const intrinsics = @import("../intrinsics.zig");
+
+const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
+const installToStringTag = intrinsics.installToStringTag;
+const argOr = intrinsics.argOr;
+const throwTypeError = intrinsics.throwTypeError;
+const lengthOfArray = intrinsics.lengthOfArray;
+const clampArrayLength = intrinsics.clampArrayLength;
+const objectGetPrototypeOf = intrinsics.objectGetPrototypeOf;
+
+// ── §28 Reflect ─────────────────────────────────────────────────────────────
+
+pub fn install(realm: *Realm) !void {
+    const obj = try realm.heap.allocateObject();
+    obj.prototype = realm.intrinsics.object_prototype;
+    try installToStringTag(realm, obj, "Reflect");
+    try installNativeMethodOnProto(realm, obj, "has", reflectHas, 2);
+    try installNativeMethodOnProto(realm, obj, "get", reflectGet, 3);
+    try installNativeMethodOnProto(realm, obj, "set", reflectSet, 4);
+    try installNativeMethodOnProto(realm, obj, "deleteProperty", reflectDeleteProperty, 2);
+    try installNativeMethodOnProto(realm, obj, "ownKeys", reflectOwnKeys, 1);
+    try installNativeMethodOnProto(realm, obj, "getPrototypeOf", reflectGetPrototypeOf, 1);
+    try installNativeMethodOnProto(realm, obj, "setPrototypeOf", reflectSetPrototypeOf, 2);
+    try installNativeMethodOnProto(realm, obj, "isExtensible", reflectIsExtensible, 1);
+    try installNativeMethodOnProto(realm, obj, "apply", reflectApply, 3);
+    try installNativeMethodOnProto(realm, obj, "construct", reflectConstruct, 2);
+    try installNativeMethodOnProto(realm, obj, "getOwnPropertyDescriptor", intrinsics.objectGetOwnPropertyDescriptor, 2);
+    try installNativeMethodOnProto(realm, obj, "defineProperty", reflectDefineProperty, 3);
+    try installNativeMethodOnProto(realm, obj, "preventExtensions", reflectPreventExtensions, 1);
+    try realm.globals.put(realm.allocator, "Reflect", heap_mod.taggedObject(obj));
+}
+
+fn reflectPreventExtensions(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §28.1.10 — Reflect.preventExtensions throws on non-object;
+    // returns Boolean (true on success, false on failure).
+    const target = argOr(args, 0, Value.undefined_);
+    if (heap_mod.valueAsPlainObject(target) == null) return throwTypeError(realm, "Reflect.preventExtensions called on non-object");
+    _ = try intrinsics.objectPreventExtensions(realm, this_value, args);
+    return Value.fromBool(true);
+}
+
+fn reflectDefineProperty(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §28.1.3 — Reflect.defineProperty returns a Boolean (false on
+    // failure rather than throwing). We delegate to the Object.*
+    // path which throws on failure; catch-and-translate would
+    // require pending-exception threading, so for now we just
+    // forward, mapping success → true. Failure cases are rare in
+    // practice; the test surface still benefits from forwarding.
+    const result = intrinsics.objectDefineProperty(realm, this_value, args) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NativeThrew => {
+            realm.pending_exception = null;
+            return Value.fromBool(false);
+        },
+    };
+    _ = result;
+    return Value.fromBool(true);
+}
+
+fn reflectHas(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Reflect.has target must be an object");
+    const key_v = argOr(args, 1, Value.undefined_);
+    var key_buf: [64]u8 = undefined;
+    const key_slice = computedKeyForReflect(key_v, &key_buf);
+    var cursor: ?*@import("../object.zig").JSObject = target;
+    while (cursor) |c| : (cursor = c.prototype) {
+        if (c.properties.contains(key_slice)) return Value.true_;
+        if (c.accessors.contains(key_slice)) return Value.true_;
+    }
+    return Value.false_;
+}
+
+fn reflectGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Reflect.get target must be an object");
+    const key_v = argOr(args, 1, Value.undefined_);
+    var key_buf: [64]u8 = undefined;
+    const key_slice = computedKeyForReflect(key_v, &key_buf);
+    return target.get(key_slice);
+}
+
+fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Reflect.set target must be an object");
+    const key_v = argOr(args, 1, Value.undefined_);
+    var key_buf: [64]u8 = undefined;
+    const key_slice = computedKeyForReflect(key_v, &key_buf);
+    const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
+    target.set(realm.allocator, owned.bytes, argOr(args, 2, Value.undefined_)) catch return error.OutOfMemory;
+    return Value.true_;
+}
+
+fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Reflect.deleteProperty target must be an object");
+    const key_v = argOr(args, 1, Value.undefined_);
+    var key_buf: [64]u8 = undefined;
+    const key_slice = computedKeyForReflect(key_v, &key_buf);
+    _ = target.properties.swapRemove(key_slice);
+    return Value.true_;
+}
+
+fn reflectOwnKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Reflect.ownKeys target must be an object");
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    out.prototype = realm.intrinsics.array_prototype;
+    var idx: usize = 0;
+    var it = target.properties.iterator();
+    while (it.next()) |entry| : (idx += 1) {
+        const key_str = realm.heap.allocateString(entry.key_ptr.*) catch return error.OutOfMemory;
+        var ibuf: [24]u8 = undefined;
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
+        const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.bytes, Value.fromString(key_str)) catch return error.OutOfMemory;
+    }
+    out.set(realm.allocator, "length", Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(out);
+}
+
+fn reflectGetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return objectGetPrototypeOf(realm, this_value, args);
+}
+
+fn reflectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    _ = realm;
+    const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return Value.false_;
+    const proto_v = argOr(args, 1, Value.null_);
+    if (proto_v.isNull()) {
+        target.prototype = null;
+        return Value.true_;
+    }
+    target.prototype = heap_mod.valueAsPlainObject(proto_v);
+    return Value.true_;
+}
+
+fn reflectIsExtensible(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = this_value;
+    _ = args;
+    // we don't track an [[Extensible]] internal slot
+    // yet; report true to match the default for ordinary objects.
+    return Value.true_;
+}
+
+fn reflectApply(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const target = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Reflect.apply target must be callable");
+    const this_arg = argOr(args, 1, Value.undefined_);
+    const args_v = argOr(args, 2, Value.undefined_);
+
+    var apply_args: std.ArrayListUnmanaged(Value) = .empty;
+    defer apply_args.deinit(realm.allocator);
+    if (heap_mod.valueAsPlainObject(args_v)) |arr| {
+        const len = try clampArrayLength(lengthOfArray(arr));
+        var i: i64 = 0;
+        while (i < len) : (i += 1) {
+            var ibuf: [24]u8 = undefined;
+            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+            apply_args.append(realm.allocator, arr.get(islice)) catch return error.OutOfMemory;
+        }
+    }
+
+    const interpreter = @import("../interpreter.zig");
+    const outcome = interpreter.callJSFunction(realm.allocator, realm, target, this_arg, apply_args.items) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    switch (outcome) {
+        .value, .yielded => |v| return v,
+        .thrown => return error.NativeThrew,
+    }
+}
+
+fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const target = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Reflect.construct target must be a constructor");
+    // §28.1.2 Reflect.construct step 2: throw if target is
+    // not actually a constructor. `isConstructor.js` harness
+    // depends on this throw.
+    if (!target.has_construct or target.is_arrow) return throwTypeError(realm, "Reflect.construct target is not a constructor");
+    const args_v = argOr(args, 1, Value.undefined_);
+
+    var ctor_args: std.ArrayListUnmanaged(Value) = .empty;
+    defer ctor_args.deinit(realm.allocator);
+    if (heap_mod.valueAsPlainObject(args_v)) |arr| {
+        const len = try clampArrayLength(lengthOfArray(arr));
+        var i: i64 = 0;
+        while (i < len) : (i += 1) {
+            var ibuf: [24]u8 = undefined;
+            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+            ctor_args.append(realm.allocator, arr.get(islice)) catch return error.OutOfMemory;
+        }
+    }
+
+    // Allocate the instance with [[Prototype]] = target.prototype,
+    // then call target as a constructor.
+    const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
+    instance.prototype = target.prototype;
+    const this_arg = heap_mod.taggedObject(instance);
+
+    const interpreter = @import("../interpreter.zig");
+    const outcome = interpreter.callJSFunction(realm.allocator, realm, target, this_arg, ctor_args.items) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    switch (outcome) {
+        .value, .yielded => |v| {
+            // ConstructResult: object return wins, else `this`.
+            if (heap_mod.valueAsPlainObject(v) != null or heap_mod.valueAsFunction(v) != null) return v;
+            return this_arg;
+        },
+        .thrown => return error.NativeThrew,
+    }
+}
+
+/// Stringify a Value for use as a property key in Reflect ops.
+/// Mirrors `computedKeyToString` in interpreter.zig.
+fn computedKeyForReflect(v: Value, scratch: *[64]u8) []const u8 {
+    if (v.isString()) {
+        const s: *JSString = @ptrCast(@alignCast(v.asString()));
+        return s.bytes;
+    }
+    if (v.isInt32()) return std.fmt.bufPrint(scratch, "{d}", .{v.asInt32()}) catch unreachable;
+    if (v.isDouble()) {
+        const d = v.asDouble();
+        if (std.math.isNan(d)) return "NaN";
+        if (std.math.isInf(d)) return if (d > 0) "Infinity" else "-Infinity";
+        if (d == @trunc(d) and d >= -9007199254740992.0 and d <= 9007199254740992.0) {
+            const i: i64 = @intFromFloat(d);
+            return std.fmt.bufPrint(scratch, "{d}", .{i}) catch unreachable;
+        }
+        return std.fmt.bufPrint(scratch, "{d}", .{d}) catch unreachable;
+    }
+    if (v.isBool()) return if (v.asBool()) "true" else "false";
+    if (v.isNull()) return "null";
+    if (v.isUndefined()) return "undefined";
+    return "[object]";
+}
+

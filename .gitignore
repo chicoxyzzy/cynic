@@ -1,0 +1,13 @@
+# Zig build artifacts
+zig-cache/
+zig-out/
+.zig-cache/
+
+# Editor / OS junk
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# test262 lives at vendor/test262 as a Git submodule (see .gitmodules).

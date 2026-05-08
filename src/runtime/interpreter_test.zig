@@ -1,0 +1,2248 @@
+//! Tests for the bytecode interpreter — extracted from
+//! `interpreter.zig` to keep the dispatch loop module focused
+//! on production code (the host file dropped from ~5,960 to
+//! ~3,730 lines after this split). All tests run end-to-end:
+//! parse → compile → run → assert on the resulting `Value`.
+
+const std = @import("std");
+const testing = std.testing;
+
+const interpreter = @import("interpreter.zig");
+const RunResult = interpreter.RunResult;
+const run = interpreter.run;
+const evaluateScript = interpreter.evaluateScript;
+
+const Value = @import("value.zig").Value;
+const JSString = @import("string.zig").JSString;
+const Realm = @import("realm.zig").Realm;
+const parser_mod = @import("../parser/parser.zig");
+const compiler_mod = @import("../bytecode/compiler.zig");
+const compileExpressionAsChunk = compiler_mod.compileExpressionAsChunk;
+const compileScriptAsChunk = compiler_mod.compileScriptAsChunk;
+const cynic_diag = @import("../diagnostic.zig");
+
+fn evaluate(realm: *Realm, source: []const u8) !Value {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const program = try parser_mod.parseScript(arena.allocator(), source, null);
+    try testing.expect(program.body.len == 1);
+    const stmt = program.body[0];
+    try testing.expect(stmt == .expression);
+    const expr = stmt.expression.expression;
+
+    var chunk = try compileExpressionAsChunk(testing.allocator, realm, &expr, source);
+    defer chunk.deinit(testing.allocator);
+    const result = try run(testing.allocator, realm, &chunk);
+    return switch (result) {
+        .value, .yielded => |v| v,
+        .thrown => error.UncaughtException,
+    };
+}
+
+/// Run a full script (any number of statements) and return the
+/// `RunResult`. Caller decides whether the `.thrown` branch is
+/// the test's expected outcome.
+fn evaluateScriptResult(realm: *Realm, source: []const u8) !RunResult {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const program = try parser_mod.parseScript(arena.allocator(), source, null);
+    var chunk = try compileScriptAsChunk(testing.allocator, realm, &program, source, null);
+    defer chunk.deinit(testing.allocator);
+    return run(testing.allocator, realm, &chunk);
+}
+
+fn expectScriptIntWithBuiltins(source: []const u8, expected: i32) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    const v = switch (try evaluateScriptResult(&realm, source)) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    if (v.isInt32()) try testing.expectEqual(expected, v.asInt32()) else if (v.isDouble()) try testing.expectEqual(@as(f64, @floatFromInt(expected)), v.asDouble()) else return error.NotANumber;
+}
+
+fn expectScriptStringWithBuiltins(source: []const u8, expected: []const u8) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    const v = switch (try evaluateScriptResult(&realm, source)) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isString());
+    const s: *JSString = @ptrCast(@alignCast(v.asString()));
+    try testing.expectEqualStrings(expected, s.bytes);
+}
+
+/// Test helper: run a script, returning the final accumulator
+/// value. Throws surface as `error.UncaughtException`. The
+/// public `evaluateScript` (top of file) is used directly by
+/// callers that want the full `RunResult`.
+fn evaluateScriptValue(realm: *Realm, source: []const u8) !Value {
+    return switch (try evaluateScriptResult(realm, source)) {
+        .value, .yielded => |v| v,
+        .thrown => error.UncaughtException,
+    };
+}
+
+fn expectScriptInt(source: []const u8, expected: i32) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const v = try evaluateScriptValue(&realm, source);
+    if (v.isInt32()) try testing.expectEqual(expected, v.asInt32()) else if (v.isDouble()) try testing.expectEqual(@as(f64, @floatFromInt(expected)), v.asDouble()) else return error.NotANumber;
+}
+
+fn expectScriptString(source: []const u8, expected: []const u8) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const v = try evaluateScriptValue(&realm, source);
+    try testing.expect(v.isString());
+    const s: *JSString = @ptrCast(@alignCast(v.asString()));
+    try testing.expectEqualStrings(expected, s.bytes);
+}
+
+fn expectScriptThrows(source: []const u8) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const result = try evaluateScriptResult(&realm, source);
+    switch (result) {
+        .value, .yielded => return error.ExpectedThrow,
+        .thrown => {}, // ok
+    }
+}
+
+fn expectInt(source: []const u8, expected: i32) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const v = try evaluate(&realm, source);
+    if (v.isInt32()) {
+        try testing.expectEqual(expected, v.asInt32());
+    } else if (v.isDouble()) {
+        try testing.expectEqual(@as(f64, @floatFromInt(expected)), v.asDouble());
+    } else {
+        return error.NotANumber;
+    }
+}
+
+fn expectDouble(source: []const u8, expected: f64) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const v = try evaluate(&realm, source);
+    const d = if (v.isInt32()) @as(f64, @floatFromInt(v.asInt32())) else v.asDouble();
+    try testing.expectEqual(@as(u64, @bitCast(expected)), @as(u64, @bitCast(d)));
+}
+
+fn expectBool(source: []const u8, expected: bool) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const v = try evaluate(&realm, source);
+    try testing.expect(v.isBool());
+    try testing.expectEqual(expected, v.asBool());
+}
+
+fn expectString(source: []const u8, expected: []const u8) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const v = try evaluate(&realm, source);
+    try testing.expect(v.isString());
+    const s: *JSString = @ptrCast(@alignCast(v.asString()));
+    try testing.expectEqualStrings(expected, s.bytes);
+}
+
+test "interpreter: 1 + 2 = 3 (int32 fast path)" {
+    try expectInt("1 + 2;", 3);
+}
+
+test "interpreter: 1 + 2 * 3 = 7 (precedence preserved)" {
+    try expectInt("1 + 2 * 3;", 7);
+}
+
+test "interpreter: double-path arithmetic" {
+    // The point: when at least one operand isn't an exact i32, the
+    // operation goes through the f64 path. Use an exactly-
+    // representable result so the bit-equal compare doesn't trip
+    // on platform-specific intermediate rounding.
+    try expectDouble("1.5 + 2.5;", 4.0);
+    try expectDouble("0.5 * 0.5;", 0.25);
+}
+
+test "interpreter: integer overflow falls back to double" {
+    try expectDouble("2147483647 + 1;", 2147483648.0);
+}
+
+test "interpreter: subtraction" {
+    try expectInt("5 - 2;", 3);
+    try expectInt("1 - 2;", -1);
+}
+
+test "interpreter: division produces a double" {
+    try expectDouble("1.0 / 2.0;", 0.5);
+    try expectDouble("1 / 0;", std.math.inf(f64));
+}
+
+test "interpreter: modulo" {
+    try expectInt("5 % 3;", 2);
+}
+
+test "interpreter: unary negate (int32)" {
+    try expectInt("-1;", -1);
+}
+
+test "interpreter: bit-not" {
+    try expectInt("~5;", -6);
+}
+
+test "interpreter: bitwise and / or / xor" {
+    try expectInt("5 & 3;", 1);
+    try expectInt("5 | 3;", 7);
+    try expectInt("5 ^ 3;", 6);
+}
+
+test "interpreter: shifts" {
+    try expectInt("1 << 4;", 16);
+    try expectInt("16 >> 2;", 4);
+    try expectInt("-1 >>> 0;", -1); // 0xFFFFFFFF as i32 is -1
+}
+
+test "interpreter: strict equality across types" {
+    try expectBool("1 === 1;", true);
+    try expectBool("1 === 2;", false);
+    try expectBool("'a' === 'a';", true);
+    try expectBool("'a' === 'b';", false);
+    try expectBool("null === null;", true);
+    // `undefined` is a global identifier — not addressable until later
+    // adds variable lookup. `void 0` is the spec-canonical way to
+    // materialise `undefined` in expression position pre-variables.
+    try expectBool("null === void 0;", false);
+    try expectBool("(void 0) === (void 0);", true);
+}
+
+test "interpreter: loose equality" {
+    try expectBool("null == void 0;", true);
+    try expectBool("1 == '1';", true);
+    try expectBool("0 == false;", true);
+    try expectBool("'1' == 1;", true);
+}
+
+test "interpreter: relational operators" {
+    try expectBool("1 < 2;", true);
+    try expectBool("2 < 1;", false);
+    try expectBool("1 <= 1;", true);
+    try expectBool("'a' < 'b';", true);
+}
+
+test "interpreter: NaN comparisons are false" {
+    try expectBool("(0/0) < 1;", false);
+    try expectBool("(0/0) > 1;", false);
+    try expectBool("(0/0) === (0/0);", false);
+}
+
+test "interpreter: logical not" {
+    try expectBool("!true;", false);
+    try expectBool("!0;", true);
+    try expectBool("!'';", true);
+    try expectBool("!'x';", false);
+}
+
+test "interpreter: conditional ?:" {
+    try expectInt("1 < 2 ? 10 : 20;", 10);
+    try expectInt("1 > 2 ? 10 : 20;", 20);
+}
+
+test "interpreter: && returns rhs when lhs truthy" {
+    try expectInt("1 && 2;", 2);
+}
+
+test "interpreter: && returns lhs when lhs falsey" {
+    // §13.13: `&&` returns the LHS value (not a coerced bool) when
+    // it's falsy. `0 && 2` is `0`, not `false`.
+    try expectInt("0 && 2;", 0);
+}
+
+test "interpreter: || returns lhs when truthy" {
+    try expectInt("1 || 2;", 1);
+}
+
+test "interpreter: || returns rhs when lhs falsey" {
+    try expectInt("0 || 2;", 2);
+}
+
+test "interpreter: string + string = concatenation" {
+    try expectString("'a' + 'b';", "ab");
+    try expectString("'foo' + 'bar';", "foobar");
+}
+
+test "interpreter: number + string = string" {
+    try expectString("1 + 'a';", "1a");
+    try expectString("'a' + 1;", "a1");
+}
+
+test "interpreter: typeof returns spec strings" {
+    try expectString("typeof 1;", "number");
+    try expectString("typeof 1.5;", "number");
+    try expectString("typeof 'a';", "string");
+    try expectString("typeof true;", "boolean");
+    try expectString("typeof null;", "object"); // §13.5.3 historical quirk
+    try expectString("typeof (void 0);", "undefined");
+}
+
+// ── later — statements, scope, control flow, exceptions ──────────────────
+
+test "later: let declaration with initializer" {
+    try expectScriptInt("let x = 42; x;", 42);
+}
+
+test "later: let declaration without initializer is undefined" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const v = try evaluateScriptValue(&realm, "let x; x;");
+    try testing.expect(v.isUndefined());
+}
+
+test "later: const declaration" {
+    try expectScriptInt("const x = 7; x + 3;", 10);
+}
+
+test "later: var declaration" {
+    try expectScriptInt("var x = 5; x * 2;", 10);
+}
+
+test "later: simple assignment to let" {
+    try expectScriptInt("let x = 1; x = 2; x;", 2);
+}
+
+test "later: compound assignment +=" {
+    try expectScriptInt("let x = 5; x += 3; x;", 8);
+}
+
+test "later: compound assignment *=" {
+    try expectScriptInt("let x = 4; x *= 5; x;", 20);
+}
+
+test "later: const reassignment is rejected at compile time" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const program = try parser_mod.parseScript(arena.allocator(), "const x = 1; x = 2;", null);
+
+    var diags: cynic_diag.Diagnostics = .empty;
+    defer diags.deinit(testing.allocator);
+    const result = compileScriptAsChunk(testing.allocator, &realm, &program, "const x = 1; x = 2;", &diags);
+    try testing.expectError(error.AssignmentToConst, result);
+    try testing.expect(diags.items.len >= 1);
+    try testing.expectEqual(cynic_diag.Code.assignment_to_const, diags.items[0].code);
+}
+
+test "later: TDZ — reading let before declaration throws ReferenceError" {
+    // The Hole sentinel sits in the let's slot from block entry
+    // until the declaration runs. Reading it via `Ldar` +
+    // `ThrowIfHole` raises a ReferenceError.
+    try expectScriptThrows("x; let x = 1;");
+}
+
+test "later: TDZ does not fire after the declaration runs" {
+    try expectScriptInt("let x = 1; x;", 1);
+}
+
+test "later: var hoisting — read before declaration is undefined" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    // later simplification: `var` is declare-on-encounter rather
+    // than fully hoisted. The full §13.3.2 hoisting semantics
+    // are correctness-equivalent for this assertion since we
+    // don't run reads through the global scope yet.
+    const v = try evaluateScriptValue(&realm, "var x = 1; x;");
+    try testing.expect(v.isInt32());
+}
+
+test "later: block scope — outer let isn't shadowed when inner doesn't redeclare" {
+    try expectScriptInt("let x = 1; { x = 2; } x;", 2);
+}
+
+test "later: block scope — inner let shadows outer let" {
+    try expectScriptInt("let x = 1; { let x = 2; } x;", 1);
+}
+
+// ── Control flow ────────────────────────────────────────────────────────
+
+test "later: if-else true branch" {
+    try expectScriptInt("let r = 0; if (true) r = 1; else r = 2; r;", 1);
+}
+
+test "later: if-else false branch" {
+    try expectScriptInt("let r = 0; if (false) r = 1; else r = 2; r;", 2);
+}
+
+test "later: while loop accumulates" {
+    try expectScriptInt(
+        "let i = 0; let s = 0; while (i < 5) { s = s + i; i = i + 1; } s;",
+        10, // 0+1+2+3+4
+    );
+}
+
+test "later: do-while runs body once even if test is false" {
+    try expectScriptInt(
+        "let r = 0; do { r = 42; } while (false); r;",
+        42,
+    );
+}
+
+test "later: for loop" {
+    try expectScriptInt(
+        "let s = 0; for (let i = 1; i <= 10; i = i + 1) s = s + i; s;",
+        55, // 1+2+...+10
+    );
+}
+
+test "later: break exits the loop" {
+    try expectScriptInt(
+        "let i = 0; while (true) { if (i === 3) break; i = i + 1; } i;",
+        3,
+    );
+}
+
+test "later: continue skips iteration body remainder" {
+    try expectScriptInt(
+        "let s = 0; for (let i = 1; i <= 5; i = i + 1) { if (i === 3) continue; s = s + i; } s;",
+        12, // 1+2+4+5
+    );
+}
+
+test "later: nested loops — break leaves only the inner" {
+    try expectScriptInt(
+        "let count = 0; for (let i = 0; i < 3; i = i + 1) { for (let j = 0; j < 3; j = j + 1) { if (j === 1) break; count = count + 1; } } count;",
+        3, // each outer iter does the inner once before break
+    );
+}
+
+// ── Exceptions ──────────────────────────────────────────────────────────
+
+test "later: throw + catch round-trip with binding" {
+    try expectScriptString(
+        "let captured = 'no'; try { throw 'boom'; } catch (e) { captured = e; } captured;",
+        "boom",
+    );
+}
+
+test "later: throw + catch round-trip without binding" {
+    try expectScriptInt(
+        "let r = 0; try { throw 1; } catch { r = 2; } r;",
+        2,
+    );
+}
+
+test "later: catch reaches non-thrown values via assignment" {
+    try expectScriptInt(
+        "let r = 0; try { r = 1; } catch (e) { r = 99; } r;",
+        1,
+    );
+}
+
+test "later: TDZ exception is catchable" {
+    try expectScriptInt(
+        "let caught = 0; try { x; let x = 1; } catch { caught = 1; } caught;",
+        1,
+    );
+}
+
+test "later: throw with no catch propagates" {
+    try expectScriptThrows("throw 42;");
+}
+
+test "later: finally runs on normal completion" {
+    try expectScriptInt(
+        "let r = 0; try { r = 1; } finally { r = r + 10; } r;",
+        11,
+    );
+}
+
+// ── Integration: fizzbuzz-shaped program ─────────────────────────────────
+
+// ── later — functions, calls, returns ──────────────────────────────────
+//
+// Closures over outer-scope bindings are later; for now functions
+// can reference their own params, locals, and (via the named-function
+// self-binding at register 0) themselves. That's enough for
+// non-recursive functions, lambdas, and *named-form* recursion.
+
+test "later: function declaration + call" {
+    try expectScriptInt("function add(a, b) { return a + b; } add(2, 3);", 5);
+}
+
+test "later: function expression assigned to a let" {
+    try expectScriptInt("let f = function(x) { return x * 2; }; f(7);", 14);
+}
+
+test "later: arrow function — concise body" {
+    try expectScriptInt("let f = (x) => x + 10; f(5);", 15);
+}
+
+test "later: arrow function — block body" {
+    try expectScriptInt("let f = (x) => { return x - 1; }; f(10);", 9);
+}
+
+test "later: function with no return falls through to undefined" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const v = try evaluateScriptValue(&realm, "function f() {} f();");
+    try testing.expect(v.isUndefined());
+}
+
+test "later: missing arguments arrive as undefined" {
+    // §10.2.3 IteratorBindingInitialization: when the caller
+    // passes fewer args than the callee declares, the missing
+    // params are `undefined`. Our convention copies args at
+    // r1.. and pads with the register file's initial value.
+    try expectScriptString(
+        "function f(a, b) { return typeof b; } f(1);",
+        "undefined",
+    );
+}
+
+test "later: named function expression — recursion via self-binding" {
+    // Per §15.2.4 NamedEvaluation, the `fact` name should be
+    // bound inside the function's own scope. later doesn't yet
+    // emit that self-binding for *expressions* (declarations
+    // work via the outer scope). Use the outer binding `f`
+    // instead — same spec-observable behaviour.
+    try expectScriptInt(
+        "let f = function(n) { return n <= 1 ? 1 : n * f(n - 1); }; f(5);",
+        120,
+    );
+}
+
+test "later: function declaration — self-recursion via self-binding" {
+    // later extends the named-function-expression trick to
+    // declarations: the function's own name is bound to r0
+    // inside its body. Real outer-scope closures arrive later.
+    try expectScriptInt(
+        "function fact(n) { return n <= 1 ? 1 : n * fact(n - 1); } fact(6);",
+        720,
+    );
+}
+
+test "later: deep recursion throws RangeError" {
+    // The interpreter caps simultaneously-active call frames at
+    // `max_call_frames` and raises a RangeError on overflow. The
+    // throw unwinds all the way back to the host since nothing
+    // catches it.
+    try expectScriptThrows(
+        "function rec(n) { return rec(n + 1); } rec(0);",
+    );
+}
+
+test "later: deep recursion is catchable" {
+    // RangeError unwinds frame-by-frame; an outer try/catch can
+    // catch it the moment unwinding hits a handler.
+    try expectScriptString(
+        \\let caught = '';
+        \\function rec(n) { return rec(n + 1); }
+        \\try { rec(0); } catch (e) { caught = 'caught'; }
+        \\caught;
+    , "caught");
+}
+
+test "later: calling a non-function throws TypeError" {
+    try expectScriptThrows("let x = 1; x();");
+}
+
+test "later: TypeError from a non-callable is catchable" {
+    try expectScriptString(
+        \\let saw = '';
+        \\try { let x = 1; x(); } catch (e) { saw = e; }
+        \\saw;
+    , "value is not callable");
+}
+
+test "later: arrow as a higher-order function arg surrogate" {
+    // No higher-order built-ins yet, but we can still
+    // test the call-return mechanism on a hand-rolled callback.
+    try expectScriptInt(
+        \\function apply(f, x) { return f(x); }
+        \\apply((y) => y * 3, 7);
+    , 21);
+}
+
+test "later: nested non-recursive calls preserve return values" {
+    try expectScriptInt(
+        \\function double(x) { return x * 2; }
+        \\function triple(x) { return x * 3; }
+        \\double(triple(4));
+    , 24);
+}
+
+// ── later — closures over arbitrary scopes ─────────────────────────────
+
+test "later: closure over an outer let" {
+    // The arrow `() => n` captures `n` from `counter`'s scope.
+    // Each invocation of the returned arrow sees and mutates
+    // the same `n` because the arrow holds a reference to
+    // counter's environment (via `captured_env`).
+    try expectScriptInt(
+        \\function counter() {
+        \\  let n = 0;
+        \\  return () => { n = n + 1; return n; };
+        \\}
+        \\let c = counter();
+        \\c(); c(); c();
+    , 3);
+}
+
+test "later: two counters maintain independent state" {
+    try expectScriptInt(
+        \\function makeCounter() {
+        \\  let n = 0;
+        \\  return () => { n = n + 1; return n; };
+        \\}
+        \\let a = makeCounter();
+        \\let b = makeCounter();
+        \\a(); a(); a();
+        \\b(); b();
+        \\a();
+    , 4);
+}
+
+test "later: closure captures multiple bindings" {
+    try expectScriptInt(
+        \\function adder(x) {
+        \\  return (y) => x + y;
+        \\}
+        \\let add5 = adder(5);
+        \\add5(10);
+    , 15);
+}
+
+test "later: nested closures (closure-of-closure)" {
+    try expectScriptInt(
+        \\function outer(a) {
+        \\  return function (b) {
+        \\    return function (c) {
+        \\      return a + b + c;
+        \\    };
+        \\  };
+        \\}
+        \\outer(1)(2)(3);
+    , 6);
+}
+
+test "later: function declaration recursion via captured outer env" {
+    // No more self-binding hack — `fact` is in script env,
+    // captured by the function's closure. The body resolves
+    // `fact` via LdaEnv at depth=1.
+    try expectScriptInt(
+        "function fact(n) { return n <= 1 ? 1 : n * fact(n - 1); } fact(7);",
+        5040,
+    );
+}
+
+// ── later — object literals + property access ───────────────────────────
+
+test "later: empty object literal" {
+    try expectScriptString("typeof ({});", "object");
+}
+
+test "later: object literal with single property" {
+    try expectScriptInt("({a: 42}).a;", 42);
+}
+
+test "later: object literal with multiple properties" {
+    try expectScriptInt("let o = {x: 10, y: 20}; o.x + o.y;", 30);
+}
+
+test "later: missing property returns undefined" {
+    try expectScriptString("typeof ({a: 1}).b;", "undefined");
+}
+
+test "later: assignment to property" {
+    try expectScriptInt("let o = {x: 1}; o.x = 5; o.x;", 5);
+}
+
+test "later: chained property reads" {
+    try expectScriptInt("let o = {inner: {value: 7}}; o.inner.value;", 7);
+}
+
+test "later: assigning new property" {
+    try expectScriptInt("let o = {}; o.x = 99; o.x;", 99);
+}
+
+test "later: typeof null is object (historical)" {
+    try expectScriptString("typeof null;", "object");
+}
+
+test "later: object stored in let, methods of access" {
+    try expectScriptInt(
+        \\let person = {age: 30, height: 180};
+        \\person.age = person.age + 1;
+        \\person.age + person.height;
+    , 211);
+}
+
+test "later: reading number-prototype methods auto-boxes" {
+    // Pre-later we threw TypeError on `(5).x`; later the
+    // primitive auto-boxes through %Number.prototype% so
+    // `(5).toFixed(0)` works. Bare property access of a
+    // non-method name returns undefined.
+    try expectScriptStringWithBuiltins("let n = 5; typeof n.x;", "undefined");
+}
+
+test "later: reading property of null/undefined still throws" {
+    try expectScriptThrows("let n = null; n.x;");
+}
+
+test "later: BigInt literal + typeof" {
+    try expectScriptStringWithBuiltins("typeof 42n;", "bigint");
+}
+
+test "later: BigInt arithmetic" {
+    try expectScriptStringWithBuiltins(
+        \\(2n ** 64n).toString();
+    , "18446744073709551616");
+}
+
+test "later: BigInt() coerces from Number, String, Boolean" {
+    try expectScriptStringWithBuiltins(
+        \\BigInt(42).toString() + ":" + BigInt("100").toString() + ":" + BigInt(true).toString();
+    , "42:100:1");
+}
+
+test "later: BigInt comparison + equality" {
+    try expectScriptStringWithBuiltins(
+        \\(5n === 5n) + ":" + (5n < 10n) + ":" + (5n === 5);
+    , "true:true:false");
+}
+
+test "later: ArrayBuffer + Uint8Array indexed access" {
+    try expectScriptStringWithBuiltins(
+        \\const u8 = new Uint8Array(4);
+        \\u8[0] = 1; u8[1] = 2; u8[2] = 3; u8[3] = 4;
+        \\u8[0] + ":" + u8[1] + ":" + u8[2] + ":" + u8[3] + ":" + u8.length;
+    , "1:2:3:4:4");
+}
+
+test "later: Int32Array view onto an ArrayBuffer" {
+    try expectScriptIntWithBuiltins(
+        \\const buf = new ArrayBuffer(16);
+        \\const i32 = new Int32Array(buf);
+        \\i32[0] = 100; i32[1] = 200;
+        \\i32.length + i32[0] + i32[1];
+    , 304);
+}
+
+test "later: TypedArray fill" {
+    try expectScriptIntWithBuiltins(
+        \\const a = new Uint8Array(5);
+        \\a.fill(7);
+        \\a[0] + a[1] + a[2] + a[3] + a[4];
+    , 35);
+}
+
+test "later: encodeURI / encodeURIComponent" {
+    try expectScriptStringWithBuiltins(
+        \\encodeURI("a b") + ":" + encodeURIComponent("a=b&c");
+    , "a%20b:a%3Db%26c");
+}
+
+test "later: String.prototype.substr (Annex B alias kept)" {
+    try expectScriptStringWithBuiltins(
+        \\"Hello, World".substr(7, 5);
+    , "World");
+}
+
+test "later: trimLeft / trimRight (Annex B aliases kept)" {
+    try expectScriptStringWithBuiltins(
+        \\"  hi  ".trimLeft() + ":" + "  hi  ".trimRight();
+    , "hi  :  hi");
+}
+
+test "later: Number.prototype.toString(radix)" {
+    try expectScriptStringWithBuiltins(
+        \\(255).toString(16) + ":" + (10).toString(2);
+    , "ff:1010");
+}
+
+test "later: BigInt.prototype.toString(radix)" {
+    try expectScriptStringWithBuiltins(
+        \\(255n).toString(16) + ":" + (-100n).toString(16);
+    , "ff:-64");
+}
+
+test "later: BigInt(non-integer) throws RangeError" {
+    try expectScriptThrows("BigInt(1.5);");
+}
+
+test "later: parseInt ToString-coerces non-strings" {
+    try expectScriptStringWithBuiltins(
+        \\String(parseInt(true)) + ":" + String(parseInt(false));
+    , "NaN:NaN");
+}
+
+test "later: TypedArray.prototype.buffer throws on prototype object" {
+    try expectScriptThrows(
+        \\Uint8Array.prototype.buffer;
+    );
+}
+
+test "later: AsyncGeneratorFunction constructor is reachable via instance proto" {
+    try expectScriptStringWithBuiltins(
+        \\const f = async function* () {};
+        \\typeof Object.getPrototypeOf(f).constructor;
+    , "function");
+}
+
+test "later: RegExp.escape escapes syntax characters" {
+    try expectScriptStringWithBuiltins(
+        \\RegExp.escape("^.*$");
+    , "\\^\\.\\*\\$");
+}
+
+test "later: WeakMap.prototype.delete on a Map throws TypeError" {
+    try expectScriptThrows(
+        \\WeakMap.prototype.delete.call(new Map(), {});
+    );
+}
+
+test "later: WeakMap.prototype.getOrInsert" {
+    try expectScriptIntWithBuiltins(
+        \\const wm = new WeakMap();
+        \\const k = {};
+        \\wm.getOrInsert(k, 5);
+        \\wm.getOrInsert(k, 99);
+    , 5);
+}
+
+test "later: decodeURI preserves reserved characters" {
+    try expectScriptStringWithBuiltins(
+        \\decodeURI("a%20b%23c");
+    , "a b%23c");
+}
+
+test "later: closure can write back through captured env" {
+    try expectScriptString(
+        \\let log = '';
+        \\function record(s) { log = log + s; }
+        \\record('a'); record('b'); record('c');
+        \\log;
+    , "abc");
+}
+
+test "later: function carries arbitrary properties" {
+    // Functions are objects (§10.2). Reads of unknown properties
+    // return undefined; writes are visible on subsequent reads.
+    // Mandatory for harness/sta.js loading
+    // (`Test262Error.prototype.toString = …`).
+    try expectScriptInt(
+        \\function f() {}
+        \\f.tag = 7;
+        \\f.tag;
+    , 7);
+}
+
+test "later: function .prototype is an auto-allocated object" {
+    // Non-arrow functions get a fresh `.prototype` object at
+    // allocation time (§10.2.4). The object's `.constructor`
+    // points back to the function (§20.2.4.1).
+    try expectScriptString(
+        \\function F() {}
+        \\typeof F.prototype;
+    , "object");
+}
+
+test "later: F.prototype.constructor === F" {
+    try expectScriptString(
+        \\function F() {}
+        \\F.prototype.constructor === F ? "yes" : "no";
+    , "yes");
+}
+
+test "later: function .prototype is mutable" {
+    // Test262 sets `Test262Error.prototype.toString = …` so the
+    //.prototype object must be a real ordinary object that
+    // accepts property writes.
+    try expectScriptInt(
+        \\function F() {}
+        \\F.prototype.x = 42;
+        \\F.prototype.x;
+    , 42);
+}
+
+test "later: assigning to f.prototype rebinds the slot" {
+    try expectScriptInt(
+        \\function F() {}
+        \\F.prototype = {marker: 99};
+        \\F.prototype.marker;
+    , 99);
+}
+
+test "later: new F() returns a new instance" {
+    try expectScriptString(
+        \\function F() {}
+        \\typeof new F();
+    , "object");
+}
+
+test "later: constructor binds this to the new instance" {
+    try expectScriptInt(
+        \\function Point(x, y) { this.x = x; this.y = y; }
+        \\const p = new Point(3, 4);
+        \\p.x + p.y;
+    , 7);
+}
+
+test "later: instance.__proto__ === F.prototype (transitively)" {
+    // No `__proto__`/`Object.getPrototypeOf` yet — but methods
+    // installed on F.prototype must be reachable via instance.
+    try expectScriptInt(
+        \\function F() {}
+        \\F.prototype.shared = 42;
+        \\const f = new F();
+        \\f.shared;
+    , 42);
+}
+
+test "later: new returns this if constructor doesn't return an object" {
+    // §13.3.5.1.1: primitive return values are discarded; the
+    // freshly allocated `this` survives.
+    try expectScriptInt(
+        \\function F() { this.tag = 99; return 17; }
+        \\new F().tag;
+    , 99);
+}
+
+test "later: new uses the explicit object return when given one" {
+    try expectScriptInt(
+        \\function F() { this.a = 1; return {b: 2}; }
+        \\const f = new F();
+        \\(f.a === undefined ? 1 : 0) + f.b;
+    , 3);
+}
+
+test "later: constructor.constructor === F" {
+    // §20.2.4.1 — `(new F).constructor` resolves through the
+    // prototype chain to `F`.
+    try expectScriptString(
+        \\function F() {}
+        \\new F().constructor === F ? "yes" : "no";
+    , "yes");
+}
+
+test "later: instanceof returns true for direct constructor" {
+    try expectScriptString(
+        \\function F() {}
+        \\const f = new F();
+        \\f instanceof F ? "yes" : "no";
+    , "yes");
+}
+
+test "later: instanceof returns false for unrelated constructor" {
+    try expectScriptString(
+        \\function F() {}
+        \\function G() {}
+        \\const f = new F();
+        \\f instanceof G ? "yes" : "no";
+    , "no");
+}
+
+test "later: instanceof on non-object returns false" {
+    try expectScriptString(
+        \\function F() {}
+        \\(5 instanceof F) ? "yes" : "no";
+    , "no");
+}
+
+test "later: instanceof on non-callable RHS throws TypeError" {
+    try expectScriptThrows("({}) instanceof {};");
+}
+
+test "later: arrow this is lexically captured" {
+    // `this` inside an arrow points to whatever `this` was at the
+    // arrow's definition site. Top-level strict `this` is undefined.
+    try expectScriptString(
+        \\const f = () => typeof this;
+        \\f();
+    , "undefined");
+}
+
+test "later: top-level this is undefined in strict mode" {
+    try expectScriptString("typeof this;", "undefined");
+}
+
+test "later: method-style call binds this to the receiver" {
+    // no method-shorthand-call sugar yet.
+    // Test through plain assignment + property access.
+    try expectScriptInt(
+        \\function F() { this.value = 7; }
+        \\F.prototype.getValue = function() { return this.value; };
+        \\new F().getValue();
+    , 7);
+}
+
+test "later: typed Error constructors install correctly" {
+    try expectScriptStringWithBuiltins(
+        \\const t = new TypeError("oops");
+        \\t.message + ":" + t.name;
+    , "oops:TypeError");
+}
+
+test "later: typed Error subclassing — TypeError instanceof Error" {
+    try expectScriptStringWithBuiltins(
+        \\const t = new TypeError("x");
+        \\(t instanceof TypeError) && (t instanceof Error) ? "yes" : "no";
+    , "yes");
+}
+
+test "later: TypeError.prototype.constructor === TypeError" {
+    try expectScriptStringWithBuiltins(
+        \\TypeError.prototype.constructor === TypeError ? "yes" : "no";
+    , "yes");
+}
+
+test "later: runtime-thrown TypeError is catchable as a real object" {
+    // The interpreter now allocates a real `new TypeError(msg)`
+    // when an opcode raises a TypeError, so user code can match
+    // against the constructor (the assert.throws shape).
+    try expectScriptStringWithBuiltins(
+        \\let kind = "none";
+        \\try {
+        \\  ({}).a.b;  // reading property of undefined → TypeError
+        \\} catch (e) {
+        \\  if (e instanceof TypeError) kind = "type";
+        \\  else kind = typeof e;
+        \\}
+        \\kind;
+    , "type");
+}
+
+test "later: ReferenceError on unresolved global is a real object" {
+    try expectScriptStringWithBuiltins(
+        \\let kind = "none";
+        \\try { unboundIdentifier; } catch (e) {
+        \\  if (e instanceof ReferenceError) kind = "ref";
+        \\}
+        \\kind;
+    , "ref");
+}
+
+test "later: empty class declaration creates a constructor" {
+    try expectScriptStringWithBuiltins(
+        \\class Empty {}
+        \\typeof Empty;
+    , "function");
+}
+
+test "later: new C() returns an instance with C.prototype as proto" {
+    try expectScriptStringWithBuiltins(
+        \\class C {}
+        \\const x = new C();
+        \\(x instanceof C) ? "yes" : "no";
+    , "yes");
+}
+
+test "later: instance method lives on the prototype" {
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  m() { return 7; }
+        \\}
+        \\new C().m();
+    , 7);
+}
+
+test "later: constructor receives args and binds this" {
+    try expectScriptIntWithBuiltins(
+        \\class Point {
+        \\  constructor(x, y) {
+        \\    this.x = x;
+        \\    this.y = y;
+        \\  }
+        \\}
+        \\const p = new Point(3, 4);
+        \\p.x + p.y;
+    , 7);
+}
+
+test "later: static method on the constructor itself" {
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  static fn() { return 9; }
+        \\}
+        \\C.fn();
+    , 9);
+}
+
+test "later: extends links B.prototype to A.prototype" {
+    try expectScriptIntWithBuiltins(
+        \\class A {
+        \\  greet() { return 1; }
+        \\}
+        \\class B extends A {}
+        \\new B().greet();
+    , 1);
+}
+
+test "later: super(...) calls parent constructor with this" {
+    try expectScriptIntWithBuiltins(
+        \\class A {
+        \\  constructor(x) { this.a = x; }
+        \\}
+        \\class B extends A {
+        \\  constructor(x) {
+        \\    super(x);
+        \\    this.b = x + 1;
+        \\  }
+        \\}
+        \\const b = new B(5);
+        \\b.a + b.b;
+    , 11);
+}
+
+test "later: super.method() looks up through home-object proto" {
+    try expectScriptIntWithBuiltins(
+        \\class A {
+        \\  base() { return 10; }
+        \\}
+        \\class B extends A {
+        \\  derived() { return super.base() + 1; }
+        \\}
+        \\new B().derived();
+    , 11);
+}
+
+test "later: instance is also instanceof both subclass and parent" {
+    try expectScriptStringWithBuiltins(
+        \\class A {}
+        \\class B extends A {}
+        \\const b = new B();
+        \\(b instanceof B && b instanceof A) ? "yes" : "no";
+    , "yes");
+}
+
+test "later: default-constructor synthesis without extends" {
+    try expectScriptStringWithBuiltins(
+        \\class C {}
+        \\typeof new C();
+    , "object");
+}
+
+test "later: default-constructor with extends forwards args" {
+    try expectScriptIntWithBuiltins(
+        \\class A {
+        \\  constructor(v) { this.v = v; }
+        \\}
+        \\class B extends A {}
+        \\new B(42).v;
+    , 42);
+}
+
+test "later: class expression assigned to const" {
+    try expectScriptIntWithBuiltins(
+        \\const C = class {
+        \\  m() { return 13; }
+        \\};
+        \\new C().m();
+    , 13);
+}
+
+test "later: class is callable only via new" {
+    try expectScriptStringWithBuiltins(
+        \\class C {}
+        \\let kind = "ok";
+        \\try { C(); kind = "no-throw"; } catch (e) {
+        \\  if (e instanceof TypeError) kind = "type";
+        \\}
+        \\kind;
+    , "type");
+}
+
+test "later: extends static methods inherited" {
+    try expectScriptIntWithBuiltins(
+        \\class A {
+        \\  static get42() { return 42; }
+        \\}
+        \\class B extends A {}
+        \\B.get42();
+    , 42);
+}
+
+test "later: public instance field initializer" {
+    try expectScriptIntWithBuiltins(
+        \\class C { x = 1; y = 2; }
+        \\const c = new C();
+        \\c.x + c.y;
+    , 3);
+}
+
+test "later: field initializer reads `this` of in-progress instance" {
+    try expectScriptIntWithBuiltins(
+        \\class C { x = 1; y = this.x + 1; }
+        \\const c = new C();
+        \\c.x + c.y;
+    , 3);
+}
+
+test "later: field initializers run AFTER super(...)" {
+    try expectScriptIntWithBuiltins(
+        \\class A { constructor() { this.parent = 7; } }
+        \\class B extends A { x = this.parent; }
+        \\new B().x;
+    , 7);
+}
+
+test "later: static field on the constructor" {
+    try expectScriptIntWithBuiltins(
+        \\class C { static x = 42; }
+        \\C.x;
+    , 42);
+}
+
+test "later: static block runs at class definition with this=class" {
+    // Use `this` (bound to the class inside a static block per
+    // §15.7.13) — `C` itself is initialised after class
+    // definition completes, so wouldn't be visible from inside.
+    try expectScriptIntWithBuiltins(
+        \\class C { static x = 0; static { this.x = 5; } }
+        \\C.x;
+    , 5);
+}
+
+test "later: private field round-trip" {
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  #x = 0;
+        \\  set(v) { this.#x = v; }
+        \\  get() { return this.#x; }
+        \\}
+        \\const c = new C();
+        \\c.set(99);
+        \\c.get();
+    , 99);
+}
+
+test "later: private field brand check throws on foreign object" {
+    try expectScriptStringWithBuiltins(
+        \\class C {
+        \\  #x = 1;
+        \\  static check(o) { return o.#x; }
+        \\}
+        \\let kind = "ok";
+        \\try { C.check({}); kind = "no-throw"; } catch (e) {
+        \\  if (e instanceof TypeError) kind = "type";
+        \\}
+        \\kind;
+    , "type");
+}
+
+test "later: private method callable via this" {
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  #priv() { return 7; }
+        \\  use() { return this.#priv(); }
+        \\}
+        \\new C().use();
+    , 7);
+}
+
+test "later: instance getter / setter pair" {
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  constructor() { this._x = 0; }
+        \\  get x() { return this._x; }
+        \\  set x(v) { this._x = v + 1; }
+        \\}
+        \\const c = new C();
+        \\c.x = 5;
+        \\c.x;
+    , 6);
+}
+
+test "later: postfix obj.x++ returns old, mutates property" {
+    try expectScriptIntWithBuiltins(
+        \\const o = {x: 5};
+        \\const a = o.x++;
+        \\a + o.x;
+    , 11);
+}
+
+test "later: prefix ++obj.x returns new" {
+    try expectScriptIntWithBuiltins(
+        \\const o = {x: 5};
+        \\const a = ++o.x;
+        \\a + o.x;
+    , 12);
+}
+
+test "later: arr[i]-- works on computed member" {
+    try expectScriptIntWithBuiltins(
+        \\const a = [10, 20, 30];
+        \\const x = a[1]--;
+        \\x + a[1];
+    , 39);
+}
+
+test "later: arguments.length and indexed access" {
+    try expectScriptIntWithBuiltins(
+        \\function f() { return arguments.length; }
+        \\f(1, 2, 3, 4);
+    , 4);
+}
+
+test "later: arguments[i] reads positional args" {
+    try expectScriptIntWithBuiltins(
+        \\function f() { return arguments[0] + arguments[2]; }
+        \\f(7, 100, 3);
+    , 10);
+}
+
+test "later: arguments not visible inside arrow functions" {
+    // Arrows inherit `arguments` from the enclosing function;
+    // when there is none (top-level), reading it is a
+    // ReferenceError.
+    try expectScriptStringWithBuiltins(
+        \\const f = () => typeof arguments;
+        \\let kind = "ok";
+        \\try { f(); } catch (e) {
+        \\  if (e instanceof ReferenceError) kind = "ref";
+        \\}
+        \\kind;
+    , "ref");
+}
+
+test "later: for-of over array iterates values" {
+    try expectScriptIntWithBuiltins(
+        \\let s = 0;
+        \\for (const x of [1, 2, 3, 4]) s = s + x;
+        \\s;
+    , 10);
+}
+
+test "later: for-of over string iterates chars" {
+    try expectScriptStringWithBuiltins(
+        \\let s = "";
+        \\for (const c of "abc") s = s + c + ",";
+        \\s;
+    , "a,b,c,");
+}
+
+test "later: for-of with break stops early" {
+    try expectScriptIntWithBuiltins(
+        \\let s = 0;
+        \\for (const x of [1, 2, 3, 4]) {
+        \\  if (x > 2) break;
+        \\  s = s + x;
+        \\}
+        \\s;
+    , 3);
+}
+
+test "later: new Number(5) wraps a primitive that ToNumber unwraps" {
+    try expectScriptIntWithBuiltins(
+        \\const n = new Number(5);
+        \\n * 2;
+    , 10);
+}
+
+test "later: new String('abc') wraps and ToString unwraps" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new String("abc");
+        \\"<" + s + ">";
+    , "<abc>");
+}
+
+test "later: Map basic round-trip" {
+    try expectScriptIntWithBuiltins(
+        \\const m = new Map();
+        \\m.set("a", 1);
+        \\m.set("b", 2);
+        \\m.get("a") + m.get("b") + m.size;
+    , 5);
+}
+
+test "later: Map constructor accepts iterable of pairs" {
+    try expectScriptIntWithBuiltins(
+        \\const m = new Map([["a", 1], ["b", 2], ["c", 3]]);
+        \\m.get("b") + m.size;
+    , 5);
+}
+
+test "later: Map.has + delete" {
+    try expectScriptStringWithBuiltins(
+        \\const m = new Map();
+        \\m.set("k", 1);
+        \\const a = m.has("k");
+        \\m.delete("k");
+        \\const b = m.has("k");
+        \\(a ? "yes" : "no") + ":" + (b ? "yes" : "no");
+    , "yes:no");
+}
+
+test "later: Map.forEach iterates in insertion order" {
+    try expectScriptStringWithBuiltins(
+        \\const m = new Map();
+        \\m.set("c", 3);
+        \\m.set("a", 1);
+        \\m.set("b", 2);
+        \\let s = "";
+        \\m.forEach((v, k) => { s = s + k + "=" + v + ","; });
+        \\s;
+    , "c=3,a=1,b=2,");
+}
+
+test "later: Set basic" {
+    try expectScriptIntWithBuiltins(
+        \\const s = new Set();
+        \\s.add(1); s.add(2); s.add(2); s.add(3);
+        \\s.size;
+    , 3);
+}
+
+test "later: Set constructor + has + delete" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new Set([1, 2, 3]);
+        \\const a = s.has(2);
+        \\s.delete(2);
+        \\const b = s.has(2);
+        \\(a ? "yes" : "no") + ":" + (b ? "yes" : "no");
+    , "yes:no");
+}
+
+test "later: Date.now returns a positive number" {
+    try expectScriptStringWithBuiltins(
+        \\typeof Date.now() === "number" ? "ok" : "no";
+    , "ok");
+}
+
+test "later: generator yields values in order" {
+    try expectScriptStringWithBuiltins(
+        \\function* g() { yield 1; yield 2; yield 3; }
+        \\const it = g();
+        \\const a = it.next();
+        \\const b = it.next();
+        \\const c = it.next();
+        \\const d = it.next();
+        \\a.value + ":" + a.done + "," + b.value + ":" + b.done + "," + c.value + ":" + c.done + "," + d.done;
+    , "1:false,2:false,3:false,true");
+}
+
+test "later: generator next(arg) sends value back to yield" {
+    try expectScriptIntWithBuiltins(
+        \\function* g() {
+        \\  const x = yield 1;
+        \\  const y = yield x + 1;
+        \\  return y * 2;
+        \\}
+        \\const it = g();
+        \\it.next();      // -> {value: 1}
+        \\it.next(10);    // -> {value: 11}, x = 10
+        \\it.next(20).value; // y = 20, return 40
+    , 40);
+}
+
+test "later: generator manual-driven loop" {
+    try expectScriptStringWithBuiltins(
+        \\function* g() { yield "a"; yield "b"; yield "c"; }
+        \\const it = g();
+        \\let s = "";
+        \\let r = it.next();
+        \\while (!r.done) { s = s + r.value; r = it.next(); }
+        \\s;
+    , "abc");
+}
+
+test "later: for-of dispatches via @@iterator over generators" {
+    try expectScriptStringWithBuiltins(
+        \\function* g() { yield "a"; yield "b"; yield "c"; }
+        \\let s = "";
+        \\for (const v of g()) s = s + v;
+        \\s;
+    , "abc");
+}
+
+test "later: for-of over plain array still walks length+index (fallback)" {
+    try expectScriptStringWithBuiltins(
+        \\let s = "";
+        \\for (const v of [10, 20, 30]) s = s + v + ",";
+        \\s;
+    , "10,20,30,");
+}
+
+test "later: for-of over Map walks insertion order" {
+    try expectScriptStringWithBuiltins(
+        \\const m = new Map();
+        \\m.set("a", 1); m.set("b", 2); m.set("c", 3);
+        \\let s = "";
+        \\for (const e of m) s = s + e[0] + "=" + e[1] + ",";
+        \\s;
+    , "a=1,b=2,c=3,");
+}
+
+test "later: for-of over Set walks insertion order" {
+    try expectScriptStringWithBuiltins(
+        \\const xs = new Set();
+        \\xs.add("p"); xs.add("q"); xs.add("r");
+        \\let s = "";
+        \\for (const v of xs) s = s + v;
+        \\s;
+    , "pqr");
+}
+
+test "later: for-of over a string yields per-character" {
+    try expectScriptStringWithBuiltins(
+        \\let out = "";
+        \\for (const ch of "abc") out = out + "[" + ch + "]";
+        \\out;
+    , "[a][b][c]");
+}
+
+test "later: array spread uses iterator protocol over a generator" {
+    try expectScriptStringWithBuiltins(
+        \\function* g() { yield 1; yield 2; yield 3; }
+        \\const arr = [0, ...g(), 4];
+        \\arr.join(",");
+    , "0,1,2,3,4");
+}
+
+test "later: array spread of a Set" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new Set();
+        \\s.add("a"); s.add("b"); s.add("c");
+        \\[...s].join(",");
+    , "a,b,c");
+}
+
+test "later: array spread of an array still works (fallback)" {
+    try expectScriptIntWithBuiltins(
+        \\const xs = [1, 2, 3];
+        \\const ys = [...xs, ...xs];
+        \\ys.length;
+    , 6);
+}
+
+test "later: typeof Symbol() === 'symbol'" {
+    try expectScriptStringWithBuiltins(
+        \\typeof Symbol("desc");
+    , "symbol");
+}
+
+test "later: Symbol(d) is identity-unique even with same description" {
+    try expectScriptStringWithBuiltins(
+        \\const a = Symbol("x");
+        \\const b = Symbol("x");
+        \\(a === b) + ":" + (a === a);
+    , "false:true");
+}
+
+test "later: Symbol.for interns by key" {
+    try expectScriptStringWithBuiltins(
+        \\const a = Symbol.for("k");
+        \\const b = Symbol.for("k");
+        \\const c = Symbol.for("other");
+        \\(a === b) + ":" + (a === c);
+    , "true:false");
+}
+
+test "later: Symbol.keyFor on registered + non-registered" {
+    try expectScriptStringWithBuiltins(
+        \\const a = Symbol.for("hello");
+        \\const b = Symbol("hello");
+        \\Symbol.keyFor(a) + ":" + Symbol.keyFor(b);
+    , "hello:undefined");
+}
+
+test "later: arr[Symbol.iterator]() yields values" {
+    try expectScriptStringWithBuiltins(
+        \\const it = [10, 20, 30][Symbol.iterator]();
+        \\let s = "";
+        \\let r = it.next();
+        \\while (!r.done) { s = s + r.value + ","; r = it.next(); }
+        \\s;
+    , "10,20,30,");
+}
+
+test "later: Symbol.iterator identity" {
+    try expectScriptStringWithBuiltins(
+        \\(Symbol.iterator === Symbol.iterator) + "";
+    , "true");
+}
+
+test "later: typeof of well-known symbols" {
+    try expectScriptStringWithBuiltins(
+        \\typeof Symbol.iterator;
+    , "symbol");
+}
+
+test "later: tagged template passes cooked + raw arrays" {
+    try expectScriptStringWithBuiltins(
+        \\function tag(strs) {
+        \\  return strs.length + ":" + strs[0] + ":" + strs.raw[0];
+        \\}
+        \\tag`a\nb`;
+    , "1:a\nb:a\\nb");
+}
+
+test "later: tagged template forwards substitutions" {
+    try expectScriptStringWithBuiltins(
+        \\function tag(strs, x, y) {
+        \\  return strs[0] + x + strs[1] + y + strs[2];
+        \\}
+        \\tag`<${1}-${2}>`;
+    , "<1-2>");
+}
+
+test "later: Function.prototype.bind pins this + prefix args" {
+    try expectScriptStringWithBuiltins(
+        \\function f(a, b) { return this.x + ":" + a + ":" + b; }
+        \\const me = { x: "self" };
+        \\const g = f.bind(me, "first");
+        \\g("second");
+    , "self:first:second");
+}
+
+test "later: Function.prototype.bind chained" {
+    try expectScriptIntWithBuiltins(
+        \\function add(a, b, c, d) { return a + b + c + d; }
+        \\const a1 = add.bind(null, 1);
+        \\const a12 = a1.bind(null, 2);
+        \\const a123 = a12.bind(null, 3);
+        \\a123(4);
+    , 10);
+}
+
+test "later: for-in walks own properties" {
+    try expectScriptStringWithBuiltins(
+        \\const o = { a: 1, b: 2, c: 3 };
+        \\let s = "";
+        \\for (const k in o) s = s + k;
+        \\s;
+    , "abc");
+}
+
+test "later: for-in over null/undefined yields nothing" {
+    try expectScriptIntWithBuiltins(
+        \\let n = 0;
+        \\for (const k in null) n++;
+        \\for (const k in undefined) n++;
+        \\n;
+    , 0);
+}
+
+test "later: for-in delivers each key as a string" {
+    try expectScriptStringWithBuiltins(
+        \\const o = { x: "a", y: "b" };
+        \\let s = "";
+        \\for (const k in o) s = s + k + ":" + (typeof k) + ",";
+        \\s;
+    , "x:string,y:string,");
+}
+
+test "later: closure-per-iteration in for (let x of …)" {
+    try expectScriptStringWithBuiltins(
+        \\const fns = [];
+        \\for (let i of [1, 2, 3]) fns.push(() => i);
+        \\fns[0]() + "," + fns[1]() + "," + fns[2]();
+    , "1,2,3");
+}
+
+test "later: closure-per-iteration with const binding" {
+    try expectScriptStringWithBuiltins(
+        \\const out = [];
+        \\for (const x of ["a", "b", "c"]) out.push(() => x);
+        \\out[0]() + out[1]() + out[2]();
+    , "abc");
+}
+
+test "later: var binding shares one slot across iterations (legacy)" {
+    // `var` is hoisted to the function scope and intentionally
+    // does NOT get per-iteration semantics — closures see the
+    // final value. Spec §14.7.5.6 step 2.b.i.
+    try expectScriptIntWithBuiltins(
+        \\const fns = [];
+        \\for (var i of [1, 2, 3]) fns.push(function () { return i; });
+        \\fns[0]() + fns[1]() + fns[2]();
+    , 9);
+}
+
+test "later: per-iter env doesn't leak: outer let is reachable" {
+    try expectScriptStringWithBuiltins(
+        \\let acc = "";
+        \\for (let v of ["x", "y"]) acc = acc + v;
+        \\acc;
+    , "xy");
+}
+
+test "later: break in for-let-of pops the per-iter env" {
+    // After break, accessing outer bindings must still work
+    // (env stack restored by the compiler-emitted pop_env).
+    try expectScriptStringWithBuiltins(
+        \\let n = 0;
+        \\for (let v of [1, 2, 3, 4]) {
+        \\  if (v === 3) break;
+        \\  n = n + v;
+        \\}
+        \\n + "/" + (typeof n);
+    , "3/number");
+}
+
+test "later: continue lands at the per-iter env teardown" {
+    try expectScriptIntWithBuiltins(
+        \\let s = 0;
+        \\for (let v of [1, 2, 3, 4]) {
+        \\  if (v === 2) continue;
+        \\  s = s + v;
+        \\}
+        \\s;
+    , 8);
+}
+
+test "later: closure-per-iteration in C-style for-let" {
+    try expectScriptStringWithBuiltins(
+        \\const fns = [];
+        \\for (let i = 0; i < 3; i++) fns.push(() => i);
+        \\fns[0]() + "," + fns[1]() + "," + fns[2]();
+    , "0,1,2");
+}
+
+test "later: C-style for-let body still updates the binding" {
+    try expectScriptIntWithBuiltins(
+        \\let total = 0;
+        \\for (let i = 0; i < 5; i++) total = total + i;
+        \\total;
+    , 10);
+}
+
+test "later: C-style for-var keeps legacy single-slot semantics" {
+    // `var` is hoisted to the function scope; closures share
+    // one slot per the spec.
+    try expectScriptIntWithBuiltins(
+        \\const fns = [];
+        \\for (var i = 0; i < 3; i++) fns.push(function() { return i; });
+        \\fns[0]() + fns[1]() + fns[2]();
+    , 9);
+}
+
+test "later: break in C-style for-let pops the per-iter env" {
+    try expectScriptIntWithBuiltins(
+        \\let s = 0;
+        \\for (let i = 0; i < 100; i++) {
+        \\  if (i === 4) break;
+        \\  s = s + i;
+        \\}
+        \\s;
+    , 6);
+}
+
+test "later: Object.defineProperty creates a non-enumerable property" {
+    try expectScriptStringWithBuiltins(
+        \\const o = {};
+        \\Object.defineProperty(o, "x", { value: 42, enumerable: false });
+        \\o.x + ":" + Object.keys(o).length;
+    , "42:0");
+}
+
+test "later: Object.getOwnPropertyDescriptor reads back flags" {
+    try expectScriptStringWithBuiltins(
+        \\const o = {};
+        \\Object.defineProperty(o, "k", { value: 7, writable: false, enumerable: true, configurable: false });
+        \\const d = Object.getOwnPropertyDescriptor(o, "k");
+        \\d.value + ":" + d.writable + ":" + d.enumerable + ":" + d.configurable;
+    , "7:false:true:false");
+}
+
+test "later: built-in proto methods are non-enumerable" {
+    // for-in over an array shouldn't surface push, pop, etc.
+    try expectScriptStringWithBuiltins(
+        \\const arr = [];
+        \\arr.x = 1;
+        \\arr.y = 2;
+        \\let s = "";
+        \\for (const k in arr) s = s + k + ",";
+        \\s;
+    , "x,y,");
+}
+
+test "later: Object.keys filters non-enumerable own properties" {
+    try expectScriptIntWithBuiltins(
+        \\const o = { a: 1, b: 2 };
+        \\Object.defineProperty(o, "hidden", { value: 0, enumerable: false });
+        \\Object.keys(o).length;
+    , 2);
+}
+
+test "later: Object.getOwnPropertyNames includes non-enumerable" {
+    // Unlike `keys`, `getOwnPropertyNames` returns ALL own property
+    // names (excluding internal `__cynic_*` slots).
+    try expectScriptIntWithBuiltins(
+        \\const o = { a: 1 };
+        \\Object.defineProperty(o, "hidden", { value: 0, enumerable: false });
+        \\Object.getOwnPropertyNames(o).length;
+    , 2);
+}
+
+test "later: Promise.resolve + .then is microtask-deferred" {
+    // Microtask scheduling: the.then callback runs only after
+    // the current sync stack drains. With a real microtask
+    // queue, the log should be "sync,then".
+    try expectScriptStringWithBuiltins(
+        \\let log = "";
+        \\Promise.resolve(1).then(v => { log = log + "then" + v + ","; });
+        \\log = log + "sync,";
+        \\globalThis.__drainMicrotasks();
+        \\log;
+    , "sync,then1,");
+}
+
+test "later: async function returns a Promise" {
+    try expectScriptStringWithBuiltins(
+        \\async function f() { return 42; }
+        \\const p = f();
+        \\typeof p.then;
+    , "function");
+}
+
+test "later: async/await round-trip with then" {
+    try expectScriptIntWithBuiltins(
+        \\async function f() {
+        \\  const x = await Promise.resolve(7);
+        \\  return x * 2;
+        \\}
+        \\let result = -1;
+        \\f().then(v => { result = v; });
+        \\globalThis.__drainMicrotasks();
+        \\result;
+    , 14);
+}
+
+test "later: async function suspends on pending await, resumes on settle" {
+    try expectScriptIntWithBuiltins(
+        \\let externalResolve;
+        \\const p = new Promise((resolve, reject) => { externalResolve = resolve; });
+        \\async function f() {
+        \\  let x = await p;
+        \\  return x + 1;
+        \\}
+        \\const result = f();
+        \\externalResolve(41);
+        \\globalThis.__drainMicrotasks();
+        \\result.__cynic_promise_value__;
+    , 42);
+}
+
+test "later: pending-await rejection throws inside the async body" {
+    try expectScriptStringWithBuiltins(
+        \\let externalReject;
+        \\const p = new Promise((_, reject) => { externalReject = reject; });
+        \\async function f() {
+        \\  try { await p; return "unreachable"; }
+        \\  catch (e) { return "caught:" + e; }
+        \\}
+        \\const result = f();
+        \\externalReject("boom");
+        \\globalThis.__drainMicrotasks();
+        \\result.__cynic_promise_value__;
+    , "caught:boom");
+}
+
+test "later: chained pending awaits suspend twice" {
+    try expectScriptIntWithBuiltins(
+        \\let r1; let r2;
+        \\const p1 = new Promise((res) => { r1 = res; });
+        \\const p2 = new Promise((res) => { r2 = res; });
+        \\async function chain() {
+        \\  const a = await p1;
+        \\  const b = await p2;
+        \\  return a + b;
+        \\}
+        \\const result = chain();
+        \\r1(10);
+        \\globalThis.__drainMicrotasks();
+        \\r2(32);
+        \\globalThis.__drainMicrotasks();
+        \\result.__cynic_promise_value__;
+    , 42);
+}
+
+test "later: chained .then on settled Promise propagates handler returns" {
+    try expectScriptIntWithBuiltins(
+        \\let final = 0;
+        \\Promise.resolve(1)
+        \\  .then(v => v + 10)
+        \\  .then(v => v + 100)
+        \\  .then(v => { final = v; });
+        \\globalThis.__drainMicrotasks();
+        \\final;
+    , 111);
+}
+
+test "later: chained .then on pending Promise fires after settle" {
+    try expectScriptIntWithBuiltins(
+        \\let final = 0;
+        \\let res;
+        \\const p = new Promise(r => { res = r; });
+        \\p.then(v => v * 2).then(v => { final = v; });
+        \\res(7);
+        \\globalThis.__drainMicrotasks();
+        \\final;
+    , 14);
+}
+
+test "later: throwing .then handler rejects the result Promise" {
+    try expectScriptStringWithBuiltins(
+        \\let final = "none";
+        \\Promise.resolve(1)
+        \\  .then(v => { throw "boom"; })
+        \\  .then(v => { final = "ok:" + v; }, e => { final = "err:" + e; });
+        \\globalThis.__drainMicrotasks();
+        \\final;
+    , "err:boom");
+}
+
+test "later: Promise-returning handler chains result settlement" {
+    try expectScriptIntWithBuiltins(
+        \\let final = 0;
+        \\Promise.resolve(1)
+        \\  .then(v => Promise.resolve(v + 100))
+        \\  .then(v => { final = v; });
+        \\globalThis.__drainMicrotasks();
+        \\final;
+    , 101);
+}
+
+test "later: typeof Symbol() is 'symbol'" {
+    try expectScriptStringWithBuiltins(
+        \\typeof Symbol("k");
+    , "symbol");
+}
+
+test "later: distinct symbols don't collide as property keys" {
+    try expectScriptIntWithBuiltins(
+        \\const a = Symbol("k");
+        \\const b = Symbol("k");
+        \\const obj = {};
+        \\obj[a] = 1; obj[b] = 2;
+        \\obj[a] + obj[b];
+    , 3);
+}
+
+test "later: Symbol.prototype.description returns the description" {
+    try expectScriptStringWithBuiltins(
+        \\Symbol("hello").description;
+    , "hello");
+}
+
+test "later: Symbol.prototype.toString returns Symbol(desc)" {
+    try expectScriptStringWithBuiltins(
+        \\Symbol("hello").toString();
+    , "Symbol(hello)");
+}
+
+test "later: well-known Symbol.iterator works on arrays" {
+    try expectScriptStringWithBuiltins(
+        \\const it = [10, 20][Symbol.iterator]();
+        \\const a = it.next();
+        \\const b = it.next();
+        \\const c = it.next();
+        \\a.value + ":" + b.value + ":" + c.done;
+    , "10:20:true");
+}
+
+test "later: Symbol.for round-trips through the registry" {
+    try expectScriptStringWithBuiltins(
+        \\const a = Symbol.for("x");
+        \\const b = Symbol.for("x");
+        \\(a === b) ? "same" : "different";
+    , "same");
+}
+
+test "later: new Date(ms).getTime() round-trips" {
+    try expectScriptIntWithBuiltins(
+        \\const d = new Date(1000000);
+        \\d.getTime();
+    , 1000000);
+}
+
+test "later: new Boolean(false) is truthy as object but unwraps to false" {
+    try expectScriptStringWithBuiltins(
+        \\const b = new Boolean(false);
+        \\const truthy = b ? "obj-truthy" : "obj-falsy";
+        \\const num = b * 1;
+        \\truthy + ":" + num;
+    , "obj-truthy:0");
+}
+
+test "later: for-of declares the binding per iteration" {
+    try expectScriptStringWithBuiltins(
+        \\const xs = [];
+        \\for (let x of [10, 20, 30]) xs.push(x);
+        \\xs.join(",");
+    , "10,20,30");
+}
+
+// later closure-per-iteration is on the deferred list — needs a
+// per-iteration env push/pop with depth-tracking refactor that's
+// out of scope for this milestone. The test below documents the
+// expected later behaviour.
+
+test "later: object-literal accessor pair" {
+    try expectScriptIntWithBuiltins(
+        \\const o = {
+        \\  _v: 0,
+        \\  get x() { return this._v; },
+        \\  set x(v) { this._v = v + 10; }
+        \\};
+        \\o.x = 1;
+        \\o.x;
+    , 11);
+}
+
+test "later: Test262Error-shape constructor works end-to-end" {
+    // The exact pattern from harness/sta.js — gating signal for
+    // later (preloading the harness).
+    try expectScriptString(
+        \\function Test262Error(message) {
+        \\  this.message = message || "";
+        \\}
+        \\Test262Error.prototype.toString = function () {
+        \\  return "Test262Error: " + this.message;
+        \\};
+        \\const e = new Test262Error("boom");
+        \\e.message;
+    , "boom");
+}
+
+test "later: fizzbuzz-shaped program runs to completion" {
+    // No console.log yet — accumulate the result into a
+    // string and check the final value. Verifies for-loop +
+    // if/else chain + string concat + variable assignment.
+    try expectScriptString(
+        \\let out = '';
+        \\for (let i = 1; i <= 15; i = i + 1) {
+        \\  if (i % 15 === 0) out = out + 'FizzBuzz,';
+        \\  else if (i % 3 === 0) out = out + 'Fizz,';
+        \\  else if (i % 5 === 0) out = out + 'Buzz,';
+        \\  else out = out + i + ',';
+        \\}
+        \\out;
+    , "1,2,Fizz,4,Buzz,Fizz,7,8,Fizz,Buzz,11,Fizz,13,14,FizzBuzz,");
+}
+
+// ── later: Multiple Scripts per Realm ──────────────────────────
+
+test "later: top-level var visible in a later script on the same realm" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    const r1 = try evaluateScript(testing.allocator, &realm, "var x = 1;");
+    try testing.expect(r1 != .thrown);
+
+    const r2 = try evaluateScript(testing.allocator, &realm, "x;");
+    const v = switch (r2) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UnexpectedThrow,
+    };
+    try testing.expectEqual(@as(i32, 1), v.asInt32());
+}
+
+test "later: top-level let visible in a later script on the same realm" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    _ = try evaluateScript(testing.allocator, &realm, "let x = 42;");
+    const r = try evaluateScript(testing.allocator, &realm, "x;");
+    const v = switch (r) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UnexpectedThrow,
+    };
+    try testing.expectEqual(@as(i32, 42), v.asInt32());
+}
+
+test "later: top-level function declaration visible across scripts" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    _ = try evaluateScript(testing.allocator, &realm, "function f() { return 7; }");
+    const r = try evaluateScript(testing.allocator, &realm, "f();");
+    const v = switch (r) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UnexpectedThrow,
+    };
+    try testing.expectEqual(@as(i32, 7), v.asInt32());
+}
+
+test "later: throw in script A doesn't poison script B" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    const r_throw = try evaluateScript(testing.allocator, &realm, "throw 1;");
+    try testing.expect(r_throw == .thrown);
+
+    const r_ok = try evaluateScript(testing.allocator, &realm, "2;");
+    const v = switch (r_ok) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UnexpectedThrow,
+    };
+    try testing.expectEqual(@as(i32, 2), v.asInt32());
+}
+
+test "later: cross-script var update is observable" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    _ = try evaluateScript(testing.allocator, &realm, "var counter = 0;");
+    _ = try evaluateScript(testing.allocator, &realm, "counter = counter + 1;");
+    _ = try evaluateScript(testing.allocator, &realm, "counter = counter + 1;");
+    const r = try evaluateScript(testing.allocator, &realm, "counter;");
+    const v = switch (r) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UnexpectedThrow,
+    };
+    try testing.expectEqual(@as(i32, 2), v.asInt32());
+}
+
+test "later: const declared in script A is reachable in script B" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    _ = try evaluateScript(testing.allocator, &realm, "const PI = 3;");
+    const r = try evaluateScript(testing.allocator, &realm, "PI + 1;");
+    const v = switch (r) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UnexpectedThrow,
+    };
+    try testing.expectEqual(@as(i32, 4), v.asInt32());
+}
+
+test "later: delete o.x removes own property; subsequent read is undefined" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    const r = try evaluateScript(testing.allocator, &realm,
+        \\(function () { var o = {x: 1, y: 2}; delete o.x; return o.x === undefined && o.y === 2; })()
+    );
+    const v = switch (r) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UnexpectedThrow,
+    };
+    try testing.expect(v.asBool());
+}
+
+test "later: delete o[k] (computed key) removes own property" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    const r = try evaluateScript(testing.allocator, &realm,
+        \\(function () { var o = {a: 1}; var k = "a"; delete o[k]; return o.a === undefined; })()
+    );
+    const v = switch (r) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UnexpectedThrow,
+    };
+    try testing.expect(v.asBool());
+}
+
+test "later: delete on non-Reference operand evaluates and yields true" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    const r = try evaluateScript(testing.allocator, &realm, "delete (1 + 1);");
+    const v = switch (r) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UnexpectedThrow,
+    };
+    try testing.expect(v.asBool());
+}
+
+test "later: built-in fn 'name' descriptor matches §10.2.9" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    const r = try evaluateScript(testing.allocator, &realm,
+        \\(function () {
+        \\    var d = Object.getOwnPropertyDescriptor(decodeURIComponent, "name");
+        \\    return d.value === "decodeURIComponent" &&
+        \\        d.writable === false &&
+        \\        d.enumerable === false &&
+        \\        d.configurable === true;
+        \\})()
+    );
+    const v = switch (r) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UnexpectedThrow,
+    };
+    try testing.expect(v.asBool());
+}
+
+test "later: built-in fn 'length' descriptor matches §10.2.4" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    const r = try evaluateScript(testing.allocator, &realm,
+        \\(function () {
+        \\    var d = Object.getOwnPropertyDescriptor(parseInt, "length");
+        \\    return typeof d.value === "number" &&
+        \\        d.writable === false &&
+        \\        d.enumerable === false &&
+        \\        d.configurable === true;
+        \\})()
+    );
+    const v = switch (r) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UnexpectedThrow,
+    };
+    try testing.expect(v.asBool());
+}
+
+test "later/later: writable=false on built-in fn name throws TypeError in strict" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    const r = try evaluateScript(testing.allocator, &realm,
+        \\(function () {
+        \\    var orig = decodeURIComponent.name;
+        \\    var threw = false;
+        \\    var caughtType = false;
+        \\    try { decodeURIComponent.name = "hijacked"; }
+        \\    catch (e) { threw = true; caughtType = e instanceof TypeError; }
+        \\    return threw && caughtType && decodeURIComponent.name === orig;
+        \\})()
+    );
+    const v = switch (r) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UnexpectedThrow,
+    };
+    try testing.expect(v.asBool());
+}
+
+test "later: delete on configurable=true built-in fn slot succeeds" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    // `name` is configurable=true on built-in functions —
+    // delete should succeed and subsequent `hasOwn` should
+    // return false. Direct `f.name` reads still inherit from
+    // the Function.prototype chain per §6.1.7.1 [[Get]].
+    const r = try evaluateScript(testing.allocator, &realm,
+        \\(function () {
+        \\    function f() {}
+        \\    var hadOwn = Object.prototype.hasOwnProperty.call(f, "name");
+        \\    delete f.name;
+        \\    return hadOwn === true && Object.prototype.hasOwnProperty.call(f, "name") === false;
+        \\})()
+    );
+    const v = switch (r) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UnexpectedThrow,
+    };
+    try testing.expect(v.asBool());
+}
