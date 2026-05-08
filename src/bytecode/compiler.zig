@@ -2126,6 +2126,26 @@ pub const Compiler = struct {
             try self.builder.emitOp(.lda_true, u.span);
             return;
         }
+        // §13.5.3 — `typeof Identifier` of an unresolvable
+        // Reference returns "undefined" instead of throwing
+        // ReferenceError. We detect the bare-identifier case at
+        // compile time: if the name doesn't resolve to any
+        // local/closed-over binding, emit `lda_global_or_undef`
+        // (silent miss). TDZ / let / const cases still resolve
+        // to a real binding so they keep their throw-on-hole
+        // behavior, matching the spec.
+        if (u.op == .typeof_ and u.operand.* == .identifier_reference) {
+            const span = u.operand.identifier_reference.span;
+            const name = self.source[span.start..span.end];
+            const scope = self.scope orelse return error.UnresolvedReference;
+            if (scope.resolve(name) == null and !std.mem.eql(u8, name, "undefined")) {
+                const k = try self.internString(name);
+                try self.builder.emitOp(.lda_global_or_undef, span);
+                try self.builder.emitU16(k);
+                try self.builder.emitOp(.typeof_, u.span);
+                return;
+            }
+        }
         try self.compileExpression(u.operand);
         const op: Op = switch (u.op) {
             .minus => .negate,

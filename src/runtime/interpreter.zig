@@ -2837,6 +2837,20 @@ fn runFrames(
                     continue;
                 }
             },
+            .lda_global_or_undef => {
+                // §13.5.3 step 3 — typeof of an unresolvable
+                // Reference is "undefined", not a thrown
+                // ReferenceError. The compiler emits this op
+                // for `typeof Identifier` when `Identifier`
+                // doesn't bind to any known scope slot.
+                const k = readU16(code, ip);
+                ip += 2;
+                if (k >= local_chunk.constants.len) return error.InvalidOpcode;
+                const key_v = local_chunk.constants[k];
+                if (!key_v.isString()) return error.InvalidOpcode;
+                const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+                acc = realm.globals.get(key_s.bytes) orelse Value.undefined_;
+            },
             .sta_global => {
                 const k = readU16(code, ip);
                 ip += 2;

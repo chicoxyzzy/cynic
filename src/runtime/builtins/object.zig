@@ -292,13 +292,14 @@ pub fn objectGetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
         return Value.null_;
     }
     if (heap_mod.valueAsFunction(arg)) |fn_obj| {
-        // §10.2.4 — a Function's `[[Prototype]]` is `fn.proto`,
-        // typically `%Function.prototype%` (or
-        // `%GeneratorFunction.prototype%` for generators, etc.).
-        // The function's `.prototype` slot is a SEPARATE thing
-        // (the proto-of-instances-from-`new`); test262 fixtures
-        // and `testTypedArray.js` rely on the [[Prototype]]
-        // semantics here.
+        // §10.2.4 — a Function's `[[Prototype]]` is whichever
+        // function-or-object slot is set. `static_parent` (a
+        // `*JSFunction`) wins when present: that's how class
+        // `B extends A` and the TypedArray `Int8Array → %TypedArray%`
+        // chain are stored, since `JSFunction.proto` is typed
+        // `*JSObject` and can't hold a function. `.prototype` is a
+        // separate thing (the proto-of-instances-from-`new`).
+        if (fn_obj.static_parent) |sp| return heap_mod.taggedFunction(sp);
         if (fn_obj.proto) |p| return heap_mod.taggedObject(p);
         return Value.null_;
     }

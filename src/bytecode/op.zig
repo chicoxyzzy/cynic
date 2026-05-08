@@ -323,6 +323,13 @@ pub const Op = enum(u8) {
     /// for §13.3.1 TDZ; that's how the global-env declarative
     /// vs property semantics is approximated.
     lda_global,
+    /// `[op] [k:u16]` — like `lda_global`, but produce
+    /// `undefined` instead of raising `ReferenceError` when the
+    /// global isn't present. Used to compile `typeof Identifier`
+    /// where `Identifier` isn't a known binding (§13.5.3 step 3:
+    /// an unresolvable Reference yields the string "undefined"
+    /// rather than throwing).
+    lda_global_or_undef,
     /// `[op] [k:u16]` — store acc into the realm's globals map
     /// under the name held in `Chunk.constants[k]` (a `JSString`).
     /// Creates the binding if it doesn't exist. Used by
@@ -489,6 +496,7 @@ pub const Op = enum(u8) {
             .lda_property,
             .lda_private,
             .lda_global,
+            .lda_global_or_undef,
             .sta_global,
             .module_load,
             .module_export,
@@ -594,6 +602,7 @@ pub const Op = enum(u8) {
             .del_named_property => "DelNamedProperty",
             .del_computed_property => "DelComputedProperty",
             .lda_global => "LdaGlobal",
+            .lda_global_or_undef => "LdaGlobalOrUndef",
             .sta_global => "StaGlobal",
             .throw_ => "Throw",
             .throw_if_hole => "ThrowIfHole",

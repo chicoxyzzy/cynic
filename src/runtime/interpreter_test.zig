@@ -1296,9 +1296,11 @@ test "later: arguments[i] reads positional args" {
 test "later: arguments not visible inside arrow functions" {
     // Arrows inherit `arguments` from the enclosing function;
     // when there is none (top-level), reading it is a
-    // ReferenceError.
+    // ReferenceError. (Reading via `typeof` would NOT throw —
+    // §13.5.3 step 3 turns unresolvable refs into "undefined".
+    // Use direct read instead.)
     try expectScriptStringWithBuiltins(
-        \\const f = () => typeof arguments;
+        \\const f = () => arguments;
         \\let kind = "ok";
         \\try { f(); } catch (e) {
         \\  if (e instanceof ReferenceError) kind = "ref";

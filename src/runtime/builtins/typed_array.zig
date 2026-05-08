@@ -186,22 +186,18 @@ pub fn install(realm: *Realm) !void {
         .{ .name = "BigInt64Array", .kind = .bigint64 },
         .{ .name = "BigUint64Array", .kind = .biguint64 },
     };
-    // testTypedArray.js does
-    // `var TypedArray = Object.getPrototypeOf(Int8Array)`
-    // and then references `TypedArray.prototype.X`. With Cynic's
-    // current heap (where JSFunction.proto must be a JSObject,
-    // not another JSFunction), the simplest workable model is to
-    // expose `%TypedArray%.prototype` as the [[Prototype]] of
-    // each concrete ctor and self-loop its `prototype` property
-    // back to itself, so `TypedArray.prototype.X === ta_proto.X`.
-    // Methods are reached the same way via the proto-chain on
-    // instances, so spec-correct results either way.
-    try setNonEnumerable(ta_proto, realm.allocator, "prototype", heap_mod.taggedObject(ta_proto));
+    // §23.2.6 — each concrete typed-array constructor has
+    // `[[Prototype]] = %TypedArray%`. `JSFunction.proto` is typed
+    // `*JSObject`, so we record the constructor link on
+    // `static_parent` (a `*JSFunction`); `objectGetPrototypeOf`
+    // and `JSFunction.get` both honour this slot before walking
+    // `proto`. `Int8Array.proto` itself stays `%Function.prototype%`
+    // (the default for any function).
 
     inline for (variants) |variant| {
         const ctor = try realm.heap.allocateFunctionNative(typedArrayConstructorBuilder(variant.kind), 1, variant.name);
         ctor.is_class_constructor = true;
-        ctor.proto = ta_proto; // see comment above; concretely ctor's [[Prototype]] is %TypedArray%.prototype.
+        ctor.static_parent = ta_ctor; // §23.2.6 — Int8Array.[[Prototype]] = %TypedArray%
         const proto = try realm.heap.allocateObject();
         proto.prototype = ta_proto; // §23.2.6 — concrete proto inherits from %TypedArray%.prototype.
         try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(ctor));
@@ -296,7 +292,13 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind) NativeFn {
                 const n_v = coerceToNumber(arg);
                 const n_d: f64 = if (n_v.isInt32()) @floatFromInt(n_v.asInt32()) else n_v.asDouble();
                 if (std.math.isNan(n_d) or n_d < 0) return throwRangeError(realm, "TypedArray length out of range");
-                const length: usize = @intFromFloat(n_d);
+                // Catch overflow before the int cast — `Infinity`
+                // and any finite value past `maxInt(u32) / elem_size`
+                // would either trap `@intFromFloat` or roll past
+                // the byte-length check below.
+                const max_len: f64 = @floatFromInt(@as(usize, std.math.maxInt(u32)) / elem_size);
+                if (n_d > max_len) return throwRangeError(realm, "TypedArray length out of range");
+                const length: usize = @intFromFloat(@trunc(n_d));
                 const byte_len = length * elem_size;
                 if (byte_len > std.math.maxInt(u32)) return throwRangeError(realm, "TypedArray byte length out of range");
 
@@ -422,7 +424,13 @@ fn typedArraySet(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     var offset: usize = 0;
     if (args.len > 1 and !args[1].isUndefined()) {
         const ov = coerceToNumber(args[1]);
-        offset = @intFromFloat(if (ov.isInt32()) @as(f64, @floatFromInt(ov.asInt32())) else ov.asDouble());
+        const od: f64 = if (ov.isInt32()) @floatFromInt(ov.asInt32()) else ov.asDouble();
+        // Spec §23.2.3.26 step 5: offset = ToIntegerOrInfinity(arg);
+        // negative / NaN / non-integer-or-overflow → RangeError.
+        if (std.math.isNan(od) or od < 0 or od > @as(f64, @floatFromInt(std.math.maxInt(usize)))) {
+            return throwRangeError(realm, "TypedArray.prototype.set: offset out of range");
+        }
+        offset = @intFromFloat(@trunc(od));
     }
     // §23.2.3.26 SetTypedArrayFromTypedArray — fast path when the
     // source is itself a typed view: copy via the same byte
@@ -430,6 +438,11 @@ fn typedArraySet(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     // numeric conversion.
     if (src.typed_view) |src_tv| {
         if (src_tv.viewed.array_buffer) |src_buf| {
+            // §23.2.3.26 step 19 / SetTypedArrayFromTypedArray —
+            // RangeError when the source overflows the destination.
+            if (offset > tv.length or src_tv.length > tv.length - offset) {
+                return throwRangeError(realm, "TypedArray.prototype.set: source overflows destination");
+            }
             const src_size = src_tv.kind.elementSize();
             var i: usize = 0;
             while (i < src_tv.length) : (i += 1) {
@@ -441,6 +454,9 @@ fn typedArraySet(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     }
     const len_v = src.get("length");
     const len: usize = if (len_v.isInt32()) @intCast(len_v.asInt32()) else if (len_v.isDouble()) @intFromFloat(len_v.asDouble()) else 0;
+    if (offset > tv.length or len > tv.length - offset) {
+        return throwRangeError(realm, "TypedArray.prototype.set: source overflows destination");
+    }
     var i: usize = 0;
     while (i < len) : (i += 1) {
         var ibuf: [16]u8 = undefined;
@@ -566,16 +582,15 @@ fn typedArrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) N
     const byte_count: usize = @as(usize, @intCast(count)) * elem_size;
     const src_off = tv.byte_offset + @as(usize, @intCast(start)) * elem_size;
     const dst_off = tv.byte_offset + @as(usize, @intCast(target)) * elem_size;
-    // Spec uses memmove-style overlap-safe copy.
-    if (dst_off > src_off and dst_off < src_off + byte_count) {
-        // Backward copy.
-        var i: usize = byte_count;
-        while (i > 0) {
-            i -= 1;
-            buf[dst_off + i] = buf[src_off + i];
-        }
+    // §23.2.3.6 copyWithin uses memmove-style overlap-safe copy.
+    // Zig's `@memcpy` panics on aliased ranges, so dispatch into
+    // the std forward / backward variants based on the copy
+    // direction. (Identical ranges short-circuit cleanly via
+    // `copyForwards` either way.)
+    if (dst_off > src_off) {
+        std.mem.copyBackwards(u8, buf[dst_off .. dst_off + byte_count], buf[src_off .. src_off + byte_count]);
     } else {
-        @memcpy(buf[dst_off .. dst_off + byte_count], buf[src_off .. src_off + byte_count]);
+        std.mem.copyForwards(u8, buf[dst_off .. dst_off + byte_count], buf[src_off .. src_off + byte_count]);
     }
     return this_value;
 }
@@ -1286,8 +1301,17 @@ fn typedArrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const idx_arg = argOr(args, 0, Value.fromInt32(0));
     const value = argOr(args, 1, Value.undefined_);
     const idx_n: f64 = if (idx_arg.isInt32()) @floatFromInt(idx_arg.asInt32()) else if (idx_arg.isDouble()) idx_arg.asDouble() else 0;
-    const idx_i: i64 = if (std.math.isNan(idx_n)) 0 else @intFromFloat(@trunc(idx_n));
-    const target_i: i64 = if (idx_i < 0) idx_i + len else idx_i;
+    // §7.1.5 ToIntegerOrInfinity yields ±Infinity for an infinite
+    // operand; the subsequent `actualIndex >= len` (or < 0) then
+    // throws RangeError. Cynic's index path uses i64, so map
+    // ±Infinity onto sentinel min/max BEFORE the int cast to
+    // avoid an UB-trapping `@intFromFloat`. NaN already coerces
+    // to 0 per spec.
+    const trunc_n = if (std.math.isNan(idx_n)) 0.0 else @trunc(idx_n);
+    const max_i: f64 = @floatFromInt(std.math.maxInt(i64));
+    const min_i: f64 = @floatFromInt(std.math.minInt(i64));
+    const idx_i: i64 = if (trunc_n >= max_i) std.math.maxInt(i64) else if (trunc_n <= min_i) std.math.minInt(i64) else @intFromFloat(trunc_n);
+    const target_i: i64 = if (idx_i < 0) idx_i +| len else idx_i;
     if (target_i < 0 or target_i >= len) return throwRangeError(realm, "with: index out of range");
 
     const out = try taMakeNew(realm, tv.kind, tv.length);
@@ -1298,6 +1322,19 @@ fn typedArrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeE
     return heap_mod.taggedObject(out);
 }
 
+/// §7.1.6 ToUint{8,16,32} — common modular reduction used by
+/// the typed-array element writers. NaN / ±Infinity coerce to 0
+/// (per spec). For finite `d`, computes `((trunc(d) mod m) + m) mod m`
+/// in floating point so 1e30 doesn't trap an i64 cast.
+fn toUintMod(d: f64, m: f64) u64 {
+    if (std.math.isNan(d) or std.math.isInf(d)) return 0;
+    const truncd = @trunc(d);
+    const reduced = truncd - @floor(truncd / m) * m;
+    const adjusted = if (reduced < 0) reduced + m else reduced;
+    // `adjusted` is now in [0, m); m ≤ 2^32 here so the u64 cast is safe.
+    return @intFromFloat(adjusted);
+}
+
 /// Write `value` (Number or BigInt) into `buf` at byte offset
 /// `byte_pos` interpreted as `kind`. Does spec-compliant
 /// truncation / clamping (mostly matching ToInt8 / ToUint8 etc).
@@ -1306,27 +1343,18 @@ pub fn writeTypedElement(buf: []u8, kind: ObjMod.TypedKind, byte_pos: usize, val
         .int8, .uint8 => {
             const v = coerceToNumber(value);
             const d: f64 = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
-            const i: i32 = if (std.math.isNan(d) or std.math.isInf(d)) 0 else @intFromFloat(@trunc(d));
-            const u: u8 = @truncate(@as(u32, @bitCast(i)));
-            buf[byte_pos] = u;
+            buf[byte_pos] = @truncate(toUintMod(d, 256.0));
         },
         .int16, .uint16 => {
             const v = coerceToNumber(value);
             const d: f64 = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
-            const i: i32 = if (std.math.isNan(d) or std.math.isInf(d)) 0 else @intFromFloat(@trunc(d));
-            const u: u16 = @truncate(@as(u32, @bitCast(i)));
+            const u: u16 = @truncate(toUintMod(d, 65536.0));
             std.mem.writeInt(u16, buf[byte_pos..][0..2], u, .little);
         },
         .int32, .uint32 => {
             const v = coerceToNumber(value);
             const d: f64 = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
-            const u: u32 = if (std.math.isNan(d) or std.math.isInf(d)) 0 else blk: {
-                const TWO32: f64 = 4294967296.0;
-                const truncd = @trunc(d);
-                const m = truncd - @floor(truncd / TWO32) * TWO32;
-                const adjusted = if (m < 0) m + TWO32 else m;
-                break :blk @intFromFloat(adjusted);
-            };
+            const u: u32 = @truncate(toUintMod(d, 4294967296.0));
             std.mem.writeInt(u32, buf[byte_pos..][0..4], u, .little);
         },
         .float32 => {
