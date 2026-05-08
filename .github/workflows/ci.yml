@@ -16,9 +16,9 @@ jobs:
           submodules: recursive
 
       - name: Set up Zig
-        uses: mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: master
 
       - name: Show Zig version
         run: zig version
@@ -43,9 +43,9 @@ jobs:
           submodules: recursive
 
       - name: Set up Zig
-        uses: mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: master
 
       - name: Run test262 (parser-only)
         run: zig build test262 -- --quiet
