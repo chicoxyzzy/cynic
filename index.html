@@ -1,0 +1,781 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Cynic — A JavaScript engine that's heard enough</title>
+<meta name="description" content="Cynic is a strict-only ECMAScript engine, written from scratch in Zig. It targets non-browser hosts and refuses what JavaScript has been trying to forget." />
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
+<link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png" />
+<link rel="manifest" href="site.webmanifest" />
+<meta name="theme-color" content="#70c0e8" />
+<meta property="og:title" content="Cynic — A JavaScript engine that's heard enough" />
+<meta property="og:description" content="Strict-only ECMAScript engine in Zig. No sloppy mode. No DOM apologetics." />
+<meta property="og:type" content="website" />
+<meta name="twitter:card" content="summary" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Bowlby+One&family=Space+Grotesk:wght@400;500&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --sky: #70c0e8;
+    --skin: #ffd521;
+    --skin-shade: #e8b800;
+    --ink: #0c0c0c;
+    --ink-soft: #2a2a2a;
+    --bart: #dc4a38;
+    --marge: #11a6d6;
+    --grass: #6cbf3a;
+    --grass-dark: #4a9123;
+    --paper: #fff8e6;
+
+    --display: 'Bowlby One', sans-serif;
+    --mono: 'JetBrains Mono', monospace;
+
+    --bd: 3px solid var(--ink);
+    --bd-thick: 4px solid var(--ink);
+    --shadow-sm: 4px 4px 0 var(--ink);
+  }
+
+  * { box-sizing: border-box; }
+
+  /* `overflow-x: hidden` keeps rotated cards from inducing a
+     horizontal scrollbar on narrow viewports. */
+  html, body {
+    margin: 0;
+    padding: 0;
+    color: var(--ink);
+    font: 18px/1.45 'Space Grotesk', system-ui, sans-serif;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    background:
+      radial-gradient(ellipse 200px 80px at  8% 12%, rgba(255,255,255,0.85), transparent 60%),
+      radial-gradient(ellipse 280px 90px at 78%  6%, rgba(255,255,255,0.90), transparent 60%),
+      radial-gradient(ellipse 240px 80px at 92% 38%, rgba(255,255,255,0.70), transparent 60%),
+      radial-gradient(ellipse 320px 100px at 22% 52%, rgba(255,255,255,0.55), transparent 60%),
+      radial-gradient(ellipse 260px 90px at 70% 70%, rgba(255,255,255,0.60), transparent 60%),
+      radial-gradient(ellipse 220px 80px at 12% 88%, rgba(255,255,255,0.70), transparent 60%),
+      radial-gradient(ellipse 280px 90px at 88% 95%, rgba(255,255,255,0.55), transparent 60%),
+      var(--sky);
+    background-attachment: fixed;
+  }
+
+  .page { max-width: 1240px; margin: 0 auto; padding: 40px 48px 0; }
+
+  /* Top bar */
+  .top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 56px; }
+  .brand { display: flex; align-items: center; gap: 14px; font-family: var(--display); font-size: 28px; letter-spacing: 0.02em; }
+
+  /* Cynic head logo (Simpsons-style) */
+  .head { --size: 56px; width: var(--size); height: var(--size); position: relative; flex: 0 0 auto; }
+  .skull {
+    position: absolute;
+    inset: 6% 8%;
+    background: var(--skin);
+    border: var(--bd);
+    border-radius: 56% 60% 50% 54% / 60% 56% 54% 58%;
+    box-shadow: inset -6px -8px 0 rgba(0,0,0,0.12);
+  }
+  .hair { position: absolute; top: -6%; left: 18%; width: 70%; height: 30%; }
+  .hair::before, .hair::after {
+    content: "";
+    position: absolute;
+    background: var(--skin);
+    border: var(--bd);
+    border-radius: 50% 50% 0 0 / 90% 90% 0 0;
+  }
+  .hair::before { left: 0; top: 0; width: 38%; height: 100%; transform: rotate(-8deg); }
+  .hair::after  { right: 0; top: 6%; width: 42%; height: 90%; transform: rotate(10deg); }
+  .eyes { position: absolute; top: 28%; left: 14%; right: 14%; height: 36%; display: flex; justify-content: space-between; }
+  .eye { width: 46%; height: 100%; background: #fff; border: var(--bd); border-radius: 50%; position: relative; overflow: hidden; }
+  .eye::before { content: ""; position: absolute; inset: 0 0 50% 0; background: var(--skin-shade); border-bottom: var(--bd); }
+  .eye::after  { content: ""; position: absolute; width: 32%; height: 32%; background: var(--ink); border-radius: 50%; bottom: 18%; }
+  .eye.left::after  { left: 48%; }
+  .eye.right::after { left: 24%; }
+  /* Mouth: top-only border + radius makes the downturned arc. */
+  .mouth {
+    position: absolute;
+    bottom: 18%; left: 32%; right: 28%;
+    height: 10%;
+    border-top: var(--bd);
+    border-radius: 50% 50% 0 0 / 100% 100% 0 0;
+    transform: rotate(-2deg);
+  }
+
+  /* Nav */
+  .nav { display: flex; align-items: center; gap: 24px; font-family: var(--display); font-size: 16px; }
+  .nav a:not(.pill) {
+    color: var(--ink);
+    text-decoration: none;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 4px 0;
+    border-bottom: 3px solid transparent;
+    transition: border-bottom-color .15s;
+  }
+  .nav a:not(.pill):hover { border-bottom-color: var(--bart); }
+  .nav .pill {
+    color: #fff;
+    text-decoration: none;
+    background: var(--bart);
+    padding: 8px 16px;
+    border: var(--bd);
+    border-radius: 999px;
+    box-shadow: var(--shadow-sm);
+    font-family: var(--mono);
+    font-size: 14px;
+    white-space: nowrap;
+    transition: transform .12s, box-shadow .12s;
+  }
+  .nav .pill:hover { transform: translate(2px, 2px); box-shadow: 2px 2px 0 var(--ink); }
+  .nav .pill .sub { opacity: .7; font-weight: 400; }
+
+  /* Hero */
+  .hero { display: grid; grid-template-columns: 1.2fr 1fr; gap: 56px; align-items: center; margin-bottom: 96px; }
+  .eyebrow {
+    display: inline-block;
+    font: 700 13px var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    background: var(--ink);
+    color: #fff;
+    padding: 6px 12px;
+    margin-bottom: 22px;
+    transform: rotate(-1.2deg);
+  }
+  h1.title {
+    font: clamp(80px, 12vw, 184px)/0.88 var(--display);
+    letter-spacing: -0.01em;
+    margin: 0 0 28px;
+    text-transform: uppercase;
+    -webkit-text-stroke: 2px var(--ink);
+    text-shadow: 8px 8px 0 var(--bart);
+  }
+  .tagline {
+    font: clamp(22px, 2.6vw, 34px)/1.05 var(--display);
+    margin: 0 0 22px;
+    max-width: 600px;
+    text-transform: uppercase;
+  }
+  .tagline em {
+    font-style: normal;
+    background: var(--skin);
+    padding: 0 10px;
+    border: var(--bd);
+    box-shadow: var(--shadow-sm);
+    display: inline-block;
+    transform: rotate(-1deg);
+  }
+  /* Card-style info blocks shared by hero lede + section sub. */
+  .lede, .section-sub {
+    font-size: 19px;
+    padding: 14px 18px;
+    border: var(--bd);
+    box-shadow: var(--shadow-sm);
+  }
+  .lede        { max-width: 560px; color: var(--ink-soft); margin: 0 0 32px;   background: rgba(255,255,255,0.55); }
+  .section-sub { max-width: 640px;                       margin: 28px 0 56px; background: rgba(255,255,255,0.60); }
+
+  /* Mascot panel */
+  .mascot-panel {
+    background: var(--paper);
+    border: var(--bd-thick);
+    border-radius: 8px;
+    box-shadow: 6px 6px 0 var(--bart);
+    padding: 28px;
+    position: relative;
+    transform: rotate(1.5deg);
+  }
+  .panel-note {
+    position: absolute;
+    top: -22px; left: 22px; right: 22px;
+    background: var(--skin);
+    border: var(--bd);
+    border-radius: 6px;
+    padding: 8px 12px 8px 14px;
+    font: 12px/1.35 var(--mono);
+    box-shadow: var(--shadow-sm);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    z-index: 5;
+  }
+  .panel-note .pin {
+    flex: 0 0 auto;
+    width: 14px; height: 14px;
+    background: var(--bart);
+    border: 2px solid var(--ink);
+    border-radius: 50%;
+    box-shadow: inset -2px -3px 0 rgba(0,0,0,0.2);
+  }
+  .panel-note b {
+    font: 400 1em var(--display);
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    margin-right: 4px;
+  }
+  .panel-note code { background: rgba(0,0,0,0.08); padding: 1px 4px; border-radius: 3px; }
+  .stage {
+    width: 100%; aspect-ratio: 1;
+    background: var(--sky);
+    border: var(--bd);
+    border-radius: 6px;
+    position: relative;
+    overflow: hidden;
+  }
+  .stage::before {
+    content: ""; position: absolute; inset: 0;
+    background:
+      radial-gradient(ellipse  80px 26px at 18% 18%, #fff, transparent 70%),
+      radial-gradient(ellipse 100px 30px at 78% 14%, #fff, transparent 70%),
+      radial-gradient(ellipse  90px 28px at 85% 60%, #fff, transparent 70%);
+  }
+  .stage::after {
+    content: ""; position: absolute;
+    left: 0; right: 0; bottom: 0;
+    height: 22%;
+    background: var(--grass);
+    border-top: var(--bd);
+    box-shadow: inset 0 -10px 0 var(--grass-dark);
+  }
+  .mascot-head {
+    --size: 64%;
+    position: absolute;
+    width: var(--size); aspect-ratio: 1;
+    left: 50%; bottom: 14%;
+    transform: translateX(-50%);
+    z-index: 2;
+  }
+  .mascot-body {
+    position: absolute;
+    left: 50%; bottom: -8%;
+    transform: translateX(-50%);
+    width: 45%; height: 28%;
+    background: var(--marge);
+    border: var(--bd);
+    border-radius: 14px 14px 4px 4px;
+    z-index: 1;
+  }
+
+  /* Section heads */
+  .section-num {
+    display: inline-block;
+    font: 700 14px var(--mono);
+    letter-spacing: 0.1em;
+    background: var(--ink);
+    color: var(--paper);
+    padding: 4px 10px;
+    margin-bottom: 28px;
+  }
+  h2.section-title {
+    font: clamp(44px, 6.4vw, 80px)/0.95 var(--display);
+    margin: 0;
+    letter-spacing: -0.005em;
+    text-transform: uppercase;
+    -webkit-text-stroke: 1.5px var(--ink);
+    text-shadow: 5px 5px 0 var(--bart);
+  }
+  h2 .accent { color: var(--bart); }
+
+  /* Refusals grid */
+  .refuse-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; margin-bottom: 120px; }
+  .refuse {
+    background: var(--paper);
+    border: var(--bd-thick);
+    padding: 24px 22px 22px;
+    box-shadow: var(--shadow-sm);
+    position: relative;
+  }
+  .refuse:nth-child(3n+1) { transform: rotate(-0.8deg); background: #fff; }
+  .refuse:nth-child(3n+2) { transform: rotate( 0.6deg); }
+  .refuse:nth-child(3n+3) { transform: rotate(-0.3deg); background: #fff; box-shadow: 4px 4px 0 var(--marge); }
+  .refuse .stamp {
+    position: absolute;
+    top: -16px; right: -16px;
+    width: 88px; height: 88px;
+    background: var(--bart);
+    color: #fff;
+    border: var(--bd);
+    border-radius: 50%;
+    display: grid; place-items: center;
+    font: 14px/0.95 var(--display);
+    text-align: center;
+    letter-spacing: 0.04em;
+    transform: rotate(-12deg);
+    box-shadow: 3px 3px 0 var(--ink);
+    z-index: 2;
+  }
+  .refuse .feature {
+    font: 700 21px var(--mono);
+    background: var(--ink);
+    color: var(--paper);
+    display: inline-block;
+    padding: 4px 10px;
+    margin-bottom: 14px;
+  }
+  .refuse h3 { font: 20px/1.1 var(--display); margin: 0 0 10px; text-transform: uppercase; }
+  .refuse p  { margin: 0; color: var(--ink-soft); font-size: 16px; }
+  .refuse .quote {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 2px dashed var(--ink);
+    font: 13px var(--mono);
+  }
+  .refuse .quote::before { content: "// "; opacity: 0.5; }
+
+  /* Manifesto strip */
+  .strip {
+    background: var(--ink);
+    color: var(--paper);
+    margin: 0 calc(50% - 50vw);
+    padding: 28px calc(50vw - 50%);
+    font: clamp(28px, 4vw, 56px) var(--display);
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    overflow: hidden;
+    border-block: var(--bd-thick);
+  }
+  .strip-inner {
+    max-width: 1240px;
+    margin: 0 auto;
+    padding: 0 48px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 48px;
+    text-align: center;
+  }
+  .strip span { color: var(--bart); }
+  .strip .pip {
+    flex: 0 0 auto;
+    width: 22px; height: 22px;
+    background: var(--bart);
+    border: 3px solid var(--paper);
+    transform: rotate(45deg);
+  }
+
+  /* Comparison */
+  .compare { margin: 96px 0 120px; }
+  .compare-table {
+    border: var(--bd-thick);
+    background: var(--paper);
+    box-shadow: 6px 6px 0 var(--ink);
+    overflow: hidden;
+  }
+  .compare-row {
+    display: grid;
+    grid-template-columns: 1.6fr 1fr 1fr;
+    border-bottom: var(--bd);
+  }
+  .compare-row:last-child { border-bottom: 0; }
+  .compare-row > div { padding: 18px 22px; border-right: var(--bd); }
+  .compare-row > div:last-child { border-right: 0; }
+  .compare-head {
+    background: var(--ink);
+    color: var(--paper);
+    font: 18px var(--display);
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+  .compare-head > div:nth-child(2) { background: var(--bart); color: #fff; }
+  .compare-row .feature-name { font: 700 15px var(--mono); }
+  .check, .cross {
+    display: flex; align-items: center; gap: 10px;
+    font: 20px var(--display);
+    text-transform: uppercase;
+  }
+  .check::before, .cross::before {
+    width: 28px; height: 28px;
+    border: var(--bd);
+    border-radius: 50%;
+    display: grid; place-items: center;
+    font-family: var(--display);
+  }
+  .check::before { content: "✓"; background: var(--grass); color: var(--ink); font-size: 16px; }
+  .cross::before { content: "✕"; background: var(--bart);  color: #fff;       font-size: 14px; }
+  .compare-note { font-weight: 500; font-size: 14px; color: var(--ink-soft); margin-top: 4px; }
+
+  /* Footer */
+  footer {
+    border-top: 3px dashed var(--ink);
+    padding: 28px 0 32px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 18px;
+    font: 13px var(--mono);
+  }
+  footer .tag { background: var(--ink); color: var(--paper); padding: 4px 10px; }
+
+  /* Responsive */
+  @media (max-width: 980px) {
+    .page { padding: 24px 24px 0; }
+    .hero { grid-template-columns: 1fr; gap: 36px; margin-bottom: 64px; }
+    .refuse-grid { grid-template-columns: 1fr 1fr; }
+    .compare-row { grid-template-columns: 1.4fr 1fr 1fr; }
+  }
+
+  @media (max-width: 600px) {
+    .page { padding: 16px 16px 0; }
+
+    /* Brand + nav: shrink so the title and pill fit on one line. */
+    .top { margin-bottom: 28px; gap: 12px; }
+    .brand { font-size: 22px; gap: 10px; }
+    .brand .head { --size: 44px; }
+    .nav { gap: 12px; }
+    .nav a:not(.pill) { display: none; }
+    .nav .pill { font-size: 13px; padding: 6px 12px; }
+
+    /* Hero typography rescaled; text-shadows pulled in. */
+    .eyebrow { font-size: 11px; padding: 5px 10px; }
+    h1.title { font-size: 64px; text-shadow: 5px 5px 0 var(--bart); }
+    .tagline { font-size: 22px; }
+    .tagline em { padding: 0 6px; }
+    .lede { font-size: 16px; padding: 12px 14px; }
+
+    /* Mascot panel keeps the desktop overlap-and-rotate composition;
+       only padding and the pinned note shrink. */
+    .mascot-panel { padding: 20px; }
+    .panel-note {
+      top: -18px; left: 14px; right: 14px;
+      padding: 6px 10px 6px 12px;
+      font-size: 11px;
+      gap: 8px;
+    }
+    .panel-note .pin { width: 12px; height: 12px; }
+
+    .section-num { font-size: 12px; padding: 3px 8px; margin-bottom: 18px; }
+    h2.section-title { font-size: 36px; text-shadow: 4px 4px 0 var(--bart); }
+    .section-sub { font-size: 16px; padding: 12px 14px; margin: 16px 0 32px; }
+
+    /* Refusals stack to one column; per-card rotation dropped so cards
+       don't poke past the page padding. */
+    .refuse-grid { grid-template-columns: 1fr; gap: 20px; margin-bottom: 64px; }
+    .refuse,
+    .refuse:nth-child(3n+1),
+    .refuse:nth-child(3n+2),
+    .refuse:nth-child(3n+3) { transform: none; }
+    .refuse { padding: 22px 20px 20px; }
+    .refuse .stamp { top: -12px; right: -12px; width: 70px; height: 70px; font-size: 12px; }
+
+    .strip { padding: 18px calc(50vw - 50%); font-size: 22px; }
+    .strip-inner { padding: 0 16px; gap: 16px; }
+
+    /* Comparison table: stack each row label → verdict → gloss
+       and drop the head (its column titles become redundant). */
+    .compare { margin: 64px 0; }
+    .compare-head { display: none; }
+    .compare-row { grid-template-columns: 1fr; border-bottom: var(--bd-thick); }
+    .compare-row:last-child { border-bottom: 0; }
+    .compare-row > div { padding: 14px 16px; border-right: 0; border-bottom: 2px solid var(--ink); }
+    .compare-row > div:last-child { border-bottom: 0; }
+    .compare-row .feature-name { font-size: 14px; }
+
+    footer { font-size: 12px; gap: 12px; }
+  }
+</style>
+</head>
+<body>
+  <main class="page">
+
+    <!-- ===== TOP BAR ===== -->
+    <header class="top">
+      <div class="brand">
+        <div class="head">
+          <div class="hair"></div>
+          <div class="skull"></div>
+          <div class="eyes">
+            <div class="eye left"></div>
+            <div class="eye right"></div>
+          </div>
+          <div class="mouth"></div>
+        </div>
+        <div>CYNIC</div>
+      </div>
+      <nav class="nav">
+        <a href="#refuses">Refuses</a>
+        <a href="#status">Status</a>
+        <a href="https://github.com/chicoxyzzy/cynic" target="_blank" rel="noopener" class="pill">★ GitHub <span class="sub">(if you must)</span></a>
+      </nav>
+    </header>
+
+    <!-- ===== HERO ===== -->
+    <section class="hero">
+      <div>
+        <span class="eyebrow">A strict-only ECMAScript engine</span>
+        <h1 class="title">Cynic.</h1>
+        <p class="tagline">A JavaScript engine that has <em>heard enough</em>.</p>
+        <p class="lede">
+          Cynic runs modern ECMAScript on edge runtimes, Workers, and servers — and politely declines everything the language has been trying to forget for the last twenty years. No sloppy mode. No <code>with</code>. No HTML-comment syntax. No DOM apologetics.
+        </p>
+      </div>
+
+      <div class="mascot-panel">
+        <div class="panel-note">
+          <span class="pin"></span>
+          <span><b>Pre-alpha.</b> Lexer + parser + bytecode interpreter ship; the runtime is filling in. Read <code>docs/ROADMAP.md</code> before opening issues. Better yet, don't.</span>
+        </div>
+        <div class="stage">
+          <div class="head mascot-head">
+            <div class="hair"></div>
+            <div class="skull"></div>
+            <div class="eyes">
+              <div class="eye left"></div>
+              <div class="eye right"></div>
+            </div>
+            <div class="mouth"></div>
+          </div>
+          <div class="mascot-body"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== REFUSALS ===== -->
+    <section id="refuses">
+      <div class="section-num">§01 · REFUSALS</div>
+      <h2 class="section-title">Things Cynic <span class="accent">won't</span> do for you.</h2>
+      <p class="section-sub">
+        Other engines treat the spec like an all-you-can-eat buffet. Cynic reads it like a contract. If a feature exists only to keep a 2003 webpage from crashing, it's gone. No flags, no opt-ins, no half-measures.
+      </p>
+
+      <div class="refuse-grid">
+        <article class="refuse">
+          <div class="stamp">REFUSED</div>
+          <span class="feature">with (obj)</span>
+          <h3>The <code>with</code> statement</h3>
+          <p>Allegedly part of the language. We checked. We disagree.</p>
+          <div class="quote">SyntaxError: with? in 2026? please.</div>
+        </article>
+
+        <article class="refuse">
+          <div class="stamp">NOPE</div>
+          <span class="feature">label:</span>
+          <h3>Labelled statements</h3>
+          <p>Intentionally omitted from the parser. <code>break label</code> was a mistake we collectively chose to make.</p>
+          <div class="quote">SyntaxError: labels declined.</div>
+        </article>
+
+        <article class="refuse">
+          <div class="stamp">RETIRED</div>
+          <span class="feature">0o7  →  07</span>
+          <h3>Legacy octal literals</h3>
+          <p>The <code>0o</code> prefix exists for a reason. The bare-leading-zero form does not.</p>
+          <div class="quote">SyntaxError: legacy octal: not in strict mode, not anywhere.</div>
+        </article>
+
+        <article class="refuse">
+          <div class="stamp">DENIED</div>
+          <span class="feature">function f() in if(){}</span>
+          <h3>Function-in-block, sloppy-mode style</h3>
+          <p>Annex B's sloppy-only function-in-block hoisting is gone. Declare it where it lives.</p>
+          <div class="quote">SyntaxError: Annex B not on the menu.</div>
+        </article>
+
+        <article class="refuse">
+          <div class="stamp">PASS</div>
+          <span class="feature">for (var i in o = {}) {}</span>
+          <h3>Initializer in <code>for-in</code> head</h3>
+          <p>Annex B accident. Doesn't parse here. Hoist your initializer like an adult.</p>
+          <div class="quote">SyntaxError: for-in head is not for assignment.</div>
+        </article>
+
+        <article class="refuse">
+          <div class="stamp">NOPE</div>
+          <span class="feature">escape() · unescape()</span>
+          <h3>The pre-URI globals</h3>
+          <p>Use <code>encodeURI</code> / <code>encodeURIComponent</code>. They've been correct since 1999.</p>
+          <div class="quote">ReferenceError: 'escape' is not shipped.</div>
+        </article>
+
+        <article class="refuse">
+          <div class="stamp">EXPIRED</div>
+          <span class="feature">"hi".bold()</span>
+          <h3>The <code>String.prototype</code> HTML wrappers</h3>
+          <p>All thirteen of them — <code>anchor</code>, <code>bold</code>, <code>fontcolor</code>, … — left at the door. This is a string, not an HTML formatter.</p>
+          <div class="quote">TypeError: 'bold' is not a string method here.</div>
+        </article>
+
+        <article class="refuse">
+          <div class="stamp">NOPE</div>
+          <span class="feature">d.getYear()</span>
+          <h3><code>Date.prototype.{getYear, setYear}</code></h3>
+          <p>The two-digit-year ones. Cynic keeps the normative aliases (<code>substr</code>, <code>trimLeft</code>, <code>toGMTString</code>) — these don't make the cut.</p>
+          <div class="quote">TypeError: 'getYear' is not on this Date.</div>
+        </article>
+
+        <article class="refuse">
+          <div class="stamp">NEVER</div>
+          <span class="feature">&lt;!-- --&gt;</span>
+          <h3>HTML comments in source</h3>
+          <p>Yes, that's real ECMAScript. Yes, we are pretending it isn't.</p>
+          <div class="quote">SyntaxError: this is a JS file. compose yourself.</div>
+        </article>
+      </div>
+    </section>
+
+    <!-- ===== STRIP ===== -->
+    <div class="strip">
+      <div class="strip-inner">
+        <span class="pip"></span>
+        <div>STRICT MODE&nbsp;<span>isn't</span>&nbsp;a mode. it's a&nbsp;<span>worldview.</span></div>
+        <span class="pip"></span>
+      </div>
+    </div>
+
+    <!-- ===== STATUS ===== -->
+    <section class="compare" id="status">
+      <div class="section-num">§02 · WHERE WE ARE</div>
+      <h2 class="section-title">Pre-alpha. <span class="accent">Not pretending otherwise.</span></h2>
+      <p class="section-sub">Lexer, parser, and bytecode interpreter ship. The runtime is filling in. JITs and generational GC are future work. Below is what works, what kind-of works, and what Cynic refuses to pretend works yet.</p>
+
+      <div class="compare-table">
+        <div class="compare-row compare-head">
+          <div>The receipts</div>
+          <div>Cynic says</div>
+          <div>What that means</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">test262 · parser</div>
+            <div class="compare-note">scoped to the corpus Cynic targets</div>
+          </div>
+          <div class="check">Mostly fine.</div>
+          <div>Almost everything attempts; most of it passes. The rest is on a list.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">test262 · runtime</div>
+            <div class="compare-note">parse → compile → execute</div>
+          </div>
+          <div class="check">Getting there.</div>
+          <div>Bigger than last week. Smaller than next week.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">In-tree unit tests</div>
+            <div class="compare-note">tests-first, allegedly</div>
+          </div>
+          <div class="check">A lot.</div>
+          <div>700+ and counting. Nobody's bragging.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">Promises &amp; async/await</div>
+            <div class="compare-note">full chaining; pending-await via <code>JSGenerator</code></div>
+          </div>
+          <div class="check">Works.</div>
+          <div>Yes, even the part where it suspends.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">Async generators</div>
+            <div class="compare-note">yield-await chaining via promise reactions</div>
+          </div>
+          <div class="check">Works.</div>
+          <div>Surprisingly. We checked.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">RegExp · full ECMA-262</div>
+            <div class="compare-note">backrefs, named groups, lookaround, <code>u</code>/<code>v</code> flags</div>
+          </div>
+          <div class="check">Works.</div>
+          <div>Bridged from QuickJS-NG. Credit where due.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">Real <code>Symbol</code> &amp; <code>BigInt</code> primitives</div>
+            <div class="compare-note">NaN-boxed, pointer-tagged; well-known symbols, registry, full BigInt arithmetic</div>
+          </div>
+          <div class="check">Works.</div>
+          <div>Primitives. Not polyfills wearing a costume.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">TypedArrays + <code>ArrayBuffer</code> + <code>DataView</code></div>
+            <div class="compare-note">full <code>%TypedArray%.prototype</code> surface</div>
+          </div>
+          <div class="check">Works.</div>
+          <div>All the views. All the bytes. None of the drama.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name"><code>Proxy</code> traps</div>
+            <div class="compare-note">get / set / has / deleteProperty / defineProperty / ownKeys + callable proxies</div>
+          </div>
+          <div class="check">Mostly.</div>
+          <div>Apply / construct trap dispatch is on the list.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name"><code>yield*</code> delegation · <code>for await of</code> · top-level <code>await</code></div>
+            <div class="compare-note">parser accepts; runtime / module loader still talking it out</div>
+          </div>
+          <div class="cross">In progress.</div>
+          <div>Don't ship to prod on these. Don't ship anything to prod, frankly.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">Real module graph</div>
+            <div class="compare-note">cyclic imports, namespace objects, dynamic <code>import()</code></div>
+          </div>
+          <div class="cross">Not yet.</div>
+          <div>Dynamic <code>import()</code> currently throws on principle (and convenience).</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">JIT tiers · generational GC</div>
+            <div class="compare-note">bytecode interp + stop-the-world mark-sweep today</div>
+          </div>
+          <div class="cross">Future Cynic's problem.</div>
+          <div>The plan is real. The plan is also not the code.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">ES2025 odds &amp; ends</div>
+            <div class="compare-note"><code>Set</code> union/intersection, <code>WeakRef</code>, <code>Promise.try</code>, <code>Promise.withResolvers</code></div>
+          </div>
+          <div class="cross">Soon. Probably.</div>
+          <div>Each one takes a swing at the runtime score as it lands.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== FOOTER ===== -->
+    <footer>
+      <div>
+        <span class="tag">CYNIC · pre-alpha</span>
+        &nbsp; — built in Zig 0.16+, with reluctance, 2026
+      </div>
+      <div class="credits">
+        Cynic is <a href="https://github.com/chicoxyzzy/cynic/blob/main/LICENSE">MIT</a>. Strict only. Always was.
+        <br />
+        RegExp by <a href="https://github.com/quickjs-ng/quickjs" target="_blank" rel="noopener">QuickJS-NG</a> (MIT) ·
+        Unicode tables from the <a href="https://www.unicode.org/license.txt" target="_blank" rel="noopener">UCD</a> ·
+        Conformance via <a href="https://github.com/tc39/test262" target="_blank" rel="noopener">tc39/test262</a> (BSD)
+      </div>
+    </footer>
+
+  </main>
+
+</body>
+</html>
