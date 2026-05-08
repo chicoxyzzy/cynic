@@ -11,3 +11,6 @@ zig-out/
 .idea/
 
 # test262 lives at vendor/test262 as a Git submodule (see .gitmodules).
+
+# Throwaway worktree used by the gh-pages deploy flow.
+.gh-pages-deploy/
