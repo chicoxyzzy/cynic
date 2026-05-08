@@ -128,6 +128,18 @@ fn constructErrorInstance(realm: *Realm, proto: *JSObject, args: []const Value) 
         const msg_str = stringifyArg(realm, args[0]) catch return error.OutOfMemory;
         instance.set(realm.allocator, "message", Value.fromString(msg_str)) catch return error.OutOfMemory;
     }
+    // §20.5.8.1 InstallErrorCause — ES2022 `error-cause`. The
+    // optional second argument is an options object; if it has
+    // an own `cause` property, copy that to `instance.cause`.
+    // (`hasOwnProperty` honoured — `{}` with no `cause` key
+    // must NOT install one.)
+    if (args.len > 1) {
+        if (heap_mod.valueAsPlainObject(args[1])) |opts| {
+            if (opts.hasOwn("cause")) {
+                instance.set(realm.allocator, "cause", opts.get("cause")) catch return error.OutOfMemory;
+            }
+        }
+    }
     return heap_mod.taggedObject(instance);
 }
 

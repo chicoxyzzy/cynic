@@ -36,12 +36,49 @@ const toBoolean = intrinsics.toBoolean;
 const sameValueZero = intrinsics.sameValueZero;
 const getPropertyChain = intrinsics.getPropertyChain;
 
+/// §20.1.1.1 Object ( [ value ] ) — both `new` and plain-call.
+/// Plain `Object()` / `Object(undefined)` / `Object(null)` →
+/// fresh empty object whose proto is `%Object.prototype%`.
+/// Plain `Object(value)` for an existing object → return value
+/// (identity, no copy). For primitive values we fall back to a
+/// fresh empty object — primitive boxing (`Object(42)` → Number
+/// wrapper) needs the wrapper plumbing that's not wired here.
+/// `new Object(value)` arrives with `this_value` set to the
+/// freshly allocated `this`; if `value` is already an object
+/// the spec says to return it (overriding `this`), otherwise
+/// just hand back `this` (the caller's `new` makes it the
+/// return value if we return undefined).
+pub fn objectConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const arg = argOr(args, 0, Value.undefined_);
+    // §20.1.1.1 step 2 — `Object(value)` with a non-nullish
+    // value-that-is-an-object returns the value unchanged. This
+    // is the identity case for both `new` and plain-call.
+    if (arg.isObject() or heap_mod.valueAsFunction(arg) != null) {
+        return arg;
+    }
+    // `new Object(...)` path — `this_value` is the freshly
+    // allocated object the interpreter built for us. For
+    // null/undefined args, that empty object IS the result.
+    if (heap_mod.valueAsPlainObject(this_value)) |_| {
+        return this_value;
+    }
+    // Plain `Object()` / `Object(undefined)` / `Object(null)` —
+    // build a fresh empty object.
+    const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+    obj.prototype = realm.intrinsics.object_prototype;
+    return heap_mod.taggedObject(obj);
+}
+
 /// Wire `Object.*` statics and `Object.prototype` instance
 /// methods. Caller arranges that `realm.intrinsics.object_prototype`
 /// + the `Object` global stub already exist; this fn pours the
 /// methods in.
 pub fn install(realm: *Realm) !void {
     if (heap_mod.valueAsFunction(realm.globals.get("Object").?)) |obj_ctor| {
+        // Replace the stub-constructor body installed during the
+        // bootstrap with the real §20.1.1.1 semantics now that
+        // `object_prototype` is wired.
+        obj_ctor.native_callback = objectConstructor;
         try installNativeMethod(realm, obj_ctor, "keys", objectKeys, 1);
         try installNativeMethod(realm, obj_ctor, "values", objectValues, 1);
         try installNativeMethod(realm, obj_ctor, "entries", objectEntries, 1);
@@ -52,6 +89,7 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethod(realm, obj_ctor, "getOwnPropertyDescriptor", objectGetOwnPropertyDescriptor, 2);
         try installNativeMethod(realm, obj_ctor, "getOwnPropertyDescriptors", objectGetOwnPropertyDescriptors, 1);
         try installNativeMethod(realm, obj_ctor, "getOwnPropertyNames", objectGetOwnPropertyNames, 1);
+        try installNativeMethod(realm, obj_ctor, "getOwnPropertySymbols", objectGetOwnPropertySymbols, 1);
         try installNativeMethod(realm, obj_ctor, "create", objectCreate, 2);
         try installNativeMethod(realm, obj_ctor, "assign", objectAssign, 2);
         try installNativeMethod(realm, obj_ctor, "freeze", objectFreeze, 1);
@@ -706,11 +744,57 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
     out.prototype = realm.intrinsics.array_prototype;
     var len: i32 = 0;
     for (keys) |key| {
+        // §20.1.2.10 — string keys only. Symbol-property keys
+        // (Cynic stores them as `@@<name>` for well-known and
+        // `<sym:N>` for user-allocated) belong to
+        // getOwnPropertySymbols.
+        if (isSymbolKey(key)) continue;
         var ibuf: [16]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
         const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         const k_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
         out.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
+        len += 1;
+    }
+    out.set(realm.allocator, "length", Value.fromInt32(len)) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(out);
+}
+
+/// Cynic flattens symbol property keys into ordinary strings —
+/// well-known symbols use the `@@<name>` form (so existing
+/// installers can refer to them by literal), and
+/// `Symbol(desc)` allocates a unique `<sym:N>` key. This helper
+/// is the canonical "is this a symbol-keyed property?" check.
+fn isSymbolKey(key: []const u8) bool {
+    return std.mem.startsWith(u8, key, "@@") or std.mem.startsWith(u8, key, "<sym:");
+}
+
+fn objectGetOwnPropertySymbols(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.getOwnPropertySymbols target is not an object");
+    const keys = try ownPropertyKeysOrdered(realm, obj);
+    defer realm.allocator.free(keys);
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    out.prototype = realm.intrinsics.array_prototype;
+    var len: i32 = 0;
+    for (keys) |key| {
+        if (!isSymbolKey(key)) continue;
+        // Recover the JSSymbol pointer from the heap's symbol
+        // list by exact prop_key match. Linear scan; the lists
+        // tend to be small (handful of well-knowns + however
+        // many `Symbol()` the program allocated).
+        var match: ?*@import("../symbol.zig").JSSymbol = null;
+        for (realm.heap.symbols.items) |sym| {
+            if (std.mem.eql(u8, sym.prop_key, key)) {
+                match = sym;
+                break;
+            }
+        }
+        const sym = match orelse continue;
+        var ibuf: [16]u8 = undefined;
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
+        const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+        out.set(realm.allocator, idx_owned.bytes, heap_mod.taggedSymbol(sym)) catch return error.OutOfMemory;
         len += 1;
     }
     out.set(realm.allocator, "length", Value.fromInt32(len)) catch return error.OutOfMemory;

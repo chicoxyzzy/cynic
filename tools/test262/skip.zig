@@ -80,11 +80,15 @@ pub const unsupported_features = [_][]const u8{
     "async-explicit-resource-management",
     // RegExp feature gates that *used* to live here moved out
     // when the vendored QuickJS-NG `libregexp.c` was wired up:
-    // named groups, lookbehind, `u`/`v` flags, match indices,
-    // and Unicode property escapes are all supported. Anything
-    // still-failing in those buckets is now a real gap, not a
-    // missing feature. The ones below remain because the spec
-    // bumped past what libregexp shipped:
+    // named groups, lookbehind, `u`-flag, match indices, and
+    // Unicode property escapes are all fully supported. The
+    // `v`-flag is left ungated even though libregexp's support
+    // is *partial*: basic patterns, `\p{…}` intersection
+    // (`&&`), and string literals (`\q{ab|cd}`) work; set
+    // difference (`[\p{Letter}--A]`) throws. Net-net we get
+    // more passes than fails by attempting them. The ones
+    // below remain skipped because libregexp doesn't ship them
+    // at all:
     //   • `regexp-duplicate-named-groups` — ES2025 grammar
     //     change to allow the same name in alternative branches.
     //   • `regexp-modifiers` — ES2024 inline (?i:…)/(?-i:…)
@@ -99,7 +103,8 @@ pub const unsupported_features = [_][]const u8{
     // SharedArrayBuffer.
     "json-modules",
     "json-parse-with-source",
-    "iterator-helpers",
+    // (iterator-helpers — Cynic ships Iterator.from + map/filter/take/
+    // drop/toArray/forEach/find/some/every/reduce. Gate dropped.)
     "async-iterator-helpers",
     "Array.fromAsync",
     "Float16Array",
@@ -112,7 +117,7 @@ pub const unsupported_features = [_][]const u8{
     // regexp-unicode-property-escapes, regexp-v-flag — all supported
     // by the vendored libregexp; gates removed.)
     "well-formed-json-stringify",
-    "error-cause",
+    // (error-cause — ES2022 `new Error(msg, {cause}).cause` — shipped.)
     "hashbang",
     // `eval` and runtime-code-construction friends — Cynic
     // permanently doesn't ship these. Aligns with SES /
@@ -181,7 +186,7 @@ test "skip: unsupported features" {
     try testing.expect(featureIsUnsupported("decorators"));
     try testing.expect(featureIsUnsupported("Temporal"));
     try testing.expect(featureIsUnsupported("regexp-modifiers"));
-    try testing.expect(!featureIsUnsupported("regexp-v-flag")); // libregexp ships v-flag
+    try testing.expect(!featureIsUnsupported("regexp-v-flag")); // libregexp ships v-flag (partial: no set-difference)
     try testing.expect(!featureIsUnsupported("regexp-named-groups"));
     try testing.expect(!featureIsUnsupported("class"));
     try testing.expect(!featureIsUnsupported("optional-chaining"));

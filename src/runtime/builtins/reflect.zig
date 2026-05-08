@@ -199,10 +199,21 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     _ = this_value;
     const target = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Reflect.construct target must be a constructor");
     // §28.1.2 Reflect.construct step 2: throw if target is
-    // not actually a constructor. `isConstructor.js` harness
-    // depends on this throw.
+    // not actually a constructor.
     if (!target.has_construct or target.is_arrow) return throwTypeError(realm, "Reflect.construct target is not a constructor");
     const args_v = argOr(args, 1, Value.undefined_);
+    // Step 3-5: optional `newTarget` defaults to `target`; when
+    // supplied, MUST be a constructor too (the trick the
+    // `isConstructor.js` harness relies on to detect non-ctor
+    // built-ins like `Object.freeze`).
+    const new_target_v = argOr(args, 2, Value.undefined_);
+    const new_target: *@import("../function.zig").JSFunction = if (new_target_v.isUndefined())
+        target
+    else if (heap_mod.valueAsFunction(new_target_v)) |nt|
+        nt
+    else
+        return throwTypeError(realm, "Reflect.construct newTarget must be a constructor");
+    if (!new_target.has_construct or new_target.is_arrow) return throwTypeError(realm, "Reflect.construct newTarget is not a constructor");
 
     var ctor_args: std.ArrayListUnmanaged(Value) = .empty;
     defer ctor_args.deinit(realm.allocator);
@@ -216,10 +227,11 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
         }
     }
 
-    // Allocate the instance with [[Prototype]] = target.prototype,
-    // then call target as a constructor.
+    // Allocate the instance with [[Prototype]] = newTarget.prototype
+    // (per §10.1.13 OrdinaryCreateFromConstructor — newTarget
+    // controls the proto, not target).
     const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
-    instance.prototype = target.prototype;
+    instance.prototype = new_target.prototype;
     const this_arg = heap_mod.taggedObject(instance);
 
     const interpreter = @import("../interpreter.zig");
