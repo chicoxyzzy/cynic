@@ -1109,7 +1109,7 @@ pub const Compiler = struct {
                     continue;
                 }
                 const key_slice = switch (p.key) {
-                    .ident => |span| self.source[span.start..span.end],
+                    .ident => |span| try self.decodeIdentifierName(self.source[span.start..span.end]),
                     .string => |span| inner: {
                         // Strip surrounding quotes — string-literal keys
                         // include the quote bytes in their span. later
@@ -1163,7 +1163,7 @@ pub const Compiler = struct {
                     continue;
                 }
                 const key_slice = switch (m.key) {
-                    .ident => |span| self.source[span.start..span.end],
+                    .ident => |span| try self.decodeIdentifierName(self.source[span.start..span.end]),
                     .string => |span| inner: {
                         const raw = self.source[span.start..span.end];
                         if (raw.len < 2) return error.UnsupportedExpression;
@@ -3117,10 +3117,15 @@ fn compileClassTemplate(
         .method => |m| {
             const raw_key = methodKeyName(self.source, m.key) orelse return error.UnsupportedStatement;
             if (!m.is_static and std.mem.eql(u8, raw_key, "constructor")) continue;
-            const key_name = if (m.key == .private)
-                std.fmt.allocPrint(arena, "{s}{s}", .{ private_prefix, raw_key }) catch return error.OutOfMemory
-            else
-                raw_key;
+            const key_name = switch (m.key) {
+                .private => std.fmt.allocPrint(arena, "{s}{s}", .{ private_prefix, raw_key }) catch return error.OutOfMemory,
+                // §12.7.1 — `\u…` escapes in IdentifierName decode to
+                // the source character, so `class C { if(){} }`
+                // installs `if`. String / numeric keys are already the
+                // PropertyKey value once their literal frame is stripped.
+                .ident => try self.decodeIdentifierName(raw_key),
+                else => raw_key,
+            };
             const method_chunk = try compileMethodBody(self, m.params, m.body.body, false, false, m.span);
             const tmpl = ChunkMod.MethodTemplate{
                 .name = key_name,
