@@ -85,10 +85,57 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethodOnProto(realm, arr_proto, "@@iterator", collections.arrayLikeValuesMethod, 0);
     }
     if (heap_mod.valueAsFunction(realm.globals.get("Array").?)) |arr_ctor| {
+        // Replace the stub-constructor body with the real
+        // §22.1.1 semantics now that array_prototype is wired.
+        arr_ctor.native_callback = arrayConstructor;
         try installNativeMethod(realm, arr_ctor, "isArray", arrayIsArray, 1);
         try installNativeMethod(realm, arr_ctor, "of", arrayOf, 0);
         try installNativeMethod(realm, arr_ctor, "from", arrayFrom, 1);
     }
+}
+
+/// §22.1.1 Array(...) — both `new` and plain-call.
+/// • `Array()` → `[]`
+/// • `Array(N)` where N is a Number → array of length N (must
+///   be a uint32; non-integer or negative throws RangeError).
+/// • `Array(item0, item1, …)` → `[item0, item1, …]`. The
+///   single-arg form gates on `typeof arg === "number"`, so
+///   `Array("x")` is `["x"]` not a 1-element array.
+/// `new Array(...)` arrives with `this_value` = the freshly
+/// allocated `this`; we hand it back populated. Plain-call
+/// allocates a fresh array.
+fn arrayConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const out = if (heap_mod.valueAsPlainObject(this_value)) |obj| obj else blk: {
+        const fresh = realm.heap.allocateObject() catch return error.OutOfMemory;
+        fresh.prototype = realm.intrinsics.array_prototype;
+        break :blk fresh;
+    };
+
+    if (args.len == 1 and (args[0].isInt32() or args[0].isDouble())) {
+        // §22.1.1.2 Array(len) — single Number arg sets length.
+        const n_d: f64 = if (args[0].isInt32()) @floatFromInt(args[0].asInt32()) else args[0].asDouble();
+        if (std.math.isNan(n_d) or std.math.isInf(n_d) or n_d < 0 or n_d > @as(f64, @floatFromInt(@as(u32, std.math.maxInt(u32))))) {
+            return throwRangeError(realm, "Array length out of range");
+        }
+        const trunc_n = @trunc(n_d);
+        if (trunc_n != n_d) {
+            return throwRangeError(realm, "Array length must be a non-negative integer");
+        }
+        const len: u32 = @intFromFloat(trunc_n);
+        out.set(realm.allocator, "length", Value.fromInt32(@intCast(len))) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(out);
+    }
+
+    // §22.1.1.3 Array(...items) — every arg becomes an element.
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        var ibuf: [24]u8 = undefined;
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+        const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.bytes, args[i]) catch return error.OutOfMemory;
+    }
+    out.set(realm.allocator, "length", Value.fromInt32(@intCast(args.len))) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(out);
 }
 
 // ── Array.prototype methods ─────────────────────────────────────────────────
