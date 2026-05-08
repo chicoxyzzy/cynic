@@ -20,6 +20,7 @@ const numberFromI64 = intrinsics.numberFromI64;
 const coerceToNumber = intrinsics.coerceToNumber;
 const throwTypeError = intrinsics.throwTypeError;
 const throwRangeError = intrinsics.throwRangeError;
+const argOr = intrinsics.argOr;
 
 // ── §21.4 Date ──────────────────────────────────────────────────────────────
 
@@ -47,7 +48,7 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, proto, "valueOf", dateGetTime, 0);
     try installNativeMethodOnProto(realm, proto, "toString", dateToString, 0);
     try installNativeMethodOnProto(realm, proto, "toISOString", dateToISOString, 0);
-    try installNativeMethodOnProto(realm, proto, "toJSON", dateToISOString, 0);
+    try installNativeMethodOnProto(realm, proto, "toJSON", dateToISOString, 1);
     try installNativeMethodOnProto(realm, proto, "getFullYear", dateGetFullYear, 0);
     try installNativeMethodOnProto(realm, proto, "getMonth", dateGetMonth, 0);
     try installNativeMethodOnProto(realm, proto, "getDate", dateGetDate, 0);
@@ -98,6 +99,32 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, proto, "toLocaleString", dateToString, 0);
     try installNativeMethodOnProto(realm, proto, "toLocaleDateString", dateToDateString, 0);
     try installNativeMethodOnProto(realm, proto, "toLocaleTimeString", dateToTimeString, 0);
+
+    // §21.4.4.45 Date.prototype[@@toPrimitive] — overrides the
+    // default ordinary toPrimitive to flip "default" → "string"
+    // (Date is the one builtin where unhinted primitive coercion
+    // prefers string, so `${date}` and `Date + ""` work).
+    try installNativeMethodOnProto(realm, proto, "@@toPrimitive", dateToPrimitive, 1);
+}
+
+fn dateToPrimitive(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (heap_mod.valueAsPlainObject(this_value) == null) {
+        return throwTypeError(realm, "Date.prototype[@@toPrimitive] called on non-object");
+    }
+    const hint_v = argOr(args, 0, Value.undefined_);
+    const hint: enum { number, string } = blk: {
+        if (hint_v.isString()) {
+            const s: *JSString = @ptrCast(@alignCast(hint_v.asString()));
+            if (std.mem.eql(u8, s.bytes, "string")) break :blk .string;
+            if (std.mem.eql(u8, s.bytes, "default")) break :blk .string; // Date defaults to string.
+            if (std.mem.eql(u8, s.bytes, "number")) break :blk .number;
+        }
+        return throwTypeError(realm, "Date.prototype[@@toPrimitive]: invalid hint");
+    };
+    return switch (hint) {
+        .string => dateToString(realm, this_value, &.{}),
+        .number => dateGetTime(realm, this_value, &.{}),
+    };
 }
 
 fn dateToDateString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
