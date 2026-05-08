@@ -29,9 +29,10 @@ const throwTypeError = intrinsics.throwTypeError;
 
 // ── libregexp C API ─────────────────────────────────────────────────────────
 
-const c = @cImport({
-    @cInclude("libregexp.h");
-});
+// Build-system `translate-c` step (`b.addTranslateC` in build.zig)
+// produces this module from `vendor/quickjs/libregexp.h`. Zig 0.17
+// removed the `@cImport` builtin in favor of this approach.
+const c = @import("c");
 
 const LRE_FLAG_GLOBAL: c_int = 1 << 0;
 const LRE_FLAG_IGNORECASE: c_int = 1 << 1;

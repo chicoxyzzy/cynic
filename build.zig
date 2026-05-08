@@ -43,6 +43,17 @@ pub fn build(b: *std.Build) void {
         .root_module = qjs_mod,
     });
 
+    // Translate libregexp.h once; expose it as the `c` import. Cheaper
+    // and forward-compatible vs `@cImport` in source (which Zig 0.17+
+    // removed in favor of build-system translate-c).
+    const translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("vendor/quickjs/libregexp.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const c_mod = translate_c.createModule();
+
     // Library module: everything except the CLI.
     const lib_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
@@ -51,6 +62,7 @@ pub fn build(b: *std.Build) void {
     });
     lib_mod.linkLibrary(qjs_regex);
     lib_mod.addIncludePath(b.path("vendor/quickjs"));
+    lib_mod.addImport("c", c_mod);
 
     // Executable module: the `cynic` CLI. Imports the library as `cynic`.
     const exe_mod = b.createModule(.{
@@ -61,6 +73,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("cynic", lib_mod);
     exe_mod.linkLibrary(qjs_regex);
     exe_mod.addIncludePath(b.path("vendor/quickjs"));
+    exe_mod.addImport("c", c_mod);
 
     const exe = b.addExecutable(.{
         .name = "cynic",
