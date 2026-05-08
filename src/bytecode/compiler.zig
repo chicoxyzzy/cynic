@@ -2002,6 +2002,18 @@ pub const Compiler = struct {
             try self.compileMemberAssignment(a);
             return;
         }
+        // §13.15.5 Destructuring Assignment — when the LHS is an
+        // ArrayLiteral or ObjectLiteral, the parser hands us the
+        // expression form and we reinterpret it as a pattern at
+        // compile time. Handles defaults, rest, nesting, member
+        // / identifier leaves. Compound assignment (`[a]+=x`)
+        // is a SyntaxError; the parser already filters these,
+        // so reaching here implies `op == .eq`.
+        if ((a.target.* == .array_literal or a.target.* == .object_literal) and a.op == .eq) {
+            try self.compileExpression(a.value);
+            try self.compileAssignmentPattern(a.target.*);
+            return;
+        }
         if (a.target.* != .identifier_reference) {
             return error.UnsupportedExpression;
         }
@@ -3925,6 +3937,254 @@ fn compileDestructure(self: *Compiler, target: ast.statement.BindingTarget) Comp
             }
         },
     }
+}
+
+/// §13.15.5 DestructuringAssignment — walk an array_literal or
+/// object_literal AST as an assignment pattern. Source value
+/// is in `acc` on entry; this function consumes it. Leaves can
+/// be IdentifierReference, MemberExpression, nested patterns,
+/// or `target = default`. Spread (`[...rest]` / `{...rest}`)
+/// is a rest element; defaults flow through `applyDefaultExpr`.
+fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) CompileError!void {
+    const r_src = try self.reserveTemp();
+    defer self.releaseTemp();
+    try self.builder.emitOp(.star, target.span());
+    try self.builder.emitU8(r_src);
+
+    switch (target) {
+        .array_literal => |al| {
+            // Find the trailing rest (if any) and the count of
+            // non-rest elements. Spread can only appear last.
+            var rest_arg: ?*ast.expression.Expression = null;
+            var elem_count = al.elements.len;
+            if (al.elements.len > 0) {
+                if (al.elements[al.elements.len - 1]) |last| {
+                    if (last == .spread) {
+                        rest_arg = last.spread.argument;
+                        elem_count -= 1;
+                    }
+                }
+            }
+
+            for (al.elements[0..elem_count], 0..) |maybe_elt, idx| {
+                const elt = maybe_elt orelse continue; // elision: skip
+                var idx_buf: [16]u8 = undefined;
+                const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch unreachable;
+                const k = try self.internString(idx_slice);
+                try self.builder.emitOp(.ldar, target.span());
+                try self.builder.emitU8(r_src);
+                try self.builder.emitOp(.lda_property, target.span());
+                try self.builder.emitU16(k);
+                try self.assignAssignmentPatternElem(elt);
+            }
+
+            if (rest_arg) |arg| {
+                try self.builder.emitOp(.array_rest_from, target.span());
+                try self.builder.emitU8(r_src);
+                try self.builder.emitU8(@intCast(elem_count));
+                try self.assignAssignmentPatternLeaf(arg.*);
+            }
+        },
+        .object_literal => |ol| {
+            // Object pattern leaves can include `{...rest}` —
+            // the parser parses that as a `.spread` property
+            // member with an identifier_reference argument.
+            for (ol.properties) |prop| switch (prop) {
+                .property => |op| {
+                    const key_slice = try self.assignmentPatternKey(op.key);
+                    const k = try self.internString(key_slice);
+                    try self.builder.emitOp(.ldar, op.span);
+                    try self.builder.emitU8(r_src);
+                    try self.builder.emitOp(.lda_property, op.span);
+                    try self.builder.emitU16(k);
+                    // Shorthand `{a}` is target `a` (assign back to a).
+                    // `{a = 1}` is shorthand with default — the parser
+                    // wraps the value as `assignment(eq, identifier_reference, default)`.
+                    try self.assignAssignmentPatternLeaf(op.value);
+                },
+                .spread => |sp| {
+                    // §13.15.5 RestElement on object pattern —
+                    // collect own enumerables not in the
+                    // already-bound key list. Mirrors the
+                    // declaration path's `object_rest_from` shape.
+                    const r_excl = try self.reserveTemp();
+                    defer self.releaseTemp();
+                    try self.builder.emitOp(.make_array, sp.span);
+                    try self.builder.emitOp(.star, sp.span);
+                    try self.builder.emitU8(r_excl);
+                    const k_length = try self.internString("length");
+                    var bound_count: i32 = 0;
+                    for (ol.properties) |p2| switch (p2) {
+                        .property => bound_count += 1,
+                        else => {},
+                    };
+                    try self.builder.emitOp(.lda_smi, sp.span);
+                    try self.builder.emitI32(bound_count);
+                    try self.builder.emitOp(.sta_property, sp.span);
+                    try self.builder.emitU16(k_length);
+                    try self.builder.emitU8(r_excl);
+                    var i: u32 = 0;
+                    for (ol.properties) |p2| switch (p2) {
+                        .property => |op2| {
+                            const ks = try self.assignmentPatternKey(op2.key);
+                            const kk = try self.internString(ks);
+                            try self.builder.emitOp(.lda_constant, sp.span);
+                            try self.builder.emitU16(kk);
+                            var ibuf: [16]u8 = undefined;
+                            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+                            const ik = try self.internString(islice);
+                            try self.builder.emitOp(.sta_property, sp.span);
+                            try self.builder.emitU16(ik);
+                            try self.builder.emitU8(r_excl);
+                            i += 1;
+                        },
+                        else => {},
+                    };
+                    try self.builder.emitOp(.object_rest_from, sp.span);
+                    try self.builder.emitU8(r_src);
+                    try self.builder.emitU8(r_excl);
+                    try self.assignAssignmentPatternLeaf(sp.argument.*);
+                },
+                .method => return error.UnsupportedExpression,
+            };
+        },
+        else => return error.UnsupportedExpression,
+    }
+}
+
+/// Assignment-pattern element handling. The element AST is
+/// `assignment(eq, target, default)` for defaults, otherwise
+/// the bare target Expression. Acc holds the property value
+/// already loaded by the caller.
+fn assignAssignmentPatternElem(self: *Compiler, elt: ast.expression.Expression) CompileError!void {
+    if (elt == .assignment and elt.assignment.op == .eq) {
+        try self.applyDefaultExpr(elt.assignment.value, elt.assignment.span);
+        try self.assignAssignmentPatternLeaf(elt.assignment.target.*);
+        return;
+    }
+    try self.assignAssignmentPatternLeaf(elt);
+}
+
+/// Assign `acc` to the LHS-shaped Expression. Leaves may be
+/// identifier_reference, member, parenthesized, or further
+/// destructuring patterns.
+fn assignAssignmentPatternLeaf(self: *Compiler, target: ast.expression.Expression) CompileError!void {
+    switch (target) {
+        .identifier_reference => |ir| {
+            const name = self.source[ir.span.start..ir.span.end];
+            const scope = self.scope orelse return error.UnresolvedReference;
+            const binding = scope.resolve(name) orelse blk: {
+                if (self.realm.globals.contains(name)) {
+                    break :blk Binding{
+                        .name = name,
+                        .env_slot = 0,
+                        .env_depth = 0,
+                        .kind = .var_,
+                        .span = ir.span,
+                        .is_global = true,
+                    };
+                }
+                try self.report(.unexpected_token, ir.span);
+                return error.UnresolvedReference;
+            };
+            try self.emitStoreBinding(binding, ir.span);
+        },
+        .member => |m| {
+            if (m.optional) return error.UnsupportedExpression;
+            if (m.object.* == .super_) return error.UnsupportedExpression;
+            try self.assignToMember(m, m.span);
+        },
+        .parenthesized => |paren| try self.assignAssignmentPatternLeaf(paren.expression.*),
+        .array_literal, .object_literal => try self.compileAssignmentPattern(target),
+        else => return error.UnsupportedExpression,
+    }
+}
+
+/// Same shape as `compileForOfMemberAssign`'s body — emit a
+/// member-target assignment with `acc` as the value.
+fn assignToMember(self: *Compiler, m: ast.expression.MemberExpr, span: Span) CompileError!void {
+    const r_value = try self.reserveTemp();
+    defer self.releaseTemp();
+    try self.builder.emitOp(.star, span);
+    try self.builder.emitU8(r_value);
+
+    try self.compileExpression(m.object);
+    const r_obj = try self.reserveTemp();
+    defer self.releaseTemp();
+    try self.builder.emitOp(.star, span);
+    try self.builder.emitU8(r_obj);
+
+    switch (m.property) {
+        .ident => |kspan| {
+            const raw = self.source[kspan.start..kspan.end];
+            if (raw.len > 0 and raw[0] == '#') return error.UnsupportedExpression;
+            const key = try self.decodeIdentifierName(raw);
+            const k = try self.internString(key);
+            try self.builder.emitOp(.ldar, span);
+            try self.builder.emitU8(r_value);
+            try self.builder.emitOp(.sta_property, span);
+            try self.builder.emitU16(k);
+            try self.builder.emitU8(r_obj);
+        },
+        .computed => |key_expr| {
+            try self.compileExpression(key_expr);
+            const r_key = try self.reserveTemp();
+            defer self.releaseTemp();
+            try self.builder.emitOp(.star, span);
+            try self.builder.emitU8(r_key);
+            try self.builder.emitOp(.ldar, span);
+            try self.builder.emitU8(r_value);
+            try self.builder.emitOp(.sta_computed, span);
+            try self.builder.emitU8(r_obj);
+            try self.builder.emitU8(r_key);
+        },
+    }
+}
+
+/// Decode the property-key shape for an assignment-pattern
+/// `.property` element. Mirrors the rules in compileObjectLiteral
+/// (ident decode + string-literal trim).
+fn assignmentPatternKey(self: *Compiler, key: ast.expression.PropertyKey) CompileError![]const u8 {
+    return switch (key) {
+        .ident => |span| try self.decodeIdentifierName(self.source[span.start..span.end]),
+        .string => |span| inner: {
+            const raw = self.source[span.start..span.end];
+            if (raw.len < 2) return error.UnsupportedExpression;
+            break :inner raw[1 .. raw.len - 1];
+        },
+        .numeric => |span| self.source[span.start..span.end],
+        else => return error.UnsupportedExpression,
+    };
+}
+
+/// `acc = (acc === undefined) ? <default-expr> : acc`.
+/// Assignment-pattern variant that takes the default as an
+/// already-parsed Expression pointer (not a BindingElement).
+fn applyDefaultExpr(self: *Compiler, default_expr: *ast.expression.Expression, span: Span) CompileError!void {
+    const r_val = try self.reserveTemp();
+    defer self.releaseTemp();
+    try self.builder.emitOp(.star, span);
+    try self.builder.emitU8(r_val);
+
+    try self.builder.emitOp(.lda_undefined, span);
+    try self.builder.emitOp(.strict_neq, span);
+    try self.builder.emitU8(r_val);
+    try self.builder.emitOp(.jmp_if_true, span);
+    const keep_patch = self.builder.here();
+    try self.builder.emitI16(0);
+
+    try self.compileExpression(default_expr);
+    try self.builder.emitOp(.jmp, span);
+    const end_patch = self.builder.here();
+    try self.builder.emitI16(0);
+
+    const keep_target = self.builder.here();
+    try self.builder.patchI16(keep_patch, keep_target);
+    try self.builder.emitOp(.ldar, span);
+    try self.builder.emitU8(r_val);
+
+    const end_target = self.builder.here();
+    try self.builder.patchI16(end_patch, end_target);
 }
 
 /// `acc = (acc === undefined) ? default : acc`. No-op if no
