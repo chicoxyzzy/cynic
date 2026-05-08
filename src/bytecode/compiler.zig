@@ -1212,6 +1212,53 @@ pub const Compiler = struct {
         try self.builder.emitU8(r_obj);
     }
 
+    /// Decode `\uXXXX` / `\u{XXXX}` escapes inside an
+    /// `IdentifierName` (member access key, object property
+    /// key) into UTF-8. Per §12.7.1 the escapes' StringValue
+    /// equals the corresponding source character, so
+    /// `obj.if` has the property name `"if"`. Returns
+    /// `key_slice` unchanged when there are no escapes.
+    /// Allocations come from the realm's class arena (lifetime
+    /// matches compiled chunks).
+    fn decodeIdentifierName(self: *Compiler, key_slice: []const u8) CompileError![]const u8 {
+        if (std.mem.indexOfScalar(u8, key_slice, '\\') == null) return key_slice;
+        const arena = self.realm.classAllocator();
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        try out.ensureTotalCapacity(arena, key_slice.len);
+        var i: usize = 0;
+        while (i < key_slice.len) {
+            if (key_slice[i] != '\\') {
+                try out.append(arena, key_slice[i]);
+                i += 1;
+                continue;
+            }
+            // `\u…` only — IdentifierName forbids other escape forms.
+            if (i + 1 >= key_slice.len or key_slice[i + 1] != 'u') return error.UnsupportedExpression;
+            i += 2;
+            var cp: u21 = 0;
+            if (i < key_slice.len and key_slice[i] == '{') {
+                i += 1;
+                while (i < key_slice.len and key_slice[i] != '}') : (i += 1) {
+                    const d = std.fmt.charToDigit(key_slice[i], 16) catch return error.UnsupportedExpression;
+                    cp = (cp << 4) | d;
+                }
+                if (i >= key_slice.len or key_slice[i] != '}') return error.UnsupportedExpression;
+                i += 1;
+            } else {
+                if (i + 4 > key_slice.len) return error.UnsupportedExpression;
+                inline for (0..4) |_| {
+                    const d = std.fmt.charToDigit(key_slice[i], 16) catch return error.UnsupportedExpression;
+                    cp = (cp << 4) | d;
+                    i += 1;
+                }
+            }
+            var enc: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(cp, &enc) catch return error.UnsupportedExpression;
+            try out.appendSlice(arena, enc[0..n]);
+        }
+        return out.items;
+    }
+
     fn compileMember(self: *Compiler, m: ast.expression.MemberExpr) CompileError!void {
         // `super.x` and `super[expr]` — `super_get` for ident keys,
         // `super_get_computed` (key in acc) for the bracket form.
@@ -1233,20 +1280,21 @@ pub const Compiler = struct {
         }
         switch (m.property) {
             .ident => |span| {
-                const key_slice = self.source[span.start..span.end];
-                if (key_slice.len > 0 and key_slice[0] == '#') {
+                const raw_slice = self.source[span.start..span.end];
+                if (raw_slice.len > 0 and raw_slice[0] == '#') {
                     // `obj.#name` — mangle with the current class's
                     // private prefix and emit `lda_private`.
                     if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
                     const prefix = self.class_stack.items[self.class_stack.items.len - 1].private_prefix;
                     const arena = self.realm.classAllocator();
-                    const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, key_slice[1..] }) catch return error.OutOfMemory;
+                    const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, raw_slice[1..] }) catch return error.OutOfMemory;
                     const k = try self.internString(mangled);
                     try self.compileExpression(m.object);
                     if (m.optional) try self.emitOptionalShortCircuit(m.span);
                     try self.builder.emitOp(.lda_private, m.span);
                     try self.builder.emitU16(k);
                 } else {
+                    const key_slice = try self.decodeIdentifierName(raw_slice);
                     const k = try self.internString(key_slice);
                     try self.compileExpression(m.object);
                     if (m.optional) try self.emitOptionalShortCircuit(m.span);
@@ -1307,14 +1355,15 @@ pub const Compiler = struct {
         var computed_r: ?u8 = null;
         switch (m.property) {
             .ident => |span| {
-                const key_slice = self.source[span.start..span.end];
-                if (key_slice.len > 0 and key_slice[0] == '#') {
+                const raw_slice = self.source[span.start..span.end];
+                if (raw_slice.len > 0 and raw_slice[0] == '#') {
                     if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
                     const prefix = self.class_stack.items[self.class_stack.items.len - 1].private_prefix;
                     const arena = self.realm.classAllocator();
-                    const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, key_slice[1..] }) catch return error.OutOfMemory;
+                    const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, raw_slice[1..] }) catch return error.OutOfMemory;
                     private_k = try self.internString(mangled);
                 } else {
+                    const key_slice = try self.decodeIdentifierName(raw_slice);
                     name_k = try self.internString(key_slice);
                 }
             },
