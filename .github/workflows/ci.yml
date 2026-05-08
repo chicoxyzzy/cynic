@@ -40,20 +40,48 @@ jobs:
     # Runtime mode is the meaningful signal — parser is uniformly
     # ≥95% across areas. ReleaseFast + 4 workers (matching the
     # GitHub-hosted runner's vCPUs) keeps wall-time around a minute.
+    #
+    # On push-to-main, also `--write-results` and commit any change
+    # back to the repo so test262-results.md tracks main without
+    # a manual refresh. PRs run the harness but don't touch the
+    # file (no write perms, no commit).
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          # Need a real token (not the default ephemeral one) so
+          # the follow-up `git push` works.
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
           version: master
 
-      - name: Run test262 (runtime, parallel)
+      - name: Run test262 (runtime, parallel, write results)
         # Drop `--quiet` so the per-bucket tally lands in the
         # CI log — we want to see the score, not just the exit
-        # code. Step timeout caps it in case the harness wedges.
+        # code. `--write-results` updates test262-results.md;
+        # the next step decides whether to commit it.
+        # Step timeout caps it in case the harness wedges.
         timeout-minutes: 8
-        run: zig build test262 -- --mode=runtime --threads=4
+        run: zig build test262 -- --mode=runtime --threads=4 --write-results
+
+      - name: Commit refreshed scores
+        # Only on push-to-main — PRs run the harness for signal
+        # but don't write back. `[skip ci]` keeps the auto-commit
+        # from triggering another CI cycle.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          if git diff --quiet test262-results.md; then
+            echo "test262-results.md unchanged."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add test262-results.md
+          git commit -m "test262: refresh scoreboard [skip ci]"
+          git push
