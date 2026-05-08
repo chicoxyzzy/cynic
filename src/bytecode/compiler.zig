@@ -2592,8 +2592,9 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
     var bind_kind: BindingKind = .let_;
     var bind_name: []const u8 = "";
     var bind_span: Span = s.span;
-    var bind_target_kind: enum { binding, identifier_assign, pattern } = .binding;
+    var bind_target_kind: enum { binding, identifier_assign, pattern, member_assign } = .binding;
     var pattern_target: ?ast.statement.BindingTarget = null;
+    var member_target: ?ast.expression.MemberExpr = null;
     switch (s.left) {
         .lexical => |ld| {
             if (ld.kind == .var_) bind_kind = .var_ else if (ld.kind == .let_) bind_kind = .let_ else bind_kind = .const_;
@@ -2611,11 +2612,25 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
                 },
             }
         },
-        .expression => |e| {
-            if (e != .identifier_reference) return error.UnsupportedStatement;
-            bind_name = self.source[e.identifier_reference.span.start..e.identifier_reference.span.end];
-            bind_span = e.identifier_reference.span;
-            bind_target_kind = .identifier_assign;
+        .expression => |e| switch (e) {
+            .identifier_reference => |ir| {
+                bind_name = self.source[ir.span.start..ir.span.end];
+                bind_span = ir.span;
+                bind_target_kind = .identifier_assign;
+            },
+            // §14.7.5.1 — for-of LHS may be any LeftHandSideExpression,
+            // including `x.y` / `x[k]` member access. The iteration
+            // value is assigned via the same machinery as
+            // `x.y = value`. (Optional chains on the LHS aren't
+            // valid receivers per the spec; reject them.)
+            .member => |m| {
+                if (m.optional) return error.UnsupportedStatement;
+                if (m.object.* == .super_) return error.UnsupportedStatement;
+                member_target = m;
+                bind_span = m.span;
+                bind_target_kind = .member_assign;
+            },
+            else => return error.UnsupportedStatement,
         },
     }
 
@@ -2735,10 +2750,12 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
     try self.builder.emitOp(.lda_property, s.span);
     try self.builder.emitU16(k_value);
 
-    // Assign to the binding (lexical or assignment-target, or
-    // walk the pattern for destructuring shapes).
+    // Assign to the binding (lexical, identifier-assign target,
+    // member target, or destructuring pattern walk).
     if (pattern_target) |pt| {
         try self.compileDestructure(pt);
+    } else if (member_target) |m| {
+        try self.compileForOfMemberAssign(m, s.span);
     } else {
         try self.assignToBinding(bind_name, bind_span);
     }
@@ -2785,6 +2802,49 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
     if (per_iter_env) {
         self.builder.code.items[per_iter_size_patch] = self.env_slot_count;
         self.env_slot_count = saved_per_iter_slot_count;
+    }
+}
+
+/// Assign `acc` (the current iteration's value) to a
+/// member-expression target (`x.y` / `x[k]`) — the same
+/// shape as `compileMemberAssignment` but driven from the
+/// for-of loop body where the value is already in `acc`.
+fn compileForOfMemberAssign(self: *Compiler, m: ast.expression.MemberExpr, span: Span) CompileError!void {
+    const r_value = try self.reserveTemp();
+    defer self.releaseTemp();
+    try self.builder.emitOp(.star, span);
+    try self.builder.emitU8(r_value);
+
+    try self.compileExpression(m.object);
+    const r_obj = try self.reserveTemp();
+    defer self.releaseTemp();
+    try self.builder.emitOp(.star, span);
+    try self.builder.emitU8(r_obj);
+
+    switch (m.property) {
+        .ident => |kspan| {
+            const raw = self.source[kspan.start..kspan.end];
+            if (raw.len > 0 and raw[0] == '#') return error.UnsupportedExpression;
+            const key = try self.decodeIdentifierName(raw);
+            const k = try self.internString(key);
+            try self.builder.emitOp(.ldar, span);
+            try self.builder.emitU8(r_value);
+            try self.builder.emitOp(.sta_property, span);
+            try self.builder.emitU16(k);
+            try self.builder.emitU8(r_obj);
+        },
+        .computed => |key_expr| {
+            try self.compileExpression(key_expr);
+            const r_key = try self.reserveTemp();
+            defer self.releaseTemp();
+            try self.builder.emitOp(.star, span);
+            try self.builder.emitU8(r_key);
+            try self.builder.emitOp(.ldar, span);
+            try self.builder.emitU8(r_value);
+            try self.builder.emitOp(.sta_computed, span);
+            try self.builder.emitU8(r_obj);
+            try self.builder.emitU8(r_key);
+        },
     }
 }
 
