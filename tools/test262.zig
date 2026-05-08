@@ -15,6 +15,14 @@
 //! --quiet Suppress live progress on stderr.
 //! --verbose Per-file outcome on stderr.
 //! --write-results Append a row to test262-results.md.
+//! --only-failing Skip-as-pass tests listed in `.test262-pass-cache.txt`.
+//! Iterative-dev shortcut: previously-failing tests re-run in
+//! seconds instead of minutes. The cache is (re)written only on
+//! full runs (no `--filter`, no `--only-failing`).
+//! --threads=<n> Worker-thread count. `0` (default) = auto-detect via
+//! `std.Thread.getCpuCount`. `1` keeps the original sequential
+//! code path. Values >1 spawn a worker pool; live in-place
+//! progress is suppressed when threads>1.
 
 const std = @import("std");
 const cynic = @import("cynic");
@@ -262,7 +270,27 @@ const Options = struct {
     /// Path to the harness directory (relative to cwd). Defaults
     /// to a sibling of the corpus root.
     harness_dir: []const u8 = "vendor/test262/harness",
+    /// Iterative-dev shortcut. When true, load
+    /// `.test262-pass-cache.txt` and skip-as-pass any test path
+    /// listed in it; only previously-failing or previously-skipped
+    /// tests actually run. The cache is populated only on full
+    /// runs (no `--filter`, no `--only-failing`).
+    only_failing: bool = false,
+    /// Worker-thread count. `0` (default) = auto-detect via
+    /// `std.Thread.getCpuCount`. `1` keeps the original sequential
+    /// code path (no spawn, no mutex, in-place progress line).
+    /// Values >1 spawn that many workers off a shared atomic path
+    /// index; each worker has its own arena + per-test bookkeeping
+    /// and merges into the global `Stats` / `BucketMap` under a
+    /// mutex at exit. Live in-place progress is suppressed when
+    /// threads>1 because workers would otherwise interleave \r
+    /// updates.
+    threads: u32 = 0,
 };
+
+/// Path of the pass-cache, written at the repo root after every
+/// full run and consumed by `--only-failing`.
+const pass_cache_path = ".test262-pass-cache.txt";
 
 const Stats = struct {
     total: u32 = 0,
@@ -356,6 +384,84 @@ const BucketMap = struct {
     }
 };
 
+/// Set of relative test paths that passed in the previous full
+/// run. Backed by `StringHashMapUnmanaged(void)` for set
+/// semantics. Owns its keys (each is `gpa.dupe`'d on insert).
+const PassCache = struct {
+    map: std.StringHashMapUnmanaged(void) = .empty,
+
+    const empty: PassCache = .{};
+
+    fn deinit(self: *PassCache, gpa: std.mem.Allocator) void {
+        var it = self.map.iterator();
+        while (it.next()) |entry| gpa.free(entry.key_ptr.*);
+        self.map.deinit(gpa);
+    }
+
+    fn contains(self: *const PassCache, rel: []const u8) bool {
+        return self.map.contains(rel);
+    }
+
+    /// Insert a relative path, deduping. Dupes the slice into
+    /// `gpa` so it outlives the caller's buffer.
+    fn put(self: *PassCache, gpa: std.mem.Allocator, rel: []const u8) !void {
+        const gop = try self.map.getOrPut(gpa, rel);
+        if (!gop.found_existing) gop.key_ptr.* = try gpa.dupe(u8, rel);
+    }
+};
+
+/// Load `.test262-pass-cache.txt` (one path per line) into
+/// `out`. Missing file is treated as an empty set — the next run
+/// will execute everything and rewrite the cache.
+fn loadPassCache(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    cwd: std.Io.Dir,
+    out: *PassCache,
+) !void {
+    // Cap at 16 MiB — a corpus of ~50k paths × ~80 bytes is well
+    // under that, and the cap protects against a corrupted file.
+    const data = cwd.readFileAlloc(io, pass_cache_path, gpa, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer gpa.free(data);
+
+    var it = std.mem.tokenizeScalar(u8, data, '\n');
+    while (it.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        try out.put(gpa, trimmed);
+    }
+}
+
+/// Write `.test262-pass-cache.txt` (sorted, one path per line).
+/// Sorting makes the file deterministic across runs so diffs
+/// over time stay readable.
+fn writePassCache(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    cwd: std.Io.Dir,
+    paths: []const []const u8,
+) !void {
+    const sorted = try gpa.alloc([]const u8, paths.len);
+    defer gpa.free(sorted);
+    @memcpy(sorted, paths);
+    std.mem.sort([]const u8, sorted, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lt);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(gpa);
+    for (sorted) |p| {
+        try buf.appendSlice(gpa, p);
+        try buf.append(gpa, '\n');
+    }
+    try cwd.writeFile(io, .{ .sub_path = pass_cache_path, .data = buf.items });
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -403,80 +509,143 @@ pub fn main(init: std.process.Init) !void {
     var buckets: BucketMap = .init(gpa);
     defer buckets.deinit();
 
+    // `--only-failing` shortcut: any test path present in the
+    // cache is counted as a pass without being classified or
+    // executed. The cache is the previous full run's pass set.
+    // A missing cache file degrades gracefully to a full run.
+    var pass_cache: PassCache = .empty;
+    defer pass_cache.deinit(gpa);
+    if (opts.only_failing) {
+        try loadPassCache(gpa, io, cwd, &pass_cache);
+    }
+
+    // A "full run" is the only time we (re)write the cache —
+    // partial runs would shrink the pass set silently. Filtered
+    // runs and `--only-failing` runs both leave the cache alone.
+    const is_full_run = opts.filter == null and !opts.only_failing;
+    var pass_paths: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (pass_paths.items) |p| gpa.free(p);
+        pass_paths.deinit(gpa);
+    }
+
     const start_ts = std.Io.Clock.now(.awake, io);
 
-    var walker = try corpus.walk(gpa);
-    defer walker.deinit();
-
-    var per_file_arena: std.heap.ArenaAllocator = .init(gpa);
-    defer per_file_arena.deinit();
-
-    while (try walker.next(io)) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.basename, ".js")) continue;
-        if (std.mem.endsWith(u8, entry.basename, "_FIXTURE.js")) continue;
-
-        // Make a stable copy of the relative path before any subsequent
-        // walker.next() invalidates the slice.
-        const rel = try gpa.dupe(u8, entry.path);
-        defer gpa.free(rel);
-
-        if (opts.filter) |needle| {
-            if (std.mem.indexOf(u8, rel, needle) == null) continue;
+    // Walk the corpus once, materialising every test path into an
+    // owned `[]const u8`. Cheap filters (extension, `_FIXTURE`,
+    // `--filter` substring, OOS path table) are applied here so
+    // workers never see paths they would just discard. Frontmatter-
+    // driven skips still happen inside `classifyAndRun` (per-test).
+    var paths: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (paths.items) |p| gpa.free(p);
+        paths.deinit(gpa);
+    }
+    {
+        var walker = try corpus.walk(gpa);
+        defer walker.deinit();
+        while (try walker.next(io)) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.basename, ".js")) continue;
+            if (std.mem.endsWith(u8, entry.basename, "_FIXTURE.js")) continue;
+            if (opts.filter) |needle| {
+                if (std.mem.indexOf(u8, entry.path, needle) == null) continue;
+            }
+            if (skip_rules.pathIsCynicOutOfScope(entry.path)) continue;
+            try paths.append(gpa, try gpa.dupe(u8, entry.path));
         }
+    }
 
-        // OOS paths exit early — we don't classify, parse, or run
-        // them. They simply don't exist for Cynic scoring.
-        if (skip_rules.pathIsCynicOutOfScope(rel)) continue;
+    // Decide thread count. `0` (default) → auto-detect; `1` keeps
+    // the original sequential code path. `getCpuCount` clamps to ≥1.
+    const auto_threads: u32 = blk: {
+        if (opts.threads != 0) break :blk opts.threads;
+        const n = std.Thread.getCpuCount() catch 1;
+        break :blk @intCast(@min(n, std.math.maxInt(u32)));
+    };
+    const thread_count: u32 = @max(auto_threads, 1);
 
-        stats.total += 1;
-        _ = per_file_arena.reset(.retain_capacity);
-        const arena = per_file_arena.allocator();
+    if (thread_count <= 1) {
+        // Sequential path — kept identical to the pre-parallel
+        // baseline so `--threads=1` reproduces the reference run
+        // (live in-place progress, single arena reused per test).
+        var per_file_arena: std.heap.ArenaAllocator = .init(gpa);
+        defer per_file_arena.deinit();
 
-        const harness_pair: ?harness_mod.HarnessSources = harness_sources;
-        const outcome = try classifyAndRun(arena, io, corpus, entry, rel, opts.mode, harness_pair);
-        const bucket_kind: ?BucketKind = switch (outcome.kind) {
-            .pass_positive, .pass_negative => .pass,
-            .fail_false_reject, .fail_false_accept => .fail,
-            .skip => .skip,
+        for (paths.items) |rel| {
+            stats.total += 1;
+
+            if (opts.only_failing and pass_cache.contains(rel)) {
+                stats.pass_pos += 1;
+                stats.pos_attempted += 1;
+                try buckets.bump(bucketName(rel), .pass);
+                if (opts.verbose) {
+                    try printVerbose(io, rel, .{ .kind = .pass_positive });
+                } else if (!opts.quiet and stats.total % 500 == 0) {
+                    try printProgress(io, &stats);
+                }
+                continue;
+            }
+
+            _ = per_file_arena.reset(.retain_capacity);
+            const arena = per_file_arena.allocator();
+
+            const harness_pair: ?harness_mod.HarnessSources = harness_sources;
+            const outcome = try classifyAndRun(arena, io, corpus, rel, opts.mode, harness_pair);
+            try recordOutcome(gpa, &stats, &buckets, &failures, &pass_paths, rel, outcome, is_full_run);
+
+            if (opts.verbose) {
+                try printVerbose(io, rel, outcome);
+            } else if (!opts.quiet and stats.total % 500 == 0) {
+                try printProgress(io, &stats);
+            }
+        }
+    } else {
+        // Parallel path. Each worker has its own arena + Stats +
+        // BucketMap + failures + pass_paths; results merge into the
+        // globals under `merge_mu` at worker exit. Workers pull
+        // paths off `index` (atomic; the only hot synchronisation
+        // point in the steady state).
+        var index: std.atomic.Value(usize) = .init(0);
+        var merge_mu: std.Io.Mutex = .init;
+        const ctx = WorkerCtx{
+            .gpa = gpa,
+            .io = io,
+            .corpus = corpus,
+            .paths = paths.items,
+            .index = &index,
+            .opts = &opts,
+            .pass_cache = &pass_cache,
+            .harness_sources = harness_sources,
+            .merge_mu = &merge_mu,
+            .global_stats = &stats,
+            .global_buckets = &buckets,
+            .global_failures = &failures,
+            .global_pass_paths = &pass_paths,
+            .is_full_run = is_full_run,
         };
-        switch (outcome.kind) {
-            .pass_positive => stats.pass_pos += 1,
-            .pass_negative => stats.pass_neg += 1,
-            .fail_false_reject => {
-                stats.fail_reject += 1;
-                try failures.append(gpa, .{
-                    .path = try gpa.dupe(u8, rel),
-                    .kind = .fail_false_reject,
-                });
-            },
-            .fail_false_accept => {
-                stats.fail_accept += 1;
-                try failures.append(gpa, .{
-                    .path = try gpa.dupe(u8, rel),
-                    .kind = .fail_false_accept,
-                });
-            },
-            .skip => stats.skip += 1,
+
+        const threads = try gpa.alloc(std.Thread, thread_count);
+        defer gpa.free(threads);
+        var spawned: usize = 0;
+        errdefer {
+            for (threads[0..spawned]) |t| t.join();
         }
-        if (bucket_kind) |bk| try buckets.bump(bucketName(rel), bk);
-        if (outcome.kind == .pass_positive or outcome.kind == .fail_false_reject) {
-            stats.pos_attempted += 1;
-        } else if (outcome.kind == .pass_negative or outcome.kind == .fail_false_accept) {
-            stats.neg_attempted += 1;
+        for (threads) |*t| {
+            t.* = try std.Thread.spawn(.{}, worker, .{ctx});
+            spawned += 1;
         }
 
-        if (opts.verbose) {
-            try printVerbose(io, rel, outcome);
-        } else if (!opts.quiet and stats.total % 500 == 0) {
-            try printProgress(io, &stats);
-        }
+        // Live in-place progress is dropped when threads>1 — workers
+        // would otherwise interleave \r-redrawn lines. The final
+        // tally still prints once workers join below.
+        for (threads) |t| t.join();
     }
 
     const elapsed = start_ts.untilNow(io, .awake).toMilliseconds();
 
-    if (!opts.quiet and !opts.verbose) {
-        // Clear the progress line.
+    if (!opts.quiet and !opts.verbose and thread_count <= 1) {
+        // Clear the progress line. (Threads>1 path doesn't draw one.)
         try std.Io.File.stderr().writeStreamingAll(io, "\r\x1b[K");
     }
 
@@ -487,6 +656,12 @@ pub fn main(init: std.process.Init) !void {
     if (opts.write_results) {
         const now_ts = std.Io.Clock.now(.real, io);
         try writeResults(gpa, io, &stats, &buckets, now_ts.toSeconds(), opts.mode);
+    }
+    // Refresh the pass cache only on full runs — partial runs
+    // (filtered or `--only-failing`) would shrink the recorded
+    // pass set and break the next `--only-failing` invocation.
+    if (is_full_run) {
+        try writePassCache(gpa, io, cwd, pass_paths.items);
     }
 
     for (failures.items) |f| gpa.free(f.path);
@@ -502,11 +677,178 @@ const RunResult = struct {
     skip_reason: ?SkipReason = null,
 };
 
+/// Update `stats` / `buckets` / `failures` / `pass_paths` for one
+/// test outcome. Pulled out so the sequential and per-worker code
+/// paths share the bookkeeping logic instead of drifting. Worker
+/// version operates on its private structs and merges under
+/// `merge_mu` at exit; sequential version passes the globals.
+fn recordOutcome(
+    gpa: std.mem.Allocator,
+    stats: *Stats,
+    buckets: *BucketMap,
+    failures: *std.ArrayListUnmanaged(Failure),
+    pass_paths: *std.ArrayListUnmanaged([]const u8),
+    rel: []const u8,
+    outcome: RunResult,
+    is_full_run: bool,
+) !void {
+    const bucket_kind: ?BucketKind = switch (outcome.kind) {
+        .pass_positive, .pass_negative => .pass,
+        .fail_false_reject, .fail_false_accept => .fail,
+        .skip => .skip,
+    };
+    switch (outcome.kind) {
+        .pass_positive => stats.pass_pos += 1,
+        .pass_negative => stats.pass_neg += 1,
+        .fail_false_reject => {
+            stats.fail_reject += 1;
+            try failures.append(gpa, .{
+                .path = try gpa.dupe(u8, rel),
+                .kind = .fail_false_reject,
+            });
+        },
+        .fail_false_accept => {
+            stats.fail_accept += 1;
+            try failures.append(gpa, .{
+                .path = try gpa.dupe(u8, rel),
+                .kind = .fail_false_accept,
+            });
+        },
+        .skip => stats.skip += 1,
+    }
+    if (bucket_kind) |bk| try buckets.bump(bucketName(rel), bk);
+    if (outcome.kind == .pass_positive or outcome.kind == .fail_false_reject) {
+        stats.pos_attempted += 1;
+    } else if (outcome.kind == .pass_negative or outcome.kind == .fail_false_accept) {
+        stats.neg_attempted += 1;
+    }
+    if (is_full_run) {
+        if (outcome.kind == .pass_positive or outcome.kind == .pass_negative) {
+            try pass_paths.append(gpa, try gpa.dupe(u8, rel));
+        }
+    }
+}
+
+/// Shared worker context. The merge-side fields (`global_*`,
+/// `merge_mu`) are mutated after each worker rolls up its own
+/// per-thread structs at exit. Workers pull paths off `index`
+/// (atomic; the only hot synchronisation point in the steady
+/// state — `fetchAdd` is wait-free on every platform we ship to).
+const WorkerCtx = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    corpus: std.Io.Dir,
+    paths: []const []const u8,
+    index: *std.atomic.Value(usize),
+    opts: *const Options,
+    pass_cache: *const PassCache,
+    harness_sources: ?harness_mod.HarnessSources,
+    merge_mu: *std.Io.Mutex,
+    global_stats: *Stats,
+    global_buckets: *BucketMap,
+    global_failures: *std.ArrayListUnmanaged(Failure),
+    global_pass_paths: *std.ArrayListUnmanaged([]const u8),
+    is_full_run: bool,
+};
+
+/// Worker entry point. Pulls paths off the shared atomic index
+/// until drained, classifies + runs each test in its own arena,
+/// and merges its private results into the globals under
+/// `merge_mu` at exit.
+fn worker(ctx: WorkerCtx) void {
+    var local_arena: std.heap.ArenaAllocator = .init(ctx.gpa);
+    defer local_arena.deinit();
+
+    var local_stats: Stats = .{};
+    var local_failures: std.ArrayListUnmanaged(Failure) = .empty;
+    var local_buckets: BucketMap = .init(ctx.gpa);
+    var local_pass_paths: std.ArrayListUnmanaged([]const u8) = .empty;
+
+    workerLoop(ctx, &local_arena, &local_stats, &local_buckets, &local_failures, &local_pass_paths) catch {
+        // Best-effort: skip merging silently on OOM / IO blow-up.
+        // The rolled-up totals will be slightly low, but the run
+        // doesn't deadlock and the surviving workers still merge.
+    };
+
+    ctx.merge_mu.lockUncancelable(ctx.io);
+    defer ctx.merge_mu.unlock(ctx.io);
+    mergeStats(ctx.global_stats, &local_stats);
+    mergeBuckets(ctx.global_buckets, &local_buckets) catch {};
+    ctx.global_failures.appendSlice(ctx.gpa, local_failures.items) catch {};
+    ctx.global_pass_paths.appendSlice(ctx.gpa, local_pass_paths.items) catch {};
+
+    // The merged-out arrays own their inner strings; we transferred
+    // those via `appendSlice`. Free the spine arrays only.
+    local_failures.deinit(ctx.gpa);
+    local_pass_paths.deinit(ctx.gpa);
+    local_buckets.deinit();
+}
+
+fn workerLoop(
+    ctx: WorkerCtx,
+    arena_state: *std.heap.ArenaAllocator,
+    stats: *Stats,
+    buckets: *BucketMap,
+    failures: *std.ArrayListUnmanaged(Failure),
+    pass_paths: *std.ArrayListUnmanaged([]const u8),
+) !void {
+    while (true) {
+        const i = ctx.index.fetchAdd(1, .monotonic);
+        if (i >= ctx.paths.len) return;
+        const rel = ctx.paths[i];
+
+        stats.total += 1;
+
+        if (ctx.opts.only_failing and ctx.pass_cache.contains(rel)) {
+            stats.pass_pos += 1;
+            stats.pos_attempted += 1;
+            try buckets.bump(bucketName(rel), .pass);
+            continue;
+        }
+
+        _ = arena_state.reset(.retain_capacity);
+        const arena = arena_state.allocator();
+
+        const outcome = classifyAndRun(arena, ctx.io, ctx.corpus, rel, ctx.opts.mode, ctx.harness_sources) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            try recordOutcome(ctx.gpa, stats, buckets, failures, pass_paths, rel, .{ .kind = .fail_false_reject }, ctx.is_full_run);
+            continue;
+        };
+        try recordOutcome(ctx.gpa, stats, buckets, failures, pass_paths, rel, outcome, ctx.is_full_run);
+    }
+}
+
+fn mergeStats(dst: *Stats, src: *const Stats) void {
+    dst.total += src.total;
+    dst.pass_pos += src.pass_pos;
+    dst.pass_neg += src.pass_neg;
+    dst.fail_reject += src.fail_reject;
+    dst.fail_accept += src.fail_accept;
+    dst.skip += src.skip;
+    dst.pos_attempted += src.pos_attempted;
+    dst.neg_attempted += src.neg_attempted;
+}
+
+fn mergeBuckets(dst: *BucketMap, src: *const BucketMap) !void {
+    var it = src.map.iterator();
+    while (it.next()) |entry| {
+        const v = entry.value_ptr.*;
+        const gop = try dst.map.getOrPut(dst.gpa, entry.key_ptr.*);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = try dst.gpa.dupe(u8, entry.key_ptr.*);
+            gop.value_ptr.* = .{ .name = gop.key_ptr.* };
+        }
+        gop.value_ptr.pass += v.pass;
+        gop.value_ptr.fail += v.fail;
+        gop.value_ptr.skip += v.skip;
+        gop.value_ptr.total += v.total;
+    }
+}
+
 fn classifyAndRun(
     arena: std.mem.Allocator,
     io: std.Io,
     corpus: std.Io.Dir,
-    entry: std.Io.Dir.Walker.Entry,
     rel: []const u8,
     mode: Mode,
     harness_pair: ?harness_mod.HarnessSources,
@@ -520,7 +862,7 @@ fn classifyAndRun(
 
     // Read the file. Cap at a generous 8 MiB — far above any real
     // test262 fixture.
-    const test_source = corpus.readFileAlloc(io, entry.path, arena, .limited(8 * 1024 * 1024)) catch {
+    const test_source = corpus.readFileAlloc(io, rel, arena, .limited(8 * 1024 * 1024)) catch {
         // Treat IO errors as skips with a malformed reason rather than
         // letting the harness die on an unexpected file.
         return .{ .kind = .skip, .skip_reason = .malformed_frontmatter };
@@ -1442,6 +1784,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.mode = .runtime;
         } else if (std.mem.eql(u8, arg, "--no-harness")) {
             opts.preload_harness = false;
+        } else if (std.mem.eql(u8, arg, "--only-failing")) {
+            opts.only_failing = true;
         } else if (std.mem.startsWith(u8, arg, "--harness-dir=")) {
             opts.harness_dir = try gpa.dupe(u8, arg["--harness-dir=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--corpus=")) {
@@ -1450,6 +1794,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.filter = try gpa.dupe(u8, arg["--filter=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--list-failures=")) {
             opts.list_failures = std.fmt.parseInt(u32, arg["--list-failures=".len..], 10) catch 0;
+        } else if (std.mem.startsWith(u8, arg, "--threads=")) {
+            opts.threads = std.fmt.parseInt(u32, arg["--threads=".len..], 10) catch 0;
         }
     }
     return opts;

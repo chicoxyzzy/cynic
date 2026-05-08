@@ -88,11 +88,18 @@ Common commands:
     zig build run -- run <file>                     # compile + run a script
 
 `zig build test262` accepts forwarded flags after `--`:
-`--filter=<glob>`, `--list-failures=<n>`, `--quiet`, `--verbose`,
+`--filter=<substring>`, `--list-failures=<n>`, `--quiet`, `--verbose`,
 `--mode={parser,runtime}` (default `parser`; `runtime` parses,
 compiles, and executes each test), `--no-harness` (disable the
 `sta.js` + `assert.js` preamble in runtime mode),
-`--write-results` (updates `test262-results.md`). The harness
+`--write-results` (updates `test262-results.md`),
+`--only-failing` (skip-as-pass any test path listed in
+`.test262-pass-cache.txt` — iterative-dev shortcut; cache is
+rewritten only on full runs without `--filter` and without
+`--only-failing` itself), `--threads=<n>` (worker count;
+`0` = auto via `std.Thread.getCpuCount`, `1` = sequential
+reference path, `>1` = pool. Past ~4 threads diminishing
+returns kick in from libc malloc contention). The harness
 scores against the **Cynic-targeted scope**: paths under
 `harness/`, `staging/`, `intl402/`, Annex B language extensions,
 and the browser-era built-ins Cynic doesn't ship are dropped from
