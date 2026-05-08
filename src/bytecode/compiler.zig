@@ -1401,12 +1401,21 @@ pub const Compiler = struct {
 
     fn compileFunctionExpr(self: *Compiler, fe: ast.expression.FunctionExpr) CompileError!void {
         const name_slice = if (fe.name) |n| self.source[n.span.start..n.span.end] else null;
-        const k = try compileFunctionTemplate(
+        // §15.2 FunctionExpression — must propagate is_generator /
+        // is_async into the template so the resulting JSFunction
+        // gets `is_generator=true` (returns an iterator on call)
+        // / `is_async=true` (returns a Promise). The shorthand
+        // `compileFunctionTemplate` hardcodes both to false and
+        // would silently downgrade `function*(){}` to a regular
+        // function.
+        const k = try compileFunctionTemplateExt(
             self,
             fe.params,
             FunctionBody{ .block = fe.body.body },
             name_slice,
             false,
+            fe.is_generator,
+            fe.is_async,
             fe.span,
         );
         try self.builder.emitOp(.make_function, fe.span);
