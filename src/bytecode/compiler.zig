@@ -2527,7 +2527,6 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
     // targets get the same treatment as identifier targets.
     const per_iter_env = (bind_target_kind == .binding or bind_target_kind == .pattern) and
         (bind_kind == .let_ or bind_kind == .const_);
-    const pattern_slot_count: u8 = if (pattern_target) |pt| countPatternBindings(pt) else 1;
 
     var loop_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = per_iter_env };
     defer loop_scope.deinit(self.allocator);
@@ -2597,21 +2596,29 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
     // see this iteration's binding value. The compile-time
     // env_depth is bumped here so the body's binding accesses
     // pick up the +1 depth.
+    //
+    // Slot allocation note: the per-iter env has its OWN slot
+    // pool, separate from the enclosing function's. We borrow
+    // the global `env_slot_count` for it (reset to 0 here, the
+    // body's lexicals append to it, restored on the way out)
+    // and patch the `make_environment` size operand at the end
+    // so it matches the actual count. Without this the loop
+    // variable and the body's first `const` collide on slot 0.
+    var per_iter_size_patch: usize = 0;
+    var saved_per_iter_slot_count: u8 = 0;
     if (per_iter_env) {
+        saved_per_iter_slot_count = self.env_slot_count;
+        self.env_slot_count = 0;
         try self.builder.emitOp(.make_environment, s.span);
-        try self.builder.emitU8(pattern_slot_count);
+        per_iter_size_patch = self.builder.code.items.len;
+        try self.builder.emitU8(0); // placeholder; patched below
         self.env_depth = saved_env_depth + 1;
         if (pattern_target) |pt| {
             try self.declarePatternBindings(pt, bind_kind);
         } else {
-            // Declare the binding in the per-iter env (slot 0).
-            try loop_scope.bindings.append(self.allocator, .{
-                .name = bind_name,
-                .env_slot = 0,
-                .env_depth = self.env_depth,
-                .kind = bind_kind,
-                .span = bind_span,
-            });
+            // Use the regular slot allocator so the body's
+            // inner lexicals know where to land.
+            _ = try self.declareBinding(bind_name, bind_kind, bind_span);
         }
     } else if (bind_target_kind == .binding) {
         // var / non-let binding lives in the function env.
@@ -2670,6 +2677,14 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
     const exit_target = self.builder.here();
     try self.builder.patchI16(exit_patch, exit_target);
     for (ctx.break_patches.items) |p| try self.builder.patchI16(p, exit_target);
+
+    // Patch the per-iter `make_environment` size to whatever
+    // env_slot_count grew to (iteration var + body lexicals),
+    // and restore the enclosing function's slot counter.
+    if (per_iter_env) {
+        self.builder.code.items[per_iter_size_patch] = self.env_slot_count;
+        self.env_slot_count = saved_per_iter_slot_count;
+    }
 }
 
 fn compileSwitch(self: *Compiler, s: ast.statement.SwitchStmt) CompileError!void {
@@ -3975,6 +3990,8 @@ fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
     // env swaps. Seeded from the init expression; later updated
     // from the per-iter env's slot before each fresh-env push.
     var r_carry: u8 = 0;
+    var per_iter_size_patch: usize = 0;
+    var saved_per_iter_slot_count: u8 = 0;
     if (per_iter_env) {
         r_carry = try self.reserveTemp();
 
@@ -3989,17 +4006,19 @@ fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
         try self.builder.emitOp(.star, single_span);
         try self.builder.emitU8(r_carry);
 
+        // Per-iter env owns its own slot pool (loop var + body
+        // lexicals). Borrow `env_slot_count`, reset it, restore
+        // at loop teardown — see compileForInOf for the same
+        // shape. Without this, body's first `const` aliases the
+        // loop variable.
+        saved_per_iter_slot_count = self.env_slot_count;
+        self.env_slot_count = 0;
         // Push the initial per-iter env (E_0) and seed it.
         try self.builder.emitOp(.make_environment, s.span);
-        try self.builder.emitU8(1);
+        per_iter_size_patch = self.builder.code.items.len;
+        try self.builder.emitU8(0); // placeholder; patched below
         self.env_depth = saved_env_depth + 1;
-        try for_scope.bindings.append(self.allocator, .{
-            .name = single_name,
-            .env_slot = 0,
-            .env_depth = self.env_depth,
-            .kind = single_kind,
-            .span = single_span,
-        });
+        _ = try self.declareBinding(single_name, single_kind, single_span);
         try self.builder.emitOp(.ldar, single_span);
         try self.builder.emitU8(r_carry);
         try self.builder.emitOp(.sta_env, single_span);
@@ -4045,6 +4064,7 @@ fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
     // FRESH env that becomes the next iteration's view.
     const update_pc = self.builder.here();
     ctx.continue_target = update_pc;
+    var per_iter_size_patch_2: usize = 0;
     if (per_iter_env) {
         // r_carry ← value from current per-iter env
         try self.builder.emitOp(.lda_env, s.span);
@@ -4055,7 +4075,8 @@ fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
         // Pop current env and push a fresh one.
         try self.builder.emitOp(.pop_env, s.span);
         try self.builder.emitOp(.make_environment, s.span);
-        try self.builder.emitU8(1);
+        per_iter_size_patch_2 = self.builder.code.items.len;
+        try self.builder.emitU8(0); // placeholder; patched below
         try self.builder.emitOp(.ldar, s.span);
         try self.builder.emitU8(r_carry);
         try self.builder.emitOp(.sta_env, s.span);
@@ -4087,7 +4108,16 @@ fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
     for (ctx.break_patches.items) |patch| try self.builder.patchI16(patch, real_exit);
     for (ctx.continue_patches.items) |patch| try self.builder.patchI16(patch, update_pc);
 
-    if (per_iter_env) self.releaseTemp(); // r_carry
+    if (per_iter_env) {
+        // Patch both per-iter `make_environment` size operands
+        // (initial seed + per-iteration refresh) to whatever
+        // env_slot_count grew to. Restore the enclosing
+        // function's slot counter.
+        self.builder.code.items[per_iter_size_patch] = self.env_slot_count;
+        self.builder.code.items[per_iter_size_patch_2] = self.env_slot_count;
+        self.env_slot_count = saved_per_iter_slot_count;
+        self.releaseTemp(); // r_carry
+    }
 }
 
 fn compileBreak(self: *Compiler, s: ast.statement.BreakStmt) CompileError!void {
