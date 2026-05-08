@@ -78,7 +78,17 @@ pub const unsupported_features = [_][]const u8{
     "source-phase-imports",
     "explicit-resource-management",
     "async-explicit-resource-management",
-    "regexp-v-flag",
+    // RegExp feature gates that *used* to live here moved out
+    // when the vendored QuickJS-NG `libregexp.c` was wired up:
+    // named groups, lookbehind, `u`/`v` flags, match indices,
+    // and Unicode property escapes are all supported. Anything
+    // still-failing in those buckets is now a real gap, not a
+    // missing feature. The ones below remain because the spec
+    // bumped past what libregexp shipped:
+    //   • `regexp-duplicate-named-groups` — ES2025 grammar
+    //     change to allow the same name in alternative branches.
+    //   • `regexp-modifiers` — ES2024 inline (?i:…)/(?-i:…)
+    //     flag scoping.
     "regexp-duplicate-named-groups",
     "regexp-modifiers",
     "Temporal",
@@ -89,6 +99,7 @@ pub const unsupported_features = [_][]const u8{
     // SharedArrayBuffer.
     "json-modules",
     "json-parse-with-source",
+    "RegExp.escape", // ES2025 static; not implemented yet.
     "iterator-helpers",
     "async-iterator-helpers",
     "Array.fromAsync",
@@ -98,10 +109,9 @@ pub const unsupported_features = [_][]const u8{
     "uint8array-base64",
     "arraybuffer-transfer",
     "resizable-arraybuffer",
-    "regexp-named-groups",
-    "regexp-lookbehind",
-    "regexp-match-indices",
-    "regexp-unicode-property-escapes",
+    // (regexp-named-groups, regexp-lookbehind, regexp-match-indices,
+    // regexp-unicode-property-escapes, regexp-v-flag — all supported
+    // by the vendored libregexp; gates removed.)
     "well-formed-json-stringify",
     "error-cause",
     "hashbang",
@@ -171,7 +181,9 @@ test "skip: cynic out-of-scope paths" {
 test "skip: unsupported features" {
     try testing.expect(featureIsUnsupported("decorators"));
     try testing.expect(featureIsUnsupported("Temporal"));
-    try testing.expect(featureIsUnsupported("regexp-v-flag"));
+    try testing.expect(featureIsUnsupported("regexp-modifiers"));
+    try testing.expect(!featureIsUnsupported("regexp-v-flag")); // libregexp ships v-flag
+    try testing.expect(!featureIsUnsupported("regexp-named-groups"));
     try testing.expect(!featureIsUnsupported("class"));
     try testing.expect(!featureIsUnsupported("optional-chaining"));
     try testing.expect(!featureIsUnsupported("async-functions"));
