@@ -52,4 +52,8 @@ jobs:
           version: master
 
       - name: Run test262 (runtime, parallel)
-        run: zig build test262 -- --mode=runtime --threads=4 --quiet
+        # Drop `--quiet` so the per-bucket tally lands in the
+        # CI log — we want to see the score, not just the exit
+        # code. Step timeout caps it in case the harness wedges.
+        timeout-minutes: 8
+        run: zig build test262 -- --mode=runtime --threads=4
