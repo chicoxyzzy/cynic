@@ -297,6 +297,14 @@ pub fn wrapAsyncGenerator(
 /// Lazily install `%GeneratorPrototype%` on the realm. Has
 /// `next` / `return` / `throw` / `[Symbol.iterator]` methods
 /// that walk the wrapper's `generator_ref`.
+///
+/// TODO: per §27.5.1 the `[[Prototype]]` should be
+/// `%IteratorPrototype%` so generator iterators inherit
+/// `.map` / `.filter` / `.every` / etc. from the
+/// iterator-helpers proposal. Wiring it through triggers a
+/// SEGV in some `built-ins/Iterator/prototype/map/` fixtures —
+/// the chain is still `Object.prototype` until that's tracked
+/// down.
 fn ensureGeneratorPrototype(realm: *Realm) !*JSObject {
     if (realm.intrinsics.generator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();

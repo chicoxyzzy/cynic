@@ -158,6 +158,14 @@ fn promiseValueOf(v: Value) Value {
 
 fn promiseConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Promise constructor requires 'new'");
+    // §27.2.3.1 step 1 — `Promise.call(p, fn)` re-initialises an
+    // existing Promise via plain-call. Cynic doesn't model
+    // NewTarget directly; an already-initialised receiver gives
+    // it away (its `__cynic_promise_state__` slot is set). Reject
+    // before clobbering the existing state.
+    if (!inst.get("__cynic_promise_state__").isUndefined()) {
+        return throwTypeError(realm, "Promise constructor requires 'new' (receiver already initialized)");
+    }
     const executor = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Promise executor must be a function");
 
     // Initial state: pending.
