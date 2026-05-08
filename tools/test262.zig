@@ -282,6 +282,80 @@ const Stats = struct {
     }
 };
 
+/// What kind of outcome to record for a bucket. Mirrors the
+/// three-way grouping the rolled-up `Stats` already uses.
+const BucketKind = enum { pass, fail, skip };
+
+/// Per-area counters. The `name` is the first two path
+/// components of the test262 fixture (e.g. `built-ins/Set`,
+/// `language/expressions`); single-component fixtures use that
+/// component alone. `pass + fail + skip == total`.
+const Bucket = struct {
+    name: []const u8,
+    pass: u32 = 0,
+    fail: u32 = 0,
+    skip: u32 = 0,
+    total: u32 = 0,
+};
+
+/// Bucket the relative test path on its first two components
+/// (or the first one if that's all there is). Returns a slice
+/// borrowed from `rel`.
+fn bucketName(rel: []const u8) []const u8 {
+    const slash1 = std.mem.indexOfScalar(u8, rel, '/') orelse return rel;
+    const slash2 = std.mem.indexOfScalarPos(u8, rel, slash1 + 1, '/') orelse return rel[0..slash1];
+    return rel[0..slash2];
+}
+
+/// Map-keyed accumulator. Owns its `name` slices once a row is
+/// written via `bump`, so callers can free the originals safely.
+const BucketMap = struct {
+    gpa: std.mem.Allocator,
+    map: std.StringHashMapUnmanaged(Bucket) = .empty,
+
+    fn init(gpa: std.mem.Allocator) BucketMap {
+        return .{ .gpa = gpa };
+    }
+    fn deinit(self: *BucketMap) void {
+        var it = self.map.iterator();
+        while (it.next()) |entry| self.gpa.free(entry.key_ptr.*);
+        self.map.deinit(self.gpa);
+    }
+
+    /// Record a single fixture's outcome for its bucket. `name`
+    /// is borrowed; we dupe on insert.
+    fn bump(self: *BucketMap, name: []const u8, kind: BucketKind) !void {
+        const gop = try self.map.getOrPut(self.gpa, name);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = try self.gpa.dupe(u8, name);
+            gop.value_ptr.* = .{ .name = gop.key_ptr.* };
+        }
+        switch (kind) {
+            .pass => gop.value_ptr.pass += 1,
+            .fail => gop.value_ptr.fail += 1,
+            .skip => gop.value_ptr.skip += 1,
+        }
+        gop.value_ptr.total += 1;
+    }
+
+    /// Materialise an owned slice of buckets sorted by fail
+    /// count descending, then pass descending, then name.
+    fn sortedByFailDesc(self: *const BucketMap, gpa: std.mem.Allocator) ![]Bucket {
+        var out = try gpa.alloc(Bucket, self.map.count());
+        var it = self.map.iterator();
+        var i: usize = 0;
+        while (it.next()) |entry| : (i += 1) out[i] = entry.value_ptr.*;
+        std.mem.sort(Bucket, out, {}, struct {
+            fn lt(_: void, a: Bucket, b: Bucket) bool {
+                if (a.fail != b.fail) return a.fail > b.fail;
+                if (a.pass != b.pass) return a.pass > b.pass;
+                return std.mem.order(u8, a.name, b.name) == .lt;
+            }
+        }.lt);
+        return out;
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -326,6 +400,8 @@ pub fn main(init: std.process.Init) !void {
     var stats: Stats = .{};
     var failures: std.ArrayListUnmanaged(Failure) = .empty;
     defer failures.deinit(gpa);
+    var buckets: BucketMap = .init(gpa);
+    defer buckets.deinit();
 
     const start_ts = std.Io.Clock.now(.awake, io);
 
@@ -359,6 +435,11 @@ pub fn main(init: std.process.Init) !void {
 
         const harness_pair: ?harness_mod.HarnessSources = harness_sources;
         const outcome = try classifyAndRun(arena, io, corpus, entry, rel, opts.mode, harness_pair);
+        const bucket_kind: ?BucketKind = switch (outcome.kind) {
+            .pass_positive, .pass_negative => .pass,
+            .fail_false_reject, .fail_false_accept => .fail,
+            .skip => .skip,
+        };
         switch (outcome.kind) {
             .pass_positive => stats.pass_pos += 1,
             .pass_negative => stats.pass_neg += 1,
@@ -378,6 +459,7 @@ pub fn main(init: std.process.Init) !void {
             },
             .skip => stats.skip += 1,
         }
+        if (bucket_kind) |bk| try buckets.bump(bucketName(rel), bk);
         if (outcome.kind == .pass_positive or outcome.kind == .fail_false_reject) {
             stats.pos_attempted += 1;
         } else if (outcome.kind == .pass_negative or outcome.kind == .fail_false_accept) {
@@ -404,7 +486,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (opts.write_results) {
         const now_ts = std.Io.Clock.now(.real, io);
-        try writeResults(gpa, io, &stats, now_ts.toSeconds(), opts.mode);
+        try writeResults(gpa, io, &stats, &buckets, now_ts.toSeconds(), opts.mode);
     }
 
     for (failures.items) |f| gpa.free(f.path);
@@ -785,6 +867,7 @@ fn writeResults(
     gpa: std.mem.Allocator,
     io: std.Io,
     stats: *const Stats,
+    buckets: *const BucketMap,
     epoch_seconds: i64,
     mode: Mode,
 ) !void {
@@ -809,6 +892,18 @@ fn writeResults(
     try parseLinearRows(gpa, &rows, existing);
     try parsePerDayRows(gpa, &rows, existing);
 
+    // Previous run's bucket pass counts — used to compute the
+    // "biggest movers" callout on the freshly-written latest row.
+    // Only the previous run is parsed (older runs lose bucket
+    // data when their row scrolls out of the snapshot).
+    var prev_bucket_pass: std.StringHashMapUnmanaged(u32) = .empty;
+    defer {
+        var it = prev_bucket_pass.iterator();
+        while (it.next()) |e| gpa.free(e.key_ptr.*);
+        prev_bucket_pass.deinit(gpa);
+    }
+    try parsePrevBucketPass(gpa, &prev_bucket_pass, existing);
+
     var line_buf: [32]u8 = undefined;
     const date = formatDateUtc(epoch_seconds, &line_buf);
 
@@ -830,7 +925,7 @@ fn writeResults(
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(gpa);
-    try writeFileBody(gpa, &buf, rows.items);
+    try writeFileBody(gpa, &buf, rows.items, buckets, &prev_bucket_pass, mode);
 
     try cwd.writeFile(io, .{ .sub_path = path, .data = buf.items });
 }
@@ -993,13 +1088,18 @@ fn trimSuffix(s: []const u8, suffix: []const u8) []const u8 {
 }
 
 /// Compose the full file body: header, `## Current scores`
-/// snapshot, `## Legend`, then `## History` with per-day
-/// mini-tables (newest day first; within a day rows go
-/// parser → runtime).
+/// snapshot, the `## Where the runtime stands, by area`
+/// scoreboard (runtime mode only), `## Legend`, then `## History`
+/// with per-day mini-tables (newest day first). The latest row
+/// in `## History` carries a `Δ pass` column and a "Biggest
+/// movers" sub-list computed against `prev_bucket_pass`.
 fn writeFileBody(
     gpa: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
     rows: []Row,
+    buckets: *const BucketMap,
+    prev_bucket_pass: *const std.StringHashMapUnmanaged(u32),
+    mode_just_run: Mode,
 ) !void {
     try out.appendSlice(gpa,
         \\# test262 conformance score history
@@ -1012,6 +1112,16 @@ fn writeFileBody(
     );
     inline for (.{ Mode.parser, Mode.runtime }) |m| {
         if (latestRow(rows, m)) |r| try writeMiniRow(gpa, out, r);
+    }
+
+    // Per-area scoreboard. Only emit when this run was a
+    // runtime run (parser is uniformly ≥95% per area; the
+    // signal is in the rolled-up totals). Always rendered
+    // for the freshly-collected `buckets` — the snapshot is
+    // "as of the most recent runtime run that wrote to this
+    // file", not a per-day archive.
+    if (mode_just_run == .runtime and buckets.map.count() > 0) {
+        try writeScoreboard(gpa, out, buckets);
     }
 
     try out.appendSlice(gpa,
@@ -1028,6 +1138,7 @@ fn writeFileBody(
         \\- **spec%** — `pass / total`. Coverage of the corpus. Skipped tests are in `total` but never in `pass`, so this rises only when we ship features that unblock previously-skipped tests.
         \\- **attempted%** — `pass / (pass + fail)`. Of the tests we actually ran, the fraction that passed. Skips drop out. Measures the quality of what's shipped, independent of coverage.
         \\- **pass / total** — raw counts. `total` is the Cynic-targeted corpus (see below); `fail` is `attempted - pass`; `skip` is `total - attempted`.
+        \\- **Δ pass** (history) — change in `pass` versus the row immediately above (chronologically previous run of the same `mode`).
         \\
         \\**Scope.** `total` excludes paths universally out of scope (`harness/`, `staging/`, `intl402/`), Annex B language extensions, and browser-era built-ins Cynic doesn't ship (`escape` / `unescape`, `String.prototype` HTML wrappers, `Date.{getYear, setYear}`).
         \\
@@ -1040,6 +1151,7 @@ fn writeFileBody(
     std.mem.sort(Row, rows, {}, rowLess);
 
     var idx: usize = 0;
+    var first_day = true;
     while (idx < rows.len) {
         const day_date = rows[idx].date;
         try out.appendSlice(gpa, "### ");
@@ -1057,17 +1169,31 @@ fn writeFileBody(
         }
         try out.appendSlice(gpa, "\n\n");
         try out.appendSlice(gpa,
-            \\|         | spec% | attempted% | pass / total |
-            \\|---|---|---|---|
+            \\|         | spec% | attempted% | pass / total | Δ pass |
+            \\|---|---|---|---|---:|
             \\
         );
 
         var j = idx;
         while (j < rows.len and std.mem.eql(u8, rows[j].date, day_date)) : (j += 1) {
-            try writeMiniRow(gpa, out, rows[j]);
+            const prev_pass: ?u32 = priorRowPass(rows, j);
+            try writeHistoryRow(gpa, out, rows[j], prev_pass);
         }
         try out.appendSlice(gpa, "\n");
+
+        // Biggest movers callout — only on the topmost (most
+        // recent) day, and only for the mode just run, since
+        // bucket data is fresh only for that mode.
+        if (first_day and prev_bucket_pass.count() > 0) {
+            for (rows[idx..j]) |r| {
+                if (r.mode != mode_just_run) continue;
+                try writeBiggestMovers(gpa, out, buckets, prev_bucket_pass);
+                break;
+            }
+        }
+
         idx = j;
+        first_day = false;
     }
 }
 
@@ -1081,6 +1207,170 @@ fn writeMiniRow(
         @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total,
     });
     try out.appendSlice(gpa, line);
+}
+
+fn writeHistoryRow(
+    gpa: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    r: Row,
+    prev_pass: ?u32,
+) !void {
+    var buf: [320]u8 = undefined;
+    if (prev_pass) |p| {
+        const delta: i64 = @as(i64, r.pass) - @as(i64, p);
+        const sign: u8 = if (delta > 0) '+' else if (delta < 0) '-' else 0;
+        const mag: u64 = @abs(delta);
+        const line = if (sign == 0)
+            try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | ±0 |\n", .{
+                @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total,
+            })
+        else
+            try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {c}{d} |\n", .{
+                @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, sign, mag,
+            });
+        try out.appendSlice(gpa, line);
+    } else {
+        const line = try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | n/a |\n", .{
+            @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total,
+        });
+        try out.appendSlice(gpa, line);
+    }
+}
+
+/// Find the chronologically-previous row of the same mode for
+/// `rows[idx]`. `rows` is assumed pre-sorted by `rowLess`
+/// (date desc, parser-before-runtime within a day).
+fn priorRowPass(rows: []const Row, idx: usize) ?u32 {
+    const cur = rows[idx];
+    var k = idx + 1;
+    while (k < rows.len) : (k += 1) {
+        if (rows[k].mode == cur.mode) return rows[k].pass;
+    }
+    return null;
+}
+
+fn writeScoreboard(
+    gpa: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    buckets: *const BucketMap,
+) !void {
+    const sorted = try buckets.sortedByFailDesc(gpa);
+    defer gpa.free(sorted);
+
+    try out.appendSlice(gpa,
+        \\
+        \\## Where the runtime stands, by area
+        \\
+        \\Bucketed on the first two path components (`built-ins/Set`,
+        \\`language/expressions`, …). Sorted by raw fail count
+        \\descending — the top is where the most tests would move
+        \\with the least work. Skipped tests are excluded from
+        \\`pass` and `fail`.
+        \\
+        \\| area | pass | fail | skip | spec% |
+        \\|---|---:|---:|---:|---:|
+        \\
+    );
+
+    var buf: [320]u8 = undefined;
+    for (sorted) |b| {
+        const pct: f64 = if (b.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass)) / @as(f64, @floatFromInt(b.total));
+        const line = try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d} | {d:.0} % |\n", .{
+            b.name, b.pass, b.fail, b.skip, pct,
+        });
+        try out.appendSlice(gpa, line);
+    }
+    try out.appendSlice(gpa, "\n");
+}
+
+fn writeBiggestMovers(
+    gpa: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    buckets: *const BucketMap,
+    prev_bucket_pass: *const std.StringHashMapUnmanaged(u32),
+) !void {
+    const Mover = struct { name: []const u8, delta: i64 };
+    var movers: std.ArrayListUnmanaged(Mover) = .empty;
+    defer movers.deinit(gpa);
+
+    // Current buckets: any with a delta vs prev (positive or
+    // negative). New buckets count as full delta from 0.
+    var it = buckets.map.iterator();
+    while (it.next()) |entry| {
+        const cur = entry.value_ptr.*;
+        const prev: u32 = prev_bucket_pass.get(entry.key_ptr.*) orelse 0;
+        const d: i64 = @as(i64, cur.pass) - @as(i64, prev);
+        if (d == 0) continue;
+        try movers.append(gpa, .{ .name = entry.key_ptr.*, .delta = d });
+    }
+    // Buckets that vanished from this run but had pass>0 last
+    // time — record as negative deltas.
+    var pit = prev_bucket_pass.iterator();
+    while (pit.next()) |entry| {
+        if (buckets.map.contains(entry.key_ptr.*)) continue;
+        if (entry.value_ptr.* == 0) continue;
+        try movers.append(gpa, .{ .name = entry.key_ptr.*, .delta = -@as(i64, entry.value_ptr.*) });
+    }
+
+    if (movers.items.len == 0) return;
+
+    std.mem.sort(Mover, movers.items, {}, struct {
+        fn lt(_: void, a: Mover, b: Mover) bool {
+            const aa: u64 = @abs(a.delta);
+            const bb: u64 = @abs(b.delta);
+            if (aa != bb) return aa > bb;
+            return std.mem.order(u8, a.name, b.name) == .lt;
+        }
+    }.lt);
+
+    const top_n = @min(movers.items.len, 5);
+    try out.appendSlice(gpa, "Biggest movers (runtime):\n\n");
+    var buf: [256]u8 = undefined;
+    for (movers.items[0..top_n]) |m| {
+        const sign: u8 = if (m.delta > 0) '+' else '-';
+        const mag: u64 = @abs(m.delta);
+        const line = try std.fmt.bufPrint(&buf, "- `{s}` {c}{d}\n", .{ m.name, sign, mag });
+        try out.appendSlice(gpa, line);
+    }
+    try out.appendSlice(gpa, "\n");
+}
+
+/// Read pass counts from the most recent `## Where the runtime
+/// stands, by area` section, keyed by area name. Earlier
+/// versions of the file (without this section) yield an empty
+/// map, which makes "biggest movers" a no-op.
+fn parsePrevBucketPass(
+    gpa: std.mem.Allocator,
+    out: *std.StringHashMapUnmanaged(u32),
+    existing: []const u8,
+) !void {
+    const heading = "## Where the runtime stands, by area";
+    const start = std.mem.indexOf(u8, existing, heading) orelse return;
+    var cursor = start + heading.len;
+    // Stop at the next `## ` heading.
+    const stop_marker = "\n## ";
+    const stop = std.mem.indexOfPos(u8, existing, cursor, stop_marker) orelse existing.len;
+
+    while (cursor < stop) {
+        const end = std.mem.indexOfScalarPos(u8, existing, cursor, '\n') orelse stop;
+        defer cursor = if (end < stop) end + 1 else stop;
+        const line = existing[cursor..end];
+        if (!std.mem.startsWith(u8, line, "| `")) continue;
+
+        // Parse `| `name` | pass | fail | skip | pct % |`.
+        var it = std.mem.tokenizeAny(u8, line, "|");
+        const name_raw = std.mem.trim(u8, it.next() orelse continue, " ");
+        if (!(std.mem.startsWith(u8, name_raw, "`") and std.mem.endsWith(u8, name_raw, "`"))) continue;
+        const name = name_raw[1 .. name_raw.len - 1];
+        const pass_s = std.mem.trim(u8, it.next() orelse continue, " ");
+        const pass = std.fmt.parseInt(u32, pass_s, 10) catch continue;
+
+        const gop = try out.getOrPut(gpa, name);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = try gpa.dupe(u8, name);
+        }
+        gop.value_ptr.* = pass;
+    }
 }
 
 /// Find the row with the latest date for the given mode.
