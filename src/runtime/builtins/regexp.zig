@@ -113,6 +113,12 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     inst.set(realm.allocator, "source", Value.fromString(pat_s)) catch return error.OutOfMemory;
     inst.set(realm.allocator, "flags", Value.fromString(flag_s)) catch return error.OutOfMemory;
     inst.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
+    // §22.2.3.2 RegExpInitialize step 12 — compile the pattern
+    // eagerly so syntactic errors raise SyntaxError at
+    // construction time rather than on the first match. The
+    // bytecode is cached on the instance, so methods that go
+    // through `ensureBytecode` reuse it.
+    _ = try ensureBytecode(realm, inst);
     return this_value;
 }
 
@@ -360,36 +366,138 @@ fn regexpToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
     return Value.fromString(r);
 }
 
-/// §22.2.6 RegExp.escape — pure string transform, no engine
-/// needed.
+/// §22.2.7.1 RegExp.escape ( S ) — ES2025. Per-codepoint
+/// transform of `S` so the result, used as a regex pattern,
+/// matches the original string literally. Cynic strings are
+/// UTF-8 internally; the spec talks in codepoints + UTF-16
+/// units, so we decode → branch → re-encode.
 fn regexpEscape(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
     if (!arg.isString()) return throwTypeError(realm, "RegExp.escape argument must be a string");
     const s: *JSString = @ptrCast(@alignCast(arg.asString()));
+
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
-    for (s.bytes, 0..) |ch, i| {
-        const must_hex_first = i == 0 and (ch >= '0' and ch <= '9');
-        if (must_hex_first or ch < 0x20 or ch >= 0x7f) {
-            const hex = "0123456789abcdef";
-            out.appendSlice(realm.allocator, "\\x") catch return error.OutOfMemory;
-            out.append(realm.allocator, hex[ch >> 4]) catch return error.OutOfMemory;
-            out.append(realm.allocator, hex[ch & 0x0F]) catch return error.OutOfMemory;
+
+    var it = std.unicode.Utf8View.initUnchecked(s.bytes).iterator();
+    var first = true;
+    while (it.nextCodepoint()) |cp| {
+        // §22.2.7.1 step 4.a — when the leading codepoint is an
+        // ASCII letter or digit, escape it as `\xHH` so the
+        // result can be safely concatenated with another regex.
+        if (first and isAsciiLetterOrDigit(cp)) {
+            try appendHexX(realm, &out, cp);
+            first = false;
             continue;
         }
-        switch (ch) {
-            '^', '$', '\\', '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '/' => {
-                out.append(realm.allocator, '\\') catch return error.OutOfMemory;
-                out.append(realm.allocator, ch) catch return error.OutOfMemory;
-            },
-            ',', '-', '=', '<', '>', '#', '&', '!', '%', ':', ';', '@', '~', '\'', '`', '"' => {
-                out.append(realm.allocator, '\\') catch return error.OutOfMemory;
-                out.append(realm.allocator, ch) catch return error.OutOfMemory;
-            },
-            else => out.append(realm.allocator, ch) catch return error.OutOfMemory,
-        }
+        first = false;
+        try encodeForRegExpEscape(realm, &out, cp);
     }
+
     const r = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
     return Value.fromString(r);
 }
+
+fn isAsciiLetterOrDigit(cp: u21) bool {
+    return (cp >= '0' and cp <= '9') or (cp >= 'a' and cp <= 'z') or (cp >= 'A' and cp <= 'Z');
+}
+
+fn appendHexX(realm: *Realm, out: *std.ArrayListUnmanaged(u8), cp: u21) NativeError!void {
+    const hex = "0123456789abcdef";
+    out.appendSlice(realm.allocator, "\\x") catch return error.OutOfMemory;
+    out.append(realm.allocator, hex[(cp >> 4) & 0xF]) catch return error.OutOfMemory;
+    out.append(realm.allocator, hex[cp & 0xF]) catch return error.OutOfMemory;
+}
+
+fn appendHexU(realm: *Realm, out: *std.ArrayListUnmanaged(u8), unit: u16) NativeError!void {
+    const hex = "0123456789abcdef";
+    out.appendSlice(realm.allocator, "\\u") catch return error.OutOfMemory;
+    out.append(realm.allocator, hex[(unit >> 12) & 0xF]) catch return error.OutOfMemory;
+    out.append(realm.allocator, hex[(unit >> 8) & 0xF]) catch return error.OutOfMemory;
+    out.append(realm.allocator, hex[(unit >> 4) & 0xF]) catch return error.OutOfMemory;
+    out.append(realm.allocator, hex[unit & 0xF]) catch return error.OutOfMemory;
+}
+
+/// §22.2.7.1 EncodeForRegExpEscape ( c ).
+fn encodeForRegExpEscape(realm: *Realm, out: *std.ArrayListUnmanaged(u8), cp: u21) NativeError!void {
+    // SyntaxCharacter (§22.2.1) + `/` — backslash-prefix.
+    switch (cp) {
+        '^', '$', '\\', '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '/' => {
+            out.append(realm.allocator, '\\') catch return error.OutOfMemory;
+            try appendUtf8(realm, out, cp);
+            return;
+        },
+        else => {},
+    }
+    // ControlEscape table — \t \n \v \f \r.
+    const ctrl: ?u8 = switch (cp) {
+        0x09 => 't',
+        0x0A => 'n',
+        0x0B => 'v',
+        0x0C => 'f',
+        0x0D => 'r',
+        else => null,
+    };
+    if (ctrl) |ce| {
+        out.append(realm.allocator, '\\') catch return error.OutOfMemory;
+        out.append(realm.allocator, ce) catch return error.OutOfMemory;
+        return;
+    }
+    // Other punctuators that pair with regex syntax in dangerous
+    // ways: `,-=<>#&!%:;@~'\`"`. Plus whitespace / line
+    // terminator / surrogate halves.
+    if (isOtherPunctuator(cp) or isRegexpEscapeWhitespace(cp) or isLineTerminator(cp) or isSurrogate(cp)) {
+        if (cp <= 0xFF) {
+            try appendHexX(realm, out, cp);
+            return;
+        }
+        if (cp <= 0xFFFF) {
+            try appendHexU(realm, out, @intCast(cp));
+            return;
+        }
+        // Codepoint above the BMP — emit the UTF-16 surrogate
+        // pair as `\uHHHH\uHHHH`.
+        const adjusted: u21 = cp - 0x10000;
+        const hi: u16 = @as(u16, @intCast(0xD800 + (adjusted >> 10)));
+        const lo: u16 = @as(u16, @intCast(0xDC00 + (adjusted & 0x3FF)));
+        try appendHexU(realm, out, hi);
+        try appendHexU(realm, out, lo);
+        return;
+    }
+    // Default: emit the codepoint as-is.
+    try appendUtf8(realm, out, cp);
+}
+
+fn appendUtf8(realm: *Realm, out: *std.ArrayListUnmanaged(u8), cp: u21) NativeError!void {
+    var buf: [4]u8 = undefined;
+    const n = std.unicode.utf8Encode(cp, &buf) catch return error.NativeThrew;
+    out.appendSlice(realm.allocator, buf[0..n]) catch return error.OutOfMemory;
+}
+
+fn isOtherPunctuator(cp: u21) bool {
+    return switch (cp) {
+        ',', '-', '=', '<', '>', '#', '&', '!', '%', ':', ';', '@', '~', '\'', '`', '"' => true,
+        else => false,
+    };
+}
+
+fn isRegexpEscapeWhitespace(cp: u21) bool {
+    // ECMA-262 WhiteSpace production; the controls (\t,\v,\f)
+    // are caught by ControlEscape upstream so they never get
+    // here.
+    return switch (cp) {
+        0x0020, 0x00A0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x202F, 0x205F, 0x3000, 0xFEFF => true,
+        else => false,
+    };
+}
+
+fn isLineTerminator(cp: u21) bool {
+    // \n / \r are caught by ControlEscape upstream; we get LS / PS here.
+    return cp == 0x2028 or cp == 0x2029;
+}
+
+fn isSurrogate(cp: u21) bool {
+    return cp >= 0xD800 and cp <= 0xDFFF;
+}
+

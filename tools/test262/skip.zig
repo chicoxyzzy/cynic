@@ -99,7 +99,6 @@ pub const unsupported_features = [_][]const u8{
     // SharedArrayBuffer.
     "json-modules",
     "json-parse-with-source",
-    "RegExp.escape", // ES2025 static; not implemented yet.
     "iterator-helpers",
     "async-iterator-helpers",
     "Array.fromAsync",
