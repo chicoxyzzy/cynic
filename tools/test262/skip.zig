@@ -47,6 +47,15 @@ pub const cynic_oos_path_prefixes = [_][]const u8{
     "annexB/built-ins/Date/prototype/toGMTString/", // alias of toUTCString — kept but tested via standard path
     "annexB/built-ins/RegExp/", // legacy-regex extensions; full RegExp engine itself is "deferred" not "out of scope"
     "annexB/built-ins/Function/createdynfn-no-line-terminator-html-close-comment-params.js",
+    // Shared-memory primitives — explicitly out of scope per
+    // docs/ROADMAP.md. Aligns with SES / Hardened JavaScript:
+    // shared memory enables side channels that defeat strong
+    // isolation between workers / agents. Cynic targets edge
+    // runtimes where the host model is single-agent-per-isolate
+    // anyway, so there's nothing for `SharedArrayBuffer` /
+    // `Atomics` to share with.
+    "built-ins/Atomics/",
+    "built-ins/SharedArrayBuffer/",
 };
 
 /// `features` names we know we don't support. When a test's frontmatter
@@ -74,8 +83,10 @@ pub const unsupported_features = [_][]const u8{
     "regexp-modifiers",
     "Temporal",
     "ShadowRealm",
-    "Atomics.waitAsync",
-    "Atomics.pause",
+    // Atomics.waitAsync / Atomics.pause used to be listed here,
+    // but the whole `built-ins/Atomics/` tree is now path-skipped
+    // as out-of-scope (SES / single-agent-per-isolate). Same for
+    // SharedArrayBuffer.
     "json-modules",
     "json-parse-with-source",
     "iterator-helpers",

@@ -151,9 +151,19 @@ code construction (aligns with SES).
 - `Function.prototype.toString` returning real source — currently
   approximate.
 
+**Deferred.** `Temporal` (ES2025) is not implemented yet —
+~4500 test262 fixtures depend on it. It's a complete date/time
+API replacement (calendars, time zones, ISO 8601, etc.) and a
+multi-week project with its own tzdata story; until then it
+stays feature-gated as `Temporal`, counts in the score
+denominator, and pulls runtime spec% down accordingly. That's
+intentional — it's the largest known coverage gap.
+
 **Out of scope.** Annex B browser-era built-ins (`escape` /
 `unescape`, `String.prototype` HTML wrappers, `Date.{getYear,
-setYear}`); `Intl`; `SharedArrayBuffer` / `Atomics`.
+setYear}`); `Intl`; `SharedArrayBuffer` / `Atomics` (path-
+skipped — shared memory defeats SES-style isolation, and
+Cynic's edge-runtime hosts are single-agent-per-isolate).
 
 ## Modules
 
