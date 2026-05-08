@@ -1,9 +1,24 @@
 name: CI
 
+# `paths-ignore` keeps the auto-commit of `test262-results.md`
+# (in the test262 job below) from triggering another CI run.
+# GitHub Actions doesn't honour `[skip ci]` in commit messages
+# the way some CIs do; path filters are the supported escape.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'test262-results.md'
   pull_request:
+    paths-ignore:
+      - 'test262-results.md'
+
+# Cancel an older in-progress run when a newer push lands.
+# Stops the pile-up if the auto-commit ever does retrigger the
+# workflow for some reason.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-and-test:
@@ -72,8 +87,10 @@ jobs:
 
       - name: Commit refreshed scores
         # Only on push-to-main — PRs run the harness for signal
-        # but don't write back. `[skip ci]` keeps the auto-commit
-        # from triggering another CI cycle.
+        # but don't write back. The retrigger-loop is broken at
+        # the workflow level by `paths-ignore: test262-results.md`
+        # in the `on:` block above, so a fresh push here doesn't
+        # spin up another CI run.
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           if git diff --quiet test262-results.md; then
@@ -83,5 +100,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add test262-results.md
-          git commit -m "test262: refresh scoreboard [skip ci]"
+          git commit -m "test262: refresh scoreboard"
           git push
