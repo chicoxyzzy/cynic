@@ -100,8 +100,20 @@ and the browser-era built-ins Cynic doesn't ship are dropped from
 that day's row. Each row records `spec%` (pass / total) and
 `attempted%` (pass / (pass + fail)). `test262-results.md` opens
 with a `## Current scores` snapshot, a `## Legend` explaining the
-columns, and a `## History` section of per-day mini-tables —
-newest day first.
+columns, a `## Where the runtime stands, by area` per-bucket
+scoreboard sorted by raw fail count (so the top of the list is
+where the most fixtures move with the least work), and a
+`## History` section of per-day mini-tables — newest day first.
+Each history row shows the `Δ pass` against the previous run of
+the same mode; the most recent row also gets a "Biggest movers"
+sub-list naming the buckets that shifted most.
+
+**Build mode.** The test262 harness binary is built `ReleaseFast`
+by default (interpreters are 5-10× slower in Debug; the harness
+chews ~50k fixtures). Pass `-Doptimize=Debug` or
+`-Dtest262-debug=true` if you need stack traces on a panic
+inside the engine — that rebuilds both the harness and the
+`cynic` library it links at Debug.
 
 CI runs `zig build` and `zig build test` as gating jobs, plus
 `zig build test262 -- --quiet` as an advisory job

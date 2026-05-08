@@ -15,6 +15,9 @@ zig-out/
 # Throwaway worktree used by the gh-pages deploy flow.
 .gh-pages-deploy/
 
+# Throwaway worktrees spawned by Claude Code agents.
+.claude/worktrees/
+
 # `--only-failing` cache for the test262 harness — written by
 # every full run, consumed by `--only-failing`.
 .test262-pass-cache.txt
