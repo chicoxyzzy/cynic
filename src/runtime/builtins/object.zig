@@ -101,6 +101,7 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethod(realm, obj_ctor, "fromEntries", objectFromEntries, 1);
         try installNativeMethod(realm, obj_ctor, "setPrototypeOf", objectSetPrototypeOf, 2);
         try installNativeMethod(realm, obj_ctor, "groupBy", objectGroupBy, 2);
+        try installNativeMethod(realm, obj_ctor, "is", objectIs, 2);
     }
     if (realm.intrinsics.object_prototype) |obj_proto| {
         try installNativeMethodOnProto(realm, obj_proto, "hasOwnProperty", objectHasOwnProperty, 1);
@@ -342,6 +343,17 @@ pub fn objectGetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
         return Value.null_;
     }
     return error.NativeThrew;
+}
+
+/// §20.1.2.13 Object.is(value1, value2) — SameValue per §7.2.10.
+/// Distinguishes `+0` from `-0`, treats `NaN === NaN` as true,
+/// uses strict equality otherwise.
+fn objectIs(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = this_value;
+    const a = argOr(args, 0, Value.undefined_);
+    const b = argOr(args, 1, Value.undefined_);
+    return Value.fromBool(intrinsics.sameValue(a, b));
 }
 
 fn objectHasOwn(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

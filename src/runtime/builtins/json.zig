@@ -352,7 +352,12 @@ const JsonParser = struct {
         if (self.pos == start) return error.Malformed;
         const slice = self.input[start..self.pos];
         const d = std.fmt.parseFloat(f64, slice) catch return error.Malformed;
-        if (d == @trunc(d) and d >= std.math.minInt(i32) and d <= std.math.maxInt(i32)) {
+        // Preserve -0 (Number per spec). The int32 fast path
+        // truncates `-0.0` to plain 0, losing the sign bit, so
+        // keep the double when the source actually wrote a
+        // signed zero.
+        const is_negative_zero = d == 0 and slice.len > 0 and slice[0] == '-';
+        if (!is_negative_zero and d == @trunc(d) and d >= std.math.minInt(i32) and d <= std.math.maxInt(i32)) {
             return Value.fromInt32(@intFromFloat(d));
         }
         return Value.fromDouble(d);

@@ -302,7 +302,9 @@ fn installStubConstructor(
     name: []const u8,
     parent_proto: *JSObject,
 ) !*JSObject {
-    const fn_obj = try realm.heap.allocateFunctionNative(stubConstructorNative, 0, name);
+    // §17 — every spec'd stub built-in (Array, String, Number,
+    // Boolean, Function) has `length === 1`.
+    const fn_obj = try realm.heap.allocateFunctionNative(stubConstructorNative, 1, name);
     const proto = try realm.heap.allocateObject();
     proto.prototype = parent_proto;
     try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
@@ -318,7 +320,8 @@ fn installStubConstructor(
 /// `Object.prototype` with the realm-wide object prototype that
 /// every plain object chains to.
 fn installCtorReusingProto(realm: *Realm, name: []const u8, proto: *JSObject) !void {
-    const fn_obj = try realm.heap.allocateFunctionNative(stubConstructorNative, 0, name);
+    // §20.1.1 — `Object` constructor's `length` is 1.
+    const fn_obj = try realm.heap.allocateFunctionNative(stubConstructorNative, 1, name);
     try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
     fn_obj.prototype = proto;
     try realm.globals.put(realm.allocator, name, heap_mod.taggedFunction(fn_obj));
@@ -895,6 +898,25 @@ pub fn strictEqualsLite(a: Value, b: Value) bool {
 }
 
 pub fn sameValueZero(a: Value, b: Value) bool {
+    return strictEqualsLite(a, b);
+}
+
+/// §7.2.10 SameValue — like SameValueZero but distinguishes
+/// `+0` from `-0`. The basis for `Object.is`.
+pub fn sameValue(a: Value, b: Value) bool {
+    // Number numerics need the SameValueNumber rule:
+    // `NaN === NaN`, `+0 !== -0`, otherwise IEEE-754 equality.
+    const a_d: ?f64 = if (a.isInt32()) @floatFromInt(a.asInt32()) else if (a.isDouble()) a.asDouble() else null;
+    const b_d: ?f64 = if (b.isInt32()) @floatFromInt(b.asInt32()) else if (b.isDouble()) b.asDouble() else null;
+    if (a_d != null and b_d != null) {
+        const da = a_d.?;
+        const db = b_d.?;
+        if (std.math.isNan(da) and std.math.isNan(db)) return true;
+        if (da == 0 and db == 0) {
+            return std.math.signbit(da) == std.math.signbit(db);
+        }
+        return da == db;
+    }
     return strictEqualsLite(a, b);
 }
 
