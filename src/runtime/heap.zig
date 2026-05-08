@@ -337,15 +337,19 @@ pub const Heap = struct {
         // length always installs.
         try f.properties.put(self.allocator, "length", Value.fromInt32(param_count));
         try f.property_flags.put(self.allocator, "length", flags);
-        // name is optional (anonymous functions skip it; they
-        // get `""` lazily via §10.2.9's name inference, later).
-        if (name) |n| {
-            const name_str = try self.allocateString(n);
+        // §10.2.9 SetFunctionName — every function gets a `name`
+        // own property; anonymous functions get `""` rather than
+        // omitting the property. Tests probe the descriptor (via
+        // `Object.getOwnPropertyDescriptor(fn, "name")`) which
+        // requires it to actually exist.
+        const display_name = name orelse "";
+        const name_str = try self.allocateString(display_name);
+        if (display_name.len > 0) {
             f.name_string = name_str;
             f.name = name_str.bytes;
-            try f.properties.put(self.allocator, "name", Value.fromString(name_str));
-            try f.property_flags.put(self.allocator, "name", flags);
         }
+        try f.properties.put(self.allocator, "name", Value.fromString(name_str));
+        try f.property_flags.put(self.allocator, "name", flags);
     }
 
     /// Allocate a `JSString` whose contents are a copy of `src`.
