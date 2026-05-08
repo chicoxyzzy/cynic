@@ -2246,3 +2246,70 @@ test "later: delete on configurable=true built-in fn slot succeeds" {
     };
     try testing.expect(v.asBool());
 }
+
+// ── §27.2.4.x Promise.try / Promise.withResolvers (ES2025) ────────────────
+
+test "later: Promise.try(fn) fulfills with sync return value" {
+    try expectScriptIntWithBuiltins(
+        \\let final = 0;
+        \\Promise.try(() => 42).then(v => { final = v; });
+        \\globalThis.__drainMicrotasks();
+        \\final;
+    , 42);
+}
+
+test "later: Promise.try(fn) rejects with sync throw" {
+    try expectScriptStringWithBuiltins(
+        \\let caught = "";
+        \\Promise.try(() => { throw "boom"; }).catch(e => { caught = "caught:" + e; });
+        \\globalThis.__drainMicrotasks();
+        \\caught;
+    , "caught:boom");
+}
+
+test "later: Promise.try forwards extra arguments to the callback" {
+    try expectScriptIntWithBuiltins(
+        \\let final = 0;
+        \\Promise.try((a, b, c) => a + b + c, 10, 20, 12).then(v => { final = v; });
+        \\globalThis.__drainMicrotasks();
+        \\final;
+    , 42);
+}
+
+test "later: Promise.try without a function rejects with TypeError" {
+    try expectScriptStringWithBuiltins(
+        \\let kind = "";
+        \\Promise.try(123).catch(e => { kind = e instanceof TypeError ? "TypeError" : String(e); });
+        \\globalThis.__drainMicrotasks();
+        \\kind;
+    , "TypeError");
+}
+
+test "later: Promise.withResolvers shape — has promise/resolve/reject" {
+    try expectScriptStringWithBuiltins(
+        \\const w = Promise.withResolvers();
+        \\typeof w.promise.then + "," + typeof w.resolve + "," + typeof w.reject;
+    , "function,function,function");
+}
+
+test "later: Promise.withResolvers().resolve(v) settles promise to fulfilled" {
+    try expectScriptIntWithBuiltins(
+        \\const w = Promise.withResolvers();
+        \\let final = 0;
+        \\w.promise.then(v => { final = v; });
+        \\w.resolve(42);
+        \\globalThis.__drainMicrotasks();
+        \\final;
+    , 42);
+}
+
+test "later: Promise.withResolvers().reject(e) settles promise to rejected" {
+    try expectScriptStringWithBuiltins(
+        \\const w = Promise.withResolvers();
+        \\let caught = "";
+        \\w.promise.catch(e => { caught = "caught:" + e; });
+        \\w.reject("nope");
+        \\globalThis.__drainMicrotasks();
+        \\caught;
+    , "caught:nope");
+}
