@@ -121,12 +121,27 @@ pub fn build(b: *std.Build) void {
     // `zig build test262` runs the parser-only conformance harness over
     // the corpus at vendor/test262/test (or `--corpus=<path>`). Imports
     // the library as `cynic`. Forward args after `--`.
+    //
+    // Always built ReleaseFast — the harness churns through ~50k tests
+    // and Debug-mode JS execution is 5-10× slower. `-Dtest262-debug=true`
+    // forces Debug for stack-traces-on-panic. The cynic library is
+    // re-imported under `lib_mod_fast` so it's also ReleaseFast.
+    const test262_debug = b.option(bool, "test262-debug", "Build the test262 harness in Debug for stack traces") orelse false;
+    const t262_optimize: std.builtin.OptimizeMode = if (test262_debug) .Debug else .ReleaseFast;
+    const lib_mod_fast = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = t262_optimize,
+    });
+    lib_mod_fast.linkLibrary(qjs_regex);
+    lib_mod_fast.addIncludePath(b.path("vendor/quickjs"));
+    lib_mod_fast.addImport("c", c_mod);
     const t262_mod = b.createModule(.{
         .root_source_file = b.path("tools/test262.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = t262_optimize,
     });
-    t262_mod.addImport("cynic", lib_mod);
+    t262_mod.addImport("cynic", lib_mod_fast);
 
     // Inject the working-tree git SHA and the test262 submodule SHA as
     // build-time strings so `--write-results` can record them in the
