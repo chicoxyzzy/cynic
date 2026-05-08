@@ -102,6 +102,11 @@ pub const Intrinsics = struct {
     /// `slice`, `every`, `some`, `find`, etc.). Each concrete
     /// `<Kind>Array.prototype` chains here.
     typed_array_prototype: ?*JSObject = null,
+    /// `%Set.prototype%` — populated by `installSet`. The ES2025
+    /// composition methods (`union`, `intersection`, …) need it
+    /// to wire the prototype of fresh result sets they allocate
+    /// outside the constructor flow.
+    set_prototype: ?*JSObject = null,
 };
 
 /// Install the later intrinsics on `realm`. Wires the constructor

@@ -318,10 +318,10 @@ fn arrayOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
 }
 
 /// §23.1.2.1 Array.from( items [, mapfn [, thisArg ] ] ).
-/// Two paths: array-like (uses `length` + indexed get) and
-/// iterable (walks `@@iterator`). later: full @@iterator path
-/// — for now we cover the array-like case which is what most
-/// test262 fixtures (and `Array.from({length: n}, …)`) need.
+/// Three paths: string (iterate code points), iterable
+/// (walks `@@iterator` — Sets, Maps, generators, custom
+/// iterables), and array-like fallback (`length` + indexed get,
+/// for `{length: n}` and DOM-style nodelists).
 fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const items = argOr(args, 0, Value.undefined_);
@@ -358,8 +358,64 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         return heap_mod.taggedObject(out);
     }
 
-    // Object / array-like path.
     const src = heap_mod.valueAsPlainObject(items) orelse return throwTypeError(realm, "Array.from: items is not iterable");
+
+    // Iterable path — preferred when present per §23.1.2.1 step 4.
+    // GetMethod(items, @@iterator) walks the prototype chain; if
+    // it resolves to a callable, take the iterator-protocol path.
+    const iter_method_v = try getPropertyChain(realm, src, "@@iterator");
+    if (heap_mod.valueAsFunction(iter_method_v)) |iter_method| {
+        const iter_outcome = interpreter.callJSFunction(realm.allocator, realm, iter_method, items, &.{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        const iter = switch (iter_outcome) {
+            .value, .yielded => |v| v,
+            .thrown => return error.NativeThrew,
+        };
+        const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return throwTypeError(realm, "Array.from: @@iterator did not return an iterator object");
+        const next_v = try getPropertyChain(realm, iter_obj, "next");
+        const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "Array.from: iterator missing callable 'next'");
+
+        var k: i64 = 0;
+        const max_iter: usize = 1 << 24;
+        var step: usize = 0;
+        while (step < max_iter) : (step += 1) {
+            const result_outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            const result = switch (result_outcome) {
+                .value, .yielded => |v| v,
+                .thrown => return error.NativeThrew,
+            };
+            const result_obj = heap_mod.valueAsPlainObject(result) orelse return throwTypeError(realm, "Array.from: iterator next() did not return an object");
+            if (intrinsics.toBoolean(result_obj.get("done"))) break;
+            const raw_v = result_obj.get("value");
+            const elem: Value = blk: {
+                if (mapfn) |mf| {
+                    const cb_args = [_]Value{ raw_v, numberFromI64(k) };
+                    const outcome = interpreter.callJSFunction(realm.allocator, realm, mf, this_arg, &cb_args) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => return error.NativeThrew,
+                    };
+                    switch (outcome) {
+                        .value, .yielded => |v| break :blk v,
+                        .thrown => return error.NativeThrew,
+                    }
+                } else break :blk raw_v;
+            };
+            var ibuf: [24]u8 = undefined;
+            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{k}) catch unreachable;
+            const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+            out.set(realm.allocator, idx_owned.bytes, elem) catch return error.OutOfMemory;
+            k += 1;
+        }
+        setLength(realm, out, k) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(out);
+    }
+
+    // Array-like fallback (`length` + indexed get).
     const len = try clampArrayLength(lengthOfArray(src));
     var i: i64 = 0;
     while (i < len) : (i += 1) {

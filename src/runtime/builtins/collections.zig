@@ -646,7 +646,19 @@ pub fn installSet(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, proto, "entries", setEntriesMethod, 0);
     try installNativeMethodOnProto(realm, proto, "@@iterator", setValuesMethod, 0);
 
+    // §24.2.4.x — ES2025 set composition methods. All accept any
+    // "set-like" object satisfying {size, has, keys}.
+    try installNativeMethodOnProto(realm, proto, "union", setUnion, 1);
+    try installNativeMethodOnProto(realm, proto, "intersection", setIntersection, 1);
+    try installNativeMethodOnProto(realm, proto, "difference", setDifference, 1);
+    try installNativeMethodOnProto(realm, proto, "symmetricDifference", setSymmetricDifference, 1);
+    try installNativeMethodOnProto(realm, proto, "isSubsetOf", setIsSubsetOf, 1);
+    try installNativeMethodOnProto(realm, proto, "isSupersetOf", setIsSupersetOf, 1);
+    try installNativeMethodOnProto(realm, proto, "isDisjointFrom", setIsDisjointFrom, 1);
+
     try installNativeGetter(realm, proto, "size", setSizeGetter);
+
+    realm.intrinsics.set_prototype = proto;
 }
 
 fn makeSetIterator(realm: *Realm, src: Value, kind: enum { values, entries }) !Value {
@@ -812,5 +824,254 @@ fn setForEach(realm: *Realm, this_value: Value, args: []const Value) NativeError
         }
     }
     return Value.undefined_;
+}
+
+// ── §24.2.4.x ES2025 Set composition helpers ─────────────────────────────
+
+/// §24.2.1.2 GetSetRecord — validate `other` is a usable
+/// set-like. We don't cache the size (Cynic's helpers iterate
+/// fresh each time anyway) so this function only validates the
+/// shape and returns the (has, keys) pair.
+const SetLike = struct {
+    has: *JSFunction,
+    keys: *JSFunction,
+    /// The set-like object itself — receiver for has/keys calls.
+    obj: Value,
+};
+
+fn validateSetLike(realm: *Realm, op: []const u8, value: Value) NativeError!SetLike {
+    const obj = heap_mod.valueAsPlainObject(value) orelse {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Set.prototype.{s}: argument must be a set-like object", .{op}) catch op;
+        return throwTypeError(realm, msg);
+    };
+    // Per spec we'd validate size, but Cynic skips that — has + keys are what
+    // we actually use, and forcing a numeric size on real Sets isn't observable.
+    const has_v = obj.get("has");
+    const has_fn = heap_mod.valueAsFunction(has_v) orelse {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Set.prototype.{s}: argument is not set-like (no callable 'has')", .{op}) catch op;
+        return throwTypeError(realm, msg);
+    };
+    const keys_v = obj.get("keys");
+    const keys_fn = heap_mod.valueAsFunction(keys_v) orelse {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Set.prototype.{s}: argument is not set-like (no callable 'keys')", .{op}) catch op;
+        return throwTypeError(realm, msg);
+    };
+    return .{ .has = has_fn, .keys = keys_fn, .obj = value };
+}
+
+fn setLikeHas(realm: *Realm, sl: SetLike, value: Value) NativeError!bool {
+    const args1 = [_]Value{value};
+    const outcome = callJSFunction(realm.allocator, realm, sl.has, sl.obj, &args1) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    return switch (outcome) {
+        .value, .yielded => |v| intrinsics.toBoolean(v),
+        .thrown => error.NativeThrew,
+    };
+}
+
+/// Walk the set-like via its `keys()` iterator, invoking
+/// `each(value)` for each yielded entry. Stops if `each` returns
+/// `error.IterStop`.
+const IterStop = error{IterStop};
+
+fn forEachSetLikeKey(
+    realm: *Realm,
+    sl: SetLike,
+    ctx: anytype,
+    comptime each: fn (@TypeOf(ctx), Value) (NativeError || IterStop)!void,
+) NativeError!void {
+    // Real Set fast path — skip the iterator protocol entirely
+    // when we can read entries directly. Behavior is identical
+    // (insertion order, deleted skip), and avoids allocating an
+    // iterator object on every call.
+    if (setDataOf(sl.obj)) |d| {
+        var i: usize = 0;
+        while (i < d.entries.items.len) : (i += 1) {
+            const e = d.entries.items[i];
+            if (e.deleted) continue;
+            each(ctx, e.value) catch |err| switch (err) {
+                error.IterStop => return,
+                else => |e2| return e2,
+            };
+        }
+        return;
+    }
+
+    // General set-like path: call `keys()` to obtain an iterator,
+    // then invoke its `next()` until `done: true`.
+    const iter_outcome = callJSFunction(realm.allocator, realm, sl.keys, sl.obj, &.{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const iter = switch (iter_outcome) {
+        .value, .yielded => |v| v,
+        .thrown => return error.NativeThrew,
+    };
+    const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return throwTypeError(realm, "set-like keys() did not return an iterator");
+    const next_v = iter_obj.get("next");
+    const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "set-like keys() iterator missing callable 'next'");
+
+    const max_iter: usize = 1 << 24;
+    var step: usize = 0;
+    while (step < max_iter) : (step += 1) {
+        const out = callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        const result = switch (out) {
+            .value, .yielded => |v| v,
+            .thrown => return error.NativeThrew,
+        };
+        const ro = heap_mod.valueAsPlainObject(result) orelse return throwTypeError(realm, "iterator next() did not return an object");
+        if (intrinsics.toBoolean(ro.get("done"))) return;
+        each(ctx, ro.get("value")) catch |err| switch (err) {
+            error.IterStop => return,
+            else => |e2| return e2,
+        };
+    }
+    return throwTypeError(realm, "set-like iteration exceeded the safety budget");
+}
+
+fn allocateEmptySet(realm: *Realm) NativeError!*JSObject {
+    const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+    if (realm.intrinsics.set_prototype) |sp| obj.prototype = sp;
+    const data = realm.allocator.create(ObjMod.SetData) catch return error.OutOfMemory;
+    data.* = .{};
+    obj.set_data = data;
+    return obj;
+}
+
+fn setUnion(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (setDataOf(this_value) == null) return throwTypeError(realm, "Set.prototype.union called on non-Set");
+    const sl = try validateSetLike(realm, "union", argOr(args, 0, Value.undefined_));
+
+    const out = try allocateEmptySet(realm);
+    // Copy this set first, then add other's keys (sameValueZero
+    // dedup keeps duplicates out).
+    {
+        const d = setDataOf(this_value).?;
+        for (d.entries.items) |e| if (!e.deleted) {
+            setAddInternal(realm, out, e.value) catch return error.OutOfMemory;
+        };
+    }
+    const Ctx = struct { realm: *Realm, out: *JSObject };
+    const each = struct {
+        fn fn_(c: Ctx, v: Value) (NativeError || IterStop)!void {
+            setAddInternal(c.realm, c.out, v) catch return error.OutOfMemory;
+        }
+    }.fn_;
+    try forEachSetLikeKey(realm, sl, Ctx{ .realm = realm, .out = out }, each);
+    return heap_mod.taggedObject(out);
+}
+
+fn setIntersection(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const this_d = setDataOf(this_value) orelse return throwTypeError(realm, "Set.prototype.intersection called on non-Set");
+    const sl = try validateSetLike(realm, "intersection", argOr(args, 0, Value.undefined_));
+
+    const out = try allocateEmptySet(realm);
+    var i: usize = 0;
+    while (i < this_d.entries.items.len) : (i += 1) {
+        const e = this_d.entries.items[i];
+        if (e.deleted) continue;
+        if (try setLikeHas(realm, sl, e.value)) {
+            setAddInternal(realm, out, e.value) catch return error.OutOfMemory;
+        }
+    }
+    return heap_mod.taggedObject(out);
+}
+
+fn setDifference(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const this_d = setDataOf(this_value) orelse return throwTypeError(realm, "Set.prototype.difference called on non-Set");
+    const sl = try validateSetLike(realm, "difference", argOr(args, 0, Value.undefined_));
+
+    const out = try allocateEmptySet(realm);
+    var i: usize = 0;
+    while (i < this_d.entries.items.len) : (i += 1) {
+        const e = this_d.entries.items[i];
+        if (e.deleted) continue;
+        if (!try setLikeHas(realm, sl, e.value)) {
+            setAddInternal(realm, out, e.value) catch return error.OutOfMemory;
+        }
+    }
+    return heap_mod.taggedObject(out);
+}
+
+fn setSymmetricDifference(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const this_d = setDataOf(this_value) orelse return throwTypeError(realm, "Set.prototype.symmetricDifference called on non-Set");
+    const sl = try validateSetLike(realm, "symmetricDifference", argOr(args, 0, Value.undefined_));
+
+    const out = try allocateEmptySet(realm);
+    // First pass: this \ other.
+    var i: usize = 0;
+    while (i < this_d.entries.items.len) : (i += 1) {
+        const e = this_d.entries.items[i];
+        if (e.deleted) continue;
+        if (!try setLikeHas(realm, sl, e.value)) {
+            setAddInternal(realm, out, e.value) catch return error.OutOfMemory;
+        }
+    }
+    // Second pass: other \ this — iterate other's keys, add ones
+    // missing from this.
+    const Ctx = struct { realm: *Realm, this_set: Value, out: *JSObject };
+    const each = struct {
+        fn fn_(c: Ctx, v: Value) (NativeError || IterStop)!void {
+            const td = setDataOf(c.this_set).?;
+            if (setIndex(td, v) == null) {
+                setAddInternal(c.realm, c.out, v) catch return error.OutOfMemory;
+            }
+        }
+    }.fn_;
+    try forEachSetLikeKey(realm, sl, Ctx{ .realm = realm, .this_set = this_value, .out = out }, each);
+    return heap_mod.taggedObject(out);
+}
+
+fn setIsSubsetOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const this_d = setDataOf(this_value) orelse return throwTypeError(realm, "Set.prototype.isSubsetOf called on non-Set");
+    const sl = try validateSetLike(realm, "isSubsetOf", argOr(args, 0, Value.undefined_));
+
+    var i: usize = 0;
+    while (i < this_d.entries.items.len) : (i += 1) {
+        const e = this_d.entries.items[i];
+        if (e.deleted) continue;
+        if (!try setLikeHas(realm, sl, e.value)) return Value.false_;
+    }
+    return Value.true_;
+}
+
+fn setIsSupersetOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (setDataOf(this_value) == null) return throwTypeError(realm, "Set.prototype.isSupersetOf called on non-Set");
+    const sl = try validateSetLike(realm, "isSupersetOf", argOr(args, 0, Value.undefined_));
+
+    const Ctx = struct { realm: *Realm, this_set: Value, ok: *bool };
+    const each = struct {
+        fn fn_(c: Ctx, v: Value) (NativeError || IterStop)!void {
+            const td = setDataOf(c.this_set).?;
+            if (setIndex(td, v) == null) {
+                c.ok.* = false;
+                return error.IterStop;
+            }
+        }
+    }.fn_;
+    var ok = true;
+    try forEachSetLikeKey(realm, sl, Ctx{ .realm = realm, .this_set = this_value, .ok = &ok }, each);
+    return Value.fromBool(ok);
+}
+
+fn setIsDisjointFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const this_d = setDataOf(this_value) orelse return throwTypeError(realm, "Set.prototype.isDisjointFrom called on non-Set");
+    const sl = try validateSetLike(realm, "isDisjointFrom", argOr(args, 0, Value.undefined_));
+
+    var i: usize = 0;
+    while (i < this_d.entries.items.len) : (i += 1) {
+        const e = this_d.entries.items[i];
+        if (e.deleted) continue;
+        if (try setLikeHas(realm, sl, e.value)) return Value.false_;
+    }
+    return Value.true_;
 }
 

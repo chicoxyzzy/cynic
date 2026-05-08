@@ -78,7 +78,6 @@ pub const unsupported_features = [_][]const u8{
     "Atomics.pause",
     "json-modules",
     "json-parse-with-source",
-    "set-methods",
     "iterator-helpers",
     "async-iterator-helpers",
     "Array.fromAsync",

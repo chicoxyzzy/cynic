@@ -2313,3 +2313,83 @@ test "later: Promise.withResolvers().reject(e) settles promise to rejected" {
         \\caught;
     , "caught:nope");
 }
+
+// ── §24.2.4.x Set ES2025 methods ──────────────────────────────────────────
+
+test "later: Set.prototype.union returns the merged set" {
+    try expectScriptStringWithBuiltins(
+        \\const a = new Set([1, 2]);
+        \\const b = new Set([2, 3]);
+        \\Array.from(a.union(b)).sort().join(",");
+    , "1,2,3");
+}
+
+test "later: Set.prototype.intersection returns elements present in both" {
+    try expectScriptStringWithBuiltins(
+        \\const a = new Set([1, 2, 3]);
+        \\const b = new Set([2, 3, 4]);
+        \\Array.from(a.intersection(b)).sort().join(",");
+    , "2,3");
+}
+
+test "later: Set.prototype.difference returns elements in this but not other" {
+    try expectScriptStringWithBuiltins(
+        \\const a = new Set([1, 2, 3]);
+        \\const b = new Set([2, 3, 4]);
+        \\Array.from(a.difference(b)).sort().join(",");
+    , "1");
+}
+
+test "later: Set.prototype.symmetricDifference returns the XOR" {
+    try expectScriptStringWithBuiltins(
+        \\const a = new Set([1, 2, 3]);
+        \\const b = new Set([2, 3, 4]);
+        \\Array.from(a.symmetricDifference(b)).sort().join(",");
+    , "1,4");
+}
+
+test "later: Set.prototype.isSubsetOf — true case" {
+    try expectScriptIntWithBuiltins(
+        \\new Set([1, 2]).isSubsetOf(new Set([1, 2, 3])) ? 1 : 0;
+    , 1);
+}
+
+test "later: Set.prototype.isSubsetOf — false case" {
+    try expectScriptIntWithBuiltins(
+        \\new Set([1, 4]).isSubsetOf(new Set([1, 2, 3])) ? 1 : 0;
+    , 0);
+}
+
+test "later: Set.prototype.isSupersetOf — true case" {
+    try expectScriptIntWithBuiltins(
+        \\new Set([1, 2, 3]).isSupersetOf(new Set([1, 2])) ? 1 : 0;
+    , 1);
+}
+
+test "later: Set.prototype.isSupersetOf — false case" {
+    try expectScriptIntWithBuiltins(
+        \\new Set([1, 2, 3]).isSupersetOf(new Set([1, 4])) ? 1 : 0;
+    , 0);
+}
+
+test "later: Set.prototype.isDisjointFrom — true case" {
+    try expectScriptIntWithBuiltins(
+        \\new Set([1, 2]).isDisjointFrom(new Set([3, 4])) ? 1 : 0;
+    , 1);
+}
+
+test "later: Set.prototype.isDisjointFrom — false case" {
+    try expectScriptIntWithBuiltins(
+        \\new Set([1, 2]).isDisjointFrom(new Set([2, 3])) ? 1 : 0;
+    , 0);
+}
+
+test "later: Set methods accept any set-like (Map keys + has + size)" {
+    // Spec says `other` is any set-like — { size, has, keys }.
+    // A Map satisfies that protocol via its own size/has/keys.
+    try expectScriptStringWithBuiltins(
+        \\const a = new Set([1, 2, 3]);
+        \\const m = new Map([[2, "x"], [3, "y"], [4, "z"]]);
+        \\Array.from(a.intersection(m)).sort().join(",");
+    , "2,3");
+}
