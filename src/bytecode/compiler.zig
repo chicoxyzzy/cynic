@@ -1092,6 +1092,22 @@ pub const Compiler = struct {
 
         for (lit.properties) |prop| switch (prop) {
             .property => |p| {
+                // §13.2.5.5 PropertyDefinitionEvaluation — computed
+                // keys evaluate the expression, ToPropertyKey-coerce
+                // it, and route through `sta_computed`. Static keys
+                // intern the source slice and use `sta_property`.
+                if (p.key == .computed) {
+                    try self.compileExpression(p.key.computed);
+                    const r_key = try self.reserveTemp();
+                    defer self.releaseTemp();
+                    try self.builder.emitOp(.star, p.span);
+                    try self.builder.emitU8(r_key);
+                    try self.compileExpression(&p.value);
+                    try self.builder.emitOp(.sta_computed, p.span);
+                    try self.builder.emitU8(r_obj);
+                    try self.builder.emitU8(r_key);
+                    continue;
+                }
                 const key_slice = switch (p.key) {
                     .ident => |span| self.source[span.start..span.end],
                     .string => |span| inner: {
@@ -1109,7 +1125,7 @@ pub const Compiler = struct {
                     // exponents canonicalize differently but are
                     // rare in test262 fixtures.
                     .numeric => |span| self.source[span.start..span.end],
-                    else => return error.UnsupportedExpression, // computed / private
+                    else => return error.UnsupportedExpression, // private
                 };
                 const k = try self.internString(key_slice);
                 try self.compileExpression(&p.value);
@@ -1119,6 +1135,33 @@ pub const Compiler = struct {
             },
             .method => |m| {
                 if (m.is_generator or m.is_async) return error.UnsupportedExpression;
+                // Computed-key method (`{ [k]: function(){…} }`): eval
+                // the key first, store to a temp, then compile the
+                // method body and store-via `sta_computed`. Computed
+                // accessors are still unsupported (would need a new
+                // `def_computed_accessor` opcode).
+                if (m.key == .computed) {
+                    if (m.kind != .method) return error.UnsupportedExpression;
+                    try self.compileExpression(m.key.computed);
+                    const r_key = try self.reserveTemp();
+                    defer self.releaseTemp();
+                    try self.builder.emitOp(.star, m.span);
+                    try self.builder.emitU8(r_key);
+                    const tk = try compileFunctionTemplate(
+                        self,
+                        m.params,
+                        FunctionBody{ .block = m.body.body },
+                        null,
+                        false,
+                        m.span,
+                    );
+                    try self.builder.emitOp(.make_function, m.span);
+                    try self.builder.emitU16(tk);
+                    try self.builder.emitOp(.sta_computed, m.span);
+                    try self.builder.emitU8(r_obj);
+                    try self.builder.emitU8(r_key);
+                    continue;
+                }
                 const key_slice = switch (m.key) {
                     .ident => |span| self.source[span.start..span.end],
                     .string => |span| inner: {

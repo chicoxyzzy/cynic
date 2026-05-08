@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 54.76 % | 95.61 % | 28542 / 52125 |
-| **runtime** | 30.42 % | 42.47 % | 15854 / 52125 |
+| **runtime** | 33.91 % | 45.72 % | 17513 / 51639 |
 
 ## Where the runtime stands, by area
 
@@ -17,74 +17,72 @@ with the least work. Skipped tests are excluded from
 
 | area | pass | fail | skip | spec% |
 |---|---:|---:|---:|---:|
-| `language/expressions` | 3717 | 6350 | 971 | 34 % |
-| `language/statements` | 2676 | 5994 | 667 | 29 % |
-| `built-ins/TypedArray` | 1 | 1221 | 216 | 0 % |
-| `built-ins/Array` | 1818 | 1052 | 211 | 59 % |
-| `built-ins/Object` | 2336 | 986 | 89 | 68 % |
-| `built-ins/String` | 539 | 674 | 10 | 44 % |
-| `built-ins/TypedArrayConstructors` | 48 | 664 | 24 | 7 % |
-| `built-ins/Promise` | 199 | 475 | 3 | 29 % |
-| `built-ins/RegExp` | 403 | 469 | 1007 | 21 % |
-| `built-ins/Function` | 140 | 280 | 89 | 28 % |
-| `built-ins/DataView` | 218 | 271 | 72 | 39 % |
-| `built-ins/Atomics` | 0 | 271 | 111 | 0 % |
+| `language/expressions` | 3909 | 6158 | 971 | 35 % |
+| `language/statements` | 2716 | 5954 | 667 | 29 % |
+| `built-ins/RegExp` | 649 | 1069 | 161 | 35 % |
+| `built-ins/Array` | 1856 | 1014 | 211 | 60 % |
+| `built-ins/Object` | 2378 | 948 | 85 | 70 % |
+| `built-ins/TypedArray` | 390 | 832 | 216 | 27 % |
+| `built-ins/String` | 588 | 630 | 5 | 48 % |
+| `built-ins/TypedArrayConstructors` | 277 | 435 | 24 | 38 % |
+| `built-ins/Promise` | 250 | 424 | 3 | 37 % |
+| `built-ins/Iterator` | 113 | 391 | 6 | 22 % |
+| `built-ins/Function` | 144 | 276 | 89 | 28 % |
+| `built-ins/DataView` | 238 | 251 | 72 | 42 % |
 | `built-ins/Proxy` | 68 | 231 | 12 | 22 % |
-| `built-ins/Date` | 371 | 215 | 8 | 62 % |
 | `language/module-code` | 380 | 202 | 14 | 64 % |
-| `language/arguments-object` | 65 | 141 | 57 | 25 % |
+| `built-ins/Date` | 417 | 169 | 8 | 70 % |
+| `language/arguments-object` | 80 | 126 | 57 | 30 % |
 | `language/eval-code` | 10 | 117 | 220 | 3 % |
-| `built-ins/Iterator` | 7 | 108 | 395 | 1 % |
-| `built-ins/Set` | 276 | 106 | 1 | 72 % |
-| `built-ins/JSON` | 38 | 105 | 22 | 23 % |
-| `built-ins/Number` | 254 | 86 | 0 | 75 % |
-| `language/literals` | 303 | 78 | 153 | 57 % |
-| `built-ins/Reflect` | 76 | 77 | 0 | 50 % |
-| `built-ins/Map` | 130 | 73 | 1 | 64 % |
-| `built-ins/SharedArrayBuffer` | 0 | 60 | 44 | 0 % |
-| `built-ins/Math` | 255 | 57 | 15 | 78 % |
-| `built-ins/Symbol` | 33 | 57 | 8 | 34 % |
-| `built-ins/ArrayBuffer` | 31 | 53 | 112 | 16 % |
+| `built-ins/JSON` | 40 | 103 | 22 | 24 % |
+| `built-ins/Set` | 293 | 89 | 1 | 77 % |
+| `language/literals` | 358 | 79 | 97 | 67 % |
+| `built-ins/Number` | 265 | 75 | 0 | 78 % |
+| `built-ins/Map` | 140 | 63 | 1 | 69 % |
+| `built-ins/Reflect` | 91 | 62 | 0 | 59 % |
 | `language/statementList` | 27 | 53 | 0 | 34 % |
-| `built-ins/NativeErrors` | 45 | 48 | 1 | 48 % |
-| `language/computed-property-names` | 0 | 48 | 0 | 0 % |
+| `built-ins/ArrayBuffer` | 32 | 52 | 112 | 16 % |
+| `built-ins/Symbol` | 39 | 51 | 8 | 40 % |
+| `built-ins/NativeErrors` | 45 | 49 | 0 | 48 % |
 | `built-ins/FinalizationRegistry` | 0 | 47 | 0 | 0 % |
-| `built-ins/BigInt` | 33 | 44 | 0 | 43 % |
 | `built-ins/parseFloat` | 12 | 42 | 0 | 22 % |
-| `built-ins/AsyncGeneratorPrototype` | 7 | 41 | 0 | 15 % |
-| `built-ins/Error` | 16 | 39 | 3 | 28 % |
+| `language/computed-property-names` | 6 | 42 | 0 | 13 % |
+| `built-ins/Error` | 17 | 41 | 0 | 29 % |
+| `built-ins/BigInt` | 39 | 38 | 0 | 51 % |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 0 | 38 | 0 | 0 % |
+| `built-ins/AsyncGeneratorPrototype` | 12 | 36 | 0 | 25 % |
 | `built-ins/GeneratorPrototype` | 26 | 35 | 0 | 43 % |
 | `built-ins/parseInt` | 26 | 29 | 0 | 47 % |
 | `built-ins/WeakRef` | 0 | 29 | 0 | 0 % |
-| `built-ins/WeakMap` | 114 | 27 | 0 | 81 % |
-| `built-ins/Boolean` | 26 | 25 | 0 | 51 % |
-| `built-ins/AggregateError` | 0 | 24 | 1 | 0 % |
+| `built-ins/AggregateError` | 0 | 25 | 0 | 0 % |
 | `language/function-code` | 85 | 23 | 109 | 39 % |
+| `built-ins/Boolean` | 28 | 23 | 0 | 55 % |
+| `built-ins/Math` | 290 | 22 | 15 | 89 % |
 | `language/types` | 82 | 22 | 9 | 73 % |
+| `built-ins/WeakMap` | 120 | 21 | 0 | 85 % |
 | `language/white-space` | 46 | 21 | 0 | 69 % |
-| `built-ins/AsyncGeneratorFunction` | 2 | 21 | 0 | 9 % |
-| `built-ins/GeneratorFunction` | 2 | 21 | 0 | 9 % |
-| `built-ins/WeakSet` | 65 | 20 | 0 | 76 % |
 | `language/global-code` | 17 | 20 | 5 | 40 % |
 | `built-ins/decodeURIComponent` | 37 | 19 | 0 | 66 % |
 | `built-ins/decodeURI` | 36 | 19 | 0 | 65 % |
+| `built-ins/AsyncGeneratorFunction` | 4 | 19 | 0 | 17 % |
+| `built-ins/GeneratorFunction` | 4 | 19 | 0 | 17 % |
 | `built-ins/encodeURIComponent` | 13 | 18 | 0 | 42 % |
+| `built-ins/WeakSet` | 68 | 17 | 0 | 80 % |
 | `built-ins/encodeURI` | 14 | 17 | 0 | 45 % |
 | `built-ins/RegExpStringIteratorPrototype` | 0 | 17 | 0 | 0 % |
 | `language/identifiers` | 252 | 16 | 0 | 94 % |
 | `built-ins/global` | 13 | 16 | 0 | 45 % |
 | `built-ins/ThrowTypeError` | 0 | 14 | 0 | 0 % |
 | `language/line-terminators` | 29 | 12 | 0 | 71 % |
-| `built-ins/AsyncFunction` | 6 | 12 | 0 | 33 % |
 | `built-ins/isFinite` | 3 | 12 | 0 | 20 % |
 | `built-ins/isNaN` | 3 | 12 | 0 | 20 % |
-| `annexB/built-ins` | 18 | 10 | 9 | 49 % |
 | `built-ins/MapIteratorPrototype` | 1 | 10 | 0 | 9 % |
 | `built-ins/SetIteratorPrototype` | 1 | 10 | 0 | 9 % |
 | `language/rest-parameters` | 1 | 10 | 0 | 9 % |
 | `built-ins/eval` | 0 | 10 | 0 | 0 % |
 | `built-ins/ArrayIteratorPrototype` | 10 | 9 | 8 | 37 % |
+| `annexB/built-ins` | 20 | 8 | 9 | 54 % |
+| `built-ins/AsyncFunction` | 11 | 7 | 0 | 61 % |
 | `language/block-scope` | 140 | 5 | 0 | 97 % |
 | `language/asi` | 97 | 5 | 0 | 95 % |
 | `language/comments` | 18 | 5 | 29 | 35 % |
@@ -165,5 +163,13 @@ with the least work. Skipped tests are excluded from
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
 | **parser** | 54.76 % | 95.61 % | 28542 / 52125 | n/a |
-| **runtime** | 30.42 % | 42.47 % | 15854 / 52125 | n/a |
+| **runtime** | 33.91 % | 45.72 % | 17513 / 51639 | n/a |
+
+Biggest movers (runtime):
+
+- `language/expressions` +45
+- `built-ins/Promise` +42
+- `language/computed-property-names` +6
+- `built-ins/Object` +3
+- `built-ins/Array` +1
 
