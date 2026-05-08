@@ -198,6 +198,22 @@ match indices land in spec-correct UTF-16 code units.
 `flags`, `dotAll` accessor; minor edge cases in the
 String.prototype dispatch.
 
+**Known imperfection (Annex B grammar leakage).** §B.1.4
+extends regex grammar with permissive forms that apply only
+when the pattern is compiled *without* the `u` (or `v`) flag —
+e.g. `\1` outside a capturing group treated as octal `\001`,
+and the lower-bound-elided quantifier `{,n}`. With `u` / `v`
+both forms correctly throw `SyntaxError`; without the flag the
+vendored libregexp accepts them, since Annex B is part of the
+normative spec and every other shipping engine does the same.
+Cynic's "Annex B not on the menu" stance is about *language*
+Annex B (sloppy mode, `with`, function-in-block, HTML comments,
+`escape`/`unescape`, the String HTML wrappers) — regex Annex B
+is left as-is. Tightening would mean either patching vendored
+libregexp or adding a Cynic-side pattern pre-validator; both
+cost more than the leak is worth and the `annexB/built-ins/RegExp/`
+test corpus is already path-skipped.
+
 ## Tooling
 
 **Done.**
