@@ -72,7 +72,8 @@ These are project rules — they apply to everyone.
 
 ## Build & test
 
-Zig 0.16 or newer. One-time setup:
+Zig 0.17-dev (master) — the Zig project skipped a stable 0.16, so
+CI tracks `master`. One-time setup:
 
     git submodule update --init vendor/test262
 
