@@ -4612,30 +4612,16 @@ fn emitParamPrologue(self: *Compiler, sp: *const ast.statement.SimpleParam, i: u
 /// default is attached.
 fn applyDefaultIfNeeded(self: *Compiler, elem: ast.statement.BindingElement) CompileError!void {
     if (elem.default) |*default_expr| {
-        const r_val = try self.reserveTemp();
-        defer self.releaseTemp();
-        try self.builder.emitOp(.star, elem.span);
-        try self.builder.emitU8(r_val);
-
-        try self.builder.emitOp(.lda_undefined, elem.span);
-        try self.builder.emitOp(.strict_neq, elem.span);
-        try self.builder.emitU8(r_val);
-        try self.builder.emitOp(.jmp_if_true, elem.span);
-        const keep_patch = self.builder.here();
-        try self.builder.emitI16(0);
-
-        try self.compileExpression(default_expr);
-        try self.builder.emitOp(.jmp, elem.span);
-        const end_patch = self.builder.here();
-        try self.builder.emitI16(0);
-
-        const keep_target = self.builder.here();
-        try self.builder.patchI16(keep_patch, keep_target);
-        try self.builder.emitOp(.ldar, elem.span);
-        try self.builder.emitU8(r_val);
-
-        const end_target = self.builder.here();
-        try self.builder.patchI16(end_patch, end_target);
+        // §13.15.5.5 — when the destructure target is a plain
+        // BindingIdentifier and the initializer is anonymous,
+        // SetFunctionName adopts the binding name. Routing
+        // through `applyDefaultExprNamed` lets the caller skip
+        // explicit re-encoding here.
+        const inferred_name: ?[]const u8 = switch (elem.target) {
+            .identifier => |id| self.source[id.span.start..id.span.end],
+            else => null,
+        };
+        try self.applyDefaultExprNamed(default_expr, elem.span, inferred_name);
     }
 }
 

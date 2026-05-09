@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 62.11 % | 94.89 % | 28800 / 46367 |
-| **runtime** | 47.46 % | 57.64 % | 22008 / 46367 |
+| **runtime** | 48.99 % | 59.50 % | 22710 / 46357 |
 
 ## Where the runtime stands, by area
 
@@ -23,8 +23,8 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_1000+ fails_** | | | | | |
-| `language/expressions` | 5571 | 4496 | 971 | 50 % | 55 % |
-| `language/statements` | 4079 | 4591 | 667 | 44 % | 47 % |
+| `language/expressions` | 5895 | 4172 | 971 | 53 % | 59 % |
+| `language/statements` | 4455 | 4215 | 667 | 48 % | 51 % |
 | **_100–999 fails_** | | | | | |
 | `built-ins/Array` | 2002 | 868 | 211 | 65 % | 70 % |
 | `built-ins/Date` | 421 | 165 | 8 | 71 % | 72 % |
@@ -69,7 +69,6 @@ browser-era built-ins …).
 | `built-ins/decodeURIComponent` | 38 | 18 | 0 | 68 % | 68 % |
 | `built-ins/encodeURI` | 15 | 16 | 0 | 48 % | 48 % |
 | `built-ins/encodeURIComponent` | 14 | 17 | 0 | 45 % | 45 % |
-| `built-ins/eval` | 0 | 10 | 0 | 0 % | 0 % |
 | `built-ins/global` | 13 | 16 | 0 | 45 % | 45 % |
 | `built-ins/isFinite` | 3 | 12 | 0 | 20 % | 20 % |
 | `built-ins/isNaN` | 3 | 12 | 0 | 20 % | 20 % |
@@ -98,7 +97,6 @@ browser-era built-ins …).
 | `language/asi` | 97 | 5 | 0 | 95 % | 95 % |
 | `language/block-scope` | 140 | 5 | 0 | 97 % | 97 % |
 | `language/comments` | 18 | 5 | 29 | 35 % | 78 % |
-| `language/destructuring` | 15 | 2 | 2 | 79 % | 88 % |
 | `language/identifier-resolution` | 6 | 3 | 5 | 43 % | 67 % |
 | `language/punctuators` | 10 | 1 | 0 | 91 % | 91 % |
 | `language/reserved-words` | 26 | 1 | 0 | 96 % | 96 % |
@@ -112,6 +110,7 @@ browser-era built-ins …).
 | ~~`built-ins/SuppressedError`~~ | ~~0~~ | ~~0~~ | ~~22~~ | ~~0 %~~ | ~~0 %~~ |
 | ~~`built-ins/Temporal`~~ | ~~0~~ | ~~0~~ | ~~4588~~ | ~~0 %~~ | ~~0 %~~ |
 | ~~`built-ins/Uint8Array`~~ | ~~0~~ | ~~0~~ | ~~68~~ | ~~0 %~~ | ~~0 %~~ |
+| `language/destructuring` | 17 | 0 | 2 | 89 % | 100 % |
 | ~~`language/directive-prologue`~~ | ~~0~~ | ~~0~~ | ~~62~~ | ~~0 %~~ | ~~0 %~~ |
 | `language/export` | 3 | 0 | 0 | 100 % | 100 % |
 | `language/future-reserved-words` | 48 | 0 | 7 | 87 % | 100 % |
@@ -142,7 +141,13 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
 | **parser** | 62.11 % | 94.89 % | 28800 / 46367 | +258 |
-| **runtime** | 47.46 % | 57.64 % | 22008 / 46367 | +4143 |
+| **runtime** | 48.99 % | 59.50 % | 22710 / 46357 | +4845 |
+
+Biggest movers (runtime):
+
+- `language/statements` +376
+- `language/expressions` +324
+- `language/destructuring` +2
 
 ### 2026-05-08 — cynic `unknown`, test262 `d0c1b455`
 
