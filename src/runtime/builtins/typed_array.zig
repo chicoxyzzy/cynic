@@ -366,6 +366,75 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind) NativeFn {
                     return this_value;
                 }
 
+                // Iterable source — §23.2.5.1.5 IterableToList path.
+                // Per spec, GetMethod(items, @@iterator) is checked
+                // before the array-like fallback. If the source has a
+                // callable `@@iterator`, drain it to a temporary list
+                // before sizing the buffer.
+                const iter_method_v = intrinsics.getPropertyChain(realm, src, "@@iterator") catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                if (heap_mod.valueAsFunction(iter_method_v)) |iter_method| {
+                    const interp = @import("../interpreter.zig");
+                    const iter_outcome = interp.callJSFunction(realm.allocator, realm, iter_method, arg, &.{}) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => return error.NativeThrew,
+                    };
+                    const iter = switch (iter_outcome) {
+                        .value, .yielded => |v| v,
+                        .thrown => return error.NativeThrew,
+                    };
+                    const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return throwTypeError(realm, "TypedArray: @@iterator did not return an iterator object");
+                    const next_v = intrinsics.getPropertyChain(realm, iter_obj, "next") catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => return error.NativeThrew,
+                    };
+                    const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "TypedArray: iterator missing callable 'next'");
+
+                    var collected: std.ArrayListUnmanaged(Value) = .empty;
+                    defer collected.deinit(realm.allocator);
+                    // §23.2.5.1.5 — re-entering JS via `next()` can
+                    // trigger a GC. Pin the iterator and the
+                    // accumulated values through a HandleScope so the
+                    // collected buffer survives every call.
+                    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+                    defer scope.close();
+                    scope.push(iter) catch return error.OutOfMemory;
+                    const max_iter: usize = 1 << 24;
+                    var step: usize = 0;
+                    while (step < max_iter) : (step += 1) {
+                        const result_outcome = interp.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            else => return error.NativeThrew,
+                        };
+                        const result = switch (result_outcome) {
+                            .value, .yielded => |v| v,
+                            .thrown => return error.NativeThrew,
+                        };
+                        const result_obj = heap_mod.valueAsPlainObject(result) orelse return throwTypeError(realm, "TypedArray: iterator next() did not return an object");
+                        if (toBoolean(result_obj.get("done"))) break;
+                        const item = result_obj.get("value");
+                        scope.push(item) catch return error.OutOfMemory;
+                        collected.append(realm.allocator, item) catch return error.OutOfMemory;
+                    }
+                    const length: usize = collected.items.len;
+                    const byte_len = length * elem_size;
+                    const buf_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+                    if (heap_mod.valueAsFunction(realm.globals.get("ArrayBuffer") orelse Value.undefined_)) |ab| {
+                        buf_obj.prototype = ab.prototype;
+                    }
+                    const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
+                    @memset(buf_bytes, 0);
+                    buf_obj.array_buffer = buf_bytes;
+                    inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length };
+                    var idx: usize = 0;
+                    while (idx < length) : (idx += 1) {
+                        writeTypedElement(buf_bytes, kind, idx * elem_size, collected.items[idx]);
+                    }
+                    return this_value;
+                }
+
                 // Array-like source — copy elements.
                 const len_v = src.get("length");
                 if (len_v.isInt32() or len_v.isDouble()) {
