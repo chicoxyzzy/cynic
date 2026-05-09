@@ -5027,8 +5027,31 @@ fn compileTry(self: *Compiler, s: ast.statement.TryStmt) CompileError!void {
         defer self.scope = saved;
 
         if (h.param) |target| {
-            const name = identifierName(self.source, target) orelse return error.UnsupportedStatement;
-            catch_register = try self.declareBinding(name, .let_, h.span);
+            // §14.15 CatchParameter is a BindingIdentifier or
+            // BindingPattern. The dispatch in `unwindThrow` deposits
+            // the thrown value into the env slot recorded as
+            // `catch_register`. For a bare identifier we declare
+            // that identifier directly. For a pattern we allocate a
+            // synthetic let slot, declare each leaf binding inside
+            // the pattern, and deconstruct from the synthetic slot
+            // at the top of the handler body.
+            switch (target) {
+                .identifier => {
+                    const name = identifierName(self.source, target) orelse return error.UnsupportedStatement;
+                    catch_register = try self.declareBinding(name, .let_, h.span);
+                },
+                .array, .object => {
+                    const synth_slot = try self.declareBinding("__cynic_catch_ex__", .let_, target.span());
+                    catch_register = synth_slot;
+                    try self.declarePatternBindings(target, .let_);
+                    // Load the deposited exception into acc and run
+                    // BindingInitialization (§14.15.10 step 5).
+                    try self.builder.emitOp(.lda_env, target.span());
+                    try self.builder.emitU8(0);
+                    try self.builder.emitU8(synth_slot);
+                    try self.compileDestructure(target);
+                },
+            }
         }
         try self.compileBlock(h.body.body, h.body.span);
         catch_body_end = self.builder.here();
