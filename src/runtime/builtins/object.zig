@@ -375,10 +375,12 @@ fn descriptorKey(realm: *Realm, v: Value) NativeError![]const u8 {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
         return s.bytes;
     }
-    if (heap_mod.valueAsSymbol(v)) |sym| {
-        if (sym.description) |d| return d;
-        return "@@anon-symbol";
-    }
+    // Symbols use their stable `prop_key` slug (`@@iterator` for
+    // well-known, `<sym:N>` for user-allocated). The interpreter's
+    // computed-key path stringifies via the same slug, so
+    // `Object.defineProperty(o, sym, ...)` and `o[sym]` resolve
+    // to the same slot.
+    if (heap_mod.valueAsSymbol(v)) |sym| return sym.prop_key;
     // §7.1.19 ToPropertyKey — fall back to ToString for numbers,
     // booleans, etc.
     const s = stringifyArg(realm, v) catch return error.OutOfMemory;

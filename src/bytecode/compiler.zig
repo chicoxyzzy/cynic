@@ -1103,6 +1103,15 @@ pub const Compiler = struct {
                     try self.builder.emitOp(.star, p.span);
                     try self.builder.emitU8(r_key);
                     try self.compileExpression(&p.value);
+                    // §15.5.6.4 — anonymous function-likes pick up
+                    // a name derived from the computed key. The
+                    // opcode no-ops if the value already has a
+                    // non-empty name or isn't a function.
+                    if (isAnonymousFunctionLike(&p.value)) {
+                        try self.builder.emitOp(.set_fn_name_from, p.span);
+                        try self.builder.emitU8(r_key);
+                        try self.builder.emitU8(0); // no prefix
+                    }
                     try self.builder.emitOp(.sta_computed, p.span);
                     try self.builder.emitU8(r_obj);
                     try self.builder.emitU8(r_key);
@@ -1127,21 +1136,34 @@ pub const Compiler = struct {
                     .numeric => |span| self.source[span.start..span.end],
                     else => return error.UnsupportedExpression, // private
                 };
+                // §B.3.1 — `{ __proto__: v }` (with a non-computed
+                // `__proto__` key, no shorthand): if `v` is Object
+                // or Null, set [[Prototype]]; otherwise no-op. Do
+                // *not* create a property named `__proto__`.
+                if (std.mem.eql(u8, key_slice, "__proto__") and p.key != .computed) {
+                    try self.compileExpression(&p.value);
+                    try self.builder.emitOp(.set_proto_literal, p.span);
+                    try self.builder.emitU8(r_obj);
+                    continue;
+                }
                 const k = try self.internString(key_slice);
-                try self.compileExpression(&p.value);
+                // §13.2.5.5 step 7 — anonymous function-likes
+                // adopt the property key as their `.name`.
+                try self.compileNamedValue(&p.value, key_slice);
                 try self.builder.emitOp(.sta_property, p.span);
                 try self.builder.emitU16(k);
                 try self.builder.emitU8(r_obj);
             },
             .method => |m| {
                 if (m.is_generator or m.is_async) return error.UnsupportedExpression;
-                // Computed-key method (`{ [k]: function(){…} }`): eval
-                // the key first, store to a temp, then compile the
-                // method body and store-via `sta_computed`. Computed
-                // accessors are still unsupported (would need a new
-                // `def_computed_accessor` opcode).
+                // Computed-key method / accessor — evaluate the key,
+                // park it in a temp, compile the body, then dispatch:
+                //   .method  → `sta_computed`
+                //   .getter  → `def_computed_accessor` (is_setter=0)
+                //   .setter  → `def_computed_accessor` (is_setter=1)
+                // §13.2.5.5 PropertyDefinitionEvaluation, with the
+                // ComputedPropertyName subforms.
                 if (m.key == .computed) {
-                    if (m.kind != .method) return error.UnsupportedExpression;
                     try self.compileExpression(m.key.computed);
                     const r_key = try self.reserveTemp();
                     defer self.releaseTemp();
@@ -1157,9 +1179,35 @@ pub const Compiler = struct {
                     );
                     try self.builder.emitOp(.make_function, m.span);
                     try self.builder.emitU16(tk);
-                    try self.builder.emitOp(.sta_computed, m.span);
-                    try self.builder.emitU8(r_obj);
+                    // §15.5.6.4 — methods get the bare key as a
+                    // name; getters/setters prefix `get `/`set `.
+                    const prefix_kind: u8 = switch (m.kind) {
+                        .method => 0,
+                        .getter => 1,
+                        .setter => 2,
+                    };
+                    try self.builder.emitOp(.set_fn_name_from, m.span);
                     try self.builder.emitU8(r_key);
+                    try self.builder.emitU8(prefix_kind);
+                    switch (m.kind) {
+                        .method => {
+                            try self.builder.emitOp(.sta_computed, m.span);
+                            try self.builder.emitU8(r_obj);
+                            try self.builder.emitU8(r_key);
+                        },
+                        .getter => {
+                            try self.builder.emitOp(.def_computed_accessor, m.span);
+                            try self.builder.emitU8(r_obj);
+                            try self.builder.emitU8(r_key);
+                            try self.builder.emitU8(0);
+                        },
+                        .setter => {
+                            try self.builder.emitOp(.def_computed_accessor, m.span);
+                            try self.builder.emitU8(r_obj);
+                            try self.builder.emitU8(r_key);
+                            try self.builder.emitU8(1);
+                        },
+                    }
                     continue;
                 }
                 const key_slice = switch (m.key) {
@@ -1173,12 +1221,26 @@ pub const Compiler = struct {
                     else => return error.UnsupportedExpression,
                 };
                 const k = try self.internString(key_slice);
+                // §15.5.6.4 — accessor `.name` is the property
+                // key prefixed with `get ` / `set `; the bare
+                // method form keeps the key as-is.
+                const fn_name = switch (m.kind) {
+                    .method => key_slice,
+                    .getter => blk: {
+                        const arena = self.realm.classAllocator();
+                        break :blk std.fmt.allocPrint(arena, "get {s}", .{key_slice}) catch return error.OutOfMemory;
+                    },
+                    .setter => blk: {
+                        const arena = self.realm.classAllocator();
+                        break :blk std.fmt.allocPrint(arena, "set {s}", .{key_slice}) catch return error.OutOfMemory;
+                    },
+                };
                 // Compile the method body as a function template.
                 const tk = try compileFunctionTemplate(
                     self,
                     m.params,
                     FunctionBody{ .block = m.body.body },
-                    key_slice,
+                    fn_name,
                     false,
                     m.span,
                 );
@@ -1489,6 +1551,97 @@ pub const Compiler = struct {
         try self.builder.emitOp(op, a.span);
         try self.builder.emitU8(r_old);
         try Helper.emitStore(self, a.span, r_obj, name_k, private_k, computed_r);
+    }
+
+    /// §IsAnonymousFunctionDefinition (informally) — the syntactic
+    /// shapes that adopt a name from their binding context.
+    /// Mirrors `compileNamedValue`'s match list so the runtime
+    /// `set_fn_name_from` is only emitted when needed.
+    /// `ParenthesizedExpression` is transparent here: per
+    /// §IsAnonymousFunctionDefinition the cover grammar reduces
+    /// `(expr)` to `expr` for naming purposes, so `(function(){})`
+    /// still picks up the binding's name.
+    fn isAnonymousFunctionLike(expr: *const Expression) bool {
+        var cur = expr;
+        while (cur.* == .parenthesized) cur = cur.parenthesized.expression;
+        return switch (cur.*) {
+            .function_expr => |fe| fe.name == null,
+            .arrow_function => true,
+            .class_expr => |ce| ce.name == null,
+            else => false,
+        };
+    }
+
+    /// §13.2.5.5 PropertyDefinitionEvaluation step 7 / 8.f /
+    /// §15.5.6.4 — when an *anonymous* function-like value is
+    /// assigned through certain binding contexts (object property,
+    /// class field, variable initializer, default parameter), the
+    /// containing key/identifier becomes its `.name`. This helper
+    /// recognises the eligible expression shapes (anonymous
+    /// `FunctionExpression`, `ArrowFunction`, anonymous
+    /// `ClassExpression`) and threads `name` into the corresponding
+    /// template; everything else falls back to the default
+    /// `compileExpression` path.
+    fn compileNamedValue(self: *Compiler, expr: *const Expression, name: []const u8) CompileError!void {
+        // Peel transparent `(expr)` wrappers so that
+        // `id: (function(){})` still infers `name = "id"`.
+        var inner = expr;
+        while (inner.* == .parenthesized) inner = inner.parenthesized.expression;
+        switch (inner.*) {
+            .function_expr => |fe| {
+                if (fe.name == null) {
+                    const k = try compileFunctionTemplateExt(
+                        self,
+                        fe.params,
+                        FunctionBody{ .block = fe.body.body },
+                        name,
+                        false,
+                        fe.is_generator,
+                        fe.is_async,
+                        fe.span,
+                    );
+                    try self.builder.emitOp(.make_function, fe.span);
+                    try self.builder.emitU16(k);
+                    return;
+                }
+            },
+            .arrow_function => |af| {
+                const body: FunctionBody = switch (af.body) {
+                    .block => |b| .{ .block = b.body },
+                    .expression => |e| .{ .expression = e },
+                };
+                const k = try compileFunctionTemplateExt(
+                    self,
+                    af.params,
+                    body,
+                    name,
+                    true,
+                    false,
+                    af.is_async,
+                    af.span,
+                );
+                try self.builder.emitOp(.make_function, af.span);
+                try self.builder.emitU16(k);
+                return;
+            },
+            .class_expr => |ce| {
+                if (ce.name == null) {
+                    const k = try compileClassTemplate(
+                        self,
+                        name,
+                        ce.superclass,
+                        ce.body,
+                        ce.span,
+                    );
+                    if (ce.superclass) |s| try self.compileExpression(s);
+                    try self.builder.emitOp(.make_class, ce.span);
+                    try self.builder.emitU16(k);
+                    return;
+                }
+            },
+            else => {},
+        }
+        try self.compileExpression(expr);
     }
 
     fn compileFunctionExpr(self: *Compiler, fe: ast.expression.FunctionExpr) CompileError!void {
@@ -1998,7 +2151,12 @@ pub const Compiler = struct {
     fn compileAssignment(self: *Compiler, a: ast.expression.AssignExpr) CompileError!void {
         // §13.15. Identifier targets go through the env-binding
         // path; member-access targets (`obj.x = …`) are later.
-        if (a.target.* == .member) {
+        // Peel `(target)` wrappers — `(x) = 1` is just `x = 1`
+        // syntactically (§13.15.1 IsValidSimpleAssignmentTarget
+        // walks through cover grammar transparently).
+        var target_ptr = a.target;
+        while (target_ptr.* == .parenthesized) target_ptr = target_ptr.parenthesized.expression;
+        if (target_ptr.* == .member) {
             try self.compileMemberAssignment(a);
             return;
         }
@@ -2009,15 +2167,15 @@ pub const Compiler = struct {
         // / identifier leaves. Compound assignment (`[a]+=x`)
         // is a SyntaxError; the parser already filters these,
         // so reaching here implies `op == .eq`.
-        if ((a.target.* == .array_literal or a.target.* == .object_literal) and a.op == .eq) {
+        if ((target_ptr.* == .array_literal or target_ptr.* == .object_literal) and a.op == .eq) {
             try self.compileExpression(a.value);
-            try self.compileAssignmentPattern(a.target.*);
+            try self.compileAssignmentPattern(target_ptr.*);
             return;
         }
-        if (a.target.* != .identifier_reference) {
+        if (target_ptr.* != .identifier_reference) {
             return error.UnsupportedExpression;
         }
-        const name = self.source[a.target.identifier_reference.span.start..a.target.identifier_reference.span.end];
+        const name = self.source[target_ptr.identifier_reference.span.start..target_ptr.identifier_reference.span.end];
         const scope = self.scope orelse return error.UnresolvedReference;
         const binding: Binding = scope.resolve(name) orelse blk: {
             // Not in any user-visible scope. If the name is
@@ -2046,7 +2204,12 @@ pub const Compiler = struct {
         }
 
         if (a.op == .eq) {
-            try self.compileExpression(a.value);
+            // §13.15.2 — for plain `x = e` where `e` is an
+            // anonymous function-like, the binding identifier
+            // becomes the function's `.name`. Compound forms
+            // (`x += e`) and logical forms (`x ||= e`) don't
+            // qualify per spec.
+            try self.compileNamedValue(a.value, name);
         } else if (a.op == .amp_amp_eq or a.op == .pipe_pipe_eq or a.op == .question_question_eq) {
             // §13.15.4 Logical assignment — `x &&= y`, `x ||= y`,
             // `x ??= y`. Reads `x` once; if the gate fails, leaves
@@ -3760,7 +3923,9 @@ fn compileLexicalDecl(self: *Compiler, ld: ast.statement.LexicalDecl) CompileErr
                     const name = self.source[id.span.start..id.span.end];
                     const binding = try self.declareBindingFull(name, .var_, d.span);
                     if (d.init) |*init_expr| {
-                        try self.compileExpression(init_expr);
+                        // §14.3.1.2 — anonymous function-likes
+                        // adopt the binding identifier as `.name`.
+                        try self.compileNamedValue(init_expr, name);
                     } else if (!binding.is_global) {
                         // Plain `var x;` at function scope still
                         // overwrites with undefined (later
@@ -3798,7 +3963,9 @@ fn compileLexicalDecl(self: *Compiler, ld: ast.statement.LexicalDecl) CompileErr
                 const name = self.source[id.span.start..id.span.end];
                 const binding = self.scope.?.lookupLocal(name) orelse return error.UnresolvedReference;
                 if (d.init) |*init_expr| {
-                    try self.compileExpression(init_expr);
+                    // §14.3.1.2 — anonymous function-likes adopt
+                    // the binding identifier as their `.name`.
+                    try self.compileNamedValue(init_expr, name);
                 } else {
                     // §14.3.1 — `const x;` is a SyntaxError (already
                     // rejected by the parser via `const_without_initializer`).
@@ -4000,7 +4167,10 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
                     // Shorthand `{a}` is target `a` (assign back to a).
                     // `{a = 1}` is shorthand with default — the parser
                     // wraps the value as `assignment(eq, identifier_reference, default)`.
-                    try self.assignAssignmentPatternLeaf(op.value);
+                    // `{x: a = 1}` puts the same `assignment(...)` node
+                    // under a renamed key. Either shape is handled by
+                    // `assignAssignmentPatternElem`.
+                    try self.assignAssignmentPatternElem(op.value);
                 },
                 .spread => |sp| {
                     // §13.15.5 RestElement on object pattern —
@@ -4058,7 +4228,18 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
 /// already loaded by the caller.
 fn assignAssignmentPatternElem(self: *Compiler, elt: ast.expression.Expression) CompileError!void {
     if (elt == .assignment and elt.assignment.op == .eq) {
-        try self.applyDefaultExpr(elt.assignment.value, elt.assignment.span);
+        // §13.15.5.5 — when the destructuring target is a plain
+        // identifier reference and the initializer is anonymous,
+        // `SetFunctionName` adopts the identifier as the name.
+        const named_target: ?[]const u8 = blk: {
+            var t = elt.assignment.target;
+            while (t.* == .parenthesized) t = t.parenthesized.expression;
+            if (t.* == .identifier_reference) {
+                break :blk self.source[t.identifier_reference.span.start..t.identifier_reference.span.end];
+            }
+            break :blk null;
+        };
+        try self.applyDefaultExprNamed(elt.assignment.value, elt.assignment.span, named_target);
         try self.assignAssignmentPatternLeaf(elt.assignment.target.*);
         return;
     }
@@ -4161,6 +4342,13 @@ fn assignmentPatternKey(self: *Compiler, key: ast.expression.PropertyKey) Compil
 /// Assignment-pattern variant that takes the default as an
 /// already-parsed Expression pointer (not a BindingElement).
 fn applyDefaultExpr(self: *Compiler, default_expr: *ast.expression.Expression, span: Span) CompileError!void {
+    return applyDefaultExprNamed(self, default_expr, span, null);
+}
+
+/// `applyDefaultExpr` with optional `binding_name` — when
+/// supplied and the default expression is an anonymous
+/// function-like, the function adopts that name (§13.15.5.5).
+fn applyDefaultExprNamed(self: *Compiler, default_expr: *ast.expression.Expression, span: Span, binding_name: ?[]const u8) CompileError!void {
     const r_val = try self.reserveTemp();
     defer self.releaseTemp();
     try self.builder.emitOp(.star, span);
@@ -4173,7 +4361,11 @@ fn applyDefaultExpr(self: *Compiler, default_expr: *ast.expression.Expression, s
     const keep_patch = self.builder.here();
     try self.builder.emitI16(0);
 
-    try self.compileExpression(default_expr);
+    if (binding_name) |name| {
+        try self.compileNamedValue(default_expr, name);
+    } else {
+        try self.compileExpression(default_expr);
+    }
     try self.builder.emitOp(.jmp, span);
     const end_patch = self.builder.here();
     try self.builder.emitI16(0);

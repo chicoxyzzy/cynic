@@ -641,6 +641,20 @@ pub fn openForInIterator(
                     str_keys.append(realm.allocator, key) catch return error.OutOfMemory;
                 }
             }
+            // Accessor descriptors are still own properties for
+            // §14.7.5.6 EnumerateObjectProperties — they show up
+            // in `for-in` and `Object.keys` alongside data slots.
+            var ait = cur.accessors.iterator();
+            while (ait.next()) |entry| {
+                const key = entry.key_ptr.*;
+                if (std.mem.startsWith(u8, key, "__cynic_")) continue;
+                if (!cur.flagsFor(key).enumerable) continue;
+                if (canonicalIntegerIndexInterp(key)) |i| {
+                    int_keys.append(realm.allocator, .{ .idx = i, .key = key }) catch return error.OutOfMemory;
+                } else {
+                    str_keys.append(realm.allocator, key) catch return error.OutOfMemory;
+                }
+            }
             std.mem.sort(KeyEntry, int_keys.items, {}, struct {
                 fn lessThan(_: void, a: KeyEntry, b: KeyEntry) bool {
                     return a.idx < b.idx;
@@ -2340,7 +2354,6 @@ fn runFrames(
             .in_op => {
                 const r = code[ip];
                 ip += 1;
-                const key_v = registers[r];
                 const obj_v = acc;
                 // §13.10.1 — RHS must be an object; otherwise TypeError.
                 const obj_in = heap_mod.valueAsPlainObject(obj_v) orelse {
@@ -2352,6 +2365,15 @@ fn runFrames(
                         return .{ .thrown = ex };
                     }
                     continue;
+                };
+                // §7.1.19 ToPropertyKey on the LHS.
+                const key_v = switch (try coerceToPropertyKey(allocator, realm, frames, f, ip, registers[r])) {
+                    .ok => |v| v,
+                    .handled => {
+                        committed = true;
+                        continue;
+                    },
+                    .uncaught => |ex| return .{ .thrown = ex },
                 };
                 var key_buf: [64]u8 = undefined;
                 const key_slice = computedKeyToString(key_v, &key_buf);
@@ -2447,8 +2469,17 @@ fn runFrames(
                     acc = Value.undefined_;
                     continue;
                 };
+                // §7.1.19 ToPropertyKey on the bracket key.
+                const key_v = switch (try coerceToPropertyKey(allocator, realm, frames, f, ip, acc)) {
+                    .ok => |v| v,
+                    .handled => {
+                        committed = true;
+                        continue;
+                    },
+                    .uncaught => |ex| return .{ .thrown = ex },
+                };
                 var key_buf: [64]u8 = undefined;
-                const key_slice = computedKeyToString(acc, &key_buf);
+                const key_slice = computedKeyToString(key_v, &key_buf);
                 acc = parent_proto.get(key_slice);
             },
 
@@ -2742,6 +2773,105 @@ fn runFrames(
                 } else {
                     entry.value_ptr.*.getter = fn_obj;
                 }
+            },
+
+            .def_computed_accessor => {
+                // Computed-key counterpart of `def_accessor` — the
+                // key is the value in `r_key`, coerced via §7.1.19
+                // ToPropertyKey (toPrimitive(string) for objects,
+                // then computedKeyToString to format the primitive).
+                // §13.2.5 PropertyDefinitionEvaluation: ComputedPropertyName.
+                const r_obj = code[ip];
+                const r_key = code[ip + 1];
+                const is_setter = code[ip + 2] != 0;
+                ip += 3;
+                const key_v = switch (try coerceToPropertyKey(allocator, realm, frames, f, ip, registers[r_key])) {
+                    .ok => |v| v,
+                    .handled => {
+                        committed = true;
+                        continue;
+                    },
+                    .uncaught => |ex| return .{ .thrown = ex },
+                };
+                var key_buf: [64]u8 = undefined;
+                const key_slice = computedKeyToString(key_v, &key_buf);
+                const obj = heap_mod.valueAsPlainObject(registers[r_obj]) orelse return error.InvalidOpcode;
+                const fn_obj = heap_mod.valueAsFunction(acc) orelse return error.InvalidOpcode;
+                const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
+                const entry = obj.accessors.getOrPut(allocator, owned.bytes) catch return error.OutOfMemory;
+                if (!entry.found_existing) entry.value_ptr.* = .{};
+                if (is_setter) {
+                    entry.value_ptr.*.setter = fn_obj;
+                } else {
+                    entry.value_ptr.*.getter = fn_obj;
+                }
+            },
+
+            .set_proto_literal => {
+                // §B.3.1 — only Object / Null actually mutate
+                // `[[Prototype]]`; any other value is a silent no-op.
+                // The computed form `{ ["__proto__"]: v }` reaches
+                // `sta_property` instead, so this path is the
+                // strictly-non-computed literal.
+                const r_obj = code[ip];
+                ip += 1;
+                const obj = heap_mod.valueAsPlainObject(registers[r_obj]) orelse return error.InvalidOpcode;
+                if (acc.isNull()) {
+                    obj.prototype = null;
+                } else if (heap_mod.valueAsPlainObject(acc)) |p| {
+                    obj.prototype = p;
+                }
+                // else: no-op; do not throw.
+            },
+
+            .set_fn_name_from => {
+                // §15.5.6.4 SetFunctionName for computed property
+                // keys. Only applies to anonymous function-likes
+                // (functions / classes whose .name is currently
+                // empty); a named expression keeps its name.
+                const r_key = code[ip];
+                const prefix_kind = code[ip + 1];
+                ip += 2;
+                const fn_obj = heap_mod.valueAsFunction(acc) orelse continue;
+                // Already named — Annex-B-style nested fix-up
+                // doesn't override.
+                const cur_name = fn_obj.get("name");
+                if (cur_name.isString()) {
+                    const cs: *JSString = @ptrCast(@alignCast(cur_name.asString()));
+                    // For accessors the spec adds the prefix even
+                    // when the underlying function had no name,
+                    // and we always emit those with the empty
+                    // template — so only the "no prefix" path
+                    // honours an existing non-empty name.
+                    if (cs.bytes.len != 0 and prefix_kind == 0) continue;
+                }
+                const prefix: []const u8 = switch (prefix_kind) {
+                    1 => "get ",
+                    2 => "set ",
+                    else => "",
+                };
+                const key_v = registers[r_key];
+                // §15.5.6.4 step 4 — Symbol receivers wrap the
+                // description in brackets; description-less
+                // symbols produce the empty string for the
+                // suffix portion.
+                if (heap_mod.valueAsSymbol(key_v)) |sym| {
+                    const suffix: []const u8 = if (sym.description) |d| d else "";
+                    const final = if (sym.description != null)
+                        std.fmt.allocPrint(realm.allocator, "{s}[{s}]", .{ prefix, suffix }) catch return error.OutOfMemory
+                    else
+                        std.fmt.allocPrint(realm.allocator, "{s}", .{prefix}) catch return error.OutOfMemory;
+                    defer realm.allocator.free(final);
+                    const owned = realm.heap.allocateString(final) catch return error.OutOfMemory;
+                    fn_obj.set(realm.allocator, "name", Value.fromString(owned)) catch return error.OutOfMemory;
+                    continue;
+                }
+                var key_buf: [64]u8 = undefined;
+                const key_slice = computedKeyToString(key_v, &key_buf);
+                const final = std.fmt.allocPrint(realm.allocator, "{s}{s}", .{ prefix, key_slice }) catch return error.OutOfMemory;
+                defer realm.allocator.free(final);
+                const owned = realm.heap.allocateString(final) catch return error.OutOfMemory;
+                fn_obj.set(realm.allocator, "name", Value.fromString(owned)) catch return error.OutOfMemory;
             },
 
             .sta_private => {
@@ -3149,12 +3279,20 @@ fn runFrames(
                 const r_obj = code[ip];
                 ip += 1;
                 const recv = registers[r_obj];
-                // §7.1.19 ToPropertyKey — coerce the key to a string.
-                // handle int / double / bool / string /
-                // null / undefined; user-defined `[Symbol.toPrimitive]`
-                // hooks (§7.1.1) are later.
+                // §7.1.19 ToPropertyKey — for object keys (e.g.
+                // `obj[arr]`), run ToPrimitive(string) so user-
+                // defined `toString` / `valueOf` / `[@@toPrimitive]`
+                // hooks fire before we string-format.
+                const key_v = switch (try coerceToPropertyKey(allocator, realm, frames, f, ip, acc)) {
+                    .ok => |v| v,
+                    .handled => {
+                        committed = true;
+                        continue;
+                    },
+                    .uncaught => |ex| return .{ .thrown = ex },
+                };
                 var key_buf: [64]u8 = undefined;
-                const key_slice = computedKeyToString(acc, &key_buf);
+                const key_slice = computedKeyToString(key_v, &key_buf);
                 if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
                     var obj = obj_in;
                     // §10.5 Proxy [[Get]] — handler trap dispatch.
@@ -3188,6 +3326,30 @@ fn runFrames(
                             acc = Value.undefined_;
                             continue;
                         } else |_| {}
+                    }
+                    // §10.1.8 [[Get]] — accessor wins over data.
+                    // Mirror the `lda_property` handling so
+                    // `obj[expr]` and `obj.x` behave identically
+                    // when `x` resolves to a getter on the chain.
+                    if (lookupAccessor(obj, key_slice)) |acc_pair| {
+                        if (acc_pair.getter) |getter| {
+                            const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
+                            switch (outcome) {
+                                .value, .yielded => |v| acc = v,
+                                .thrown => |ex| {
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    continue;
+                                },
+                            }
+                        } else {
+                            acc = Value.undefined_;
+                        }
+                        continue;
                     }
                     acc = obj.get(key_slice);
                 } else if (heap_mod.valueAsFunction(recv)) |fn_obj| {
@@ -3228,8 +3390,18 @@ fn runFrames(
                 const r_key = code[ip + 1];
                 ip += 2;
                 const recv = registers[r_obj];
+                // §7.1.19 ToPropertyKey — object keys go through
+                // ToPrimitive(string) before stringification.
+                const key_v = switch (try coerceToPropertyKey(allocator, realm, frames, f, ip, registers[r_key])) {
+                    .ok => |v| v,
+                    .handled => {
+                        committed = true;
+                        continue;
+                    },
+                    .uncaught => |ex| return .{ .thrown = ex },
+                };
                 var key_buf: [64]u8 = undefined;
-                const key_slice = computedKeyToString(registers[r_key], &key_buf);
+                const key_slice = computedKeyToString(key_v, &key_buf);
                 // TypedArray numeric-index write — bypass the
                 // ordinary [[Set]] machinery; §23.2.4.6
                 // SetTypedArrayFromArrayLike writes straight to
@@ -3325,8 +3497,17 @@ fn runFrames(
                 const r_key = code[ip + 1];
                 ip += 2;
                 const recv = registers[r_obj];
+                // §7.1.19 ToPropertyKey for the bracket key.
+                const key_v = switch (try coerceToPropertyKey(allocator, realm, frames, f, ip, registers[r_key])) {
+                    .ok => |v| v,
+                    .handled => {
+                        committed = true;
+                        continue;
+                    },
+                    .uncaught => |ex| return .{ .thrown = ex },
+                };
                 var key_buf: [64]u8 = undefined;
-                const key_slice = computedKeyToString(registers[r_key], &key_buf);
+                const key_slice = computedKeyToString(key_v, &key_buf);
                 if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
                     if (obj_in.proxy_target != null) {
                         const r = try proxyDeleteTrap(allocator, realm, frames, f, ip, obj_in, key_slice);
@@ -4048,6 +4229,29 @@ fn coerceForCompare(
         },
     };
     return .{ .ok = prim };
+}
+
+/// §7.1.19 ToPropertyKey wrapper — when a computed key (`obj[k]`,
+/// `{ [k]: v }`, etc.) is an object that's neither Symbol nor
+/// BigInt, run §7.1.1 ToPrimitive with hint "string" so that
+/// `[arr]` evaluates `arr.toString()` (returning `"a,b,c"` for
+/// `[a,b,c]`, the empty string for `[]`, etc.) before
+/// `computedKeyToString` formats the result. Symbol primitives
+/// pass through — `computedKeyToString` already maps them to
+/// their stable `prop_key` slug. Returns `.handled` /
+/// `.uncaught` like the comparison coercion helpers.
+fn coerceToPropertyKey(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    frames: *std.ArrayListUnmanaged(CallFrame),
+    f: *CallFrame,
+    ip: usize,
+    value: Value,
+) RunError!CompareOutcome {
+    if (!value.isObject()) return .{ .ok = value };
+    if (heap_mod.valueAsSymbol(value) != null) return .{ .ok = value };
+    if (heap_mod.valueAsBigInt(value) != null) return .{ .ok = value };
+    return coerceForCompare(allocator, realm, frames, f, ip, value, .string);
 }
 
 /// §7.1.5 ToUint32 — coerces to u32 with the round-toward-zero,

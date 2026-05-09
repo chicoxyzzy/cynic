@@ -244,6 +244,39 @@ pub const Op = enum(u8) {
     /// setter (`is_setter != 0`) on `r_obj.accessors[key_k]`.
     /// §13.2.5 PropertyDefinitionEvaluation for accessors.
     def_accessor,
+    /// `[op] [r_obj:u8] [r_key:u8] [is_setter:u8]` — like
+    /// `def_accessor` but the key is the string in `r_key`
+    /// (after `computedKeyToString` coercion) rather than a
+    /// constant index. Drives `{ get [expr](){} }` and the
+    /// matching setter form.
+    def_computed_accessor,
+    /// `[op] [r_obj:u8]` — §B.3.1 `__proto__` literal — when an
+    /// object literal contains `{ __proto__: v }` (and the key
+    /// is *not* computed), the value is special: if `v` is an
+    /// Object set `r_obj.[[Prototype]] = v`; if `v` is `null`
+    /// set it to `null`; otherwise it's a no-op (the `__proto__`
+    /// property is *not* created). The computed form
+    /// `{ ["__proto__"]: v }` falls through to ordinary
+    /// `sta_property` and so isn't routed here. The acc holds
+    /// `v`; this op preserves acc.
+    set_proto_literal,
+    /// `[op] [r_key:u8] [prefix:u8]` — §13.2.5.5 / §15.5.6.4
+    /// SetFunctionName fix-up for computed property keys. If
+    /// `acc` is an anonymous function-like (`.name === ""`), set
+    /// its `.name` to the property-key derived from `r_key`:
+    ///   - String / numeric / boolean / null / undefined → ToString
+    ///   - Symbol with description `d`         → `"[" + d + "]"`
+    ///   - Symbol with no description          → `""`
+    ///   - Already-named function              → no-op
+    /// `prefix` selects an accessor-style prefix:
+    ///   - `0` → no prefix (plain method or value form)
+    ///   - `1` → `"get "` (getter)
+    ///   - `2` → `"set "` (setter)
+    /// Drives the `name` inference for `{ [k]: function(){} }`,
+    /// `{ [k]: () => x }`, `{ [k]: class{} }`, and the
+    /// `{ get [k](){} }` / `{ set [k](){} }` accessor forms.
+    /// The acc (the function/class) is preserved.
+    set_fn_name_from,
     /// Build the implicit `arguments` array-like for the current
     /// non-arrow function frame. Reads registers[0..argc] and
     /// returns a JSObject with numeric-index properties + a
@@ -480,7 +513,9 @@ pub const Op = enum(u8) {
             .in_op,
             .iter_close,
             .array_spread,
+            .set_proto_literal,
             => 1, // single u8 register operand
+            .set_fn_name_from => 2, // r_key:u8 + prefix:u8
             .mov,
             .array_rest_from,
             .object_rest_from,
@@ -509,6 +544,7 @@ pub const Op = enum(u8) {
             => 2, // u8 + u8
             .sta_property, .sta_private => 3, // k:u16 + r_obj:u8
             .def_accessor => 4, // k:u16 + r_obj:u8 + is_setter:u8
+            .def_computed_accessor => 3, // r_obj:u8 + r_key:u8 + is_setter:u8
             .lda_computed => 1, // r_obj:u8 (key in acc)
             .sta_computed => 2, // r_obj:u8 + r_key:u8
             .del_named_property => 3, // k:u16 + r_obj:u8
@@ -581,6 +617,9 @@ pub const Op = enum(u8) {
             .lda_private => "LdaPrivate",
             .sta_private => "StaPrivate",
             .def_accessor => "DefAccessor",
+            .def_computed_accessor => "DefComputedAccessor",
+            .set_proto_literal => "SetProtoLiteral",
+            .set_fn_name_from => "SetFnNameFrom",
             .lda_arguments => "LdaArguments",
             .gen_yield => "GenYield",
             .await_ => "Await",

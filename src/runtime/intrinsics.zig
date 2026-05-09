@@ -945,10 +945,32 @@ pub fn doubleToI64Saturating(d: f64) i64 {
 /// `.constructor` is wired back to the function and `.name` is
 /// `name`.
 /// to keep the runtime well-defined.
-pub fn stringifyArg(realm: *Realm, v: Value) !*JSString {
+pub fn stringifyArg(realm: *Realm, v: Value) NativeError!*JSString {
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
         return s;
+    }
+    // §7.1.17 ToString — for object receivers run §7.1.1
+    // ToPrimitive with hint "string" first, which consults
+    // `Symbol.toPrimitive` / `toString` / `valueOf` in spec
+    // order. Symbol primitives throw TypeError per §7.1.17 step 6.
+    if (v.isObject()) {
+        if (heap_mod.valueAsSymbol(v) != null) {
+            return throwTypeError(realm, "Cannot convert a Symbol value to a string");
+        }
+        if (heap_mod.valueAsBigInt(v)) |bi| {
+            const buf = std.fmt.allocPrint(realm.allocator, "{d}", .{bi.value}) catch return error.OutOfMemory;
+            defer realm.allocator.free(buf);
+            return realm.heap.allocateString(buf) catch return error.OutOfMemory;
+        }
+        if (heap_mod.valueAsFunction(v) != null) {
+            return realm.heap.allocateString("function () { [native code] }") catch return error.OutOfMemory;
+        }
+        const prim = try toPrimitive(realm, v, .string);
+        // Don't recurse into another `isObject()` case — at this
+        // point `prim` must be a primitive (toPrimitive throws
+        // TypeError otherwise).
+        return stringifyArg(realm, prim);
     }
     var buf: [64]u8 = undefined;
     const slice: []const u8 = blk: {
@@ -976,7 +998,7 @@ pub fn stringifyArg(realm: *Realm, v: Value) !*JSString {
             break :blk "[object]";
         }
     };
-    return realm.heap.allocateString(slice);
+    return realm.heap.allocateString(slice) catch return error.OutOfMemory;
 }
 
 // ── ArrayBuffer / DataView / TypedArray live in `builtins/typed_array.zig` ───
