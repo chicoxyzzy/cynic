@@ -93,6 +93,16 @@ code construction (aligns with SES).
   `Reflect.construct`).
 - Microtask queue + `await` suspension via generator-shaped frame
   saves; promise reaction queue with then / catch / finally.
+- Stop-the-world mark-sweep heap, fired on allocation pressure
+  (`gc_threshold` allocations between cycles, default 16,384).
+  Roots: globals, intrinsics, microtask queue, modules, top-level
+  chunks, active call frames, open handle scopes. The heap stays
+  bounded under any allocating loop / recursion / promise chain.
+  Operational details + `HandleScope` contract for natives:
+  [docs/handbook/gc.md](handbook/gc.md).
+- Per-test interpreter step budget — the test262 harness caps
+  each fixture at 50M opcodes so a `while(true){}` can't wedge
+  the sweep.
 
 **In progress / planned.**
 
@@ -103,6 +113,11 @@ code construction (aligns with SES).
 - Tail-call optimization (PTC).
 - Top-level `await` in modules.
 - `typeof` of a callable proxy returning `"function"`.
+- Plug the four known-leaking patterns at `gc_threshold=1`
+  (generator wrapper iteration, promise microtask chain,
+  property-bag growth, array spread) — see
+  [docs/handbook/gc.md](handbook/gc.md#known-root-gaps).
+- Generational / incremental GC.
 
 ## Standard library
 

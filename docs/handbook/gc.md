@@ -117,6 +117,36 @@ allocating loop's RSS stays under 20 MB and rare enough that scripts
 which churn through a few thousand short-lived objects don't pay for
 GC at all.
 
+## Known root gaps
+
+The default threshold (16,384) keeps the test262 sweep + the unit
+suite green. Dropping it to `1` (collect after every allocation, the
+maximum-stress configuration `interpreter_test.zig` uses for the GC
+tests) currently breaks four patterns; each is a missing root the
+walker doesn't yet reach. They're filed here, not in `// TODO`s:
+
+- **Generator wrapper iteration.** `for (v of gen())` crashes — the
+  `JSGenerator`'s saved frame is reachable through the wrapper
+  JSObject's `generator_ref`, but somewhere along the for-of /
+  iterator-protocol path a temporary loses its mark bit before the
+  next `next()` call.
+- **Promise microtask chain.** `.then(...).then(...)` queues
+  reactions whose `callback` and `result` hang off
+  `microtask_queue`. They survive a single collection, but mid-drain
+  collections lose them; the sub-Promise that's pending in step *n*
+  isn't being kept alive by step *n-1*'s reaction record.
+- **Property-bag growth.** A loop that writes 20+ keys onto the same
+  object triggers `HashMap.grow`. Mid-grow collection loses values
+  (the new bucket array is in flight before the property points at it).
+- **Array spread + iterator.** `[...src, k, ...src]` allocates a
+  fresh array, walks the iterator, accumulates results. The
+  in-flight result array isn't reachable from the active frame for
+  the brief window between iterator-step allocation and append.
+
+The two GC stress tests in `interpreter_test.zig` exercise patterns
+that already work (object-allocating loop, captured-env closures);
+the four above are the next hardening pass.
+
 ## What's not yet done
 
 The README has these as future work and they remain so:

@@ -154,7 +154,9 @@ in V8".
 Roughly in order of complexity:
 
 1. **Bump-allocator + mark-sweep** — what to start with. Simple,
-   correct, slow for long-running programs.
+   correct, slow for long-running programs. **What Cynic ships
+   today** — see [gc.md](gc.md) for the trigger / root-set / native
+   safety contract.
 2. **Generational moving** — ~80% of allocations die young.
    Bump-allocate in a young space, copy survivors to an old
    space, only old-space gets the heavy collector. Lieberman /

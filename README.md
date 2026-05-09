@@ -99,7 +99,11 @@ The shape, in broad strokes — the per-bucket numbers live in the
   per-area scoreboard.
 
 Internals: NaN-boxed values, Ignition-style register-file +
-accumulator bytecode, stop-the-world mark-sweep heap.
+accumulator bytecode, stop-the-world mark-sweep heap fired on
+allocation pressure (the heap stays bounded under any allocating
+loop / recursion / promise chain — see
+[`docs/handbook/gc.md`](docs/handbook/gc.md) for the trigger and
+the `HandleScope` contract for natives).
 
 ### Known gaps
 
