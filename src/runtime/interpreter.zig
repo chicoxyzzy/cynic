@@ -3920,7 +3920,7 @@ pub fn consumePendingException(realm: *Realm) ?Value {
 /// Walk `obj` and its prototype chain looking for an accessor
 /// (getter/setter) descriptor for `key`. Returns the
 /// `Accessor` if found, else null. §10.1.8 / §10.1.9.
-fn lookupAccessor(obj: *JSObject, key: []const u8) ?@import("object.zig").Accessor {
+pub fn lookupAccessor(obj: *JSObject, key: []const u8) ?@import("object.zig").Accessor {
     var cursor: ?*JSObject = obj;
     while (cursor) |c| : (cursor = c.prototype) {
         if (c.accessors.get(key)) |a| return a;
