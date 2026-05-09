@@ -286,6 +286,17 @@ const Options = struct {
     /// threads>1 because workers would otherwise interleave \r
     /// updates.
     threads: u32 = 0,
+    /// Per-test allocation-pressure GC threshold. Forwarded to
+    /// each fresh realm's `heap.gc_threshold` before the body
+    /// runs. Default tightens the engine's stock 16,384 down to
+    /// 4,096 so a fixture that allocates aggressively
+    /// (recursion, deep promise chains, allocating loops)
+    /// can't balloon a worker's peak RSS while still inside a
+    /// finite step budget. `0` falls through to the engine
+    /// default; lower values stress-test the GC trigger but
+    /// will currently surface the four known root gaps tracked
+    /// in `docs/handbook/gc.md`.
+    gc_threshold: u32 = 4096,
 };
 
 /// Path of the pass-cache, written at the repo root after every
@@ -599,7 +610,7 @@ pub fn main(init: std.process.Init) !void {
             const arena = per_file_arena.allocator();
 
             const harness_pair: ?harness_mod.HarnessSources = harness_sources;
-            const outcome = try classifyAndRun(arena, io, corpus, rel, opts.mode, harness_pair);
+            const outcome = try classifyAndRun(arena, io, corpus, rel, opts.mode, harness_pair, opts.gc_threshold);
             try recordOutcome(gpa, &stats, &buckets, &failures, &pass_paths, rel, outcome, is_full_run);
 
             if (opts.verbose) {
@@ -835,7 +846,7 @@ fn workerLoop(
         _ = arena_state.reset(.retain_capacity);
         const arena = arena_state.allocator();
 
-        const outcome = classifyAndRun(arena, ctx.io, ctx.corpus, rel, ctx.opts.mode, ctx.harness_sources) catch |err| {
+        const outcome = classifyAndRun(arena, ctx.io, ctx.corpus, rel, ctx.opts.mode, ctx.harness_sources, ctx.opts.gc_threshold) catch |err| {
             if (err == error.OutOfMemory) return err;
             try recordOutcome(ctx.gpa, stats, buckets, failures, pass_paths, rel, .{ .kind = .fail_false_reject }, ctx.is_full_run);
             continue;
@@ -878,6 +889,7 @@ fn classifyAndRun(
     rel: []const u8,
     mode: Mode,
     harness_pair: ?harness_mod.HarnessSources,
+    gc_threshold: u32,
 ) !RunResult {
     // Hard exclusions — `harness/`, `staging/`, `intl402/`.
     // Cynic-out-of-scope paths (Annex B / browser-era) are
@@ -986,6 +998,12 @@ fn classifyAndRun(
     // it expected a throw of that shape) or fails as a
     // false-reject — the worker keeps moving.
     realm.step_budget = 50_000_000;
+    // Forward the harness-level GC threshold (default 4,096
+    // tests/fixture, tunable via `--gc-threshold=N`) so a
+    // misbehaving allocating fixture can't balloon a worker's
+    // RSS while still inside its step budget. `0` falls through
+    // to the engine default.
+    if (gc_threshold != 0) realm.heap.gc_threshold = gc_threshold;
 
     // §INTERPRETING.md — async-flagged tests call `$DONE()` /
     // `$DONE(err)` to signal completion. Install the host hook
@@ -1878,6 +1896,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.list_failures = std.fmt.parseInt(u32, arg["--list-failures=".len..], 10) catch 0;
         } else if (std.mem.startsWith(u8, arg, "--threads=")) {
             opts.threads = std.fmt.parseInt(u32, arg["--threads=".len..], 10) catch 0;
+        } else if (std.mem.startsWith(u8, arg, "--gc-threshold=")) {
+            opts.gc_threshold = std.fmt.parseInt(u32, arg["--gc-threshold=".len..], 10) catch 4096;
         }
     }
     return opts;

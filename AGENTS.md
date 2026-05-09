@@ -101,7 +101,11 @@ rewritten only on full runs without `--filter` and without
 `--only-failing` itself), `--threads=<n>` (worker count;
 `0` = auto via `std.Thread.getCpuCount`, `1` = sequential
 reference path, `>1` = pool. Past ~4 threads diminishing
-returns kick in from libc malloc contention). The harness
+returns kick in from libc malloc contention),
+`--gc-threshold=<n>` (per-fixture allocation-pressure GC
+threshold, default 4,096; lower values stress-test the GC
+trigger but currently surface the four known root gaps in
+[docs/handbook/gc.md](docs/handbook/gc.md)). The harness
 scores against the **Cynic-targeted scope**: paths under
 `harness/`, `staging/`, `intl402/`, Annex B language extensions,
 and the browser-era built-ins Cynic doesn't ship are dropped from
