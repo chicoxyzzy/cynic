@@ -358,14 +358,14 @@ fn objectIs(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
 
 fn objectHasOwn(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    _ = realm;
     const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse {
         return error.NativeThrew;
     };
-    const key_v = argOr(args, 1, Value.undefined_);
-    if (!key_v.isString()) return Value.false_;
-    const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-    return Value.fromBool(obj.hasOwn(key_s.bytes));
+    // §7.1.19 ToPropertyKey — the spec coerces non-string,
+    // non-symbol args; `descriptorKey` handles strings, symbols,
+    // and primitive ToString fallback.
+    const key = descriptorKey(realm, argOr(args, 1, Value.undefined_)) catch return error.OutOfMemory;
+    return Value.fromBool(obj.hasOwn(key));
 }
 
 // ── Property descriptors (§20.1.2) ──────────────────────────────────────────
@@ -1082,15 +1082,14 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 // ── Object.prototype methods ────────────────────────────────────────────────
 
 fn objectHasOwnProperty(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
-    const key_v = argOr(args, 0, Value.undefined_);
-    if (!key_v.isString()) return Value.false_;
-    const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+    // §7.1.19 ToPropertyKey for the lookup — symbol args coerce
+    // through their stable `prop_key` slug, primitives via ToString.
+    const key = descriptorKey(realm, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
     if (heap_mod.valueAsPlainObject(this_value)) |obj| {
-        return Value.fromBool(obj.hasOwn(key_s.bytes));
+        return Value.fromBool(obj.hasOwn(key));
     }
     if (heap_mod.valueAsFunction(this_value)) |fn_obj| {
-        return Value.fromBool(fn_obj.hasOwn(key_s.bytes));
+        return Value.fromBool(fn_obj.hasOwn(key));
     }
     return Value.false_;
 }
@@ -1099,17 +1098,14 @@ fn objectHasOwnProperty(realm: *Realm, this_value: Value, args: []const Value) N
 /// `true` iff `key` is an own property of the receiver and its
 /// [[Enumerable]] attribute is `true`.
 fn objectProtoPropertyIsEnumerable(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
-    const key_v = argOr(args, 0, Value.undefined_);
-    if (!key_v.isString()) return Value.false_;
-    const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+    const key = descriptorKey(realm, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
     if (heap_mod.valueAsPlainObject(this_value)) |obj| {
-        if (!obj.hasOwn(key_s.bytes)) return Value.false_;
-        return Value.fromBool(obj.flagsFor(key_s.bytes).enumerable);
+        if (!obj.hasOwn(key)) return Value.false_;
+        return Value.fromBool(obj.flagsFor(key).enumerable);
     }
     if (heap_mod.valueAsFunction(this_value)) |fn_obj| {
-        if (!fn_obj.hasOwn(key_s.bytes)) return Value.false_;
-        return Value.fromBool(fn_obj.flagsForOwn(key_s.bytes).enumerable);
+        if (!fn_obj.hasOwn(key)) return Value.false_;
+        return Value.fromBool(fn_obj.flagsForOwn(key).enumerable);
     }
     return Value.false_;
 }
