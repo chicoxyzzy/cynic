@@ -173,6 +173,15 @@ pub const JSFunction = struct {
     /// `proto` slot points at a JSObject; this is the
     /// JSFunction-typed equivalent.)
     static_parent: ?*JSFunction = null,
+    /// §28.2.2.1.1 `[[RevocableProxy]]` — the proxy captured by a
+    /// `Proxy.revocable` revoke function. Non-null marks this
+    /// function as a revocation closure: the interpreter's call
+    /// dispatch flips the proxy's `proxy_revoked` flag instead
+    /// of running the (placeholder) native body. Cleared to
+    /// `null` after the first call so subsequent invocations
+    /// no-op (spec step 1 — return undefined when [[RevocableProxy]]
+    /// is null).
+    revocable_proxy: ?*JSObject = null,
     /// Function-as-object: properties set via `fn.foo = bar`.
     /// Spec: §10.2 Function objects are ordinary objects too —
     /// they support arbitrary property assignment. Without this

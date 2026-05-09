@@ -168,7 +168,14 @@ fn reflectIsExtensible(realm: *Realm, this_value: Value, args: []const Value) Na
 
 fn reflectApply(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const target = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Reflect.apply target must be callable");
+    const target_v = argOr(args, 0, Value.undefined_);
+    // Allow callable Proxy (apply-trap dispatch via callValue).
+    if (heap_mod.valueAsFunction(target_v) == null) {
+        const po = heap_mod.valueAsPlainObject(target_v) orelse return throwTypeError(realm, "Reflect.apply target must be callable");
+        if (po.proxy_target_fn == null and po.proxy_target == null and !po.proxy_revoked) {
+            return throwTypeError(realm, "Reflect.apply target must be callable");
+        }
+    }
     const this_arg = argOr(args, 1, Value.undefined_);
     const args_v = argOr(args, 2, Value.undefined_);
 
@@ -185,35 +192,25 @@ fn reflectApply(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     }
 
     const interpreter = @import("../interpreter.zig");
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, target, this_arg, apply_args.items) catch |err| switch (err) {
+    const outcome = interpreter.callValue(realm.allocator, realm, target_v, this_arg, apply_args.items) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
     switch (outcome) {
         .value, .yielded => |v| return v,
-        .thrown => return error.NativeThrew,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
     }
 }
 
 fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const target = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Reflect.construct target must be a constructor");
-    // §28.1.2 Reflect.construct step 2: throw if target is
-    // not actually a constructor.
-    if (!target.has_construct or target.is_arrow) return throwTypeError(realm, "Reflect.construct target is not a constructor");
+    const target_v = argOr(args, 0, Value.undefined_);
     const args_v = argOr(args, 1, Value.undefined_);
-    // Step 3-5: optional `newTarget` defaults to `target`; when
-    // supplied, MUST be a constructor too (the trick the
-    // `isConstructor.js` harness relies on to detect non-ctor
-    // built-ins like `Object.freeze`).
     const new_target_v = argOr(args, 2, Value.undefined_);
-    const new_target: *@import("../function.zig").JSFunction = if (new_target_v.isUndefined())
-        target
-    else if (heap_mod.valueAsFunction(new_target_v)) |nt|
-        nt
-    else
-        return throwTypeError(realm, "Reflect.construct newTarget must be a constructor");
-    if (!new_target.has_construct or new_target.is_arrow) return throwTypeError(realm, "Reflect.construct newTarget is not a constructor");
+    const interpreter = @import("../interpreter.zig");
 
     var ctor_args: std.ArrayListUnmanaged(Value) = .empty;
     defer ctor_args.deinit(realm.allocator);
@@ -227,6 +224,45 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
         }
     }
 
+    // §10.5.14 — if `target` is a Proxy with a `construct` trap,
+    // dispatch the trap. Missing trap walks down the proxy chain
+    // until we reach a real constructor.
+    if (heap_mod.valueAsPlainObject(target_v)) |po| {
+        if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+            const newt: Value = if (new_target_v.isUndefined()) target_v else new_target_v;
+            const outcome = interpreter.constructValue(realm.allocator, realm, target_v, ctor_args.items, newt) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            switch (outcome) {
+                .value, .yielded => |v| return v,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            }
+        }
+    }
+
+    const target = heap_mod.valueAsFunction(target_v) orelse return throwTypeError(realm, "Reflect.construct target must be a constructor");
+    // §28.1.2 Reflect.construct step 2: throw if target is
+    // not actually a constructor.
+    if (!target.has_construct or target.is_arrow) return throwTypeError(realm, "Reflect.construct target is not a constructor");
+    // Step 3-5: optional `newTarget` defaults to `target`; when
+    // supplied, MUST be a constructor too (the trick the
+    // `isConstructor.js` harness relies on to detect non-ctor
+    // built-ins like `Object.freeze`).
+    const new_target: *@import("../function.zig").JSFunction = if (new_target_v.isUndefined())
+        target
+    else if (heap_mod.valueAsFunction(new_target_v)) |nt|
+        nt
+    else if (heap_mod.valueAsPlainObject(new_target_v)) |po|
+        // newTarget can be a callable Proxy.
+        if (po.proxy_target_fn) |tfn| tfn else return throwTypeError(realm, "Reflect.construct newTarget must be a constructor")
+    else
+        return throwTypeError(realm, "Reflect.construct newTarget must be a constructor");
+    if (!new_target.has_construct or new_target.is_arrow) return throwTypeError(realm, "Reflect.construct newTarget is not a constructor");
+
     // Allocate the instance with [[Prototype]] = newTarget.prototype
     // (per §10.1.13 OrdinaryCreateFromConstructor — newTarget
     // controls the proto, not target).
@@ -234,7 +270,6 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     instance.prototype = new_target.prototype;
     const this_arg = heap_mod.taggedObject(instance);
 
-    const interpreter = @import("../interpreter.zig");
     const outcome = interpreter.callJSFunction(realm.allocator, realm, target, this_arg, ctor_args.items) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
@@ -245,7 +280,10 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
             if (heap_mod.valueAsPlainObject(v) != null or heap_mod.valueAsFunction(v) != null) return v;
             return this_arg;
         },
-        .thrown => return error.NativeThrew,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
     }
 }
 

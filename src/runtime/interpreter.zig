@@ -1187,6 +1187,134 @@ pub fn unwrapBoundCall(
 /// Bytecode callees get a fresh frame stack and run their body
 /// to a `Return` (or uncaught throw). The caller's interpreter
 /// session is unaffected — this opens its own dispatch session.
+/// §10.5.13 [[Call]] dispatcher that accepts a `Value`. Used by
+/// `Function.prototype.{call, apply}`, `Reflect.apply`, and other
+/// reflective callers that can receive a Proxy as the callee:
+/// they need the `apply` trap fired before the host-side native
+/// short-circuit. Returns the same shape as `callJSFunction`.
+pub fn callValue(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    callee_v: Value,
+    this_value: Value,
+    args: []const Value,
+) RunError!RunResult {
+    // Proxy of fn — dispatch through `apply` trap if present;
+    // otherwise unwrap to the target function.
+    if (heap_mod.valueAsPlainObject(callee_v)) |po| {
+        if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+            if (po.proxy_revoked) {
+                const ex = try makeTypeError(realm, "Cannot perform 'apply' on a proxy that has been revoked");
+                return .{ .thrown = ex };
+            }
+            const target_v: Value = if (po.proxy_target_fn) |tfn|
+                heap_mod.taggedFunction(tfn)
+            else if (po.proxy_target) |t|
+                heap_mod.taggedObject(t)
+            else
+                return .{ .thrown = try makeTypeError(realm, "proxy target slot is null") };
+            const handler = po.proxy_handler orelse return .{ .thrown = try makeTypeError(realm, "proxy handler slot is null") };
+            const trap_v = handler.get("apply");
+            if (!trap_v.isUndefined() and !trap_v.isNull()) {
+                const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return .{ .thrown = try makeTypeError(realm, "proxy 'apply' trap is not callable") };
+                // Wrap args in a fresh array.
+                const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
+                arr.prototype = realm.intrinsics.array_prototype;
+                var i: usize = 0;
+                while (i < args.len) : (i += 1) {
+                    var ibuf: [24]u8 = undefined;
+                    const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+                    const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+                    arr.set(allocator, owned.bytes, args[i]) catch return error.OutOfMemory;
+                }
+                arr.set(allocator, "length", Value.fromInt32(@intCast(args.len))) catch return error.OutOfMemory;
+                const trap_args = [_]Value{ target_v, this_value, heap_mod.taggedObject(arr) };
+                return callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args);
+            }
+            // Trap missing — fall through to target.
+            return callValue(allocator, realm, target_v, this_value, args);
+        }
+    }
+    // Plain function path.
+    if (heap_mod.valueAsFunction(callee_v)) |fn_obj| {
+        return callJSFunction(allocator, realm, fn_obj, this_value, args);
+    }
+    return .{ .thrown = try makeTypeError(realm, "value is not callable") };
+}
+
+/// §10.5.14 [[Construct]] dispatcher that accepts a `Value`. Used
+/// by `Reflect.construct` to handle Proxy receivers — fires the
+/// `construct` trap if installed, otherwise falls through to the
+/// target's [[Construct]]. The result must be an Object per
+/// §10.5.14 step 11.
+pub fn constructValue(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    callee_v: Value,
+    args: []const Value,
+    new_target: Value,
+) RunError!RunResult {
+    if (heap_mod.valueAsPlainObject(callee_v)) |po| {
+        if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+            if (po.proxy_revoked) {
+                return .{ .thrown = try makeTypeError(realm, "Cannot perform 'construct' on a proxy that has been revoked") };
+            }
+            const target_v: Value = if (po.proxy_target_fn) |tfn|
+                heap_mod.taggedFunction(tfn)
+            else if (po.proxy_target) |t|
+                heap_mod.taggedObject(t)
+            else
+                return .{ .thrown = try makeTypeError(realm, "proxy target slot is null") };
+            const handler = po.proxy_handler orelse return .{ .thrown = try makeTypeError(realm, "proxy handler slot is null") };
+            const trap_v = handler.get("construct");
+            if (!trap_v.isUndefined() and !trap_v.isNull()) {
+                const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return .{ .thrown = try makeTypeError(realm, "proxy 'construct' trap is not callable") };
+                const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
+                arr.prototype = realm.intrinsics.array_prototype;
+                var i: usize = 0;
+                while (i < args.len) : (i += 1) {
+                    var ibuf: [24]u8 = undefined;
+                    const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+                    const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+                    arr.set(allocator, owned.bytes, args[i]) catch return error.OutOfMemory;
+                }
+                arr.set(allocator, "length", Value.fromInt32(@intCast(args.len))) catch return error.OutOfMemory;
+                const trap_args = [_]Value{ target_v, heap_mod.taggedObject(arr), new_target };
+                const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args);
+                switch (outcome) {
+                    .value, .yielded => |v| {
+                        if (heap_mod.valueAsPlainObject(v) == null and heap_mod.valueAsFunction(v) == null) {
+                            return .{ .thrown = try makeTypeError(realm, "proxy 'construct' trap returned non-object") };
+                        }
+                        return .{ .value = v };
+                    },
+                    .thrown => |ex| return .{ .thrown = ex },
+                }
+            }
+            // Trap missing — recurse on the target.
+            return constructValue(allocator, realm, target_v, args, new_target);
+        }
+    }
+    const target = heap_mod.valueAsFunction(callee_v) orelse {
+        return .{ .thrown = try makeTypeError(realm, "value is not a constructor") };
+    };
+    if (!target.has_construct or target.is_arrow) {
+        return .{ .thrown = try makeTypeError(realm, "value is not a constructor") };
+    }
+    const new_target_fn: *JSFunction = if (heap_mod.valueAsFunction(new_target)) |nt| nt else target;
+    const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
+    instance.prototype = new_target_fn.prototype;
+    const this_arg = heap_mod.taggedObject(instance);
+    const outcome = try callJSFunction(allocator, realm, target, this_arg, args);
+    switch (outcome) {
+        .value, .yielded => |v| {
+            if (heap_mod.valueAsPlainObject(v) != null or heap_mod.valueAsFunction(v) != null) return .{ .value = v };
+            return .{ .value = this_arg };
+        },
+        .thrown => |ex| return .{ .thrown = ex },
+    }
+}
+
 pub fn callJSFunction(
     allocator: std.mem.Allocator,
     realm: *Realm,
@@ -1746,15 +1874,32 @@ fn runFrames(
                 ip += 2;
 
                 const callee_v = registers[r_callee];
-                // §10.5 callable Proxy — when the callee is a
-                // proxy whose `[[ProxyTarget]]` is a function,
-                // unwrap to the target. Apply-trap dispatch is
-                // later; today we just forward the call.
-                var resolved_v = callee_v;
+                // §10.5.13 callable Proxy [[Call]] — if the callee
+                // is a proxy, route through `callValue` which
+                // handles the apply trap and chained proxies.
                 if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-                    if (po.proxy_target_fn) |target_fn| resolved_v = heap_mod.taggedFunction(target_fn);
+                    if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+                        const args_start = @as(usize, r_callee) + 1;
+                        const args_slice = registers[args_start .. args_start + argc];
+                        const cresult = try callValue(allocator, realm, callee_v, Value.undefined_, args_slice);
+                        switch (cresult) {
+                            .value, .yielded => |v| {
+                                acc = v;
+                                continue;
+                            },
+                            .thrown => |ex| {
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue;
+                            },
+                        }
+                    }
                 }
-                const callee_fn = heap_mod.valueAsFunction(resolved_v) orelse {
+                const callee_fn = heap_mod.valueAsFunction(callee_v) orelse {
                     const ex = try makeTypeError(realm, "value is not callable");
                     f.ip = ip;
                     f.accumulator = acc;
@@ -1775,6 +1920,20 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
+                    continue;
+                }
+
+                // §28.2.2.1.1 — revocation function. Calling it
+                // clears the captured proxy's internal slots.
+                // First call returns undefined and clears the slot;
+                // subsequent calls no-op (slot is null).
+                if (callee_fn.revocable_proxy) |rp| {
+                    rp.proxy_target = null;
+                    rp.proxy_handler = null;
+                    rp.proxy_target_fn = null;
+                    rp.proxy_revoked = true;
+                    callee_fn.revocable_proxy = null;
+                    acc = Value.undefined_;
                     continue;
                 }
 
@@ -1924,12 +2083,31 @@ fn runFrames(
                 ip += 3;
 
                 const callee_v = registers[r_callee];
-                // §10.5 — unwrap callable Proxy.
-                var resolved_v = callee_v;
+                // §10.5.13 callable Proxy [[Call]] — route through
+                // `callValue` (handles apply trap + chained proxies).
                 if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-                    if (po.proxy_target_fn) |target_fn| resolved_v = heap_mod.taggedFunction(target_fn);
+                    if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+                        const args_start = @as(usize, r_callee) + 1;
+                        const args_slice = registers[args_start .. args_start + argc];
+                        const cresult = try callValue(allocator, realm, callee_v, registers[r_recv], args_slice);
+                        switch (cresult) {
+                            .value, .yielded => |v| {
+                                acc = v;
+                                continue;
+                            },
+                            .thrown => |ex| {
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue;
+                            },
+                        }
+                    }
                 }
-                const callee_fn = heap_mod.valueAsFunction(resolved_v) orelse {
+                const callee_fn = heap_mod.valueAsFunction(callee_v) orelse {
                     const ex = try makeTypeError(realm, "value is not callable");
                     f.ip = ip;
                     f.accumulator = acc;
@@ -1941,6 +2119,17 @@ fn runFrames(
                 };
 
                 const recv = registers[r_recv];
+
+                // §28.2.2.1.1 — revocation function. See `.call`.
+                if (callee_fn.revocable_proxy) |rp| {
+                    rp.proxy_target = null;
+                    rp.proxy_handler = null;
+                    rp.proxy_target_fn = null;
+                    rp.proxy_revoked = true;
+                    callee_fn.revocable_proxy = null;
+                    acc = Value.undefined_;
+                    continue;
+                }
 
                 // §10.4.1 — bound functions unwrap. `this = recv`
                 // is overridden by the bound `this` inside
@@ -2075,8 +2264,33 @@ fn runFrames(
                 ip += 2;
 
                 const callee_v = registers[r_callee];
-                // §10.5 — `new ProxyOfFn(...)` unwraps to the
-                // function target. Construct trap is later.
+                // §10.5.14 callable Proxy [[Construct]] — if a
+                // construct trap is installed, dispatch through
+                // the handler. Missing trap recurses into the
+                // target via `constructValue` (which handles
+                // chained proxies).
+                if (heap_mod.valueAsPlainObject(callee_v)) |po| {
+                    if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+                        const args_start = @as(usize, r_callee) + 1;
+                        const args_slice = registers[args_start .. args_start + argc];
+                        const cresult = try constructValue(allocator, realm, callee_v, args_slice, callee_v);
+                        switch (cresult) {
+                            .value, .yielded => |v| {
+                                acc = v;
+                                continue;
+                            },
+                            .thrown => |ex| {
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue;
+                            },
+                        }
+                    }
+                }
                 var resolved_v = callee_v;
                 if (heap_mod.valueAsPlainObject(callee_v)) |po| {
                     if (po.proxy_target_fn) |target_fn| resolved_v = heap_mod.taggedFunction(target_fn);
@@ -2425,7 +2639,7 @@ fn runFrames(
                 const key_slice = computedKeyToString(key_v, &key_buf);
                 // §10.5.7 Proxy [[HasProperty]] dispatch.
                 var obj = obj_in;
-                if (obj.proxy_target != null) {
+                if (obj.proxy_target != null or obj.proxy_revoked) {
                     const r2 = try proxyHasTrap(allocator, realm, frames, f, ip, obj, key_slice);
                     switch (r2) {
                         .value => |v| {
@@ -3324,7 +3538,7 @@ fn runFrames(
                     // a missing trap falls through to default lookup
                     // on the target.
                     var obj = obj_in;
-                    if (obj.proxy_target != null) {
+                    if (obj.proxy_target != null or obj.proxy_revoked) {
                         const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key_s.bytes, acc);
                         switch (r) {
                             .value => |v| {
@@ -3484,7 +3698,7 @@ fn runFrames(
                 if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
                     var obj = obj_in;
                     // §10.5 Proxy [[Get]] — handler trap dispatch.
-                    if (obj.proxy_target != null) {
+                    if (obj.proxy_target != null or obj.proxy_revoked) {
                         const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key_slice, recv);
                         switch (r) {
                             .value => |v| {
@@ -3633,7 +3847,7 @@ fn runFrames(
                 const recv = registers[r_obj];
                 // §10.5.10 Proxy [[Delete]] dispatch.
                 if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
-                    if (obj_in.proxy_target != null) {
+                    if (obj_in.proxy_target != null or obj_in.proxy_revoked) {
                         const r = try proxyDeleteTrap(allocator, realm, frames, f, ip, obj_in, key_s.bytes);
                         switch (r) {
                             .value => |v| {
@@ -3697,7 +3911,7 @@ fn runFrames(
                 var key_buf: [64]u8 = undefined;
                 const key_slice = computedKeyToString(key_v, &key_buf);
                 if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
-                    if (obj_in.proxy_target != null) {
+                    if (obj_in.proxy_target != null or obj_in.proxy_revoked) {
                         const r = try proxyDeleteTrap(allocator, realm, frames, f, ip, obj_in, key_slice);
                         switch (r) {
                             .value => |v| {
@@ -4219,6 +4433,14 @@ fn proxyGetTrap(
     key: []const u8,
     receiver: Value,
 ) RunError!ProxyOutcome {
+    if (proxy.proxy_revoked) {
+        const ex = try makeTypeError(realm, "Cannot perform 'get' on a proxy that has been revoked");
+        f.ip = ip;
+        if (!try unwindThrow(allocator, realm, frames, ex)) {
+            return .{ .uncaught = ex };
+        }
+        return .handled;
+    }
     const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
     const handler = proxy.proxy_handler orelse return .{ .fallthrough = target };
     const trap_v = handler.get("get");
@@ -4250,6 +4472,14 @@ fn proxyDeleteTrap(
     proxy: *JSObject,
     key: []const u8,
 ) RunError!ProxyOutcome {
+    if (proxy.proxy_revoked) {
+        const ex = try makeTypeError(realm, "Cannot perform 'deleteProperty' on a proxy that has been revoked");
+        f.ip = ip;
+        if (!try unwindThrow(allocator, realm, frames, ex)) {
+            return .{ .uncaught = ex };
+        }
+        return .handled;
+    }
     const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
     const handler = proxy.proxy_handler orelse return .{ .fallthrough = target };
     const trap_v = handler.get("deleteProperty");
@@ -4282,6 +4512,14 @@ fn proxyHasTrap(
     proxy: *JSObject,
     key: []const u8,
 ) RunError!ProxyOutcome {
+    if (proxy.proxy_revoked) {
+        const ex = try makeTypeError(realm, "Cannot perform 'has' on a proxy that has been revoked");
+        f.ip = ip;
+        if (!try unwindThrow(allocator, realm, frames, ex)) {
+            return .{ .uncaught = ex };
+        }
+        return .handled;
+    }
     const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
     const handler = proxy.proxy_handler orelse return .{ .fallthrough = target };
     const trap_v = handler.get("has");
@@ -4317,6 +4555,14 @@ fn proxySetTrap(
     value: Value,
     receiver: Value,
 ) RunError!ProxyOutcome {
+    if (proxy.proxy_revoked) {
+        const ex = try makeTypeError(realm, "Cannot perform 'set' on a proxy that has been revoked");
+        f.ip = ip;
+        if (!try unwindThrow(allocator, realm, frames, ex)) {
+            return .{ .uncaught = ex };
+        }
+        return .handled;
+    }
     const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
     const handler = proxy.proxy_handler orelse return .{ .fallthrough = target };
     const trap_v = handler.get("set");

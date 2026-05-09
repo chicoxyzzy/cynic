@@ -50,28 +50,35 @@ pub fn installPrototypeMethods(realm: *Realm) !void {
 // its own frame stack).
 
 fn functionCall(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const fn_obj = heap_mod.valueAsFunction(this_value) orelse return error.NativeThrew;
+    // §20.2.3.1 — if `this` is a callable Proxy, the apply trap
+    // fires (callValue handles that); otherwise dispatch to the
+    // ordinary function.
+    if (heap_mod.valueAsFunction(this_value) == null and heap_mod.valueAsPlainObject(this_value) == null) {
+        return throwTypeError(realm, "Function.prototype.call requires a callable receiver");
+    }
     const this_arg = argOr(args, 0, Value.undefined_);
     const rest: []const Value = if (args.len > 1) args[1..] else &.{};
 
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, fn_obj, this_arg, rest) catch |err| switch (err) {
+    const outcome = interpreter.callValue(realm.allocator, realm, this_value, this_arg, rest) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
     switch (outcome) {
         .value, .yielded => |v| return v,
-        .thrown => {
-            // The reentrant session threw — surface that to the
-            // outer interpreter as a native throw. later: a
-            // dedicated `realm.pending_throw` slot would let us
-            // forward the actual exception value verbatim.
+        .thrown => |ex| {
+            // Surface the inner exception verbatim through the
+            // `pending_exception` slot so the outer interpreter
+            // re-raises with the right value (Test262Error etc.).
+            realm.pending_exception = ex;
             return error.NativeThrew;
         },
     }
 }
 
 fn functionApply(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const fn_obj = heap_mod.valueAsFunction(this_value) orelse return error.NativeThrew;
+    if (heap_mod.valueAsFunction(this_value) == null and heap_mod.valueAsPlainObject(this_value) == null) {
+        return throwTypeError(realm, "Function.prototype.apply requires a callable receiver");
+    }
     const this_arg = argOr(args, 0, Value.undefined_);
     var apply_args: std.ArrayListUnmanaged(Value) = .empty;
     defer apply_args.deinit(realm.allocator);
@@ -95,13 +102,16 @@ fn functionApply(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     }
 
 
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, fn_obj, this_arg, apply_args.items) catch |err| switch (err) {
+    const outcome = interpreter.callValue(realm.allocator, realm, this_value, this_arg, apply_args.items) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
     switch (outcome) {
         .value, .yielded => |v| return v,
-        .thrown => return error.NativeThrew,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
     }
 }
 

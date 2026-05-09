@@ -604,8 +604,10 @@ pub fn typeOf(realm: *Realm, v: Value) RunError!Value {
         "symbol"
     else if (heap_mod.isBigInt(v))
         "bigint"
-    else if (heap_mod.isPlainObject(v))
-        "object"
+    else if (heap_mod.valueAsPlainObject(v)) |po|
+        // §10.5.x — a Proxy reports `typeof` as "function" iff
+        // its target is (or, post-revocation, was) callable.
+        if (po.proxy_callable) "function" else "object"
     else
         "undefined";
     const s = realm.heap.allocateString(name) catch return error.OutOfMemory;

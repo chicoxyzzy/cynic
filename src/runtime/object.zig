@@ -227,6 +227,17 @@ pub const JSObject = struct {
     /// call/new opcodes check this slot to make the proxy
     /// itself callable.
     proxy_target_fn: ?*@import("function.zig").JSFunction = null,
+    /// §28.2.2.1 Proxy.revocable — a revoked proxy reports as
+    /// revoked once `revoke()` clears its `[[ProxyTarget]]` /
+    /// `[[ProxyHandler]]`. Every internal method on a revoked
+    /// proxy throws TypeError per §10.5.x step 1.
+    proxy_revoked: bool = false,
+    /// §10.5 ProxyCreate — when the original target was callable,
+    /// `[[Call]]` is exposed on the proxy regardless of whether
+    /// `proxy_target_fn` is currently set. After revocation the
+    /// `proxy_target_fn` slot is null, but `typeof` and re-wraps
+    /// still need to know the proxy is "callable".
+    proxy_callable: bool = false,
     /// §22.2.7 RegExp instance — opaque pointer to the compiled
     /// libregexp bytecode (vendored QuickJS-NG engine). The first
     /// call to `.exec`/`.test` parses the `source` + `flags` and
