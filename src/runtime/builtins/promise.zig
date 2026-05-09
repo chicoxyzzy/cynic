@@ -411,6 +411,77 @@ fn aggregatorRejectFromPending(realm: *Realm, ctor: *JSFunction) Value {
     return allocatePromiseFor(realm, ctor, .rejected, ex) catch ex;
 }
 
+/// Resolve an aggregator input value to a Cynic-tagged Promise.
+/// §27.2.4.1.2 step h — "Let nextPromise be Invoke(C, "resolve", «
+/// nextValue »)". The aggregator family (`all`, `allSettled`,
+/// `race`, `any`) doesn't actually look at user values directly;
+/// it pushes them through `Promise.resolve(C, x)` so a thenable
+/// gets unwrapped via `.then` and a real Promise rides through
+/// unchanged.
+///
+/// Cynic settles synchronously, so by the time we return the
+/// resulting Promise is either fulfilled, rejected, or still
+/// pending (the thenable's `.then` deferred the call). Pending
+/// inputs from a real thenable will never settle by the time the
+/// aggregator wraps up — that's a lossy fast-track, but it's
+/// what Cynic's sync-resolution model can promise. The dominant
+/// fixture pattern (`{then(r){r(v)}}`-style synchronous
+/// thenables) settles before we read the state.
+fn resolveInputAsPromise(realm: *Realm, ctor: *JSFunction, v: Value) NativeError!Value {
+    // Already a Cynic-tagged Promise of the right ctor — pass through.
+    if (heap_mod.valueAsPlainObject(v)) |obj| {
+        if (promiseStateOf(v) != null) {
+            const c_v = obj.get("constructor");
+            if (heap_mod.valueAsFunction(c_v)) |c| {
+                if (c == ctor) return v;
+            }
+        }
+    }
+
+    // Non-promise / cross-ctor: invoke `.then` if it has one,
+    // otherwise treat as `Promise.resolve(v)`.
+    if (heap_mod.valueAsPlainObject(v)) |obj| {
+        const then_v = try getPropertyChain(realm, obj, "then");
+        if (heap_mod.valueAsFunction(then_v)) |then_fn| {
+            // Allocate a fresh pending Promise and pass bound
+            // resolve/reject closures into the thenable's `.then`.
+            const target_v = allocatePromiseFor(realm, ctor, .pending, Value.undefined_) catch return error.OutOfMemory;
+
+            const resolve_impl = realm.heap.allocateFunctionNative(promiseResolveImpl, 1, "") catch return error.OutOfMemory;
+            resolve_impl.proto = realm.intrinsics.function_prototype;
+            const resolve_fn = realm.heap.allocateFunctionNative(boundResolveTrampoline, 1, "") catch return error.OutOfMemory;
+            resolve_fn.proto = realm.intrinsics.function_prototype;
+            resolve_fn.bound_target = resolve_impl;
+            resolve_fn.bound_this = target_v;
+
+            const reject_impl = realm.heap.allocateFunctionNative(promiseRejectImpl, 1, "") catch return error.OutOfMemory;
+            reject_impl.proto = realm.intrinsics.function_prototype;
+            const reject_fn = realm.heap.allocateFunctionNative(boundResolveTrampoline, 1, "") catch return error.OutOfMemory;
+            reject_fn.proto = realm.intrinsics.function_prototype;
+            reject_fn.bound_target = reject_impl;
+            reject_fn.bound_this = target_v;
+
+            const interp = @import("../interpreter.zig");
+            const then_args = [_]Value{ heap_mod.taggedFunction(resolve_fn), heap_mod.taggedFunction(reject_fn) };
+            const outcome = interp.callJSFunction(realm.allocator, realm, then_fn, v, &then_args) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            switch (outcome) {
+                .value, .yielded => {},
+                .thrown => |ex| {
+                    // §25.6.1.3.1 — thenable's `then` throwing
+                    // causes the wrapping Promise to reject.
+                    const target = heap_mod.valueAsPlainObject(target_v).?;
+                    settlePromise(realm, target, .rejected, ex) catch return error.OutOfMemory;
+                },
+            }
+            return target_v;
+        }
+    }
+    return allocatePromiseFor(realm, ctor, .fulfilled, v) catch return error.OutOfMemory;
+}
+
 fn promiseAll(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctor = try thisAsPromiseCtor(realm, this_value, "all");
     var list = collectIterable(realm, argOr(args, 0, Value.undefined_)) catch |err| switch (err) {
@@ -421,7 +492,8 @@ fn promiseAll(realm: *Realm, this_value: Value, args: []const Value) NativeError
 
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
-    for (list.items, 0..) |v, idx| {
+    for (list.items, 0..) |raw_v, idx| {
+        const v = try resolveInputAsPromise(realm, ctor, raw_v);
         const unwrapped = if (promiseStateOf(v)) |state|
             if (std.mem.eql(u8, state, "rejected"))
                 return allocatePromiseFor(realm, ctor, .rejected, promiseValueOf(v)) catch return error.OutOfMemory
@@ -454,7 +526,8 @@ fn promiseAllSettled(realm: *Realm, this_value: Value, args: []const Value) Nati
     out.prototype = realm.intrinsics.array_prototype;
     const fulfilled_str = realm.heap.allocateString("fulfilled") catch return error.OutOfMemory;
     const rejected_str = realm.heap.allocateString("rejected") catch return error.OutOfMemory;
-    for (list.items, 0..) |v, idx| {
+    for (list.items, 0..) |raw_v, idx| {
+        const v = try resolveInputAsPromise(realm, ctor, raw_v);
         const entry = realm.heap.allocateObject() catch return error.OutOfMemory;
         entry.prototype = realm.intrinsics.object_prototype;
         if (promiseStateOf(v)) |state| {
@@ -498,7 +571,8 @@ fn promiseRace(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     // settled input wins; non-promise inputs are treated as
     // synchronously-fulfilled per `Promise.resolve(v)`.
     if (list.items.len == 0) return allocatePromiseFor(realm, ctor, .pending, Value.undefined_) catch return error.OutOfMemory;
-    for (list.items) |v| {
+    for (list.items) |raw_v| {
+        const v = try resolveInputAsPromise(realm, ctor, raw_v);
         if (promiseStateOf(v)) |state| {
             if (std.mem.eql(u8, state, "rejected")) {
                 return allocatePromiseFor(realm, ctor, .rejected, promiseValueOf(v)) catch return error.OutOfMemory;
@@ -533,7 +607,8 @@ fn promiseAny(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // input rejects (otherwise discarded with the deinit below).
     const reasons = realm.heap.allocateObject() catch return error.OutOfMemory;
     reasons.prototype = realm.intrinsics.array_prototype;
-    for (list.items, 0..) |v, idx| {
+    for (list.items, 0..) |raw_v, idx| {
+        const v = try resolveInputAsPromise(realm, ctor, raw_v);
         if (promiseStateOf(v)) |state| {
             if (std.mem.eql(u8, state, "fulfilled")) {
                 return allocatePromiseFor(realm, ctor, .fulfilled, promiseValueOf(v)) catch return error.OutOfMemory;
