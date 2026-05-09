@@ -3620,28 +3620,9 @@ fn compileConstructorBody(
     const slot_count_patch = self.builder.here();
     try self.builder.emitU8(0);
 
-    for (params, 0..) |p, i| {
-        switch (p) {
-            .simple => |sp| {
-                if (sp.default != null) return error.UnsupportedExpression;
-                if (sp.target == .identifier) {
-                    const param_name = self.source[sp.target.identifier.span.start..sp.target.identifier.span.end];
-                    const slot = try self.declareBinding(param_name, .let_, sp.span);
-                    try self.builder.emitOp(.ldar, sp.span);
-                    try self.builder.emitU8(@intCast(i));
-                    try self.builder.emitOp(.sta_env, sp.span);
-                    try self.builder.emitU8(0);
-                    try self.builder.emitU8(slot);
-                } else {
-                    try self.declarePatternBindings(sp.target, .let_);
-                    try self.builder.emitOp(.ldar, sp.span);
-                    try self.builder.emitU8(@intCast(i));
-                    try self.compileDestructure(sp.target);
-                }
-                if (@as(u8, @intCast(i + 1)) > self.builder.register_count) {
-                    self.builder.register_count = @intCast(i + 1);
-                }
-            },
+    for (params, 0..) |*p, i| {
+        switch (p.*) {
+            .simple => |*sp| try self.emitParamPrologue(sp, @intCast(i)),
             .rest => return error.UnsupportedExpression,
         }
     }
@@ -3735,28 +3716,9 @@ fn compileMethodBody(
     try self.builder.emitU8(0);
 
     // Param prologue, same as compileFunctionTemplate.
-    for (params, 0..) |p, i| {
-        switch (p) {
-            .simple => |sp| {
-                if (sp.default != null) return error.UnsupportedExpression;
-                if (sp.target == .identifier) {
-                    const param_name = self.source[sp.target.identifier.span.start..sp.target.identifier.span.end];
-                    const slot = try self.declareBinding(param_name, .let_, sp.span);
-                    try self.builder.emitOp(.ldar, sp.span);
-                    try self.builder.emitU8(@intCast(i));
-                    try self.builder.emitOp(.sta_env, sp.span);
-                    try self.builder.emitU8(0);
-                    try self.builder.emitU8(slot);
-                } else {
-                    try self.declarePatternBindings(sp.target, .let_);
-                    try self.builder.emitOp(.ldar, sp.span);
-                    try self.builder.emitU8(@intCast(i));
-                    try self.compileDestructure(sp.target);
-                }
-                if (@as(u8, @intCast(i + 1)) > self.builder.register_count) {
-                    self.builder.register_count = @intCast(i + 1);
-                }
-            },
+    for (params, 0..) |*p, i| {
+        switch (p.*) {
+            .simple => |*sp| try self.emitParamPrologue(sp, @intCast(i)),
             .rest => return error.UnsupportedExpression,
         }
     }
@@ -4500,14 +4462,14 @@ fn assignmentPatternKey(self: *Compiler, key: ast.expression.PropertyKey) Compil
 /// `acc = (acc === undefined) ? <default-expr> : acc`.
 /// Assignment-pattern variant that takes the default as an
 /// already-parsed Expression pointer (not a BindingElement).
-fn applyDefaultExpr(self: *Compiler, default_expr: *ast.expression.Expression, span: Span) CompileError!void {
+fn applyDefaultExpr(self: *Compiler, default_expr: *const ast.expression.Expression, span: Span) CompileError!void {
     return applyDefaultExprNamed(self, default_expr, span, null);
 }
 
 /// `applyDefaultExpr` with optional `binding_name` — when
 /// supplied and the default expression is an anonymous
 /// function-like, the function adopts that name (§13.15.5.5).
-fn applyDefaultExprNamed(self: *Compiler, default_expr: *ast.expression.Expression, span: Span, binding_name: ?[]const u8) CompileError!void {
+fn applyDefaultExprNamed(self: *Compiler, default_expr: *const ast.expression.Expression, span: Span, binding_name: ?[]const u8) CompileError!void {
     const r_val = try self.reserveTemp();
     defer self.releaseTemp();
     try self.builder.emitOp(.star, span);
@@ -4536,6 +4498,48 @@ fn applyDefaultExprNamed(self: *Compiler, default_expr: *ast.expression.Expressi
 
     const end_target = self.builder.here();
     try self.builder.patchI16(end_patch, end_target);
+}
+
+/// §10.2.3 prologue for a single non-rest parameter — declare
+/// the binding, copy the caller-supplied register `i` into the
+/// function's env slot, and apply a default expression when the
+/// arg is `undefined` (§15.2.4 IteratorBindingInitialization).
+/// Destructuring patterns route through `compileDestructure`
+/// after the default is in `acc`.
+fn emitParamPrologue(self: *Compiler, sp: *const ast.statement.SimpleParam, i: u8) CompileError!void {
+    if (sp.target == .identifier) {
+        const param_name = self.source[sp.target.identifier.span.start..sp.target.identifier.span.end];
+        const slot = try self.declareBinding(param_name, .let_, sp.span);
+        // Load the caller-supplied register into acc.
+        try self.builder.emitOp(.ldar, sp.span);
+        try self.builder.emitU8(i);
+        // §15.2.4 step 8 — `function f(x = expr)`: when the
+        // argument is `undefined`, evaluate `expr` (with the
+        // already-bound earlier params visible) and use its
+        // value. Anonymous function-likes pick up the param
+        // name (§15.5.6.4).
+        if (sp.default) |*default_expr| {
+            try self.applyDefaultExprNamed(default_expr, sp.span, param_name);
+        }
+        try self.builder.emitOp(.sta_env, sp.span);
+        try self.builder.emitU8(0);
+        try self.builder.emitU8(slot);
+    } else {
+        // §15.2 Destructuring parameter — declare each leaf
+        // binding, then walk the pattern over the arg in `acc`.
+        try self.declarePatternBindings(sp.target, .let_);
+        try self.builder.emitOp(.ldar, sp.span);
+        try self.builder.emitU8(i);
+        if (sp.default) |*default_expr| {
+            try self.applyDefaultExprNamed(default_expr, sp.span, null);
+        }
+        try self.compileDestructure(sp.target);
+    }
+    // Account for the param register so the chunk's register
+    // file sizing covers them.
+    if (i + 1 > self.builder.register_count) {
+        self.builder.register_count = i + 1;
+    }
 }
 
 /// `acc = (acc === undefined) ? default : acc`. No-op if no
@@ -5153,35 +5157,10 @@ fn compileFunctionTemplateExt(
     // receive preamble. Each arg arrives in caller-supplied
     // register r{i}; we Ldar then StaEnv into the function's
     // own env slot.
-    for (params, 0..) |p, i| {
-        switch (p) {
-            .simple => |sp| {
-                if (sp.default != null) return error.UnsupportedExpression;
-                if (sp.target == .identifier) {
-                    const param_name = self.source[sp.target.identifier.span.start..sp.target.identifier.span.end];
-                    const slot = try self.declareBinding(param_name, .let_, sp.span);
-                    // Receive arg from caller-supplied register `i`
-                    // (the Call op deposits args at r0..r{argc-1}),
-                    // then store into the env slot we just claimed.
-                    try self.builder.emitOp(.ldar, sp.span);
-                    try self.builder.emitU8(@intCast(i));
-                    try self.builder.emitOp(.sta_env, sp.span);
-                    try self.builder.emitU8(0);
-                    try self.builder.emitU8(slot);
-                } else {
-                    // §15.2 Destructuring parameter — declare each
-                    // leaf binding, then walk the pattern over the
-                    // arg loaded into `acc`.
-                    try self.declarePatternBindings(sp.target, .let_);
-                    try self.builder.emitOp(.ldar, sp.span);
-                    try self.builder.emitU8(@intCast(i));
-                    try self.compileDestructure(sp.target);
-                }
-                // Account for the param register so the chunk's
-                // register file sizing covers them.
-                if (@as(u8, @intCast(i + 1)) > self.builder.register_count) {
-                    self.builder.register_count = @intCast(i + 1);
-                }
+    for (params, 0..) |*p, i| {
+        switch (p.*) {
+            .simple => |*sp| {
+                try self.emitParamPrologue(sp, @intCast(i));
             },
             .rest => return error.UnsupportedExpression,
         }

@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 54.76 % | 95.61 % | 28542 / 52125 |
-| **runtime** | 37.00 % | 49.88 % | 19108 / 51639 |
+| **runtime** | 39.86 % | 53.73 % | 20581 / 51639 |
 
 ## Where the runtime stands, by area
 
@@ -20,8 +20,8 @@ Temporal, browser-era built-ins …).
 
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
-| `language/statements` | 3107 | 5563 | 667 | 33 % | 36 % |
-| `language/expressions` | 4555 | 5512 | 971 | 41 % | 45 % |
+| `language/statements` | 3746 | 4924 | 667 | 40 % | 43 % |
+| `language/expressions` | 5387 | 4680 | 971 | 49 % | 54 % |
 | `built-ins/RegExp` | 658 | 1060 | 161 | 35 % | 38 % |
 | `built-ins/Array` | 1984 | 886 | 211 | 64 % | 69 % |
 | `built-ins/TypedArray` | 390 | 832 | 216 | 27 % | 32 % |
@@ -30,7 +30,7 @@ Temporal, browser-era built-ins …).
 | `built-ins/TypedArrayConstructors` | 271 | 441 | 24 | 37 % | 38 % |
 | `built-ins/Promise` | 253 | 421 | 3 | 37 % | 38 % |
 | `built-ins/Iterator` | 113 | 391 | 6 | 22 % | 22 % |
-| `built-ins/Function` | 156 | 264 | 89 | 31 % | 37 % |
+| `built-ins/Function` | 157 | 263 | 89 | 31 % | 37 % |
 | `built-ins/DataView` | 238 | 251 | 72 | 42 % | 49 % |
 | `built-ins/Proxy` | 68 | 231 | 12 | 22 % | 23 % |
 | `language/module-code` | 368 | 214 | 14 | 62 % | 63 % |
@@ -40,7 +40,7 @@ Temporal, browser-era built-ins …).
 | `built-ins/Set` | 299 | 83 | 1 | 78 % | 78 % |
 | `language/literals` | 358 | 79 | 97 | 67 % | 82 % |
 | `built-ins/Number` | 265 | 75 | 0 | 78 % | 78 % |
-| `language/arguments-object` | 132 | 74 | 57 | 50 % | 64 % |
+| `language/arguments-object` | 133 | 73 | 57 | 51 % | 65 % |
 | `built-ins/Map` | 140 | 63 | 1 | 69 % | 69 % |
 | `built-ins/Reflect` | 93 | 60 | 0 | 61 % | 61 % |
 | `language/statementList` | 27 | 53 | 0 | 34 % | 34 % |
@@ -161,18 +161,18 @@ Temporal, browser-era built-ins …).
 
 ## History
 
-### 2026-05-09 — cynic `e69594d`, test262 `d0c1b455`
+### 2026-05-09 — cynic `d4961fd`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 37.00 % | 49.88 % | 19108 / 51639 | +1243 |
+| **runtime** | 39.86 % | 53.73 % | 20581 / 51639 | +2716 |
 
 Biggest movers (runtime):
 
-- `language/statements` +315
-- `language/expressions` +302
-- `language/arguments-object` +52
-- `built-ins/Set` +6
+- `language/expressions` +832
+- `language/statements` +639
+- `built-ins/Function` +1
+- `language/arguments-object` +1
 
 ### 2026-05-08 — cynic `unknown`, test262 `d0c1b455`
 
