@@ -194,14 +194,29 @@ pub fn install(realm: *Realm) !void {
     // `proto`. `Int8Array.proto` itself stays `%Function.prototype%`
     // (the default for any function).
 
+    // Frozen-style descriptor for the per-kind static data
+    // properties spec'd in §23.2.6: `BYTES_PER_ELEMENT` on both
+    // the constructor and the prototype, plus `prototype` on the
+    // constructor itself, are all `{w:false, e:false, c:false}`.
+    const frozen: @import("../object.zig").PropertyFlags = .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = false,
+    };
     inline for (variants) |variant| {
-        const ctor = try realm.heap.allocateFunctionNative(typedArrayConstructorBuilder(variant.kind), 1, variant.name);
+        // §23.2.5 — "The length property of TypedArray is 3."
+        // Each concrete constructor has the same arity as
+        // %TypedArray% itself (signature is up to (buffer,
+        // byteOffset, length) or one of the other 3-arg forms).
+        const ctor = try realm.heap.allocateFunctionNative(typedArrayConstructorBuilder(variant.kind), 3, variant.name);
         ctor.is_class_constructor = true;
         ctor.static_parent = ta_ctor; // §23.2.6 — Int8Array.[[Prototype]] = %TypedArray%
         const proto = try realm.heap.allocateObject();
         proto.prototype = ta_proto; // §23.2.6 — concrete proto inherits from %TypedArray%.prototype.
         try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(ctor));
-        try setNonEnumerable(proto, realm.allocator, "BYTES_PER_ELEMENT", Value.fromInt32(variant.kind.elementSize()));
+        // §23.2.6.2 — `<TypedArray>.prototype.BYTES_PER_ELEMENT`
+        // is `{w:false, e:false, c:false}`.
+        try proto.setWithFlags(realm.allocator, "BYTES_PER_ELEMENT", Value.fromInt32(variant.kind.elementSize()), frozen);
         // §23.2.6 — concrete typed arrays don't get their own
         // @@toStringTag accessor in the spec; %TypedArray%.proto's
         // accessor reads `[[TypedArrayName]]`. With Cynic's
@@ -210,7 +225,11 @@ pub fn install(realm: *Realm) !void {
         // it through the prototype chain.
         try installToStringTag(realm, proto, variant.name);
         ctor.prototype = proto;
-        try ctor.set(realm.allocator, "BYTES_PER_ELEMENT", Value.fromInt32(variant.kind.elementSize()));
+        // §23.2.5.2 — `<TypedArray>.prototype` is also frozen.
+        try ctor.setWithFlags(realm.allocator, "prototype", heap_mod.taggedObject(proto), frozen);
+        // §23.2.5.1 — `<TypedArray>.BYTES_PER_ELEMENT` is frozen
+        // on the constructor too.
+        try ctor.setWithFlags(realm.allocator, "BYTES_PER_ELEMENT", Value.fromInt32(variant.kind.elementSize()), frozen);
 
         try realm.globals.put(realm.allocator, variant.name, heap_mod.taggedFunction(ctor));
     }
@@ -289,8 +308,14 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind) NativeFn {
             // 2. `new Uint8Array(buffer, offset?, length?)` — view existing buffer.
             // 3. `new Uint8Array(arrayLikeOrIterable)` — copy elements from source.
             if (arg.isInt32() or arg.isDouble() or arg.isUndefined()) {
-                const n_v = coerceToNumber(arg);
-                const n_d: f64 = if (n_v.isInt32()) @floatFromInt(n_v.asInt32()) else n_v.asDouble();
+                // §23.2.5.1.1 — `new TypedArray()` allocates a
+                // zero-length view. `coerceToNumber(undefined)`
+                // would produce NaN and fall into the RangeError
+                // branch; short-circuit here.
+                const n_d: f64 = if (arg.isUndefined()) 0 else blk: {
+                    const n_v = coerceToNumber(arg);
+                    break :blk if (n_v.isInt32()) @floatFromInt(n_v.asInt32()) else n_v.asDouble();
+                };
                 if (std.math.isNan(n_d) or n_d < 0) return throwRangeError(realm, "TypedArray length out of range");
                 // Catch overflow before the int cast — `Infinity`
                 // and any finite value past `maxInt(u32) / elem_size`
