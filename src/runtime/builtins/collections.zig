@@ -590,14 +590,36 @@ pub fn installWeakSet(realm: *Realm) !void {
     const proto = r.proto;
 
     try installNativeMethodOnProto(realm, proto, "add", weakSetAdd, 1);
-    try installNativeMethodOnProto(realm, proto, "has", setHas, 1);
-    try installNativeMethodOnProto(realm, proto, "delete", setDelete, 1);
+    try installNativeMethodOnProto(realm, proto, "has", weakSetHas, 1);
+    try installNativeMethodOnProto(realm, proto, "delete", weakSetDelete, 1);
+}
+
+fn weakSetDataOf(this_value: Value) ?*@import("../object.zig").SetData {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
+    const d = obj.set_data orelse return null;
+    // Symmetric brand check: WeakSet methods reject Set receivers.
+    if (!d.is_weak) return null;
+    return d;
+}
+
+fn weakSetHas(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const d = weakSetDataOf(this_value) orelse return throwTypeError(realm, "WeakSet.prototype.has called on non-WeakSet");
+    return Value.fromBool(setIndex(d, argOr(args, 0, Value.undefined_)) != null);
+}
+
+fn weakSetDelete(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const d = weakSetDataOf(this_value) orelse return throwTypeError(realm, "WeakSet.prototype.delete called on non-WeakSet");
+    if (setIndex(d, argOr(args, 0, Value.undefined_))) |i| {
+        d.entries.items[i].deleted = true;
+        return Value.true_;
+    }
+    return Value.false_;
 }
 
 fn weakSetConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "WeakSet constructor requires 'new'");
     const data = realm.allocator.create(ObjMod.SetData) catch return error.OutOfMemory;
-    data.* = .{};
+    data.* = .{ .is_weak = true };
     inst.set_data = data;
     if (args.len > 0 and !args[0].isUndefined() and !args[0].isNull()) {
         const src = heap_mod.valueAsPlainObject(args[0]) orelse return throwTypeError(realm, "WeakSet iterable must be an object");
@@ -616,7 +638,8 @@ fn weakSetConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
 
 fn weakSetAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "WeakSet.prototype.add called on non-WeakSet");
-    if (inst.set_data == null) return throwTypeError(realm, "WeakSet.prototype.add called on non-WeakSet");
+    const d = inst.set_data orelse return throwTypeError(realm, "WeakSet.prototype.add called on non-WeakSet");
+    if (!d.is_weak) return throwTypeError(realm, "WeakSet.prototype.add called on non-WeakSet");
     const v = argOr(args, 0, Value.undefined_);
     if (!v.isObject()) return throwTypeError(realm, "WeakSet value must be an object");
     setAddInternal(realm, inst, v) catch return error.OutOfMemory;
@@ -626,8 +649,10 @@ fn weakSetAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError
 // ── §24.2 Set ───────────────────────────────────────────────────────────────
 
 pub fn installSet(realm: *Realm) !void {
+    // §24.2.1 — `Set.length` is 0 (`iterable` is optional, so the
+    // [[Construct]] arity drops it from the count).
     const r = try installConstructor(realm, .{
-        .name = "Set", .ctor = setConstructor, .arity = 1,
+        .name = "Set", .ctor = setConstructor, .arity = 0,
         .to_string_tag = "Set",
     });
     _ = r.ctor;
@@ -641,10 +666,17 @@ pub fn installSet(realm: *Realm) !void {
     // §24.2.3 Set iterators — `values()` is the default; spec
     // also defines `entries()` (returns `[v, v]` pairs) and
     // `keys()` (alias of `values()`).
-    try installNativeMethodOnProto(realm, proto, "values", setValuesMethod, 0);
-    try installNativeMethodOnProto(realm, proto, "keys", setValuesMethod, 0);
+    // §24.2.3 — `Set.prototype.values`, `.keys`, and `@@iterator`
+    // are required to be the *same* function object. Allocate
+    // once and install it under all three names.
+    const values_fn = try realm.heap.allocateFunctionNative(setValuesMethod, 0, "values");
+    values_fn.has_construct = false;
+    values_fn.proto = realm.intrinsics.function_prototype;
+    const values_v = heap_mod.taggedFunction(values_fn);
+    try proto.setWithFlags(realm.allocator, "values", values_v, .{ .writable = true, .enumerable = false, .configurable = true });
+    try proto.setWithFlags(realm.allocator, "keys", values_v, .{ .writable = true, .enumerable = false, .configurable = true });
+    try proto.setWithFlags(realm.allocator, "@@iterator", values_v, .{ .writable = true, .enumerable = false, .configurable = true });
     try installNativeMethodOnProto(realm, proto, "entries", setEntriesMethod, 0);
-    try installNativeMethodOnProto(realm, proto, "@@iterator", setValuesMethod, 0);
 
     // §24.2.4.x — ES2025 set composition methods. All accept any
     // "set-like" object satisfying {size, has, keys}.
@@ -746,7 +778,12 @@ fn setConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeE
 
 fn setDataOf(this_value: Value) ?*@import("../object.zig").SetData {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    return obj.set_data;
+    const d = obj.set_data orelse return null;
+    // Set.prototype methods reject WeakSet receivers — §24.2.3
+    // brand-checks the [[SetData]] internal slot, which is
+    // distinct from WeakSet's [[WeakSetData]].
+    if (d.is_weak) return null;
+    return d;
 }
 
 fn setIndex(d: *@import("../object.zig").SetData, key: Value) ?usize {
@@ -766,7 +803,8 @@ fn setAddInternal(realm: *Realm, inst: *@import("../object.zig").JSObject, value
 
 fn setAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Set.prototype.add called on non-Set");
-    if (inst.set_data == null) return throwTypeError(realm, "Set.prototype.add called on non-Set");
+    const d = inst.set_data orelse return throwTypeError(realm, "Set.prototype.add called on non-Set");
+    if (d.is_weak) return throwTypeError(realm, "Set.prototype.add called on non-Set");
     setAddInternal(realm, inst, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
     return this_value;
 }

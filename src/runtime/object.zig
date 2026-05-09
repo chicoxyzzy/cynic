@@ -92,6 +92,11 @@ pub const MapEntry = struct {
 /// minus the value column.
 pub const SetData = struct {
     entries: std.ArrayListUnmanaged(SetEntry) = .empty,
+    /// Whether this set data belongs to a WeakSet instance.
+    /// Set.prototype.{add, has, delete, clear, forEach, entries,
+    /// values, keys, size, …} reject receivers whose set_data
+    /// is a WeakSet's; symmetric rejection on the WeakSet side.
+    is_weak: bool = false,
 
     pub fn deinit(self: *SetData, allocator: std.mem.Allocator) void {
         self.entries.deinit(allocator);

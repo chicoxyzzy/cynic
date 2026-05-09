@@ -459,6 +459,13 @@ pub fn installNativeGetter(realm: *Realm, proto: *JSObject, name: []const u8, ge
     getter.proto = realm.intrinsics.function_prototype;
     const entry = try proto.accessors.getOrPut(realm.allocator, name);
     entry.value_ptr.* = .{ .getter = getter };
+    // §17 — built-in accessor properties are { enumerable: false,
+    // configurable: true }. `writable` is N/A on accessor descriptors.
+    try proto.property_flags.put(realm.allocator, name, .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = true,
+    });
 }
 
 /// Decimal-format a non-negative integer index into the
