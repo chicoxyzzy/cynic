@@ -242,6 +242,84 @@ pub const Realm = struct {
         return self.class_arena.?.allocator();
     }
 
+    /// Run a stop-the-world mark-sweep cycle. Roots:
+    ///   • `realm.globals` (every binding)
+    ///   • `realm.intrinsics` (every prototype / constructor pointer)
+    ///   • `realm.pending_exception`, `async_done_error`
+    ///   • `realm.microtask_queue` (callbacks + args + async-gen handles)
+    ///   • `realm.modules` + `realm.current_module` (module export bags)
+    ///   • `realm.script_chunks` (each chunk's constants pool)
+    ///   • Active `frames` — each frame's accumulator, registers,
+    ///     `this`, captured env, home object, owning generator,
+    ///     plus the chunk it's currently executing.
+    ///   • Open handle scopes (covered by `heap.collect`).
+    ///
+    /// Called from the interpreter dispatch loop when
+    /// `heap.allocs_since_gc` crosses `heap.gc_threshold`. The
+    /// counter resets to zero at the end of `heap.collect`.
+    pub fn collectGarbage(
+        self: *Realm,
+        frames: []const @import("interpreter.zig").CallFrame,
+    ) void {
+        // Globals.
+        var git = self.globals.iterator();
+        while (git.next()) |e| self.heap.markValue(e.value_ptr.*);
+
+        // Intrinsics — the struct is a flat list of optional
+        // `*JSObject` / `*JSFunction` pointers; iterate fields
+        // with comptime reflection so adding a new intrinsic
+        // doesn't silently break GC roots.
+        inline for (@typeInfo(Intrinsics).@"struct".fields) |field| {
+            const v = @field(self.intrinsics, field.name);
+            const T = @TypeOf(v);
+            if (T == ?*@import("object.zig").JSObject) {
+                if (v) |o| self.heap.markValue(heap_mod.taggedObject(o));
+            } else if (T == ?*JSFunction) {
+                if (v) |fp| self.heap.markValue(heap_mod.taggedFunction(fp));
+            }
+        }
+
+        // Per-realm singleton values.
+        if (self.pending_exception) |ex| self.heap.markValue(ex);
+        self.heap.markValue(self.async_done_error);
+
+        // Microtask queue.
+        for (self.microtask_queue.items) |mt| {
+            self.heap.markValue(mt.callback);
+            self.heap.markValue(mt.arg);
+            if (mt.async_gen) |g| self.heap.markGenerator(g);
+            self.heap.markValue(mt.reaction_handler);
+            self.heap.markValue(mt.reaction_result);
+        }
+
+        // Modules — each `ModuleRecord.exports` is a plain
+        // `*JSObject` on the GC heap whose property bag holds
+        // every named export.
+        if (self.current_module) |m| self.heap.markValue(heap_mod.taggedObject(m.exports));
+        var mit = self.modules.iterator();
+        while (mit.next()) |e| self.heap.markValue(heap_mod.taggedObject(e.value_ptr.*.exports));
+
+        // Top-level chunks — plus, transitively via `markChunk`,
+        // every nested function / class template they hold.
+        for (self.script_chunks.items) |chunk| self.heap.markChunk(chunk);
+
+        // Active call frames.
+        for (frames) |f| {
+            self.heap.markValue(f.accumulator);
+            self.heap.markValue(f.this_value);
+            for (f.registers) |r| self.heap.markValue(r);
+            if (f.env) |env| self.heap.markEnvironment(env);
+            if (f.home_object) |ho| self.heap.markValue(heap_mod.taggedObject(ho));
+            if (f.generator) |gen| self.heap.markGenerator(gen);
+            self.heap.markChunk(f.chunk);
+        }
+
+        // Hand off to `heap.collect` for the handle-scope walk
+        // and the actual sweep. The empty roots slice is fine —
+        // every root above is already marked.
+        self.heap.collect(&.{});
+    }
+
     /// Install the host's built-in bindings — `print`, `console`,
     /// the typed Error constructors, plus core prototypes.
     /// Call after `init` if the realm should run user scripts.

@@ -179,6 +179,21 @@ pub const Heap = struct {
     /// scanned during a collect.
     handle_scopes: std.ArrayListUnmanaged(*HandleScope) = .empty,
 
+    /// Allocations (across every kind) since the last `collect`
+    /// call. Bumped by each `allocateX`; the interpreter dispatch
+    /// loop checks it against `gc_threshold` between opcodes and
+    /// runs `Realm.collectGarbage` when it crosses. Zero once GC
+    /// finishes. Stop-the-world mark-sweep means we never run
+    /// mid-opcode — pointers from native callbacks stay stable.
+    allocs_since_gc: u32 = 0,
+    /// Allocation count that triggers a collection. Tunable; the
+    /// default is sized so an empty allocating loop runs GC every
+    /// few hundred ms at typical `JSObject`/`Environment` sizes.
+    /// `std.math.maxInt(u32)` effectively disables the trigger
+    /// (the unit-test paths that call `collect` directly do this
+    /// when they want full control over when GC fires).
+    gc_threshold: u32 = 16384,
+
     pub fn init(allocator: std.mem.Allocator) Heap {
         return .{ .allocator = allocator };
     }
@@ -208,6 +223,7 @@ pub const Heap = struct {
         const b = try JSBigInt.init(self.allocator, value);
         errdefer b.deinit(self.allocator);
         try self.bigints.append(self.allocator, b);
+        self.allocs_since_gc +|= 1;
         return b;
     }
 
@@ -225,6 +241,7 @@ pub const Heap = struct {
         const s = try JSSymbol.init(self.allocator, description, owned);
         errdefer s.deinit(self.allocator);
         try self.symbols.append(self.allocator, s);
+        self.allocs_since_gc +|= 1;
         return s;
     }
 
@@ -238,6 +255,7 @@ pub const Heap = struct {
         const s = try JSSymbol.init(self.allocator, description, owned);
         errdefer s.deinit(self.allocator);
         try self.symbols.append(self.allocator, s);
+        self.allocs_since_gc +|= 1;
         return s;
     }
 
@@ -251,6 +269,7 @@ pub const Heap = struct {
         const g = try JSGenerator.init(self.allocator, chunk, register_count, captured_env, this_value);
         errdefer g.deinit(self.allocator);
         try self.generators.append(self.allocator, g);
+        self.allocs_since_gc +|= 1;
         return g;
     }
 
@@ -258,6 +277,7 @@ pub const Heap = struct {
         const o = try JSObject.init(self.allocator);
         errdefer o.deinit(self.allocator);
         try self.objects.append(self.allocator, o);
+        self.allocs_since_gc +|= 1;
         return o;
     }
 
@@ -267,6 +287,7 @@ pub const Heap = struct {
         const env = try Environment.init(self.allocator, parent, slot_count);
         errdefer env.deinit(self.allocator);
         try self.environments.append(self.allocator, env);
+        self.allocs_since_gc +|= 1;
         return env;
     }
 
@@ -298,6 +319,7 @@ pub const Heap = struct {
         // sees the right flags.
         try self.installFunctionLengthAndName(f, param_count, name);
         try self.functions.append(self.allocator, f);
+        self.allocs_since_gc +|= 1;
         if (!is_arrow) {
             const proto = try self.allocateObject();
             f.prototype = proto;
@@ -327,6 +349,7 @@ pub const Heap = struct {
         errdefer f.deinit(self.allocator);
         try self.installFunctionLengthAndName(f, param_count, name);
         try self.functions.append(self.allocator, f);
+        self.allocs_since_gc +|= 1;
         return f;
     }
 
@@ -371,6 +394,7 @@ pub const Heap = struct {
         const s = try JSString.init(self.allocator, src);
         errdefer s.deinit(self.allocator);
         try self.strings.append(self.allocator, s);
+        self.allocs_since_gc +|= 1;
         return s;
     }
 
@@ -408,6 +432,12 @@ pub const Heap = struct {
                 if (f.bound_args) |ba| {
                     for (ba) |a| self.markValue(a);
                 }
+                // The function's chunk holds heap-allocated string
+                // / symbol constants (pulled in by every literal
+                // string opcode). The chunk itself isn't on the GC
+                // heap (realm.script_chunks owns it), but the
+                // values inside need keeping alive.
+                if (f.chunk) |c| self.markChunk(c);
             }
         } else if (valueAsPlainObject(v)) |o| {
             if (!o.marked) {
@@ -450,6 +480,27 @@ pub const Heap = struct {
             }
         }
         // Doubles, ints, bools, null, undefined, hole: no heap pointer.
+    }
+
+    /// Walk a `Chunk`'s constant pool and recurse into nested
+    /// function templates. Chunks themselves aren't on the GC
+    /// heap — the realm owns them — but the heap-allocated
+    /// strings / symbols sitting in their constants pool are.
+    /// Idempotent isn't needed: chunks are walked from at most
+    /// a handful of roots per cycle (active frames, JSFunctions),
+    /// and the recursion bottoms out on the (always-finite)
+    /// template tree.
+    pub fn markChunk(self: *Heap, chunk: *const Chunk) void {
+        for (chunk.constants) |c| self.markValue(c);
+        for (chunk.function_templates) |*ft| self.markChunk(&ft.chunk);
+        for (chunk.class_templates) |*ct| {
+            self.markChunk(&ct.constructor_chunk);
+            for (ct.instance_methods) |*m| self.markChunk(&m.chunk);
+            for (ct.static_methods) |*m| self.markChunk(&m.chunk);
+            for (ct.instance_fields) |*fd| if (fd.init_chunk) |*ic| self.markChunk(ic);
+            for (ct.static_fields) |*fd| if (fd.init_chunk) |*ic| self.markChunk(ic);
+            for (ct.static_blocks) |*sb| self.markChunk(sb);
+        }
     }
 
     /// Mark `env` and recursively walk its parent chain + slots.
@@ -585,6 +636,10 @@ pub const Heap = struct {
                 }
             }
         }
+        // Reset the allocation pressure counter so the next
+        // collect doesn't fire until fresh allocations cross
+        // the threshold again.
+        self.allocs_since_gc = 0;
     }
 
     /// Open a new handle scope. The returned scope is owned by the

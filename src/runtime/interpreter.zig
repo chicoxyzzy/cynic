@@ -63,7 +63,7 @@ const RelOp = arith.RelOp;
 /// per-call allocation work.
 const max_call_frames: usize = 1024;
 
-const CallFrame = struct {
+pub const CallFrame = struct {
     chunk: *const Chunk,
     ip: usize,
     accumulator: Value,
@@ -1443,6 +1443,16 @@ fn runFrames(
     frames: *std.ArrayListUnmanaged(CallFrame),
 ) RunError!RunResult {
     while (frames.items.len > 0) {
+        // Allocation-pressure GC — when the heap counter has
+        // climbed past its threshold, run a stop-the-world
+        // mark-sweep with the live roots from the realm + the
+        // current frame stack. Stop-the-world means we never
+        // run mid-opcode, so pointers natives hold across a
+        // sub-call stay stable; the check at dispatch top is
+        // the natural safe point.
+        if (realm.heap.allocs_since_gc >= realm.heap.gc_threshold) {
+            realm.collectGarbage(frames.items);
+        }
         // Cooperative step budget — saturating decrement, then
         // unwind a synthetic `RangeError` when the budget hits
         // zero. The default budget is huge (maxInt(u64)) so
