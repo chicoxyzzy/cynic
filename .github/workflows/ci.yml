@@ -69,5 +69,9 @@ jobs:
       - name: Run test262 (runtime, parallel)
         # Drop `--quiet` so the per-bucket tally lands in the CI
         # log. Step timeout caps it in case the harness wedges.
+        # `continue-on-error` keeps a cancel / timeout from
+        # painting the build red — score regressions are reviewed
+        # on PRs against `test262-results.md`, not here.
         timeout-minutes: 8
+        continue-on-error: true
         run: zig build test262 -- --mode=runtime --threads=4

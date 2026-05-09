@@ -636,10 +636,28 @@ pub fn main(init: std.process.Init) !void {
             spawned += 1;
         }
 
-        // Live in-place progress is dropped when threads>1 — workers
-        // would otherwise interleave \r-redrawn lines. The final
-        // tally still prints once workers join below.
+        // Periodic progress monitor — drives a `\n`-terminated
+        // status line every 5 s so CI logs (which buffer stderr
+        // and don't render `\r`-redrawn output) see something
+        // before the run finishes. Only prints when not quiet
+        // and not in verbose-per-test mode.
+        var monitor_done: std.atomic.Value(bool) = .init(false);
+        var monitor_thread: ?std.Thread = null;
+        if (!opts.quiet and !opts.verbose) {
+            monitor_thread = try std.Thread.spawn(.{}, monitorLoop, .{
+                io,
+                &index,
+                &monitor_done,
+                @as(usize, paths.items.len),
+            });
+        }
+
         for (threads) |t| t.join();
+
+        if (monitor_thread) |m| {
+            monitor_done.store(true, .release);
+            m.join();
+        }
     }
 
     const elapsed = start_ts.untilNow(io, .awake).toMilliseconds();
@@ -1120,6 +1138,35 @@ fn printProgress(io: std.Io, stats: *const Stats) !void {
         stats.total, stats.pass(), stats.fail(), stats.skip,
     });
     try std.Io.File.stderr().writeStreamingAll(io, msg);
+}
+
+/// Background monitor thread for the parallel runner — peeks at
+/// the shared atomic path index every 5 s and emits a
+/// `\n`-terminated status line so CI logs surface progress before
+/// the workers finish. The line carries no pass/fail breakdown
+/// (the workers' Stats are merged at exit, not midway), only the
+/// "k of N tests dispatched" counter — but that's enough to tell
+/// "still running" from "wedged" at a glance. Stops as soon as
+/// `done` flips to true.
+fn monitorLoop(
+    io: std.Io,
+    index: *std.atomic.Value(usize),
+    done: *std.atomic.Value(bool),
+    total: usize,
+) void {
+    var elapsed_s: u32 = 0;
+    while (!done.load(.acquire)) {
+        std.Io.sleep(io, .fromSeconds(5), .awake) catch break;
+        elapsed_s += 5;
+        if (done.load(.acquire)) break;
+        const dispatched = index.load(.acquire);
+        const display = if (dispatched > total) total else dispatched;
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "[{d}s] dispatched {d}/{d}\n", .{
+            elapsed_s, display, total,
+        }) catch continue;
+        std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
+    }
 }
 
 fn printVerbose(io: std.Io, rel: []const u8, r: RunResult) !void {
