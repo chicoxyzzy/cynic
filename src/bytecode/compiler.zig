@@ -4831,8 +4831,12 @@ fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
             if (ld.kind != .var_) {
                 const kind: BindingKind = if (ld.kind == .let_) .let_ else .const_;
                 for (ld.declarators) |d| {
-                    const name = identifierName(self.source, d.name) orelse return error.UnsupportedStatement;
-                    _ = try self.declareBinding(name, kind, d.span);
+                    // §13.3.1 — declare every leaf binding (or
+                    // the single ident) for `let`/`const`. Patterns
+                    // are walked via `declarePatternBindings`; the
+                    // assignment / destructure happens later via
+                    // `compileLexicalDecl`.
+                    try self.declarePatternBindings(d.name, kind);
                 }
             }
             try self.compileLexicalDecl(ld);
