@@ -65,6 +65,7 @@ These are project rules — they apply to everyone.
 | See what's planned and what's done | [docs/ROADMAP.md](docs/ROADMAP.md) |
 | Decide between two designs | [docs/handbook/prior-art.md](docs/handbook/prior-art.md) |
 | Add a lexer / parser / runtime feature | [docs/handbook/tdd.md](docs/handbook/tdd.md), then [docs/handbook/compiler-engineering.md](docs/handbook/compiler-engineering.md) |
+| Touch heap-allocating native code | [docs/handbook/gc.md](docs/handbook/gc.md) (`HandleScope` contract for natives that re-enter JS) |
 | Look up a Zig idiom Cynic uses | [docs/handbook/zig.md](docs/handbook/zig.md) |
 | Score current conformance | `zig build test262 -- --quiet`; history in [test262-results.md](test262-results.md) |
 | Find spec text | [tc39.es/ecma262](https://tc39.es/ecma262/) |

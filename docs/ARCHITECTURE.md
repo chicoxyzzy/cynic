@@ -89,15 +89,23 @@ unrelated to a from-scratch interpreter.
 
 ## Garbage collection
 
-Stop-the-world mark-sweep over per-type free lists. Decided at later;
-see [src/runtime/heap.zig](../src/runtime/heap.zig). Roots: the
-interpreter's frame stack, the accumulator, the constant pool, and the
-realm's globals table. Allocations may collect.
+Stop-the-world mark-sweep over per-type free lists, triggered on
+allocation pressure. See [src/runtime/heap.zig](../src/runtime/heap.zig)
+for the collector itself; the trigger and the realm-wide root walker
+live in [src/runtime/realm.zig](../src/runtime/realm.zig) and the
+interpreter dispatch loop in
+[src/runtime/interpreter.zig](../src/runtime/interpreter.zig). The
+operational details — root set, threshold, the `HandleScope` contract
+for natives — are in [docs/handbook/gc.md](handbook/gc.md).
 
-`Heap` tracks `JSString`, `JSFunction`, `JSObject`, and `Environment`
-on separate lists. Sweep walks each list, frees unmarked objects, and
-clears mark bits. Property tables on `JSObject` and slot arrays on
-`Environment` are walked to compute reachability.
+`Heap` tracks `JSString`, `JSFunction`, `JSObject`, `Environment`,
+`JSGenerator`, `JSSymbol`, and `JSBigInt` on separate lists. Each
+`allocateX` increments `allocs_since_gc`; the dispatch loop checks
+the counter against `gc_threshold` (default 16,384) between opcodes
+and runs `Realm.collectGarbage` when it crosses. Roots include the
+realm's globals, intrinsics, microtask queue, modules, top-level
+chunks, the active frames' registers + accumulator + this + env +
+home_object, and any open handle scopes.
 
 Reference counting (QuickJS) was rejected: it leaks cycles and bloats
 the runtime API. Generational moving GC (Lieberman / Hewitt 1983,
