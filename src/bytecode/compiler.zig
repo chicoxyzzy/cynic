@@ -2785,9 +2785,14 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
     var bind_kind: BindingKind = .let_;
     var bind_name: []const u8 = "";
     var bind_span: Span = s.span;
-    var bind_target_kind: enum { binding, identifier_assign, pattern, member_assign } = .binding;
+    var bind_target_kind: enum { binding, identifier_assign, pattern, member_assign, assignment_pattern } = .binding;
     var pattern_target: ?ast.statement.BindingTarget = null;
     var member_target: ?ast.expression.MemberExpr = null;
+    // §13.15.5 — for-of LHS shaped as an array/object literal is
+    // re-parsed as an AssignmentPattern (§14.7.5.1 step 6.h.iv).
+    // We hold the expression here and route through
+    // `compileAssignmentPattern` at body emit.
+    var assignment_pattern_target: ?ast.expression.Expression = null;
     switch (s.left) {
         .lexical => |ld| {
             if (ld.kind == .var_) bind_kind = .var_ else if (ld.kind == .let_) bind_kind = .let_ else bind_kind = .const_;
@@ -2822,6 +2827,23 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
                 member_target = m;
                 bind_span = m.span;
                 bind_target_kind = .member_assign;
+            },
+            // Array / object literal LHS in a for-of head is the
+            // assignment-destructuring form: `for ([a,b] of …)`,
+            // `for ({x: a.b} of …)`. Per §14.7.5.1 the LHS is
+            // re-parsed as an AssignmentPattern. The parser already
+            // produces an array/object literal for these (since
+            // they're indistinguishable from expressions until we
+            // see the `of`); we route them through
+            // `compileAssignmentPattern`.
+            .array_literal, .object_literal => {
+                assignment_pattern_target = e;
+                bind_span = switch (e) {
+                    .array_literal => |al| al.span,
+                    .object_literal => |ol| ol.span,
+                    else => unreachable,
+                };
+                bind_target_kind = .assignment_pattern;
             },
             else => return error.UnsupportedStatement,
         },
@@ -2944,11 +2966,14 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
     try self.builder.emitU16(k_value);
 
     // Assign to the binding (lexical, identifier-assign target,
-    // member target, or destructuring pattern walk).
+    // member target, assignment pattern, or destructuring pattern
+    // walk).
     if (pattern_target) |pt| {
         try self.compileDestructure(pt);
     } else if (member_target) |m| {
         try self.compileForOfMemberAssign(m, s.span);
+    } else if (assignment_pattern_target) |ap| {
+        try self.compileAssignmentPattern(ap);
     } else {
         try self.assignToBinding(bind_name, bind_span);
     }
