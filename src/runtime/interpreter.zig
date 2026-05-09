@@ -2805,6 +2805,29 @@ fn runFrames(
                 acc = heap_mod.taggedObject(obj);
             },
 
+            .rest_args_from => {
+                // §15.2.4 — collect the trailing args into a real
+                // Array (not an array-like). Slot `start` is the
+                // first arg index past the named non-rest params.
+                const start = code[ip];
+                ip += 1;
+                const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+                obj.prototype = realm.intrinsics.array_prototype;
+                var len: i32 = 0;
+                if (start < f.argc) {
+                    var i: u8 = start;
+                    while (i < f.argc) : (i += 1) {
+                        var ibuf: [16]u8 = undefined;
+                        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
+                        const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+                        obj.set(allocator, owned.bytes, registers[i]) catch return error.OutOfMemory;
+                        len += 1;
+                    }
+                }
+                obj.set(allocator, "length", Value.fromInt32(len)) catch return error.OutOfMemory;
+                acc = heap_mod.taggedObject(obj);
+            },
+
             .def_accessor => {
                 const k = readU16(code, ip);
                 const r_obj = code[ip + 2];

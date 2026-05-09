@@ -293,6 +293,13 @@ pub const Op = enum(u8) {
     /// `length` slot, in `acc`. §10.4.4. Emitted by the function
     /// prologue when the body references `arguments`.
     lda_arguments,
+    /// `[op] [start:u8]` — §15.2.4 IteratorBindingInitialization
+    /// for a rest parameter `function f(a, b,...rest) {}`. Build a
+    /// fresh Array from the current frame's argument registers
+    /// `start..argc`, with `length = argc - start`, leaving it in
+    /// `acc`. When the caller passed fewer than `start` args, the
+    /// resulting array is empty.
+    rest_args_from,
     /// Suspend the current generator frame and surface `acc` as
     /// the yielded value. The runtime saves `ip`, `acc`, env,
     /// `this`, `home_object`, and the register file into the
@@ -534,6 +541,7 @@ pub const Op = enum(u8) {
             .object_spread,
             .set_proto_literal,
             .set_home,
+            .rest_args_from,
             => 1, // single u8 register operand
             .set_fn_name_from => 2, // r_key:u8 + prefix:u8
             .mov,
@@ -642,6 +650,7 @@ pub const Op = enum(u8) {
             .set_home => "SetHome",
             .set_fn_name_from => "SetFnNameFrom",
             .lda_arguments => "LdaArguments",
+            .rest_args_from => "RestArgsFrom",
             .gen_yield => "GenYield",
             .await_ => "Await",
             .iter_open => "IterOpen",

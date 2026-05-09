@@ -3623,7 +3623,7 @@ fn compileConstructorBody(
     for (params, 0..) |*p, i| {
         switch (p.*) {
             .simple => |*sp| try self.emitParamPrologue(sp, @intCast(i)),
-            .rest => return error.UnsupportedExpression,
+            .rest => |*rp| try self.emitRestParamPrologue(rp, @intCast(i)),
         }
     }
 
@@ -3719,7 +3719,7 @@ fn compileMethodBody(
     for (params, 0..) |*p, i| {
         switch (p.*) {
             .simple => |*sp| try self.emitParamPrologue(sp, @intCast(i)),
-            .rest => return error.UnsupportedExpression,
+            .rest => |*rp| try self.emitRestParamPrologue(rp, @intCast(i)),
         }
     }
 
@@ -4500,6 +4500,28 @@ fn applyDefaultExprNamed(self: *Compiler, default_expr: *const ast.expression.Ex
     try self.builder.patchI16(end_patch, end_target);
 }
 
+/// §10.2.3 — rest parameter prologue: collect the trailing args
+/// (the ones beyond the explicit params) into a fresh Array via
+/// `rest_args_from start`, and bind that array to the rest
+/// target's slot. Destructuring rest targets walk the resulting
+/// array through `compileDestructure`.
+fn emitRestParamPrologue(self: *Compiler, rp: *const ast.statement.RestParam, start_index: u8) CompileError!void {
+    if (rp.target == .identifier) {
+        const param_name = self.source[rp.target.identifier.span.start..rp.target.identifier.span.end];
+        const slot = try self.declareBinding(param_name, .let_, rp.span);
+        try self.builder.emitOp(.rest_args_from, rp.span);
+        try self.builder.emitU8(start_index);
+        try self.builder.emitOp(.sta_env, rp.span);
+        try self.builder.emitU8(0);
+        try self.builder.emitU8(slot);
+    } else {
+        try self.declarePatternBindings(rp.target, .let_);
+        try self.builder.emitOp(.rest_args_from, rp.span);
+        try self.builder.emitU8(start_index);
+        try self.compileDestructure(rp.target);
+    }
+}
+
 /// §10.2.3 prologue for a single non-rest parameter — declare
 /// the binding, copy the caller-supplied register `i` into the
 /// function's env slot, and apply a default expression when the
@@ -5159,10 +5181,8 @@ fn compileFunctionTemplateExt(
     // own env slot.
     for (params, 0..) |*p, i| {
         switch (p.*) {
-            .simple => |*sp| {
-                try self.emitParamPrologue(sp, @intCast(i));
-            },
-            .rest => return error.UnsupportedExpression,
+            .simple => |*sp| try self.emitParamPrologue(sp, @intCast(i)),
+            .rest => |*rp| try self.emitRestParamPrologue(rp, @intCast(i)),
         }
     }
 

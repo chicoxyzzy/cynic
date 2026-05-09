@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 54.76 % | 95.61 % | 28542 / 52125 |
-| **runtime** | 39.86 % | 53.73 % | 20581 / 51639 |
+| **runtime** | 39.88 % | 53.76 % | 20595 / 51639 |
 
 ## Where the runtime stands, by area
 
@@ -26,7 +26,7 @@ Temporal, browser-era built-ins …).
 | `built-ins/Array` | 1984 | 886 | 211 | 64 % | 69 % |
 | `built-ins/TypedArray` | 390 | 832 | 216 | 27 % | 32 % |
 | `built-ins/Object` | 2602 | 724 | 85 | 76 % | 78 % |
-| `built-ins/String` | 703 | 515 | 5 | 57 % | 58 % |
+| `built-ins/String` | 705 | 513 | 5 | 58 % | 58 % |
 | `built-ins/TypedArrayConstructors` | 271 | 441 | 24 | 37 % | 38 % |
 | `built-ins/Promise` | 253 | 421 | 3 | 37 % | 38 % |
 | `built-ins/Iterator` | 113 | 391 | 6 | 22 % | 22 % |
@@ -37,10 +37,10 @@ Temporal, browser-era built-ins …).
 | `built-ins/Date` | 421 | 165 | 8 | 71 % | 72 % |
 | `language/eval-code` | 10 | 117 | 220 | 3 % | 8 % |
 | `built-ins/JSON` | 40 | 103 | 22 | 24 % | 28 % |
-| `built-ins/Set` | 299 | 83 | 1 | 78 % | 78 % |
 | `language/literals` | 358 | 79 | 97 | 67 % | 82 % |
+| `built-ins/Set` | 303 | 79 | 1 | 79 % | 79 % |
 | `built-ins/Number` | 265 | 75 | 0 | 78 % | 78 % |
-| `language/arguments-object` | 133 | 73 | 57 | 51 % | 65 % |
+| `language/arguments-object` | 134 | 72 | 57 | 51 % | 65 % |
 | `built-ins/Map` | 140 | 63 | 1 | 69 % | 69 % |
 | `built-ins/Reflect` | 93 | 60 | 0 | 61 % | 61 % |
 | `language/statementList` | 27 | 53 | 0 | 34 % | 34 % |
@@ -81,7 +81,6 @@ Temporal, browser-era built-ins …).
 | `built-ins/isNaN` | 3 | 12 | 0 | 20 % | 20 % |
 | `built-ins/MapIteratorPrototype` | 1 | 10 | 0 | 9 % | 9 % |
 | `built-ins/SetIteratorPrototype` | 1 | 10 | 0 | 9 % | 9 % |
-| `language/rest-parameters` | 1 | 10 | 0 | 9 % | 9 % |
 | `built-ins/eval` | 0 | 10 | 0 | 0 % | 0 % |
 | `built-ins/ArrayIteratorPrototype` | 10 | 9 | 8 | 37 % | 53 % |
 | `annexB/built-ins` | 20 | 8 | 9 | 54 % | 71 % |
@@ -92,6 +91,7 @@ Temporal, browser-era built-ins …).
 | `built-ins/StringIteratorPrototype` | 2 | 5 | 0 | 29 % | 29 % |
 | `built-ins/undefined` | 1 | 4 | 3 | 13 % | 20 % |
 | `built-ins/AsyncIteratorPrototype` | 0 | 4 | 9 | 0 % | 0 % |
+| `language/rest-parameters` | 8 | 3 | 0 | 73 % | 73 % |
 | `language/identifier-resolution` | 6 | 3 | 5 | 43 % | 67 % |
 | `language/destructuring` | 15 | 2 | 2 | 79 % | 88 % |
 | `built-ins/Infinity` | 2 | 2 | 2 | 33 % | 50 % |
@@ -161,17 +161,17 @@ Temporal, browser-era built-ins …).
 
 ## History
 
-### 2026-05-09 — cynic `d4961fd`, test262 `d0c1b455`
+### 2026-05-09 — cynic `350dbef`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 39.86 % | 53.73 % | 20581 / 51639 | +2716 |
+| **runtime** | 39.88 % | 53.76 % | 20595 / 51639 | +2730 |
 
 Biggest movers (runtime):
 
-- `language/expressions` +832
-- `language/statements` +639
-- `built-ins/Function` +1
+- `language/rest-parameters` +7
+- `built-ins/Set` +4
+- `built-ins/String` +2
 - `language/arguments-object` +1
 
 ### 2026-05-08 — cynic `unknown`, test262 `d0c1b455`
