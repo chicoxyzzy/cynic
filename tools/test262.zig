@@ -393,17 +393,37 @@ const BucketMap = struct {
         gop.value_ptr.total += 1;
     }
 
-    /// Materialise an owned slice of buckets sorted by fail
-    /// count descending, then pass descending, then name.
-    fn sortedByFailDesc(self: *const BucketMap, gpa: std.mem.Allocator) ![]Bucket {
+    /// Materialise an owned slice of buckets sorted into
+    /// fail-magnitude tiers, alphabetical within each tier.
+    /// The tiers are:
+    ///   • 1000+ fails  (whole-language buckets, the long tail)
+    ///   • 100–999      (mid-volume — feature areas with real gaps)
+    ///   • 10–99        (small areas / partial features)
+    ///   • 1–9          (polish)
+    ///   • 0            (fully passing OR fully OOS-skipped — bottom)
+    /// Within a tier, sort by name so the table is scannable —
+    /// readers usually want "where's `built-ins/Promise`?", not
+    /// "what's at row 14?". A pure raw-fail-desc sort buried
+    /// related areas (all the `built-ins/*` typed-array siblings,
+    /// say) at random heights; tiering keeps them together while
+    /// still surfacing the heavy-hitter tier at the top.
+    fn sortedByFailTiered(self: *const BucketMap, gpa: std.mem.Allocator) ![]Bucket {
         var out = try gpa.alloc(Bucket, self.map.count());
         var it = self.map.iterator();
         var i: usize = 0;
         while (it.next()) |entry| : (i += 1) out[i] = entry.value_ptr.*;
         std.mem.sort(Bucket, out, {}, struct {
+            fn tier(fail: u32) u8 {
+                if (fail == 0) return 4;
+                if (fail < 10) return 3;
+                if (fail < 100) return 2;
+                if (fail < 1000) return 1;
+                return 0;
+            }
             fn lt(_: void, a: Bucket, b: Bucket) bool {
-                if (a.fail != b.fail) return a.fail > b.fail;
-                if (a.pass != b.pass) return a.pass > b.pass;
+                const ta = tier(a.fail);
+                const tb = tier(b.fail);
+                if (ta != tb) return ta < tb;
                 return std.mem.order(u8, a.name, b.name) == .lt;
             }
         }.lt);
@@ -1902,7 +1922,7 @@ fn writeScoreboard(
     out: *std.ArrayListUnmanaged(u8),
     buckets: *const BucketMap,
 ) !void {
-    const sorted = try buckets.sortedByFailDesc(gpa);
+    const sorted = try buckets.sortedByFailTiered(gpa);
     defer gpa.free(sorted);
 
     try out.appendSlice(gpa,
@@ -1910,13 +1930,15 @@ fn writeScoreboard(
         \\## Where the runtime stands, by area
         \\
         \\Bucketed on the first two path components (`built-ins/Set`,
-        \\`language/expressions`, …). Sorted by raw fail count
-        \\descending — the top is where the most tests would move
-        \\with the least work. Skipped tests are excluded from
-        \\`pass` and `fail`. Rows in ~~strikethrough~~ are buckets
-        \\we skip wholesale (out of scope per the Cynic-targeted
-        \\skiplist — Annex B language extensions, intl402, staging,
-        \\Temporal, browser-era built-ins …).
+        \\`language/expressions`, …). Grouped into fail-magnitude
+        \\tiers (1000+, 100–999, 10–99, 1–9, 0), alphabetical
+        \\within each tier — heavy-hitter areas surface at the top,
+        \\related siblings stay neighbours so the table is scannable.
+        \\Skipped tests are excluded from `pass` and `fail`. Rows
+        \\in ~~strikethrough~~ are buckets we skip wholesale (out
+        \\of scope per the Cynic-targeted skiplist — Annex B
+        \\language extensions, intl402, staging, Temporal,
+        \\browser-era built-ins …).
         \\
         \\| area | pass | fail | skip | spec% | attempted% |
         \\|---|---:|---:|---:|---:|---:|
@@ -1924,7 +1946,27 @@ fn writeScoreboard(
     );
 
     var buf: [320]u8 = undefined;
+    var prev_tier: u8 = 255;
     for (sorted) |b| {
+        const tier: u8 = if (b.fail == 0) 4 else if (b.fail < 10) 3 else if (b.fail < 100) 2 else if (b.fail < 1000) 1 else 0;
+        if (tier != prev_tier) {
+            // Insert a tier label as a single-cell row spanning
+            // the table — keeps the header visible at the
+            // boundary instead of relying on the reader to spot
+            // the magnitude shift on their own. GitHub renders
+            // colspan via leading bold cell + filler dashes
+            // poorly, so we use a plain italic row.
+            const label: []const u8 = switch (tier) {
+                0 => "1000+ fails",
+                1 => "100–999 fails",
+                2 => "10–99 fails",
+                3 => "1–9 fails",
+                else => "0 fails (passing or wholly OOS)",
+            };
+            const hdr = try std.fmt.bufPrint(&buf, "| **_{s}_** | | | | | |\n", .{label});
+            try out.appendSlice(gpa, hdr);
+            prev_tier = tier;
+        }
         const pct: f64 = if (b.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass)) / @as(f64, @floatFromInt(b.total));
         const attempted: u32 = b.pass + b.fail;
         const att_pct: f64 = if (attempted == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass)) / @as(f64, @floatFromInt(attempted));
