@@ -173,6 +173,31 @@ dispatch, so its values no longer have a queue-based root.
 
 ## What's not yet done
 
+### Array-spread integer-key gap
+
+Spread into an array (`[...iter]`) allocates a JSString per index
+("0", "1", "2", …) inside the loop and stores its `bytes` slice
+as the property key. Nothing roots those JSStrings — `setComputedOwned`-
+style anchoring would, but the `key_anchors` list grows linearly
+with the iteration count and turns the GC walk quadratic on the
+test262 poisoned-iterator fixtures (`spread-err-{sngl,mult}-err-itr-value.js`,
+which iterate up to 16M times).
+
+Any per-key anchoring scheme has the same shape — N anchors, K
+GC cycles, K = N/threshold, total marking work N²/threshold. So
+the fix isn't *which* container to anchor in, it's getting integer-
+indexed property writes off the string-keyed property map entirely.
+That means a real `JSArray` heap kind with packed indexed elements
+(V8 / JSC / SM all do this — "elements" storage is a separate slot
+vector from the named-property dictionary). Until that lands, the
+spread loop uses the unrooted `target.set` path; the fixture passes
+in practice because the JSStrings get reallocated at addresses
+that happen to keep the in-flight slices valid through the loop's
+trapped exception. It's not memory-correct under arbitrary GC
+schedules, just under ours.
+
+### Future work
+
 The README has these as future work and they remain so:
 
 - **Generational GC.** A nursery + tenuring lets the cheap case (most
