@@ -18,6 +18,9 @@ zig-out/
 # Throwaway worktrees spawned by Claude Code agents.
 .claude/worktrees/
 
+# Scheduler lock file written by Claude Code's /loop machinery.
+.claude/scheduled_tasks.lock
+
 # `--only-failing` cache for the test262 harness — written by
 # every full run, consumed by `--only-failing`.
 .test262-pass-cache.txt
