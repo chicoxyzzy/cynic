@@ -644,7 +644,9 @@ fn objectDefineProperties(realm: *Realm, this_value: Value, args: []const Value)
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
         if (!props.flagsFor(key).enumerable) continue;
-        const desc_v = entry.value_ptr.*;
+        // §20.1.2.3.1 step 5.b.ii — Get each descriptor through the
+        // chain so accessor-backed descriptor slots fire.
+        const desc_v = try getPropertyChain(realm, props, key);
         const inner_args = [_]Value{ heap_mod.taggedObject(target), blk: {
             const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
             break :blk Value.fromString(k_str);
@@ -843,7 +845,11 @@ fn objectCreate(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             const key = entry.key_ptr.*;
             if (!props.flagsFor(key).enumerable) continue;
             const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-            const inner = [_]Value{ heap_mod.taggedObject(obj), Value.fromString(k_str), entry.value_ptr.* };
+            // §20.1.2.3.1 ObjectDefineProperties step 5.b.ii — Get
+            // each descriptor through the chain so accessor-backed
+            // descriptor slots fire.
+            const desc_v = try getPropertyChain(realm, props, key);
+            const inner = [_]Value{ heap_mod.taggedObject(obj), Value.fromString(k_str), desc_v };
             _ = try objectDefineProperty(realm, Value.undefined_, &inner);
         }
     }
@@ -863,7 +869,10 @@ fn objectAssign(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             const key = entry.key_ptr.*;
             if (std.mem.startsWith(u8, key, "__cynic_")) continue;
             if (!src.flagsFor(key).enumerable) continue;
-            target.set(realm.allocator, key, entry.value_ptr.*) catch return error.OutOfMemory;
+            // §20.1.2.1 step 5.c.iv — Get(from, nextKey) so accessor
+            // getters on the source fire instead of being read past.
+            const v = try getPropertyChain(realm, src, key);
+            target.set(realm.allocator, key, v) catch return error.OutOfMemory;
         }
     }
     return heap_mod.taggedObject(target);
@@ -976,11 +985,14 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
             .thrown => return error.NativeThrew,
         };
         const result = heap_mod.valueAsPlainObject(result_v) orelse break;
-        if (toBoolean(result.get("done"))) break;
-        const pair_v = result.get("value");
+        // §7.4.5 IteratorComplete / IteratorValue use Get(), so
+        // user-supplied iterator results with accessor `done`/`value`
+        // slots must fire those getters.
+        if (toBoolean(try getPropertyChain(realm, result, "done"))) break;
+        const pair_v = try getPropertyChain(realm, result, "value");
         const pair = heap_mod.valueAsPlainObject(pair_v) orelse return throwTypeError(realm, "Object.fromEntries entry must be an object");
-        const k = pair.get("0");
-        const v = pair.get("1");
+        const k = try getPropertyChain(realm, pair, "0");
+        const v = try getPropertyChain(realm, pair, "1");
         const key_str = if (k.isString())
             (@as(*JSString, @ptrCast(@alignCast(k.asString())))).bytes
         else blk: {
