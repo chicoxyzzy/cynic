@@ -125,6 +125,17 @@ pub fn isBigInt(v: Value) bool {
     return valueKind(v) == kind_bigint;
 }
 
+/// §6.1.7 — JS-level "Object" (plain object or function exotic).
+/// Distinct from `Value.isObject`, which is a heap-tag predicate
+/// that also covers Symbol and BigInt (those share the
+/// tagged-pointer encoding but are primitives at the JS layer,
+/// per §6.1.5 and §6.1.6.2). Spec checks like §7.1.1 ToPrimitive
+/// "If Type(result) is Object" want this helper, not `isObject`.
+pub fn isJSObject(v: Value) bool {
+    const k = valueKind(v) orelse return false;
+    return k == kind_object or k == kind_function;
+}
+
 pub const Heap = struct {
     allocator: std.mem.Allocator,
     /// Every live `JSString` allocated through this heap. Sweep

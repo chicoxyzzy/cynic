@@ -875,7 +875,12 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
             };
             switch (outcome) {
                 .value, .yielded => |v| {
-                    if (v.isObject()) return throwTypeError(realm, "Symbol.toPrimitive must return a primitive value");
+                    // §7.1.1 step 6 — `If Type(result) is not Object,
+                    // return result`. Symbols and BigInts are JS
+                    // primitives (§6.1.5 / §6.1.6.2), so they pass
+                    // through even though they share the object-tag
+                    // encoding internally.
+                    if (heap_mod.isJSObject(v)) return throwTypeError(realm, "Symbol.toPrimitive must return a primitive value");
                     return v;
                 },
                 .thrown => |ex| {
@@ -897,7 +902,11 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
                 };
                 switch (outcome) {
                     .value, .yielded => |v| {
-                        if (!v.isObject()) return v;
+                        // §7.1.1.1 step 5.iii — accept any JS
+                        // primitive (including Symbol / BigInt). Only
+                        // a true Object result keeps the loop going to
+                        // try the second method.
+                        if (!heap_mod.isJSObject(v)) return v;
                     },
                     .thrown => |ex| {
                         realm.pending_exception = ex;

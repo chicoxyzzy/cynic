@@ -350,7 +350,11 @@ pub fn addValues(realm: *Realm, lhs: Value, rhs: Value) RunError!?Value {
     // code surface via `pending_exception`.
     var l = lhs;
     var r = rhs;
-    if (l.isObject() or r.isObject()) {
+    // §13.15.4 step 1: `lprim = ? ToPrimitive(lval)`. Only fires when
+    // a side is a JS Object — Symbol / BigInt primitives short-
+    // circuit the no-op call (and a recursive `toPrimitive` on them
+    // would still return the value as-is per §7.1.1 step 2).
+    if (heap_mod.isJSObject(l) or heap_mod.isJSObject(r)) {
         l = intrinsics_mod.toPrimitive(realm, l, .default) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.NativeThrew => return null,
