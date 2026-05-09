@@ -1607,7 +1607,10 @@ fn writeScoreboard(
         \\`language/expressions`, …). Sorted by raw fail count
         \\descending — the top is where the most tests would move
         \\with the least work. Skipped tests are excluded from
-        \\`pass` and `fail`.
+        \\`pass` and `fail`. Rows in ~~strikethrough~~ are buckets
+        \\we skip wholesale (out of scope per the Cynic-targeted
+        \\skiplist — Annex B language extensions, intl402, staging,
+        \\Temporal, browser-era built-ins …).
         \\
         \\| area | pass | fail | skip | spec% | attempted% |
         \\|---|---:|---:|---:|---:|---:|
@@ -1619,9 +1622,20 @@ fn writeScoreboard(
         const pct: f64 = if (b.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass)) / @as(f64, @floatFromInt(b.total));
         const attempted: u32 = b.pass + b.fail;
         const att_pct: f64 = if (attempted == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass)) / @as(f64, @floatFromInt(attempted));
-        const line = try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d} | {d:.0} % | {d:.0} % |\n", .{
-            b.name, b.pass, b.fail, b.skip, pct, att_pct,
-        });
+        // Strikethrough buckets we skip wholesale (every test
+        // filtered out as out-of-scope per the Cynic-targeted
+        // skiplist). They're kept in the table for visibility —
+        // crossing them out makes the rows we actually run easy
+        // to spot.
+        const strike: bool = (b.pass == 0 and b.fail == 0);
+        const line = if (strike)
+            try std.fmt.bufPrint(&buf, "| ~~`{s}`~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d:.0} %~~ | ~~{d:.0} %~~ |\n", .{
+                b.name, b.pass, b.fail, b.skip, pct, att_pct,
+            })
+        else
+            try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d} | {d:.0} % | {d:.0} % |\n", .{
+                b.name, b.pass, b.fail, b.skip, pct, att_pct,
+            });
         try out.appendSlice(gpa, line);
     }
     try out.appendSlice(gpa, "\n");
