@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 54.76 % | 95.61 % | 28542 / 52125 |
-| **runtime** | 35.45 % | 47.79 % | 18307 / 51639 |
+| **runtime** | 35.48 % | 47.83 % | 18323 / 51639 |
 
 ## Where the runtime stands, by area
 
@@ -20,8 +20,8 @@ Temporal, browser-era built-ins …).
 
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
-| `language/expressions` | 4171 | 5896 | 971 | 38 % | 41 % |
-| `language/statements` | 2787 | 5883 | 667 | 30 % | 32 % |
+| `language/expressions` | 4181 | 5886 | 971 | 38 % | 42 % |
+| `language/statements` | 2790 | 5880 | 667 | 30 % | 32 % |
 | `built-ins/RegExp` | 658 | 1060 | 161 | 35 % | 38 % |
 | `built-ins/Array` | 1979 | 891 | 211 | 64 % | 69 % |
 | `built-ins/TypedArray` | 390 | 832 | 216 | 27 % | 32 % |
@@ -53,8 +53,8 @@ Temporal, browser-era built-ins …).
 | `built-ins/BigInt` | 39 | 38 | 0 | 51 % | 51 % |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 0 | 38 | 0 | 0 % | 0 % |
 | `built-ins/AsyncGeneratorPrototype` | 12 | 36 | 0 | 25 % | 25 % |
-| `language/computed-property-names` | 12 | 36 | 0 | 25 % | 25 % |
 | `built-ins/GeneratorPrototype` | 26 | 35 | 0 | 43 % | 43 % |
+| `language/computed-property-names` | 15 | 33 | 0 | 31 % | 31 % |
 | `built-ins/WeakRef` | 0 | 29 | 0 | 0 % | 0 % |
 | `built-ins/parseInt` | 28 | 27 | 0 | 51 % | 51 % |
 | `built-ins/AggregateError` | 0 | 25 | 0 | 0 % | 0 % |
@@ -161,19 +161,17 @@ Temporal, browser-era built-ins …).
 
 ## History
 
-### 2026-05-09 — cynic `9ce18b2`, test262 `d0c1b455`
+### 2026-05-09 — cynic `8dadcfd`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 35.45 % | 47.79 % | 18307 / 51639 | +442 |
+| **runtime** | 35.48 % | 47.83 % | 18323 / 51639 | +458 |
 
 Biggest movers (runtime):
 
-- `built-ins/Array` +71
-- `language/statements` +22
-- `built-ins/Function` -18
-- `language/module-code` -12
-- `language/expressions` +8
+- `language/expressions` +10
+- `language/computed-property-names` +3
+- `language/statements` +3
 
 ### 2026-05-08 — cynic `unknown`, test262 `d0c1b455`
 

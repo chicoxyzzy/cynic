@@ -2451,6 +2451,31 @@ fn runFrames(
                     acc = Value.undefined_;
                     continue;
                 };
+                // §10.1.8 OrdinaryGet via super reference — the
+                // accessor descriptor wins, and getters fire with
+                // `this` bound to the caller's `this_value` (§9.1.6
+                // step 5: Receiver = the active method's `this`,
+                // not the parent prototype).
+                if (lookupAccessor(parent_proto, key_s.bytes)) |acc_pair| {
+                    if (acc_pair.getter) |getter| {
+                        const outcome = try callJSFunction(allocator, realm, getter, f.this_value, &.{});
+                        switch (outcome) {
+                            .value, .yielded => |v| acc = v,
+                            .thrown => |ex| {
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue;
+                            },
+                        }
+                    } else {
+                        acc = Value.undefined_;
+                    }
+                    continue;
+                }
                 acc = parent_proto.get(key_s.bytes);
             },
 
@@ -2480,6 +2505,26 @@ fn runFrames(
                 };
                 var key_buf: [64]u8 = undefined;
                 const key_slice = computedKeyToString(key_v, &key_buf);
+                if (lookupAccessor(parent_proto, key_slice)) |acc_pair| {
+                    if (acc_pair.getter) |getter| {
+                        const outcome = try callJSFunction(allocator, realm, getter, f.this_value, &.{});
+                        switch (outcome) {
+                            .value, .yielded => |v| acc = v,
+                            .thrown => |ex| {
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue;
+                            },
+                        }
+                    } else {
+                        acc = Value.undefined_;
+                    }
+                    continue;
+                }
                 acc = parent_proto.get(key_slice);
             },
 
@@ -2804,6 +2849,22 @@ fn runFrames(
                     entry.value_ptr.*.setter = fn_obj;
                 } else {
                     entry.value_ptr.*.getter = fn_obj;
+                }
+            },
+
+            .set_home => {
+                // §10.2.5 set [[HomeObject]] for an object-literal
+                // method. acc holds the freshly-built JSFunction;
+                // `r_obj` holds the enclosing object. `super` lookup
+                // walks `home_object.[[Prototype]]` so this is what
+                // makes `super.x()` from inside `{ method(){} }`
+                // resolve against `Object.getPrototypeOf(obj)`.
+                const r_obj = code[ip];
+                ip += 1;
+                if (heap_mod.valueAsFunction(acc)) |fn_obj| {
+                    if (heap_mod.valueAsPlainObject(registers[r_obj])) |home| {
+                        fn_obj.home_object = home;
+                    }
                 }
             },
 

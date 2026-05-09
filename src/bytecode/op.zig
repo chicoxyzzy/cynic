@@ -260,6 +260,16 @@ pub const Op = enum(u8) {
     /// `sta_property` and so isn't routed here. The acc holds
     /// `v`; this op preserves acc.
     set_proto_literal,
+    /// `[op] [r_obj:u8]` — §10.2.5 set [[HomeObject]]. If `acc` is
+    /// a function, set its `home_object` slot to the object in
+    /// `r_obj`. No-op for non-function `acc`. Emitted between
+    /// `make_function` and `sta_property` / `def_accessor` for
+    /// object-literal methods so `super.x` / `super[x]` /
+    /// `super.x(...)` from inside the method walks
+    /// `r_obj.[[Prototype]]` to find the parent property —
+    /// matching the class-method machinery.
+    set_home,
+
     /// `[op] [r_key:u8] [prefix:u8]` — §13.2.5.5 / §15.5.6.4
     /// SetFunctionName fix-up for computed property keys. If
     /// `acc` is an anonymous function-like (`.name === ""`), set
@@ -514,6 +524,7 @@ pub const Op = enum(u8) {
             .iter_close,
             .array_spread,
             .set_proto_literal,
+            .set_home,
             => 1, // single u8 register operand
             .set_fn_name_from => 2, // r_key:u8 + prefix:u8
             .mov,
@@ -619,6 +630,7 @@ pub const Op = enum(u8) {
             .def_accessor => "DefAccessor",
             .def_computed_accessor => "DefComputedAccessor",
             .set_proto_literal => "SetProtoLiteral",
+            .set_home => "SetHome",
             .set_fn_name_from => "SetFnNameFrom",
             .lda_arguments => "LdaArguments",
             .gen_yield => "GenYield",

@@ -1179,6 +1179,11 @@ pub const Compiler = struct {
                     );
                     try self.builder.emitOp(.make_function, m.span);
                     try self.builder.emitU16(tk);
+                    // §10.2.5 — object-literal methods carry a
+                    // [[HomeObject]] pointing at the enclosing
+                    // object so `super.x` walks its prototype chain.
+                    try self.builder.emitOp(.set_home, m.span);
+                    try self.builder.emitU8(r_obj);
                     // §15.5.6.4 — methods get the bare key as a
                     // name; getters/setters prefix `get `/`set `.
                     const prefix_kind: u8 = switch (m.kind) {
@@ -1246,6 +1251,11 @@ pub const Compiler = struct {
                 );
                 try self.builder.emitOp(.make_function, m.span);
                 try self.builder.emitU16(tk);
+                // §10.2.5 — wire [[HomeObject]] before installing
+                // so `super` lookups inside the method body resolve
+                // against the enclosing object's prototype chain.
+                try self.builder.emitOp(.set_home, m.span);
+                try self.builder.emitU8(r_obj);
                 switch (m.kind) {
                     .method => {
                         try self.builder.emitOp(.sta_property, m.span);
