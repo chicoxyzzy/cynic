@@ -30,6 +30,7 @@ const setNonEnumerable = intrinsics.setNonEnumerable;
 const argOr = intrinsics.argOr;
 const numberFromI64 = intrinsics.numberFromI64;
 const coerceToNumber = intrinsics.coerceToNumber;
+const toNumber = intrinsics.toNumber;
 const throwTypeError = intrinsics.throwTypeError;
 const throwRangeError = intrinsics.throwRangeError;
 const toBoolean = intrinsics.toBoolean;
@@ -949,35 +950,94 @@ fn typedArrayFilter(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
 fn dataViewConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "DataView constructor requires 'new'");
-    const buf_obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "DataView: first argument must be an ArrayBuffer");
-    const buf = buf_obj.array_buffer orelse return throwTypeError(realm, "DataView: first argument must be an ArrayBuffer");
+    const buf_arg = argOr(args, 0, Value.undefined_);
+    const buf_obj = heap_mod.valueAsPlainObject(buf_arg) orelse return throwTypeError(realm, "DataView: first argument must be an ArrayBuffer");
+    // The first argument has to *be* an ArrayBuffer object, not
+    // some random object — but checking `array_buffer != null`
+    // also covers the detached case, which §25.3.2.1 step 6 says
+    // throws TypeError ("If IsDetachedBuffer(buffer) is true").
+    if (buf_obj.array_buffer == null) return throwTypeError(realm, "DataView: ArrayBuffer is detached");
 
-    // §7.1.17 ToIndex — reject non-integer / NaN / Infinity /
-    // negative; cap at 2^53 - 1. Use the same cap-on-saturation
-    // pattern as `dvOffsetArg` to keep `@intFromFloat` panic-free.
-    var byte_offset: usize = 0;
-    if (args.len > 1 and !args[1].isUndefined()) {
-        const ov = coerceToNumber(args[1]);
-        const od: f64 = if (ov.isInt32()) @floatFromInt(ov.asInt32()) else ov.asDouble();
-        if (std.math.isNan(od) or od < 0 or std.math.isInf(od)) return throwRangeError(realm, "DataView: byteOffset out of range");
-        const cap_ix: f64 = 9007199254740992.0;
-        if (od >= cap_ix) return throwRangeError(realm, "DataView: byteOffset exceeds 2^53-1");
-        byte_offset = @intFromFloat(@trunc(od));
-    }
-    if (byte_offset > buf.len) return throwRangeError(realm, "DataView: byteOffset exceeds buffer");
+    // §7.1.17 ToIndex — runs BEFORE the buffer-length read, since
+    // the user's `valueOf` could detach the buffer mid-call.
+    const byte_offset = try dvToIndex(realm, argOr(args, 1, Value.undefined_));
 
-    var byte_length: usize = buf.len - byte_offset;
-    if (args.len > 2 and !args[2].isUndefined()) {
-        const lv = coerceToNumber(args[2]);
-        const ld: f64 = if (lv.isInt32()) @floatFromInt(lv.asInt32()) else lv.asDouble();
-        if (std.math.isNan(ld) or ld < 0 or std.math.isInf(ld)) return throwRangeError(realm, "DataView: byteLength out of range");
-        const cap_ix: f64 = 9007199254740992.0;
-        if (ld >= cap_ix) return throwRangeError(realm, "DataView: byteLength exceeds 2^53-1");
-        byte_length = @intFromFloat(@trunc(ld));
-        if (byte_offset + byte_length > buf.len) return throwRangeError(realm, "DataView: byteLength exceeds buffer");
+    // Re-check detachment / fetch buf after each user-observable
+    // step (ToIndex can call into JS via `valueOf`).
+    const buf1 = buf_obj.array_buffer orelse return throwTypeError(realm, "DataView: ArrayBuffer detached during construction");
+    if (byte_offset > buf1.len) return throwRangeError(realm, "DataView: byteOffset exceeds buffer");
+
+    const length_arg = argOr(args, 2, Value.undefined_);
+    var byte_length: usize = undefined;
+    if (length_arg.isUndefined()) {
+        byte_length = buf1.len - byte_offset;
+    } else {
+        byte_length = try dvToIndex(realm, length_arg);
+        const buf2 = buf_obj.array_buffer orelse return throwTypeError(realm, "DataView: ArrayBuffer detached during construction");
+        if (byte_offset > buf2.len or byte_length > buf2.len - byte_offset) return throwRangeError(realm, "DataView: byteLength exceeds buffer");
     }
     inst.data_view = .{ .viewed = buf_obj, .byte_offset = byte_offset, .byte_length = byte_length };
     return this_value;
+}
+
+/// §7.1.17 ToIndex. Throws TypeError on Symbol/BigInt (via
+/// `dvToNumber`), RangeError on non-integer / NaN / Infinity /
+/// negative, and caps at 2^53 - 1. Result is a usize.
+fn dvToIndex(realm: *Realm, v: Value) NativeError!usize {
+    if (v.isUndefined()) return 0;
+    const num = try dvToNumber(realm, v);
+    const d: f64 = if (num.isInt32()) @floatFromInt(num.asInt32()) else num.asDouble();
+    // §7.1.5 ToIntegerOrInfinity then §7.1.17 step 3 — NaN ⇒ 0,
+    // but ToIndex step 4 requires integerIndex == ToIntegerOrInfinity
+    // and rejects negative / >2^53-1. -0 collapses to 0 here
+    // (truncation), which is what the spec mandates.
+    if (std.math.isNan(d)) return 0;
+    const truncd = @trunc(d);
+    if (truncd < 0) return throwRangeError(realm, "ToIndex: value is negative");
+    const cap_ix: f64 = 9007199254740992.0; // 2^53
+    if (truncd >= cap_ix) return throwRangeError(realm, "ToIndex: value exceeds 2^53-1");
+    return @intFromFloat(truncd);
+}
+
+/// §7.1.4 ToNumber wrapped to throw TypeError for Symbol and
+/// BigInt, which the underlying `intrinsics.toNumber` doesn't
+/// handle (it falls back to NaN for those tags). DataView paths
+/// always need the throwing behaviour per spec §25.3.1.1 step 4.
+/// We do ToPrimitive first so a `valueOf`/`@@toPrimitive` that
+/// returns a Symbol/BigInt also lands in the TypeError branch
+/// (the underlying `toNumber` would silently NaN those).
+fn dvToNumber(realm: *Realm, v: Value) NativeError!Value {
+    const prim = try intrinsics.toPrimitive(realm, v, .number);
+    if (heap_mod.valueAsSymbol(prim) != null) return throwTypeError(realm, "Cannot convert a Symbol value to a Number");
+    if (heap_mod.valueAsBigInt(prim) != null) return throwTypeError(realm, "Cannot convert a BigInt value to a Number");
+    return coerceToNumber(prim);
+}
+
+/// §7.1.13 ToBigInt — DataView's BigInt setters need this. Inlined
+/// here because `bigint.zig` keeps `toBigIntValue` private. Returns
+/// the i64 value already truncated for storage.
+fn dvToBigInt64(realm: *Realm, v: Value) NativeError!i64 {
+    // ToPrimitive(value, hint Number) — the spec says "default" hint
+    // for ToBigInt actually, but for our purposes (no Date/Symbol
+    // detection), `.number` is fine since BigInt-flavoured `valueOf`
+    // returns a BigInt directly.
+    const prim = try intrinsics.toPrimitive(realm, v, .number);
+    if (heap_mod.valueAsBigInt(prim)) |bi| return @as(i64, @truncate(bi.value));
+    if (prim.isBool()) return if (prim.asBool()) 1 else 0;
+    if (prim.isString()) {
+        const s: *JSString = @ptrCast(@alignCast(prim.asString()));
+        const trimmed = std.mem.trim(u8, s.bytes, " \t\n\r");
+        if (trimmed.len == 0) return 0;
+        var negate = false;
+        var rest = trimmed;
+        if (rest[0] == '-') { negate = true; rest = rest[1..]; } else if (rest[0] == '+') { rest = rest[1..]; }
+        if (rest.len == 0) return throwTypeError(realm, "Cannot convert string to BigInt");
+        const parsed = std.fmt.parseInt(i128, rest, 0) catch return throwTypeError(realm, "Cannot convert string to BigInt");
+        const final: i128 = if (negate) -parsed else parsed;
+        return @as(i64, @truncate(final));
+    }
+    // Numbers, null, undefined, Symbol → TypeError per §7.1.13.
+    return throwTypeError(realm, "Cannot convert value to BigInt");
 }
 
 fn dvOf(this_value: Value) ?ObjMod.DataView {
@@ -988,167 +1048,74 @@ fn dvOf(this_value: Value) ?ObjMod.DataView {
 fn dataViewByteLength(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const dv = dvOf(this_value) orelse return throwTypeError(realm, "DataView accessor on non-DataView");
+    // §25.3.4.1 step 6 — throw if buffer is detached.
+    if (dv.viewed.array_buffer == null) return throwTypeError(realm, "DataView: buffer is detached");
     return Value.fromInt32(@intCast(dv.byte_length));
 }
 
 fn dataViewByteOffset(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const dv = dvOf(this_value) orelse return throwTypeError(realm, "DataView accessor on non-DataView");
+    // §25.3.4.2 step 6 — throw if buffer is detached.
+    if (dv.viewed.array_buffer == null) return throwTypeError(realm, "DataView: buffer is detached");
     return Value.fromInt32(@intCast(dv.byte_offset));
 }
 
 fn dataViewBuffer(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
+    // §25.3.4.4 — `buffer` getter returns the [[ViewedArrayBuffer]]
+    // even when detached (no detached check, unlike byteLength /
+    // byteOffset). Detached state is observable as `byteLength === 0`.
     const dv = dvOf(this_value) orelse return throwTypeError(realm, "DataView accessor on non-DataView");
     return heap_mod.taggedObject(dv.viewed);
-}
-
-fn dvOffsetArg(args: []const Value) usize {
-    const v = coerceToNumber(argOr(args, 0, Value.fromInt32(0)));
-    const d: f64 = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
-    // §7.1.5 ToIntegerOrInfinity-style — but cap absurd values at
-    // a sentinel that's definitely larger than any real buffer
-    // so the bounds check reliably trips and `@intFromFloat`
-    // never panics. Negative goes to 0; NaN goes to 0; +Inf and
-    // any value above the address-space max land on this cap.
-    if (std.math.isNan(d) or d < 0) return 0;
-    const cap: f64 = 1e18;
-    if (d >= cap) return std.math.maxInt(usize);
-    return @intFromFloat(@trunc(d));
 }
 
 fn dvLittleEndian(args: []const Value, idx: usize) bool {
     return idx < args.len and toBoolean(args[idx]);
 }
 
-fn dvCheckBounds(realm: *Realm, dv: ObjMod.DataView, byte_offset: usize, size: usize) NativeError!void {
-    // Overflow-safe: byte_offset > byte_length - size (avoiding
-    // `byte_offset + size` which can wrap when byte_offset is the
-    // saturating-Infinity sentinel).
-    if (size > dv.byte_length or byte_offset > dv.byte_length - size) {
+/// §25.3.1.1 GetViewValue prologue. Returns `(dv, buf, byteOffset)`
+/// after running ToIndex(byteOffset) (which can call into JS via
+/// `valueOf`), checking detachment, and verifying bounds — in
+/// that exact order. The caller does the read on `buf[byte_offset]`.
+const DvAccess = struct { dv: ObjMod.DataView, buf: []u8, abs_offset: usize };
+
+fn dvGetPrologue(realm: *Realm, this_value: Value, args: []const Value, elem_size: usize) NativeError!DvAccess {
+    const dv = dvOf(this_value) orelse return throwTypeError(realm, "DataView method on non-DataView");
+    // §25.3.1.1 step 4 — ToIndex first (its valueOf could detach).
+    const off = try dvToIndex(realm, argOr(args, 0, Value.undefined_));
+    // step 8 — RequireInternalSlot already done; step 9 — IsDetachedBuffer.
+    const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: buffer is detached");
+    // step 12-13 — bounds (overflow-safe).
+    if (elem_size > dv.byte_length or off > dv.byte_length - elem_size) {
         return throwRangeError(realm, "DataView: byte offset out of bounds");
     }
+    return .{ .dv = dv, .buf = buf, .abs_offset = dv.byte_offset + off };
 }
 
-fn dvBuf(realm: *Realm, this_value: Value) NativeError!struct { dv: ObjMod.DataView, buf: []u8 } {
+/// §25.3.1.2 SetViewValue prologue for numeric setters. Order is:
+/// ToIndex(byteOffset) → ToNumber(value) → detached check →
+/// bounds check. Both ToIndex and ToNumber can re-enter JS, so we
+/// re-fetch the buffer slice afterwards.
+const DvSetNum = struct { dv: ObjMod.DataView, buf: []u8, abs_offset: usize, value: f64 };
+
+fn dvSetNumPrologue(realm: *Realm, this_value: Value, args: []const Value, elem_size: usize) NativeError!DvSetNum {
     const dv = dvOf(this_value) orelse return throwTypeError(realm, "DataView method on non-DataView");
-    const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: detached buffer");
-    return .{ .dv = dv, .buf = buf };
+    const off = try dvToIndex(realm, argOr(args, 0, Value.undefined_));
+    const num_v = try dvToNumber(realm, argOr(args, 1, Value.undefined_));
+    const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: buffer is detached");
+    if (elem_size > dv.byte_length or off > dv.byte_length - elem_size) {
+        return throwRangeError(realm, "DataView: byte offset out of bounds");
+    }
+    const d: f64 = if (num_v.isInt32()) @floatFromInt(num_v.asInt32()) else num_v.asDouble();
+    return .{ .dv = dv, .buf = buf, .abs_offset = dv.byte_offset + off, .value = d };
 }
 
-// Get* methods.
-fn dataViewGetInt8(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 1);
-    const b = ctx.buf[ctx.dv.byte_offset + off];
-    return Value.fromInt32(@as(i8, @bitCast(b)));
-}
-
-fn dataViewGetUint8(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 1);
-    return Value.fromInt32(ctx.buf[ctx.dv.byte_offset + off]);
-}
-
-fn dvReadEndian(comptime T: type, buf: []const u8, off: usize, le: bool) T {
-    const slice = buf[off..][0..@sizeOf(T)];
-    return std.mem.readInt(T, slice, if (le) .little else .big);
-}
-
-fn dataViewGetInt16(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 2);
-    const v = dvReadEndian(i16, ctx.buf, ctx.dv.byte_offset + off, dvLittleEndian(args, 1));
-    return Value.fromInt32(v);
-}
-fn dataViewGetUint16(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 2);
-    const v = dvReadEndian(u16, ctx.buf, ctx.dv.byte_offset + off, dvLittleEndian(args, 1));
-    return Value.fromInt32(v);
-}
-fn dataViewGetInt32(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 4);
-    const v = dvReadEndian(i32, ctx.buf, ctx.dv.byte_offset + off, dvLittleEndian(args, 1));
-    return Value.fromInt32(v);
-}
-fn dataViewGetUint32(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 4);
-    const v = dvReadEndian(u32, ctx.buf, ctx.dv.byte_offset + off, dvLittleEndian(args, 1));
-    if (v <= std.math.maxInt(i32)) return Value.fromInt32(@intCast(v));
-    return Value.fromDouble(@floatFromInt(v));
-}
-fn dataViewGetFloat32(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 4);
-    const u = dvReadEndian(u32, ctx.buf, ctx.dv.byte_offset + off, dvLittleEndian(args, 1));
-    const f: f32 = @bitCast(u);
-    return Value.fromDouble(@floatCast(f));
-}
-fn dataViewGetFloat64(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 8);
-    const u = dvReadEndian(u64, ctx.buf, ctx.dv.byte_offset + off, dvLittleEndian(args, 1));
-    return Value.fromDouble(@bitCast(u));
-}
-fn dataViewGetBigInt64(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 8);
-    const u = dvReadEndian(i64, ctx.buf, ctx.dv.byte_offset + off, dvLittleEndian(args, 1));
-    const bi = realm.heap.allocateBigInt(@intCast(u)) catch return error.OutOfMemory;
-    return heap_mod.taggedBigInt(bi);
-}
-fn dataViewGetBigUint64(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 8);
-    const u = dvReadEndian(u64, ctx.buf, ctx.dv.byte_offset + off, dvLittleEndian(args, 1));
-    const bi = realm.heap.allocateBigInt(@as(i128, u)) catch return error.OutOfMemory;
-    return heap_mod.taggedBigInt(bi);
-}
-
-// Set* methods.
-fn dvWriteEndian(comptime T: type, buf: []u8, off: usize, value: T, le: bool) void {
-    const slice = buf[off..][0..@sizeOf(T)];
-    std.mem.writeInt(T, slice, value, if (le) .little else .big);
-}
-
-fn dataViewSetInt8(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 1);
-    const i = dvCoerceI32(argOr(args, 1, Value.fromInt32(0)));
-    ctx.buf[ctx.dv.byte_offset + off] = @bitCast(@as(i8, @truncate(i)));
-    return Value.undefined_;
-}
-fn dataViewSetUint8(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 1);
-    const i = dvCoerceI32(argOr(args, 1, Value.fromInt32(0)));
-    ctx.buf[ctx.dv.byte_offset + off] = @truncate(@as(u32, @bitCast(i)));
-    return Value.undefined_;
-}
-fn dvCoerceI32(v: Value) i32 {
-    const n = coerceToNumber(v);
-    const d: f64 = if (n.isInt32()) @floatFromInt(n.asInt32()) else n.asDouble();
+/// §7.1.6 ToInt32 on an f64 — modular 2^32, sign-reinterpret. NaN /
+/// ±Infinity collapse to 0 per spec. Branchless cast through u32
+/// avoids `@intFromFloat` panics for huge inputs.
+fn toInt32Mod(d: f64) i32 {
     if (std.math.isNan(d) or std.math.isInf(d)) return 0;
-    // §7.1.6 ToInt32 — modulo 2^32 with sign-bit reinterpretation.
-    // Equivalent to V8's `DoubleToInt32`. The straight
-    // `@intFromFloat(@trunc(d))` would panic for `d` outside i32
-    // range (which is allowed in JS — `setInt32(0, 1e30)` is
-    // legal and lands the bit pattern of `ToInt32(1e30)`).
     const TWO32: f64 = 4294967296.0;
     const truncd = @trunc(d);
     const m = truncd - @floor(truncd / TWO32) * TWO32;
@@ -1156,73 +1123,139 @@ fn dvCoerceI32(v: Value) i32 {
     const u: u32 = @intFromFloat(adjusted);
     return @bitCast(u);
 }
+
+fn dvReadEndian(comptime T: type, buf: []const u8, off: usize, le: bool) T {
+    const slice = buf[off..][0..@sizeOf(T)];
+    return std.mem.readInt(T, slice, if (le) .little else .big);
+}
+fn dvWriteEndian(comptime T: type, buf: []u8, off: usize, value: T, le: bool) void {
+    const slice = buf[off..][0..@sizeOf(T)];
+    std.mem.writeInt(T, slice, value, if (le) .little else .big);
+}
+
+// Get* methods.
+fn dataViewGetInt8(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const a = try dvGetPrologue(realm, this_value, args, 1);
+    return Value.fromInt32(@as(i8, @bitCast(a.buf[a.abs_offset])));
+}
+fn dataViewGetUint8(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const a = try dvGetPrologue(realm, this_value, args, 1);
+    return Value.fromInt32(a.buf[a.abs_offset]);
+}
+fn dataViewGetInt16(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const a = try dvGetPrologue(realm, this_value, args, 2);
+    return Value.fromInt32(dvReadEndian(i16, a.buf, a.abs_offset, dvLittleEndian(args, 1)));
+}
+fn dataViewGetUint16(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const a = try dvGetPrologue(realm, this_value, args, 2);
+    return Value.fromInt32(dvReadEndian(u16, a.buf, a.abs_offset, dvLittleEndian(args, 1)));
+}
+fn dataViewGetInt32(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const a = try dvGetPrologue(realm, this_value, args, 4);
+    return Value.fromInt32(dvReadEndian(i32, a.buf, a.abs_offset, dvLittleEndian(args, 1)));
+}
+fn dataViewGetUint32(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const a = try dvGetPrologue(realm, this_value, args, 4);
+    const v = dvReadEndian(u32, a.buf, a.abs_offset, dvLittleEndian(args, 1));
+    if (v <= std.math.maxInt(i32)) return Value.fromInt32(@intCast(v));
+    return Value.fromDouble(@floatFromInt(v));
+}
+fn dataViewGetFloat32(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const a = try dvGetPrologue(realm, this_value, args, 4);
+    const u = dvReadEndian(u32, a.buf, a.abs_offset, dvLittleEndian(args, 1));
+    const f: f32 = @bitCast(u);
+    return Value.fromDouble(@floatCast(f));
+}
+fn dataViewGetFloat64(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const a = try dvGetPrologue(realm, this_value, args, 8);
+    const u = dvReadEndian(u64, a.buf, a.abs_offset, dvLittleEndian(args, 1));
+    return Value.fromDouble(@bitCast(u));
+}
+fn dataViewGetBigInt64(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const a = try dvGetPrologue(realm, this_value, args, 8);
+    const u = dvReadEndian(i64, a.buf, a.abs_offset, dvLittleEndian(args, 1));
+    const bi = realm.heap.allocateBigInt(@intCast(u)) catch return error.OutOfMemory;
+    return heap_mod.taggedBigInt(bi);
+}
+fn dataViewGetBigUint64(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const a = try dvGetPrologue(realm, this_value, args, 8);
+    const u = dvReadEndian(u64, a.buf, a.abs_offset, dvLittleEndian(args, 1));
+    const bi = realm.heap.allocateBigInt(@as(i128, u)) catch return error.OutOfMemory;
+    return heap_mod.taggedBigInt(bi);
+}
+
+// Set* methods.
+fn dataViewSetInt8(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const a = try dvSetNumPrologue(realm, this_value, args, 1);
+    a.buf[a.abs_offset] = @bitCast(@as(i8, @truncate(toInt32Mod(a.value))));
+    return Value.undefined_;
+}
+fn dataViewSetUint8(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const a = try dvSetNumPrologue(realm, this_value, args, 1);
+    a.buf[a.abs_offset] = @truncate(@as(u32, @bitCast(toInt32Mod(a.value))));
+    return Value.undefined_;
+}
 fn dataViewSetInt16(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 2);
-    dvWriteEndian(i16, ctx.buf, ctx.dv.byte_offset + off, @truncate(dvCoerceI32(argOr(args, 1, Value.fromInt32(0)))), dvLittleEndian(args, 2));
+    const a = try dvSetNumPrologue(realm, this_value, args, 2);
+    dvWriteEndian(i16, a.buf, a.abs_offset, @truncate(toInt32Mod(a.value)), dvLittleEndian(args, 2));
     return Value.undefined_;
 }
 fn dataViewSetUint16(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 2);
-    const u: u16 = @truncate(@as(u32, @bitCast(dvCoerceI32(argOr(args, 1, Value.fromInt32(0))))));
-    dvWriteEndian(u16, ctx.buf, ctx.dv.byte_offset + off, u, dvLittleEndian(args, 2));
+    const a = try dvSetNumPrologue(realm, this_value, args, 2);
+    const u: u16 = @truncate(@as(u32, @bitCast(toInt32Mod(a.value))));
+    dvWriteEndian(u16, a.buf, a.abs_offset, u, dvLittleEndian(args, 2));
     return Value.undefined_;
 }
 fn dataViewSetInt32(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 4);
-    dvWriteEndian(i32, ctx.buf, ctx.dv.byte_offset + off, dvCoerceI32(argOr(args, 1, Value.fromInt32(0))), dvLittleEndian(args, 2));
+    const a = try dvSetNumPrologue(realm, this_value, args, 4);
+    dvWriteEndian(i32, a.buf, a.abs_offset, toInt32Mod(a.value), dvLittleEndian(args, 2));
     return Value.undefined_;
 }
 fn dataViewSetUint32(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 4);
-    const u: u32 = @bitCast(dvCoerceI32(argOr(args, 1, Value.fromInt32(0))));
-    dvWriteEndian(u32, ctx.buf, ctx.dv.byte_offset + off, u, dvLittleEndian(args, 2));
+    const a = try dvSetNumPrologue(realm, this_value, args, 4);
+    const u: u32 = @bitCast(toInt32Mod(a.value));
+    dvWriteEndian(u32, a.buf, a.abs_offset, u, dvLittleEndian(args, 2));
     return Value.undefined_;
 }
 fn dataViewSetFloat32(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 4);
-    const v = coerceToNumber(argOr(args, 1, Value.fromInt32(0)));
-    const d: f64 = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
-    const f: f32 = @floatCast(d);
+    const a = try dvSetNumPrologue(realm, this_value, args, 4);
+    const f: f32 = @floatCast(a.value);
     const u: u32 = @bitCast(f);
-    dvWriteEndian(u32, ctx.buf, ctx.dv.byte_offset + off, u, dvLittleEndian(args, 2));
+    dvWriteEndian(u32, a.buf, a.abs_offset, u, dvLittleEndian(args, 2));
     return Value.undefined_;
 }
 fn dataViewSetFloat64(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 8);
-    const v = coerceToNumber(argOr(args, 1, Value.fromInt32(0)));
-    const d: f64 = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
-    const u: u64 = @bitCast(d);
-    dvWriteEndian(u64, ctx.buf, ctx.dv.byte_offset + off, u, dvLittleEndian(args, 2));
+    const a = try dvSetNumPrologue(realm, this_value, args, 8);
+    const u: u64 = @bitCast(a.value);
+    dvWriteEndian(u64, a.buf, a.abs_offset, u, dvLittleEndian(args, 2));
     return Value.undefined_;
 }
 fn dataViewSetBigInt64(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 8);
-    const bi = heap_mod.valueAsBigInt(argOr(args, 1, Value.undefined_));
-    const i: i64 = if (bi) |b| @as(i64, @truncate(b.value)) else 0;
-    dvWriteEndian(i64, ctx.buf, ctx.dv.byte_offset + off, i, dvLittleEndian(args, 2));
+    // §25.3.4.16 — index check (RangeError) before value
+    // conversion (which can throw via poisoned valueOf), so the
+    // index validity wins on negative-byteoffset + poisoned-value.
+    // ToIndex throws RangeError; bounds check throws RangeError;
+    // ToBigInt may throw TypeError. The spec ordering:
+    // ToIndex → ToBigInt → detached → bounds, but the
+    // BigInt-specific test262 (`index-check-before-value-conversion`)
+    // also wants -1.5 / -Infinity to fail (RangeError) before
+    // poisoned valueOf is read — those cases are caught in ToIndex.
+    const dv = dvOf(this_value) orelse return throwTypeError(realm, "DataView method on non-DataView");
+    const off = try dvToIndex(realm, argOr(args, 0, Value.undefined_));
+    const i = try dvToBigInt64(realm, argOr(args, 1, Value.undefined_));
+    const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: buffer is detached");
+    if (8 > dv.byte_length or off > dv.byte_length - 8) return throwRangeError(realm, "DataView: byte offset out of bounds");
+    dvWriteEndian(i64, buf, dv.byte_offset + off, i, dvLittleEndian(args, 2));
     return Value.undefined_;
 }
 fn dataViewSetBigUint64(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const ctx = try dvBuf(realm, this_value);
-    const off = dvOffsetArg(args);
-    try dvCheckBounds(realm, ctx.dv, off, 8);
-    const bi = heap_mod.valueAsBigInt(argOr(args, 1, Value.undefined_));
-    const u: u64 = if (bi) |b| @as(u64, @bitCast(@as(i64, @truncate(b.value)))) else 0;
-    dvWriteEndian(u64, ctx.buf, ctx.dv.byte_offset + off, u, dvLittleEndian(args, 2));
+    const dv = dvOf(this_value) orelse return throwTypeError(realm, "DataView method on non-DataView");
+    const off = try dvToIndex(realm, argOr(args, 0, Value.undefined_));
+    const i = try dvToBigInt64(realm, argOr(args, 1, Value.undefined_));
+    const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: buffer is detached");
+    if (8 > dv.byte_length or off > dv.byte_length - 8) return throwRangeError(realm, "DataView: byte offset out of bounds");
+    const u: u64 = @bitCast(i);
+    dvWriteEndian(u64, buf, dv.byte_offset + off, u, dvLittleEndian(args, 2));
     return Value.undefined_;
 }
 
