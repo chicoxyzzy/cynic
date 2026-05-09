@@ -58,6 +58,25 @@ pub fn installAll(realm: *Realm, obj_proto: *JSObject) !void {
     realm.intrinsics.uri_error_constructor = try installError(realm, "URIError", uriErrorNative, error_proto);
     realm.intrinsics.uri_error_prototype = realm.intrinsics.uri_error_constructor.?.prototype;
 
+    realm.intrinsics.eval_error_constructor = try installError(realm, "EvalError", evalErrorNative, error_proto);
+    realm.intrinsics.eval_error_prototype = realm.intrinsics.eval_error_constructor.?.prototype;
+
+    // §20.5.6.3 NativeError prototype object — each NativeError
+    // prototype is an Error instance shape with own
+    // `message: ""` (besides the `constructor` and `name` already
+    // wired by `installError`).
+    try installPrototypeMessage(realm, error_proto);
+    try installPrototypeMessage(realm, realm.intrinsics.type_error_prototype.?);
+    try installPrototypeMessage(realm, realm.intrinsics.range_error_prototype.?);
+    try installPrototypeMessage(realm, realm.intrinsics.reference_error_prototype.?);
+    try installPrototypeMessage(realm, realm.intrinsics.syntax_error_prototype.?);
+    try installPrototypeMessage(realm, realm.intrinsics.uri_error_prototype.?);
+    try installPrototypeMessage(realm, realm.intrinsics.eval_error_prototype.?);
+
+    // §20.5.3.4 Error.prototype.toString — installed only on the
+    // Error prototype; NativeError instances inherit it.
+    try intrinsics.installNativeMethodOnProto(realm, error_proto, "toString", errorPrototypeToString, 0);
+
     // §20.5.7 AggregateError(errors, message, options) — the only
     // typed Error whose constructor takes a leading iterable.
     // Built with the same `installError` builder; the constructor
@@ -262,22 +281,86 @@ fn uriErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeE
     return constructErrorInstance(realm, realm.intrinsics.uri_error_prototype.?, args);
 }
 
+fn evalErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    return constructErrorInstance(realm, realm.intrinsics.eval_error_prototype.?, args);
+}
+
+/// §20.5.6.3.2 — initial value of `<NativeError>.prototype.message`
+/// is the empty string with `{w:true, e:false, c:true}`. Same shape
+/// for `Error.prototype.message`.
+fn installPrototypeMessage(realm: *Realm, proto: *JSObject) !void {
+    const empty = try realm.heap.allocateString("");
+    try setNonEnumerable(proto, realm.allocator, "message", Value.fromString(empty));
+}
+
+/// §20.5.3.4 Error.prototype.toString:
+/// 1. Let O be the this value.
+/// 2. If Type(O) is not Object, throw TypeError.
+/// 3. Let name be ? Get(O, "name"); default to "Error" if undefined.
+/// 4. Let msg be ? Get(O, "message"); default to "" if undefined.
+/// 5. If name === "" return msg.
+/// 6. If msg === "" return name.
+/// 7. Return name + ": " + msg.
+fn errorPrototypeToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse {
+        return intrinsics.throwTypeError(realm, "Error.prototype.toString called on non-object");
+    };
+
+    const name_v = try intrinsics.getPropertyChain(realm, obj, "name");
+    const name_str: *JSString = blk: {
+        if (name_v.isUndefined()) {
+            break :blk realm.heap.allocateString("Error") catch return error.OutOfMemory;
+        }
+        break :blk try stringifyArg(realm, name_v);
+    };
+
+    const msg_v = try intrinsics.getPropertyChain(realm, obj, "message");
+    const msg_str: *JSString = blk: {
+        if (msg_v.isUndefined()) {
+            break :blk realm.heap.allocateString("") catch return error.OutOfMemory;
+        }
+        break :blk try stringifyArg(realm, msg_v);
+    };
+
+    if (name_str.bytes.len == 0) return Value.fromString(msg_str);
+    if (msg_str.bytes.len == 0) return Value.fromString(name_str);
+
+    const joined = std.fmt.allocPrint(realm.allocator, "{s}: {s}", .{ name_str.bytes, msg_str.bytes }) catch return error.OutOfMemory;
+    defer realm.allocator.free(joined);
+    const out = realm.heap.allocateString(joined) catch return error.OutOfMemory;
+    return Value.fromString(out);
+}
+
 fn constructErrorInstance(realm: *Realm, proto: *JSObject, args: []const Value) NativeError!Value {
     const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
     instance.prototype = proto;
+    // §20.5.1.1 step 4 — DefinePropertyOrThrow with descriptor
+    // `{[[Value]]: msg, [[Writable]]: true, [[Enumerable]]: false,
+    //  [[Configurable]]: true}`.
     if (args.len > 0 and !args[0].isUndefined()) {
         const msg_str = stringifyArg(realm, args[0]) catch return error.OutOfMemory;
-        instance.set(realm.allocator, "message", Value.fromString(msg_str)) catch return error.OutOfMemory;
+        instance.setWithFlags(realm.allocator, "message", Value.fromString(msg_str), .{
+            .writable = true,
+            .enumerable = false,
+            .configurable = true,
+        }) catch return error.OutOfMemory;
     }
     // §20.5.8.1 InstallErrorCause — ES2022 `error-cause`. The
     // optional second argument is an options object; if it has
-    // an own `cause` property, copy that to `instance.cause`.
-    // (`hasOwnProperty` honoured — `{}` with no `cause` key
-    // must NOT install one.)
+    // an own `cause` property, copy that to `instance.cause` with
+    // `{w:true, e:false, c:true}` (CreateNonEnumerableDataPropertyOrThrow).
+    // `hasOwnProperty` honoured — `{}` with no `cause` key must
+    // NOT install one.
     if (args.len > 1) {
         if (heap_mod.valueAsPlainObject(args[1])) |opts| {
             if (opts.hasOwn("cause")) {
-                instance.set(realm.allocator, "cause", opts.get("cause")) catch return error.OutOfMemory;
+                instance.setWithFlags(realm.allocator, "cause", opts.get("cause"), .{
+                    .writable = true,
+                    .enumerable = false,
+                    .configurable = true,
+                }) catch return error.OutOfMemory;
             }
         }
     }
