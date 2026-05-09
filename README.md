@@ -55,124 +55,65 @@ test262 conformance, Cynic-scoped (history + legend in
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser**  | 54.76 % | 95.61 % | 28,542 / 52,125 |
-| **runtime** | 30.15 % | 42.34 % | 15,718 / 52,125 |
+| **runtime** | 35.29 % | 47.57 % | 18,221 / 51,639 |
 
 `spec%` is coverage of the (Cynic-targeted) corpus; `attempted%` is the
 quality of what's shipped, ignoring skips. Plus 700+ unit tests.
 
 ### What works today
 
-**Parser.** Full §13 expression grammar with cover-grammar arrows;
-classes with private members + getters/setters + static blocks;
-generators, async, async generators; modules (`import` / `export` in
-all forms); destructuring across declarators, params, catch, for-loop
-bindings, and assignment targets — including rest patterns and defaults
-+ nesting + renaming; regex literals via parser-driven lexer re-entry;
-optional chaining, nullish coalescing, logical-assignments, `import.meta`,
-dynamic `import()`.
+The shape, in broad strokes — the per-bucket numbers live in the
+[`test262-results.md`](test262-results.md) scoreboard.
 
-**Statements & control flow.** `if` / `else`, `switch` (with
-fall-through), `while`, `do/while`, C-style `for`, `for-of` over any
-iterable (`@@iterator` with array-like fallback) including `for (const
-[a, b] of pairs)` destructuring, `for-in` over own + inherited string
-keys, `try` / `catch` / `finally` (including finally-on-throw via
-synthetic handlers and finally-on-return inlined into `return`),
-`throw`, lexical bindings with TDZ enforcement, closure-per-iteration
-in both `for-let-of` and C-style `for-let`, template literals, tagged
-templates, destructuring (defaults, nested, rest, all target positions
-incl. function params), array + call-arg + `new C(...args)` spread,
-iterator-close on for-of break + return per §7.4.6.
+- **Parser** — every §13 expression form, classes (private members,
+  static blocks, getters/setters), generators + async + async
+  generators, ES6 modules in all forms, destructuring in every
+  position the spec allows.
+- **Statements & control flow** — the usual `if` / `switch` /
+  `while` / `for` / `try` family, including TDZ enforcement and
+  per-iteration closures for `for-let`. `for-of` walks any
+  `@@iterator`-bearing iterable; iterator-close fires on `break`
+  per §7.4.6.
+- **Functions & classes** — closures, `arguments`, `bind` chains,
+  `extends` / `super`, default-ctor synthesis, only-via-`new`,
+  instance + private + static fields, static blocks, getters and
+  setters.
+- **Built-ins** — `Object`, `Array`, `String` / `Number` /
+  `Boolean` / `BigInt` / `Symbol` (real primitives, not polyfills),
+  `Math`, `JSON`, `Map` / `Set` / `WeakMap` / `WeakSet`,
+  `Reflect`, ES2025 `Set` ops (`union` / `intersection` / …),
+  `Iterator` helpers (`map` / `filter` / `take` / `drop` / etc.),
+  `Proxy` (most traps), `Date` (UTC-only), the URI globals, the
+  standard error hierarchy with `error-cause`.
+- **TypedArrays** — `ArrayBuffer`, `DataView`, the typed-array
+  family backed by the canonical `%TypedArray%.prototype`.
+- **RegExp** — full ECMA-262 via vendored QuickJS-NG `libregexp.c`
+  (named groups, lookbehind, `u` / `v` flags, indices). String
+  methods dispatch through it.
+- **Promises & async/await** — full chaining (settled and pending),
+  pending-await suspension via `JSGenerator` capture, async
+  generators with promise-reaction chaining, `Promise.try` and
+  `Promise.withResolvers`.
+- **Tooling** — `cynic parse | eval | run` plus a parallel test262
+  harness with `--threads=N`, `--only-failing` cache, and a
+  per-area scoreboard.
 
-**Functions & classes.** Functions, arrows, closures via captured
-environments; implicit `arguments` inside non-arrow functions;
-`Function.prototype.{call, apply, bind}` (bind chains, prefix args,
-`new boundFn(...)` ignores bound `this` per §10.4.1.2); class
-declarations + expressions, instance + static methods, `extends`,
-`super(...)`, `super.method(...)`, `super[expr]`, default-constructor
-synthesis, only-via-`new` check, public + private instance fields with
-brand checks, private methods, static fields, static blocks, getters /
-setters on classes and object literals.
-
-**Built-ins.** `Object` (`keys`/`values`/`entries`/`getPrototypeOf`/
-`hasOwn`/`create`/`assign`/`freeze`/`seal`/`defineProperty`/
-`fromEntries`/`groupBy`/…); `Array` (`isArray`/`of`/`from`) plus the
-standard `Array.prototype` method set; `String.prototype` (`charAt`/
-`slice`/`replace`/`replaceAll`/`padStart`/`split`/`match`/`matchAll`/
-`search`/`codePointAt`/`localeCompare`/`normalize` passthrough/…);
-full `Math`, `Number.*`, `JSON.{stringify, parse}`, `parseInt` /
-`parseFloat`; URI globals (`encodeURI` / `decodeURI` + component
-variants, full UTF-8 validation throwing `URIError` on malformed
-input); `Map` / `Set` / `WeakMap` / `WeakSet` (insertion-ordered,
-SameValueZero, full method surface, `Map.groupBy`); `Reflect`
-(`has`/`get`/`set`/`deleteProperty`/`ownKeys`/`defineProperty`/
-`getOwnPropertyDescriptor`/`preventExtensions`/…); **real `Symbol`
-primitive** (NaN-boxed pointer-tagged variant; `typeof === "symbol"`;
-distinct symbols are distinct property keys via per-symbol synthetic
-key strings) with the standard well-known symbols, `Symbol.prototype.{
-toString, valueOf, description}`, and `Symbol.for` / `Symbol.keyFor`
-registry; `BigInt` (pointer-tagged i128, full arithmetic + ToBigInt);
-`ArrayBuffer` / `DataView` + the typed-array family (`Int8Array` /
-`Uint8Array` / `Int32Array` / `Float64Array` / `BigInt64Array` / …)
-with the standard `%TypedArray%.prototype` surface; `Date` (constructor,
-`.now()` / `.UTC()`, the standard `getXxx` / `setXxx` methods, all in
-UTC; `toUTCString`, `toDateString`, `toTimeString`, `toLocale*` aliases);
-typed `Error` / `TypeError` / `RangeError` / `ReferenceError` /
-`SyntaxError` / `URIError` constructors with proto chain.
-
-**Iterator helpers.** `Iterator` global with `Iterator.from(x)` and
-prototype methods `map`, `filter`, `take`, `drop`, `toArray`,
-`forEach`, `find`, `some`, `every`, `reduce`.
-
-**RegExp.** Full ECMA-262 engine via vendored QuickJS-NG `libregexp.c`
-(MIT, ~3500 LOC C). Backreferences, named groups, lookahead /
-lookbehind, `u` / `v` flags, sticky / global / multiline / dotAll /
-ignoreCase. Bridged from Zig with UTF-8 ↔ UTF-16 transcoding so match
-indices land in spec-correct UTF-16 code units. `String.prototype`
-methods (`match`, `matchAll`, `replace`, `replaceAll`, `split`,
-`search`) all dispatch through it.
-
-**Promises & async.** `Promise` with **full chaining semantics for
-both settled and pending sources** — `.then(onF, onR)` registers a
-reaction record, settlement enqueues a `promise_reaction` microtask
-that runs the appropriate handler and resolves the chained
-result Promise. Handler return values propagate; Promise-returning
-handlers chain (`p.then(v => Promise.resolve(v+1))` works); throwing
-handlers reject. `Promise.{resolve, reject, all, race, allSettled,
-any, catch, finally}`. `new Promise(executor)` with working
-resolve/reject. **`async function` with full pending-await suspension**
-— the awaiting frame state is captured into a `JSGenerator` that's
-registered as an internal waiter on the pending Promise; settlement
-schedules an `async_resume` microtask that re-enters the dispatch loop
-with the resolved value (or throws the rejection inside the resumed
-frame). Generators (`function*` with `yield`, `it.next(arg)` resume,
-`[Symbol.iterator]` self-iteration); **async generators** with
-pending-promise yield-await chaining via promise reactions.
-
-**Proxy.** `get`, `set`, `has`, `deleteProperty`, `defineProperty`,
-`getOwnPropertyDescriptor`, `ownKeys` traps. **Callable proxies** —
-`new Proxy(fn, handler)` produces an invocable wrapper that unwraps to
-the target function on call / `new`. Apply / construct trap dispatch is
-future work.
-
-**Internals.** NaN-boxed value rep, Ignition-style register-file +
-accumulator bytecode, stop-the-world mark-sweep heap. The test262
-harness preload uses upstream `harness/sta.js` + `harness/assert.js`
-(no Cynic-shipped shim).
+Internals: NaN-boxed values, Ignition-style register-file +
+accumulator bytecode, stop-the-world mark-sweep heap.
 
 ### Known gaps
 
-`yield*` (generator delegation; parser accepts, compiler errors),
-`for await of` end-to-end runtime, top-level `await` in modules, real
-module graph (cyclic imports, namespace objects, dynamic `import()`
-resolution — current dynamic-`import` is a `TypeError` stub),
-generator `.return()` running pending `finally` blocks inside the body
-(only finally-on-throw fires today), tail-call optimization,
-`Set.prototype.{union, intersection, difference, …}` ES2025 helpers,
-`WeakRef` / `FinalizationRegistry`, `Promise.{try, withResolvers}`,
-`Function.prototype.toString` returning real source, `String.prototype.normalize`
-real NFC/NFD/NFKC/NFKD (currently passthrough), `Date` timezone
-handling beyond UTC. Each takes a swing at the runtime score as it
-lands.
+`yield*` (parser accepts; runtime errors), `for await of`
+end-to-end, top-level `await` in modules, the real module graph
+(cyclic imports, namespace objects, dynamic `import()`), generator
+`.return()` running pending `finally` blocks, tail-call
+optimization, `WeakRef` / `FinalizationRegistry`,
+`Function.prototype.toString` returning real source,
+`String.prototype.normalize` (currently passthrough), `Date`
+timezones beyond UTC, `Proxy` `apply` / `construct` trap dispatch,
+destructuring assignment targets (declarations work; the standalone
+`[a, b] = arr` form does not yet). Each takes a swing at the runtime
+score as it lands.
 
 ## Build
 
@@ -191,7 +132,9 @@ zig build run -- run   path/to/file.js              # compile + run a script
 zig build run -- run   a.js b.js c.js               # multiple files share one realm
 ```
 
-Requires Zig 0.16 or newer.
+Requires Zig **0.17-dev** (master). The Zig project skipped a stable
+0.16, so CI tracks `master` via `mlugg/setup-zig`. If your local
+`zig version` reports an older dev tag, bump it.
 
 `zig build test262` accepts forwarded flags after `--`:
 
@@ -214,101 +157,6 @@ Contributors — human or AI agent — should read
 [`AGENTS.md`](AGENTS.md) for project conventions (tests-first,
 prior-art surveys, spec-faithful naming) and pointers into the
 engineering handbook under [`docs/handbook/`](docs/handbook/).
-
-## Layout
-
-```
-src/
-├── main.zig                CLI entry point (lex / parse / eval / run)
-├── root.zig                Library root, re-exports public API
-├── source.zig              Source, Span, line/column lookup
-├── diagnostic.zig          Diagnostic representation + Code enum
-├── lexer/
-│   ├── lexer.zig           Strict-mode lexical scanner (§11/§12)
-│   └── token.zig           Token + reserved-word table (§12.7)
-├── unicode/
-│   ├── idents.zig          IdentifierStart / IdentifierPart predicates
-│   └── ident_tables.zig    Generated UCD ranges (do not edit)
-├── ast.zig                 AST barrel module
-├── ast/
-│   ├── expression.zig      §13 expression nodes
-│   ├── statement.zig       §14/§16 statement nodes
-│   ├── program.zig         Top-level Script / Module
-│   └── printer.zig         S-expression dumper (used by tests + CLI)
-├── parser/
-│   ├── parser.zig          Statement parser, token-stream API,
-│   │                       module entry, parseScript / parseModule
-│   ├── parser_test.zig     Parser unit tests
-│   └── expression.zig      Pratt-style expression parser
-├── bytecode.zig            Bytecode barrel module
-├── bytecode/
-│   ├── op.zig              Opcode enum + operand-decoding helpers
-│   ├── chunk.zig           Chunk (bytecode + constants + spans) + Builder
-│   ├── compiler.zig        AST → Chunk compiler
-│   ├── scope.zig           Compile-time lexical scope chain + TDZ tracking
-│   ├── disasm.zig          Bytecode disassembler
-│   ├── literals.zig        Literal-parsing helpers
-│   └── arguments_scan.zig  Implicit-`arguments` reference scan
-├── runtime.zig             Runtime barrel module
-├── runtime/
-│   ├── value.zig           NaN-boxed Value, predicates, coercions
-│   ├── heap.zig            Mark-sweep heap, allocation entry points
-│   ├── realm.zig           Realm: heap + globals + intrinsics + buffered output
-│   ├── string.zig          JSString heap object
-│   ├── symbol.zig          JSSymbol primitive (heap-side)
-│   ├── bigint.zig          JSBigInt primitive (heap-side)
-│   ├── function.zig        JSFunction + native-callback shape + property table
-│   ├── object.zig          JSObject (plain hashtable, prototype slot)
-│   ├── generator.zig       JSGenerator (function* / async function frame state)
-│   ├── module.zig          ModuleRecord
-│   ├── environment.zig     Heap-allocated declarative environment record
-│   ├── class.zig           §15.7.14 OrdinaryClassDefinition host helper
-│   ├── interpreter.zig     Switch-dispatch interpreter loop, reentrant call API
-│   ├── interpreter_arith.zig  Arithmetic + coercion helpers
-│   ├── interpreter_test.zig   End-to-end interpreter tests
-│   ├── intrinsics.zig      Cross-builtin orchestrator + shared helpers
-│   └── builtins/           JS-visible per-builtin install + prototypes:
-│       ├── object.zig          Object statics + Object.prototype + descriptors
-│       ├── array.zig           Array.prototype + Array statics
-│       ├── string.zig          String.prototype methods
-│       ├── number.zig          Number prototype + statics + parseInt / parseFloat
-│       ├── uri.zig             encodeURI{,Component} / decodeURI{,Component}
-│       ├── math.zig            Math object
-│       ├── json.zig            JSON.{stringify, parse}
-│       ├── error.zig           Error / TypeError / RangeError / URIError installers
-│       ├── function.zig        Function.prototype.{call, apply, bind} + variants
-│       ├── collections.zig     Map / Set / WeakMap / WeakSet + iterator factories
-│       ├── promise.zig         Promise constructor + statics + .then chaining
-│       ├── reflect.zig         Reflect static methods
-│       ├── symbol.zig          Symbol constructor + well-known symbols
-│       ├── bigint.zig          BigInt constructor + statics
-│       ├── proxy.zig           Proxy with trap dispatch + callable wrappers
-│       ├── regexp.zig          RegExp via libregexp bridge
-│       ├── iterator.zig        Iterator global + helper prototype
-│       ├── date.zig            Date constructor + prototype + statics
-│       └── typed_array.zig     ArrayBuffer + DataView + TypedArray family
-└── cli/
-    ├── eval.zig            `cynic eval <expr>` subcommand
-    └── run.zig             `cynic run <file>` subcommand
-tools/
-├── gen_unicode_idents.zig  Generator for src/unicode/ident_tables.zig
-├── test262.zig             test262 conformance harness (parser + runtime modes)
-└── test262/
-    ├── frontmatter.zig     YAML-subset frontmatter parser
-    ├── harness.zig         sta.js + assert.js preload
-    └── skip.zig            Unsupported features + path skip lists
-vendor/
-├── quickjs/                Vendored QuickJS-NG (MIT) — libregexp engine
-├── unicode/                UCD source (Unicode 17.0.0; tracks latest)
-└── test262/                git submodule, tc39/test262
-docs/
-├── ARCHITECTURE.md         Architecture overview
-├── ROADMAP.md              Thematic roadmap
-└── handbook/               Engineering handbook (TDD, prior-art,
-                            compiler-engineering, Zig idioms)
-AGENTS.md                   Entry point for any contributor
-CLAUDE.md                   One-line @AGENTS.md import for Claude Code
-```
 
 ## License
 
