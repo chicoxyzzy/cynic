@@ -1,6 +1,6 @@
 # Cynic — Roadmap
 
-_Last refreshed at runtime conformance **41.07%** (21210 / 51639 test262
+_Last refreshed at runtime conformance **45.40%** (21210 / 46714 test262
 runtime tests, Cynic-targeted scope; parser at 54.76%). Sections below
 are themes, not strict timelines — many run in parallel._
 
@@ -14,7 +14,7 @@ is `pass / (pass + fail)` — quality of what's shipped, ignoring skips.
 | Layer | spec% | attempted% | pass / total | Notes |
 |---|---|---|---|---|
 | Parser | 54.76% | 95.61% | 28,542 / 52,125 | Strict-only; `InputElementRegExp` re-entry exposed for the parser |
-| Runtime | 41.07% | 55.39% | 21,210 / 51,639 | Bytecode interpreter; reaches everything the parser accepts that doesn't depend on a missing built-in |
+| Runtime | 45.40% | 55.39% | 21,210 / 46,714 | Bytecode interpreter; reaches everything the parser accepts that doesn't depend on a missing built-in |
 
 `zig build test` runs all unit tests; `zig build test262 -- --quiet`
 runs the conformance harness. Score history + per-area breakdown live

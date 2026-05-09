@@ -533,9 +533,12 @@ pub fn main(init: std.process.Init) !void {
 
     // Walk the corpus once, materialising every test path into an
     // owned `[]const u8`. Cheap filters (extension, `_FIXTURE`,
-    // `--filter` substring, OOS path table) are applied here so
-    // workers never see paths they would just discard. Frontmatter-
-    // driven skips still happen inside `classifyAndRun` (per-test).
+    // `--filter` substring, OOS path table, universal-skip path
+    // table) are applied here so workers never see paths they
+    // would just discard. Frontmatter-driven skips
+    // (no-strict / raw / unsupported-feature / no-frontmatter)
+    // still happen inside `classifyAndRun` because they require
+    // reading the file.
     var paths: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
         for (paths.items) |p| gpa.free(p);
@@ -551,6 +554,11 @@ pub fn main(init: std.process.Init) !void {
             if (opts.filter) |needle| {
                 if (std.mem.indexOf(u8, entry.path, needle) == null) continue;
             }
+            // Universal skips — `harness/`, `staging/`,
+            // `intl402/` — never produce a meaningful pass / fail.
+            // Drop them up front instead of dispatching a worker
+            // just to mark them `skip`.
+            if (skip_rules.pathIsSkipped(entry.path)) continue;
             if (skip_rules.pathIsCynicOutOfScope(entry.path)) continue;
             try paths.append(gpa, try gpa.dupe(u8, entry.path));
         }
