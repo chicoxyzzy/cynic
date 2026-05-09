@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 62.11 % | 94.89 % | 28794 / 46357 |
-| **runtime** | 49.34 % | 59.92 % | 22871 / 46357 |
+| **runtime** | 50.45 % | 61.27 % | 23387 / 46357 |
 
 ## Where the runtime stands, by area
 
@@ -30,11 +30,11 @@ browser-era built-ins …).
 | `built-ins/Date` | 423 | 163 | 8 | 71 % | 72 % |
 | `built-ins/Function` | 170 | 250 | 89 | 33 % | 40 % |
 | `built-ins/Iterator` | 263 | 241 | 6 | 52 % | 52 % |
-| `built-ins/Object` | 2726 | 600 | 85 | 80 % | 82 % |
+| `built-ins/Object` | 2727 | 599 | 85 | 80 % | 82 % |
 | `built-ins/Promise` | 329 | 345 | 3 | 49 % | 49 % |
 | `built-ins/Proxy` | 116 | 183 | 12 | 37 % | 39 % |
-| `built-ins/RegExp` | 742 | 976 | 161 | 39 % | 43 % |
-| `built-ins/String` | 829 | 389 | 5 | 68 % | 68 % |
+| `built-ins/RegExp` | 1197 | 521 | 161 | 64 % | 70 % |
+| `built-ins/String` | 848 | 370 | 5 | 69 % | 70 % |
 | `built-ins/TypedArray` | 444 | 778 | 216 | 31 % | 36 % |
 | `built-ins/TypedArrayConstructors` | 336 | 376 | 24 | 46 % | 47 % |
 | `language/module-code` | 369 | 213 | 14 | 62 % | 63 % |
@@ -55,7 +55,7 @@ browser-era built-ins …).
 | `built-ins/MapIteratorPrototype` | 1 | 10 | 0 | 9 % | 9 % |
 | `built-ins/Math` | 290 | 22 | 15 | 89 % | 93 % |
 | `built-ins/NativeErrors` | 45 | 49 | 0 | 48 % | 48 % |
-| `built-ins/Number` | 268 | 72 | 0 | 79 % | 79 % |
+| `built-ins/Number` | 269 | 71 | 0 | 79 % | 79 % |
 | `built-ins/Reflect` | 93 | 60 | 0 | 61 % | 61 % |
 | `built-ins/RegExpStringIteratorPrototype` | 0 | 17 | 0 | 0 % | 0 % |
 | `built-ins/Set` | 303 | 79 | 1 | 79 % | 79 % |
@@ -65,22 +65,20 @@ browser-era built-ins …).
 | `built-ins/WeakMap` | 120 | 21 | 0 | 85 % | 85 % |
 | `built-ins/WeakRef` | 0 | 29 | 0 | 0 % | 0 % |
 | `built-ins/WeakSet` | 68 | 17 | 0 | 80 % | 80 % |
-| `built-ins/decodeURI` | 37 | 18 | 0 | 67 % | 67 % |
-| `built-ins/decodeURIComponent` | 38 | 18 | 0 | 68 % | 68 % |
-| `built-ins/encodeURI` | 15 | 16 | 0 | 48 % | 48 % |
-| `built-ins/encodeURIComponent` | 14 | 17 | 0 | 45 % | 45 % |
+| `built-ins/encodeURI` | 17 | 14 | 0 | 55 % | 55 % |
+| `built-ins/encodeURIComponent` | 16 | 15 | 0 | 52 % | 52 % |
 | `built-ins/global` | 9 | 20 | 0 | 31 % | 31 % |
 | `built-ins/isFinite` | 3 | 12 | 0 | 20 % | 20 % |
 | `built-ins/isNaN` | 3 | 12 | 0 | 20 % | 20 % |
 | `built-ins/parseFloat` | 20 | 34 | 0 | 37 % | 37 % |
-| `built-ins/parseInt` | 33 | 22 | 0 | 60 % | 60 % |
+| `built-ins/parseInt` | 34 | 21 | 0 | 62 % | 62 % |
 | `language/arguments-object` | 134 | 72 | 57 | 51 % | 65 % |
 | `language/computed-property-names` | 15 | 33 | 0 | 31 % | 31 % |
 | `language/function-code` | 86 | 22 | 109 | 40 % | 80 % |
 | `language/global-code` | 17 | 20 | 5 | 40 % | 46 % |
 | `language/identifiers` | 252 | 16 | 0 | 94 % | 94 % |
 | `language/line-terminators` | 29 | 12 | 0 | 71 % | 71 % |
-| `language/literals` | 386 | 51 | 97 | 72 % | 88 % |
+| `language/literals` | 398 | 39 | 97 | 75 % | 91 % |
 | `language/statementList` | 27 | 53 | 0 | 34 % | 34 % |
 | `language/types` | 91 | 13 | 9 | 81 % | 88 % |
 | `language/white-space` | 51 | 16 | 0 | 76 % | 76 % |
@@ -93,6 +91,8 @@ browser-era built-ins …).
 | `built-ins/Infinity` | 1 | 3 | 2 | 17 % | 25 % |
 | `built-ins/NaN` | 1 | 3 | 2 | 17 % | 25 % |
 | `built-ins/StringIteratorPrototype` | 2 | 5 | 0 | 29 % | 29 % |
+| `built-ins/decodeURI` | 48 | 7 | 0 | 87 % | 87 % |
+| `built-ins/decodeURIComponent` | 50 | 6 | 0 | 89 % | 89 % |
 | `built-ins/undefined` | 0 | 5 | 3 | 0 % | 0 % |
 | `language/asi` | 97 | 5 | 0 | 95 % | 95 % |
 | `language/block-scope` | 140 | 5 | 0 | 97 % | 97 % |
@@ -136,12 +136,12 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-09 — cynic `886156f`, test262 `d0c1b455`
+### 2026-05-09 — cynic `288a174`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
 | **parser** | 62.11 % | 94.89 % | 28794 / 46357 | +252 |
-| **runtime** | 49.34 % | 59.92 % | 22871 / 46357 | +5006 |
+| **runtime** | 50.45 % | 61.27 % | 23387 / 46357 | +5522 |
 
 ### 2026-05-08 — cynic `unknown`, test262 `d0c1b455`
 

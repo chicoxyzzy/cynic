@@ -69,6 +69,82 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, sp, "match", stringMatch, 1);
     try installNativeMethodOnProto(realm, sp, "matchAll", stringMatchAll, 1);
     try installNativeMethodOnProto(realm, sp, "search", stringSearch, 1);
+
+    // §22.1.2.* — String constructor statics.
+    if (heap_mod.valueAsFunction(realm.globals.get("String").?)) |str_ctor| {
+        try intrinsics.installNativeMethod(realm, str_ctor, "fromCharCode", stringFromCharCode, 1);
+        try intrinsics.installNativeMethod(realm, str_ctor, "fromCodePoint", stringFromCodePoint, 1);
+    }
+}
+
+/// §22.1.2.1 String.fromCharCode(...codeUnits). Each argument is
+/// ToUint16-coerced and emitted as one UTF-16 code unit. Cynic
+/// stores strings as WTF-8: every code unit fits in 1-3 bytes
+/// (surrogate halves get their natural 3-byte sequence — they
+/// only combine into an astral codepoint when the caller wrote
+/// the high half right before the low half).
+fn stringFromCharCode(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(realm.allocator);
+    for (args) |a| {
+        const nv = coerceToNumber(a);
+        const n: f64 = if (nv.isInt32()) @floatFromInt(nv.asInt32()) else nv.asDouble();
+        const cu: u16 = toUint16(n);
+        appendWtf8(realm.allocator, &out, cu) catch return error.OutOfMemory;
+    }
+    const s = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
+    return Value.fromString(s);
+}
+
+/// §22.1.2.2 String.fromCodePoint(...codePoints). Each argument
+/// must coerce to an integer in 0…0x10FFFF; otherwise RangeError.
+/// The codepoint is emitted as a single WTF-8 sequence (1-4
+/// bytes — astral codepoints are one element of the resulting
+/// string under the WTF-8 / per-codepoint iteration model).
+fn stringFromCodePoint(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(realm.allocator);
+    for (args) |a| {
+        const nv = coerceToNumber(a);
+        const n: f64 = if (nv.isInt32()) @floatFromInt(nv.asInt32()) else nv.asDouble();
+        if (std.math.isNan(n) or std.math.isInf(n) or n != @trunc(n) or n < 0 or n > 0x10FFFF) {
+            return intrinsics.throwRangeError(realm, "String.fromCodePoint: argument out of range");
+        }
+        const cp: u21 = @intFromFloat(n);
+        appendWtf8(realm.allocator, &out, cp) catch return error.OutOfMemory;
+    }
+    const s = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
+    return Value.fromString(s);
+}
+
+fn toUint16(n: f64) u16 {
+    // §7.1.7 ToUint16 — `NaN` / `±0` / `±Infinity` map to +0; else
+    // truncate toward zero, then mod 2^16.
+    if (std.math.isNan(n) or std.math.isInf(n)) return 0;
+    const truncated = @trunc(n);
+    const m: f64 = @mod(truncated, 65536.0);
+    const adjusted: f64 = if (m < 0) m + 65536.0 else m;
+    return @intFromFloat(adjusted);
+}
+
+fn appendWtf8(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), cp: u21) !void {
+    if (cp < 0x80) {
+        try out.append(allocator, @intCast(cp));
+    } else if (cp < 0x800) {
+        try out.append(allocator, @intCast(0xC0 | (cp >> 6)));
+        try out.append(allocator, @intCast(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+        try out.append(allocator, @intCast(0xE0 | (cp >> 12)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 6) & 0x3F)));
+        try out.append(allocator, @intCast(0x80 | (cp & 0x3F)));
+    } else {
+        try out.append(allocator, @intCast(0xF0 | (cp >> 18)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 12) & 0x3F)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 6) & 0x3F)));
+        try out.append(allocator, @intCast(0x80 | (cp & 0x3F)));
+    }
 }
 
 /// §22.1.3.12 String.prototype.matchAll(regex) — return an
