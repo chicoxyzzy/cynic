@@ -627,22 +627,15 @@ pub fn main(init: std.process.Init) !void {
         // point in the steady state).
         var index: std.atomic.Value(usize) = .init(0);
         var merge_mu: std.Io.Mutex = .init;
-        const ctx = WorkerCtx{
-            .gpa = gpa,
-            .io = io,
-            .corpus = corpus,
-            .paths = paths.items,
-            .index = &index,
-            .opts = &opts,
-            .pass_cache = &pass_cache,
-            .harness_sources = harness_sources,
-            .merge_mu = &merge_mu,
-            .global_stats = &stats,
-            .global_buckets = &buckets,
-            .global_failures = &failures,
-            .global_pass_paths = &pass_paths,
-            .is_full_run = is_full_run,
-        };
+
+        // Per-worker "currently running" slots. Each worker
+        // writes its current path index here at the top of every
+        // test; the monitor reads them to surface what each
+        // worker is on. A wedged sweep names the offending
+        // fixture instead of leaving you to bisect by filter.
+        const current_paths = try gpa.alloc(std.atomic.Value(usize), thread_count);
+        defer gpa.free(current_paths);
+        for (current_paths) |*slot| slot.* = .init(idle_slot);
 
         const threads = try gpa.alloc(std.Thread, thread_count);
         defer gpa.free(threads);
@@ -650,7 +643,25 @@ pub fn main(init: std.process.Init) !void {
         errdefer {
             for (threads[0..spawned]) |t| t.join();
         }
-        for (threads) |*t| {
+        for (threads, 0..) |*t, wid| {
+            const ctx = WorkerCtx{
+                .gpa = gpa,
+                .io = io,
+                .corpus = corpus,
+                .paths = paths.items,
+                .index = &index,
+                .opts = &opts,
+                .pass_cache = &pass_cache,
+                .harness_sources = harness_sources,
+                .merge_mu = &merge_mu,
+                .global_stats = &stats,
+                .global_buckets = &buckets,
+                .global_failures = &failures,
+                .global_pass_paths = &pass_paths,
+                .is_full_run = is_full_run,
+                .worker_id = wid,
+                .current_paths = current_paths,
+            };
             t.* = try std.Thread.spawn(.{}, worker, .{ctx});
             spawned += 1;
         }
@@ -668,6 +679,8 @@ pub fn main(init: std.process.Init) !void {
                 &index,
                 &monitor_done,
                 @as(usize, paths.items.len),
+                paths.items,
+                current_paths,
             });
         }
 
@@ -786,7 +799,20 @@ const WorkerCtx = struct {
     global_failures: *std.ArrayListUnmanaged(Failure),
     global_pass_paths: *std.ArrayListUnmanaged([]const u8),
     is_full_run: bool,
+    /// Worker's identity (0..thread_count-1). Used to claim a
+    /// slot in `current_paths` so the progress monitor can name
+    /// the path each worker is currently chewing on.
+    worker_id: usize,
+    /// Per-worker "currently running path index" slots — one
+    /// slot per worker, written at the top of each test, read
+    /// by `monitorLoop`. `idle_slot` (= maxInt) means the
+    /// worker isn't on any test (between iterations or done).
+    /// Lets a wedged sweep tell you exactly which fixture
+    /// stalled instead of leaving you to bisect by filter.
+    current_paths: []std.atomic.Value(usize),
 };
+
+const idle_slot: usize = std.math.maxInt(usize);
 
 /// Worker entry point. Pulls paths off the shared atomic index
 /// until drained, classifies + runs each test in its own arena,
@@ -829,9 +855,15 @@ fn workerLoop(
     failures: *std.ArrayListUnmanaged(Failure),
     pass_paths: *std.ArrayListUnmanaged([]const u8),
 ) !void {
+    defer ctx.current_paths[ctx.worker_id].store(idle_slot, .release);
     while (true) {
         const i = ctx.index.fetchAdd(1, .monotonic);
         if (i >= ctx.paths.len) return;
+        // Claim this path in our slot before any allocation /
+        // dispatch can hang. The progress monitor reads this on
+        // its next tick — when a worker wedges, the next dump
+        // names the exact fixture.
+        ctx.current_paths[ctx.worker_id].store(i, .release);
         const rel = ctx.paths[i];
 
         stats.total += 1;
@@ -1190,19 +1222,57 @@ fn monitorLoop(
     index: *std.atomic.Value(usize),
     done: *std.atomic.Value(bool),
     total: usize,
+    paths: []const []const u8,
+    current_paths: []std.atomic.Value(usize),
 ) void {
     var elapsed_s: u32 = 0;
+    var prev_dispatched: usize = 0;
+    var stuck_ticks: u32 = 0;
     while (!done.load(.acquire)) {
         std.Io.sleep(io, .fromSeconds(5), .awake) catch break;
         elapsed_s += 5;
         if (done.load(.acquire)) break;
         const dispatched = index.load(.acquire);
         const display = if (dispatched > total) total else dispatched;
-        var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "[{d}s] dispatched {d}/{d}\n", .{
-            elapsed_s, display, total,
-        }) catch continue;
-        std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
+
+        // Quiescence detection: if the dispatched counter hasn't
+        // advanced between ticks, every worker is busy on a single
+        // long-running test. Two ticks (10 s) of no movement is
+        // the signal to dump per-worker paths so a wedge names
+        // its fixture even before the run is killed.
+        if (dispatched == prev_dispatched) {
+            stuck_ticks += 1;
+        } else {
+            stuck_ticks = 0;
+            prev_dispatched = dispatched;
+        }
+
+        var buf: [4096]u8 = undefined;
+        var pos: usize = 0;
+        const head = std.fmt.bufPrint(buf[pos..], "[{d}s] dispatched {d}/{d}", .{ elapsed_s, display, total }) catch continue;
+        pos += head.len;
+        // Once stuck OR every minute as a heartbeat, append the
+        // currently-running path for each worker so the log
+        // names the wedge candidate.
+        const dump_workers = stuck_ticks >= 2 or (elapsed_s % 60 == 0 and elapsed_s > 0);
+        if (dump_workers) {
+            for (current_paths, 0..) |*slot, wid| {
+                const i = slot.load(.acquire);
+                if (pos + 256 >= buf.len) break;
+                const part = if (i == idle_slot)
+                    std.fmt.bufPrint(buf[pos..], " w{d}=idle", .{wid}) catch break
+                else if (i < paths.len)
+                    std.fmt.bufPrint(buf[pos..], " w{d}={s}", .{ wid, paths[i] }) catch break
+                else
+                    continue;
+                pos += part.len;
+            }
+        }
+        if (pos < buf.len) {
+            buf[pos] = '\n';
+            pos += 1;
+        }
+        std.Io.File.stderr().writeStreamingAll(io, buf[0..pos]) catch {};
     }
 }
 
