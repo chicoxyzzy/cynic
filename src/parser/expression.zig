@@ -1500,17 +1500,50 @@ fn parseFunctionExpressionAt(p: *Parser, start: u32, is_async: bool) ParseError!
     } };
 }
 
-/// §13.2.5 ParenthesizedExpression. TODO(cover-grammar): replace with the
-/// `CoverParenthesizedExpressionAndArrowParameterList` production once arrow
-/// functions land — the same prefix `(` could begin either form, and we'll
-/// reinterpret based on whether `=>` follows.
+/// §13.2.5 CoverParenthesizedExpressionAndArrowParameterList — a
+/// parenthesized expression that may also be the head of an arrow
+/// function. Items are comma-separated AssignmentExpressions, each
+/// of which can additionally be a `...rest` SpreadElement (only
+/// valid as an arrow-parameter rest, but the cover grammar
+/// accepts it here and the arrow-reinterpret path picks it up via
+/// `collectArrowParams`). When the form turns out to be a real
+/// expression, `(a, ...rest)` is a SyntaxError surfaced when
+/// `reinterpretLhsAsArrow` doesn't see `=>` next.
 fn parseParenthesized(p: *Parser) ParseError!Expression {
     const lparen = try p.bump();
     std.debug.assert(lparen.kind == .lparen);
-    const inner = try parseExpression(p);
+    var items: std.ArrayListUnmanaged(Expression) = .empty;
+    while (p.peek().kind != .rparen and p.peek().kind != .eof) {
+        if (p.peek().kind == .ellipsis) {
+            const dots = try p.bump();
+            const arg = try parseAssignment(p);
+            const arg_ptr = try p.arena.create(Expression);
+            arg_ptr.* = arg;
+            try items.append(p.arena, .{ .spread = .{
+                .span = .{ .start = dots.span.start, .end = arg.span().end },
+                .argument = arg_ptr,
+            } });
+        } else {
+            const item = try parseAssignment(p);
+            try items.append(p.arena, item);
+        }
+        if (p.peek().kind != .comma) break;
+        _ = try p.bump();
+    }
     const rparen = try p.expect(.rparen);
     const inner_ptr = try p.arena.create(Expression);
-    inner_ptr.* = inner;
+    if (items.items.len == 1) {
+        inner_ptr.* = items.items[0];
+    } else {
+        // Multiple items — fold into a sequence, mirroring what the
+        // expression parser produces for `(a, b, c)`. Arrow
+        // reinterpretation walks the sequence one item at a time.
+        const owned = try items.toOwnedSlice(p.arena);
+        inner_ptr.* = .{ .sequence = .{
+            .span = .{ .start = lparen.span.start, .end = rparen.span.end },
+            .expressions = owned,
+        } };
+    }
     return .{ .parenthesized = .{
         .span = .{ .start = lparen.span.start, .end = rparen.span.end },
         .expression = inner_ptr,

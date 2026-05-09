@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 54.76 % | 95.61 % | 28542 / 52125 |
-| **runtime** | 39.88 % | 53.76 % | 20595 / 51639 |
+| **runtime** | 39.89 % | 53.78 % | 20601 / 51639 |
 
 ## Where the runtime stands, by area
 
@@ -21,7 +21,7 @@ Temporal, browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | `language/statements` | 3746 | 4924 | 667 | 40 % | 43 % |
-| `language/expressions` | 5387 | 4680 | 971 | 49 % | 54 % |
+| `language/expressions` | 5392 | 4675 | 971 | 49 % | 54 % |
 | `built-ins/RegExp` | 658 | 1060 | 161 | 35 % | 38 % |
 | `built-ins/Array` | 1984 | 886 | 211 | 64 % | 69 % |
 | `built-ins/TypedArray` | 390 | 832 | 216 | 27 % | 32 % |
@@ -91,9 +91,9 @@ Temporal, browser-era built-ins …).
 | `built-ins/StringIteratorPrototype` | 2 | 5 | 0 | 29 % | 29 % |
 | `built-ins/undefined` | 1 | 4 | 3 | 13 % | 20 % |
 | `built-ins/AsyncIteratorPrototype` | 0 | 4 | 9 | 0 % | 0 % |
-| `language/rest-parameters` | 8 | 3 | 0 | 73 % | 73 % |
 | `language/identifier-resolution` | 6 | 3 | 5 | 43 % | 67 % |
 | `language/destructuring` | 15 | 2 | 2 | 79 % | 88 % |
+| `language/rest-parameters` | 9 | 2 | 0 | 82 % | 82 % |
 | `built-ins/Infinity` | 2 | 2 | 2 | 33 % | 50 % |
 | `built-ins/NaN` | 2 | 2 | 2 | 33 % | 50 % |
 | `language/reserved-words` | 26 | 1 | 0 | 96 % | 96 % |
@@ -161,18 +161,16 @@ Temporal, browser-era built-ins …).
 
 ## History
 
-### 2026-05-09 — cynic `350dbef`, test262 `d0c1b455`
+### 2026-05-09 — cynic `0a45e8f`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 39.88 % | 53.76 % | 20595 / 51639 | +2730 |
+| **runtime** | 39.89 % | 53.78 % | 20601 / 51639 | +2736 |
 
 Biggest movers (runtime):
 
-- `language/rest-parameters` +7
-- `built-ins/Set` +4
-- `built-ins/String` +2
-- `language/arguments-object` +1
+- `language/expressions` +5
+- `language/rest-parameters` +1
 
 ### 2026-05-08 — cynic `unknown`, test262 `d0c1b455`
 
