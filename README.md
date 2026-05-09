@@ -55,7 +55,7 @@ test262 conformance, Cynic-scoped (history + legend in
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser**  | 54.76 % | 95.61 % | 28,542 / 52,125 |
-| **runtime** | 40.59 % | 54.71 % | 20,958 / 51,639 |
+| **runtime** | 40.67 % | 54.83 % | 21,005 / 51,639 |
 
 `spec%` is coverage of the (Cynic-targeted) corpus; `attempted%` is the
 quality of what's shipped, ignoring skips. Plus 700+ unit tests.
