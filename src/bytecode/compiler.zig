@@ -2960,6 +2960,7 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
         // own keys directly and has no `.return()` contract.
         .iter_register = if (s.kind == .in_) null else r_iter,
         .parent = self.current_loop,
+        .entry_finally_chain = self.finally_chain,
     };
     defer ctx.deinit(self.allocator);
     const saved_loop = self.current_loop;
@@ -3087,7 +3088,11 @@ fn compileSwitch(self: *Compiler, s: ast.statement.SwitchStmt) CompileError!void
     try self.builder.emitI16(0);
 
     // Set up a loop context for `break` inside the switch.
-    var ctx: LoopContext = .{ .continue_target = 0, .parent = self.current_loop };
+    var ctx: LoopContext = .{
+        .continue_target = 0,
+        .parent = self.current_loop,
+        .entry_finally_chain = self.finally_chain,
+    };
     defer ctx.deinit(self.allocator);
     const saved_loop = self.current_loop;
     self.current_loop = &ctx;
@@ -3140,16 +3145,17 @@ fn compileReturn(self: *Compiler, s: ast.statement.ReturnStmt) CompileError!void
     }
     // §14.15 — run every active finally block before returning.
     // Stash the return value in a temp so the finally bodies
-    // can clobber `acc` freely, then restore it.
+    // can clobber `acc` freely, then restore it. The helper
+    // rewinds `finally_chain` past each `f` before compiling
+    // its body so an abrupt `return` / `break` / `continue`
+    // inside it doesn't re-inline `f` (per §14.15.3 step 4 an
+    // abrupt completion in finally replaces the outer one).
     if (self.finally_chain != null) {
         const r_save = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.star, s.span);
         try self.builder.emitU8(r_save);
-        var fctx = self.finally_chain;
-        while (fctx) |f| : (fctx = f.parent) {
-            try self.compileBlock(f.body, f.span);
-        }
+        try self.emitFinalliesUntil(null, s.span);
         try self.builder.emitOp(.ldar, s.span);
         try self.builder.emitU8(r_save);
     }
@@ -4693,6 +4699,14 @@ const LoopContext = struct {
     /// Function boundaries reset to `null` (each function gets
     /// its own loop chain).
     parent: ?*LoopContext = null,
+    /// Snapshot of `finally_chain` at the moment the loop was
+    /// entered. `break` and `continue` walk the chain from the
+    /// current head down to (but not including) this anchor,
+    /// inlining each finally body so abrupt exits from inside a
+    /// `try { … } finally { F }` nested in the loop body still
+    /// run F. §14.15.3 step 4: an abrupt finally completion
+    /// replaces the outer one outright.
+    entry_finally_chain: ?*FinallyContext = null,
 
     fn deinit(self: *LoopContext, allocator: std.mem.Allocator) void {
         self.break_patches.deinit(allocator);
@@ -4707,7 +4721,11 @@ fn compileWhile(self: *Compiler, s: ast.statement.WhileStmt) CompileError!void {
     const exit_patch = self.builder.here();
     try self.builder.emitI16(0);
 
-    var ctx: LoopContext = .{ .continue_target = loop_start, .parent = self.current_loop };
+    var ctx: LoopContext = .{
+        .continue_target = loop_start,
+        .parent = self.current_loop,
+        .entry_finally_chain = self.finally_chain,
+    };
     defer ctx.deinit(self.allocator);
     const saved = self.current_loop;
     self.current_loop = &ctx;
@@ -4730,7 +4748,11 @@ fn compileWhile(self: *Compiler, s: ast.statement.WhileStmt) CompileError!void {
 
 fn compileDoWhile(self: *Compiler, s: ast.statement.DoWhileStmt) CompileError!void {
     const loop_start = self.builder.here();
-    var ctx: LoopContext = .{ .continue_target = 0, .parent = self.current_loop }; // patched after body
+    var ctx: LoopContext = .{
+        .continue_target = 0,
+        .parent = self.current_loop,
+        .entry_finally_chain = self.finally_chain,
+    }; // patched after body
     defer ctx.deinit(self.allocator);
     const saved = self.current_loop;
     self.current_loop = &ctx;
@@ -4854,7 +4876,12 @@ fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
         try self.builder.emitI16(0);
     }
 
-    var ctx: LoopContext = .{ .continue_target = 0, .needs_env_pop = per_iter_env, .parent = self.current_loop };
+    var ctx: LoopContext = .{
+        .continue_target = 0,
+        .needs_env_pop = per_iter_env,
+        .parent = self.current_loop,
+        .entry_finally_chain = self.finally_chain,
+    };
     defer ctx.deinit(self.allocator);
     const saved_loop = self.current_loop;
     self.current_loop = &ctx;
@@ -4926,6 +4953,29 @@ fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
     }
 }
 
+/// Inline every finally body whose try-statement was opened
+/// after `anchor` (i.e. lies between the abrupt-completion site
+/// and `anchor` in lexical order). Used by `break` / `continue`
+/// to honour §14.15.3 step 4: a `try { … break; } finally { F }`
+/// must run F before the loop exit. The chain is rewound past
+/// each `f` before its body is compiled so an abrupt `return` /
+/// `break` / `continue` inside F doesn't re-inline F itself.
+fn emitFinalliesUntil(
+    self: *Compiler,
+    anchor: ?*FinallyContext,
+    span: Span,
+) CompileError!void {
+    if (self.finally_chain == anchor) return;
+    const saved_chain = self.finally_chain;
+    defer self.finally_chain = saved_chain;
+    var fctx = self.finally_chain;
+    while (fctx) |f| : (fctx = f.parent) {
+        if (f == anchor) break;
+        self.finally_chain = f.parent;
+        try self.compileBlock(f.body, span);
+    }
+}
+
 fn compileBreak(self: *Compiler, s: ast.statement.BreakStmt) CompileError!void {
     const ctx = self.current_loop orelse {
         try self.report(.unexpected_token, s.span);
@@ -4937,6 +4987,9 @@ fn compileBreak(self: *Compiler, s: ast.statement.BreakStmt) CompileError!void {
         try self.builder.emitOp(.iter_close, s.span);
         try self.builder.emitU8(r_iter);
     }
+    // §14.15 — run every finally block opened between this
+    // `break` and the loop entry before transferring control.
+    try self.emitFinalliesUntil(ctx.entry_finally_chain, s.span);
     // `break` jumps past the natural `pop_env` site; emit one
     // here so the per-iteration env doesn't outlive the loop.
     if (ctx.needs_env_pop) try self.builder.emitOp(.pop_env, s.span);
@@ -4956,6 +5009,9 @@ fn compileContinue(self: *Compiler, s: ast.statement.ContinueStmt) CompileError!
         try self.report(.unexpected_token, s.span);
         return error.UnsupportedStatement;
     };
+    // §14.15 — run every finally block opened between this
+    // `continue` and the loop entry before transferring control.
+    try self.emitFinalliesUntil(ctx.entry_finally_chain, s.span);
     // `continue` lands at `continue_target`, which (for
     // for-of/for-in over `let`) emits the `pop_env` itself —
     // so we don't need to pop here.
