@@ -402,6 +402,14 @@ pub const Op = enum(u8) {
     /// later treats any object with a numeric `.length` as
     /// spreadable; full Symbol.iterator dispatch is later.
     array_spread,
+    /// `[op] [r_obj:u8]` — §13.2.5.5 / §7.3.26 CopyDataProperties.
+    /// Read `acc` as the source. `null` / `undefined` are no-ops.
+    /// Otherwise walk the source's own enumerable string and
+    /// symbol keys (skipping the engine's `__cynic_*` slots),
+    /// reading each via the regular property dispatch path
+    /// (getters fire), and `[[Set]]` the result into the target
+    /// in `r_obj`. Drives `{ ...src, k: v }` object-literal spread.
+    object_spread,
     /// `[op] [k:u16]` — load property whose name is `JSString` at
     /// `Chunk.constants[k]` from the object currently in acc.
     /// Walks the prototype chain; missing keys yield `undefined`
@@ -523,6 +531,7 @@ pub const Op = enum(u8) {
             .in_op,
             .iter_close,
             .array_spread,
+            .object_spread,
             .set_proto_literal,
             .set_home,
             => 1, // single u8 register operand
@@ -646,6 +655,7 @@ pub const Op = enum(u8) {
             .make_object => "MakeObject",
             .make_array => "MakeArray",
             .array_spread => "ArraySpread",
+            .object_spread => "ObjectSpread",
             .lda_property => "LdaProperty",
             .sta_property => "StaProperty",
             .lda_computed => "LdaComputed",

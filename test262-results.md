@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 54.76 % | 95.61 % | 28542 / 52125 |
-| **runtime** | 35.48 % | 47.83 % | 18323 / 51639 |
+| **runtime** | 35.63 % | 48.03 % | 18397 / 51639 |
 
 ## Where the runtime stands, by area
 
@@ -20,8 +20,8 @@ Temporal, browser-era built-ins …).
 
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
-| `language/expressions` | 4181 | 5886 | 971 | 38 % | 42 % |
-| `language/statements` | 2790 | 5880 | 667 | 30 % | 32 % |
+| `language/statements` | 2792 | 5878 | 667 | 30 % | 32 % |
+| `language/expressions` | 4253 | 5814 | 971 | 39 % | 42 % |
 | `built-ins/RegExp` | 658 | 1060 | 161 | 35 % | 38 % |
 | `built-ins/Array` | 1979 | 891 | 211 | 64 % | 69 % |
 | `built-ins/TypedArray` | 390 | 832 | 216 | 27 % | 32 % |
@@ -161,17 +161,16 @@ Temporal, browser-era built-ins …).
 
 ## History
 
-### 2026-05-09 — cynic `8dadcfd`, test262 `d0c1b455`
+### 2026-05-09 — cynic `d52a3dc`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 35.48 % | 47.83 % | 18323 / 51639 | +458 |
+| **runtime** | 35.63 % | 48.03 % | 18397 / 51639 | +532 |
 
 Biggest movers (runtime):
 
-- `language/expressions` +10
-- `language/computed-property-names` +3
-- `language/statements` +3
+- `language/expressions` +72
+- `language/statements` +2
 
 ### 2026-05-08 — cynic `unknown`, test262 `d0c1b455`
 

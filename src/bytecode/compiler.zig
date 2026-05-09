@@ -1276,7 +1276,16 @@ pub const Compiler = struct {
                     },
                 }
             },
-            .spread => return error.UnsupportedExpression,
+            .spread => |sp| {
+                // §13.2.5.5 / §7.3.26 CopyDataProperties — `{ ...src }`.
+                // Compile the source into acc, then `object_spread`
+                // walks its own enumerable string + symbol keys and
+                // copies each into r_obj. `null` / `undefined` are
+                // tolerated silently per spec.
+                try self.compileExpression(sp.argument);
+                try self.builder.emitOp(.object_spread, sp.span);
+                try self.builder.emitU8(r_obj);
+            },
         };
 
         // Final result of an object literal is the object itself.
