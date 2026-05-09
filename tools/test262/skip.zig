@@ -58,12 +58,14 @@ pub const cynic_oos_path_prefixes = [_][]const u8{
     "built-ins/SharedArrayBuffer/",
     // `eval` and runtime code construction — out permanently
     // (AGENTS.md, ROADMAP.md). Aligns with SES / Hardened
-    // JavaScript. Fixtures under `language/eval-code/` directly
+    // JavaScript. Fixtures under `language/eval-code/` and the
+    // `built-ins/eval/` prototype-and-properties tree directly
     // call `eval(...)` with no escape hatch, so they all
     // false-reject under our config; reclassifying them here
     // stops the harness from advertising progress on something
     // we've already decided not to do.
     "language/eval-code/",
+    "built-ins/eval/",
 };
 
 /// `features` names we know we don't support. When a test's frontmatter
