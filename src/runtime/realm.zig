@@ -155,6 +155,14 @@ pub const Realm = struct {
     /// be revisited with a per-script arena later if it
     /// matters.
     script_chunks: std.ArrayListUnmanaged(*@import("../bytecode/chunk.zig").Chunk) = .empty,
+    /// Cooperative interpreter step budget. Decremented once per
+    /// opcode in `runFrames`; on reaching zero the dispatch loop
+    /// raises a synthetic `RangeError("step budget exhausted")`
+    /// and unwinds. Default is `maxInt(u64)` so non-test hosts
+    /// don't trip it. The test262 harness sets a per-test value
+    /// before each run so an infinite-loop fixture can't wedge
+    /// the entire sweep.
+    step_budget: u64 = std.math.maxInt(u64),
 
     pub fn init(allocator: std.mem.Allocator) Realm {
         return .{

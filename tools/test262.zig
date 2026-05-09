@@ -975,6 +975,17 @@ fn classifyAndRun(
     var realm = cynic.runtime.Realm.init(arena);
     defer realm.deinit();
     realm.installBuiltins() catch return .{ .kind = .fail_false_reject };
+    // Cap each test at a generous opcode budget so an
+    // infinite-loop fixture (`while(true){}`, recursive yield,
+    // a `for(;;)` waiting on an awaitable that never settles)
+    // can't hang a worker forever. 50M opcodes is far above any
+    // legitimate test — typical fixtures are well under 1M, and
+    // the deepest recursion / generator tests in the corpus top
+    // out around 10M. On exhaustion the interpreter throws a
+    // synthetic `RangeError`; the test then either passes (if
+    // it expected a throw of that shape) or fails as a
+    // false-reject — the worker keeps moving.
+    realm.step_budget = 50_000_000;
 
     // §INTERPRETING.md — async-flagged tests call `$DONE()` /
     // `$DONE(err)` to signal completion. Install the host hook

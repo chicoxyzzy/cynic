@@ -1443,6 +1443,19 @@ fn runFrames(
     frames: *std.ArrayListUnmanaged(CallFrame),
 ) RunError!RunResult {
     while (frames.items.len > 0) {
+        // Cooperative step budget — saturating decrement, then
+        // unwind a synthetic `RangeError` when the budget hits
+        // zero. The default budget is huge (maxInt(u64)) so
+        // ordinary hosts never see this; the test262 harness
+        // dials it down per-test so a `while(true){}` fixture
+        // can't wedge the whole sweep. The check sits before
+        // opcode dispatch — every re-entry into `runFrames`
+        // (native call → JS callback → ...) ticks too.
+        if (realm.step_budget == 0) {
+            const ex = try makeRangeError(realm, "interpreter step budget exhausted");
+            return .{ .thrown = ex };
+        }
+        realm.step_budget -|= 1;
         var f = &frames.items[frames.items.len - 1];
         const local_chunk = f.chunk;
         const code = local_chunk.code;
