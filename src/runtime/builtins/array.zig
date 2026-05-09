@@ -275,7 +275,7 @@ fn arraySlice(realm: *Realm, this_value: Value, args: []const Value) NativeError
 }
 
 fn arrayConcat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
+    const obj = try toObjectThis(realm, this_value);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     var write_idx: i64 = 0;
@@ -551,7 +551,7 @@ fn arrayFindLast(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 }
 
 fn arrayFindLastIndex(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
+    const obj = try toObjectThis(realm, this_value);
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return error.NativeThrew;
     const this_arg = argOr(args, 1, Value.undefined_);
     const len = try clampArrayLength(lengthOfArray(obj));
@@ -567,7 +567,7 @@ fn arrayFindLastIndex(realm: *Realm, this_value: Value, args: []const Value) Nat
 }
 
 fn arrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
+    const obj = try toObjectThis(realm, this_value);
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return error.NativeThrew;
     const len = try clampArrayLength(lengthOfArray(obj));
     var acc: Value = Value.undefined_;
@@ -609,7 +609,7 @@ fn arrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) Nativ
 }
 
 fn arrayFlat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
+    const obj = try toObjectThis(realm, this_value);
     const depth_v = argOr(args, 0, Value.fromInt32(1));
     // Infinity / very-large depth → effectively-unbounded; we cap
     // with a recursion sentinel inside `flattenInto`.
@@ -666,7 +666,7 @@ pub fn isArrayLike(v: Value) bool {
 }
 
 fn arrayFlatMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
+    const obj = try toObjectThis(realm, this_value);
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return error.NativeThrew;
     const this_arg = argOr(args, 1, Value.undefined_);
     const len = try clampArrayLength(lengthOfArray(obj));
