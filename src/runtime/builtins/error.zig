@@ -57,6 +57,147 @@ pub fn installAll(realm: *Realm, obj_proto: *JSObject) !void {
 
     realm.intrinsics.uri_error_constructor = try installError(realm, "URIError", uriErrorNative, error_proto);
     realm.intrinsics.uri_error_prototype = realm.intrinsics.uri_error_constructor.?.prototype;
+
+    // §20.5.7 AggregateError(errors, message, options) — the only
+    // typed Error whose constructor takes a leading iterable.
+    // Built with the same `installError` builder; the constructor
+    // body iterates `errors`, materialises an Array, and pins it
+    // as an own data property on the instance.
+    realm.intrinsics.aggregate_error_constructor = try installAggregateError(realm, error_proto);
+    realm.intrinsics.aggregate_error_prototype = realm.intrinsics.aggregate_error_constructor.?.prototype;
+}
+
+/// §20.5.7.1.1 AggregateError(errors, message[, options]) — built
+/// out-of-line because its arity is 2 (vs. 1 for the rest) and
+/// the body has to walk the iterable to populate `errors`.
+fn installAggregateError(realm: *Realm, parent_proto: *JSObject) !*JSFunction {
+    const fn_obj = try realm.heap.allocateFunctionNative(aggregateErrorNative, 2, "AggregateError");
+    const proto = try realm.heap.allocateObject();
+    proto.prototype = parent_proto;
+    try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
+    const name_str = try realm.heap.allocateString("AggregateError");
+    try setNonEnumerable(proto, realm.allocator, "name", Value.fromString(name_str));
+    // §20.5.7.3.2 — the prototype's `message` defaults to "".
+    const empty = try realm.heap.allocateString("");
+    try setNonEnumerable(proto, realm.allocator, "message", Value.fromString(empty));
+    fn_obj.prototype = proto;
+    try realm.globals.put(realm.allocator, "AggregateError", heap_mod.taggedFunction(fn_obj));
+    return fn_obj;
+}
+
+fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const proto = realm.intrinsics.aggregate_error_prototype.?;
+    const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
+    instance.prototype = proto;
+
+    // §20.5.7.1.1 step 4 — IteratorToList(GetIterator(errors)).
+    // Cynic doesn't have a generic GetIterator helper at this
+    // layer, so we accept the two shapes that test262 throws at
+    // us: real iterables (array-like with `@@iterator`) and bare
+    // array-likes (`length` + indexed get). For array-likes we
+    // materialise to an Array; for iterables we walk the protocol.
+    const errors_v = if (args.len > 0) args[0] else Value.undefined_;
+    const errors_arr = aggregateErrorMaterialiseErrors(realm, errors_v) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    // `errors` is an own data property with {w:true, e:false, c:true}
+    // per §20.5.7.1.1 step 6 (CreateNonEnumerableDataPropertyOrThrow).
+    instance.setWithFlags(realm.allocator, "errors", errors_arr, .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    }) catch return error.OutOfMemory;
+
+    // §20.5.7.1.1 step 2 — message is the second arg; if defined,
+    // ToString and pin as own.
+    if (args.len > 1 and !args[1].isUndefined()) {
+        const msg_str = stringifyArg(realm, args[1]) catch return error.OutOfMemory;
+        instance.set(realm.allocator, "message", Value.fromString(msg_str)) catch return error.OutOfMemory;
+    }
+    // §20.5.8.1 InstallErrorCause — third arg is an options object;
+    // own `cause` key (if present) copies to instance.
+    if (args.len > 2) {
+        if (heap_mod.valueAsPlainObject(args[2])) |opts| {
+            if (opts.hasOwn("cause")) {
+                instance.set(realm.allocator, "cause", opts.get("cause")) catch return error.OutOfMemory;
+            }
+        }
+    }
+    return heap_mod.taggedObject(instance);
+}
+
+/// Walk `errors_v` per §20.5.7.1.1 step 4 (IteratorToList) and
+/// build a fresh Array. Accepts iterables (objects with a callable
+/// `@@iterator`) and array-likes (`length` + indexed get). Throws
+/// `TypeError` on non-object input.
+fn aggregateErrorMaterialiseErrors(realm: *Realm, errors_v: Value) NativeError!Value {
+    const interpreter = @import("../interpreter.zig");
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    out.prototype = realm.intrinsics.array_prototype;
+
+    const src = heap_mod.valueAsPlainObject(errors_v) orelse {
+        return intrinsics.throwTypeError(realm, "AggregateError: errors argument is not iterable");
+    };
+
+    // Iterable path first.
+    const iter_method_v = try intrinsics.getPropertyChain(realm, src, "@@iterator");
+    if (heap_mod.valueAsFunction(iter_method_v)) |iter_method| {
+        const iter_outcome = interpreter.callJSFunction(realm.allocator, realm, iter_method, errors_v, &.{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        const iter = switch (iter_outcome) {
+            .value, .yielded => |v| v,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        };
+        const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return intrinsics.throwTypeError(realm, "AggregateError: @@iterator did not return an object");
+        const next_v = try intrinsics.getPropertyChain(realm, iter_obj, "next");
+        const next_fn = heap_mod.valueAsFunction(next_v) orelse return intrinsics.throwTypeError(realm, "AggregateError: iterator missing callable 'next'");
+        var k: i64 = 0;
+        const max_iter: usize = 1 << 24;
+        var step: usize = 0;
+        while (step < max_iter) : (step += 1) {
+            const result_outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            const result = switch (result_outcome) {
+                .value, .yielded => |v| v,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            };
+            const result_obj = heap_mod.valueAsPlainObject(result) orelse return intrinsics.throwTypeError(realm, "AggregateError: iterator next() did not return an object");
+            if (intrinsics.toBoolean(result_obj.get("done"))) break;
+            const elem = result_obj.get("value");
+            var ibuf: [24]u8 = undefined;
+            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{k}) catch unreachable;
+            const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+            out.set(realm.allocator, idx_owned.bytes, elem) catch return error.OutOfMemory;
+            k += 1;
+        }
+        @import("array.zig").setLength(realm, out, k) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(out);
+    }
+
+    // Array-like fallback.
+    const len = try intrinsics.clampArrayLength(try intrinsics.toLengthOf(realm, src));
+    var i: i64 = 0;
+    while (i < len) : (i += 1) {
+        var ibuf: [24]u8 = undefined;
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+        const elem = try intrinsics.getPropertyChain(realm, src, islice);
+        const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+        out.set(realm.allocator, idx_owned.bytes, elem) catch return error.OutOfMemory;
+    }
+    @import("array.zig").setLength(realm, out, len) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(out);
 }
 
 pub fn installError(

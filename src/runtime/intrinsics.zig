@@ -61,6 +61,11 @@ pub const Intrinsics = struct {
     syntax_error_prototype: ?*JSObject = null,
     uri_error_constructor: ?*JSFunction = null,
     uri_error_prototype: ?*JSObject = null,
+    /// §20.5.7 AggregateError — Error subclass with an `errors`
+    /// own property. Constructed by `Promise.any` when every
+    /// input rejects; user code can also `new AggregateError([…])`.
+    aggregate_error_constructor: ?*JSFunction = null,
+    aggregate_error_prototype: ?*JSObject = null,
 
     /// `%GeneratorPrototype%` (§27.5.1). Lazily installed on the
     /// first `function*` call by `interpreter.ensureGeneratorPrototype`;
