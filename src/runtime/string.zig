@@ -27,6 +27,13 @@ pub const JSString = struct {
     /// `Heap.collect` after each sweep. `false` when freshly
     /// allocated and after every full GC cycle.
     marked: bool = false,
+    /// Permanently-live: never collected, never needs marking.
+    /// Set on chunk-constant strings at chunk-finalize time, since
+    /// chunks are realm-lifetime and their constant pool can't
+    /// outlive the realm. Saves the per-GC-cycle `markChunk`
+    /// recursion (which would otherwise walk every nested
+    /// function / class template's constants on every collect).
+    pinned: bool = false,
 
     /// Allocate a new `JSString` whose contents are a copy of `src`.
     /// The returned pointer and its `bytes` are both owned by

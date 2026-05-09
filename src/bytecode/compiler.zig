@@ -5389,7 +5389,13 @@ pub fn compileScriptAsChunk(
     try c.builder.emitOp(.return_, end_span);
 
     c.builder.code.items[slot_count_patch] = c.env_slot_count;
-    return c.finish();
+    var chunk = try c.finish();
+    // Pin every JSString in the chunk's constant pool (incl.
+    // nested function / class templates). Chunks are realm-
+    // lifetime; pinning lets the GC skip walking the chunk
+    // tree on every collect. See `Heap.pinChunk`.
+    realm.heap.pinChunk(&chunk);
+    return chunk;
 }
 
 /// Compile a Module — same as `compileScriptAsChunk` but the
@@ -5437,6 +5443,7 @@ pub fn compileModuleAsChunk(
     c.builder.code.items[slot_count_patch] = c.env_slot_count;
     var chunk = try c.finish();
     chunk.base_url = base_url;
+    realm.heap.pinChunk(&chunk);
     return chunk;
 }
 
@@ -5464,7 +5471,9 @@ pub fn compileExpressionAsChunk(
 
     try c.compileExpression(expr);
     try c.builder.emitOp(.return_, expr.span());
-    return c.finish();
+    var chunk = try c.finish();
+    realm.heap.pinChunk(&chunk);
+    return chunk;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────

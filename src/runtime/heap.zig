@@ -34,6 +34,16 @@ const JSGenerator = @import("generator.zig").JSGenerator;
 const JSSymbol = @import("symbol.zig").JSSymbol;
 const JSBigInt = @import("bigint.zig").JSBigInt;
 
+/// Monotonic nanosecond timestamp via libc `clock_gettime`.
+/// Used by `Heap.collect`'s diagnostic pause-time field; the
+/// std `std.Io` clock would require threading the io handle
+/// down here, which costs more than this small libc detour.
+fn monotonicNs() i128 {
+    var ts: std.c.timespec = .{ .sec = 0, .nsec = 0 };
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(i128, @intCast(ts.sec)) * std.time.ns_per_s + @as(i128, @intCast(ts.nsec));
+}
+
 /// Heap-managed pointers are at least 8-byte aligned (the
 /// allocator's minimum for any struct containing a pointer
 /// field), which leaves the bottom three bits free. We encode
@@ -193,6 +203,14 @@ pub const Heap = struct {
     /// (the unit-test paths that call `collect` directly do this
     /// when they want full control over when GC fires).
     gc_threshold: u32 = 16384,
+    /// When non-zero, every `collect` cycle prints a one-line
+    /// stderr report of live counts per heap kind (before sweep,
+    /// after sweep). Diagnostic for finding leaks: a kind whose
+    /// post-sweep count climbs across cycles is being kept alive
+    /// by something. Counts as the cycle number for cross-
+    /// referencing.
+    gc_stats_cycle: u32 = 0,
+    gc_stats: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) Heap {
         return .{ .allocator = allocator };
@@ -433,11 +451,10 @@ pub const Heap = struct {
                     for (ba) |a| self.markValue(a);
                 }
                 // The function's chunk holds heap-allocated string
-                // / symbol constants (pulled in by every literal
-                // string opcode). The chunk itself isn't on the GC
-                // heap (realm.script_chunks owns it), but the
-                // values inside need keeping alive.
-                if (f.chunk) |c| self.markChunk(c);
+                // constants. Those JSStrings were pinned at
+                // chunk-finalize time (see `pinChunk`), so we
+                // don't need to walk them here — sweep skips
+                // pinned items entirely.
             }
         } else if (valueAsPlainObject(v)) |o| {
             if (!o.marked) {
@@ -466,6 +483,24 @@ pub const Heap = struct {
                     }
                 }
                 if (o.generator_ref) |gen| self.markGenerator(gen);
+                // Heap-allocated JSStrings whose `.bytes` slice
+                // backs a property key. The property hash maps
+                // store `[]const u8`, not pointers; without this
+                // anchor the JSString gets swept and the key
+                // dangles. Computed `obj[expr] = v` writes go
+                // through `setComputedOwned` which pushes here.
+                for (o.key_anchors.items) |s| s.marked = true;
+                // Pending Promise reactions / waiters — settlement
+                // microtasks read these lists. A reaction's
+                // `result_promise` is the chained sub-Promise that
+                // a later `.then` is registered on; without marking
+                // it here, mid-drain GC collects the chain.
+                for (o.promise_reactions.items) |r| {
+                    self.markValue(r.on_fulfilled);
+                    self.markValue(r.on_rejected);
+                    self.markValue(r.result_promise);
+                }
+                for (o.promise_waiters.items) |w| self.markGenerator(w);
                 if (o.instance_field_inits) |inits| {
                     for (inits) |fi| {
                         if (fi.init_fn) |fnp| self.markValue(taggedFunction(fnp));
@@ -482,24 +517,38 @@ pub const Heap = struct {
         // Doubles, ints, bools, null, undefined, hole: no heap pointer.
     }
 
-    /// Walk a `Chunk`'s constant pool and recurse into nested
-    /// function templates. Chunks themselves aren't on the GC
-    /// heap — the realm owns them — but the heap-allocated
-    /// strings / symbols sitting in their constants pool are.
-    /// Idempotent isn't needed: chunks are walked from at most
-    /// a handful of roots per cycle (active frames, JSFunctions),
-    /// and the recursion bottoms out on the (always-finite)
-    /// template tree.
-    pub fn markChunk(self: *Heap, chunk: *const Chunk) void {
-        for (chunk.constants) |c| self.markValue(c);
-        for (chunk.function_templates) |*ft| self.markChunk(&ft.chunk);
+    /// Walk a `Chunk`'s constant pool and pin every JSString it
+    /// references — including those in nested function / class
+    /// templates. Called once at chunk-finalize time
+    /// (`compileScriptAsChunk`, `compileModuleAsChunk`) and
+    /// never again: chunks are realm-lifetime, so their constant
+    /// pool can't outlive the realm. Pinned strings are skipped
+    /// during sweep, which lets us drop the per-GC-cycle walk
+    /// of `script_chunks` and `JSFunction.chunk` (the heap's
+    /// hottest mark-phase work, since chunk trees recurse into
+    /// every method / static-block / field initializer).
+    pub fn pinChunk(self: *Heap, chunk: *const Chunk) void {
+        for (chunk.constants) |c| self.pinValue(c);
+        for (chunk.function_templates) |*ft| self.pinChunk(&ft.chunk);
         for (chunk.class_templates) |*ct| {
-            self.markChunk(&ct.constructor_chunk);
-            for (ct.instance_methods) |*m| self.markChunk(&m.chunk);
-            for (ct.static_methods) |*m| self.markChunk(&m.chunk);
-            for (ct.instance_fields) |*fd| if (fd.init_chunk) |*ic| self.markChunk(ic);
-            for (ct.static_fields) |*fd| if (fd.init_chunk) |*ic| self.markChunk(ic);
-            for (ct.static_blocks) |*sb| self.markChunk(sb);
+            self.pinChunk(&ct.constructor_chunk);
+            for (ct.instance_methods) |*m| self.pinChunk(&m.chunk);
+            for (ct.static_methods) |*m| self.pinChunk(&m.chunk);
+            for (ct.instance_fields) |*fd| if (fd.init_chunk) |*ic| self.pinChunk(ic);
+            for (ct.static_fields) |*fd| if (fd.init_chunk) |*ic| self.pinChunk(ic);
+            for (ct.static_blocks) |*sb| self.pinChunk(sb);
+        }
+    }
+
+    /// Pin the heap-allocated payload of `v` if it's a string.
+    /// Other primitive kinds carry no heap pointer; symbols /
+    /// bigints don't appear in chunk constants (the compiler
+    /// allocates symbols at runtime). Idempotent.
+    fn pinValue(self: *Heap, v: Value) void {
+        _ = self;
+        if (v.isString()) {
+            const s: *JSString = @ptrCast(@alignCast(v.asString()));
+            s.pinned = true;
         }
     }
 
@@ -533,11 +582,26 @@ pub const Heap = struct {
     /// freed. After this call every surviving object's `marked` bit
     /// is back to `false`, ready for the next cycle.
     pub fn collect(self: *Heap, roots: []const Value) void {
+        // Wall-clock start for the diagnostic pause-time field.
+        // Production engines (V8 `--trace-gc`, JSC GC logs, SM
+        // `MOZ_GCTIMER`) all surface per-cycle pause distribution
+        // — the long-tail cycles are where investigation starts.
+        const t_start = monotonicNs();
+
         // Mark phase.
         for (roots) |r| self.markValue(r);
         for (self.handle_scopes.items) |scope| {
             for (scope.handles.items) |r| self.markValue(r);
         }
+
+        // Snapshot pre-sweep counts for the diagnostic report.
+        const pre_objs = self.objects.items.len;
+        const pre_strs = self.strings.items.len;
+        const pre_fns = self.functions.items.len;
+        const pre_envs = self.environments.items.len;
+        const pre_gens = self.generators.items.len;
+        const pre_syms = self.symbols.items.len;
+        const pre_bigs = self.bigints.items.len;
 
         // Sweep phase. Walk in reverse so swap-removal stays cheap.
         {
@@ -545,7 +609,10 @@ pub const Heap = struct {
             while (i > 0) {
                 i -= 1;
                 const s = self.strings.items[i];
-                if (s.marked) {
+                if (s.pinned) {
+                    // Permanently live (chunk constants). Skip;
+                    // never gets marked or cleared either way.
+                } else if (s.marked) {
                     s.marked = false;
                 } else {
                     _ = self.strings.swapRemove(i);
@@ -640,6 +707,31 @@ pub const Heap = struct {
         // collect doesn't fire until fresh allocations cross
         // the threshold again.
         self.allocs_since_gc = 0;
+
+        // Per-cycle diagnostic report — flagged on by the
+        // `--gc-stats` test262 harness option (or by hand for
+        // ad-hoc debugging). Format: `[gc N] kind=pre→post ...`.
+        // A kind whose `post` keeps climbing across cycles is
+        // being kept alive by something that should let go.
+        if (self.gc_stats) {
+            self.gc_stats_cycle += 1;
+            const elapsed_ns: i128 = monotonicNs() - t_start;
+            const elapsed_us: i128 = @divTrunc(elapsed_ns, 1000);
+            std.debug.print(
+                "[gc {d}] {d}\u{00B5}s obj={d}\u{2192}{d} str={d}\u{2192}{d} fn={d}\u{2192}{d} env={d}\u{2192}{d} gen={d}\u{2192}{d} sym={d}\u{2192}{d} big={d}\u{2192}{d}\n",
+                .{
+                    self.gc_stats_cycle,
+                    elapsed_us,
+                    pre_objs, self.objects.items.len,
+                    pre_strs, self.strings.items.len,
+                    pre_fns,  self.functions.items.len,
+                    pre_envs, self.environments.items.len,
+                    pre_gens, self.generators.items.len,
+                    pre_syms, self.symbols.items.len,
+                    pre_bigs, self.bigints.items.len,
+                },
+            );
+        }
     }
 
     /// Open a new handle scope. The returned scope is owned by the

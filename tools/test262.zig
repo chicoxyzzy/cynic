@@ -23,6 +23,9 @@
 //! `std.Thread.getCpuCount`. `1` keeps the original sequential
 //! code path. Values >1 spawn a worker pool; live in-place
 //! progress is suppressed when threads>1.
+//! --gc-threshold=<n>      Per-fixture allocation-pressure GC threshold. Default 65,536.
+//! --gc-stats              Per-realm one-line stderr report after every GC cycle.
+//! --top-slow=<n>          Print the N slowest fixtures (≥50ms) after the final tally.
 
 const std = @import("std");
 const cynic = @import("cynic");
@@ -288,15 +291,28 @@ const Options = struct {
     threads: u32 = 0,
     /// Per-test allocation-pressure GC threshold. Forwarded to
     /// each fresh realm's `heap.gc_threshold` before the body
-    /// runs. Default tightens the engine's stock 16,384 down to
-    /// 4,096 so a fixture that allocates aggressively
-    /// (recursion, deep promise chains, allocating loops)
-    /// can't balloon a worker's peak RSS while still inside a
-    /// finite step budget. `0` falls through to the engine
-    /// default; lower values stress-test the GC trigger but
-    /// will currently surface the four known root gaps tracked
-    /// in `docs/handbook/gc.md`.
-    gc_threshold: u32 = 4096,
+    /// runs. Default tuned for harness wall-time: 32,768 keeps
+    /// per-fixture peak RSS bounded but halves the GC-cycle
+    /// count vs the engine's stock 16,384, which matters once
+    /// the marker has to walk `key_anchors` / `frame_stacks` /
+    /// promise reactions per cycle. Tighter values surface the
+    /// still-open root gaps tracked in `docs/handbook/gc.md`
+    /// and inflate per-fixture overhead. `0` falls through to
+    /// the engine default.
+    gc_threshold: u32 = 65536,
+    /// When true, every per-fixture realm prints a one-line
+    /// stderr report after every GC cycle. Diagnostic for
+    /// finding leaks or oversized roots; pair with `--filter`
+    /// to keep the output sane.
+    gc_stats: bool = false,
+    /// When >0, print the top-N slowest fixtures after the
+    /// final tally. V8 (`--trace-test-runtime`) and JSC's
+    /// run-jsc-tests both surface this — long-tail outliers
+    /// dominate wall-time and are the first thing to debug
+    /// when a sweep starts to feel slow. Captures wall-clock
+    /// per fixture; only fixtures over `slow_threshold_ms`
+    /// (50ms) are recorded to keep the per-worker buffer cheap.
+    top_slow: u32 = 0,
 };
 
 /// Path of the pass-cache, written at the repo root after every
@@ -519,6 +535,11 @@ pub fn main(init: std.process.Init) !void {
     defer failures.deinit(gpa);
     var buckets: BucketMap = .init(gpa);
     defer buckets.deinit();
+    var slow: std.ArrayListUnmanaged(SlowEntry) = .empty;
+    defer {
+        for (slow.items) |e| gpa.free(e.path);
+        slow.deinit(gpa);
+    }
 
     // `--only-failing` shortcut: any test path present in the
     // cache is counted as a pass without being classified or
@@ -610,7 +631,15 @@ pub fn main(init: std.process.Init) !void {
             const arena = per_file_arena.allocator();
 
             const harness_pair: ?harness_mod.HarnessSources = harness_sources;
-            const outcome = try classifyAndRun(arena, io, corpus, rel, opts.mode, harness_pair, opts.gc_threshold);
+            const fx_start = if (opts.top_slow > 0) std.Io.Clock.now(.awake, io) else undefined;
+            const outcome = try classifyAndRun(arena, io, corpus, rel, opts.mode, harness_pair, opts.gc_threshold, opts.gc_stats);
+            if (opts.top_slow > 0) {
+                const ms_i = fx_start.untilNow(io, .awake).toMilliseconds();
+                const ms_u: u64 = if (ms_i > 0) @intCast(ms_i) else 0;
+                if (ms_u >= slow_threshold_ms) {
+                    try slow.append(gpa, .{ .path = try gpa.dupe(u8, rel), .ms = ms_u });
+                }
+            }
             try recordOutcome(gpa, &stats, &buckets, &failures, &pass_paths, rel, outcome, is_full_run);
 
             if (opts.verbose) {
@@ -658,6 +687,7 @@ pub fn main(init: std.process.Init) !void {
                 .global_buckets = &buckets,
                 .global_failures = &failures,
                 .global_pass_paths = &pass_paths,
+                .global_slow = &slow,
                 .is_full_run = is_full_run,
                 .worker_id = wid,
                 .current_paths = current_paths,
@@ -703,6 +733,9 @@ pub fn main(init: std.process.Init) !void {
     if (opts.list_failures > 0) {
         try printFailureList(io, failures.items, opts.list_failures);
     }
+    if (opts.top_slow > 0 and slow.items.len > 0) {
+        try printTopSlow(io, slow.items, opts.top_slow);
+    }
     if (opts.write_results) {
         const now_ts = std.Io.Clock.now(.real, io);
         try writeResults(gpa, io, &stats, &buckets, now_ts.toSeconds(), opts.mode);
@@ -721,6 +754,22 @@ const Failure = struct {
     path: []const u8,
     kind: Outcome,
 };
+
+/// `--top-slow=N` capture. Each entry pairs a per-fixture wall-clock
+/// duration with the test path. Workers buffer locally; the spine
+/// is merged into `global_slow` under `merge_mu` at exit, then
+/// sorted descending and printed after the final tally. Owns its
+/// `path` (gpa-duped) so we can free it after the report.
+const SlowEntry = struct {
+    path: []const u8,
+    ms: u64,
+};
+
+/// Don't bother recording fixtures that finish faster than this.
+/// Keeps per-worker buffers cheap on a 46k-fixture sweep —
+/// fixtures interesting enough to debug almost always run at
+/// least this long under the runtime mode.
+const slow_threshold_ms: u64 = 50;
 
 const RunResult = struct {
     kind: Outcome,
@@ -798,6 +847,7 @@ const WorkerCtx = struct {
     global_buckets: *BucketMap,
     global_failures: *std.ArrayListUnmanaged(Failure),
     global_pass_paths: *std.ArrayListUnmanaged([]const u8),
+    global_slow: *std.ArrayListUnmanaged(SlowEntry),
     is_full_run: bool,
     /// Worker's identity (0..thread_count-1). Used to claim a
     /// slot in `current_paths` so the progress monitor can name
@@ -826,8 +876,9 @@ fn worker(ctx: WorkerCtx) void {
     var local_failures: std.ArrayListUnmanaged(Failure) = .empty;
     var local_buckets: BucketMap = .init(ctx.gpa);
     var local_pass_paths: std.ArrayListUnmanaged([]const u8) = .empty;
+    var local_slow: std.ArrayListUnmanaged(SlowEntry) = .empty;
 
-    workerLoop(ctx, &local_arena, &local_stats, &local_buckets, &local_failures, &local_pass_paths) catch {
+    workerLoop(ctx, &local_arena, &local_stats, &local_buckets, &local_failures, &local_pass_paths, &local_slow) catch {
         // Best-effort: skip merging silently on OOM / IO blow-up.
         // The rolled-up totals will be slightly low, but the run
         // doesn't deadlock and the surviving workers still merge.
@@ -839,11 +890,13 @@ fn worker(ctx: WorkerCtx) void {
     mergeBuckets(ctx.global_buckets, &local_buckets) catch {};
     ctx.global_failures.appendSlice(ctx.gpa, local_failures.items) catch {};
     ctx.global_pass_paths.appendSlice(ctx.gpa, local_pass_paths.items) catch {};
+    ctx.global_slow.appendSlice(ctx.gpa, local_slow.items) catch {};
 
     // The merged-out arrays own their inner strings; we transferred
     // those via `appendSlice`. Free the spine arrays only.
     local_failures.deinit(ctx.gpa);
     local_pass_paths.deinit(ctx.gpa);
+    local_slow.deinit(ctx.gpa);
     local_buckets.deinit();
 }
 
@@ -854,6 +907,7 @@ fn workerLoop(
     buckets: *BucketMap,
     failures: *std.ArrayListUnmanaged(Failure),
     pass_paths: *std.ArrayListUnmanaged([]const u8),
+    slow: *std.ArrayListUnmanaged(SlowEntry),
 ) !void {
     defer ctx.current_paths[ctx.worker_id].store(idle_slot, .release);
     while (true) {
@@ -878,11 +932,19 @@ fn workerLoop(
         _ = arena_state.reset(.retain_capacity);
         const arena = arena_state.allocator();
 
-        const outcome = classifyAndRun(arena, ctx.io, ctx.corpus, rel, ctx.opts.mode, ctx.harness_sources, ctx.opts.gc_threshold) catch |err| {
+        const fx_start = if (ctx.opts.top_slow > 0) std.Io.Clock.now(.awake, ctx.io) else undefined;
+        const outcome = classifyAndRun(arena, ctx.io, ctx.corpus, rel, ctx.opts.mode, ctx.harness_sources, ctx.opts.gc_threshold, ctx.opts.gc_stats) catch |err| {
             if (err == error.OutOfMemory) return err;
             try recordOutcome(ctx.gpa, stats, buckets, failures, pass_paths, rel, .{ .kind = .fail_false_reject }, ctx.is_full_run);
             continue;
         };
+        if (ctx.opts.top_slow > 0) {
+            const ms_i = fx_start.untilNow(ctx.io, .awake).toMilliseconds();
+            const ms_u: u64 = if (ms_i > 0) @intCast(ms_i) else 0;
+            if (ms_u >= slow_threshold_ms) {
+                try slow.append(ctx.gpa, .{ .path = try ctx.gpa.dupe(u8, rel), .ms = ms_u });
+            }
+        }
         try recordOutcome(ctx.gpa, stats, buckets, failures, pass_paths, rel, outcome, ctx.is_full_run);
     }
 }
@@ -922,6 +984,7 @@ fn classifyAndRun(
     mode: Mode,
     harness_pair: ?harness_mod.HarnessSources,
     gc_threshold: u32,
+    gc_stats: bool,
 ) !RunResult {
     // Hard exclusions — `harness/`, `staging/`, `intl402/`.
     // Cynic-out-of-scope paths (Annex B / browser-era) are
@@ -1036,6 +1099,7 @@ fn classifyAndRun(
     // RSS while still inside its step budget. `0` falls through
     // to the engine default.
     if (gc_threshold != 0) realm.heap.gc_threshold = gc_threshold;
+    realm.heap.gc_stats = gc_stats;
 
     // §INTERPRETING.md — async-flagged tests call `$DONE()` /
     // `$DONE(err)` to signal completion. Install the host hook
@@ -1217,6 +1281,23 @@ fn printProgress(io: std.Io, stats: *const Stats) !void {
 /// "k of N tests dispatched" counter — but that's enough to tell
 /// "still running" from "wedged" at a glance. Stops as soon as
 /// `done` flips to true.
+/// Snapshot the process resident-set size in MB for the
+/// progress-line `rss=NNNMB` field. macOS reports `ru_maxrss` in
+/// bytes; Linux reports it in KB; both are highest-watermark not
+/// current. Returns null if the syscall fails. Used by
+/// `monitorLoop` to surface allocation pressure as it builds —
+/// catches the "where did 5 GB come from" pattern at the
+/// progress tick instead of after the run.
+fn currentRssMb() ?usize {
+    var ru: std.c.rusage = undefined;
+    if (std.c.getrusage(0, &ru) != 0) return null; // 0 = RUSAGE_SELF
+    const raw: usize = @intCast(ru.maxrss);
+    // macOS: bytes. Linux: KB. Distinguish by sniffing the
+    // magnitude — anything well over a few GB is bytes.
+    const bytes: usize = if (raw > 1024 * 1024 * 64) raw else raw * 1024;
+    return bytes / (1024 * 1024);
+}
+
 fn monitorLoop(
     io: std.Io,
     index: *std.atomic.Value(usize),
@@ -1249,7 +1330,11 @@ fn monitorLoop(
 
         var buf: [4096]u8 = undefined;
         var pos: usize = 0;
-        const head = std.fmt.bufPrint(buf[pos..], "[{d}s] dispatched {d}/{d}", .{ elapsed_s, display, total }) catch continue;
+        const rss_mb = currentRssMb();
+        const head = if (rss_mb) |mb|
+            std.fmt.bufPrint(buf[pos..], "[{d}s] dispatched {d}/{d} rss={d}MB", .{ elapsed_s, display, total, mb }) catch continue
+        else
+            std.fmt.bufPrint(buf[pos..], "[{d}s] dispatched {d}/{d}", .{ elapsed_s, display, total }) catch continue;
         pos += head.len;
         // Once stuck OR every minute as a heartbeat, append the
         // currently-running path for each worker so the log
@@ -1331,6 +1416,27 @@ fn printFailureList(io: std.Io, failures: []const Failure, n: u32) !void {
     if (failures.len > shown) {
         const more = try std.fmt.bufPrint(&buf, "  … {d} more\n", .{failures.len - shown});
         try std.Io.File.stdout().writeStreamingAll(io, more);
+    }
+}
+
+/// Sort the captured slow-fixture entries descending and print
+/// the top N. Long-tail outliers dominate harness wall-time —
+/// surfacing them post-tally is the cheapest way to focus
+/// optimisation. Inspired by V8's `--trace-test-runtime` and
+/// JSC's `run-jsc-tests` slow-test summary.
+fn printTopSlow(io: std.Io, slow: []SlowEntry, n: u32) !void {
+    std.mem.sort(SlowEntry, slow, {}, struct {
+        fn lt(_: void, a: SlowEntry, b: SlowEntry) bool {
+            return a.ms > b.ms;
+        }
+    }.lt);
+    var buf: [1024]u8 = undefined;
+    const limit = @min(@as(usize, n), slow.len);
+    const head = try std.fmt.bufPrint(&buf, "\ntop {d} slowest fixtures (≥{d}ms):\n", .{ limit, slow_threshold_ms });
+    try std.Io.File.stdout().writeStreamingAll(io, head);
+    for (slow[0..limit]) |e| {
+        const line = try std.fmt.bufPrint(&buf, "  {d:>6}ms  {s}\n", .{ e.ms, e.path });
+        try std.Io.File.stdout().writeStreamingAll(io, line);
     }
 }
 
@@ -1968,6 +2074,10 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.threads = std.fmt.parseInt(u32, arg["--threads=".len..], 10) catch 0;
         } else if (std.mem.startsWith(u8, arg, "--gc-threshold=")) {
             opts.gc_threshold = std.fmt.parseInt(u32, arg["--gc-threshold=".len..], 10) catch 4096;
+        } else if (std.mem.eql(u8, arg, "--gc-stats")) {
+            opts.gc_stats = true;
+        } else if (std.mem.startsWith(u8, arg, "--top-slow=")) {
+            opts.top_slow = std.fmt.parseInt(u32, arg["--top-slow=".len..], 10) catch 0;
         }
     }
     return opts;

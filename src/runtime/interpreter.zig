@@ -186,6 +186,7 @@ pub fn evaluateScript(
         return error.CompileError;
     };
     try realm.script_chunks.append(realm.allocator, chunk_ptr);
+    // (chunk constants pinned inside `compileScriptAsChunk`)
     return run(allocator, realm, chunk_ptr);
 }
 
@@ -811,6 +812,7 @@ pub fn loadModule(
         mr.error_value = ex;
         return ex;
     };
+    // (chunk constants pinned inside `compileModuleAsChunk`)
 
     // Run the module body. JSFunctions declared inside this
     // chunk hold non-owning pointers into mr.chunk; the chunk
@@ -906,6 +908,18 @@ fn runPromiseReaction(
     was_rejected: bool,
 ) RunError!void {
     const result_obj = heap_mod.valueAsPlainObject(result_promise) orelse return;
+
+    // The microtask was orderedRemove'd from the queue before
+    // dispatch — `result_promise` and `value` no longer have a
+    // queue-based root. The handler call below can re-enter JS
+    // (and trigger GC). Pin them through a HandleScope so the
+    // sub-Promise we're about to settle stays alive for the
+    // handler return + settle.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(result_promise) catch return error.OutOfMemory;
+    scope.push(value) catch return error.OutOfMemory;
+    scope.push(handler) catch return error.OutOfMemory;
 
     // No handler for this state — propagate value/state to result.
     if (handler.isUndefined() or heap_mod.valueAsFunction(handler) == null) {
@@ -1442,16 +1456,43 @@ fn runFrames(
     realm: *Realm,
     frames: *std.ArrayListUnmanaged(CallFrame),
 ) RunError!RunResult {
+    // Register this dispatch's frame stack with the realm so
+    // `collectGarbage` can walk OUR frames as roots in addition
+    // to any outer (parent) `runFrames` stack. Without this,
+    // a child dispatch (e.g. a native callback re-entering JS,
+    // a `for-of` driving a generator's `next()`) collects
+    // values that the parent's registers still point at. The
+    // append-then-defer sequence is paired so a failed append
+    // doesn't leave a phantom pop running.
+    try realm.frame_stacks.append(realm.allocator, frames);
+    defer {
+        // Pop our own entry — locating by pointer in case some
+        // pathological re-entrant path nested without us seeing it.
+        const stacks = &realm.frame_stacks;
+        if (stacks.items.len > 0 and stacks.items[stacks.items.len - 1] == frames) {
+            _ = stacks.pop();
+        } else {
+            var i: usize = stacks.items.len;
+            while (i > 0) {
+                i -= 1;
+                if (stacks.items[i] == frames) {
+                    _ = stacks.swapRemove(i);
+                    break;
+                }
+            }
+        }
+    }
     while (frames.items.len > 0) {
         // Allocation-pressure GC — when the heap counter has
         // climbed past its threshold, run a stop-the-world
-        // mark-sweep with the live roots from the realm + the
-        // current frame stack. Stop-the-world means we never
-        // run mid-opcode, so pointers natives hold across a
-        // sub-call stay stable; the check at dispatch top is
-        // the natural safe point.
+        // mark-sweep. Roots come from the realm (globals,
+        // intrinsics, microtask queue, modules) plus every
+        // nested `runFrames` stack registered above. Stop-the-
+        // world means we never run mid-opcode, so pointers
+        // natives hold across a sub-call stay stable; the
+        // check at dispatch top is the natural safe point.
         if (realm.heap.allocs_since_gc >= realm.heap.gc_threshold) {
-            realm.collectGarbage(frames.items);
+            realm.collectGarbage();
         }
         // Cooperative step budget — saturating decrement, then
         // unwind a synthetic `RangeError` when the budget hits
@@ -3423,6 +3464,15 @@ fn runFrames(
                         continue;
                     },
                 };
+                // The iterator object lives only as a Zig-stack
+                // local across the per-step `next()` calls below;
+                // its `next` method allocates a result object and
+                // can trigger GC. Without a handle scope the iter
+                // (and its `next` function pointer) get swept and
+                // we read garbage on the second iteration.
+                const spread_scope = realm.heap.openScope() catch return error.OutOfMemory;
+                defer spread_scope.close();
+                spread_scope.push(iter) catch return error.OutOfMemory;
                 const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return error.InvalidOpcode;
                 const next_v = iter_obj.get("next");
                 const next_fn = heap_mod.valueAsFunction(next_v) orelse {
@@ -3469,6 +3519,15 @@ fn runFrames(
                     var db: [24]u8 = undefined;
                     const ds = std.fmt.bufPrint(&db, "{d}", .{target_len}) catch unreachable;
                     const owned = realm.heap.allocateString(ds) catch return error.OutOfMemory;
+                    // Don't anchor — integer-index keys at scale
+                    // (16M-iter pathological iterators) make
+                    // `key_anchors` traversal quadratic against
+                    // the alloc-pressure GC. The target array is
+                    // live in `acc` for the loop; the JSStrings
+                    // are reachable via `heap.strings` and walked
+                    // in sweep regardless. Real arrays use
+                    // `setComputedOwned` only for arbitrary
+                    // user-supplied keys.
                     target.set(allocator, owned.bytes, elem) catch return error.OutOfMemory;
                     target_len += 1;
                 }
@@ -3846,9 +3905,12 @@ fn runFrames(
                 }
                 // Allocate a heap-owned copy of the key — the
                 // scratch buffer is reused on every iteration.
+                // Anchor the JSString to the receiver so GC keeps
+                // the key's backing memory alive (the property
+                // map only stores the slice).
                 const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
                 {
-                    const set_outcome = try strictSetProperty(allocator, realm, frames, f, ip, recv, owned.bytes, acc);
+                    const set_outcome = try strictSetPropertyAnchored(allocator, realm, frames, f, ip, recv, owned.bytes, owned, acc);
                     switch (set_outcome) {
                         .ok => {},
                         .handled => {
@@ -4330,6 +4392,28 @@ fn strictSetProperty(
     key: []const u8,
     value: Value,
 ) RunError!SetOutcome {
+    return strictSetPropertyAnchored(allocator, realm, frames, f, ip, recv, key, null, value);
+}
+
+/// Like `strictSetProperty`, but anchors `key_string` (the
+/// JSString whose `bytes == key`) onto the receiver via
+/// `setComputedOwned`, so the GC keeps the key's backing memory
+/// alive for as long as the property is live. Without this, a
+/// `obj[expr] = v` write where `expr` allocates a fresh JSString
+/// (e.g. `"k" + i`) loses the key's bytes the next time GC runs
+/// and a hash lookup that compares against the dangling slice
+/// either crashes or finds nothing.
+fn strictSetPropertyAnchored(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    frames: *std.ArrayListUnmanaged(CallFrame),
+    f: *CallFrame,
+    ip: usize,
+    recv: Value,
+    key: []const u8,
+    key_string: ?*JSString,
+    value: Value,
+) RunError!SetOutcome {
     if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
         // §10.5 Proxy [[Set]] — if `recv` is a proxy exotic,
         // dispatch through `handler.set` before falling back to
@@ -4387,10 +4471,22 @@ fn strictSetProperty(
             }
             return .ok;
         }
-        const ok = obj.setIfWritable(allocator, key, value) catch return error.OutOfMemory;
-        if (!ok) {
-            const ex = try makeTypeError(realm, "Cannot assign to read-only property");
-            return throwInSetter(realm, frames, f, ip, value, ex);
+        // Fast path that also anchors the key's backing JSString
+        // when the caller supplied one. Necessary because
+        // `properties` stores `[]const u8` slices, not pointers,
+        // so a heap-allocated key gets swept without the anchor.
+        const had_entry = obj.properties.contains(key);
+        if (had_entry) {
+            const flags = obj.flagsFor(key);
+            if (!flags.writable) {
+                const ex = try makeTypeError(realm, "Cannot assign to read-only property");
+                return throwInSetter(realm, frames, f, ip, value, ex);
+            }
+            obj.properties.put(allocator, key, value) catch return error.OutOfMemory;
+        } else if (key_string) |ks| {
+            obj.setComputedOwned(allocator, ks, value) catch return error.OutOfMemory;
+        } else {
+            obj.set(allocator, key, value) catch return error.OutOfMemory;
         }
         return .ok;
     }

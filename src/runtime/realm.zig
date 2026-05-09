@@ -163,6 +163,17 @@ pub const Realm = struct {
     /// before each run so an infinite-loop fixture can't wedge
     /// the entire sweep.
     step_budget: u64 = std.math.maxInt(u64),
+    /// Stack of every live `runFrames` call's frame list. Each
+    /// entry is the `*ArrayListUnmanaged(CallFrame)` that a
+    /// `runFrames` invocation is currently dispatching against;
+    /// pushed on entry, popped on return. The GC walks every
+    /// stack here so a nested `runFrames` (a native callback
+    /// re-entering JS, `gen.next()` from outside the interpreter,
+    /// `callJSFunction` from inside an opcode) doesn't lose the
+    /// outer frames' registers as roots. Without this, an
+    /// allocation inside a child `runFrames` collects values that
+    /// the parent's for-of's `r_iter` register still points at.
+    frame_stacks: std.ArrayListUnmanaged(*std.ArrayListUnmanaged(@import("interpreter.zig").CallFrame)) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Realm {
         return .{
@@ -185,6 +196,7 @@ pub const Realm = struct {
             self.allocator.destroy(ch);
         }
         self.script_chunks.deinit(self.allocator);
+        self.frame_stacks.deinit(self.allocator);
         self.heap.deinit();
         if (self.class_arena) |*a| a.deinit();
     }
@@ -249,18 +261,22 @@ pub const Realm = struct {
     ///   • `realm.microtask_queue` (callbacks + args + async-gen handles)
     ///   • `realm.modules` + `realm.current_module` (module export bags)
     ///   • `realm.script_chunks` (each chunk's constants pool)
-    ///   • Active `frames` — each frame's accumulator, registers,
+    ///   • Every active `runFrames` invocation's frame stack —
+    ///     pushed onto `realm.frame_stacks` on entry, popped on
+    ///     return. Walks every frame's accumulator, registers,
     ///     `this`, captured env, home object, owning generator,
-    ///     plus the chunk it's currently executing.
+    ///     plus the chunk. Critical for nested re-entry: a
+    ///     native callback that calls back into JS (e.g. `gen.next()`
+    ///     fired by a `for-of` loop, `Promise.then` handlers,
+    ///     iterator-protocol step calls) opens a child `runFrames`;
+    ///     the outer frames' registers must stay rooted across the
+    ///     child's allocations.
     ///   • Open handle scopes (covered by `heap.collect`).
     ///
     /// Called from the interpreter dispatch loop when
     /// `heap.allocs_since_gc` crosses `heap.gc_threshold`. The
     /// counter resets to zero at the end of `heap.collect`.
-    pub fn collectGarbage(
-        self: *Realm,
-        frames: []const @import("interpreter.zig").CallFrame,
-    ) void {
+    pub fn collectGarbage(self: *Realm) void {
         // Globals.
         var git = self.globals.iterator();
         while (git.next()) |e| self.heap.markValue(e.value_ptr.*);
@@ -299,19 +315,27 @@ pub const Realm = struct {
         var mit = self.modules.iterator();
         while (mit.next()) |e| self.heap.markValue(heap_mod.taggedObject(e.value_ptr.*.exports));
 
-        // Top-level chunks — plus, transitively via `markChunk`,
-        // every nested function / class template they hold.
-        for (self.script_chunks.items) |chunk| self.heap.markChunk(chunk);
+        // Chunk constants — pinned at chunk-finalize time
+        // (`Heap.pinChunk`); sweep skips pinned strings, so
+        // there's nothing to mark per cycle. Saves the
+        // recursive `markChunk` walk over every nested function
+        // / class template's constant pool.
 
-        // Active call frames.
-        for (frames) |f| {
-            self.heap.markValue(f.accumulator);
-            self.heap.markValue(f.this_value);
-            for (f.registers) |r| self.heap.markValue(r);
-            if (f.env) |env| self.heap.markEnvironment(env);
-            if (f.home_object) |ho| self.heap.markValue(heap_mod.taggedObject(ho));
-            if (f.generator) |gen| self.heap.markGenerator(gen);
-            self.heap.markChunk(f.chunk);
+        // Active call frames — every nested `runFrames` invocation's
+        // stack is pushed onto `frame_stacks`. Walking all of them
+        // means an outer for-of's `r_iter` register stays alive
+        // while a generator body's nested dispatch loop allocates
+        // (and triggers GC) underneath.
+        for (self.frame_stacks.items) |stack| {
+            for (stack.items) |f| {
+                self.heap.markValue(f.accumulator);
+                self.heap.markValue(f.this_value);
+                for (f.registers) |r| self.heap.markValue(r);
+                if (f.env) |env| self.heap.markEnvironment(env);
+                if (f.home_object) |ho| self.heap.markValue(heap_mod.taggedObject(ho));
+                if (f.generator) |gen| self.heap.markGenerator(gen);
+                // f.chunk's constants were pinned at finalize.
+            }
         }
 
         // Hand off to `heap.collect` for the handle-scope walk

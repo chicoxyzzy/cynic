@@ -103,9 +103,15 @@ rewritten only on full runs without `--filter` and without
 reference path, `>1` = pool. Past ~4 threads diminishing
 returns kick in from libc malloc contention),
 `--gc-threshold=<n>` (per-fixture allocation-pressure GC
-threshold, default 4,096; lower values stress-test the GC
-trigger but currently surface the four known root gaps in
-[docs/handbook/gc.md](docs/handbook/gc.md)). The harness
+threshold, default 65,536; lower values stress-test the GC
+trigger but currently surface the known root gaps in
+[docs/handbook/gc.md](docs/handbook/gc.md)),
+`--gc-stats` (per-realm one-line stderr report after every
+GC cycle — pause time + per-pool live counts; pair with
+`--filter` to keep output sane),
+`--top-slow=<n>` (after the tally, print the N slowest
+fixtures over 50ms — V8 / JSC both surface this; long-tail
+outliers usually dominate sweep wall-time). The harness
 scores against the **Cynic-targeted scope**: paths under
 `harness/`, `staging/`, `intl402/`, Annex B language extensions,
 and the browser-era built-ins Cynic doesn't ship are dropped from

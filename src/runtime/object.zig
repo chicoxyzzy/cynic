@@ -243,6 +243,15 @@ pub const JSObject = struct {
     /// call to `.exec`/`.test` parses the `source` + `flags` and
     /// caches the bytecode here. The runtime owns the allocation.
     regex_bytecode: ?[]u8 = null,
+    /// Heap-allocated JSStrings whose `bytes` slice backs a key
+    /// in `properties` / `accessors` / `private_properties` /
+    /// `property_flags`. The hash maps store `[]const u8` slices,
+    /// not pointers — so without this anchor the JSString gets
+    /// swept and the key slice dangles. Static-literal key strings
+    /// (constants pool, builtin installation) don't need anchoring;
+    /// only keys allocated for `obj[expr] = v` etc. via
+    /// `setComputedOwned` land here.
+    key_anchors: std.ArrayListUnmanaged(*@import("string.zig").JSString) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) !*JSObject {
         const o = try allocator.create(JSObject);
@@ -260,11 +269,27 @@ pub const JSObject = struct {
         if (self.array_buffer) |ab| allocator.free(ab);
         self.promise_waiters.deinit(allocator);
         self.promise_reactions.deinit(allocator);
+        self.key_anchors.deinit(allocator);
         // instance_field_inits / private_method_inits are
         // borrowed slices owned by class.zig (allocated against
         // the realm allocator and tracked by the realm); freeing
         // them happens at realm.deinit().
         allocator.destroy(self);
+    }
+
+    /// Like `set`, but anchors `key_str` (whose `bytes` is the
+    /// property key) onto this object so the GC keeps it alive
+    /// for as long as the object is reachable. Use when the key
+    /// is a heap-allocated JSString rather than a static literal
+    /// or chunk-constant slice (the latter never get swept).
+    pub fn setComputedOwned(
+        self: *JSObject,
+        allocator: std.mem.Allocator,
+        key_str: *@import("string.zig").JSString,
+        v: Value,
+    ) !void {
+        try self.properties.put(allocator, key_str.bytes, v);
+        try self.key_anchors.append(allocator, key_str);
     }
 
     /// Read the (possibly defaulted) descriptor flags for

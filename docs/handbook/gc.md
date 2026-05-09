@@ -57,10 +57,14 @@ Native calls do — see "natives and `HandleScope`" below.
 - **Top-level chunks** — every `Chunk` in `realm.script_chunks`, plus
   every nested `FunctionTemplate` / `ClassTemplate` chunk transitively
   (see `Heap.markChunk`).
-- **Active call frames** — for each `CallFrame` in the dispatch loop's
-  stack: `accumulator`, `this_value`, every register, the env chain,
-  `home_object`, the owning `JSGenerator` (when running a generator
-  body), and the executing chunk's constants.
+- **Active call frames** — for every nested `runFrames` stack
+  registered on `realm.frame_stacks`, each `CallFrame`'s
+  `accumulator`, `this_value`, every register, the env chain,
+  `home_object`, the owning `JSGenerator` (when running a
+  generator body), and the executing chunk's constants. Walking
+  every nested stack (not just the "current" one) is required
+  for re-entrant patterns — see "Re-entrant dispatch and nested
+  frame stacks" below.
 - **Open handle scopes** — `heap.collect` walks `heap.handle_scopes`
   itself (see below).
 
@@ -117,35 +121,55 @@ allocating loop's RSS stays under 20 MB and rare enough that scripts
 which churn through a few thousand short-lived objects don't pay for
 GC at all.
 
-## Known root gaps
+## Re-entrant dispatch and nested frame stacks
 
-The default threshold (16,384) keeps the test262 sweep + the unit
-suite green. Dropping it to `1` (collect after every allocation, the
-maximum-stress configuration `interpreter_test.zig` uses for the GC
-tests) currently breaks four patterns; each is a missing root the
-walker doesn't yet reach. They're filed here, not in `// TODO`s:
+A native callback that re-enters JS — `gen.next()` from a
+`for-of`, a Promise reaction handler, an iterator-protocol step
+call — opens a child `runFrames` invocation under the parent's.
+The child's `frames.items` is a *different* ArrayList from the
+parent's, so a naïve "walk the current frame stack" GC roots only
+the child. The parent's registers (which hold the for-of's
+`r_iter`, the spread's target array, the Promise wrapper, …)
+become invisible roots and get swept under high allocation
+pressure.
 
-- **Generator wrapper iteration.** `for (v of gen())` crashes — the
-  `JSGenerator`'s saved frame is reachable through the wrapper
-  JSObject's `generator_ref`, but somewhere along the for-of /
-  iterator-protocol path a temporary loses its mark bit before the
-  next `next()` call.
-- **Promise microtask chain.** `.then(...).then(...)` queues
-  reactions whose `callback` and `result` hang off
-  `microtask_queue`. They survive a single collection, but mid-drain
-  collections lose them; the sub-Promise that's pending in step *n*
-  isn't being kept alive by step *n-1*'s reaction record.
-- **Property-bag growth.** A loop that writes 20+ keys onto the same
-  object triggers `HashMap.grow`. Mid-grow collection loses values
-  (the new bucket array is in flight before the property points at it).
-- **Array spread + iterator.** `[...src, k, ...src]` allocates a
-  fresh array, walks the iterator, accumulates results. The
-  in-flight result array isn't reachable from the active frame for
-  the brief window between iterator-step allocation and append.
+The fix lives on the realm: `realm.frame_stacks` is a stack of
+every live `runFrames` invocation's frame list. `runFrames`
+pushes its own `*ArrayListUnmanaged(CallFrame)` on entry and pops
+on return; `Realm.collectGarbage` walks every entry. So child
+allocations can never collect parent registers.
 
-The two GC stress tests in `interpreter_test.zig` exercise patterns
-that already work (object-allocating loop, captured-env closures);
-the four above are the next hardening pass.
+## Key-anchor strings on JSObject
+
+`JSObject.properties` is `StringArrayHashMapUnmanaged(Value)` —
+keyed on `[]const u8`, NOT `*JSString`. Static keys (chunk
+constants, builtin installation literals) outlive the object
+trivially, but a write like `obj["k" + i] = v` allocates a
+*fresh* `JSString` on the GC heap, then stores its `.bytes`
+slice as the key. Without an anchor the JSString gets swept; the
+slice dangles; the next hash lookup either returns nothing or
+SEGVs comparing against freed memory.
+
+`JSObject.key_anchors: ArrayListUnmanaged(*JSString)` holds those
+heap-allocated key strings; `markValue` walks the list and marks
+each. The write path uses `setComputedOwned(allocator, key_str, v)`
+to stash the JSString alongside the entry. Static-key writes still
+go through `set` / `setIfWritable` — they don't need anchoring and
+the parallel list stays empty.
+
+## Promise reaction roots
+
+`JSObject.promise_reactions[i].result_promise` is the chained
+sub-Promise that a later `.then` is registered on; it lives on
+the *source* Promise's reaction list until settlement fires. The
+walker now follows that list when marking a JSObject
+(`heap.markValue`); without it, mid-drain GC collects the chain
+before step *n* can settle into step *n+1*'s sub-Promise.
+
+`runPromiseReaction` opens a `HandleScope` to pin
+`result_promise`, `value`, and `handler` across the handler call
+— the microtask was `orderedRemove`d from the queue before
+dispatch, so its values no longer have a queue-based root.
 
 ## What's not yet done
 

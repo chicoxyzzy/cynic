@@ -2450,12 +2450,74 @@ test "GC: closures keep captured envs alive under gc_threshold=1" {
     , 36);
 }
 
-// Known-broken under gc_threshold=1: generator wrapper
-// (`for (v of gen())` crashes; some root on the JSGenerator's
-// frame state isn't reached), Promise microtask chain (reaction
-// values vanish before the drain), property-bag growth
-// (deeply-keyed object loses its values), array spread + iterator
-// (intermediate array not rooted across the iterator-result
-// allocations). Tracked in [docs/handbook/gc.md](../../docs/handbook/gc.md);
-// each is a missing root the walker doesn't yet reach. The
-// two tests above cover the patterns that already work.
+fn expectScriptStringUnderGcPressure(source: []const u8, expected: []const u8) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    realm.heap.gc_threshold = 1;
+    const v = switch (try evaluateScriptResult(&realm, source)) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isString());
+    const s: *JSString = @ptrCast(@alignCast(v.asString()));
+    try testing.expectEqualStrings(expected, s.bytes);
+}
+
+test "GC: generator wrapper iteration survives gc_threshold=1" {
+    // `for (v of g())` opens an iterator on the wrapper JSObject
+    // returned by the generator call. The wrapper sits in the
+    // for-of's `r_iter` register; the underlying JSGenerator is
+    // reachable through `wrapper.generator_ref`. Each `next()`
+    // call descends into a nested `runFrames` that walks the
+    // generator's saved frame state — that nested walk must keep
+    // the OUTER frame's wrapper register alive so the next
+    // iteration finds the same generator.
+    try expectScriptIntUnderGcPressure(
+        \\function* g() { for (let i = 0; i < 5; i++) yield i * 100; }
+        \\let s = 0; for (const v of g()) s += v;
+        \\s;
+    , 1000);
+}
+
+test "GC: Promise microtask chain survives gc_threshold=1" {
+    // `.then(...).then(...)` queues `promise_reaction` microtasks
+    // whose `reaction_result` is the chained sub-Promise. The
+    // outer Promise the next-step reaction was registered on
+    // must be kept alive across mid-drain collections — it lives
+    // on `JSObject.promise_reactions[i].result_promise`, which
+    // the walker reaches only via the source object's reaction list.
+    try expectScriptIntUnderGcPressure(
+        \\let acc = 0;
+        \\Promise.resolve(1).then(v => v + 10).then(v => v + 100).then(v => { acc = v; });
+        \\globalThis.__drainMicrotasks();
+        \\acc;
+    , 111);
+}
+
+test "GC: property-bag growth survives gc_threshold=1" {
+    // Loop writes 20 keys onto a single object, triggering at
+    // least one `StringArrayHashMap.grow`. The keys are JSStrings
+    // allocated for `"k" + i`; with threshold=1, each `+` and
+    // `set` triggers a sweep. The object lives in a register;
+    // its property entries' value pointers must survive the grow.
+    try expectScriptStringUnderGcPressure(
+        \\const o = {};
+        \\for (let i = 0; i < 20; i++) o["k" + i] = "v" + i;
+        \\let str = ""; for (let i = 0; i < 20; i++) str += o["k" + i];
+        \\str;
+    , "v0v1v2v3v4v5v6v7v8v9v10v11v12v13v14v15v16v17v18v19");
+}
+
+// Array-spread + iterator at gc_threshold=1 is a known gap —
+// the spread loop's index-key JSStrings can be swept mid-loop
+// when nothing roots them. The fix would anchor each index key
+// on the target array via `setComputedOwned`, but the
+// pathological poisoned-iterator fixture in test262
+// (`spread-err-{sngl,mult}-err-itr-value.js`) iterates 16M
+// times without breaking — anchoring those keys turns the GC
+// walk quadratic and wedges the sweep. Tracked in
+// `docs/handbook/gc.md`. The test below is omitted until we
+// design a spread-loop allocation that's both anchored and
+// quadratic-free (e.g. a real `JSArray` heap kind with packed
+// indexed slots, no string keys).
