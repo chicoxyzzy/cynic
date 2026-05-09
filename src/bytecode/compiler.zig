@@ -3519,7 +3519,10 @@ fn compileStaticBlockChunk(
     const slot_count_patch = self.builder.here();
     try self.builder.emitU8(0);
     try self.hoistLetConst(body);
-    for (body) |*s| try self.compileStatement(s);
+    try self.hoistVarAndFunctions(body);
+    try self.emitVarInits(span);
+    for (body) |*s| if (s.* == .function_decl) try self.compileStatement(s);
+    for (body) |*s| if (s.* != .function_decl) try self.compileStatement(s);
     try self.builder.emitOp(.lda_undefined, span);
     try self.builder.emitOp(.return_, span);
 
@@ -3736,7 +3739,10 @@ fn compileMethodBody(
 
     // Body.
     try self.hoistLetConst(body_stmts);
-    for (body_stmts) |*s| try self.compileStatement(s);
+    try self.hoistVarAndFunctions(body_stmts);
+    try self.emitVarInits(span);
+    for (body_stmts) |*s| if (s.* == .function_decl) try self.compileStatement(s);
+    for (body_stmts) |*s| if (s.* != .function_decl) try self.compileStatement(s);
     try self.builder.emitOp(.lda_undefined, span);
     try self.builder.emitOp(.return_, span);
 
@@ -3856,6 +3862,123 @@ fn hoistLetConst(self: *Compiler, body: []ast.statement.Statement) CompileError!
     }
 }
 
+/// §13.3.2 — pre-declare every `var` binding (and the names of
+/// every function declaration) reachable in the function body
+/// without crossing a nested function / class / arrow boundary.
+/// Walks into blocks, control-flow bodies, switch cases, try /
+/// catch / finally, and the heads / bodies of `for` / `for-in` /
+/// `for-of` (where `var` is allowed), so that
+///
+///     console.log(x); var x = 1;
+///     f();           function f(){}
+///
+/// resolve their forward references against a binding that
+/// already exists at scope-entry. `var` bindings still need to
+/// be initialised to `undefined` ahead of any reachable read —
+/// `emitVarInits` handles that immediately after `make_environment`.
+fn hoistVarAndFunctions(self: *Compiler, body: []ast.statement.Statement) CompileError!void {
+    for (body) |*s| try self.hoistStatement(s);
+}
+
+fn hoistStatement(self: *Compiler, s: *ast.statement.Statement) CompileError!void {
+    switch (s.*) {
+        .lexical => |ld| {
+            if (ld.kind != .var_) return;
+            for (ld.declarators) |d| {
+                try self.declarePatternVarBindings(d.name);
+            }
+        },
+        .function_decl => |fd| {
+            const name = self.source[fd.name.span.start..fd.name.span.end];
+            _ = try self.declareBindingFull(name, .var_, fd.name.span);
+        },
+        .block => |b| try self.hoistVarAndFunctions(b.body),
+        .if_ => |i| {
+            try self.hoistStatement(i.consequent);
+            if (i.alternate) |alt| try self.hoistStatement(alt);
+        },
+        .while_ => |w| try self.hoistStatement(w.body),
+        .do_while => |dw| try self.hoistStatement(dw.body),
+        .for_ => |f| {
+            if (f.init) |head| switch (head) {
+                .lexical => |ld| if (ld.kind == .var_) {
+                    for (ld.declarators) |d| try self.declarePatternVarBindings(d.name);
+                },
+                .expression => {},
+            };
+            try self.hoistStatement(f.body);
+        },
+        .for_in_of => |f| {
+            switch (f.left) {
+                .lexical => |ld| if (ld.kind == .var_) {
+                    for (ld.declarators) |d| try self.declarePatternVarBindings(d.name);
+                },
+                .expression => {},
+            }
+            try self.hoistStatement(f.body);
+        },
+        .try_ => |t| {
+            try self.hoistVarAndFunctions(t.block.body);
+            if (t.handler) |h| try self.hoistVarAndFunctions(h.body.body);
+            if (t.finalizer) |fin| try self.hoistVarAndFunctions(fin.body);
+        },
+        .switch_ => |sw| {
+            for (sw.cases) |case| try self.hoistVarAndFunctions(case.body);
+        },
+        // Nested function / class / arrow bodies have their own
+        // function-like scope and are handled by their own
+        // `hoistVarAndFunctions` call. Other statement shapes
+        // (expression, return, throw, break, continue, debugger,
+        // import / export, labeled — n/a) carry no `var` /
+        // function-decl children we need to walk.
+        else => {},
+    }
+}
+
+fn declarePatternVarBindings(self: *Compiler, target: ast.statement.BindingTarget) CompileError!void {
+    switch (target) {
+        .identifier => |id| {
+            const name = self.source[id.span.start..id.span.end];
+            _ = try self.declareBindingFull(name, .var_, id.span);
+        },
+        .array => |arr| {
+            for (arr.elements) |maybe_elem| {
+                if (maybe_elem) |elem| try self.declarePatternVarBindings(elem.target);
+            }
+            if (arr.rest) |rest| try self.declarePatternVarBindings(rest.*);
+        },
+        .object => |obj| {
+            for (obj.properties) |prop| try self.declarePatternVarBindings(prop.value.target);
+            if (obj.rest) |rest_id| {
+                const name = self.source[rest_id.span.start..rest_id.span.end];
+                _ = try self.declareBindingFull(name, .var_, rest_id.span);
+            }
+        },
+    }
+}
+
+/// Emit `lda_undefined; sta_env 0 slot` for every non-global
+/// `var` binding currently in the function-like scope.
+/// `make_environment` allocates slots filled with the TDZ Hole;
+/// reading a hoisted `var` before its initialiser would otherwise
+/// see Hole and trip `throw_if_hole`. Globals are pre-initialised
+/// to `undefined` in the realm map by `declareBindingFull` so
+/// they don't need bytecode here.
+fn emitVarInits(self: *Compiler, span: Span) CompileError!void {
+    const fn_scope = self.functionScope();
+    var emitted_undef = false;
+    for (fn_scope.bindings.items) |b| {
+        if (b.kind != .var_ or b.is_global) continue;
+        if (!emitted_undef) {
+            try self.builder.emitOp(.lda_undefined, span);
+            emitted_undef = true;
+        }
+        try self.builder.emitOp(.sta_env, span);
+        try self.builder.emitU8(0); // depth=0 — the freshly-pushed env
+        try self.builder.emitU8(b.env_slot);
+    }
+}
+
 /// Count every BindingIdentifier produced by `target`. Used by
 /// for-of with a destructuring lhs to size the per-iteration
 /// environment ahead of `make_environment`.
@@ -3913,37 +4036,40 @@ fn declarePatternBindings(self: *Compiler, target: ast.statement.BindingTarget, 
 
 fn compileLexicalDecl(self: *Compiler, ld: ast.statement.LexicalDecl) CompileError!void {
     if (ld.kind == .var_) {
-        // `var` declarations live in the enclosing function-like
-        // scope's env. later: declare-on-encounter (like later).
-        // Real §13.3.2 hoisting / pre-initialisation to undefined
-        // arrives later.
+        // `var` bindings (and their function-scope slots) were
+        // pre-declared and pre-initialised to `undefined` by
+        // `hoistVarAndFunctions` + `emitVarInits` at function /
+        // script entry. The work here is just running the
+        // initialiser when one's present.
         for (ld.declarators) |d| {
             switch (d.name) {
                 .identifier => |id| {
                     const name = self.source[id.span.start..id.span.end];
-                    const binding = try self.declareBindingFull(name, .var_, d.span);
                     if (d.init) |*init_expr| {
                         // §14.3.1.2 — anonymous function-likes
                         // adopt the binding identifier as `.name`.
                         try self.compileNamedValue(init_expr, name);
-                    } else if (!binding.is_global) {
-                        // Plain `var x;` at function scope still
-                        // overwrites with undefined (later
-                        // declare-on-encounter). At top-level
-                        // (global) the hoist already wrote
-                        // undefined and we don't want to clobber
-                        // an existing cross-script binding, so
-                        // emit nothing.
-                        try self.builder.emitOp(.lda_undefined, d.span);
-                    } else {
-                        // Global `var x;` with no initialiser:
-                        // hoist already populated the slot.
-                        continue;
+                        const binding = self.scope.?.resolve(name) orelse blk: {
+                            // Hoist always declares; the only way to
+                            // miss is a cross-realm shadow on the
+                            // global object (treat as global write).
+                            if (self.realm.globals.contains(name)) {
+                                break :blk Binding{
+                                    .name = name,
+                                    .env_slot = 0,
+                                    .env_depth = 0,
+                                    .kind = .var_,
+                                    .span = d.span,
+                                    .is_global = true,
+                                };
+                            }
+                            return error.UnresolvedReference;
+                        };
+                        try self.emitStoreBinding(binding, d.span);
                     }
-                    try self.emitStoreBinding(binding, d.span);
+                    // No init: hoist already wrote undefined.
                 },
                 else => {
-                    try self.declarePatternBindings(d.name, .var_);
                     if (d.init) |*init_expr| {
                         try self.compileExpression(init_expr);
                     } else {
@@ -5049,7 +5175,11 @@ fn compileFunctionTemplateExt(
     switch (body) {
         .block => |stmts| {
             try self.hoistLetConst(stmts);
-            for (stmts) |*s| try self.compileStatement(s);
+            try self.hoistVarAndFunctions(stmts);
+            try self.emitVarInits(span);
+            // Function decls go first — see compileScriptAsChunk.
+            for (stmts) |*s| if (s.* == .function_decl) try self.compileStatement(s);
+            for (stmts) |*s| if (s.* != .function_decl) try self.compileStatement(s);
             try self.builder.emitOp(.lda_undefined, span);
             try self.builder.emitOp(.return_, span);
         },
@@ -5120,8 +5250,15 @@ pub fn compileScriptAsChunk(
     try c.builder.emitU8(0);
 
     try c.hoistLetConst(program.body);
+    try c.hoistVarAndFunctions(program.body);
+    try c.emitVarInits(start_span);
 
-    for (program.body) |*s| try c.compileStatement(s);
+    // §14.1.3 — top-level function declarations are evaluated
+    // before any other statement so forward calls (`f();
+    // function f(){}`) resolve. Block-nested function decls
+    // (strict-mode lexical) stay where they are.
+    for (program.body) |*s| if (s.* == .function_decl) try c.compileStatement(s);
+    for (program.body) |*s| if (s.* != .function_decl) try c.compileStatement(s);
 
     const end_span: Span = .{
         .start = if (program.body.len > 0) program.body[program.body.len - 1].span().end else 0,
@@ -5163,8 +5300,11 @@ pub fn compileModuleAsChunk(
     try c.builder.emitU8(0);
 
     try c.hoistLetConst(program.body);
+    try c.hoistVarAndFunctions(program.body);
+    try c.emitVarInits(start_span);
 
-    for (program.body) |*s| try c.compileStatement(s);
+    for (program.body) |*s| if (s.* == .function_decl) try c.compileStatement(s);
+    for (program.body) |*s| if (s.* != .function_decl) try c.compileStatement(s);
 
     const end_span: Span = .{
         .start = if (program.body.len > 0) program.body[program.body.len - 1].span().end else 0,

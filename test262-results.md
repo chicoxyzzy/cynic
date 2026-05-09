@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 54.76 % | 95.61 % | 28542 / 52125 |
-| **runtime** | 35.29 % | 47.57 % | 18221 / 51639 |
+| **runtime** | 35.45 % | 47.79 % | 18307 / 51639 |
 
 ## Where the runtime stands, by area
 
@@ -20,20 +20,20 @@ Temporal, browser-era built-ins …).
 
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
-| `language/statements` | 2765 | 5905 | 667 | 30 % | 32 % |
-| `language/expressions` | 4163 | 5904 | 971 | 38 % | 41 % |
-| `built-ins/RegExp` | 655 | 1063 | 161 | 35 % | 38 % |
-| `built-ins/Array` | 1908 | 962 | 211 | 62 % | 66 % |
+| `language/expressions` | 4171 | 5896 | 971 | 38 % | 41 % |
+| `language/statements` | 2787 | 5883 | 667 | 30 % | 32 % |
+| `built-ins/RegExp` | 658 | 1060 | 161 | 35 % | 38 % |
+| `built-ins/Array` | 1979 | 891 | 211 | 64 % | 69 % |
 | `built-ins/TypedArray` | 390 | 832 | 216 | 27 % | 32 % |
-| `built-ins/Object` | 2592 | 734 | 85 | 76 % | 78 % |
-| `built-ins/String` | 696 | 522 | 5 | 57 % | 57 % |
+| `built-ins/Object` | 2594 | 732 | 85 | 76 % | 78 % |
+| `built-ins/String` | 703 | 515 | 5 | 57 % | 58 % |
 | `built-ins/TypedArrayConstructors` | 275 | 437 | 24 | 37 % | 39 % |
 | `built-ins/Promise` | 253 | 421 | 3 | 37 % | 38 % |
 | `built-ins/Iterator` | 113 | 391 | 6 | 22 % | 22 % |
-| `built-ins/Function` | 147 | 273 | 89 | 29 % | 35 % |
+| `built-ins/Function` | 129 | 291 | 89 | 25 % | 31 % |
 | `built-ins/DataView` | 238 | 251 | 72 | 42 % | 49 % |
 | `built-ins/Proxy` | 68 | 231 | 12 | 22 % | 23 % |
-| `language/module-code` | 380 | 202 | 14 | 64 % | 65 % |
+| `language/module-code` | 368 | 214 | 14 | 62 % | 63 % |
 | `built-ins/Date` | 421 | 165 | 8 | 71 % | 72 % |
 | `language/arguments-object` | 80 | 126 | 57 | 30 % | 39 % |
 | `language/eval-code` | 10 | 117 | 220 | 3 % | 8 % |
@@ -58,9 +58,9 @@ Temporal, browser-era built-ins …).
 | `built-ins/WeakRef` | 0 | 29 | 0 | 0 % | 0 % |
 | `built-ins/parseInt` | 28 | 27 | 0 | 51 % | 51 % |
 | `built-ins/AggregateError` | 0 | 25 | 0 | 0 % | 0 % |
-| `language/function-code` | 85 | 23 | 109 | 39 % | 79 % |
 | `built-ins/Boolean` | 28 | 23 | 0 | 55 % | 55 % |
 | `built-ins/Math` | 290 | 22 | 15 | 89 % | 93 % |
+| `language/function-code` | 86 | 22 | 109 | 40 % | 80 % |
 | `built-ins/WeakMap` | 120 | 21 | 0 | 85 % | 85 % |
 | `language/types` | 83 | 21 | 9 | 73 % | 80 % |
 | `language/white-space` | 46 | 21 | 0 | 69 % | 69 % |
@@ -89,10 +89,10 @@ Temporal, browser-era built-ins …).
 | `language/block-scope` | 140 | 5 | 0 | 97 % | 97 % |
 | `language/asi` | 97 | 5 | 0 | 95 % | 95 % |
 | `language/comments` | 18 | 5 | 29 | 35 % | 78 % |
-| `language/identifier-resolution` | 4 | 5 | 5 | 29 % | 44 % |
 | `built-ins/StringIteratorPrototype` | 2 | 5 | 0 | 29 % | 29 % |
 | `built-ins/undefined` | 1 | 4 | 3 | 13 % | 20 % |
 | `built-ins/AsyncIteratorPrototype` | 0 | 4 | 9 | 0 % | 0 % |
+| `language/identifier-resolution` | 6 | 3 | 5 | 43 % | 67 % |
 | `language/destructuring` | 15 | 2 | 2 | 79 % | 88 % |
 | `built-ins/Infinity` | 2 | 2 | 2 | 33 % | 50 % |
 | `built-ins/NaN` | 2 | 2 | 2 | 33 % | 50 % |
@@ -161,11 +161,19 @@ Temporal, browser-era built-ins …).
 
 ## History
 
-### 2026-05-09 — cynic `9f3f23a`, test262 `d0c1b455`
+### 2026-05-09 — cynic `9ce18b2`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 35.29 % | 47.57 % | 18221 / 51639 | +356 |
+| **runtime** | 35.45 % | 47.79 % | 18307 / 51639 | +442 |
+
+Biggest movers (runtime):
+
+- `built-ins/Array` +71
+- `language/statements` +22
+- `built-ins/Function` -18
+- `language/module-code` -12
+- `language/expressions` +8
 
 ### 2026-05-08 — cynic `unknown`, test262 `d0c1b455`
 
