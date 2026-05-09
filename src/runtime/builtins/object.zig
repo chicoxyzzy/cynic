@@ -426,32 +426,37 @@ const ParsedDescriptor = struct {
 fn parseDescriptor(realm: *Realm, desc: *@import("../object.zig").JSObject) NativeError!ParsedDescriptor {
     var out: ParsedDescriptor = .{};
 
+    // §6.2.5.5 step 2 onward — every "Has + Get" pair walks the
+    // descriptor's prototype chain. Use `getPropertyChain` so
+    // inherited *accessor* properties (e.g. `Object.defineProperty(
+    // proto, "value", { get: () => 42 })`) fire instead of being
+    // silently treated as `undefined`.
     if (desc.hasProperty("enumerable")) {
         out.has_enumerable = true;
-        out.enumerable = toBoolean(desc.get("enumerable"));
+        out.enumerable = toBoolean(try getPropertyChain(realm, desc, "enumerable"));
     }
     if (desc.hasProperty("configurable")) {
         out.has_configurable = true;
-        out.configurable = toBoolean(desc.get("configurable"));
+        out.configurable = toBoolean(try getPropertyChain(realm, desc, "configurable"));
     }
     if (desc.hasProperty("value")) {
         out.has_value = true;
-        out.value = desc.get("value");
+        out.value = try getPropertyChain(realm, desc, "value");
     }
     if (desc.hasProperty("writable")) {
         out.has_writable = true;
-        out.writable = toBoolean(desc.get("writable"));
+        out.writable = toBoolean(try getPropertyChain(realm, desc, "writable"));
     }
     if (desc.hasProperty("get")) {
         out.has_get = true;
-        const get_v = desc.get("get");
+        const get_v = try getPropertyChain(realm, desc, "get");
         if (!get_v.isUndefined()) {
             out.getter = heap_mod.valueAsFunction(get_v) orelse return throwTypeError(realm, "Object.defineProperty: getter must be callable or undefined");
         }
     }
     if (desc.hasProperty("set")) {
         out.has_set = true;
-        const set_v = desc.get("set");
+        const set_v = try getPropertyChain(realm, desc, "set");
         if (!set_v.isUndefined()) {
             out.setter = heap_mod.valueAsFunction(set_v) orelse return throwTypeError(realm, "Object.defineProperty: setter must be callable or undefined");
         }
