@@ -475,6 +475,12 @@ pub const Op = enum(u8) {
     /// runtime check for §13.3.1 TDZ. Otherwise no-op. Emitted
     /// after `Ldar` of any `let` / `const` slot.
     throw_if_hole,
+    /// §7.1.22 RequireObjectCoercible — if `acc` is null or
+    /// undefined, raise a `TypeError`. Otherwise no-op. Emitted
+    /// at the head of object destructuring (`const {…} = v`,
+    /// `({…} = v)`) before any property reads, so `const {} = null`
+    /// throws as the spec requires.
+    require_object_coercible,
 
     // ── Termination ──────────────────────────────────────────────────────
     /// Halt with `acc` as the program's value. Top-level only in
@@ -509,6 +515,7 @@ pub const Op = enum(u8) {
             .typeof_,
             .throw_,
             .throw_if_hole,
+            .require_object_coercible,
             .return_,
             .super_get_computed,
             => 0,
@@ -676,6 +683,7 @@ pub const Op = enum(u8) {
             .sta_global => "StaGlobal",
             .throw_ => "Throw",
             .throw_if_hole => "ThrowIfHole",
+            .require_object_coercible => "RequireObjectCoercible",
             .return_ => "Return",
         };
     }

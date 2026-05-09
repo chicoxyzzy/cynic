@@ -4185,6 +4185,13 @@ fn compileDestructure(self: *Compiler, target: ast.statement.BindingTarget) Comp
             }
         },
         .object => |obj_pat| {
+            // §13.15.5.4 / §14.3.3 — destructuring an object
+            // pattern starts with RequireObjectCoercible on the
+            // source. `const {} = null` must throw TypeError before
+            // any (zero) property reads happen.
+            try self.builder.emitOp(.ldar, target.span());
+            try self.builder.emitU8(r_src);
+            try self.builder.emitOp(.require_object_coercible, target.span());
             for (obj_pat.properties) |prop| {
                 const key_span: Span = switch (prop.key) {
                     .ident => |s| s,
@@ -4304,6 +4311,13 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
             }
         },
         .object_literal => |ol| {
+            // §13.15.5.4 — assignment to an object pattern
+            // requires the source be ToObject-coercible. `({} = null)`
+            // throws TypeError; emit the guard before any property
+            // reads (and before the empty-pattern early exit).
+            try self.builder.emitOp(.ldar, target.span());
+            try self.builder.emitU8(r_src);
+            try self.builder.emitOp(.require_object_coercible, target.span());
             // Object pattern leaves can include `{...rest}` —
             // the parser parses that as a `.spread` property
             // member with an identifier_reference argument.

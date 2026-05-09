@@ -4096,6 +4096,17 @@ fn runFrames(
                     }
                 }
             },
+            .require_object_coercible => {
+                if (acc.isNull() or acc.isUndefined()) {
+                    const ex = try makeTypeError(realm, "Cannot destructure null or undefined");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                }
+            },
 
             .return_ => {
                 // Pop the current frame, leaving its accumulator as
