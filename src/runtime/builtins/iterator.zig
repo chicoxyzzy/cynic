@@ -53,6 +53,7 @@ pub fn install(realm: *Realm) !void {
 
     try installNativeMethodOnProto(realm, proto, "map", iteratorMap, 1);
     try installNativeMethodOnProto(realm, proto, "filter", iteratorFilter, 1);
+    try installNativeMethodOnProto(realm, proto, "flatMap", iteratorFlatMap, 1);
     try installNativeMethodOnProto(realm, proto, "take", iteratorTake, 1);
     try installNativeMethodOnProto(realm, proto, "drop", iteratorDrop, 1);
     try installNativeMethodOnProto(realm, proto, "toArray", iteratorToArray, 0);
@@ -280,6 +281,171 @@ fn iteratorFilter(realm: *Realm, this_value: Value, args: []const Value) NativeE
         return typeErrorAfterClose(realm, this_value, "Iterator.prototype.filter predicate is not callable");
     }
     return buildLazy(realm, this_value, cb_v, filterNext);
+}
+
+/// §27.1.4.4 Iterator.prototype.flatMap. Same lazy shape as
+/// `.map`/`.filter`, but the mapper's result is interpreted as an
+/// iterable via §7.4.6 GetIteratorFlattenable(reject-strings) and
+/// each of its values is yielded one at a time. State adds an
+/// `__cynic_iter_active__` slot for the currently-open inner
+/// iterator (undefined when the outer must be advanced next).
+fn iteratorFlatMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (heap_mod.valueAsPlainObject(this_value) == null) return throwTypeError(realm, "Iterator.prototype.flatMap called on non-object");
+    const cb_v = argOr(args, 0, Value.undefined_);
+    if (heap_mod.valueAsFunction(cb_v) == null) {
+        return typeErrorAfterClose(realm, this_value, "Iterator.prototype.flatMap mapper is not callable");
+    }
+    const ctor_v = realm.globals.get("Iterator") orelse return throwTypeError(realm, "Iterator constructor missing");
+    const ctor = heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "Iterator constructor missing");
+    const wrap = realm.heap.allocateObject() catch return error.OutOfMemory;
+    wrap.prototype = ctor.prototype;
+    wrap.set(realm.allocator, "__cynic_iter_source__", this_value) catch return error.OutOfMemory;
+    wrap.set(realm.allocator, "__cynic_iter_payload__", cb_v) catch return error.OutOfMemory;
+    wrap.set(realm.allocator, "__cynic_iter_count__", Value.fromInt32(0)) catch return error.OutOfMemory;
+    wrap.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(false)) catch return error.OutOfMemory;
+    wrap.set(realm.allocator, "__cynic_iter_running__", Value.fromBool(false)) catch return error.OutOfMemory;
+    wrap.set(realm.allocator, "__cynic_iter_active__", Value.undefined_) catch return error.OutOfMemory;
+    const next_fn = realm.heap.allocateFunctionNative(flatMapNext, 0, "next") catch return error.OutOfMemory;
+    next_fn.has_construct = false;
+    wrap.setWithFlags(realm.allocator, "next", heap_mod.taggedFunction(next_fn), .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    }) catch return error.OutOfMemory;
+    const ret_fn = realm.heap.allocateFunctionNative(flatMapReturn, 0, "return") catch return error.OutOfMemory;
+    ret_fn.has_construct = false;
+    wrap.setWithFlags(realm.allocator, "return", heap_mod.taggedFunction(ret_fn), .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    }) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(wrap);
+}
+
+/// `wrapper.return()` for flatMap. Closes whichever iterator is
+/// currently active: the inner if one is open (we'd otherwise
+/// abandon mid-stream), then the outer source. First throw wins;
+/// the second close runs in swallow mode so the original throw
+/// propagates.
+fn flatMapReturn(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Iterator return on non-object");
+    if (intrinsics.toBoolean(obj.get("__cynic_iter_done__"))) {
+        return iterResult(realm, Value.undefined_, true);
+    }
+    obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch return error.OutOfMemory;
+    const active = obj.get("__cynic_iter_active__");
+    const src = obj.get("__cynic_iter_source__");
+    if (heap_mod.valueAsPlainObject(active) != null) {
+        // Close inner first; if it throws, swallow the outer close.
+        closeIteratorPropagate(realm, active) catch |err| {
+            closeIteratorSwallow(realm, src);
+            return err;
+        };
+    }
+    try closeIteratorPropagate(realm, src);
+    return iterResult(realm, Value.undefined_, true);
+}
+
+fn flatMapNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "flatMap iter on non-object");
+    try checkNotRunning(realm, obj);
+    if (intrinsics.toBoolean(obj.get("__cynic_iter_done__"))) return doneResult(realm);
+    markRunning(obj, realm.allocator);
+    defer clearRunning(obj, realm.allocator);
+
+    const src = obj.get("__cynic_iter_source__");
+    const cb = heap_mod.valueAsFunction(obj.get("__cynic_iter_payload__")) orelse return doneResult(realm);
+
+    while (true) {
+        // 1. If we have a currently-open inner iterator, pull from it.
+        const active = obj.get("__cynic_iter_active__");
+        if (heap_mod.valueAsPlainObject(active) != null) {
+            const r = invokeIterNext(realm, active) catch |err| {
+                obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
+                // Inner threw — outer also needs closing per spec.
+                closeIteratorSwallow(realm, src);
+                return err;
+            };
+            if (heap_mod.valueAsPlainObject(r) == null) {
+                obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
+                realm.pending_exception = intrinsics.newTypeError(realm, "Iterator result is not an object") catch return error.OutOfMemory;
+                closeIteratorSwallow(realm, active);
+                closeIteratorSwallow(realm, src);
+                return error.NativeThrew;
+            }
+            const done_v = iterGet(realm, r, "done") catch |err| {
+                obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
+                closeIteratorSwallow(realm, src);
+                return err;
+            };
+            if (intrinsics.toBoolean(done_v)) {
+                // Inner exhausted — clear active and loop to outer.
+                // Per spec, no IteratorClose on a naturally-done inner.
+                obj.set(realm.allocator, "__cynic_iter_active__", Value.undefined_) catch return error.OutOfMemory;
+                continue;
+            }
+            const value = iterGet(realm, r, "value") catch |err| {
+                obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
+                closeIteratorSwallow(realm, src);
+                return err;
+            };
+            return iterResult(realm, value, false);
+        }
+
+        // 2. No active inner — pull next value from outer.
+        const result = invokeIterNext(realm, src) catch |err| {
+            obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
+            return err;
+        };
+        if (heap_mod.valueAsPlainObject(result) == null) {
+            obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
+            return typeErrorAfterClose(realm, src, "Iterator result is not an object");
+        }
+        const done_v = iterGet(realm, result, "done") catch |err| {
+            obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
+            return err;
+        };
+        if (intrinsics.toBoolean(done_v)) {
+            obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch return error.OutOfMemory;
+            return doneResult(realm);
+        }
+        const value = iterGet(realm, result, "value") catch |err| {
+            obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
+            return err;
+        };
+        const idx_v = obj.get("__cynic_iter_count__");
+        const idx: i32 = if (idx_v.isInt32()) idx_v.asInt32() else 0;
+        obj.set(realm.allocator, "__cynic_iter_count__", Value.fromInt32(idx + 1)) catch return error.OutOfMemory;
+
+        // 3. Apply mapper(value, idx).
+        const args_call = [_]Value{ value, Value.fromInt32(idx) };
+        const out = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &args_call) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
+                return callbackErrored(realm, src);
+            },
+        };
+        const mapped = switch (out) {
+            .value, .yielded => |x| x,
+            .thrown => |ex| {
+                obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
+                return callbackThrew(realm, src, ex);
+            },
+        };
+
+        // 4. GetIteratorFlattenable(reject-strings) on the mapped value.
+        const inner = getIteratorFlattenable(realm, mapped, true) catch {
+            obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
+            // Flattenable's throw is already in pending_exception;
+            // close the outer source (swallow) before propagating.
+            return callbackErrored(realm, src);
+        };
+        obj.set(realm.allocator, "__cynic_iter_active__", inner) catch return error.OutOfMemory;
+        // Loop back to drain `active`.
+    }
 }
 
 fn iteratorTake(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
