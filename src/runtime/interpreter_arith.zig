@@ -343,6 +343,17 @@ pub fn valueToOwnedString(realm: *Realm, v: Value, scratch: *[64]u8) RunError!St
             return valueToOwnedString(realm, p, scratch);
         }
     }
+    // §20.2.3.5 — functions stringify via the native-function
+    // form so `"" + fn` matches `String(fn)` and the test262
+    // `validateNativeFunctionSource` matcher.
+    if (heap_mod.valueAsFunction(v)) |fn_obj| {
+        const display_name: []const u8 = if (fn_obj.name) |n| n else "";
+        const formatted = if (display_name.len == 0)
+            std.fmt.allocPrint(realm.allocator, "function () {{ [native code] }}", .{}) catch return error.OutOfMemory
+        else
+            std.fmt.allocPrint(realm.allocator, "function {s}() {{ [native code] }}", .{display_name}) catch return error.OutOfMemory;
+        return .{ .bytes = formatted, .allocated = true };
+    }
     return .{ .bytes = "[object Object]", .allocated = false };
 }
 

@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 54.76 % | 95.61 % | 28542 / 52125 |
-| **runtime** | 35.64 % | 48.05 % | 18405 / 51639 |
+| **runtime** | 35.69 % | 48.12 % | 18431 / 51639 |
 
 ## Where the runtime stands, by area
 
@@ -25,12 +25,12 @@ Temporal, browser-era built-ins …).
 | `built-ins/RegExp` | 658 | 1060 | 161 | 35 % | 38 % |
 | `built-ins/Array` | 1984 | 886 | 211 | 64 % | 69 % |
 | `built-ins/TypedArray` | 390 | 832 | 216 | 27 % | 32 % |
-| `built-ins/Object` | 2601 | 725 | 85 | 76 % | 78 % |
+| `built-ins/Object` | 2602 | 724 | 85 | 76 % | 78 % |
 | `built-ins/String` | 703 | 515 | 5 | 57 % | 58 % |
 | `built-ins/TypedArrayConstructors` | 271 | 441 | 24 | 37 % | 38 % |
 | `built-ins/Promise` | 253 | 421 | 3 | 37 % | 38 % |
 | `built-ins/Iterator` | 113 | 391 | 6 | 22 % | 22 % |
-| `built-ins/Function` | 129 | 291 | 89 | 25 % | 31 % |
+| `built-ins/Function` | 154 | 266 | 89 | 30 % | 37 % |
 | `built-ins/DataView` | 238 | 251 | 72 | 42 % | 49 % |
 | `built-ins/Proxy` | 68 | 231 | 12 | 22 % | 23 % |
 | `language/module-code` | 368 | 214 | 14 | 62 % | 63 % |
@@ -161,17 +161,16 @@ Temporal, browser-era built-ins …).
 
 ## History
 
-### 2026-05-09 — cynic `737ea08`, test262 `d0c1b455`
+### 2026-05-09 — cynic `115f668`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 35.64 % | 48.05 % | 18405 / 51639 | +540 |
+| **runtime** | 35.69 % | 48.12 % | 18431 / 51639 | +566 |
 
 Biggest movers (runtime):
 
-- `built-ins/Object` +7
-- `built-ins/Array` +5
-- `built-ins/TypedArrayConstructors` -4
+- `built-ins/Function` +25
+- `built-ins/Object` +1
 
 ### 2026-05-08 — cynic `unknown`, test262 `d0c1b455`
 

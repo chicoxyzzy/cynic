@@ -30,13 +30,14 @@ const lengthOfArray = intrinsics.lengthOfArray;
 const clampArrayLength = intrinsics.clampArrayLength;
 const callJSFunction = interpreter.callJSFunction;
 
-/// Wire `Function.prototype.{call, apply, bind}` onto the
-/// realm's `%Function.prototype%`.
+/// Wire `Function.prototype.{call, apply, bind, toString}` onto
+/// the realm's `%Function.prototype%`.
 pub fn installPrototypeMethods(realm: *Realm) !void {
     const fn_proto = realm.intrinsics.function_prototype orelse return;
     try installNativeMethodOnProto(realm, fn_proto, "call", functionCall, 1);
     try installNativeMethodOnProto(realm, fn_proto, "apply", functionApply, 2);
     try installNativeMethodOnProto(realm, fn_proto, "bind", functionBind, 1);
+    try installNativeMethodOnProto(realm, fn_proto, "toString", functionToString, 0);
 }
 
 // ── Function.prototype.{call, apply, bind} ──────────────────────────────────
@@ -191,5 +192,40 @@ fn variantCtorThrows(realm: *Realm, this_value: Value, args: []const Value) Nati
     // string source. For now throw so tests that
     // intentionally trigger the error see a TypeError.
     return throwTypeError(realm, "Function constructor from string not supported");
+}
+
+// ── Function.prototype.toString ─────────────────────────────────────────────
+//
+// §20.2.3.5 — the spec wants the function's original source text
+// for declarations / expressions / arrows / methods, and the
+// "[native code]" placeholder for native functions and bound
+// functions. We don't yet retain source slices on
+// `FunctionTemplate`, so every callable falls into the native-
+// function format. The format is the one test262's
+// `nativeFunctionMatcher.js` validates: `function NAME(...) {
+// [native code] }` — `validateNativeFunctionSource` walks it
+// loosely (accepts any whitespace, strings inside the params).
+
+fn functionToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const display_name: []const u8 = blk: {
+        if (heap_mod.valueAsFunction(this_value)) |fn_obj| {
+            if (fn_obj.name) |n| break :blk n;
+            break :blk "";
+        }
+        // §20.2.3.5 step 3 — `this` must be a callable Object;
+        // otherwise throw TypeError. Cynic's reflective Proxy
+        // wrappers count as callable when `proxy_target` is a
+        // function, but they're routed through `valueAsFunction`
+        // already, so reaching here means non-function.
+        return throwTypeError(realm, "Function.prototype.toString requires that 'this' be a Function");
+    };
+    var buf: [256]u8 = undefined;
+    const formatted = if (display_name.len == 0)
+        std.fmt.bufPrint(&buf, "function () {{ [native code] }}", .{}) catch unreachable
+    else
+        std.fmt.bufPrint(&buf, "function {s}() {{ [native code] }}", .{display_name}) catch return error.OutOfMemory;
+    const s = realm.heap.allocateString(formatted) catch return error.OutOfMemory;
+    return Value.fromString(s);
 }
 

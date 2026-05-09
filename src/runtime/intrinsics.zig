@@ -963,8 +963,19 @@ pub fn stringifyArg(realm: *Realm, v: Value) NativeError!*JSString {
             defer realm.allocator.free(buf);
             return realm.heap.allocateString(buf) catch return error.OutOfMemory;
         }
-        if (heap_mod.valueAsFunction(v) != null) {
-            return realm.heap.allocateString("function () { [native code] }") catch return error.OutOfMemory;
+        if (heap_mod.valueAsFunction(v)) |fn_obj| {
+            // §20.2.3.5 — bridge through Function.prototype.toString
+            // so user-named functions stringify as
+            // `function name() { [native code] }` rather than the
+            // generic placeholder. Falls back to the placeholder
+            // if no name is set.
+            const display_name: []const u8 = if (fn_obj.name) |n| n else "";
+            const formatted = if (display_name.len == 0)
+                std.fmt.allocPrint(realm.allocator, "function () {{ [native code] }}", .{}) catch return error.OutOfMemory
+            else
+                std.fmt.allocPrint(realm.allocator, "function {s}() {{ [native code] }}", .{display_name}) catch return error.OutOfMemory;
+            defer realm.allocator.free(formatted);
+            return realm.heap.allocateString(formatted) catch return error.OutOfMemory;
         }
         const prim = try toPrimitive(realm, v, .string);
         // Don't recurse into another `isObject()` case — at this
