@@ -102,6 +102,7 @@ pub fn buildClass(
     if (parent_ctor != null) ctor.constructor_kind = .derived;
     // Wire the ctor's [[Prototype]] for `Function.prototype.call`/`apply`/`bind`.
     ctor.proto = realm.intrinsics.function_prototype;
+    ctor.source = template.source;
     // The constructor itself is a "method" of the class — its
     // home object is the prototype object, so `super(...)` /
     // `super.method()` inside the constructor body resolve.
@@ -172,6 +173,7 @@ pub fn buildClass(
         );
         fn_obj.home_object = proto;
         fn_obj.proto = realm.intrinsics.function_prototype;
+        fn_obj.source = m.source;
 
         if (std.mem.startsWith(u8, m.name, template.private_prefix)) {
             // Private method — record in private_method_inits so
@@ -246,6 +248,7 @@ pub fn buildClass(
             captured_env,
         );
         fn_obj.proto = realm.intrinsics.function_prototype;
+        fn_obj.source = m.source;
         switch (m.kind) {
             .method => try ctor.set(realm.allocator, m.name, heap_mod.taggedFunction(fn_obj)),
             .getter, .setter => {

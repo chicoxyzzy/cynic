@@ -208,11 +208,7 @@ fn variantCtorThrows(realm: *Realm, this_value: Value, args: []const Value) Nati
 
 fn functionToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    const display_name: []const u8 = blk: {
-        if (heap_mod.valueAsFunction(this_value)) |fn_obj| {
-            if (fn_obj.name) |n| break :blk n;
-            break :blk "";
-        }
+    const fn_obj = heap_mod.valueAsFunction(this_value) orelse {
         // §20.2.3.5 step 3 — `this` must be a callable Object;
         // otherwise throw TypeError. Cynic's reflective Proxy
         // wrappers count as callable when `proxy_target` is a
@@ -220,11 +216,20 @@ fn functionToString(realm: *Realm, this_value: Value, args: []const Value) Nativ
         // already, so reaching here means non-function.
         return throwTypeError(realm, "Function.prototype.toString requires that 'this' be a Function");
     };
-    var buf: [256]u8 = undefined;
+    // §20.2.3.5 step 6 — if the function carries source text,
+    // hand it back verbatim. Engine-synthesised functions
+    // (default constructors, native bridges, bound functions)
+    // fall through to the native-function placeholder.
+    if (fn_obj.source) |src| {
+        const s = realm.heap.allocateString(src) catch return error.OutOfMemory;
+        return Value.fromString(s);
+    }
+    const display_name: []const u8 = if (fn_obj.name) |n| n else "";
     const formatted = if (display_name.len == 0)
-        std.fmt.bufPrint(&buf, "function () {{ [native code] }}", .{}) catch unreachable
+        std.fmt.allocPrint(realm.allocator, "function () {{ [native code] }}", .{}) catch return error.OutOfMemory
     else
-        std.fmt.bufPrint(&buf, "function {s}() {{ [native code] }}", .{display_name}) catch return error.OutOfMemory;
+        std.fmt.allocPrint(realm.allocator, "function {s}() {{ [native code] }}", .{display_name}) catch return error.OutOfMemory;
+    defer realm.allocator.free(formatted);
     const s = realm.heap.allocateString(formatted) catch return error.OutOfMemory;
     return Value.fromString(s);
 }

@@ -92,6 +92,13 @@ pub const JSFunction = struct {
     /// Lifecycle is managed by the heap (sweep walks it through
     /// `strings`). `null` for anonymous functions.
     name_string: ?*@import("string.zig").JSString = null,
+    /// §20.2.3.5 — borrowed slice of the original source spanning
+    /// the FunctionExpression / FunctionDeclaration / ArrowFunction
+    /// / MethodDefinition. Stamped from the template's `source`
+    /// at `make_function` time. `null` for native, bound, and
+    /// engine-synthesised functions — those fall back to the
+    /// `function NAME() { [native code] }` placeholder.
+    source: ?[]const u8 = null,
     /// Whether this is an arrow function. Affects `this` binding
     /// (§15.3 — arrows inherit `this` lexically) and self-binding
     /// rules (declarations / named function expressions get a

@@ -1679,6 +1679,11 @@ fn runFrames(
                 if (tmpl.is_arrow) fn_obj.captured_this = f.this_value;
                 fn_obj.is_generator = tmpl.is_generator;
                 fn_obj.is_async = tmpl.is_async;
+                // §20.2.3.5 — borrow the template's source slice
+                // for `Function.prototype.toString`. The slice
+                // borrows from the chunk's source, which is
+                // pinned for the lifetime of the realm.
+                fn_obj.source = tmpl.source;
                 // Wire the function's own [[Prototype]] to the
                 // appropriate %FunctionPrototype% — async-generator,
                 // generator, async-function, or plain — so

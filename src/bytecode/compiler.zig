@@ -3390,6 +3390,12 @@ fn compileClassTemplate(
                     .getter => .getter,
                     .setter => .setter,
                 },
+                // §20.2.3.5 — borrow the MethodDefinition's source
+                // span for `Function.prototype.toString`.
+                .source = if (m.span.start <= m.span.end and m.span.end <= self.source.len)
+                    self.source[m.span.start..m.span.end]
+                else
+                    null,
             };
             if (m.is_static) {
                 static_methods[i_stat] = tmpl;
@@ -3405,6 +3411,10 @@ fn compileClassTemplate(
     return self.builder.addClassTemplate(.{
         .name = name,
         .span = span,
+        .source = if (span.start <= span.end and span.end <= self.source.len)
+            self.source[span.start..span.end]
+        else
+            null,
         .has_heritage = is_derived,
         .private_prefix = private_prefix,
         .constructor_chunk = ctor_chunk,
@@ -5233,6 +5243,14 @@ fn compileFunctionTemplateExt(
         .is_arrow = is_arrow,
         .is_generator = is_generator,
         .is_async = is_async,
+        // §20.2.3.5 — borrow the original source span so
+        // `Function.prototype.toString` can hand it back verbatim
+        // (whitespace, comments, and all). The slice points into
+        // `self.source`, which the realm keeps pinned.
+        .source = if (span.start <= span.end and span.end <= self.source.len)
+            self.source[span.start..span.end]
+        else
+            null,
     });
 }
 

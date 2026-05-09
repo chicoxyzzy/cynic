@@ -77,6 +77,12 @@ pub const FunctionTemplate = struct {
     /// the microtask queue. later ships a sync-await model;
     /// true suspension on pending awaits is later.
     is_async: bool = false,
+    /// §20.2.3.5 — borrowed slice of the original source spanning
+    /// the function expression / declaration as written. Used by
+    /// `Function.prototype.toString` to hand back real source for
+    /// user-defined functions; `null` for engine-synthesised
+    /// functions (default constructors, native bridges).
+    source: ?[]const u8 = null,
 };
 
 /// Compile-time blueprint for a class definition.
@@ -94,6 +100,10 @@ pub const ClassTemplate = struct {
     name: ?[]const u8,
     /// Span over the whole `class …` form (for diagnostics).
     span: Span,
+    /// §20.2.3.5 — source slice spanning `class … { … }`. Used by
+    /// `Function.prototype.toString` on the class constructor.
+    /// `null` for engine-synthesised classes.
+    source: ?[]const u8 = null,
     /// Whether `class C extends …` was written. When true, the
     /// runtime evaluates the heritage expression at MakeClass
     /// time using the bytecode emitted by the enclosing chunk
@@ -159,6 +169,10 @@ pub const MethodTemplate = struct {
     /// `get x() { … }` / `set x(v) { … }` get the latter two;
     /// installed as accessor descriptors at MakeClass time.
     kind: MethodKind = .method,
+    /// §20.2.3.5 — borrowed slice spanning the MethodDefinition
+    /// in the original source. `null` for the engine-synthesised
+    /// default constructor and any other non-source-backed method.
+    source: ?[]const u8 = null,
 };
 
 pub const FieldTemplate = struct {
