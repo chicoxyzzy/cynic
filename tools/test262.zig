@@ -1282,20 +1282,66 @@ fn printProgress(io: std.Io, stats: *const Stats) !void {
 /// "still running" from "wedged" at a glance. Stops as soon as
 /// `done` flips to true.
 /// Snapshot the process resident-set size in MB for the
-/// progress-line `rss=NNNMB` field. macOS reports `ru_maxrss` in
-/// bytes; Linux reports it in KB; both are highest-watermark not
-/// current. Returns null if the syscall fails. Used by
+/// progress-line `rss=NNNMB` field. We want *current* RSS, not
+/// the max-watermark `getrusage` returns — the watermark is
+/// useless once it spikes once and stays high for the rest of
+/// the run. Returns null if the syscall fails. Used by
 /// `monitorLoop` to surface allocation pressure as it builds —
-/// catches the "where did 5 GB come from" pattern at the
-/// progress tick instead of after the run.
+/// catches "where did 5 GB come from" patterns at the progress
+/// tick instead of after the run.
+///
+/// macOS: Mach `task_info(MACH_TASK_BASIC_INFO).resident_size`
+/// returns *current* bytes. (Zig 0.17 std binding for
+/// `mach_task_basic_info` is missing the `resident_size_max`
+/// field, which matters for the kernel's count check, so we
+/// redeclare the struct to match XNU's layout exactly.)
+///
+/// Linux: `/proc/self/statm` resident pages × page size — also
+/// current. `getrusage` on Linux returns max-watermark in KB
+/// which is the same trap.
 fn currentRssMb() ?usize {
+    const builtin = @import("builtin");
+    if (builtin.os.tag == .macos) {
+        const TimeValue = extern struct { seconds: i32, microseconds: i32 };
+        const TaskBasicInfo = extern struct {
+            virtual_size: u64,
+            resident_size: u64,
+            resident_size_max: u64,
+            user_time: TimeValue,
+            system_time: TimeValue,
+            policy: i32,
+            suspend_count: i32,
+        };
+        const flavor: u32 = 20; // MACH_TASK_BASIC_INFO
+        var info: TaskBasicInfo = undefined;
+        var count: u32 = @sizeOf(TaskBasicInfo) / @sizeOf(u32);
+        const rc = std.c.task_info(
+            std.c.mach_task_self(),
+            flavor,
+            @ptrCast(&info),
+            &count,
+        );
+        if (rc != 0) return null;
+        return @intCast(info.resident_size / (1024 * 1024));
+    }
+    if (builtin.os.tag == .linux) {
+        // statm: <size> <resident> <shared> <text> <lib> <data> <dt>
+        // — values in pages.
+        var buf: [128]u8 = undefined;
+        const file = std.fs.cwd().openFile("/proc/self/statm", .{}) catch return null;
+        defer file.close();
+        const n = file.read(&buf) catch return null;
+        const slice = buf[0..n];
+        var it = std.mem.tokenizeAny(u8, slice, " \t\n");
+        _ = it.next() orelse return null;
+        const rss_pages = std.fmt.parseInt(usize, it.next() orelse return null, 10) catch return null;
+        const page_size = std.heap.pageSize();
+        return (rss_pages * page_size) / (1024 * 1024);
+    }
     var ru: std.c.rusage = undefined;
     if (std.c.getrusage(0, &ru) != 0) return null; // 0 = RUSAGE_SELF
-    const raw: usize = @intCast(ru.maxrss);
-    // macOS: bytes. Linux: KB. Distinguish by sniffing the
-    // magnitude — anything well over a few GB is bytes.
-    const bytes: usize = if (raw > 1024 * 1024 * 64) raw else raw * 1024;
-    return bytes / (1024 * 1024);
+    const raw_kb: usize = @intCast(ru.maxrss);
+    return raw_kb / 1024;
 }
 
 fn monitorLoop(
