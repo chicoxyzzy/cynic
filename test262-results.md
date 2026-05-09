@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 54.76 % | 95.61 % | 28542 / 52125 |
-| **runtime** | 39.89 % | 53.78 % | 20601 / 51639 |
+| **runtime** | 39.97 % | 53.88 % | 20641 / 51639 |
 
 ## Where the runtime stands, by area
 
@@ -20,8 +20,8 @@ Temporal, browser-era built-ins …).
 
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
-| `language/statements` | 3746 | 4924 | 667 | 40 % | 43 % |
-| `language/expressions` | 5392 | 4675 | 971 | 49 % | 54 % |
+| `language/statements` | 3750 | 4920 | 667 | 40 % | 43 % |
+| `language/expressions` | 5427 | 4640 | 971 | 49 % | 54 % |
 | `built-ins/RegExp` | 658 | 1060 | 161 | 35 % | 38 % |
 | `built-ins/Array` | 1984 | 886 | 211 | 64 % | 69 % |
 | `built-ins/TypedArray` | 390 | 832 | 216 | 27 % | 32 % |
@@ -62,8 +62,8 @@ Temporal, browser-era built-ins …).
 | `built-ins/Math` | 290 | 22 | 15 | 89 % | 93 % |
 | `language/function-code` | 86 | 22 | 109 | 40 % | 80 % |
 | `built-ins/WeakMap` | 120 | 21 | 0 | 85 % | 85 % |
-| `language/types` | 83 | 21 | 9 | 73 % | 80 % |
 | `language/white-space` | 46 | 21 | 0 | 69 % | 69 % |
+| `language/types` | 84 | 20 | 9 | 74 % | 81 % |
 | `language/global-code` | 17 | 20 | 5 | 40 % | 46 % |
 | `built-ins/decodeURIComponent` | 37 | 19 | 0 | 66 % | 66 % |
 | `built-ins/decodeURI` | 36 | 19 | 0 | 65 % | 65 % |
@@ -161,16 +161,17 @@ Temporal, browser-era built-ins …).
 
 ## History
 
-### 2026-05-09 — cynic `0a45e8f`, test262 `d0c1b455`
+### 2026-05-09 — cynic `157d4aa`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 39.89 % | 53.78 % | 20601 / 51639 | +2736 |
+| **runtime** | 39.97 % | 53.88 % | 20641 / 51639 | +2776 |
 
 Biggest movers (runtime):
 
-- `language/expressions` +5
-- `language/rest-parameters` +1
+- `language/expressions` +35
+- `language/statements` +4
+- `language/types` +1
 
 ### 2026-05-08 — cynic `unknown`, test262 `d0c1b455`
 

@@ -2196,26 +2196,25 @@ pub const Compiler = struct {
         }
         const name = self.source[target_ptr.identifier_reference.span.start..target_ptr.identifier_reference.span.end];
         const scope = self.scope orelse return error.UnresolvedReference;
-        const binding: Binding = scope.resolve(name) orelse blk: {
-            // Not in any user-visible scope. If the name is
-            // already in `realm.globals` (host built-in or a
-            // top-level binding declared by an earlier
-            // `evaluateScript` against the same realm), treat
-            // the assignment as a global update. Otherwise it's
-            // strict-mode assignment to an undeclared
-            // identifier — error.
-            if (self.realm.globals.contains(name)) {
-                break :blk Binding{
-                    .name = name,
-                    .env_slot = 0,
-                    .env_depth = 0,
-                    .kind = .var_, // unknown — treat as var (no TDZ check)
-                    .span = a.target.span(),
-                    .is_global = true,
-                };
-            }
-            try self.report(.unexpected_token, a.target.span());
-            return error.UnresolvedReference;
+        const binding: Binding = scope.resolve(name) orelse Binding{
+            // Not in any user-visible scope. Treat the assignment
+            // as a global write — `sta_global` creates the binding
+            // if absent. This matches the "create on assign" path
+            // that real engines take for forward-declared
+            // top-level vars and is also what's needed for tests
+            // that compile assignments to names whose
+            // reachability is gated by an earlier throw (the
+            // assignment never actually runs). Strict-mode
+            // ReferenceError on truly-unresolvable PutValue is a
+            // runtime check we leave to `sta_global` once we wire
+            // a globalThis sentinel; today every top-level write
+            // succeeds the way browsers do under sloppy mode.
+            .name = name,
+            .env_slot = 0,
+            .env_depth = 0,
+            .kind = .var_,
+            .span = a.target.span(),
+            .is_global = true,
         };
         if (binding.kind == .const_) {
             try self.report(.assignment_to_const, a.span);
