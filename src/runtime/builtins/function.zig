@@ -94,6 +94,24 @@ fn functionApply(realm: *Realm, this_value: Value, args: []const Value) NativeEr
                 const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
                 apply_args.append(realm.allocator, arr.get(islice)) catch return error.OutOfMemory;
             }
+        } else if (heap_mod.valueAsFunction(arg_array)) |fn_arr| {
+            // §20.2.3.1 / §7.3.18 CreateListFromArrayLike — any
+            // object with a `length` and indexed properties is a
+            // valid argArray. Functions count: e.g.
+            // `fn.apply(x, Array)` reads `Array.length` (== 1).
+            const len_v = fn_arr.get("length");
+            const raw_len: i64 = if (len_v.isInt32()) len_v.asInt32() else if (len_v.isDouble()) blk: {
+                const d = len_v.asDouble();
+                if (std.math.isNan(d)) break :blk 0;
+                break :blk @intFromFloat(@max(0.0, @min(d, @as(f64, @floatFromInt(@as(i64, std.math.maxInt(i64))))) ));
+            } else 0;
+            const len = try clampArrayLength(raw_len);
+            var i: i64 = 0;
+            while (i < len) : (i += 1) {
+                var ibuf: [24]u8 = undefined;
+                const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+                apply_args.append(realm.allocator, fn_arr.get(islice)) catch return error.OutOfMemory;
+            }
         } else {
             // §20.2.3.1 step 6 — non-object, non-null/undefined
             // is a TypeError.
