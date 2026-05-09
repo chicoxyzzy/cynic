@@ -512,6 +512,15 @@ pub const Heap = struct {
                     }
                 }
                 if (o.prototype) |p| self.markValue(taggedObject(p));
+                // §23.2 / §25.3 — TypedArray and DataView views
+                // borrow bytes from a sibling ArrayBuffer object via
+                // `viewed`. The ArrayBuffer is held only through this
+                // Zig field, not through a JS-visible property, so
+                // without marking it here the buffer gets swept while
+                // the view is still reachable and indexed reads see
+                // freed bytes.
+                if (o.typed_view) |tv| self.markValue(taggedObject(tv.viewed));
+                if (o.data_view) |dv| self.markValue(taggedObject(dv.viewed));
             }
         }
         // Doubles, ints, bools, null, undefined, hole: no heap pointer.

@@ -136,7 +136,7 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-09 — cynic `6999d10`, test262 `d0c1b455`
+### 2026-05-09 — cynic `536dfb4`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
