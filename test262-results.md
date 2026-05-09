@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 54.76 % | 95.61 % | 28542 / 52125 |
-| **runtime** | 35.70 % | 48.12 % | 18433 / 51639 |
+| **runtime** | 37.00 % | 49.88 % | 19108 / 51639 |
 
 ## Where the runtime stands, by area
 
@@ -20,8 +20,8 @@ Temporal, browser-era built-ins …).
 
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
-| `language/statements` | 2792 | 5878 | 667 | 30 % | 32 % |
-| `language/expressions` | 4253 | 5814 | 971 | 39 % | 42 % |
+| `language/statements` | 3107 | 5563 | 667 | 33 % | 36 % |
+| `language/expressions` | 4555 | 5512 | 971 | 41 % | 45 % |
 | `built-ins/RegExp` | 658 | 1060 | 161 | 35 % | 38 % |
 | `built-ins/Array` | 1984 | 886 | 211 | 64 % | 69 % |
 | `built-ins/TypedArray` | 390 | 832 | 216 | 27 % | 32 % |
@@ -35,12 +35,12 @@ Temporal, browser-era built-ins …).
 | `built-ins/Proxy` | 68 | 231 | 12 | 22 % | 23 % |
 | `language/module-code` | 368 | 214 | 14 | 62 % | 63 % |
 | `built-ins/Date` | 421 | 165 | 8 | 71 % | 72 % |
-| `language/arguments-object` | 80 | 126 | 57 | 30 % | 39 % |
 | `language/eval-code` | 10 | 117 | 220 | 3 % | 8 % |
 | `built-ins/JSON` | 40 | 103 | 22 | 24 % | 28 % |
-| `built-ins/Set` | 293 | 89 | 1 | 77 % | 77 % |
+| `built-ins/Set` | 299 | 83 | 1 | 78 % | 78 % |
 | `language/literals` | 358 | 79 | 97 | 67 % | 82 % |
 | `built-ins/Number` | 265 | 75 | 0 | 78 % | 78 % |
+| `language/arguments-object` | 132 | 74 | 57 | 50 % | 64 % |
 | `built-ins/Map` | 140 | 63 | 1 | 69 % | 69 % |
 | `built-ins/Reflect` | 93 | 60 | 0 | 61 % | 61 % |
 | `language/statementList` | 27 | 53 | 0 | 34 % | 34 % |
@@ -161,15 +161,18 @@ Temporal, browser-era built-ins …).
 
 ## History
 
-### 2026-05-09 — cynic `e0aae94`, test262 `d0c1b455`
+### 2026-05-09 — cynic `e69594d`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 35.70 % | 48.12 % | 18433 / 51639 | +568 |
+| **runtime** | 37.00 % | 49.88 % | 19108 / 51639 | +1243 |
 
 Biggest movers (runtime):
 
-- `built-ins/Function` +2
+- `language/statements` +315
+- `language/expressions` +302
+- `language/arguments-object` +52
+- `built-ins/Set` +6
 
 ### 2026-05-08 — cynic `unknown`, test262 `d0c1b455`
 

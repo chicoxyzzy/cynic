@@ -3251,9 +3251,11 @@ fn compileClassTemplate(
     var static_block_count: usize = 0;
     for (body) |member| switch (member) {
         .method => |m| {
-            if (m.is_generator or m.is_async) {
-                return error.UnsupportedStatement;
-            }
+            // Generator and async methods are runtime concerns —
+            // the body compiles the same; the `is_generator` /
+            // `is_async` flags propagate to the JSFunction at
+            // MakeClass time so the call site allocates a
+            // generator / wraps in a Promise as appropriate.
             const is_priv = m.key == .private;
             const key_name = methodKeyName(self.source, m.key) orelse return error.UnsupportedStatement;
             _ = is_priv;
@@ -3390,6 +3392,8 @@ fn compileClassTemplate(
                     .getter => .getter,
                     .setter => .setter,
                 },
+                .is_generator = m.is_generator,
+                .is_async = m.is_async,
                 // §20.2.3.5 — borrow the MethodDefinition's source
                 // span for `Function.prototype.toString`.
                 .source = if (m.span.start <= m.span.end and m.span.end <= self.source.len)

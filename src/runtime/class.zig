@@ -172,7 +172,21 @@ pub fn buildClass(
             captured_env,
         );
         fn_obj.home_object = proto;
-        fn_obj.proto = realm.intrinsics.function_prototype;
+        fn_obj.is_generator = m.is_generator;
+        fn_obj.is_async = m.is_async;
+        // §27.3 — `[[Prototype]]` of the method function points
+        // at the matching variant prototype so
+        // `Object.getPrototypeOf(fn).constructor` resolves to
+        // GeneratorFunction / AsyncFunction / etc. when the
+        // method body uses those forms.
+        fn_obj.proto = if (m.is_generator and m.is_async)
+            realm.intrinsics.async_generator_function_prototype orelse realm.intrinsics.function_prototype
+        else if (m.is_generator)
+            realm.intrinsics.generator_function_prototype orelse realm.intrinsics.function_prototype
+        else if (m.is_async)
+            realm.intrinsics.async_function_prototype orelse realm.intrinsics.function_prototype
+        else
+            realm.intrinsics.function_prototype;
         fn_obj.source = m.source;
 
         if (std.mem.startsWith(u8, m.name, template.private_prefix)) {
@@ -247,7 +261,16 @@ pub fn buildClass(
             false,
             captured_env,
         );
-        fn_obj.proto = realm.intrinsics.function_prototype;
+        fn_obj.is_generator = m.is_generator;
+        fn_obj.is_async = m.is_async;
+        fn_obj.proto = if (m.is_generator and m.is_async)
+            realm.intrinsics.async_generator_function_prototype orelse realm.intrinsics.function_prototype
+        else if (m.is_generator)
+            realm.intrinsics.generator_function_prototype orelse realm.intrinsics.function_prototype
+        else if (m.is_async)
+            realm.intrinsics.async_function_prototype orelse realm.intrinsics.function_prototype
+        else
+            realm.intrinsics.function_prototype;
         fn_obj.source = m.source;
         switch (m.kind) {
             .method => try ctor.set(realm.allocator, m.name, heap_mod.taggedFunction(fn_obj)),

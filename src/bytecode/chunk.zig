@@ -169,6 +169,10 @@ pub const MethodTemplate = struct {
     /// `get x() { … }` / `set x(v) { … }` get the latter two;
     /// installed as accessor descriptors at MakeClass time.
     kind: MethodKind = .method,
+    /// `*method() {}` — generator method (§15.5).
+    is_generator: bool = false,
+    /// `async method() {}` — async method (§15.8).
+    is_async: bool = false,
     /// §20.2.3.5 — borrowed slice spanning the MethodDefinition
     /// in the original source. `null` for the engine-synthesised
     /// default constructor and any other non-source-backed method.
