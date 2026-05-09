@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 62.11 % | 94.89 % | 28794 / 46357 |
-| **runtime** | 50.49 % | 61.32 % | 23404 / 46357 |
+| **runtime** | 50.66 % | 61.53 % | 23485 / 46357 |
 
 ## Where the runtime stands, by area
 
@@ -27,7 +27,6 @@ browser-era built-ins …).
 | `language/statements` | 4457 | 4213 | 667 | 48 % | 51 % |
 | **_100–999 fails_** | | | | | |
 | `built-ins/Array` | 2010 | 860 | 211 | 65 % | 70 % |
-| `built-ins/Date` | 423 | 163 | 8 | 71 % | 72 % |
 | `built-ins/Function` | 170 | 250 | 89 | 33 % | 40 % |
 | `built-ins/Iterator` | 280 | 224 | 6 | 55 % | 56 % |
 | `built-ins/Object` | 2727 | 599 | 85 | 80 % | 82 % |
@@ -46,6 +45,7 @@ browser-era built-ins …).
 | `built-ins/AsyncGeneratorPrototype` | 12 | 36 | 0 | 25 % | 25 % |
 | `built-ins/BigInt` | 39 | 38 | 0 | 51 % | 51 % |
 | `built-ins/DataView` | 416 | 73 | 72 | 74 % | 85 % |
+| `built-ins/Date` | 504 | 82 | 8 | 85 % | 86 % |
 | `built-ins/Error` | 18 | 40 | 0 | 31 % | 31 % |
 | `built-ins/FinalizationRegistry` | 0 | 47 | 0 | 0 % | 0 % |
 | `built-ins/GeneratorFunction` | 4 | 19 | 0 | 17 % | 17 % |
@@ -136,12 +136,12 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-09 — cynic `0664297`, test262 `d0c1b455`
+### 2026-05-09 — cynic `7a40b28`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
 | **parser** | 62.11 % | 94.89 % | 28794 / 46357 | +252 |
-| **runtime** | 50.49 % | 61.32 % | 23404 / 46357 | +5539 |
+| **runtime** | 50.66 % | 61.53 % | 23485 / 46357 | +5620 |
 
 ### 2026-05-08 — cynic `unknown`, test262 `d0c1b455`
 

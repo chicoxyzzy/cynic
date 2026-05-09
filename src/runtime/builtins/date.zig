@@ -157,115 +157,151 @@ fn dateToTimeString(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
 // ── Date setters (§21.4.4 — UTC-only since `getTimezoneOffset` is 0) ────────
 
-fn dateNumArg(args: []const Value, i: usize, default_d: f64) f64 {
-    if (i >= args.len or args[i].isUndefined()) return default_d;
-    const v = coerceToNumber(args[i]);
-    return if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
+/// Pre-coerce-and-snapshot helper for the §21.4.4 setters. Spec
+/// order is: read [[DateValue]] (snapshot), then ? ToNumber each
+/// *present* argument in source order, *then* check whether the
+/// snapshot was NaN. Side-effects in valueOf can mutate the
+/// receiver's [[DateValue]] mid-coercion (test262
+/// `date-value-read-before-tonumber-when-date-is-{valid,invalid}`)
+/// — the snapshot wins. ToNumber abrupt-completes propagate.
+///
+/// `arity` is the number of arguments the setter consumes; the
+/// returned `coerced` array has exactly that many entries, with
+/// indices ≥ args.len filled with NaN (a sentinel for "not
+/// present" — distinct from a present `undefined`, which ToNumber
+/// also turns into NaN, but presence is tracked separately via
+/// `present_count`).
+const SetterPrelude = struct {
+    inst: *JSObject,
+    snapshot: f64,
+    coerced: [4]f64,
+    present_count: usize,
+};
+
+fn setterPrelude(realm: *Realm, this_value: Value, args: []const Value, arity: usize) NativeError!SetterPrelude {
+    const inst = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "Date.prototype setter called on non-Date");
+    const snapshot = inst.date_ms orelse
+        return throwTypeError(realm, "Date.prototype setter called on non-Date");
+    var coerced: [4]f64 = .{ std.math.nan(f64), std.math.nan(f64), std.math.nan(f64), std.math.nan(f64) };
+    const present = @min(args.len, arity);
+    var i: usize = 0;
+    while (i < present) : (i += 1) {
+        const v = try intrinsics.toNumber(realm, args[i]);
+        coerced[i] = if (v.isInt32()) @as(f64, @floatFromInt(v.asInt32())) else v.asDouble();
+    }
+    return .{ .inst = inst, .snapshot = snapshot, .coerced = coerced, .present_count = present };
+}
+
+/// §21.4.1.31 TimeClip — abs(t) > 8.64e15 or non-finite ⇒ NaN,
+/// otherwise ToInteger(t).
+fn timeClip(t: f64) f64 {
+    if (!std.math.isFinite(t)) return std.math.nan(f64);
+    if (@abs(t) > 8.64e15) return std.math.nan(f64);
+    return @trunc(t) + 0.0; // Normalize -0 to +0 via the +0.0.
 }
 
 fn dateSetTime(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
-    const inst = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    if (inst.date_ms == null) return error.NativeThrew;
-    const ms = dateNumArg(args, 0, std.math.nan(f64));
-    inst.date_ms = ms;
-    return Value.fromDouble(ms);
+    const inst = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "Date.prototype.setTime called on non-Date");
+    if (inst.date_ms == null) return throwTypeError(realm, "Date.prototype.setTime called on non-Date");
+    const arg_v = if (args.len == 0) Value.undefined_ else args[0];
+    const v = try intrinsics.toNumber(realm, arg_v);
+    const t = if (v.isInt32()) @as(f64, @floatFromInt(v.asInt32())) else v.asDouble();
+    const clipped = timeClip(t);
+    inst.date_ms = clipped;
+    return Value.fromDouble(clipped);
 }
 
 fn dateSetMs(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
-    const inst = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    const cur = inst.date_ms orelse return error.NativeThrew;
+    const p = try setterPrelude(realm, this_value, args, 1);
+    const cur = p.snapshot;
     if (std.math.isNan(cur)) return Value.fromDouble(cur);
-    const new_ms_part = dateNumArg(args, 0, 0);
+    const new_ms_part = p.coerced[0];
     const old_ms_part = @floor(@mod(cur, 1000.0));
-    const ms = cur - old_ms_part + new_ms_part;
-    inst.date_ms = ms;
-    return Value.fromDouble(ms);
+    const new_ms = timeClip(cur - old_ms_part + new_ms_part);
+    p.inst.date_ms = new_ms;
+    return Value.fromDouble(new_ms);
 }
 
 fn dateSetSeconds(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
-    const inst = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    const cur = inst.date_ms orelse return error.NativeThrew;
+    const p = try setterPrelude(realm, this_value, args, 2);
+    const cur = p.snapshot;
     if (std.math.isNan(cur)) return Value.fromDouble(cur);
-    const sec = dateNumArg(args, 0, 0);
-    const ms_arg = dateNumArg(args, 1, @floor(@mod(cur, 1000.0)));
-    // Replace the seconds + ms component of cur.
+    const sec = p.coerced[0];
+    const ms_arg = if (p.present_count > 1) p.coerced[1] else @floor(@mod(cur, 1000.0));
     const day_minute_part = @floor(cur / 60000.0) * 60000.0;
-    const new_ms = day_minute_part + sec * 1000.0 + ms_arg;
-    inst.date_ms = new_ms;
+    const new_ms = timeClip(day_minute_part + sec * 1000.0 + ms_arg);
+    p.inst.date_ms = new_ms;
     return Value.fromDouble(new_ms);
 }
 
 fn dateSetMinutes(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
-    const inst = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    const cur = inst.date_ms orelse return error.NativeThrew;
+    const p = try setterPrelude(realm, this_value, args, 3);
+    const cur = p.snapshot;
     if (std.math.isNan(cur)) return Value.fromDouble(cur);
-    const minute = dateNumArg(args, 0, 0);
-    const sec = dateNumArg(args, 1, @floor(@mod(cur, 60000.0) / 1000.0));
-    const ms_arg = dateNumArg(args, 2, @floor(@mod(cur, 1000.0)));
+    const minute = p.coerced[0];
+    const sec = if (p.present_count > 1) p.coerced[1] else @floor(@mod(cur, 60000.0) / 1000.0);
+    const ms_arg = if (p.present_count > 2) p.coerced[2] else @floor(@mod(cur, 1000.0));
     const hour_part = @floor(cur / 3600000.0) * 3600000.0;
-    const new_ms = hour_part + minute * 60000.0 + sec * 1000.0 + ms_arg;
-    inst.date_ms = new_ms;
+    const new_ms = timeClip(hour_part + minute * 60000.0 + sec * 1000.0 + ms_arg);
+    p.inst.date_ms = new_ms;
     return Value.fromDouble(new_ms);
 }
 
 fn dateSetHours(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
-    const inst = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    const cur = inst.date_ms orelse return error.NativeThrew;
+    const p = try setterPrelude(realm, this_value, args, 4);
+    const cur = p.snapshot;
     if (std.math.isNan(cur)) return Value.fromDouble(cur);
-    const hour = dateNumArg(args, 0, 0);
-    const minute = dateNumArg(args, 1, @floor(@mod(cur, 3600000.0) / 60000.0));
-    const sec = dateNumArg(args, 2, @floor(@mod(cur, 60000.0) / 1000.0));
-    const ms_arg = dateNumArg(args, 3, @floor(@mod(cur, 1000.0)));
+    const hour = p.coerced[0];
+    const minute = if (p.present_count > 1) p.coerced[1] else @floor(@mod(cur, 3600000.0) / 60000.0);
+    const sec = if (p.present_count > 2) p.coerced[2] else @floor(@mod(cur, 60000.0) / 1000.0);
+    const ms_arg = if (p.present_count > 3) p.coerced[3] else @floor(@mod(cur, 1000.0));
     const day_part = @floor(cur / 86400000.0) * 86400000.0;
-    const new_ms = day_part + hour * 3600000.0 + minute * 60000.0 + sec * 1000.0 + ms_arg;
-    inst.date_ms = new_ms;
+    const new_ms = timeClip(day_part + hour * 3600000.0 + minute * 60000.0 + sec * 1000.0 + ms_arg);
+    p.inst.date_ms = new_ms;
     return Value.fromDouble(new_ms);
 }
 
 fn dateSetDate(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
-    const inst = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    const cur = inst.date_ms orelse return error.NativeThrew;
+    const p = try setterPrelude(realm, this_value, args, 1);
+    const cur = p.snapshot;
     if (std.math.isNan(cur)) return Value.fromDouble(cur);
-    // Decompose cur to (year, month, day) then re-encode with new day.
     const ymd = msToYMD(cur);
     const time_part = @mod(cur, 86400000.0);
-    const new_day = dateNumArg(args, 0, @floatFromInt(ymd.day));
-    const new_ms = ymdToMs(ymd.year, ymd.month, new_day) * 86400000.0 + time_part;
-    inst.date_ms = new_ms;
+    const new_day = p.coerced[0];
+    const new_ms = timeClip(ymdToMs(@floatFromInt(ymd.year), @floatFromInt(ymd.month), new_day) * 86400000.0 + time_part);
+    p.inst.date_ms = new_ms;
     return Value.fromDouble(new_ms);
 }
 
 fn dateSetMonth(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
-    const inst = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    const cur = inst.date_ms orelse return error.NativeThrew;
+    const p = try setterPrelude(realm, this_value, args, 2);
+    const cur = p.snapshot;
     if (std.math.isNan(cur)) return Value.fromDouble(cur);
     const ymd = msToYMD(cur);
     const time_part = @mod(cur, 86400000.0);
-    const new_month = dateNumArg(args, 0, @floatFromInt(ymd.month));
-    const new_day = dateNumArg(args, 1, @floatFromInt(ymd.day));
-    const new_ms = ymdToMs(ymd.year, new_month, new_day) * 86400000.0 + time_part;
-    inst.date_ms = new_ms;
+    const new_month = p.coerced[0];
+    const new_day = if (p.present_count > 1) p.coerced[1] else @as(f64, @floatFromInt(ymd.day));
+    const new_ms = timeClip(ymdToMs(@floatFromInt(ymd.year), new_month, new_day) * 86400000.0 + time_part);
+    p.inst.date_ms = new_ms;
     return Value.fromDouble(new_ms);
 }
 
 fn dateSetFullYear(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
-    const inst = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    const cur = inst.date_ms orelse return error.NativeThrew;
+    // setFullYear is special: per §21.4.4.21, if t is NaN we
+    // *don't* return NaN — we treat t as +0 and continue. So no
+    // snapshot-NaN bail. Args still coerce in spec order before
+    // the t-check.
+    const p = try setterPrelude(realm, this_value, args, 3);
+    const cur = p.snapshot;
     const ymd = if (std.math.isNan(cur)) YMD{ .year = 1970, .month = 0, .day = 1 } else msToYMD(cur);
     const time_part = if (std.math.isNan(cur)) 0.0 else @mod(cur, 86400000.0);
-    const new_year = dateNumArg(args, 0, @floatFromInt(ymd.year));
-    const new_month = dateNumArg(args, 1, @floatFromInt(ymd.month));
-    const new_day = dateNumArg(args, 2, @floatFromInt(ymd.day));
-    const new_ms = ymdToMs(new_year, new_month, new_day) * 86400000.0 + time_part;
-    inst.date_ms = new_ms;
+    const new_year = p.coerced[0];
+    const new_month = if (p.present_count > 1) p.coerced[1] else @as(f64, @floatFromInt(ymd.month));
+    const new_day = if (p.present_count > 2) p.coerced[2] else @as(f64, @floatFromInt(ymd.day));
+    const new_ms = timeClip(ymdToMs(new_year, new_month, new_day) * 86400000.0 + time_part);
+    p.inst.date_ms = new_ms;
     return Value.fromDouble(new_ms);
 }
 
