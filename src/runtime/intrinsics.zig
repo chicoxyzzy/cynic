@@ -182,7 +182,18 @@ pub fn install(realm: *Realm) !void {
     // with `[[BooleanData]]: false`. `Boolean.prototype.toString()` /
     // `.valueOf()` calls directly on the prototype unbox it.
     if (heap_mod.valueAsFunction(realm.globals.get("Boolean").?)) |bool_ctor| {
-        if (bool_ctor.prototype) |bp| bp.boxed_primitive = Value.false_;
+        if (bool_ctor.prototype) |bp| {
+            bp.boxed_primitive = Value.false_;
+            // §20.3.3.2 / §20.3.3.3 — install `valueOf` and
+            // `toString` on `Boolean.prototype`. Without these,
+            // `new Boolean(false) - 1` falls through to the
+            // inherited `Object.prototype.valueOf` (returns the
+            // wrapper, still an object), then to
+            // `Object.prototype.toString` ("[object Boolean]"),
+            // and finally ToNumber → NaN.
+            try installNativeMethodOnProto(realm, bp, "valueOf", booleanProtoValueOf, 0);
+            try installNativeMethodOnProto(realm, bp, "toString", booleanProtoToString, 0);
+        }
     }
 
     // String.prototype methods all live in builtins/string.zig.
@@ -743,6 +754,38 @@ fn booleanConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
         return this_value;
     }
     return primitive;
+}
+
+/// §20.3.3.3 thisBooleanValue / Boolean.prototype.valueOf — return
+/// the underlying primitive bool. Receivers that aren't bool /
+/// Boolean wrapper get a TypeError per the abstract op.
+fn booleanProtoValueOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    if (this_value.isBool()) return this_value;
+    if (heap_mod.valueAsPlainObject(this_value)) |inst| {
+        if (inst.boxed_primitive) |bp| {
+            if (bp.isBool()) return bp;
+        }
+    }
+    return throwTypeError(realm, "Boolean.prototype.valueOf called on non-Boolean");
+}
+
+/// §20.3.3.2 Boolean.prototype.toString — `"true"` / `"false"`.
+/// Throws TypeError when the receiver isn't a bool / Boolean
+/// wrapper.
+fn booleanProtoToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const b = blk: {
+        if (this_value.isBool()) break :blk this_value.asBool();
+        if (heap_mod.valueAsPlainObject(this_value)) |inst| {
+            if (inst.boxed_primitive) |bp| {
+                if (bp.isBool()) break :blk bp.asBool();
+            }
+        }
+        return throwTypeError(realm, "Boolean.prototype.toString called on non-Boolean");
+    };
+    const s = realm.heap.allocateString(if (b) "true" else "false") catch return error.OutOfMemory;
+    return Value.fromString(s);
 }
 
 pub fn coerceToNumber(v: Value) Value {

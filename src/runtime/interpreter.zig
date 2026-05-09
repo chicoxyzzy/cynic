@@ -1381,135 +1381,176 @@ fn runFrames(
             .lda_hole => acc = Value.hole_,
 
             // ── Arithmetic — `acc = reg <op> acc` ───────────────────────
+            // Per §13.15.4 ApplyStringOrNumericBinaryOperator the
+            // helpers handle ToPrimitive / ToNumeric themselves —
+            // user `valueOf` / `toString` / `Symbol.toPrimitive`
+            // bodies can throw, BigInt+Number is a TypeError, etc.
+            // A null return means an exception is pending; spill
+            // the frame and unwind.
             .add => {
                 const r = code[ip];
                 ip += 1;
-                if (heap_mod.isBigInt(registers[r]) or heap_mod.isBigInt(acc)) {
-                    if (try bigintArith(realm, .add, registers[r], acc)) |res| {
-                        acc = res;
-                    } else {
-                        const ex = realm.pending_exception orelse try makeTypeError(realm, "BigInt op");
-                        realm.pending_exception = null;
-                        f.ip = ip;
-                        f.accumulator = acc;
-                        committed = true;
-                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                        continue;
-                    }
-                } else {
-                    acc = try addValues(realm, registers[r], acc);
+                if (try addValues(realm, registers[r], acc)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip; f.accumulator = acc; committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
                 }
             },
             .sub => {
                 const r = code[ip];
                 ip += 1;
-                if (heap_mod.isBigInt(registers[r]) or heap_mod.isBigInt(acc)) {
-                    if (try bigintArith(realm, .sub, registers[r], acc)) |res| acc = res else {
-                        const ex = realm.pending_exception orelse try makeTypeError(realm, "BigInt op");
-                        realm.pending_exception = null;
-                        f.ip = ip; f.accumulator = acc; committed = true;
-                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                        continue;
-                    }
-                } else acc = numericBinary(.sub, registers[r], acc);
+                if (try numericBinary(realm, .sub, registers[r], acc)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip; f.accumulator = acc; committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
+                }
             },
             .mul => {
                 const r = code[ip];
                 ip += 1;
-                if (heap_mod.isBigInt(registers[r]) or heap_mod.isBigInt(acc)) {
-                    if (try bigintArith(realm, .mul, registers[r], acc)) |res| acc = res else {
-                        const ex = realm.pending_exception orelse try makeTypeError(realm, "BigInt op");
-                        realm.pending_exception = null;
-                        f.ip = ip; f.accumulator = acc; committed = true;
-                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                        continue;
-                    }
-                } else acc = numericBinary(.mul, registers[r], acc);
+                if (try numericBinary(realm, .mul, registers[r], acc)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip; f.accumulator = acc; committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
+                }
             },
             .div => {
                 const r = code[ip];
                 ip += 1;
-                if (heap_mod.isBigInt(registers[r]) or heap_mod.isBigInt(acc)) {
-                    if (try bigintArith(realm, .div, registers[r], acc)) |res| acc = res else {
-                        const ex = realm.pending_exception orelse try makeTypeError(realm, "BigInt op");
-                        realm.pending_exception = null;
-                        f.ip = ip; f.accumulator = acc; committed = true;
-                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                        continue;
-                    }
-                } else acc = numericBinary(.div, registers[r], acc);
+                if (try numericBinary(realm, .div, registers[r], acc)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip; f.accumulator = acc; committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
+                }
             },
             .mod => {
                 const r = code[ip];
                 ip += 1;
-                if (heap_mod.isBigInt(registers[r]) or heap_mod.isBigInt(acc)) {
-                    if (try bigintArith(realm, .mod, registers[r], acc)) |res| acc = res else {
-                        const ex = realm.pending_exception orelse try makeTypeError(realm, "BigInt op");
-                        realm.pending_exception = null;
-                        f.ip = ip; f.accumulator = acc; committed = true;
-                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                        continue;
-                    }
-                } else acc = numericBinary(.mod, registers[r], acc);
+                if (try numericBinary(realm, .mod, registers[r], acc)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip; f.accumulator = acc; committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
+                }
             },
             .pow => {
                 const r = code[ip];
                 ip += 1;
-                if (heap_mod.isBigInt(registers[r]) or heap_mod.isBigInt(acc)) {
-                    if (try bigintArith(realm, .pow, registers[r], acc)) |res| acc = res else {
-                        const ex = realm.pending_exception orelse try makeTypeError(realm, "BigInt op");
-                        realm.pending_exception = null;
-                        f.ip = ip; f.accumulator = acc; committed = true;
-                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                        continue;
-                    }
-                } else acc = numericBinary(.pow, registers[r], acc);
+                if (try numericBinary(realm, .pow, registers[r], acc)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip; f.accumulator = acc; committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
+                }
             },
 
             // ── Bitwise — both operands are ToInt32-coerced ─────────────
             .bit_and => {
                 const r = code[ip];
                 ip += 1;
-                acc = bitwiseBinary(.bit_and, registers[r], acc);
+                if (try bitwiseBinary(realm, .bit_and, registers[r], acc)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip; f.accumulator = acc; committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
+                }
             },
             .bit_or => {
                 const r = code[ip];
                 ip += 1;
-                acc = bitwiseBinary(.bit_or, registers[r], acc);
+                if (try bitwiseBinary(realm, .bit_or, registers[r], acc)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip; f.accumulator = acc; committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
+                }
             },
             .bit_xor => {
                 const r = code[ip];
                 ip += 1;
-                acc = bitwiseBinary(.bit_xor, registers[r], acc);
+                if (try bitwiseBinary(realm, .bit_xor, registers[r], acc)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip; f.accumulator = acc; committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
+                }
             },
             .shl => {
                 const r = code[ip];
                 ip += 1;
-                acc = bitwiseBinary(.shl, registers[r], acc);
+                if (try bitwiseBinary(realm, .shl, registers[r], acc)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip; f.accumulator = acc; committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
+                }
             },
             .shr => {
                 const r = code[ip];
                 ip += 1;
-                acc = bitwiseBinary(.shr, registers[r], acc);
+                if (try bitwiseBinary(realm, .shr, registers[r], acc)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip; f.accumulator = acc; committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
+                }
             },
             .shr_u => {
                 const r = code[ip];
                 ip += 1;
-                acc = bitwiseBinary(.shr_u, registers[r], acc);
+                if (try bitwiseBinary(realm, .shr_u, registers[r], acc)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip; f.accumulator = acc; committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
+                }
             },
 
             // ── Unary on accumulator ────────────────────────────────────
             .negate => {
-                if (heap_mod.valueAsBigInt(acc)) |bi| {
-                    const neg = realm.heap.allocateBigInt(-bi.value) catch return error.OutOfMemory;
-                    acc = heap_mod.taggedBigInt(neg);
-                } else {
-                    acc = unaryNegate(acc);
+                if (try unaryNegate(realm, acc)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip; f.accumulator = acc; committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
                 }
             },
-            .bit_not => acc = unaryBitNot(acc),
+            .bit_not => {
+                if (try unaryBitNot(realm, acc)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip; f.accumulator = acc; committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
+                }
+            },
             .logical_not => acc = Value.fromBool(!toBoolean(acc)),
-            .to_number => acc = unaryToNumber(acc),
+            .to_number => {
+                if (try unaryToNumber(realm, acc)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip; f.accumulator = acc; committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
+                }
+            },
             .typeof_ => acc = try typeOf(realm, acc),
 
             // ── Comparison ──────────────────────────────────────────────

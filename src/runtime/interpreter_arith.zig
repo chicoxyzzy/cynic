@@ -158,21 +158,81 @@ pub fn bigintArith(realm: *Realm, comptime op: BigIntOp, lhs: Value, rhs: Value)
 pub const BitwiseOp = enum { bit_and, bit_or, bit_xor, shl, shr, shr_u };
 pub const RelOp = enum { lt, gt, le, ge };
 
-pub fn numericBinary(comptime op: NumericOp, lhs: Value, rhs: Value) Value {
+/// §7.1.4 ToNumeric — coerce a Value to a primitive that the
+/// numeric / bitwise operators can consume. Lands a TypeError on
+/// the realm and returns null when the operand is a Symbol (or an
+/// object whose `Symbol.toPrimitive` / `valueOf` / `toString`
+/// returns a Symbol), so callers can distinguish "operand ready"
+/// from "exception in flight". Other thrown completions from user
+/// code (a `valueOf` body that throws) propagate the same way.
+pub fn toNumericPrimitive(realm: *Realm, value: Value) RunError!?Value {
+    if (heap_mod.isSymbol(value)) {
+        realm.pending_exception = try makeTypeError(realm, "Cannot convert a Symbol to a number");
+        return null;
+    }
+    if (!value.isObject()) return value;
+    // BigInts are technically `isObject()==true` here (they live
+    // on the heap with the same top tag) but ToPrimitive is a
+    // no-op for them.
+    if (heap_mod.isBigInt(value)) return value;
+    if (heap_mod.isFunction(value) or heap_mod.isPlainObject(value)) {
+        const prim = intrinsics_mod.toPrimitive(realm, value, .number) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NativeThrew => return null,
+        };
+        if (heap_mod.isSymbol(prim)) {
+            realm.pending_exception = try makeTypeError(realm, "Cannot convert a Symbol to a number");
+            return null;
+        }
+        return prim;
+    }
+    return value;
+}
+
+pub fn numericBinary(realm: *Realm, comptime op: NumericOp, lhs: Value, rhs: Value) RunError!?Value {
+    // §13.15.4 ApplyStringOrNumericBinaryOperator step 1 — call
+    // ToPrimitive on each operand (hint "number") before any
+    // numeric coercion. Spec sequencing matters: lhs first, then
+    // rhs. A throw inside `valueOf` / `toString` / Symbol.toPrim
+    // bubbles via `pending_exception`.
+    const l = (try toNumericPrimitive(realm, lhs)) orelse return null;
+    const r = (try toNumericPrimitive(realm, rhs)) orelse return null;
+
+    // §6.1.6.2 — once both sides are primitives, BigInt + Number
+    // is an unconditional TypeError. Pure-BigInt math went through
+    // `bigintArith` upstream already; this branch only fires when
+    // one operand was a Number until valueOf produced a BigInt
+    // (or the reverse).
+    const l_is_bigint = heap_mod.isBigInt(l);
+    const r_is_bigint = heap_mod.isBigInt(r);
+    if (l_is_bigint and r_is_bigint) {
+        return (try bigintArith(realm, switch (op) {
+            .sub => .sub,
+            .mul => .mul,
+            .div => .div,
+            .mod => .mod,
+            .pow => .pow,
+        }, l, r)) orelse return null;
+    }
+    if (l_is_bigint != r_is_bigint) {
+        realm.pending_exception = try makeTypeError(realm, "Cannot mix BigInt and other types");
+        return null;
+    }
+
     // Int32 fast path — only safe when both are int32 AND the
     // mathematical result also fits without overflow / float
     // promotion. Cheaper than the double path on cold caches.
-    if (lhs.isInt32() and rhs.isInt32() and op != .div and op != .pow) {
-        const a = lhs.asInt32();
-        const b = rhs.asInt32();
+    if (l.isInt32() and r.isInt32() and op != .div and op != .pow) {
+        const a = l.asInt32();
+        const b = r.asInt32();
         switch (op) {
             .sub => {
-                const r = @subWithOverflow(a, b);
-                if (r[1] == 0) return Value.fromInt32(r[0]);
+                const o = @subWithOverflow(a, b);
+                if (o[1] == 0) return Value.fromInt32(o[0]);
             },
             .mul => {
-                const r = @mulWithOverflow(a, b);
-                if (r[1] == 0) return Value.fromInt32(r[0]);
+                const o = @mulWithOverflow(a, b);
+                if (o[1] == 0) return Value.fromInt32(o[0]);
             },
             .mod => {
                 if (b != 0) return Value.fromInt32(@mod(a, b));
@@ -182,8 +242,8 @@ pub fn numericBinary(comptime op: NumericOp, lhs: Value, rhs: Value) Value {
         // fall through to double path
     }
 
-    const a = toNumber(lhs);
-    const b = toNumber(rhs);
+    const a = toNumber(l);
+    const b = toNumber(r);
     return Value.fromDouble(switch (op) {
         .sub => a - b,
         .mul => a * b,
@@ -193,9 +253,32 @@ pub fn numericBinary(comptime op: NumericOp, lhs: Value, rhs: Value) Value {
     });
 }
 
-pub fn bitwiseBinary(comptime op: BitwiseOp, lhs: Value, rhs: Value) Value {
-    const a = toInt32(lhs);
-    const b = toInt32(rhs);
+pub fn bitwiseBinary(realm: *Realm, comptime op: BitwiseOp, lhs: Value, rhs: Value) RunError!?Value {
+    // §13.12 BitwiseOp — spec evaluates lhs then rhs, then
+    // ToNumeric on each. We already have the bytecode-evaluated
+    // values in registers, so we only owe the ToNumeric step.
+    const l = (try toNumericPrimitive(realm, lhs)) orelse return null;
+    const r = (try toNumericPrimitive(realm, rhs)) orelse return null;
+
+    // BigInt mixing — bitwise ops on BigInt are not yet supported
+    // by the interpreter, but mixed Number+BigInt must still throw
+    // TypeError per §6.1.6.2.
+    const l_is_bigint = heap_mod.isBigInt(l);
+    const r_is_bigint = heap_mod.isBigInt(r);
+    if (l_is_bigint != r_is_bigint) {
+        realm.pending_exception = try makeTypeError(realm, "Cannot mix BigInt and other types");
+        return null;
+    }
+    if (l_is_bigint and r_is_bigint) {
+        // BigInt bitwise still pending — surface a TypeError so
+        // callers see a deterministic failure rather than the
+        // Number-coerced 0 they used to get.
+        realm.pending_exception = try makeTypeError(realm, "BigInt bitwise operators not yet supported");
+        return null;
+    }
+
+    const a = toInt32(l);
+    const b = toInt32(r);
     return switch (op) {
         .bit_and => Value.fromInt32(a & b),
         .bit_or => Value.fromInt32(a | b),
@@ -212,23 +295,42 @@ pub fn bitwiseBinary(comptime op: BitwiseOp, lhs: Value, rhs: Value) Value {
     };
 }
 
-pub fn unaryNegate(v: Value) Value {
+pub fn unaryNegate(realm: *Realm, v: Value) RunError!?Value {
     if (v.isInt32()) {
         const i = v.asInt32();
         // -INT_MIN overflows; promote to double in that case.
         if (i == std.math.minInt(i32)) return Value.fromDouble(-@as(f64, @floatFromInt(i)));
         return Value.fromInt32(-i);
     }
-    return Value.fromDouble(-toNumber(v));
+    // §13.5.5 Unary `-` — ToNumeric first; BigInt negation is
+    // handled by the caller in the dispatch loop. Plain primitives
+    // and objects-with-valueOf land here.
+    const prim = (try toNumericPrimitive(realm, v)) orelse return null;
+    if (heap_mod.valueAsBigInt(prim)) |bi| {
+        const neg = realm.heap.allocateBigInt(-bi.value) catch return error.OutOfMemory;
+        return heap_mod.taggedBigInt(neg);
+    }
+    return Value.fromDouble(-toNumber(prim));
 }
 
-pub fn unaryBitNot(v: Value) Value {
-    return Value.fromInt32(~toInt32(v));
+pub fn unaryBitNot(realm: *Realm, v: Value) RunError!?Value {
+    const prim = (try toNumericPrimitive(realm, v)) orelse return null;
+    if (heap_mod.valueAsBigInt(prim)) |_| {
+        // BigInt ~ is `-(x + 1n)`. The full BigInt op suite isn't
+        // wired through bitwise yet, so surface a deterministic
+        // TypeError rather than silently coercing through
+        // toInt32 (which produces 0 for any BigInt).
+        realm.pending_exception = try makeTypeError(realm, "BigInt bitwise operators not yet supported");
+        return null;
+    }
+    return Value.fromInt32(~toInt32(prim));
 }
 
-pub fn unaryToNumber(v: Value) Value {
+pub fn unaryToNumber(realm: *Realm, v: Value) RunError!?Value {
     if (v.isInt32() or v.isDouble()) return v;
-    const d = toNumber(v);
+    const prim = (try toNumericPrimitive(realm, v)) orelse return null;
+    if (heap_mod.isBigInt(prim)) return prim;
+    const d = toNumber(prim);
     // Try int32 fast path on the way out.
     if (!std.math.isNan(d) and d == @trunc(d) and d >= std.math.minInt(i32) and d <= std.math.maxInt(i32)) {
         return Value.fromInt32(@intFromFloat(d));
@@ -237,37 +339,46 @@ pub fn unaryToNumber(v: Value) Value {
 }
 
 /// §7.1.6 / §6.1.6.1 — addition is the only operator with the
-/// string-concatenation shortcut.
-pub fn addValues(realm: *Realm, lhs: Value, rhs: Value) RunError!Value {
-    // §13.15.4 ApplyStringOrNumericBinaryOperator. Both
-    // operands first go through ToPrimitive (which consults
-    // Symbol.toPrimitive / valueOf / toString on objects).
+/// string-concatenation shortcut. Returns null when an exception
+/// is pending on the realm so the caller can unwind through the
+/// dispatch loop.
+pub fn addValues(realm: *Realm, lhs: Value, rhs: Value) RunError!?Value {
+    // §13.15.4 ApplyStringOrNumericBinaryOperator. Both operands
+    // go through ToPrimitive (which consults
+    // `Symbol.toPrimitive` / `valueOf` / `toString` on objects)
+    // before any numeric or string coercion. Throws inside user
+    // code surface via `pending_exception`.
     var l = lhs;
     var r = rhs;
     if (l.isObject() or r.isObject()) {
         l = intrinsics_mod.toPrimitive(realm, l, .default) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.NativeThrew => {
-                const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
-                realm.pending_exception = null;
-                return ex;
-            },
+            error.NativeThrew => return null,
         };
         r = intrinsics_mod.toPrimitive(realm, r, .default) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.NativeThrew => {
-                const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
-                realm.pending_exception = null;
-                return ex;
-            },
+            error.NativeThrew => return null,
         };
     }
-    if (heap_mod.isBigInt(l) and heap_mod.isBigInt(r)) {
-        return (try bigintArith(realm, .add, l, r)) orelse {
-            const ex = realm.pending_exception orelse try makeTypeError(realm, "BigInt op");
-            realm.pending_exception = null;
-            return ex;
-        };
+    // §13.15.4 — Symbol primitives never participate in `+`. Even
+    // when one side is already string-typed, a Symbol on the other
+    // side is a TypeError per §7.1.4.1 (the eventual ToString /
+    // ToNumber call rejects it).
+    if (heap_mod.isSymbol(l) or heap_mod.isSymbol(r)) {
+        realm.pending_exception = try makeTypeError(realm, "Cannot convert a Symbol to a primitive value");
+        return null;
+    }
+    const l_is_bigint = heap_mod.isBigInt(l);
+    const r_is_bigint = heap_mod.isBigInt(r);
+    if (l_is_bigint and r_is_bigint) {
+        return (try bigintArith(realm, .add, l, r)) orelse return null;
+    }
+    if (l_is_bigint != r_is_bigint and !l.isString() and !r.isString()) {
+        // Mixed Number + BigInt is a TypeError; if either side is
+        // a string the spec routes to string-concatenation
+        // (BigInt's ToString is well-defined).
+        realm.pending_exception = try makeTypeError(realm, "Cannot mix BigInt and other types");
+        return null;
     }
     // Both numbers: int32 fast path with overflow fallback to f64.
     if ((l.isInt32() or l.isDouble()) and (r.isInt32() or r.isDouble())) {
