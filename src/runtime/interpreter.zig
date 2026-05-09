@@ -202,7 +202,21 @@ pub fn run(allocator: std.mem.Allocator, realm: *Realm, chunk: *const Chunk) Run
 
     // Top-level frame. `env` is left null; the script's leading
     // `MakeEnvironment` instruction is the one that allocates it.
-    // §9.4.7 — `this` at the top of a strict script is undefined.
+    //
+    // §10.4.7 — top-level `this` resolves through the
+    // global / module Environment Record:
+    //   • Module → undefined.
+    //   • Script (strict or sloppy) → the global object. Strict
+    //     mode only changes `this` for *function* calls; the
+    //     script-body `this` is always GlobalThis (§9.3.4).
+    // We tell scripts apart from modules by inspecting
+    // `realm.current_module`, which `loadModule` sets before
+    // delegating to `run`.
+    const top_level_this: Value = blk: {
+        if (realm.current_module != null) break :blk Value.undefined_;
+        if (realm.globals.get("globalThis")) |gt| break :blk gt;
+        break :blk Value.undefined_;
+    };
     {
         const main_regs = try allocator.alloc(Value, chunk.register_count);
         @memset(main_regs, Value.undefined_);
@@ -212,7 +226,7 @@ pub fn run(allocator: std.mem.Allocator, realm: *Realm, chunk: *const Chunk) Run
             .accumulator = Value.undefined_,
             .registers = main_regs,
             .env = null,
-            .this_value = Value.undefined_,
+            .this_value = top_level_this,
             .home_object = null,
             .argc = 0,
         });
