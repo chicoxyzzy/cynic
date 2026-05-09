@@ -714,12 +714,16 @@ pub fn openForInIterator(
 
 /// `next()` for the synthesised array-like iterator. Reads
 /// `this.__cynic_iter_target__[idx]`, increments `idx`, returns
-/// `{value, done}`. Done when `idx >= length`. Strings get
-/// per-codepoint slicing (`s[i]` returns the i-th character as
-/// a one-char string). later: respect surrogate pairs (§7.4.6
-/// CreateIterResultObject doesn't, but `String.prototype[
-/// @@iterator]` is supposed to walk by UTF-16 code points;
-/// Cynic walks by ASCII for now).
+/// `{value, done}`. Done when `idx >= length`.
+///
+/// Strings get per-codepoint walking per §22.1.5.1
+/// `String.prototype[@@iterator]` — `idx` is the byte offset
+/// into the WTF-8 backing storage, advanced by the length of
+/// the leading-byte's encoded sequence. The yielded value is
+/// a fresh string containing exactly the codepoint's bytes
+/// (1 byte for ASCII, 4 bytes for an astral codepoint, 3 bytes
+/// for a lone surrogate stored as WTF-8). Done when `idx >=
+/// bytes.len`.
 fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
     _ = args;
     const iter_obj = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
@@ -727,19 +731,48 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
     const idx_v = iter_obj.get("__cynic_iter_idx__");
     const idx: i32 = if (idx_v.isInt32()) idx_v.asInt32() else 0;
 
-    // Length: from `target.length` if it's an object, or from the
-    // string's byte length if it's a string.
+    const result = realm.heap.allocateObject() catch return error.OutOfMemory;
+    result.prototype = realm.intrinsics.object_prototype;
+
+    if (target.isString()) {
+        const s: *@import("string.zig").JSString = @ptrCast(@alignCast(target.asString()));
+        const start: usize = @intCast(idx);
+        if (start >= s.bytes.len) {
+            result.set(realm.allocator, "value", Value.undefined_) catch return error.OutOfMemory;
+            result.set(realm.allocator, "done", Value.true_) catch return error.OutOfMemory;
+            return heap_mod.taggedObject(result);
+        }
+        const b0 = s.bytes[start];
+        // Decode the leading-byte width — UTF-8 (and WTF-8) sequence
+        // lengths are 1/2/3/4 by the high bits of b0. We accept
+        // anything well-formed AND lone-surrogate 3-byte sequences
+        // (0xED 0xA0..0xBF 0x80..0xBF). Malformed bytes fall back
+        // to single-byte advance so we don't loop forever.
+        var width: usize = 1;
+        if (b0 < 0x80) {
+            width = 1;
+        } else if (b0 & 0xE0 == 0xC0) {
+            width = 2;
+        } else if (b0 & 0xF0 == 0xE0) {
+            width = 3;
+        } else if (b0 & 0xF8 == 0xF0) {
+            width = 4;
+        }
+        if (start + width > s.bytes.len) width = 1;
+        const sub = realm.heap.allocateString(s.bytes[start .. start + width]) catch return error.OutOfMemory;
+        result.set(realm.allocator, "value", Value.fromString(sub)) catch return error.OutOfMemory;
+        result.set(realm.allocator, "done", Value.false_) catch return error.OutOfMemory;
+        iter_obj.set(realm.allocator, "__cynic_iter_idx__", Value.fromInt32(idx + @as(i32, @intCast(width)))) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(result);
+    }
+
+    // Length: from `target.length` if it's an object.
     var length: i32 = 0;
     if (heap_mod.valueAsPlainObject(target)) |obj| {
         const len_v = obj.get("length");
         if (len_v.isInt32()) length = len_v.asInt32() else if (len_v.isDouble()) length = @intFromFloat(len_v.asDouble());
-    } else if (target.isString()) {
-        const s: *@import("string.zig").JSString = @ptrCast(@alignCast(target.asString()));
-        length = @intCast(@min(s.bytes.len, std.math.maxInt(i32)));
     }
 
-    const result = realm.heap.allocateObject() catch return error.OutOfMemory;
-    result.prototype = realm.intrinsics.object_prototype;
     if (idx >= length) {
         result.set(realm.allocator, "value", Value.undefined_) catch return error.OutOfMemory;
         result.set(realm.allocator, "done", Value.true_) catch return error.OutOfMemory;
@@ -751,13 +784,6 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
         var ibuf: [16]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
         elem = obj.get(islice);
-    } else if (target.isString()) {
-        const s: *@import("string.zig").JSString = @ptrCast(@alignCast(target.asString()));
-        const start: usize = @intCast(idx);
-        if (start < s.bytes.len) {
-            const sub = realm.heap.allocateString(s.bytes[start .. start + 1]) catch return error.OutOfMemory;
-            elem = Value.fromString(sub);
-        }
     }
     result.set(realm.allocator, "value", elem) catch return error.OutOfMemory;
     result.set(realm.allocator, "done", Value.false_) catch return error.OutOfMemory;

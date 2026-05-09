@@ -224,7 +224,7 @@ pub fn decodeStringContent(allocator: std.mem.Allocator, inner: []const u8) ![]u
                         if (cp > 0x10FFFF) return error.BadLiteral;
                     }
                     if (j >= inner.len or inner[j] != '}') return error.BadLiteral;
-                    try appendCodepointUtf8(allocator, &out, @intCast(cp));
+                    try appendCodepointWtf8(allocator, &out, @intCast(cp));
                     i = j + 1;
                 } else {
                     if (i + 6 > inner.len) return error.BadLiteral;
@@ -233,7 +233,33 @@ pub fn decodeStringContent(allocator: std.mem.Allocator, inner: []const u8) ![]u
                         const d = hexDigit(inner[i + 2 + k]) orelse return error.BadLiteral;
                         cp = (cp << 4) | d;
                     }
-                    try appendCodepointUtf8(allocator, &out, @intCast(cp));
+                    // §12.8.4.3 SV — a `\uHIGH` immediately followed
+                    // by `\uLOW` (HIGH in 0xD800..0xDBFF, LOW in
+                    // 0xDC00..0xDFFF) decodes to the combined astral
+                    // codepoint per UTF16Decode. Without this we'd
+                    // emit two lone-surrogate WTF-8 sequences for
+                    // what JS treats as a single character.
+                    if (cp >= 0xD800 and cp <= 0xDBFF and
+                        i + 12 <= inner.len and
+                        inner[i + 6] == '\\' and inner[i + 7] == 'u' and inner[i + 8] != '{')
+                    {
+                        var lo: u32 = 0;
+                        var ok = true;
+                        for (0..4) |k| {
+                            const d = hexDigit(inner[i + 8 + k]) orelse {
+                                ok = false;
+                                break;
+                            };
+                            lo = (lo << 4) | d;
+                        }
+                        if (ok and lo >= 0xDC00 and lo <= 0xDFFF) {
+                            const combined: u32 = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                            try appendCodepointWtf8(allocator, &out, @intCast(combined));
+                            i += 12;
+                            continue;
+                        }
+                    }
+                    try appendCodepointWtf8(allocator, &out, @intCast(cp));
                     i += 6;
                 }
             },
@@ -261,6 +287,31 @@ fn appendCodepointUtf8(allocator: std.mem.Allocator, out: *std.ArrayListUnmanage
     var buf: [4]u8 = undefined;
     const n = std.unicode.utf8Encode(cp, &buf) catch return error.BadLiteral;
     try out.appendSlice(allocator, buf[0..n]);
+}
+
+/// WTF-8 encode (Unicode TR-26) — same as UTF-8 but surrogate
+/// halves (U+D800..U+DFFF) are emitted as their natural 3-byte
+/// sequences. This lets Cynic round-trip lone surrogates in
+/// JS string literals (§6.1.4 — Strings are sequences of code
+/// units, not codepoints). Standard UTF-8 readers reject the
+/// resulting bytes; Cynic's string-iteration / printing paths
+/// must be surrogate-aware.
+fn appendCodepointWtf8(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), cp: u21) !void {
+    if (cp < 0x80) {
+        try out.append(allocator, @intCast(cp));
+    } else if (cp < 0x800) {
+        try out.append(allocator, @intCast(0xC0 | (cp >> 6)));
+        try out.append(allocator, @intCast(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+        try out.append(allocator, @intCast(0xE0 | (cp >> 12)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 6) & 0x3F)));
+        try out.append(allocator, @intCast(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0x10FFFF) {
+        try out.append(allocator, @intCast(0xF0 | (cp >> 18)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 12) & 0x3F)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 6) & 0x3F)));
+        try out.append(allocator, @intCast(0x80 | (cp & 0x3F)));
+    } else return error.BadLiteral;
 }
 
 // ---------------------------------------------------------------------------
