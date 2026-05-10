@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 |
-| **runtime** | 51.97 % | 63.12 % | 24073 / 46320 |
+| **runtime** | 52.42 % | 63.66 % | 24282 / 46320 |
 
 ## Where the runtime stands, by area
 
@@ -23,13 +23,12 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_1000+ fails_** | | | | | |
-| `language/expressions` | 5918 | 4149 | 971 | 54 % | 59 % |
-| `language/statements` | 4462 | 4208 | 667 | 48 % | 51 % |
+| `language/expressions` | 5919 | 4148 | 971 | 54 % | 59 % |
+| `language/statements` | 4463 | 4207 | 667 | 48 % | 51 % |
 | **_100–999 fails_** | | | | | |
 | `built-ins/Array` | 2053 | 817 | 211 | 67 % | 72 % |
 | `built-ins/Function` | 173 | 247 | 89 | 34 % | 41 % |
-| `built-ins/Iterator` | 280 | 224 | 6 | 55 % | 56 % |
-| `built-ins/Object` | 2730 | 596 | 85 | 80 % | 82 % |
+| `built-ins/Object` | 2732 | 594 | 85 | 80 % | 82 % |
 | `built-ins/Promise` | 459 | 215 | 3 | 68 % | 68 % |
 | `built-ins/Proxy` | 121 | 178 | 12 | 39 % | 40 % |
 | `built-ins/RegExp` | 1130 | 588 | 161 | 60 % | 66 % |
@@ -47,9 +46,9 @@ browser-era built-ins …).
 | `built-ins/DataView` | 421 | 68 | 72 | 75 % | 86 % |
 | `built-ins/Date` | 502 | 84 | 8 | 85 % | 86 % |
 | `built-ins/Error` | 33 | 25 | 0 | 57 % | 57 % |
-| `built-ins/FinalizationRegistry` | 0 | 47 | 0 | 0 % | 0 % |
 | `built-ins/GeneratorFunction` | 4 | 19 | 0 | 17 % | 17 % |
 | `built-ins/GeneratorPrototype` | 26 | 35 | 0 | 43 % | 43 % |
+| `built-ins/Iterator` | 423 | 81 | 6 | 83 % | 84 % |
 | `built-ins/JSON` | 70 | 73 | 22 | 42 % | 49 % |
 | `built-ins/Map` | 142 | 61 | 1 | 70 % | 70 % |
 | `built-ins/MapIteratorPrototype` | 1 | 10 | 0 | 9 % | 9 % |
@@ -62,7 +61,6 @@ browser-era built-ins …).
 | `built-ins/Symbol` | 41 | 49 | 8 | 42 % | 46 % |
 | `built-ins/ThrowTypeError` | 0 | 14 | 0 | 0 % | 0 % |
 | `built-ins/WeakMap` | 120 | 21 | 0 | 85 % | 85 % |
-| `built-ins/WeakRef` | 0 | 29 | 0 | 0 % | 0 % |
 | `built-ins/WeakSet` | 71 | 14 | 0 | 84 % | 84 % |
 | `built-ins/encodeURI` | 17 | 14 | 0 | 55 % | 55 % |
 | `built-ins/encodeURIComponent` | 16 | 15 | 0 | 52 % | 52 % |
@@ -84,10 +82,12 @@ browser-era built-ins …).
 | `built-ins/AsyncFunction` | 10 | 8 | 0 | 56 % | 56 % |
 | `built-ins/AsyncIteratorPrototype` | 0 | 4 | 9 | 0 % | 0 % |
 | `built-ins/Boolean` | 43 | 8 | 0 | 84 % | 84 % |
+| `built-ins/FinalizationRegistry` | 40 | 7 | 0 | 85 % | 85 % |
 | `built-ins/Infinity` | 1 | 3 | 2 | 17 % | 25 % |
 | `built-ins/Math` | 304 | 8 | 15 | 93 % | 97 % |
 | `built-ins/NaN` | 1 | 3 | 2 | 17 % | 25 % |
 | `built-ins/StringIteratorPrototype` | 2 | 5 | 0 | 29 % | 29 % |
+| `built-ins/WeakRef` | 22 | 7 | 0 | 76 % | 76 % |
 | `built-ins/decodeURI` | 48 | 7 | 0 | 87 % | 87 % |
 | `built-ins/decodeURIComponent` | 50 | 6 | 0 | 89 % | 89 % |
 | `built-ins/parseFloat` | 50 | 4 | 0 | 93 % | 93 % |
@@ -135,12 +135,20 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-10 — cynic `735c016`, test262 `d0c1b455`
+### 2026-05-10 — cynic `bd53b8a`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 | +464 |
-| **runtime** | 51.97 % | 63.12 % | 24073 / 46320 | +160 |
+| **runtime** | 52.42 % | 63.66 % | 24282 / 46320 | +369 |
+
+Biggest movers (runtime):
+
+- `built-ins/Iterator` +143
+- `built-ins/FinalizationRegistry` +40
+- `built-ins/WeakRef` +22
+- `built-ins/Object` +2
+- `language/expressions` +1
 
 ### 2026-05-09 — cynic `fcc5543`, test262 `d0c1b455`
 
