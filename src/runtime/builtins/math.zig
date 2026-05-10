@@ -158,7 +158,14 @@ fn mathCbrt(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
 fn mathPow(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = realm;
     _ = this_value;
-    return mathDouble(std.math.pow(f64, mathArg(args, 0), mathArg(args, 1)));
+    // §21.3.2.27 Math.pow — same special cases as the `**`
+    // operator (§6.1.6.1.3): `Math.pow(±1, ±∞) === NaN` despite
+    // IEEE 754 `pow` returning 1.
+    const a = mathArg(args, 0);
+    const b = mathArg(args, 1);
+    if (std.math.isNan(b)) return mathDouble(std.math.nan(f64));
+    if (std.math.isInf(b) and (a == 1.0 or a == -1.0)) return mathDouble(std.math.nan(f64));
+    return mathDouble(std.math.pow(f64, a, b));
 }
 fn mathExp(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = realm;
@@ -225,7 +232,10 @@ fn mathMin(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
     while (i < args.len) : (i += 1) {
         const v = mathArg(args, i);
         if (std.math.isNan(v)) return mathDouble(v);
-        if (v < best) best = v;
+        // §21.3.2.25 — `Math.min(-0, +0)` returns -0 even though
+        // IEEE 754 treats them as equal. Spec rule: -0 < +0
+        // for the purposes of Math.min/max.
+        if (v < best or (v == 0 and best == 0 and std.math.signbit(v) and !std.math.signbit(best))) best = v;
     }
     return mathDouble(best);
 }
@@ -239,7 +249,8 @@ fn mathMax(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
     while (i < args.len) : (i += 1) {
         const v = mathArg(args, i);
         if (std.math.isNan(v)) return mathDouble(v);
-        if (v > best) best = v;
+        // §21.3.2.24 — `Math.max(-0, +0)` returns +0; +0 > -0.
+        if (v > best or (v == 0 and best == 0 and !std.math.signbit(v) and std.math.signbit(best))) best = v;
     }
     return mathDouble(best);
 }

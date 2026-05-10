@@ -1058,6 +1058,10 @@ pub fn stringifyArg(realm: *Realm, v: Value) NativeError!*JSString {
             const d = v.asDouble();
             if (std.math.isNan(d)) break :blk "NaN";
             if (std.math.isInf(d)) break :blk if (d > 0) "Infinity" else "-Infinity";
+            // §6.1.6.1.13 Number::toString step 2 — both +0 and
+            // -0 stringify as `"0"`. The internal sign survives
+            // for SameValue, but ToString collapses them.
+            if (d == 0) break :blk "0";
             // §6.1.6.1.20 — switch to exponential notation for
             // very large / very small magnitudes so the formatted
             // result fits in our scratch buffer.

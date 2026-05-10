@@ -249,8 +249,19 @@ pub fn numericBinary(realm: *Realm, comptime op: NumericOp, lhs: Value, rhs: Val
         .mul => a * b,
         .div => a / b,
         .mod => @mod(a, b),
-        .pow => std.math.pow(f64, a, b),
+        .pow => jsPow(a, b),
     });
+}
+
+/// §6.1.6.1.3 Number::exponentiate — adds the JS spec's special
+/// cases on top of IEEE 754 `pow`. The relevant divergence:
+/// when `|base| == 1` and the exponent is ±∞, the spec returns
+/// NaN. `std.math.pow` returns 1 in that case (and 0 for `0 ** anything`
+/// which is correct).
+fn jsPow(a: f64, b: f64) f64 {
+    if (std.math.isNan(b)) return std.math.nan(f64);
+    if (std.math.isInf(b) and (a == 1.0 or a == -1.0)) return std.math.nan(f64);
+    return std.math.pow(f64, a, b);
 }
 
 pub fn bitwiseBinary(realm: *Realm, comptime op: BitwiseOp, lhs: Value, rhs: Value) RunError!?Value {
@@ -300,6 +311,11 @@ pub fn unaryNegate(realm: *Realm, v: Value) RunError!?Value {
         const i = v.asInt32();
         // -INT_MIN overflows; promote to double in that case.
         if (i == std.math.minInt(i32)) return Value.fromDouble(-@as(f64, @floatFromInt(i)));
+        // -0 must round-trip as Double — the SMI representation
+        // collapses sign on zero, but §6.1.6.1 NumberValue
+        // distinguishes +0 from -0 so `Object.is(-0, 0)` is false
+        // and `1 / (-0) === -Infinity`.
+        if (i == 0) return Value.fromDouble(-0.0);
         return Value.fromInt32(-i);
     }
     // §13.5.5 Unary `-` — ToNumeric first; BigInt negation is
