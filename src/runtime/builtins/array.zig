@@ -47,6 +47,17 @@ const objectFromThis = intrinsics.objectFromThis;
 /// the per-method wiring).
 pub fn install(realm: *Realm) !void {
     if (realm.intrinsics.array_prototype) |arr_proto| {
+        // §23.1.3 — %Array.prototype% is an Array exotic with an
+        // own `length` property, value 0, descriptor `{writable:
+        // true, enumerable: false, configurable: false}`. Without
+        // it `Array.prototype.length` reads as `undefined` and
+        // `Object.getOwnPropertyDescriptor(Array.prototype,
+        // "length")` returns null.
+        try arr_proto.setWithFlags(realm.allocator, "length", Value.fromInt32(0), .{
+            .writable = true,
+            .enumerable = false,
+            .configurable = false,
+        });
         try installNativeMethodOnProto(realm, arr_proto, "push", arrayPush, 1);
         try installNativeMethodOnProto(realm, arr_proto, "pop", arrayPop, 0);
         try installNativeMethodOnProto(realm, arr_proto, "indexOf", arrayIndexOf, 1);
