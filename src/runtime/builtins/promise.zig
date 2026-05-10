@@ -99,6 +99,119 @@ fn allocatePromise(realm: *Realm, state: PromiseState, value: Value) !Value {
 /// `Promise.reject` / `Promise.all` / etc. to honor the
 /// receiver constructor for subclassing
 /// (`SubPromise.resolve(x) instanceof SubPromise`).
+/// §27.2.1.5 NewPromiseCapability(C). Builds a `{promise,
+/// resolve, reject}` triple by calling `C` as a constructor with
+/// a closure-shaped executor that captures the resolve/reject
+/// arguments. The executor is GetCapabilitiesExecutor (§27.2.1.5.1):
+/// it stores the args into the capability and **throws TypeError
+/// on a second call**.
+///
+/// User code reaches this through `Promise.{all, allSettled, race,
+/// any, resolve, reject}.call(C, …)` — every aggregator has to
+/// build a fresh capability through the constructor, so a
+/// subclassed Promise can intercept (or a poisoned constructor
+/// can reject before any iteration starts).
+pub const PromiseCapability = struct {
+    promise: Value,
+    resolve: *JSFunction,
+    reject: *JSFunction,
+};
+
+/// Native impl behind the executor JSFunction. The executor is
+/// allocated as a bound function whose `bound_this` is the state
+/// JSObject that records the resolve / reject pair; calls dispatch
+/// through `bound_target` so `this_value` here is the state.
+fn capabilityExecutorImpl(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const state = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "capability executor: state not bound");
+    // §27.2.1.5.1 GetCapabilitiesExecutor — second call is a
+    // TypeError. We mark the slots present once the first call
+    // populates them; the sentinel "__cynic_cap_called__" guards
+    // against re-population.
+    if (state.hasOwn("__cynic_cap_called__")) {
+        return throwTypeError(realm, "capability executor: already called");
+    }
+    const resolve_v = if (args.len >= 1) args[0] else Value.undefined_;
+    const reject_v = if (args.len >= 2) args[1] else Value.undefined_;
+    state.set(realm.allocator, "__cynic_cap_resolve__", resolve_v) catch return error.OutOfMemory;
+    state.set(realm.allocator, "__cynic_cap_reject__", reject_v) catch return error.OutOfMemory;
+    state.set(realm.allocator, "__cynic_cap_called__", Value.true_) catch return error.OutOfMemory;
+    return Value.undefined_;
+}
+
+pub fn newPromiseCapability(realm: *Realm, ctor: *JSFunction) NativeError!PromiseCapability {
+    if (!ctor.has_construct or ctor.is_arrow) {
+        return throwTypeError(realm, "Promise capability: not a constructor");
+    }
+    // Capture state on a fresh JSObject. Wrapping the executor as
+    // a bound function lets the impl pick up the state via
+    // `this_value` without needing closures.
+    const state = realm.heap.allocateObject() catch return error.OutOfMemory;
+    state.prototype = realm.intrinsics.object_prototype;
+
+    const executor_impl = realm.heap.allocateFunctionNative(capabilityExecutorImpl, 2, "") catch return error.OutOfMemory;
+    executor_impl.proto = realm.intrinsics.function_prototype;
+    const executor = realm.heap.allocateFunctionNative(boundResolveTrampoline, 2, "") catch return error.OutOfMemory;
+    executor.proto = realm.intrinsics.function_prototype;
+    executor.bound_target = executor_impl;
+    executor.bound_this = heap_mod.taggedObject(state);
+
+    // §27.2.1.5 step 6 — Construct(C, «executor»).
+    const interp = @import("../interpreter.zig");
+    const ctor_v = heap_mod.taggedFunction(ctor);
+    const construct_outcome = interp.constructValue(realm.allocator, realm, ctor_v, &.{heap_mod.taggedFunction(executor)}, ctor_v) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const promise_v = switch (construct_outcome) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+
+    // §27.2.1.5 step 7-8 — IsCallable(resolve) / IsCallable(reject).
+    const resolve_v = state.get("__cynic_cap_resolve__");
+    const reject_v = state.get("__cynic_cap_reject__");
+    const resolve_fn = heap_mod.valueAsFunction(resolve_v) orelse return throwTypeError(realm, "Promise capability: resolve is not callable");
+    const reject_fn = heap_mod.valueAsFunction(reject_v) orelse return throwTypeError(realm, "Promise capability: reject is not callable");
+    return PromiseCapability{ .promise = promise_v, .resolve = resolve_fn, .reject = reject_fn };
+}
+
+/// Settle a capability through its resolve function. The resolve
+/// function is whatever the user constructor's executor handed
+/// us — could be the standard Cynic resolve closure (settles the
+/// Promise), could be user-supplied (subclasses).
+pub fn capabilityResolve(realm: *Realm, cap: PromiseCapability, value: Value) NativeError!Value {
+    const interp = @import("../interpreter.zig");
+    const outcome = interp.callJSFunction(realm.allocator, realm, cap.resolve, Value.undefined_, &.{value}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    switch (outcome) {
+        .value, .yielded => return cap.promise,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    }
+}
+
+pub fn capabilityReject(realm: *Realm, cap: PromiseCapability, reason: Value) NativeError!Value {
+    const interp = @import("../interpreter.zig");
+    const outcome = interp.callJSFunction(realm.allocator, realm, cap.reject, Value.undefined_, &.{reason}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    switch (outcome) {
+        .value, .yielded => return cap.promise,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    }
+}
+
 pub fn allocatePromiseFor(
     realm: *Realm,
     ctor: ?*JSFunction,
@@ -311,6 +424,11 @@ fn promiseFinally(realm: *Realm, this_value: Value, args: []const Value) NativeE
     return this_value;
 }
 
+/// §27.2.4.7 Promise.resolve. When the receiver is a subclassed
+/// constructor we go through NewPromiseCapability so the user's
+/// constructor sees its executor; for the built-in `Promise`
+/// constructor we short-circuit through `allocatePromiseFor` and
+/// the `v` is already a same-realm Promise pass-through.
 fn promiseResolve(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctor = try thisAsPromiseCtor(realm, this_value, "resolve");
     const v = argOr(args, 0, Value.undefined_);
@@ -327,11 +445,26 @@ fn promiseResolve(realm: *Realm, this_value: Value, args: []const Value) NativeE
             }
         }
     }
-    return allocatePromiseFor(realm, ctor, .fulfilled, v) catch return error.OutOfMemory;
+    // For the built-in Promise constructor, the fast path
+    // produces an internally-tagged result; for user constructors
+    // we go through NewPromiseCapability so the executor's
+    // resolve receives `v`.
+    const builtin_promise = heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_);
+    if (builtin_promise != null and ctor == builtin_promise.?) {
+        return allocatePromiseFor(realm, ctor, .fulfilled, v) catch return error.OutOfMemory;
+    }
+    const cap = try newPromiseCapability(realm, ctor);
+    return capabilityResolve(realm, cap, v);
 }
 fn promiseReject(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctor = try thisAsPromiseCtor(realm, this_value, "reject");
-    return allocatePromiseFor(realm, ctor, .rejected, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
+    const reason = argOr(args, 0, Value.undefined_);
+    const builtin_promise = heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_);
+    if (builtin_promise != null and ctor == builtin_promise.?) {
+        return allocatePromiseFor(realm, ctor, .rejected, reason) catch return error.OutOfMemory;
+    }
+    const cap = try newPromiseCapability(realm, ctor);
+    return capabilityReject(realm, cap, reason);
 }
 /// Walk an iterable into an owned []Value list. Mirrors §7.4.2 +
 /// §7.4.5 IteratorToList — calls `@@iterator`, steps `next`, and
@@ -693,18 +826,53 @@ fn allProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, idx: usize,
 
 fn promiseAll(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctor = try thisAsPromiseCtor(realm, this_value, "all");
+    // §27.2.4.1 step 2 — `Let promiseCapability be ? NewPromiseCapability(C)`.
+    // Synchronously throws if `ctor`'s executor is misshapen
+    // (called twice / non-callable args). Built-in Promise gets
+    // a capability too; resolve/reject settle the result via the
+    // standard closures.
+    const cap = if (isBuiltinPromise(realm, ctor)) null_cap else try newPromiseCapability(realm, ctor);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     var ctx = AllCtx{ .out = out };
     iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, allProcess) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.NativeThrew => return aggregatorRejectFromPending(realm, ctor),
+        error.NativeThrew => return aggregatorRejectThroughCap(realm, ctor, cap),
     };
     if (ctx.rejected) |rv| {
-        return allocatePromiseFor(realm, ctor, .rejected, rv) catch return error.OutOfMemory;
+        return aggregatorSettleReject(realm, ctor, cap, rv);
     }
     setLength(realm, out, @intCast(ctx.count)) catch return error.OutOfMemory;
-    return allocatePromiseFor(realm, ctor, .fulfilled, heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+    return aggregatorSettleResolve(realm, ctor, cap, heap_mod.taggedObject(out));
+}
+
+/// Helpers binding the per-aggregator "resolve/reject through
+/// capability OR fast-path" branches into one place. The
+/// `null_cap` sentinel is used for the built-in `Promise`
+/// constructor where no capability is required.
+const NullCap = struct {};
+const null_cap: ?PromiseCapability = null;
+
+fn isBuiltinPromise(realm: *Realm, ctor: *JSFunction) bool {
+    const builtin = heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_);
+    return builtin != null and ctor == builtin.?;
+}
+
+fn aggregatorSettleResolve(realm: *Realm, ctor: *JSFunction, cap: ?PromiseCapability, value: Value) NativeError!Value {
+    if (cap) |c| return capabilityResolve(realm, c, value);
+    return allocatePromiseFor(realm, ctor, .fulfilled, value) catch return error.OutOfMemory;
+}
+
+fn aggregatorSettleReject(realm: *Realm, ctor: *JSFunction, cap: ?PromiseCapability, reason: Value) NativeError!Value {
+    if (cap) |c| return capabilityReject(realm, c, reason);
+    return allocatePromiseFor(realm, ctor, .rejected, reason) catch return error.OutOfMemory;
+}
+
+fn aggregatorRejectThroughCap(realm: *Realm, ctor: *JSFunction, cap: ?PromiseCapability) NativeError!Value {
+    const ex = realm.pending_exception orelse Value.undefined_;
+    realm.pending_exception = null;
+    if (cap) |c| return capabilityReject(realm, c, ex);
+    return allocatePromiseFor(realm, ctor, .rejected, ex) catch return error.OutOfMemory;
 }
 
 /// §27.2.4.2.1 PerformPromiseAllSettled. Per-item callback —
@@ -747,6 +915,7 @@ fn allSettledProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, idx:
 
 fn promiseAllSettled(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctor = try thisAsPromiseCtor(realm, this_value, "allSettled");
+    const cap = if (isBuiltinPromise(realm, ctor)) null_cap else try newPromiseCapability(realm, ctor);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     const fulfilled_str = realm.heap.allocateString("fulfilled") catch return error.OutOfMemory;
@@ -754,10 +923,10 @@ fn promiseAllSettled(realm: *Realm, this_value: Value, args: []const Value) Nati
     var ctx = AllSettledCtx{ .out = out, .fulfilled_str = fulfilled_str, .rejected_str = rejected_str };
     iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, allSettledProcess) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.NativeThrew => return aggregatorRejectFromPending(realm, ctor),
+        error.NativeThrew => return aggregatorRejectThroughCap(realm, ctor, cap),
     };
     setLength(realm, out, @intCast(ctx.count)) catch return error.OutOfMemory;
-    return allocatePromiseFor(realm, ctor, .fulfilled, heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+    return aggregatorSettleResolve(realm, ctor, cap, heap_mod.taggedObject(out));
 }
 
 /// §27.2.4.4.1 PerformPromiseRace. The first input that's already
@@ -794,16 +963,20 @@ fn raceProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, idx: usize
 
 fn promiseRace(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctor = try thisAsPromiseCtor(realm, this_value, "race");
+    const cap = if (isBuiltinPromise(realm, ctor)) null_cap else try newPromiseCapability(realm, ctor);
     var ctx = RaceCtx{};
     iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, raceProcess) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.NativeThrew => return aggregatorRejectFromPending(realm, ctor),
+        error.NativeThrew => return aggregatorRejectThroughCap(realm, ctor, cap),
     };
     if (ctx.found) |hit| {
-        return allocatePromiseFor(realm, ctor, hit.state, hit.value) catch return error.OutOfMemory;
+        if (hit.state == .rejected) return aggregatorSettleReject(realm, ctor, cap, hit.value);
+        if (hit.state == .fulfilled) return aggregatorSettleResolve(realm, ctor, cap, hit.value);
     }
     // Empty iterable OR every input pending — result Promise
-    // stays pending (§27.2.4.4.1 step 3).
+    // stays pending (§27.2.4.4.1 step 3). Capability path: just
+    // return its (still-pending) Promise; fast path: allocate.
+    if (cap) |c| return c.promise;
     return allocatePromiseFor(realm, ctor, .pending, Value.undefined_) catch return error.OutOfMemory;
 }
 
@@ -841,15 +1014,16 @@ fn anyProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, idx: usize,
 
 fn promiseAny(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctor = try thisAsPromiseCtor(realm, this_value, "any");
+    const cap = if (isBuiltinPromise(realm, ctor)) null_cap else try newPromiseCapability(realm, ctor);
     const reasons = realm.heap.allocateObject() catch return error.OutOfMemory;
     reasons.prototype = realm.intrinsics.array_prototype;
     var ctx = AnyCtx{ .reasons = reasons };
     iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, anyProcess) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.NativeThrew => return aggregatorRejectFromPending(realm, ctor),
+        error.NativeThrew => return aggregatorRejectThroughCap(realm, ctor, cap),
     };
     if (ctx.found) |fv| {
-        return allocatePromiseFor(realm, ctor, .fulfilled, fv) catch return error.OutOfMemory;
+        return aggregatorSettleResolve(realm, ctor, cap, fv);
     }
     setLength(realm, reasons, @intCast(ctx.count)) catch return error.OutOfMemory;
 
@@ -863,7 +1037,7 @@ fn promiseAny(realm: *Realm, this_value: Value, args: []const Value) NativeError
     }) catch return error.OutOfMemory;
     const msg_str = realm.heap.allocateString("All promises were rejected") catch return error.OutOfMemory;
     agg.set(realm.allocator, "message", Value.fromString(msg_str)) catch return error.OutOfMemory;
-    return allocatePromiseFor(realm, ctor, .rejected, heap_mod.taggedObject(agg)) catch return error.OutOfMemory;
+    return aggregatorSettleReject(realm, ctor, cap, heap_mod.taggedObject(agg));
 }
 
 /// §27.2.4.5 Promise.try ( callbackfn, ...args ) — ES2025.
