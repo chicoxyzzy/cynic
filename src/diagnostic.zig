@@ -62,6 +62,11 @@ pub const Code = enum {
     mixed_logical_operators,
     /// `delete x` where `x` is a bare IdentifierReference — §13.5.1.1.
     delete_of_unqualified_identifier,
+    /// `delete obj.#priv` / `delete (g().#priv)` / etc. — §13.5.1.1
+    /// makes deleting `MemberExpression.PrivateName` or
+    /// `CallExpression.PrivateName` a SyntaxError. The rule recurses
+    /// through CoverParenthesizedExpressionAndArrowParameterList.
+    delete_of_private_name,
     /// `let eval = …` / `let arguments = …` / similar — §13.1.1 makes
     /// `eval` and `arguments` restricted in BindingIdentifier position.
     restricted_identifier_in_strict,
@@ -97,6 +102,7 @@ pub const Code = enum {
             .unexpected_token,
             .mixed_logical_operators,
             .delete_of_unqualified_identifier,
+            .delete_of_private_name,
             .restricted_identifier_in_strict,
             .const_without_initializer,
             .assignment_target_invalid,
@@ -140,6 +146,7 @@ test "Code.errorClass: parser/lexer codes are SyntaxError" {
         .unexpected_token,
         .mixed_logical_operators,
         .delete_of_unqualified_identifier,
+        .delete_of_private_name,
         .restricted_identifier_in_strict,
         .const_without_initializer,
         .assignment_target_invalid,

@@ -4,7 +4,7 @@
 
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
-| **parser** | 62.11 % | 94.89 % | 28794 / 46357 |
+| **parser** | 62.53 % | 95.52 % | 28986 / 46357 |
 | **runtime** | 51.58 % | 62.65 % | 23913 / 46357 |
 
 ## Where the runtime stands, by area
@@ -135,6 +135,13 @@ browser-era built-ins …).
 **Scope.** `total` excludes paths universally out of scope (`harness/`, `staging/`, `intl402/`), Annex B language extensions, and browser-era built-ins Cynic doesn't ship (`escape` / `unescape`, `String.prototype` HTML wrappers, `Date.{getYear, setYear}`).
 
 ## History
+
+### 2026-05-10 — cynic `5cbe6be`, test262 `d0c1b455`
+
+|         | spec% | attempted% | pass / total | Δ pass |
+|---|---|---|---|---:|
+| **parser** | 62.53 % | 95.52 % | 28986 / 46357 | +192 |
+| **runtime** | 51.58 % | 62.65 % | 23913 / 46357 | ±0 |
 
 ### 2026-05-09 — cynic `fcc5543`, test262 `d0c1b455`
 

@@ -691,6 +691,17 @@ fn parseUnary(p: *Parser) ParseError!Expression {
                 .end = operand.span().end,
             });
         }
+        // §13.5.1.1 Early Error: delete of `MemberExpression.PrivateName`
+        // or `CallExpression.PrivateName` is a SyntaxError. Through
+        // CoverParenthesizedExpressionAndArrowParameterList the rule
+        // applies recursively, so peel parens (and the optional-chain
+        // wrapper) before testing the property kind.
+        if (op == .delete_ and deleteOperandIsPrivateName(operand, p.source)) {
+            try p.report(.delete_of_private_name, .{
+                .start = tok.span.start,
+                .end = operand.span().end,
+            });
+        }
         const operand_ptr = try p.arena.create(Expression);
         operand_ptr.* = operand;
         return .{ .unary = .{
@@ -938,6 +949,24 @@ fn isBareIdentifierReference(e: Expression) bool {
     return switch (e) {
         .identifier_reference => true,
         .parenthesized => |p| isBareIdentifierReference(p.expression.*),
+        else => false,
+    };
+}
+
+/// §13.5.1.1: returns true if `e`, after peeling
+/// CoverParenthesizedExpressionAndArrowParameterList wrappers and the
+/// optional-chain wrapper, is a MemberExpression whose final property is
+/// a PrivateName (its source span starts with `#`). The same shape covers
+/// `CallExpression.PrivateName` since that's an AST `member` node whose
+/// `object` happens to be a `call`.
+fn deleteOperandIsPrivateName(e: Expression, source: []const u8) bool {
+    return switch (e) {
+        .parenthesized => |paren| deleteOperandIsPrivateName(paren.expression.*, source),
+        .chain => |ch| deleteOperandIsPrivateName(ch.expression.*, source),
+        .member => |m| switch (m.property) {
+            .ident => |id_span| id_span.start < source.len and source[id_span.start] == '#',
+            .computed => false,
+        },
         else => false,
     };
 }
