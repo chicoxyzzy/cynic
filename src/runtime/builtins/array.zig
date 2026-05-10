@@ -200,8 +200,14 @@ pub fn numberFromI64(n: i64) Value {
 fn arrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
     const target = argOr(args, 0, Value.undefined_);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
-    var i: i64 = 0;
+    // §23.1.3.16 step 1-7 — handle fromIndex BEFORE clamping
+    // length so a fromIndex of +∞ short-circuits to -1 even when
+    // the array's length exceeds our 16M iteration cap.
+    const raw_len = try toLengthOf(realm, obj);
+    if (raw_len <= 0) return Value.fromInt32(-1);
+    const start = startIndexFrom(args, raw_len) orelse return Value.fromInt32(-1);
+    const len = try clampArrayLength(raw_len);
+    var i: i64 = start;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
@@ -210,6 +216,39 @@ fn arrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         if (strictEqualsLite(v, target)) return numberFromI64(i);
     }
     return Value.fromInt32(-1);
+}
+
+/// §23.1.3.16 step 5-7 — clamp the optional `fromIndex` arg
+/// against the (uncapped) array length. Returns the start index
+/// to iterate from, or `null` when fromIndex is past the end
+/// (caller short-circuits to -1). Negative fromIndex is offset
+/// from the end (`len + fromIndex`), clamped to 0.
+fn startIndexFrom(args: []const Value, len: i64) ?i64 {
+    if (args.len < 2) return 0;
+    const v = args[1];
+    // §7.1.5 ToIntegerOrInfinity coercion. We accept Number
+    // primitives directly; for String go through `coerceToNumber`
+    // (which handles "Infinity", "-Infinity", numeric strings,
+    // and the empty/all-whitespace cases per §7.1.4).
+    const nv = if (v.isString()) intrinsics.coerceToNumber(v) else v;
+    const n: f64 = if (nv.isUndefined()) 0 else if (nv.isInt32()) @floatFromInt(nv.asInt32()) else if (nv.isDouble()) nv.asDouble() else if (nv.isBool()) (if (nv.asBool()) @as(f64, 1) else @as(f64, 0)) else if (nv.isNull()) @as(f64, 0) else 0;
+    if (std.math.isNan(n)) return 0;
+    if (n == std.math.inf(f64)) return null;
+    if (n == -std.math.inf(f64)) return 0;
+    const trunc_n = @trunc(n);
+    if (trunc_n >= 0) {
+        // i64::MAX exceeds f64's exactly-representable integer
+        // range — `len` is already a real array length so any
+        // `trunc_n` ≥ `len` short-circuits below.
+        const flen: f64 = @floatFromInt(len);
+        if (trunc_n >= flen) return null;
+        return @intFromFloat(trunc_n);
+    }
+    // Negative — count from the end.
+    const flen: f64 = @floatFromInt(len);
+    const adjusted = flen + trunc_n;
+    if (adjusted < 0) return 0;
+    return @intFromFloat(adjusted);
 }
 
 fn arrayIncludes(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
