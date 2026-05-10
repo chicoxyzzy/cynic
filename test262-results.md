@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 62.53 % | 95.52 % | 28986 / 46357 |
-| **runtime** | 51.59 % | 62.66 % | 23917 / 46357 |
+| **runtime** | 51.68 % | 62.77 % | 23959 / 46357 |
 
 ## Where the runtime stands, by area
 
@@ -70,8 +70,6 @@ browser-era built-ins …).
 | `built-ins/global` | 11 | 18 | 0 | 38 % | 38 % |
 | `built-ins/isFinite` | 3 | 12 | 0 | 20 % | 20 % |
 | `built-ins/isNaN` | 3 | 12 | 0 | 20 % | 20 % |
-| `built-ins/parseFloat` | 20 | 34 | 0 | 37 % | 37 % |
-| `built-ins/parseInt` | 34 | 21 | 0 | 62 % | 62 % |
 | `language/arguments-object` | 134 | 72 | 57 | 51 % | 65 % |
 | `language/computed-property-names` | 15 | 33 | 0 | 31 % | 31 % |
 | `language/function-code` | 86 | 22 | 109 | 40 % | 80 % |
@@ -93,6 +91,8 @@ browser-era built-ins …).
 | `built-ins/StringIteratorPrototype` | 2 | 5 | 0 | 29 % | 29 % |
 | `built-ins/decodeURI` | 48 | 7 | 0 | 87 % | 87 % |
 | `built-ins/decodeURIComponent` | 50 | 6 | 0 | 89 % | 89 % |
+| `built-ins/parseFloat` | 50 | 4 | 0 | 93 % | 93 % |
+| `built-ins/parseInt` | 46 | 9 | 0 | 84 % | 84 % |
 | `built-ins/undefined` | 0 | 5 | 3 | 0 % | 0 % |
 | `language/asi` | 97 | 5 | 0 | 95 % | 95 % |
 | `language/block-scope` | 140 | 5 | 0 | 97 % | 97 % |
@@ -136,12 +136,12 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-10 — cynic `9e5be83`, test262 `d0c1b455`
+### 2026-05-10 — cynic `304322b`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
 | **parser** | 62.53 % | 95.52 % | 28986 / 46357 | +192 |
-| **runtime** | 51.59 % | 62.66 % | 23917 / 46357 | +4 |
+| **runtime** | 51.68 % | 62.77 % | 23959 / 46357 | +46 |
 
 ### 2026-05-09 — cynic `fcc5543`, test262 `d0c1b455`
 
