@@ -126,6 +126,12 @@ fn parseAssignment(p: *Parser) ParseError!Expression {
                 try p.report(.assignment_target_invalid, lhs.span());
             }
         }
+        // §13.15.1 Early Error: in strict mode, the LeftHandSideExpression of
+        // an Assignment / CompoundAssignment may not be the IdentifierReference
+        // `eval` or `arguments`. Cynic is strict-only, so the rule always fires.
+        if (isEvalOrArgumentsRef(lhs, p.source)) {
+            try p.report(.assignment_target_invalid, lhs.span());
+        }
         const rhs = try parseAssignment(p);
         const lhs_ptr = try p.arena.create(Expression);
         lhs_ptr.* = lhs;
@@ -670,6 +676,12 @@ fn parseUnary(p: *Parser) ParseError!Expression {
         if (!isSimpleAssignmentTarget(operand)) {
             try p.report(.assignment_target_invalid, operand.span());
         }
+        // §13.4.1 Early Error: in strict mode, the operand of a prefix
+        // UpdateExpression may not be the IdentifierReference `eval` or
+        // `arguments`. Cynic is strict-only.
+        if (isEvalOrArgumentsRef(operand, p.source)) {
+            try p.report(.assignment_target_invalid, operand.span());
+        }
         const operand_ptr = try p.arena.create(Expression);
         operand_ptr.* = operand;
         return .{ .update = .{
@@ -718,6 +730,11 @@ fn parseUnary(p: *Parser) ParseError!Expression {
         if (ast_expr.UpdateOp.fromToken(next.kind)) |op| {
             const op_tok = try p.bump();
             if (!isSimpleAssignmentTarget(lhs)) {
+                try p.report(.assignment_target_invalid, lhs.span());
+            }
+            // §13.4.1 Early Error: postfix `eval++` / `arguments--` etc. are
+            // strict-mode SyntaxErrors. Cynic is strict-only.
+            if (isEvalOrArgumentsRef(lhs, p.source)) {
                 try p.report(.assignment_target_invalid, lhs.span());
             }
             const operand_ptr = try p.arena.create(Expression);
@@ -949,6 +966,22 @@ fn isBareIdentifierReference(e: Expression) bool {
     return switch (e) {
         .identifier_reference => true,
         .parenthesized => |p| isBareIdentifierReference(p.expression.*),
+        else => false,
+    };
+}
+
+/// §13.15.1, §13.4.1 Early Error helper: returns true when `e` is the bare
+/// IdentifierReference `eval` or `arguments` (peeling redundant parens via
+/// CoverParenthesizedExpressionAndArrowParameterList). Cynic is strict-only,
+/// so callers don't gate on a strict flag.
+fn isEvalOrArgumentsRef(e: Expression, source: []const u8) bool {
+    return switch (e) {
+        .identifier_reference => |id| blk: {
+            if (id.span.end > source.len) break :blk false;
+            const name = source[id.span.start..id.span.end];
+            break :blk std.mem.eql(u8, name, "eval") or std.mem.eql(u8, name, "arguments");
+        },
+        .parenthesized => |p| isEvalOrArgumentsRef(p.expression.*, source),
         else => false,
     };
 }
