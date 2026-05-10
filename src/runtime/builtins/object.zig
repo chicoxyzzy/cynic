@@ -149,6 +149,20 @@ pub fn ownPropertyKeysOrdered(
     var string_keys: std.ArrayListUnmanaged([]const u8) = .empty;
     defer string_keys.deinit(realm.allocator);
 
+    // §10.4.2 Array exotic — packed-element indices are own
+    // string-keyed properties for §7.3.21 OrdinaryOwnPropertyKeys.
+    // Holes (slots equal to the hole sentinel) are NOT own
+    // properties (§10.4.2.1 step 2) and are skipped here.
+    if (obj.is_array_exotic) {
+        var ei: u32 = 0;
+        while (ei < obj.elements.items.len) : (ei += 1) {
+            if (JSObject.isElementHole(obj.elements.items[ei])) continue;
+            var ibuf: [16]u8 = undefined;
+            const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ei}) catch continue;
+            const owned = realm.heap.allocateString(ks) catch return error.OutOfMemory;
+            integer_keys.append(realm.allocator, .{ .idx = ei, .key = owned.bytes }) catch return error.OutOfMemory;
+        }
+    }
     var it = obj.properties.iterator();
     while (it.next()) |entry| {
         const k = entry.key_ptr.*;
@@ -260,6 +274,7 @@ fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError
     defer realm.allocator.free(keys);
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
     result.prototype = realm.intrinsics.array_prototype;
+    result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     var idx: usize = 0;
     for (keys) |key| {
         if (!obj.flagsFor(key).enumerable) continue;
@@ -281,6 +296,7 @@ fn objectValues(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     defer realm.allocator.free(keys);
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
     result.prototype = realm.intrinsics.array_prototype;
+    result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     var idx: usize = 0;
     for (keys) |key| {
         if (!obj.flagsFor(key).enumerable) continue;
@@ -302,11 +318,13 @@ fn objectEntries(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     defer realm.allocator.free(keys);
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
     result.prototype = realm.intrinsics.array_prototype;
+    result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     var idx: usize = 0;
     for (keys) |key| {
         if (!obj.flagsFor(key).enumerable) continue;
         const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
         pair.prototype = realm.intrinsics.array_prototype;
+        pair.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
         const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
         const v = try getPropertyChain(realm, obj, key);
         pair.set(realm.allocator, "0", Value.fromString(key_str)) catch return error.OutOfMemory;
@@ -554,7 +572,24 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
         const had_own = target.hasOwn(key) or target.accessors.contains(key);
         const cur_flags = target.flagsFor(key);
         const cur_is_accessor = target.accessors.contains(key);
-        const cur_value: Value = if (cur_is_accessor) Value.undefined_ else target.properties.get(key) orelse Value.undefined_;
+        // §10.1.6 — current value comes from `properties` first,
+        // then from an Array exotic's `elements` for indexed keys
+        // (so `defineProperty` sees the slot's actual value, not
+        // undefined, when running the non-configurable redefine
+        // guard on an already-set index).
+        const cur_value: Value = blk_cv: {
+            if (cur_is_accessor) break :blk_cv Value.undefined_;
+            if (target.properties.get(key)) |v| break :blk_cv v;
+            if (target.is_array_exotic) {
+                if (ObjMod.JSObject.canonicalIntegerIndex(key)) |idx| {
+                    if (idx < target.elements.items.len) {
+                        const ev = target.elements.items[idx];
+                        if (!ObjMod.JSObject.isElementHole(ev)) break :blk_cv ev;
+                    }
+                }
+            }
+            break :blk_cv Value.undefined_;
+        };
         var cur_getter: ?*JSFunction = null;
         var cur_setter: ?*JSFunction = null;
         if (target.accessors.get(key)) |a| {
@@ -801,9 +836,11 @@ fn objectGetOwnPropertyDescriptors(realm: *Realm, this_value: Value, args: []con
     const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.getOwnPropertyDescriptors target is not an object");
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.object_prototype;
-    var it = obj.properties.iterator();
-    while (it.next()) |entry| {
-        const key = entry.key_ptr.*;
+    // §20.1.2.10 — walk OwnPropertyKeys(O), which on an Array
+    // exotic surfaces the packed-element indices.
+    const keys = try ownPropertyKeysOrdered(realm, obj);
+    defer realm.allocator.free(keys);
+    for (keys) |key| {
         const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
         const inner_args = [_]Value{ heap_mod.taggedObject(obj), Value.fromString(k_str) };
         const desc = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &inner_args);
@@ -823,6 +860,7 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
     if (heap_mod.valueAsFunction(target)) |fn_obj| {
         const out = realm.heap.allocateObject() catch return error.OutOfMemory;
         out.prototype = realm.intrinsics.array_prototype;
+        out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
         var len: i32 = 0;
         var fit = fn_obj.properties.iterator();
         while (fit.next()) |entry| {
@@ -844,6 +882,7 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
     defer realm.allocator.free(keys);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
+    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     var len: i32 = 0;
     for (keys) |key| {
         // §20.1.2.10 — string keys only. Symbol-property keys
@@ -878,6 +917,7 @@ fn objectGetOwnPropertySymbols(realm: *Realm, this_value: Value, args: []const V
     defer realm.allocator.free(keys);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
+    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     var len: i32 = 0;
     for (keys) |key| {
         if (!isSymbolKey(key)) continue;
@@ -945,9 +985,12 @@ fn objectAssign(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         const src_v = args[i];
         if (src_v.isUndefined() or src_v.isNull()) continue;
         const src = heap_mod.valueAsPlainObject(src_v) orelse continue;
-        var it = src.properties.iterator();
-        while (it.next()) |entry| {
-            const key = entry.key_ptr.*;
+        // §20.1.2.1 step 5 — `OwnPropertyKeys(from)` includes the
+        // Array exotic's packed indexed slots; `ownPropertyKeysOrdered`
+        // surfaces them ahead of string keys.
+        const keys = try ownPropertyKeysOrdered(realm, src);
+        defer realm.allocator.free(keys);
+        for (keys) |key| {
             if (std.mem.startsWith(u8, key, "__cynic_")) continue;
             if (!src.flagsFor(key).enumerable) continue;
             // §20.1.2.1 step 5.c.iv — Get(from, nextKey) so accessor
@@ -1160,6 +1203,7 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         } else {
             bucket = realm.heap.allocateObject() catch return error.OutOfMemory;
             bucket.prototype = realm.intrinsics.array_prototype;
+            bucket.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
             bucket.set(realm.allocator, "length", Value.fromInt32(0)) catch return error.OutOfMemory;
             out.set(realm.allocator, key_str, heap_mod.taggedObject(bucket)) catch return error.OutOfMemory;
         }

@@ -156,6 +156,7 @@ fn aggregateErrorMaterialiseErrors(realm: *Realm, errors_v: Value) NativeError!V
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
 
+    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     const src = heap_mod.valueAsPlainObject(errors_v) orelse {
         return intrinsics.throwTypeError(realm, "AggregateError: errors argument is not iterable");
     };

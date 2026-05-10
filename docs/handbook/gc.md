@@ -173,33 +173,25 @@ dispatch, so its values no longer have a queue-based root.
 
 ## What's not yet done
 
-### Array-spread integer-key gap
+### Array-spread integer-key gap (resolved)
 
-Spread into an array (`[...iter]`) allocates a JSString per index
-("0", "1", "2", …) inside the loop and stores its `bytes` slice
-as the property key. Nothing roots those JSStrings — `setComputedOwned`-
-style anchoring would, but the `key_anchors` list grows linearly
-with the iteration count and turns the GC walk quadratic on the
-test262 poisoned-iterator fixtures (`spread-err-{sngl,mult}-err-itr-value.js`,
-which iterate up to 16M times).
+Historic: spread into an array (`[...iter]`) used to allocate a
+JSString per index ("0", "1", "2", …) inside the loop and store
+its `bytes` slice as the property key. Nothing rooted those
+JSStrings, and the test262 poisoned-iterator fixtures
+(`spread-err-{sngl,mult}-err-itr-value.js`, up to 16M iters)
+either turned the GC walk quadratic (with anchoring) or relied
+on the JSString reallocator happening to land at compatible
+addresses (without).
 
-Any per-key anchoring scheme has the same shape — N anchors, K
-GC cycles, K = N/threshold, total marking work N²/threshold. So
-the fix isn't *which* container to anchor in, it's getting integer-
-indexed property writes off the string-keyed property map entirely.
-That means a real `JSArray` heap kind with packed indexed elements
-(V8 / JSC / SM all do this — "elements" storage is a separate slot
-vector from the named-property dictionary).
-
-Until that lands, two things keep this from biting in practice:
-the spread loop uses the unrooted `target.set` path (so JSStrings
-get reallocated at addresses that happen to keep the in-flight
-slices valid through the loop's trapped exception — not memory-
-correct under arbitrary GC schedules, just under ours), AND the
-iterator-step accessor walks invoke poisoned `done` / `value`
-getters per §7.4.7. The latter is what actually bounds the
-test262 poisoned-iterator fixtures: the throw fires on the first
-`.next()` call instead of letting the loop run to its 16M cap.
+Resolved by the §10.4.2 Array exotic refactor: `JSObject` grew an
+`elements: ArrayListUnmanaged(Value)` vector and an
+`is_array_exotic` flag, and every site that allocates an Array
+instance now calls `JSObject.markAsArrayExotic`. Integer-indexed
+reads/writes route through the packed vector (the `array_spread`
+opcode goes straight to `setIndexed`, no JSString allocation per
+index), and the GC's mark walk is `O(N)` over the elements
+vector regardless of how many iterations the source produced.
 
 ### Future work
 

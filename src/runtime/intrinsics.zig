@@ -603,6 +603,26 @@ pub fn argOr(args: []const Value, i: usize, default: Value) Value {
     return if (i < args.len) args[i] else default;
 }
 
+/// §23.1.1 ArrayCreate — allocate a fresh Array instance with
+/// `[[Prototype]]` = `%Array.prototype%`, `is_array_exotic =
+/// true`, and `length = 0` (writable, non-enumerable, non-
+/// configurable per §23.1.4). Centralised so every Array-shaped
+/// JSObject (literal, builtin result, slice/concat/Array.from
+/// output, etc.) goes through one place — one missed flag and
+/// `arr[3]` reads come from `properties` instead of `elements`.
+pub fn allocateArray(realm: *Realm) !*JSObject {
+    const obj = try realm.heap.allocateObject();
+    obj.prototype = realm.intrinsics.array_prototype;
+    obj.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    obj.is_array_exotic = true;
+    try obj.setWithFlags(realm.allocator, "length", Value.fromInt32(0), .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = false,
+    });
+    return obj;
+}
+
 pub fn objectFromThis(this_value: Value) ?*JSObject {
     return heap_mod.valueAsPlainObject(this_value);
 }
@@ -721,6 +741,18 @@ pub fn getPropertyChain(realm: *Realm, obj: *JSObject, key: []const u8) NativeEr
             }
             // Setter-only accessor — read returns undefined.
             return Value.undefined_;
+        }
+        // §10.4.2 Array exotic — integer-indexed read goes
+        // through the packed `elements` vector, not the
+        // named-property bag. Holes fall through to the
+        // prototype chain (matches §10.4.2.1 step 2).
+        if (o.is_array_exotic) {
+            if (JSObject.canonicalIntegerIndex(key)) |idx| {
+                if (idx < o.elements.items.len) {
+                    const v = o.elements.items[idx];
+                    if (!JSObject.isElementHole(v)) return v;
+                }
+            }
         }
         if (o.properties.get(key)) |v| return v;
         cur = o.prototype;

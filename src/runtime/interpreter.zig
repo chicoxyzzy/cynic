@@ -648,7 +648,7 @@ pub fn openForInIterator(
 ) RunError!Value {
     const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
     arr.prototype = realm.intrinsics.array_prototype;
-
+    arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     var seen: std.StringArrayHashMapUnmanaged(void) = .empty;
     defer seen.deinit(realm.allocator);
 
@@ -665,6 +665,23 @@ pub fn openForInIterator(
             defer int_keys.deinit(realm.allocator);
             var str_keys: std.ArrayListUnmanaged([]const u8) = .empty;
             defer str_keys.deinit(realm.allocator);
+
+            // §10.4.2 Array exotic — packed elements are own
+            // integer-indexed properties for §14.7.5.6
+            // EnumerateObjectProperties / `for-in` / `Object.keys`
+            // purposes. Holes (slots equal to undefined) are
+            // skipped today (matches the spec's hole semantics
+            // closely enough for dense arrays; full sparse-hole
+            // representation is later).
+            if (cur.is_array_exotic) {
+                var ei: u32 = 0;
+                while (ei < cur.elements.items.len) : (ei += 1) {
+                    var ibuf: [16]u8 = undefined;
+                    const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ei}) catch continue;
+                    const key_owned_str = realm.heap.allocateString(ks) catch return error.OutOfMemory;
+                    int_keys.append(realm.allocator, .{ .idx = ei, .key = key_owned_str.bytes }) catch return error.OutOfMemory;
+                }
+            }
 
             var it = cur.properties.iterator();
             while (it.next()) |entry| {
@@ -1295,6 +1312,7 @@ pub fn callValue(
                 // Wrap args in a fresh array.
                 const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
                 arr.prototype = realm.intrinsics.array_prototype;
+                arr.markAsArrayExotic(allocator) catch return error.OutOfMemory;
                 var i: usize = 0;
                 while (i < args.len) : (i += 1) {
                     var ibuf: [24]u8 = undefined;
@@ -1391,6 +1409,7 @@ pub fn constructValue(
                 const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return .{ .thrown = try makeTypeError(realm, "proxy 'construct' trap is not callable") };
                 const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
                 arr.prototype = realm.intrinsics.array_prototype;
+                arr.markAsArrayExotic(allocator) catch return error.OutOfMemory;
                 var i: usize = 0;
                 while (i < args.len) : (i += 1) {
                     var ibuf: [24]u8 = undefined;
@@ -2783,6 +2802,7 @@ fn runFrames(
                 }
                 const out_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
                 out_obj.prototype = realm.intrinsics.array_prototype;
+                out_obj.markAsArrayExotic(allocator) catch return error.OutOfMemory;
                 var i: i64 = start;
                 var out_idx: i64 = 0;
                 var ibuf: [24]u8 = undefined;
@@ -3195,6 +3215,7 @@ fn runFrames(
                 if (acc.isNull() or acc.isUndefined()) {
                     const empty = realm.heap.allocateObject() catch return error.OutOfMemory;
                     empty.prototype = realm.intrinsics.array_prototype;
+                    empty.markAsArrayExotic(allocator) catch return error.OutOfMemory;
                     empty.set(allocator, "length", Value.fromInt32(0)) catch return error.OutOfMemory;
                     acc = openIterator(allocator, realm, heap_mod.taggedObject(empty)) catch return error.OutOfMemory;
                 } else {
@@ -3304,6 +3325,7 @@ fn runFrames(
                 ip += 1;
                 const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
                 obj.prototype = realm.intrinsics.array_prototype;
+                obj.markAsArrayExotic(allocator) catch return error.OutOfMemory;
                 var len: i32 = 0;
                 if (start < f.argc) {
                     var i: u8 = start;
@@ -3591,6 +3613,7 @@ fn runFrames(
             .make_array => {
                 const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
                 obj.prototype = realm.intrinsics.array_prototype;
+                obj.markAsArrayExotic(allocator) catch return error.OutOfMemory;
                 // §23.1.4 — `Array.prototype.length` is
                 // non-enumerable. Pre-flag the slot so for-in
                 // and `Object.keys` don't surface it.
@@ -3720,19 +3743,20 @@ fn runFrames(
                             break;
                         },
                     };
-                    var db: [24]u8 = undefined;
-                    const ds = std.fmt.bufPrint(&db, "{d}", .{target_len}) catch unreachable;
-                    const owned = realm.heap.allocateString(ds) catch return error.OutOfMemory;
-                    // Don't anchor — integer-index keys at scale
-                    // (16M-iter pathological iterators) make
-                    // `key_anchors` traversal quadratic against
-                    // the alloc-pressure GC. The target array is
-                    // live in `acc` for the loop; the JSStrings
-                    // are reachable via `heap.strings` and walked
-                    // in sweep regardless. Real arrays use
-                    // `setComputedOwned` only for arbitrary
-                    // user-supplied keys.
-                    target.set(allocator, owned.bytes, elem) catch return error.OutOfMemory;
+                    // §10.4.2 — `target` is array-exotic, so the
+                    // append goes straight into the packed
+                    // `elements` vector. No JSString allocation
+                    // per index → the pathological iterator
+                    // fixtures (16M-iter `spread-err-…`) no
+                    // longer balloon the heap.
+                    if (target.is_array_exotic and target_len <= 0xFFFFFFFE) {
+                        target.setIndexed(allocator, @intCast(target_len), elem) catch return error.OutOfMemory;
+                    } else {
+                        var db: [24]u8 = undefined;
+                        const ds = std.fmt.bufPrint(&db, "{d}", .{target_len}) catch unreachable;
+                        const owned = realm.heap.allocateString(ds) catch return error.OutOfMemory;
+                        target.set(allocator, owned.bytes, elem) catch return error.OutOfMemory;
+                    }
                     target_len += 1;
                 }
                 if (committed) continue;
@@ -3747,11 +3771,24 @@ fn runFrames(
                     continue;
                 }
 
-                const len_v: Value = if (target_len >= std.math.minInt(i32) and target_len <= std.math.maxInt(i32))
-                    Value.fromInt32(@intCast(target_len))
-                else
-                    Value.fromDouble(@floatFromInt(target_len));
-                target.set(allocator, "length", len_v) catch return error.OutOfMemory;
+                // §10.4.2.4 — `target` is array-exotic by the
+                // time spread runs (every site that allocates an
+                // array-shaped JSObject calls `markAsArrayExotic`).
+                // The indexed writes above already kept length
+                // in sync via `syncLengthProperty`; this final
+                // assignment is a no-op, kept for parity with
+                // pre-array-exotic objects (e.g. `Array.prototype`
+                // itself) that still flow through this path.
+                if (target.is_array_exotic) {
+                    const u32_len: u32 = if (target_len < 0) 0 else if (target_len > 0xFFFFFFFE) 0xFFFFFFFE else @intCast(target_len);
+                    target.setArrayLength(allocator, u32_len) catch return error.OutOfMemory;
+                } else {
+                    const len_v: Value = if (target_len >= std.math.minInt(i32) and target_len <= std.math.maxInt(i32))
+                        Value.fromInt32(@intCast(target_len))
+                    else
+                        Value.fromDouble(@floatFromInt(target_len));
+                    target.set(allocator, "length", len_v) catch return error.OutOfMemory;
+                }
             },
 
             .object_spread => {
@@ -4589,6 +4626,15 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
             _ = obj.property_flags.swapRemove(key);
             return .{ .ok = true };
         }
+        // §10.4.2 Array exotic — integer-indexed keys live in the
+        // packed `elements` vector. Holes get marked via undefined;
+        // length is unaffected (§13.5.1.2 step 5).
+        if (obj.is_array_exotic) {
+            if (obj_mod.JSObject.canonicalIntegerIndex(key)) |idx| {
+                _ = obj.removeIndexed(idx);
+                return .{ .ok = true };
+            }
+        }
         // Data property.
         if (!obj.properties.contains(key)) return .{ .ok = true };
         const flags = obj.flagsFor(key);
@@ -4625,7 +4671,6 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
     // Other primitives (string, number, bool, symbol, bigint) —
     // ToObject wraps them per §7.1.18, but the wrapper has no
     // own properties so the delete trivially succeeds.
-    _ = obj_mod;
     return .{ .ok = true };
 }
 
@@ -4734,6 +4779,29 @@ fn strictSetPropertyAnchored(
             }
             return .ok;
         }
+        // §10.4.2.1 [[DefineOwnProperty]] — Array exotic indexed
+        // writes go straight to the packed `elements` vector via
+        // `setIndexed`, which also keeps `length` in sync. The
+        // §17 length-write-gating against
+        // `length: { writable: false }` still applies.
+        if (obj.is_array_exotic) {
+            if (canonicalIntegerIndexInterp(key)) |idx| {
+                if (idx <= 0xFFFFFFFE) {
+                    if (obj.property_flags.get("length")) |flags| {
+                        if (!flags.writable) {
+                            const cur_len_v = obj.properties.get("length") orelse Value.fromInt32(0);
+                            const cur_len: u32 = if (cur_len_v.isInt32()) @intCast(@max(0, cur_len_v.asInt32())) else 0;
+                            if (idx >= cur_len) {
+                                const ex = try makeTypeError(realm, "Cannot extend non-writable array length");
+                                return throwInSetter(realm, frames, f, ip, value, ex);
+                            }
+                        }
+                    }
+                    obj.setIndexed(allocator, idx, value) catch return error.OutOfMemory;
+                    return .ok;
+                }
+            }
+        }
         // Fast path that also anchors the key's backing JSString
         // when the caller supplied one. Necessary because
         // `properties` stores `[]const u8` slices, not pointers,
@@ -4750,41 +4818,6 @@ fn strictSetPropertyAnchored(
             obj.setComputedOwned(allocator, ks, value) catch return error.OutOfMemory;
         } else {
             obj.set(allocator, key, value) catch return error.OutOfMemory;
-        }
-        // §10.4.2.1 [[DefineOwnProperty]] step 4 — Array exotic
-        // length auto-extend on integer-indexed write. Without
-        // this, `a[5] = 7` on a fresh array leaves
-        // `a.length === 0` instead of 6.
-        //
-        // Per §7.1.21, the "array index" range is [0, 2^32-2];
-        // 2^32-1 is reserved as the impossible-length sentinel
-        // and is NOT an array index — so writing
-        // `a[4294967295]` is a regular property write that does
-        // NOT bump length. `canonicalIntegerIndexInterp` accepts
-        // up to maxInt(u32); we tighten the gate here.
-        if (obj.prototype != null and obj.prototype == realm.intrinsics.array_prototype) blk: {
-            const idx = canonicalIntegerIndexInterp(key) orelse break :blk;
-            if (idx > 0xFFFFFFFE) break :blk;
-            const cur_len_v = obj.get("length");
-            const cur_len: u32 = if (cur_len_v.isInt32()) @intCast(@max(0, cur_len_v.asInt32())) else if (cur_len_v.isDouble()) inner: {
-                const d = cur_len_v.asDouble();
-                if (std.math.isNan(d) or d < 0) break :inner 0;
-                break :inner @intFromFloat(@min(d, @as(f64, std.math.maxInt(u32))));
-            } else 0;
-            if (idx >= cur_len) {
-                if (obj.property_flags.get("length")) |flags| {
-                    if (!flags.writable) {
-                        const ex = try makeTypeError(realm, "Cannot extend non-writable array length");
-                        return throwInSetter(realm, frames, f, ip, value, ex);
-                    }
-                }
-                const new_len: u64 = @as(u64, idx) + 1;
-                const new_len_v: Value = if (new_len <= std.math.maxInt(i32))
-                    Value.fromInt32(@intCast(new_len))
-                else
-                    Value.fromDouble(@floatFromInt(new_len));
-                obj.set(allocator, "length", new_len_v) catch return error.OutOfMemory;
-            }
         }
         return .ok;
     }
@@ -5176,6 +5209,20 @@ const TruncateResult = struct {
 /// On a non-configurable element, stop and return its index + 1
 /// as the floor.
 fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, target_len: u32) TruncateResult {
+    // §10.4.2.4 — Array exotic: truncate the packed `elements`
+    // vector. Indexed slots are configurable today (Cynic doesn't
+    // yet support `Object.defineProperty(arr, "0", {configurable:false})`
+    // promoting a slot into the named-property bag), so the
+    // walk is a single resize.
+    if (obj.is_array_exotic) {
+        if (target_len < obj.elements.items.len) {
+            obj.elements.resize(allocator, target_len) catch return .{ .final_length = target_len, .blocked = false };
+        }
+        return .{ .final_length = target_len, .blocked = false };
+    }
+    // Pre-array-exotic fallback for any object (e.g. an array-
+    // like with stringified-index own properties) that ended up
+    // routed through ArraySetLength via prototype chaining.
     var indices: std.ArrayListUnmanaged(u32) = .empty;
     defer indices.deinit(allocator);
     var it = obj.properties.iterator();

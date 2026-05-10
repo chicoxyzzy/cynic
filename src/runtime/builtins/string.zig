@@ -254,6 +254,7 @@ fn stringMatch(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     re_obj.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
     result.prototype = realm.intrinsics.array_prototype;
+    result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     var idx: i32 = 0;
     var ibuf: [16]u8 = undefined;
     var prev_last_index: i32 = -1;
@@ -653,6 +654,7 @@ fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
 
+    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     if (limit == 0) {
         setLength(realm, out, 0) catch return error.OutOfMemory;
         return heap_mod.taggedObject(out);

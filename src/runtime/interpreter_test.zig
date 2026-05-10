@@ -3208,3 +3208,65 @@ test "later: Iterator.zip(strict) closes other iters in reverse on mismatch" {
         \\threw + ":" + log.join(",");
     , "true:A_next,B_next,C_ret,A_ret");
 }
+
+// ── §10.4.2 — Array exotic packed elements ──────────────────────────────────
+
+test "later: Array(N) with N writes leaves length at N" {
+    try expectScriptIntWithBuiltins(
+        \\var x = Array(100);
+        \\x[0] = 1;
+        \\x[50] = 2;
+        \\x.length;
+    , 100);
+}
+
+test "later: arr.length = N truncates elements past N" {
+    try expectScriptStringWithBuiltins(
+        \\var a = [1, 2, 3, 4, 5];
+        \\a.length = 2;
+        \\a.length + ":" + a.join(",");
+    , "2:1,2");
+}
+
+test "later: holes fall through to prototype-chain accessors" {
+    // §10.4.2.1 step 2 — sparse holes are NOT own properties;
+    // reads delegate to the prototype chain, where Array.prototype's
+    // accessor at "1" fires.
+    try expectScriptStringWithBuiltins(
+        \\var got;
+        \\Object.defineProperty(Array.prototype, "1", {
+        \\  get: function() { return 42; },
+        \\  configurable: true,
+        \\});
+        \\try { got = String([0,,2][1]); } finally {
+        \\  delete Array.prototype[1];
+        \\}
+        \\got;
+    , "42");
+}
+
+test "later: Array() spread does not allocate per-index strings" {
+    // Smoke-only — exercises the array_spread fast path that
+    // routes directly into the packed `elements` vector.
+    try expectScriptIntWithBuiltins(
+        \\function* g() { for (let i = 0; i < 100; i++) yield i; }
+        \\const a = [...g()];
+        \\a.length;
+    , 100);
+}
+
+test "later: arr[3] = v auto-extends length on Array exotic" {
+    try expectScriptIntWithBuiltins(
+        \\var a = [];
+        \\a[3] = "x";
+        \\a.length;
+    , 4);
+}
+
+test "later: delete arr[i] holes the slot but leaves length" {
+    try expectScriptStringWithBuiltins(
+        \\var a = [1, 2, 3];
+        \\delete a[1];
+        \\a.length + ":" + (1 in a ? "y" : "n") + ":" + a[1];
+    , "3:n:undefined");
+}

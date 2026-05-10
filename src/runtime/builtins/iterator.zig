@@ -871,6 +871,7 @@ fn iteratorToArray(realm: *Realm, this_value: Value, args: []const Value) Native
     const next_fn = try snapshotNext(realm, this_value);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
+    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     var idx: i32 = 0;
     var ibuf: [24]u8 = undefined;
     const max_iter: usize = 1 << 24;
@@ -1704,6 +1705,7 @@ fn zipNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
         result_obj.prototype = null;
     } else {
         result_obj.prototype = realm.intrinsics.array_prototype;
+        result_obj.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     }
 
     var sbuf: [40]u8 = undefined;

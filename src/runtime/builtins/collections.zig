@@ -232,6 +232,7 @@ fn arrayLikeIterEntriesNext(realm: *Realm, this_value: Value, args: []const Valu
     if (arrayLikeIterStep(realm, this_value)) |step| {
         const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
         arr.prototype = realm.intrinsics.array_prototype;
+        arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
         arr.set(realm.allocator, "0", Value.fromInt32(step.idx)) catch return error.OutOfMemory;
         arr.set(realm.allocator, "1", step.value) catch return error.OutOfMemory;
         arr.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
@@ -294,6 +295,7 @@ fn mapIterNext(realm: *Realm, this_value: Value, args: []const Value) NativeErro
             else => {
                 const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
                 arr.prototype = realm.intrinsics.array_prototype;
+                arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
                 arr.set(realm.allocator, "0", kv.key) catch return error.OutOfMemory;
                 arr.set(realm.allocator, "1", kv.value) catch return error.OutOfMemory;
                 arr.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
@@ -366,6 +368,7 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
         } else {
             const bucket = realm.heap.allocateObject() catch return error.OutOfMemory;
             bucket.prototype = realm.intrinsics.array_prototype;
+            bucket.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
             const idx_owned = realm.heap.allocateString("0") catch return error.OutOfMemory;
             bucket.set(realm.allocator, idx_owned.bytes, item) catch return error.OutOfMemory;
             bucket.set(realm.allocator, "length", Value.fromInt32(1)) catch return error.OutOfMemory;
@@ -786,6 +789,7 @@ fn setIterNext(realm: *Realm, this_value: Value, args: []const Value) NativeErro
         if (kind == 1) {
             const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
             arr.prototype = realm.intrinsics.array_prototype;
+            arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
             arr.set(realm.allocator, "0", v) catch return error.OutOfMemory;
             arr.set(realm.allocator, "1", v) catch return error.OutOfMemory;
             arr.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;

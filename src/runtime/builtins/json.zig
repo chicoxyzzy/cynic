@@ -631,6 +631,7 @@ const JsonParser = struct {
         self.advance(); // [
         const arr = self.realm.heap.allocateObject() catch return error.OutOfMemory;
         arr.prototype = self.realm.intrinsics.array_prototype;
+        arr.markAsArrayExotic(self.realm.allocator) catch return error.OutOfMemory;
         self.skipWs();
         if (self.peek() == @as(u8, ']')) {
             self.advance();

@@ -494,6 +494,12 @@ pub const Heap = struct {
                     }
                 }
                 if (o.generator_ref) |gen| self.markGenerator(gen);
+                // §10.4.2 Array exotic — packed indexed elements
+                // are part of the JSObject's own state; mark each
+                // slot to keep referenced values alive.
+                if (o.is_array_exotic) {
+                    for (o.elements.items) |elem| self.markValue(elem);
+                }
                 // §26.1 WeakRef — strong-ref impl: keep target alive
                 // for the lifetime of the WeakRef. Once Cynic grows
                 // true GC-weak references this becomes conditional

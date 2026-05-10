@@ -334,6 +334,7 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // with `index` and `input` properties on the result.
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
+    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     const whole_byte_start = input.byte_for_unit[whole_start];
     const whole_byte_end = input.byte_for_unit[whole_end];
     const whole_str = realm.heap.allocateString(input_s.bytes[whole_byte_start..whole_byte_end]) catch return error.OutOfMemory;

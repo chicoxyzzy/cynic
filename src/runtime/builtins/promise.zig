@@ -1081,6 +1081,7 @@ fn promiseAll(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const cap = try newPromiseCapability(realm, ctor);
     const values = realm.heap.allocateObject() catch return error.OutOfMemory;
     values.prototype = realm.intrinsics.array_prototype;
+    values.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     const state = try allocAggState(realm, .all, cap, values);
     var ctx = AggIterCtx{ .state = state, .cap = cap };
     iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, aggregatorAllProcess) catch |err| switch (err) {
@@ -1168,6 +1169,7 @@ fn promiseAllSettled(realm: *Realm, this_value: Value, args: []const Value) Nati
     const cap = try newPromiseCapability(realm, ctor);
     const values = realm.heap.allocateObject() catch return error.OutOfMemory;
     values.prototype = realm.intrinsics.array_prototype;
+    values.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     const state = try allocAggState(realm, .all_settled, cap, values);
     var ctx = AggIterCtx{ .state = state, .cap = cap };
     iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, aggregatorAllProcess) catch |err| switch (err) {
@@ -1246,6 +1248,7 @@ fn promiseAny(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const cap = try newPromiseCapability(realm, ctor);
     const errors = realm.heap.allocateObject() catch return error.OutOfMemory;
     errors.prototype = realm.intrinsics.array_prototype;
+    errors.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     const state = try allocAggState(realm, .any, cap, errors);
     var ctx = AggIterCtx{ .state = state, .cap = cap };
     iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, aggregatorAnyProcess) catch |err| switch (err) {

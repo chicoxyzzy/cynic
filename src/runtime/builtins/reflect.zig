@@ -127,6 +127,7 @@ fn reflectOwnKeys(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Reflect.ownKeys target must be an object");
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
+    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     var idx: usize = 0;
     var it = target.properties.iterator();
     while (it.next()) |entry| : (idx += 1) {
