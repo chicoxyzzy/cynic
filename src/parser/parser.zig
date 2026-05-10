@@ -897,9 +897,11 @@ pub const Parser = struct {
             try body.append(self.arena, stmt);
         }
         const rbrace = try self.expect(.rbrace);
+        const slice = try body.toOwnedSlice(self.arena);
+        try self.validateBlockBindings(slice);
         return .{
             .span = .{ .start = lbrace.span.start, .end = rbrace.span.end },
-            .body = try body.toOwnedSlice(self.arena),
+            .body = slice,
         };
     }
 
@@ -917,10 +919,22 @@ pub const Parser = struct {
             try cases.append(self.arena, case);
         }
         const rbrace = try self.expect(.rbrace);
+        const cases_slice = try cases.toOwnedSlice(self.arena);
+        // §14.12.1 CaseBlock early errors: LDN of the entire switch body
+        // must have no duplicates and must not intersect VDN. Validate
+        // against the concatenation of every case's StatementList.
+        {
+            var combined: std.ArrayListUnmanaged(Statement) = .empty;
+            defer combined.deinit(self.arena);
+            for (cases_slice) |case|
+                for (case.body) |stmt|
+                    try combined.append(self.arena, stmt);
+            try self.validateBlockBindings(combined.items);
+        }
         return .{ .switch_ = .{
             .span = .{ .start = start, .end = rbrace.span.end },
             .discriminant = discriminant,
-            .cases = try cases.toOwnedSlice(self.arena),
+            .cases = cases_slice,
         } };
     }
 
@@ -1281,6 +1295,161 @@ pub const Parser = struct {
             }
         }
         try names.append(self.arena, name);
+    }
+
+    /// §14.2.1 / §14.12.1 early errors for a Block / SwitchBody
+    /// StatementList:
+    ///
+    /// • LexicallyDeclaredNames must not contain duplicates.
+    /// • LexicallyDeclaredNames ∩ VarDeclaredNames must be empty.
+    ///
+    /// LDN at this scope = `let`/`const`/`class`/`function` BoundNames
+    /// declared *directly* in the StatementList (not inside nested
+    /// blocks). VDN = `var` BoundNames recursively reachable through
+    /// non-function statements.
+    fn validateBlockBindings(self: *Parser, body: []const Statement) ParseError!void {
+        var lex_names: std.ArrayListUnmanaged(NameSpan) = .empty;
+        defer lex_names.deinit(self.arena);
+        var var_names: std.ArrayListUnmanaged(NameSpan) = .empty;
+        defer var_names.deinit(self.arena);
+
+        for (body) |stmt| try self.collectBlockLDN(stmt, &lex_names);
+        for (body) |stmt| try self.collectVDN(stmt, &var_names);
+
+        // Duplicates within LDN.
+        var i: usize = 0;
+        while (i < lex_names.items.len) : (i += 1) {
+            var j: usize = 0;
+            while (j < i) : (j += 1) {
+                if (std.mem.eql(u8, lex_names.items[i].name, lex_names.items[j].name)) {
+                    try self.report(.duplicate_lexical_binding, lex_names.items[i].span);
+                    break;
+                }
+            }
+        }
+        // LDN ∩ VDN.
+        for (lex_names.items) |ln| {
+            for (var_names.items) |vn| {
+                if (std.mem.eql(u8, ln.name, vn.name)) {
+                    try self.report(.duplicate_lexical_binding, ln.span);
+                    break;
+                }
+            }
+        }
+    }
+
+    const NameSpan = struct { name: []const u8, span: Span };
+
+    /// LexicallyDeclaredNames of a single Block-level Statement: only
+    /// the top-level lexical declarations (let/const/class/function)
+    /// contribute. Other statements (including nested blocks) contribute
+    /// nothing — their LDNs belong to *their* inner scope.
+    fn collectBlockLDN(
+        self: *Parser,
+        stmt: Statement,
+        out: *std.ArrayListUnmanaged(NameSpan),
+    ) ParseError!void {
+        switch (stmt) {
+            .lexical => |lex| {
+                if (lex.kind == .var_) return; // var is VDN, not LDN
+                for (lex.declarators) |decl| try self.collectTargetNames(decl.name, out);
+            },
+            .class_decl => |cd| {
+                try out.append(self.arena, .{
+                    .name = self.source[cd.name.span.start..cd.name.span.end],
+                    .span = cd.name.span,
+                });
+            },
+            .function_decl => |fd| {
+                try out.append(self.arena, .{
+                    .name = self.source[fd.name.span.start..fd.name.span.end],
+                    .span = fd.name.span,
+                });
+            },
+            else => {},
+        }
+    }
+
+    /// VarDeclaredNames of a Block-level Statement: every `var`
+    /// declaration reachable through non-function statements. Recurses
+    /// into nested blocks, control-flow bodies, try/catch/finally,
+    /// switch cases. Does NOT descend into FunctionDeclaration /
+    /// ClassDeclaration / FunctionExpression bodies.
+    fn collectVDN(
+        self: *Parser,
+        stmt: Statement,
+        out: *std.ArrayListUnmanaged(NameSpan),
+    ) ParseError!void {
+        switch (stmt) {
+            .lexical => |lex| {
+                if (lex.kind != .var_) return;
+                for (lex.declarators) |decl| try self.collectTargetNames(decl.name, out);
+            },
+            .block => |b| for (b.body) |inner| try self.collectVDN(inner, out),
+            .if_ => |i| {
+                try self.collectVDN(i.consequent.*, out);
+                if (i.alternate) |alt| try self.collectVDN(alt.*, out);
+            },
+            .while_ => |w| try self.collectVDN(w.body.*, out),
+            .do_while => |d| try self.collectVDN(d.body.*, out),
+            .for_ => |f| {
+                if (f.init) |init_head| switch (init_head) {
+                    .lexical => |lex| {
+                        if (lex.kind == .var_)
+                            for (lex.declarators) |decl|
+                                try self.collectTargetNames(decl.name, out);
+                    },
+                    .expression => {},
+                };
+                try self.collectVDN(f.body.*, out);
+            },
+            .for_in_of => |f| {
+                switch (f.left) {
+                    .lexical => |lex| {
+                        if (lex.kind == .var_)
+                            for (lex.declarators) |decl|
+                                try self.collectTargetNames(decl.name, out);
+                    },
+                    .expression => {},
+                }
+                try self.collectVDN(f.body.*, out);
+            },
+            .try_ => |t| {
+                for (t.block.body) |inner| try self.collectVDN(inner, out);
+                if (t.handler) |h| for (h.body.body) |inner| try self.collectVDN(inner, out);
+                if (t.finalizer) |fin| for (fin.body) |inner| try self.collectVDN(inner, out);
+            },
+            .switch_ => |sw| {
+                for (sw.cases) |case| for (case.body) |inner| try self.collectVDN(inner, out);
+            },
+            else => {},
+        }
+    }
+
+    fn collectTargetNames(
+        self: *Parser,
+        target: stmt_mod.BindingTarget,
+        out: *std.ArrayListUnmanaged(NameSpan),
+    ) ParseError!void {
+        switch (target) {
+            .identifier => |id| try out.append(self.arena, .{
+                .name = self.source[id.span.start..id.span.end],
+                .span = id.span,
+            }),
+            .object => |obj| {
+                for (obj.properties) |prop|
+                    try self.collectTargetNames(prop.value.target, out);
+                if (obj.rest) |rest_id| try out.append(self.arena, .{
+                    .name = self.source[rest_id.span.start..rest_id.span.end],
+                    .span = rest_id.span,
+                });
+            },
+            .array => |arr| {
+                for (arr.elements) |maybe_elem|
+                    if (maybe_elem) |elem| try self.collectTargetNames(elem.target, out);
+                if (arr.rest) |rest_target| try self.collectTargetNames(rest_target.*, out);
+            },
+        }
     }
 
     /// §14.16 DebuggerStatement.

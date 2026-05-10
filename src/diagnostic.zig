@@ -74,6 +74,11 @@ pub const Code = enum {
     const_without_initializer,
     /// LHS of `=` is not a SimpleAssignmentTarget — §13.15.
     assignment_target_invalid,
+    /// Duplicate lexical binding inside a Block / SwitchBody / function
+    /// body / Script / Module — §14.2.1, §14.12.1, §15.2.1, §16.1.1, §16.2.1.
+    /// Triggered when LexicallyDeclaredNames has duplicates, or when a
+    /// LexicallyDeclaredName also appears in VarDeclaredNames.
+    duplicate_lexical_binding,
 
     // ── Runtime (later+) ───────────────────────────────────────────────────
     /// `let` or `const` binding read before its initialiser ran —
@@ -106,6 +111,7 @@ pub const Code = enum {
             .restricted_identifier_in_strict,
             .const_without_initializer,
             .assignment_target_invalid,
+            .duplicate_lexical_binding,
             => .syntax_error,
             .let_in_tdz => .reference_error,
             .assignment_to_const => .type_error,
@@ -150,6 +156,7 @@ test "Code.errorClass: parser/lexer codes are SyntaxError" {
         .restricted_identifier_in_strict,
         .const_without_initializer,
         .assignment_target_invalid,
+        .duplicate_lexical_binding,
     };
     for (parser_codes) |c| {
         try testing.expectEqual(ErrorClass.syntax_error, c.errorClass());
