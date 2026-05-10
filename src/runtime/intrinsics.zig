@@ -281,6 +281,8 @@ pub fn install(realm: *Realm) !void {
     try @import("builtins/reflect.zig").install(realm);
     try @import("builtins/symbol.zig").install(realm);
     try @import("builtins/proxy.zig").install(realm);
+    // §26.1 WeakRef — strong-ref impl, mirrors collections.zig.
+    try @import("builtins/weak_ref.zig").install(realm);
     try @import("builtins/promise.zig").install(realm);
     try @import("builtins/bigint.zig").install(realm);
     try @import("builtins/typed_array.zig").install(realm);

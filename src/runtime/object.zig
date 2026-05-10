@@ -248,6 +248,16 @@ pub const JSObject = struct {
     /// call to `.exec`/`.test` parses the `source` + `flags` and
     /// caches the bytecode here. The runtime owns the allocation.
     regex_bytecode: ?[]u8 = null,
+    /// §26.1 WeakRef — `[[WeakRefTarget]]` internal slot. Set on
+    /// `new WeakRef(target)` instances. `is_weak_ref` is the brand
+    /// (`deref.call(plainObj)` must throw a TypeError per §26.1.3.2
+    /// even when no target was supplied). `weak_ref_target` holds
+    /// the live target Value (Object or non-registered Symbol per
+    /// §6.2.10 CanBeHeldWeakly). Cynic's WeakRef is a strong-ref
+    /// impl — observable behaviour matches the spec, GC weakness
+    /// is later (mirrors WeakMap / WeakSet, see collections.zig).
+    is_weak_ref: bool = false,
+    weak_ref_target: Value = Value.undefined_,
     /// Heap-allocated JSStrings whose `bytes` slice backs a key
     /// in `properties` / `accessors` / `private_properties` /
     /// `property_flags`. The hash maps store `[]const u8` slices,

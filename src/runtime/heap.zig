@@ -483,6 +483,12 @@ pub const Heap = struct {
                     }
                 }
                 if (o.generator_ref) |gen| self.markGenerator(gen);
+                // §26.1 WeakRef — strong-ref impl: keep target alive
+                // for the lifetime of the WeakRef. Once Cynic grows
+                // true GC-weak references this becomes conditional
+                // (only marked while inside a job that has observed
+                // `.deref()`, per §9.10 AddToKeptObjects).
+                if (o.is_weak_ref) self.markValue(o.weak_ref_target);
                 // Heap-allocated JSStrings whose `.bytes` slice
                 // backs a property key. The property hash maps
                 // store `[]const u8`, not pointers; without this

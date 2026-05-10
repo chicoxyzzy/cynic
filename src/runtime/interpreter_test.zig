@@ -2683,3 +2683,102 @@ test "GC: property-bag growth survives gc_threshold=1" {
 // design a spread-loop allocation that's both anchored and
 // quadratic-free (e.g. a real `JSArray` heap kind with packed
 // indexed slots, no string keys).
+
+// ---------------------------------------------------------------------------
+// §26.1 WeakRef
+// ---------------------------------------------------------------------------
+
+fn expectScriptThrowsWithBuiltins(source: []const u8) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    const result = try evaluateScriptResult(&realm, source);
+    switch (result) {
+        .value, .yielded => return error.ExpectedThrow,
+        .thrown => {},
+    }
+}
+
+test "later: WeakRef constructor accepts an object target" {
+    try expectScriptIntWithBuiltins(
+        \\const t = { x: 7 };
+        \\const wr = new WeakRef(t);
+        \\wr.deref().x;
+    , 7);
+}
+
+test "later: WeakRef constructor accepts a function target" {
+    // §6.2.10 CanBeHeldWeakly — functions are objects.
+    try expectScriptIntWithBuiltins(
+        \\const f = function () { return 42; };
+        \\const wr = new WeakRef(f);
+        \\wr.deref()();
+    , 42);
+}
+
+test "later: WeakRef constructor accepts a non-registered symbol" {
+    // §26.1.1.1 step 2 + §6.2.10 — Symbol() is weakly holdable.
+    try expectScriptIntWithBuiltins(
+        \\const s = Symbol("a");
+        \\const wr = new WeakRef(s);
+        \\wr.deref() === s ? 1 : 0;
+    , 1);
+}
+
+test "later: WeakRef constructor rejects undefined target" {
+    // §26.1.1.1 step 2 — CanBeHeldWeakly(undefined) is false.
+    try expectScriptThrowsWithBuiltins(
+        \\new WeakRef();
+    );
+}
+
+test "later: WeakRef constructor rejects null target" {
+    try expectScriptThrowsWithBuiltins(
+        \\new WeakRef(null);
+    );
+}
+
+test "later: WeakRef constructor rejects number target" {
+    try expectScriptThrowsWithBuiltins(
+        \\new WeakRef(1);
+    );
+}
+
+test "later: WeakRef constructor rejects string target" {
+    try expectScriptThrowsWithBuiltins(
+        \\new WeakRef("not an object");
+    );
+}
+
+test "later: WeakRef constructor rejects registered symbol target" {
+    // §6.2.10 — Symbol.for() symbols are *not* weakly holdable.
+    try expectScriptThrowsWithBuiltins(
+        \\new WeakRef(Symbol.for("k"));
+    );
+}
+
+test "later: WeakRef called without new throws" {
+    // §26.1.1.1 step 1 — undefined NewTarget → TypeError.
+    try expectScriptThrowsWithBuiltins(
+        \\WeakRef({});
+    );
+}
+
+test "later: WeakRef.prototype.deref on plain object throws" {
+    // §26.1.3.2 step 2 — RequireInternalSlot([[WeakRefTarget]]).
+    try expectScriptThrowsWithBuiltins(
+        \\WeakRef.prototype.deref.call({});
+    );
+}
+
+test "later: WeakRef.prototype.deref on prototype itself throws" {
+    try expectScriptThrowsWithBuiltins(
+        \\WeakRef.prototype.deref();
+    );
+}
+
+test "later: WeakRef.prototype.deref on primitive throws" {
+    try expectScriptThrowsWithBuiltins(
+        \\WeakRef.prototype.deref.call(undefined);
+    );
+}
