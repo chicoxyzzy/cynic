@@ -4385,6 +4385,13 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
         },
         else => return error.UnsupportedExpression,
     }
+    // §13.15.2 / §13.15.4 — DestructuringAssignmentEvaluation
+    // returns the RHS value (the source we destructured). Caller
+    // (expression context) reads `acc` for the assignment-expression
+    // result, so restore it here. Statement / for-of callers
+    // overwrite `acc` immediately and don't care.
+    try self.builder.emitOp(.ldar, target.span());
+    try self.builder.emitU8(r_src);
 }
 
 /// Assignment-pattern element handling. The element AST is
@@ -4419,19 +4426,19 @@ fn assignAssignmentPatternLeaf(self: *Compiler, target: ast.expression.Expressio
         .identifier_reference => |ir| {
             const name = self.source[ir.span.start..ir.span.end];
             const scope = self.scope orelse return error.UnresolvedReference;
-            const binding = scope.resolve(name) orelse blk: {
-                if (self.realm.globals.contains(name)) {
-                    break :blk Binding{
-                        .name = name,
-                        .env_slot = 0,
-                        .env_depth = 0,
-                        .kind = .var_,
-                        .span = ir.span,
-                        .is_global = true,
-                    };
-                }
-                try self.report(.unexpected_token, ir.span);
-                return error.UnresolvedReference;
+            // §13.15.5.3 — fall through to a global write when the
+            // identifier doesn't resolve in any user-visible scope.
+            // Matches the regular-assignment fallback (sloppy-mode
+            // "create on assign"); strict-mode `ReferenceError` is a
+            // runtime check `sta_global` will own once `globalThis`
+            // grows a sentinel.
+            const binding: Binding = scope.resolve(name) orelse Binding{
+                .name = name,
+                .env_slot = 0,
+                .env_depth = 0,
+                .kind = .var_,
+                .span = ir.span,
+                .is_global = true,
             };
             try self.emitStoreBinding(binding, ir.span);
         },
