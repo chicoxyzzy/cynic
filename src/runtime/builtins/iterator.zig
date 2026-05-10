@@ -1137,8 +1137,10 @@ fn getIteratorFlattenable(realm: *Realm, v: Value, reject_strings: bool) NativeE
         // (Cynic doesn't yet have a String iterator, so reject anyway for safety.)
         return throwTypeError(realm, "iterable is a primitive");
     }
-    const obj = heap_mod.valueAsPlainObject(v).?;
-    const m_v = obj.get("@@iterator");
+    // §7.4.6 step 2 — accessor-aware `@@iterator` read so the
+    // `iterables-iteration*.js` family observes the spec's exact
+    // ordering (one `get @@iterator` per input, at this site).
+    const m_v = try iterGet(realm, v, "@@iterator");
     if (m_v.isUndefined() or m_v.isNull()) {
         // No @@iterator — treat `v` itself as the iterator (must
         // expose a `next`).
@@ -1336,60 +1338,117 @@ fn readZipPadding(realm: *Realm, options_v: Value) NativeError!?*JSObject {
     return pad_obj;
 }
 
-/// Close every iter in `iters[start..]` (forward index order),
+/// A sub-iterator opened from the zip iterables list, with its
+/// `next` method snapshotted at construction (§7.4.2 GetIteratorDirect
+/// step 1). zipNext dispatches through the cached `next` for every
+/// step so a `get next()` accessor on the underlying iterator
+/// fires exactly once.
+const ZipIterSlot = struct {
+    iter: Value,
+    /// Result of `Get(iter, "next")`. Stored as a Value (not a
+    /// `*JSFunction`) so the §7.4.4 IteratorNext callability check
+    /// is deferred to step time — matches the spec's
+    /// `[[NextMethod]]` semantics.
+    next: Value,
+};
+
+/// §7.4.2 GetIteratorDirect — given a raw iterator `iter`,
+/// snapshot its `next` via accessor-aware [[Get]]. The
+/// callability check is deferred (per §7.4.4 IteratorNext) so a
+/// non-callable `next` only TypeErrors at step time.
+fn snapshotIterNextValue(realm: *Realm, iter: Value) NativeError!Value {
+    if (heap_mod.valueAsPlainObject(iter) == null) {
+        return throwTypeError(realm, "iterator is not an object");
+    }
+    return iterGet(realm, iter, "next");
+}
+
+/// Close every slot in `slots[start..]` (forward index order),
 /// swallowing errors so the caller's pending throw wins.
-fn closeAllSwallow(realm: *Realm, iters: []const Value, start: usize) void {
+fn closeAllSwallowSlots(realm: *Realm, slots: []const ZipIterSlot, start: usize) void {
     var i: usize = start;
-    while (i < iters.len) : (i += 1) {
-        closeIteratorSwallow(realm, iters[i]);
+    while (i < slots.len) : (i += 1) {
+        closeIteratorSwallow(realm, slots[i].iter);
     }
 }
 
 /// Open every entry of an iterables-iterable (zip's `iterables`
 /// argument — itself iterable — yielding objects to pass through
-/// `GetIteratorFlattenable(reject-strings)`). Returns the
-/// collected raw-iterator list. On any throw, closes already-
-/// opened inner iters and the input iterator before propagating.
-fn collectZipIters(realm: *Realm, iterables_v: Value) NativeError![]Value {
+/// §7.4.6 GetIteratorFlattenable(reject-strings)). Returns the
+/// collected sub-iterators with their snapshotted `next` slots.
+/// On any throw, closes already-opened inner iters and the input
+/// iterator before propagating.
+///
+/// §27.5.4 step 10 (Iterator.zip): `Let inputIter be ? GetIterator(iterables, sync)` —
+/// reads `@@iterator` once, calls it, then §7.4.2 GetIteratorDirect
+/// snapshots the returned iterator's `next`. Both reads are
+/// accessor-aware so the `iterables-iteration.js` log ordering
+/// matches.
+fn collectZipIters(realm: *Realm, iterables_v: Value) NativeError![]ZipIterSlot {
     if (heap_mod.valueAsPlainObject(iterables_v) == null) {
         return throwTypeError(realm, "Iterator.zip iterables must be an object");
     }
-    const input_iter = interpreter.openIterator(realm.allocator, realm, iterables_v) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return throwTypeError(realm, "Iterator.zip iterables is not iterable"),
+    // §7.4.2 GetIterator(iterables, sync) — accessor-aware
+    // `@@iterator` read, then call the method.
+    const m_v = try iterGet(realm, iterables_v, "@@iterator");
+    if (m_v.isUndefined() or m_v.isNull()) {
+        return throwTypeError(realm, "Iterator.zip iterables is not iterable");
+    }
+    const m_fn = heap_mod.valueAsFunction(m_v) orelse {
+        return throwTypeError(realm, "Iterator.zip iterables @@iterator is not callable");
     };
-    var iters: std.ArrayListUnmanaged(Value) = .empty;
+    const input_iter = try callIteratorMethod(realm, m_fn, iterables_v);
+    // §7.4.2 step 1 — snapshot input_iter.next.
+    const input_next_v = try snapshotIterNextValue(realm, input_iter);
+
+    var iters: std.ArrayListUnmanaged(ZipIterSlot) = .empty;
     errdefer iters.deinit(realm.allocator);
     while (true) {
-        const r = invokeIterNext(realm, input_iter) catch |err| {
-            closeAllSwallow(realm, iters.items, 0);
+        // §7.4.4 IteratorNext callability check fires here.
+        const input_next_fn = heap_mod.valueAsFunction(input_next_v) orelse {
+            closeAllSwallowSlots(realm, iters.items, 0);
+            iters.deinit(realm.allocator);
+            return throwTypeError(realm, "iterator has no callable next");
+        };
+        const r = invokeIterNextFn(realm, input_iter, input_next_fn) catch |err| {
+            closeAllSwallowSlots(realm, iters.items, 0);
             iters.deinit(realm.allocator);
             return err;
         };
         if (heap_mod.valueAsPlainObject(r) == null) {
-            closeAllSwallow(realm, iters.items, 0);
+            closeAllSwallowSlots(realm, iters.items, 0);
             iters.deinit(realm.allocator);
             return typeErrorAfterClose(realm, input_iter, "Iterator result is not an object");
         }
         const done_v = iterGet(realm, r, "done") catch |err| {
-            closeAllSwallow(realm, iters.items, 0);
+            closeAllSwallowSlots(realm, iters.items, 0);
             iters.deinit(realm.allocator);
             return err;
         };
         if (intrinsics.toBoolean(done_v)) break;
         const value = iterGet(realm, r, "value") catch |err| {
-            closeAllSwallow(realm, iters.items, 0);
+            closeAllSwallowSlots(realm, iters.items, 0);
             iters.deinit(realm.allocator);
             return err;
         };
         const sub_iter = getIteratorFlattenable(realm, value, true) catch |err| {
-            closeAllSwallow(realm, iters.items, 0);
+            closeAllSwallowSlots(realm, iters.items, 0);
             closeIteratorSwallow(realm, input_iter);
             iters.deinit(realm.allocator);
             return err;
         };
-        iters.append(realm.allocator, sub_iter) catch {
-            closeAllSwallow(realm, iters.items, 0);
+        // §7.4.2 step 1 — snapshot the sub-iter's `next` once.
+        const sub_next_v = snapshotIterNextValue(realm, sub_iter) catch |err| {
+            closeIteratorSwallow(realm, sub_iter);
+            closeAllSwallowSlots(realm, iters.items, 0);
+            closeIteratorSwallow(realm, input_iter);
+            iters.deinit(realm.allocator);
+            return err;
+        };
+        iters.append(realm.allocator, .{ .iter = sub_iter, .next = sub_next_v }) catch {
+            closeIteratorSwallow(realm, sub_iter);
+            closeAllSwallowSlots(realm, iters.items, 0);
+            closeIteratorSwallow(realm, input_iter);
             iters.deinit(realm.allocator);
             return error.OutOfMemory;
         };
@@ -1402,7 +1461,7 @@ fn collectZipIters(realm: *Realm, iterables_v: Value) NativeError![]Value {
 /// `keys == null` builds zip; non-null builds zipKeyed.
 fn buildZipWrapper(
     realm: *Realm,
-    iters: []const Value,
+    iters: []const ZipIterSlot,
     mode: ZipMode,
     padding: ?*JSObject,
     keys: ?[]const []const u8,
@@ -1417,9 +1476,15 @@ fn buildZipWrapper(
     wrap.set(realm.allocator, "__cynic_iter_running__", Value.fromBool(false)) catch return error.OutOfMemory;
 
     var sbuf: [40]u8 = undefined;
-    for (iters, 0..) |it, i| {
+    for (iters, 0..) |slot, i| {
         const owned = realm.heap.allocateString(slotName(&sbuf, "__cynic_iter_zip_", i)) catch return error.OutOfMemory;
-        wrap.set(realm.allocator, owned.bytes, it) catch return error.OutOfMemory;
+        wrap.set(realm.allocator, owned.bytes, slot.iter) catch return error.OutOfMemory;
+        // §7.4.2 GetIteratorDirect — snapshot of iter.next, stashed
+        // per-input so step time doesn't re-trigger a `get next`
+        // accessor (the `iterator-zip-iteration.js` log expects
+        // exactly one `get name.next` per input, at construction).
+        const owned_n = realm.heap.allocateString(slotName(&sbuf, "__cynic_iter_zipnext_", i)) catch return error.OutOfMemory;
+        wrap.set(realm.allocator, owned_n.bytes, slot.next) catch return error.OutOfMemory;
         const owned_a = realm.heap.allocateString(slotName(&sbuf, "__cynic_iter_active_", i)) catch return error.OutOfMemory;
         wrap.set(realm.allocator, owned_a.bytes, Value.fromBool(true)) catch return error.OutOfMemory;
     }
@@ -1447,31 +1512,48 @@ fn buildZipWrapper(
     // is left empty (reads return undefined).
     if (mode == .longest and padding != null and iters.len > 0) {
         const pad_obj = padding.?;
-        const pad_iter = interpreter.openIterator(realm.allocator, realm, heap_mod.taggedObject(pad_obj)) catch |err| switch (err) {
-            error.OutOfMemory => {
-                // Already-collected iters need closing.
-                closeAllSwallow(realm, iters, 0);
-                return error.OutOfMemory;
-            },
-            else => {
-                closeAllSwallow(realm, iters, 0);
-                return throwTypeError(realm, "Iterator.zip 'padding' is not iterable");
-            },
+        // §27.5.4 step 14b — `Let paddingIter be ? GetIterator(padding, sync)`.
+        // Accessor-aware `@@iterator` read; then §7.4.2 snapshots next.
+        const pad_v = heap_mod.taggedObject(pad_obj);
+        const pad_m_v = iterGet(realm, pad_v, "@@iterator") catch |err| {
+            closeAllSwallowSlots(realm, iters, 0);
+            return err;
+        };
+        if (pad_m_v.isUndefined() or pad_m_v.isNull()) {
+            closeAllSwallowSlots(realm, iters, 0);
+            return throwTypeError(realm, "Iterator.zip 'padding' is not iterable");
+        }
+        const pad_m_fn = heap_mod.valueAsFunction(pad_m_v) orelse {
+            closeAllSwallowSlots(realm, iters, 0);
+            return throwTypeError(realm, "Iterator.zip 'padding' @@iterator is not callable");
+        };
+        const pad_iter = callIteratorMethod(realm, pad_m_fn, pad_v) catch |err| {
+            closeAllSwallowSlots(realm, iters, 0);
+            return err;
+        };
+        // §7.4.2 step 1 — snapshot pad_iter.next once.
+        const pad_next_v = snapshotIterNextValue(realm, pad_iter) catch |err| {
+            closeAllSwallowSlots(realm, iters, 0);
+            return err;
         };
         var still_active = true;
         for (iters, 0..) |_, i| {
             const slot_owned = realm.heap.allocateString(slotName(&sbuf, "__cynic_iter_pad_", i)) catch return error.OutOfMemory;
             if (still_active) {
-                const r = invokeIterNext(realm, pad_iter) catch |err| {
-                    closeAllSwallow(realm, iters, 0);
+                const pad_next_fn = heap_mod.valueAsFunction(pad_next_v) orelse {
+                    closeAllSwallowSlots(realm, iters, 0);
+                    return throwTypeError(realm, "padding iterator has no callable next");
+                };
+                const r = invokeIterNextFn(realm, pad_iter, pad_next_fn) catch |err| {
+                    closeAllSwallowSlots(realm, iters, 0);
                     return err;
                 };
                 if (heap_mod.valueAsPlainObject(r) == null) {
-                    closeAllSwallow(realm, iters, 0);
+                    closeAllSwallowSlots(realm, iters, 0);
                     return typeErrorAfterClose(realm, pad_iter, "padding iterator result is not an object");
                 }
                 const done_v = iterGet(realm, r, "done") catch |err| {
-                    closeAllSwallow(realm, iters, 0);
+                    closeAllSwallowSlots(realm, iters, 0);
                     return err;
                 };
                 if (intrinsics.toBoolean(done_v)) {
@@ -1480,7 +1562,7 @@ fn buildZipWrapper(
                     continue;
                 }
                 const value = iterGet(realm, r, "value") catch |err| {
-                    closeAllSwallow(realm, iters, 0);
+                    closeAllSwallowSlots(realm, iters, 0);
                     return err;
                 };
                 wrap.set(realm.allocator, slot_owned.bytes, value) catch return error.OutOfMemory;
@@ -1492,7 +1574,7 @@ fn buildZipWrapper(
         // close it (NormalCompletion).
         if (still_active) {
             closeIteratorPropagate(realm, pad_iter) catch |err| {
-                closeAllSwallow(realm, iters, 0);
+                closeAllSwallowSlots(realm, iters, 0);
                 return err;
             };
         }
@@ -1518,23 +1600,77 @@ fn buildZipWrapper(
 fn zipReturn(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Iterator return on non-object");
+    // §27.5.1 — split per spec:
+    //   suspended-start (never stepped) → set state to "completed"
+    //                  and run IteratorCloseAll without entering
+    //                  "executing"; nested return() observes
+    //                  completed state and returns iterResult
+    //                  (the `suspended-start-iterator-close-calls-return.js`
+    //                  family probes this).
+    //   suspended-yield (stepped at least once) → state transitions
+    //                  to "executing" during IteratorCloseAll;
+    //                  nested return() observes executing state
+    //                  and throws TypeError per §27.5.1.4
+    //                  GeneratorValidate step 6.
+    const started = intrinsics.toBoolean(obj.get("__cynic_iter_started__"));
+    if (started) try checkNotRunning(realm, obj);
     if (intrinsics.toBoolean(obj.get("__cynic_iter_done__"))) {
         return iterResult(realm, Value.undefined_, true);
     }
     obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch return error.OutOfMemory;
+    if (started) markRunning(obj, realm.allocator);
+    defer if (started) clearRunning(obj, realm.allocator);
     const count_v = obj.get("__cynic_iter_count__");
     const count: i32 = if (count_v.isInt32()) count_v.asInt32() else 0;
+    // §7.4.13 IteratorCloseAll(openIters, NormalCompletion(undefined)):
+    // walk in REVERSE order; carry the running completion forward —
+    // a throw from one iter's return() turns the completion into a
+    // throw; subsequent IteratorClose calls (per §7.4.10 step 5)
+    // swallow further throws and preserve the existing one.
     var sbuf: [40]u8 = undefined;
-    var i: i32 = 0;
-    while (i < count) : (i += 1) {
+    var pending: ?Value = null;
+    var i: i32 = count - 1;
+    while (i >= 0) : (i -= 1) {
         const a_slot = slotName(&sbuf, "__cynic_iter_active_", @intCast(i));
         if (!intrinsics.toBoolean(obj.get(a_slot))) continue;
         var sbuf2: [40]u8 = undefined;
         const z_slot = slotName(&sbuf2, "__cynic_iter_zip_", @intCast(i));
         const it_v = obj.get(z_slot);
-        closeIteratorSwallow(realm, it_v);
+        obj.set(realm.allocator, a_slot, Value.fromBool(false)) catch {};
+        if (pending == null) {
+            // No pending throw — call return() and capture any throw.
+            closeIteratorPropagate(realm, it_v) catch {
+                pending = realm.pending_exception orelse Value.undefined_;
+            };
+        } else {
+            // Already have a throw — IteratorClose with throw
+            // completion swallows new errors (§7.4.10 step 5).
+            closeIteratorSwallow(realm, it_v);
+        }
+    }
+    if (pending) |ex| {
+        realm.pending_exception = ex;
+        return error.NativeThrew;
     }
     return iterResult(realm, Value.undefined_, true);
+}
+
+/// Step the i-th sub-iterator using its cached `next` (from the
+/// `__cynic_iter_zipnext_<i>__` slot, populated at construction
+/// per §7.4.2 GetIteratorDirect). The §7.4.4 IteratorNext
+/// callability check fires here — a non-callable cached value
+/// throws TypeError now, not at construction time.
+fn stepZipIter(realm: *Realm, obj: *JSObject, i: i32) NativeError!Value {
+    var sbuf: [40]u8 = undefined;
+    const z_slot = slotName(&sbuf, "__cynic_iter_zip_", @intCast(i));
+    const it_v = obj.get(z_slot);
+    var sbuf2: [40]u8 = undefined;
+    const n_slot = slotName(&sbuf2, "__cynic_iter_zipnext_", @intCast(i));
+    const next_v = obj.get(n_slot);
+    const next_fn = heap_mod.valueAsFunction(next_v) orelse {
+        return throwTypeError(realm, "iterator has no callable next");
+    };
+    return invokeIterNextFn(realm, it_v, next_fn);
 }
 
 fn zipNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -1542,6 +1678,10 @@ fn zipNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "zip iter on non-object");
     try checkNotRunning(realm, obj);
     if (intrinsics.toBoolean(obj.get("__cynic_iter_done__"))) return doneResult(realm);
+    // §27.5.1 — once next() has been entered, the helper transitions
+    // out of "suspended-start"; subsequent return() must run as
+    // suspended-yield (executing) per GeneratorResumeAbrupt.
+    obj.set(realm.allocator, "__cynic_iter_started__", Value.fromBool(true)) catch return error.OutOfMemory;
     markRunning(obj, realm.allocator);
     defer clearRunning(obj, realm.allocator);
 
@@ -1557,7 +1697,8 @@ fn zipNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
     const keyed = intrinsics.toBoolean(obj.get("__cynic_iter_keyed__"));
 
     // Build the result holder. zip yields Array exotics, zipKeyed
-    // yields a *null-prototype* OrdinaryObject (§27.1.4.4 step 16).
+    // yields a *null-prototype* OrdinaryObject (§27.5.4 step 16 /
+    // §27.5.5 step 16).
     const result_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
     if (keyed) {
         result_obj.prototype = null;
@@ -1567,101 +1708,141 @@ fn zipNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
 
     var sbuf: [40]u8 = undefined;
     var any_active: bool = false;
-    var any_inactive: bool = false;
     var i: i32 = 0;
     while (i < count) : (i += 1) {
         const a_slot = slotName(&sbuf, "__cynic_iter_active_", @intCast(i));
         const active = intrinsics.toBoolean(obj.get(a_slot));
-        if (active) {
-            var sbuf2: [40]u8 = undefined;
-            const z_slot = slotName(&sbuf2, "__cynic_iter_zip_", @intCast(i));
-            const it_v = obj.get(z_slot);
-            const r = invokeIterNext(realm, it_v) catch |err| {
-                // §7.4.10 IfAbruptCloseIterators: close every
-                // iter (including i — it threw before being
-                // removed from openIters).
-                obj.set(realm.allocator, a_slot, Value.fromBool(false)) catch {};
-                obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
-                closeAllExcept(realm, obj, count, -1);
-                return err;
-            };
-            if (heap_mod.valueAsPlainObject(r) == null) {
-                obj.set(realm.allocator, a_slot, Value.fromBool(false)) catch {};
-                obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
-                closeAllExcept(realm, obj, count, -1);
-                return throwTypeError(realm, "Iterator result is not an object");
+        if (!active) {
+            // Already exhausted in a previous round (longest only —
+            // shortest/strict would have terminated the wrapper at
+            // first exhaustion). §27.5.4 step 14d.iv — pad slot.
+            if (mode == .longest) {
+                var sbuf2: [40]u8 = undefined;
+                const p_slot = slotName(&sbuf2, "__cynic_iter_pad_", @intCast(i));
+                const pv = obj.get(p_slot);
+                try storeZipResult(realm, obj, result_obj, @intCast(i), pv, keyed);
+            } else {
+                obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch return error.OutOfMemory;
+                return doneResult(realm);
             }
-            const done_v = iterGet(realm, r, "done") catch |err| {
-                obj.set(realm.allocator, a_slot, Value.fromBool(false)) catch {};
-                obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
-                closeAllExcept(realm, obj, count, -1);
-                return err;
-            };
-            if (intrinsics.toBoolean(done_v)) {
-                obj.set(realm.allocator, a_slot, Value.fromBool(false)) catch return error.OutOfMemory;
-                any_inactive = true;
-                switch (mode) {
-                    .shortest => {
-                        // Stop and close the rest (i is removed
-                        // from openIters per spec).
-                        obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch return error.OutOfMemory;
-                        closeAllExcept(realm, obj, count, i);
-                        return doneResult(realm);
-                    },
-                    .strict => {
-                        if (i == 0) {
-                            obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch return error.OutOfMemory;
-                            closeAllExcept(realm, obj, count, i);
-                            return doneResult(realm);
-                        }
+            continue;
+        }
+
+        // §27.5.4 step 14d — `Let result be Completion(IteratorStepValue(iter))`.
+        // Cynic splits this into stepZipIter (cached `next`) plus
+        // explicit `done` / `value` reads so the §7.4.10
+        // IfAbruptCloseIterators close-all path is observable on
+        // every spec-defined throw site.
+        const r = stepZipIter(realm, obj, i) catch |err| {
+            obj.set(realm.allocator, a_slot, Value.fromBool(false)) catch {};
+            obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
+            closeAllExcept(realm, obj, count, -1);
+            return err;
+        };
+        if (heap_mod.valueAsPlainObject(r) == null) {
+            obj.set(realm.allocator, a_slot, Value.fromBool(false)) catch {};
+            obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
+            closeAllExcept(realm, obj, count, -1);
+            return throwTypeError(realm, "Iterator result is not an object");
+        }
+        const done_v = iterGet(realm, r, "done") catch |err| {
+            obj.set(realm.allocator, a_slot, Value.fromBool(false)) catch {};
+            obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
+            closeAllExcept(realm, obj, count, -1);
+            return err;
+        };
+        if (intrinsics.toBoolean(done_v)) {
+            // §27.5.4 step 14d.iii — iter[i] returned done. Remove
+            // from openIters (active=false). Mode dictates the rest.
+            obj.set(realm.allocator, a_slot, Value.fromBool(false)) catch return error.OutOfMemory;
+            switch (mode) {
+                .shortest => {
+                    obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch return error.OutOfMemory;
+                    closeAllExcept(realm, obj, count, i);
+                    return doneResult(realm);
+                },
+                .strict => {
+                    // §27.5.4 step 14d.iii (strict): if i ≠ 0,
+                    // immediately throw closing all still-open in
+                    // reverse. If i = 0, walk k = 1..count-1
+                    // stepping each — they must all be done too,
+                    // otherwise throw.
+                    if (i != 0) {
                         obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch return error.OutOfMemory;
                         closeAllExcept(realm, obj, count, i);
                         return throwTypeError(realm, "Iterator.zip strict: iterator exhausted before others");
-                    },
-                    .longest => {
-                        const p_slot = slotName(&sbuf2, "__cynic_iter_pad_", @intCast(i));
-                        const pv = obj.get(p_slot);
-                        try storeZipResult(realm, obj, result_obj, @intCast(i), pv, keyed);
-                        continue;
-                    },
-                }
-            }
-            const value = iterGet(realm, r, "value") catch |err| {
-                obj.set(realm.allocator, a_slot, Value.fromBool(false)) catch {};
-                obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
-                closeAllExcept(realm, obj, count, -1);
-                return err;
-            };
-            try storeZipResult(realm, obj, result_obj, @intCast(i), value, keyed);
-            any_active = true;
-        } else {
-            any_inactive = true;
-            // strict mode shouldn't reach here normally — once any
-            // becomes inactive, we either errored or finished. For
-            // longest, pad.
-            switch (mode) {
+                    }
+                    var k: i32 = 1;
+                    while (k < count) : (k += 1) {
+                        const r2 = stepZipIter(realm, obj, k) catch |err| {
+                            obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
+                            const k_slot = slotName(&sbuf, "__cynic_iter_active_", @intCast(k));
+                            obj.set(realm.allocator, k_slot, Value.fromBool(false)) catch {};
+                            closeAllExcept(realm, obj, count, -1);
+                            return err;
+                        };
+                        if (heap_mod.valueAsPlainObject(r2) == null) {
+                            obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch return error.OutOfMemory;
+                            const k_slot = slotName(&sbuf, "__cynic_iter_active_", @intCast(k));
+                            obj.set(realm.allocator, k_slot, Value.fromBool(false)) catch {};
+                            closeAllExcept(realm, obj, count, -1);
+                            return throwTypeError(realm, "Iterator result is not an object");
+                        }
+                        const k_done = iterGet(realm, r2, "done") catch |err| {
+                            obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
+                            const k_slot = slotName(&sbuf, "__cynic_iter_active_", @intCast(k));
+                            obj.set(realm.allocator, k_slot, Value.fromBool(false)) catch {};
+                            closeAllExcept(realm, obj, count, -1);
+                            return err;
+                        };
+                        if (intrinsics.toBoolean(k_done)) {
+                            const k_slot = slotName(&sbuf, "__cynic_iter_active_", @intCast(k));
+                            obj.set(realm.allocator, k_slot, Value.fromBool(false)) catch return error.OutOfMemory;
+                            continue;
+                        }
+                        // k yielded a value — strict violation.
+                        // §7.4.13 IteratorCloseAll(openIters, throw)
+                        // closes everything still active (k still
+                        // is — the spec hasn't removed it) in
+                        // reverse, then throws.
+                        obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch return error.OutOfMemory;
+                        closeAllExcept(realm, obj, count, -1);
+                        return throwTypeError(realm, "Iterator.zip strict: iterator exhausted before others");
+                    }
+                    // Every iterator exhausted in the same round.
+                    obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch return error.OutOfMemory;
+                    return doneResult(realm);
+                },
                 .longest => {
+                    // §27.5.4 step 14d.iv — substitute padding[i].
                     var sbuf2: [40]u8 = undefined;
                     const p_slot = slotName(&sbuf2, "__cynic_iter_pad_", @intCast(i));
                     const pv = obj.get(p_slot);
                     try storeZipResult(realm, obj, result_obj, @intCast(i), pv, keyed);
-                },
-                else => {
-                    // Shouldn't happen — _done_ would have been true.
-                    obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch return error.OutOfMemory;
-                    return doneResult(realm);
+                    continue;
                 },
             }
         }
+        const value = iterGet(realm, r, "value") catch |err| {
+            obj.set(realm.allocator, a_slot, Value.fromBool(false)) catch {};
+            obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
+            closeAllExcept(realm, obj, count, -1);
+            return err;
+        };
+        try storeZipResult(realm, obj, result_obj, @intCast(i), value, keyed);
+        any_active = true;
     }
 
-    if (mode == .longest and !any_active and any_inactive) {
+    if (mode == .longest and !any_active) {
         // Every iter exhausted — done.
         obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch return error.OutOfMemory;
         return doneResult(realm);
     }
 
     if (!keyed) {
+        // §27.5.4 step 14e — `Set status to Completion(Set(result, "length", iterCount, true))`.
+        // `assertIsPackedArray` checks length is writable, non-
+        // enumerable, non-configurable.
         result_obj.setWithFlags(realm.allocator, "length", Value.fromInt32(count), .{
             .writable = true,
             .enumerable = false,
@@ -1760,7 +1941,7 @@ fn iteratorZipKeyed(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const all_keys = try @import("object.zig").ownPropertyKeysOrdered(realm, iterables_obj);
     defer realm.allocator.free(all_keys);
 
-    var iters: std.ArrayListUnmanaged(Value) = .empty;
+    var iters: std.ArrayListUnmanaged(ZipIterSlot) = .empty;
     defer iters.deinit(realm.allocator);
     var keys: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
@@ -1777,30 +1958,38 @@ fn iteratorZipKeyed(realm: *Realm, this_value: Value, args: []const Value) Nativ
         if (!has_data and !has_acc) continue;
         if (!flags.enumerable) continue;
         const v = iterGet(realm, iterables_v, key) catch |err| {
-            closeAllSwallow(realm, iters.items, 0);
+            closeAllSwallowSlots(realm, iters.items, 0);
             return err;
         };
         if (v.isUndefined()) continue;
         const sub_iter = getIteratorFlattenable(realm, v, true) catch |err| {
-            closeAllSwallow(realm, iters.items, 0);
+            closeAllSwallowSlots(realm, iters.items, 0);
+            return err;
+        };
+        // §7.4.2 step 1 — snapshot sub_iter.next once, accessor-
+        // aware via iterGet. (Same `next`-snapshot rule as zip.)
+        const sub_next_v = snapshotIterNextValue(realm, sub_iter) catch |err| {
+            closeIteratorSwallow(realm, sub_iter);
+            closeAllSwallowSlots(realm, iters.items, 0);
             return err;
         };
         // Copy the key into our owned storage so we keep the
         // identity stable even if the underlying property string
         // gets recycled.
         const owned_key = realm.allocator.dupe(u8, key) catch {
-            closeAllSwallow(realm, iters.items, 0);
+            closeAllSwallowSlots(realm, iters.items, 0);
             closeIteratorSwallow(realm, sub_iter);
             return error.OutOfMemory;
         };
         keys.append(realm.allocator, owned_key) catch {
             realm.allocator.free(owned_key);
-            closeAllSwallow(realm, iters.items, 0);
+            closeAllSwallowSlots(realm, iters.items, 0);
             closeIteratorSwallow(realm, sub_iter);
             return error.OutOfMemory;
         };
-        iters.append(realm.allocator, sub_iter) catch {
-            closeAllSwallow(realm, iters.items, 0);
+        iters.append(realm.allocator, .{ .iter = sub_iter, .next = sub_next_v }) catch {
+            closeAllSwallowSlots(realm, iters.items, 0);
+            closeIteratorSwallow(realm, sub_iter);
             return error.OutOfMemory;
         };
     }

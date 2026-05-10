@@ -3171,3 +3171,40 @@ test "later: bind on target with non-string name yields 'bound '" {
         \\"<" + f.bind().name + ">";
     , "<bound >");
 }
+
+// §27.5.4 / §7.4.2 — `Iterator.zip` snapshots each input
+// iterator's `next` once at construction (GetIteratorDirect step 1).
+// Subsequent steps dispatch through the cached snapshot, so a
+// `get next()` accessor on an underlying iterator must fire
+// exactly once per input — never on per-step iteration.
+test "later: Iterator.zip snapshots each input.next once" {
+    try expectScriptStringWithBuiltins(
+        \\let aGets = 0, bGets = 0;
+        \\const a = { get next() { ++aGets; let i = 0; return function () { return i < 3 ? { value: i++, done: false } : { value: undefined, done: true }; }; } };
+        \\const b = { get next() { ++bGets; let i = 10; return function () { return i < 13 ? { value: i++, done: false } : { value: undefined, done: true }; }; } };
+        \\const z = Iterator.zip([a, b]);
+        \\z.next(); z.next(); z.next(); z.next();
+        \\aGets + ":" + bGets;
+    , "1:1");
+}
+
+// §27.5.4 step 14d.iii (strict) + §7.4.13 IteratorCloseAll —
+// when one input is exhausted before the others in `mode: "strict"`,
+// every still-open iter is closed in REVERSE order via `return()`,
+// then a TypeError is thrown.
+test "later: Iterator.zip(strict) closes other iters in reverse on mismatch" {
+    try expectScriptStringWithBuiltins(
+        \\const log = [];
+        \\const mk = (name, n, isShort) => ({
+        \\  next() {
+        \\    log.push(name + "_next");
+        \\    return isShort ? { done: true } : { value: 0, done: false };
+        \\  },
+        \\  return() { log.push(name + "_ret"); return {}; },
+        \\});
+        \\let threw = false;
+        \\try { Iterator.zip([mk("A", 1, false), mk("B", 1, true), mk("C", 1, false)], { mode: "strict" }).next(); }
+        \\catch (e) { threw = (e instanceof TypeError); }
+        \\threw + ":" + log.join(",");
+    , "true:A_next,B_next,C_ret,A_ret");
+}
