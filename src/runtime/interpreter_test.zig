@@ -3044,3 +3044,130 @@ test "later: GetPrototypeFromConstructor propagates abrupt getter throw" {
         \\catch (e) { e.message; }
     , "abrupt");
 }
+
+// ── §20.2.3 Function.prototype own properties ──────────────────────────────
+//
+// Per §20.2.3 the Function prototype object has a `length` of 0 and
+// a `name` of "" — both with §17 default flags
+// `{w:false, e:false, c:true}`. Property order per §17 install order
+// is `length` then `name`.
+
+test "later: Function.prototype.length is 0 with §17 flags" {
+    try expectScriptStringWithBuiltins(
+        \\const d = Object.getOwnPropertyDescriptor(Function.prototype, "length");
+        \\d.value + ":" + d.writable + ":" + d.enumerable + ":" + d.configurable;
+    , "0:false:false:true");
+}
+
+test "later: Function.prototype.name is '' with §17 flags" {
+    try expectScriptStringWithBuiltins(
+        \\const d = Object.getOwnPropertyDescriptor(Function.prototype, "name");
+        \\"<" + d.value + ">:" + d.writable + ":" + d.enumerable + ":" + d.configurable;
+    , "<>:false:false:true");
+}
+
+test "later: Function.prototype property order: length before name" {
+    try expectScriptStringWithBuiltins(
+        \\const ns = Object.getOwnPropertyNames(Function.prototype);
+        \\const li = ns.indexOf("length");
+        \\const ni = ns.indexOf("name");
+        \\(li >= 0 && ni === li + 1) ? "ok" : ("bad:" + li + "," + ni);
+    , "ok");
+}
+
+// ── §20.2.3.6 Function.prototype[@@hasInstance] ────────────────────────────
+//
+// Per §20.2.3.6 the `[Symbol.hasInstance]` property on
+// `Function.prototype` is a function that performs
+// OrdinaryHasInstance(this, V). The descriptor itself is
+// `{w:false, e:false, c:false}`. Its own `name` is
+// "[Symbol.hasInstance]" and `length` is 1.
+
+test "later: Function.prototype[@@hasInstance] is a function" {
+    try expectScriptStringWithBuiltins(
+        \\typeof Function.prototype[Symbol.hasInstance];
+    , "function");
+}
+
+test "later: Function.prototype[@@hasInstance] descriptor non-writable, non-configurable" {
+    try expectScriptStringWithBuiltins(
+        \\const d = Object.getOwnPropertyDescriptor(Function.prototype, Symbol.hasInstance);
+        \\d.writable + ":" + d.enumerable + ":" + d.configurable;
+    , "false:false:false");
+}
+
+test "later: Function.prototype[@@hasInstance] name and length" {
+    try expectScriptStringWithBuiltins(
+        \\const m = Function.prototype[Symbol.hasInstance];
+        \\m.name + ":" + m.length;
+    , "[Symbol.hasInstance]:1");
+}
+
+test "later: Function.prototype[@@hasInstance] returns true for matching prototype" {
+    try expectScriptStringWithBuiltins(
+        \\function F() {}
+        \\const o = new F();
+        \\F[Symbol.hasInstance](o) ? "y" : "n";
+    , "y");
+}
+
+test "later: Function.prototype[@@hasInstance] returns false for non-object" {
+    try expectScriptStringWithBuiltins(
+        \\function F() {}
+        \\const a = F[Symbol.hasInstance](42) ? "y" : "n";
+        \\const b = F[Symbol.hasInstance](null) ? "y" : "n";
+        \\const c = F[Symbol.hasInstance](undefined) ? "y" : "n";
+        \\a + b + c;
+    , "nnn");
+}
+
+test "later: Function.prototype[@@hasInstance] non-callable this returns false" {
+    try expectScriptStringWithBuiltins(
+        \\Function.prototype[Symbol.hasInstance].call({}) ? "y" : "n";
+    , "n");
+}
+
+// ── §10.4.1.3 BoundFunctionCreate — name & length ──────────────────────────
+//
+// Per §20.2.3.2 Function.prototype.bind:
+//   • SetFunctionName(F, targetName, "bound") — name becomes
+//     "bound " + targetName.
+//   • SetFunctionLength(F, max(0, target.length - args.length)).
+// Both with §17 flags `{w:false, e:false, c:true}`.
+
+test "later: bind sets name to 'bound ' + target name" {
+    try expectScriptStringWithBuiltins(
+        \\function foo() {}
+        \\foo.bind().name;
+    , "bound foo");
+}
+
+test "later: bind chained sets name to 'bound bound ' + target name" {
+    try expectScriptStringWithBuiltins(
+        \\function foo() {}
+        \\foo.bind().bind().name;
+    , "bound bound foo");
+}
+
+test "later: bind sets length to max(0, target.length - bound.length)" {
+    try expectScriptStringWithBuiltins(
+        \\function bar(x, y) {}
+        \\"" + bar.bind(null).length + "," + bar.bind(null, 1).length + "," + bar.bind(null, 1, 2).length + "," + bar.bind(null, 1, 2, 3).length;
+    , "2,1,0,0");
+}
+
+test "later: bind name is non-enumerable, non-writable, configurable" {
+    try expectScriptStringWithBuiltins(
+        \\function foo() {}
+        \\const d = Object.getOwnPropertyDescriptor(foo.bind(), "name");
+        \\d.writable + ":" + d.enumerable + ":" + d.configurable;
+    , "false:false:true");
+}
+
+test "later: bind on target with non-string name yields 'bound '" {
+    try expectScriptStringWithBuiltins(
+        \\const f = function() {};
+        \\Object.defineProperty(f, "name", { value: 42, configurable: true });
+        \\"<" + f.bind().name + ">";
+    , "<bound >");
+}

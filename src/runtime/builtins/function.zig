@@ -34,10 +34,69 @@ const callJSFunction = interpreter.callJSFunction;
 /// the realm's `%Function.prototype%`.
 pub fn installPrototypeMethods(realm: *Realm) !void {
     const fn_proto = realm.intrinsics.function_prototype orelse return;
+
+    // §20.2.3 — Properties of the Function Prototype Object.
+    // `Function.prototype` itself has own data properties
+    // `length: 0` and `name: ""` with §17 default flags
+    // `{w:false, e:false, c:true}`. `installStubConstructor`
+    // mistakenly leaves a `name: "Function"` slot; replace it.
+    // `length` is installed first so the §17 property-order
+    // convention (length before name) holds.
+    _ = fn_proto.properties.swapRemove("name");
+    _ = fn_proto.property_flags.swapRemove("name");
+    const builtin_fn_flags: @import("../object.zig").PropertyFlags = .{
+        .writable = false, .enumerable = false, .configurable = true,
+    };
+    try fn_proto.setWithFlags(realm.allocator, "length", Value.fromInt32(0), builtin_fn_flags);
+    const empty_name = try realm.heap.allocateString("");
+    try fn_proto.setWithFlags(realm.allocator, "name", Value.fromString(empty_name), builtin_fn_flags);
+
     try installNativeMethodOnProto(realm, fn_proto, "call", functionCall, 1);
     try installNativeMethodOnProto(realm, fn_proto, "apply", functionApply, 2);
     try installNativeMethodOnProto(realm, fn_proto, "bind", functionBind, 1);
     try installNativeMethodOnProto(realm, fn_proto, "toString", functionToString, 0);
+
+    // §20.2.3.6 — Function.prototype[@@hasInstance].
+    // Descriptor: `{w:false, e:false, c:false}` (per §17).
+    // Function's own `name` is "[Symbol.hasInstance]", `length` is 1.
+    const hi_fn = try realm.heap.allocateFunctionNative(functionHasInstance, 1, "[Symbol.hasInstance]");
+    hi_fn.proto = fn_proto;
+    hi_fn.has_construct = false;
+    try fn_proto.setWithFlags(realm.allocator, "@@hasInstance", heap_mod.taggedFunction(hi_fn), .{
+        .writable = false, .enumerable = false, .configurable = false,
+    });
+}
+
+// ── §20.2.3.6 / §7.3.20 Function.prototype[@@hasInstance] ──────────────
+//
+// `f[@@hasInstance](v)` returns OrdinaryHasInstance(f, v).
+fn functionHasInstance(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const v = if (args.len > 0) args[0] else Value.undefined_;
+
+    var target_fn = heap_mod.valueAsFunction(this_value) orelse return Value.false_;
+    while (target_fn.bound_target) |inner| target_fn = inner;
+
+    if (heap_mod.valueAsPlainObject(v)) |v_obj| {
+        const target_proto = target_fn.prototype orelse {
+            return throwTypeError(realm, "Function has non-object prototype in instanceof check");
+        };
+        var cursor: ?*JSObject = v_obj.prototype;
+        while (cursor) |p| : (cursor = p.prototype) {
+            if (p == target_proto) return Value.true_;
+        }
+        return Value.false_;
+    }
+    if (heap_mod.valueAsFunction(v)) |fv| {
+        const target_proto = target_fn.prototype orelse {
+            return throwTypeError(realm, "Function has non-object prototype in instanceof check");
+        };
+        var cursor: ?*JSObject = fv.proto;
+        while (cursor) |p| : (cursor = p.prototype) {
+            if (p == target_proto) return Value.true_;
+        }
+        return Value.false_;
+    }
+    return Value.false_;
 }
 
 // ── Function.prototype.{call, apply, bind} ──────────────────────────────────
@@ -153,6 +212,38 @@ fn functionBind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         owned_args = buf;
     }
 
+    // §20.2.3.2 step 7-8 — compute bound length. Read
+    // target.length only if it's an own property. If non-Number
+    // or absent, L = 0; otherwise
+    // L = max(0, ToInteger(targetLen) - args.length).
+    var bound_length: f64 = 0;
+    if (target.properties.get("length")) |len_v| {
+        if (len_v.isInt32()) {
+            const li: i64 = @as(i64, len_v.asInt32()) - @as(i64, @intCast(prefix_args.len));
+            bound_length = @floatFromInt(@max(@as(i64, 0), li));
+        } else if (len_v.isDouble()) {
+            const d = len_v.asDouble();
+            if (std.math.isNan(d)) {
+                bound_length = 0;
+            } else if (std.math.isInf(d)) {
+                bound_length = if (d > 0) d else 0;
+            } else {
+                const ti: f64 = @trunc(d);
+                bound_length = @max(0.0, ti - @as(f64, @floatFromInt(prefix_args.len)));
+            }
+        }
+    }
+
+    // §20.2.3.2 step 4-6 — name = "bound " + (target.name if String else "").
+    var name_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer name_buf.deinit(realm.allocator);
+    name_buf.appendSlice(realm.allocator, "bound ") catch return error.OutOfMemory;
+    const target_name_v = target.properties.get("name") orelse Value.undefined_;
+    if (target_name_v.isString()) {
+        const ts: *JSString = @ptrCast(@alignCast(target_name_v.asString()));
+        name_buf.appendSlice(realm.allocator, ts.bytes) catch return error.OutOfMemory;
+    }
+
     // The bound function carries no chunk; call sites detect
     // `bound_target` and route through that.
     const bound = realm.heap.allocateFunctionNative(boundFunctionTrampoline, 0, "bound") catch return error.OutOfMemory;
@@ -160,6 +251,21 @@ fn functionBind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     bound.bound_target = target;
     bound.bound_this = bound_this;
     bound.bound_args = owned_args;
+
+    // Override the §17 default `length` / `name` slots stamped
+    // by `installFunctionLengthAndName` with the spec-computed
+    // values. Flags stay `{w:false, e:false, c:true}`.
+    const fn_flags: @import("../object.zig").PropertyFlags = .{
+        .writable = false, .enumerable = false, .configurable = true,
+    };
+    const len_v: Value = if (bound_length >= -2147483648.0 and bound_length <= 2147483647.0 and @trunc(bound_length) == bound_length)
+        Value.fromInt32(@intFromFloat(bound_length))
+    else
+        Value.fromDouble(bound_length);
+    try bound.setWithFlags(realm.allocator, "length", len_v, fn_flags);
+    const name_str = realm.heap.allocateString(name_buf.items) catch return error.OutOfMemory;
+    try bound.setWithFlags(realm.allocator, "name", Value.fromString(name_str), fn_flags);
+
     return heap_mod.taggedFunction(bound);
 }
 
