@@ -44,6 +44,7 @@ const Program = ast.Program;
 const stmt_mod = @import("../ast/statement.zig");
 
 const expr_mod = @import("expression.zig");
+const pattern_validate = @import("pattern_validate.zig");
 
 pub const ParseError = error{
     ParseError,
@@ -217,11 +218,20 @@ pub const Parser = struct {
             try body.append(self.arena, stmt);
         }
         const end: u32 = self.current.span.end;
-        return .{
+        const program: Program = .{
             .span = .{ .start = start, .end = end },
             .source_kind = source_kind,
             .body = try body.toOwnedSlice(self.arena),
         };
+        // Post-parse early-error pass for AssignmentPattern shapes the
+        // expression-cover reinterpretation only checks at the top level
+        // (§13.15.5 nested-target / RestElement-position rules).
+        var validator: pattern_validate.Validator = .{
+            .arena = self.arena,
+            .diagnostics = self.diagnostics,
+        };
+        try validator.run(&program);
+        return program;
     }
 
     /// §16.2.2 ModuleItem — top-level only. Recognises ImportDeclaration
