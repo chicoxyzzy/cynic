@@ -79,6 +79,15 @@ pub const Code = enum {
     /// Triggered when LexicallyDeclaredNames has duplicates, or when a
     /// LexicallyDeclaredName also appears in VarDeclaredNames.
     duplicate_lexical_binding,
+    /// §15.7.1 ClassBody early errors:
+    ///   • static MethodDefinition with PropName "prototype",
+    ///   • non-static SpecialMethod (generator / async / async-generator /
+    ///     getter / setter) with PropName "constructor",
+    ///   • PrivateBoundIdentifier "#constructor" anywhere,
+    ///   • duplicate non-special non-static "constructor" methods,
+    ///   • duplicate PrivateBoundIdentifiers (other than one paired
+    ///     get + set on the same is_static).
+    invalid_class_element,
 
     // ── Runtime (later+) ───────────────────────────────────────────────────
     /// `let` or `const` binding read before its initialiser ran —
@@ -112,6 +121,7 @@ pub const Code = enum {
             .const_without_initializer,
             .assignment_target_invalid,
             .duplicate_lexical_binding,
+            .invalid_class_element,
             => .syntax_error,
             .let_in_tdz => .reference_error,
             .assignment_to_const => .type_error,
@@ -157,6 +167,7 @@ test "Code.errorClass: parser/lexer codes are SyntaxError" {
         .const_without_initializer,
         .assignment_target_invalid,
         .duplicate_lexical_binding,
+        .invalid_class_element,
     };
     for (parser_codes) |c| {
         try testing.expectEqual(ErrorClass.syntax_error, c.errorClass());
