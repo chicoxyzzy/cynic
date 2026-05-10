@@ -1829,6 +1829,67 @@ test "later: Promise.race honors a user-overridden .then on items" {
     , 1);
 }
 
+test "later: Promise.all resolves with the aggregated values via microtask" {
+    // §27.2.4.1.2 — each item's resolveElement closure fills
+    // a per-index slot; once `remainingElementsCount` hits zero
+    // the cap.resolve fires. Driving this through `.then`
+    // microtasks means the result Promise's reaction observes
+    // the FULL array even when iteration finishes synchronously.
+    try expectScriptStringWithBuiltins(
+        \\let result = "";
+        \\Promise.all([1, 2, 3]).then(arr => { result = arr.join(","); });
+        \\globalThis.__drainMicrotasks();
+        \\result;
+    , "1,2,3");
+}
+
+test "later: Promise.all rejects on the first rejected input" {
+    // §27.2.4.1.2 — the per-element reject calls cap.reject
+    // immediately; cap.resolve / .reject are idempotent so
+    // later element settlements are no-ops.
+    try expectScriptStringWithBuiltins(
+        \\let result = "";
+        \\Promise.all([Promise.resolve(1), Promise.reject("oops"), Promise.resolve(3)])
+        \\  .then(() => { result = "fulfilled"; }, e => { result = "rejected:" + e; });
+        \\globalThis.__drainMicrotasks();
+        \\result;
+    , "rejected:oops");
+}
+
+test "later: Promise.allSettled wraps each input as {status, value/reason}" {
+    try expectScriptStringWithBuiltins(
+        \\let result = "";
+        \\Promise.allSettled([Promise.resolve("a"), Promise.reject("b")])
+        \\  .then(arr => {
+        \\    result = arr[0].status + ":" + arr[0].value + "," +
+        \\             arr[1].status + ":" + arr[1].reason;
+        \\  });
+        \\globalThis.__drainMicrotasks();
+        \\result;
+    , "fulfilled:a,rejected:b");
+}
+
+test "later: Promise.any resolves on first fulfilled input" {
+    try expectScriptStringWithBuiltins(
+        \\let result = "";
+        \\Promise.any([Promise.reject("a"), Promise.resolve("b"), Promise.resolve("c")])
+        \\  .then(v => { result = v; }, () => { result = "rejected"; });
+        \\globalThis.__drainMicrotasks();
+        \\result;
+    , "b");
+}
+
+test "later: Promise.any rejects with AggregateError when all inputs reject" {
+    try expectScriptStringWithBuiltins(
+        \\let result = "";
+        \\Promise.any([Promise.reject("a"), Promise.reject("b")])
+        \\  .then(() => { result = "fulfilled"; },
+        \\        e => { result = e.errors.join(","); });
+        \\globalThis.__drainMicrotasks();
+        \\result;
+    , "a,b");
+}
+
 test "later: async function returns a Promise" {
     try expectScriptStringWithBuiltins(
         \\async function f() { return 42; }
