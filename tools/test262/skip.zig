@@ -24,29 +24,19 @@ pub const skip_path_prefixes = [_][]const u8{
 /// demands. The default `--scope=full` keeps measuring against
 /// everything.
 pub const cynic_oos_path_prefixes = [_][]const u8{
-    // Annex B language extensions — sloppy mode only.
-    "annexB/language/",
-    // Annex B browser-era built-ins we deliberately don't ship.
-    "annexB/built-ins/escape/",
-    "annexB/built-ins/unescape/",
-    "annexB/built-ins/String/prototype/anchor/",
-    "annexB/built-ins/String/prototype/big/",
-    "annexB/built-ins/String/prototype/blink/",
-    "annexB/built-ins/String/prototype/bold/",
-    "annexB/built-ins/String/prototype/fixed/",
-    "annexB/built-ins/String/prototype/fontcolor/",
-    "annexB/built-ins/String/prototype/fontsize/",
-    "annexB/built-ins/String/prototype/italics/",
-    "annexB/built-ins/String/prototype/link/",
-    "annexB/built-ins/String/prototype/small/",
-    "annexB/built-ins/String/prototype/strike/",
-    "annexB/built-ins/String/prototype/sub/",
-    "annexB/built-ins/String/prototype/sup/",
-    "annexB/built-ins/Date/prototype/getYear/",
-    "annexB/built-ins/Date/prototype/setYear/",
-    "annexB/built-ins/Date/prototype/toGMTString/", // alias of toUTCString — kept but tested via standard path
-    "annexB/built-ins/RegExp/", // legacy-regex extensions; full RegExp engine itself is "deferred" not "out of scope"
-    "annexB/built-ins/Function/createdynfn-no-line-terminator-html-close-comment-params.js",
+    // Annex B in its entirety — language extensions (sloppy
+    // mode, legacy octals, HTML-like comments, sloppy-mode
+    // function-in-block, for-in initializer, labels) plus the
+    // browser-era built-ins (`escape` / `unescape` /
+    // `String.prototype` HTML wrappers / `Date.{getYear,
+    // setYear}` / legacy-regex extensions). The few normative
+    // aliases Cynic *does* ship (`String.prototype.{substr,
+    // trimLeft, trimRight}`, `Date.prototype.toGMTString`) are
+    // already covered by the standard-path test262 fixtures
+    // under `built-ins/...`, so the parallel `annexB/built-ins/...`
+    // tree is pure duplication that we exclude from the scope
+    // denominator.
+    "annexB/",
     // Shared-memory primitives — explicitly out of scope per
     // docs/ROADMAP.md. Aligns with SES / Hardened JavaScript:
     // shared memory enables side channels that defeat strong
@@ -184,12 +174,18 @@ test "skip: known path prefixes" {
 }
 
 test "skip: cynic out-of-scope paths" {
+    // The whole `annexB/` tree is OOS — legacy browser-era
+    // built-ins, sloppy-mode language extensions, and the
+    // duplicate-of-standard-path fixtures for the few aliases
+    // Cynic does ship (covered by `built-ins/.../substr/...`
+    // etc.).
     try testing.expect(pathIsCynicOutOfScope("annexB/built-ins/escape/empty-string.js"));
     try testing.expect(pathIsCynicOutOfScope("annexB/built-ins/String/prototype/blink/B.2.3.4.js"));
     try testing.expect(pathIsCynicOutOfScope("annexB/built-ins/Date/prototype/setYear/year-nan.js"));
     try testing.expect(pathIsCynicOutOfScope("annexB/language/comments/single-line-html-open.js"));
-    try testing.expect(!pathIsCynicOutOfScope("annexB/built-ins/String/prototype/substr/length-undef.js"));
+    try testing.expect(pathIsCynicOutOfScope("annexB/built-ins/String/prototype/substr/length-undef.js"));
     try testing.expect(!pathIsCynicOutOfScope("language/expressions/addition/order-of-evaluation.js"));
+    try testing.expect(!pathIsCynicOutOfScope("built-ins/String/prototype/substr/length-undef.js"));
 }
 
 test "skip: unsupported features" {

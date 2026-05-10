@@ -49,16 +49,11 @@ filling in. JITs and generational GC are future work. See
 
 ### Conformance
 
-test262 conformance, Cynic-scoped (history + legend in
-[`test262-results.md`](test262-results.md)):
-
-|         | spec% | attempted% | pass / total |
-|---|---|---|---|
-| **parser**  | 54.76 % | 95.61 % | 28,542 / 52,125 |
-| **runtime** | 45.40 % | 55.39 % | 21,210 / 46,714 |
-
-`spec%` is coverage of the (Cynic-targeted) corpus; `attempted%` is the
-quality of what's shipped, ignoring skips. Plus 700+ unit tests.
+Current scores, history, and per-bucket breakdown live in
+[`test262-results.md`](test262-results.md). `spec%` is coverage
+of the (Cynic-targeted) corpus; `attempted%` is the quality of
+what's shipped, ignoring skips. Plus 700+ unit tests
+(`zig build test`).
 
 ### What works today
 

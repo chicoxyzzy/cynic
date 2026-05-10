@@ -47,7 +47,10 @@ These are project rules — they apply to everyone.
   - **Annex B normative aliases** — kept where they're widely
     used in real-world code or near-free aliases:
     `String.prototype.{substr, trimLeft, trimRight}`,
-    `Date.prototype.toGMTString`. See later in
+    `Date.prototype.toGMTString`. They're tested via the
+    standard-path test262 fixtures under `built-ins/...`; the
+    parallel `annexB/built-ins/...` tree is path-skipped in
+    full (it's pure duplication for our purposes). See later in
     [docs/ROADMAP.md](docs/ROADMAP.md).
   - **`eval` and runtime code construction** — out
     permanently. `eval()` itself, `new Function(string)` /
