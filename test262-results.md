@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.15 % | 96.48 % | 29276 / 46357 |
-| **runtime** | 51.82 % | 62.93 % | 24020 / 46357 |
+| **runtime** | 51.71 % | 62.81 % | 23973 / 46357 |
 
 ## Where the runtime stands, by area
 
@@ -23,16 +23,16 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_1000+ fails_** | | | | | |
-| `language/expressions` | 5907 | 4160 | 971 | 54 % | 59 % |
-| `language/statements` | 4460 | 4210 | 667 | 48 % | 51 % |
+| `language/expressions` | 5903 | 4164 | 971 | 53 % | 59 % |
+| `language/statements` | 4462 | 4208 | 667 | 48 % | 51 % |
 | **_100–999 fails_** | | | | | |
-| `built-ins/Array` | 2016 | 854 | 211 | 65 % | 70 % |
+| `built-ins/Array` | 2034 | 836 | 211 | 66 % | 71 % |
 | `built-ins/Function` | 173 | 247 | 89 | 34 % | 41 % |
 | `built-ins/Iterator` | 280 | 224 | 6 | 55 % | 56 % |
-| `built-ins/Object` | 2730 | 596 | 85 | 80 % | 82 % |
+| `built-ins/Object` | 2731 | 595 | 85 | 80 % | 82 % |
 | `built-ins/Promise` | 381 | 293 | 3 | 56 % | 57 % |
 | `built-ins/Proxy` | 121 | 178 | 12 | 39 % | 40 % |
-| `built-ins/RegExp` | 1197 | 521 | 161 | 64 % | 70 % |
+| `built-ins/RegExp` | 1130 | 588 | 161 | 60 % | 66 % |
 | `built-ins/String` | 849 | 369 | 5 | 69 % | 70 % |
 | `built-ins/TypedArray` | 768 | 454 | 216 | 53 % | 63 % |
 | `built-ins/TypedArrayConstructors` | 372 | 340 | 24 | 51 % | 52 % |
@@ -70,7 +70,7 @@ browser-era built-ins …).
 | `built-ins/global` | 11 | 18 | 0 | 38 % | 38 % |
 | `built-ins/isFinite` | 3 | 12 | 0 | 20 % | 20 % |
 | `built-ins/isNaN` | 3 | 12 | 0 | 20 % | 20 % |
-| `language/arguments-object` | 134 | 72 | 57 | 51 % | 65 % |
+| `language/arguments-object` | 137 | 69 | 57 | 52 % | 67 % |
 | `language/computed-property-names` | 15 | 33 | 0 | 31 % | 31 % |
 | `language/function-code` | 85 | 23 | 109 | 39 % | 79 % |
 | `language/global-code` | 17 | 20 | 5 | 40 % | 46 % |
@@ -136,12 +136,12 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-10 — cynic `9c1024e`, test262 `d0c1b455`
+### 2026-05-10 — cynic `c76c4e0`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
 | **parser** | 63.15 % | 96.48 % | 29276 / 46357 | +482 |
-| **runtime** | 51.82 % | 62.93 % | 24020 / 46357 | +107 |
+| **runtime** | 51.71 % | 62.81 % | 23973 / 46357 | +60 |
 
 ### 2026-05-09 — cynic `fcc5543`, test262 `d0c1b455`
 

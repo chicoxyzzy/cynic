@@ -3150,9 +3150,17 @@ fn runFrames(
                 // index entries and a `.length` slot. We don't
                 // model the §10.4.4.6 mapped-vs-unmapped distinction
                 // (mapped requires sloppy mode, which Cynic doesn't
-                // implement); strict-mode unmapped is a plain object.
+                // implement); strict-mode unmapped is a plain
+                // object whose [[Prototype]] is %Object.prototype%
+                // (§10.4.4.7 step 5). Earlier code chained it to
+                // %Array.prototype% for ergonomic
+                // `Array.prototype.X.call(arguments, …)`, but
+                // (a) the call form already works through
+                // ToObject + indexed access, and (b) the wrong
+                // chain made `arguments[N] = v` trigger Array
+                // exotic auto-length-extend.
                 const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-                obj.prototype = realm.intrinsics.array_prototype;
+                obj.prototype = realm.intrinsics.object_prototype;
                 var i: u8 = 0;
                 while (i < f.argc) : (i += 1) {
                     var ibuf: [16]u8 = undefined;
@@ -4570,6 +4578,41 @@ fn strictSetPropertyAnchored(
             obj.setComputedOwned(allocator, ks, value) catch return error.OutOfMemory;
         } else {
             obj.set(allocator, key, value) catch return error.OutOfMemory;
+        }
+        // §10.4.2.1 [[DefineOwnProperty]] step 4 — Array exotic
+        // length auto-extend on integer-indexed write. Without
+        // this, `a[5] = 7` on a fresh array leaves
+        // `a.length === 0` instead of 6.
+        //
+        // Per §7.1.21, the "array index" range is [0, 2^32-2];
+        // 2^32-1 is reserved as the impossible-length sentinel
+        // and is NOT an array index — so writing
+        // `a[4294967295]` is a regular property write that does
+        // NOT bump length. `canonicalIntegerIndexInterp` accepts
+        // up to maxInt(u32); we tighten the gate here.
+        if (obj.prototype != null and obj.prototype == realm.intrinsics.array_prototype) blk: {
+            const idx = canonicalIntegerIndexInterp(key) orelse break :blk;
+            if (idx > 0xFFFFFFFE) break :blk;
+            const cur_len_v = obj.get("length");
+            const cur_len: u32 = if (cur_len_v.isInt32()) @intCast(@max(0, cur_len_v.asInt32())) else if (cur_len_v.isDouble()) inner: {
+                const d = cur_len_v.asDouble();
+                if (std.math.isNan(d) or d < 0) break :inner 0;
+                break :inner @intFromFloat(@min(d, @as(f64, std.math.maxInt(u32))));
+            } else 0;
+            if (idx >= cur_len) {
+                if (obj.property_flags.get("length")) |flags| {
+                    if (!flags.writable) {
+                        const ex = try makeTypeError(realm, "Cannot extend non-writable array length");
+                        return throwInSetter(realm, frames, f, ip, value, ex);
+                    }
+                }
+                const new_len: u64 = @as(u64, idx) + 1;
+                const new_len_v: Value = if (new_len <= std.math.maxInt(i32))
+                    Value.fromInt32(@intCast(new_len))
+                else
+                    Value.fromDouble(@floatFromInt(new_len));
+                obj.set(allocator, "length", new_len_v) catch return error.OutOfMemory;
+            }
         }
         return .ok;
     }
