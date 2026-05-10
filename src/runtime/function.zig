@@ -20,6 +20,7 @@ const Chunk = @import("../bytecode/chunk.zig").Chunk;
 const Environment = @import("environment.zig").Environment;
 const JSObject = @import("object.zig").JSObject;
 const PropertyFlags = @import("object.zig").PropertyFlags;
+const Accessor = @import("object.zig").Accessor;
 const Value = @import("value.zig").Value;
 
 /// Discriminator for heap objects sharing the `Object` value tag.
@@ -197,6 +198,14 @@ pub const JSFunction = struct {
     /// `flagsForOwn`; user overrides via `Object.defineProperty`
     /// drop into this map.
     property_flags: std.StringArrayHashMapUnmanaged(PropertyFlags) = .empty,
+    /// §10.1.8 [[Get]] / §10.1.9 [[Set]] accessor descriptors on
+    /// the function object itself. Mirrors `JSObject.accessors` —
+    /// `Object.defineProperty(fn, key, {get, set})` lands here.
+    /// Read paths (lda_property) and the §10.1.14
+    /// GetPrototypeFromConstructor lookup in `constructValue` /
+    /// `new_call` consult this map before the data property bag,
+    /// per §10.1.8.1 OrdinaryGet step 4 (accessor descriptor wins).
+    accessors: std.StringArrayHashMapUnmanaged(Accessor) = .empty,
     /// `Function.prototype` — the object that becomes the
     /// `[[Prototype]]` of instances created by `new f(…)`. Auto-
     /// allocated for non-arrow functions at construction time
@@ -262,6 +271,7 @@ pub const JSFunction = struct {
     pub fn deinit(self: *JSFunction, allocator: std.mem.Allocator) void {
         self.properties.deinit(allocator);
         self.property_flags.deinit(allocator);
+        self.accessors.deinit(allocator);
         if (self.bound_args) |a| allocator.free(a);
         allocator.destroy(self);
     }
@@ -415,8 +425,19 @@ pub const JSFunction = struct {
 
     pub fn hasOwn(self: *const JSFunction, key: []const u8) bool {
         if (self.properties.contains(key)) return true;
+        if (self.accessors.contains(key)) return true;
         if (std.mem.eql(u8, key, "prototype") and self.prototype != null) return true;
         return false;
+    }
+
+    /// Own-property accessor lookup. Distinct from `JSObject`'s
+    /// chain-walking `lookupAccessor` — function `[[Prototype]]`
+    /// chain is `static_parent` → `proto`, neither of which is
+    /// expected to host accessor descriptors today (built-in
+    /// `%Function.prototype%` exposes only data properties).
+    /// Spec anchor: §10.1.8.1 OrdinaryGet step 4.
+    pub fn ownAccessor(self: *const JSFunction, key: []const u8) ?Accessor {
+        return self.accessors.get(key);
     }
 };
 

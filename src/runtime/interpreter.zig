@@ -1317,6 +1317,51 @@ pub fn callValue(
     return .{ .thrown = try makeTypeError(realm, "value is not callable") };
 }
 
+/// §10.1.14 GetPrototypeFromConstructor. Resolves the
+/// `[[Prototype]]` to install on a freshly-allocated instance:
+///   1. Let proto be Get(constructor, "prototype").
+///   2. If Type(proto) is not Object, fall back to the
+///      target's own `.prototype` slot (the intrinsic default
+///      proto for the constructor — Cynic's analogue of
+///      `realm.[[Intrinsics]].[[<intrinsicDefaultProto>]]`).
+/// Honors accessor descriptors on the new-target so user-installed
+/// `Object.defineProperty(boundFn, "prototype", {get})` fires.
+/// Returns `.thrown` when the accessor's getter throws so the
+/// caller can propagate the abrupt completion.
+pub const ProtoLookup = union(enum) {
+    proto: ?*JSObject,
+    thrown: Value,
+};
+
+pub fn getPrototypeFromConstructor(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    new_target: *JSFunction,
+    intrinsic_default: ?*JSObject,
+) RunError!ProtoLookup {
+    // §10.1.8.1 OrdinaryGet step 4 — accessor wins.
+    if (new_target.ownAccessor("prototype")) |acc_pair| {
+        if (acc_pair.getter) |getter| {
+            const recv = heap_mod.taggedFunction(new_target);
+            const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
+            switch (outcome) {
+                .value, .yielded => |v| {
+                    if (heap_mod.valueAsPlainObject(v)) |po| return .{ .proto = po };
+                    return .{ .proto = intrinsic_default };
+                },
+                .thrown => |ex| return .{ .thrown = ex },
+            }
+        }
+        // Write-only accessor: getter is undefined → ToObject fails → use default.
+        return .{ .proto = intrinsic_default };
+    }
+    // Data property — read the dedicated slot first (mirrors
+    // `JSFunction.get("prototype")`).
+    if (new_target.prototype) |p| return .{ .proto = p };
+    // No `prototype` at all (arrow, bound without override) — fall back.
+    return .{ .proto = intrinsic_default };
+}
+
 /// §10.5.14 [[Construct]] dispatcher that accepts a `Value`. Used
 /// by `Reflect.construct` to handle Proxy receivers — fires the
 /// `construct` trap if installed, otherwise falls through to the
@@ -1377,8 +1422,19 @@ pub fn constructValue(
         return .{ .thrown = try makeTypeError(realm, "value is not a constructor") };
     }
     const new_target_fn: *JSFunction = if (heap_mod.valueAsFunction(new_target)) |nt| nt else target;
+    // §10.1.14 GetPrototypeFromConstructor — Get(new_target,
+    // "prototype") so user-installed accessors on a NewTarget
+    // (e.g. `Object.defineProperty(boundFn, "prototype", {get})`)
+    // fire. Falls back to the target's own `.prototype` slot when
+    // the resolved value isn't an Object (Cynic's analogue of the
+    // spec's intrinsicDefaultProto).
+    const proto_lookup = try getPrototypeFromConstructor(allocator, realm, new_target_fn, target.prototype);
+    const resolved_proto: ?*JSObject = switch (proto_lookup) {
+        .proto => |p| p,
+        .thrown => |ex| return .{ .thrown = ex },
+    };
     const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
-    instance.prototype = new_target_fn.prototype;
+    instance.prototype = resolved_proto;
     const this_arg = heap_mod.taggedObject(instance);
     const outcome = try callJSFunction(allocator, realm, target, this_arg, args);
     switch (outcome) {
@@ -2480,8 +2536,25 @@ fn runFrames(
                     // arg slice; instead, re-enter `callJSFunction`
                     // with the constructor-flavour by allocating a
                     // synthetic instance and forcing the call.
+                    // §10.1.14 GetPrototypeFromConstructor on the
+                    // *bound* function (callee_fn — that's
+                    // NewTarget per §10.4.1.2 step 5), so accessors
+                    // on the bound function fire.
+                    const proto_lookup = try getPrototypeFromConstructor(allocator, realm, callee_fn, resolved_callee.prototype);
+                    const resolved_proto: ?*JSObject = switch (proto_lookup) {
+                        .proto => |p| p,
+                        .thrown => |ex| {
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue;
+                        },
+                    };
                     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
-                    inst.prototype = resolved_callee.prototype;
+                    inst.prototype = resolved_proto;
                     const this_v = heap_mod.taggedObject(inst);
                     const result = try callJSFunction(allocator, realm, resolved_callee, this_v, unwrapped.args);
                     switch (result) {
@@ -2509,9 +2582,24 @@ fn runFrames(
                 }
 
                 // §13.3.5.1.1 OrdinaryCallBindThis with NewTarget=callee.
-                // Allocate the instance with [[Prototype]] = callee.prototype.
+                // §10.1.14 GetPrototypeFromConstructor — read
+                // `prototype` through the accessor path so a
+                // user-installed getter on the constructor fires.
+                const proto_lookup_main = try getPrototypeFromConstructor(allocator, realm, callee_fn, callee_fn.prototype);
+                const resolved_proto_main: ?*JSObject = switch (proto_lookup_main) {
+                    .proto => |p| p,
+                    .thrown => |ex| {
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
+                    },
+                };
                 const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
-                instance.prototype = callee_fn.prototype;
+                instance.prototype = resolved_proto_main;
                 const this_value = heap_mod.taggedObject(instance);
 
                 // Native fast path — same calling shape as `Call`,
@@ -3777,7 +3865,33 @@ fn runFrames(
                         acc = obj.get(key_s.bytes);
                     }
                 } else if (heap_mod.valueAsFunction(acc)) |fn_obj| {
-                    acc = fn_obj.get(key_s.bytes);
+                    // §10.1.8.1 OrdinaryGet step 4 — accessor
+                    // descriptor wins over data. JSFunction's
+                    // `[[Prototype]]` chain (`static_parent` →
+                    // `proto`) is data-only today, so own-only
+                    // lookup suffices.
+                    if (fn_obj.ownAccessor(key_s.bytes)) |acc_pair| {
+                        if (acc_pair.getter) |getter| {
+                            const recv = acc;
+                            const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
+                            switch (outcome) {
+                                .value, .yielded => |v| acc = v,
+                                .thrown => |ex| {
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    continue;
+                                },
+                            }
+                        } else {
+                            acc = Value.undefined_;
+                        }
+                    } else {
+                        acc = fn_obj.get(key_s.bytes);
+                    }
                 } else if (acc.isString()) {
                     // §6.1.4.4 — string primitives expose.length,
                     // numeric-index char access, and inherited
@@ -3953,7 +4067,29 @@ fn runFrames(
                     }
                     acc = obj.get(key_slice);
                 } else if (heap_mod.valueAsFunction(recv)) |fn_obj| {
-                    acc = fn_obj.get(key_slice);
+                    // §10.1.8.1 OrdinaryGet — accessor descriptor
+                    // wins. Mirror the named-key branch above.
+                    if (fn_obj.ownAccessor(key_slice)) |acc_pair| {
+                        if (acc_pair.getter) |getter| {
+                            const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
+                            switch (outcome) {
+                                .value, .yielded => |v| acc = v,
+                                .thrown => |ex| {
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    continue;
+                                },
+                            }
+                        } else {
+                            acc = Value.undefined_;
+                        }
+                    } else {
+                        acc = fn_obj.get(key_slice);
+                    }
                 } else if (recv.isString()) {
                     // §6.1.4.4 — string primitives expose.length,
                     // numeric-index character access, and inherited

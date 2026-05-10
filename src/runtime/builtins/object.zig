@@ -610,10 +610,22 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
     }
 
     if (heap_mod.valueAsFunction(target_v)) |target_fn| {
+        // §17 — function objects are ordinary objects too. Mirror
+        // the JSObject path: accessor descriptors land in
+        // `target_fn.accessors`; data descriptors land in
+        // `properties`. The §10.1.6.3 non-configurable redefine
+        // guard runs against the snapshotted current shape.
         const had_own = target_fn.hasOwn(key);
         const cur_flags = target_fn.flagsForOwn(key);
-        const cur_value: Value = target_fn.get(key);
-        if (had_own and !isCompatibleRedefine(false, cur_flags, cur_value, null, null, parsed)) {
+        const cur_is_accessor = target_fn.accessors.contains(key);
+        const cur_value: Value = if (cur_is_accessor) Value.undefined_ else target_fn.get(key);
+        var cur_getter: ?*JSFunction = null;
+        var cur_setter: ?*JSFunction = null;
+        if (target_fn.accessors.get(key)) |a| {
+            cur_getter = a.getter;
+            cur_setter = a.setter;
+        }
+        if (had_own and !isCompatibleRedefine(cur_is_accessor, cur_flags, cur_value, cur_getter, cur_setter, parsed)) {
             return throwTypeError(realm, "Object.defineProperty: cannot redefine non-configurable property");
         }
 
@@ -627,8 +639,39 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
         if (parsed.has_enumerable) flags.enumerable = parsed.enumerable;
         if (parsed.has_configurable) flags.configurable = parsed.configurable;
 
-        const value: Value = if (parsed.has_value) parsed.value else cur_value;
-        target_fn.setWithFlags(realm.allocator, key, value, flags) catch return error.OutOfMemory;
+        if (parsed.isAccessor()) {
+            // Replace any existing data slot.
+            _ = target_fn.properties.swapRemove(key);
+            const entry = target_fn.accessors.getOrPut(realm.allocator, key) catch return error.OutOfMemory;
+            const new_getter: ?*JSFunction = if (parsed.has_get) parsed.getter else if (cur_is_accessor) cur_getter else null;
+            const new_setter: ?*JSFunction = if (parsed.has_set) parsed.setter else if (cur_is_accessor) cur_setter else null;
+            entry.value_ptr.* = .{ .getter = new_getter, .setter = new_setter };
+            // Accessors don't carry a `writable` bit; clear it.
+            flags.writable = false;
+            const is_default = flags.writable and flags.enumerable and flags.configurable;
+            if (is_default) {
+                _ = target_fn.property_flags.swapRemove(key);
+            } else {
+                target_fn.property_flags.put(realm.allocator, key, flags) catch return error.OutOfMemory;
+            }
+            return target_v;
+        }
+
+        if (parsed.isData() or !cur_is_accessor) {
+            // Drop any previous accessor.
+            _ = target_fn.accessors.swapRemove(key);
+            const value: Value = if (parsed.has_value) parsed.value else cur_value;
+            target_fn.setWithFlags(realm.allocator, key, value, flags) catch return error.OutOfMemory;
+            return target_v;
+        }
+
+        // Generic descriptor on an existing accessor — just update flags.
+        const is_default = flags.writable and flags.enumerable and flags.configurable;
+        if (is_default) {
+            _ = target_fn.property_flags.swapRemove(key);
+        } else {
+            target_fn.property_flags.put(realm.allocator, key, flags) catch return error.OutOfMemory;
+        }
         return target_v;
     }
 
@@ -721,10 +764,23 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
 
     // §17 — built-in functions are also ordinary objects.
     // Without this branch every `verifyProperty(builtin, "name",
-    // …)` test falls through to the type-error path. Currently
-    // we only support data descriptors on functions (no
-    // accessors via `Object.defineProperty` on a function).
+    // …)` test falls through to the type-error path.
     if (heap_mod.valueAsFunction(target)) |fn_obj| {
+        // Accessor descriptor first — symmetric with the JSObject
+        // path above. §6.2.5 PropertyDescriptor: accessor and data
+        // descriptors are mutually exclusive shapes.
+        if (fn_obj.accessors.get(key)) |acc| {
+            const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
+            desc.prototype = realm.intrinsics.object_prototype;
+            const get_v: Value = if (acc.getter) |g| heap_mod.taggedFunction(g) else Value.undefined_;
+            const set_v: Value = if (acc.setter) |s| heap_mod.taggedFunction(s) else Value.undefined_;
+            desc.set(realm.allocator, "get", get_v) catch return error.OutOfMemory;
+            desc.set(realm.allocator, "set", set_v) catch return error.OutOfMemory;
+            const flags = fn_obj.flagsForOwn(key);
+            desc.set(realm.allocator, "enumerable", Value.fromBool(flags.enumerable)) catch return error.OutOfMemory;
+            desc.set(realm.allocator, "configurable", Value.fromBool(flags.configurable)) catch return error.OutOfMemory;
+            return heap_mod.taggedObject(desc);
+        }
         if (!fn_obj.hasOwn(key)) return Value.undefined_;
         const value = fn_obj.get(key);
         const flags = fn_obj.flagsForOwn(key);

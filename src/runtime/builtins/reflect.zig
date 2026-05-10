@@ -263,11 +263,25 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
         return throwTypeError(realm, "Reflect.construct newTarget must be a constructor");
     if (!new_target.has_construct or new_target.is_arrow) return throwTypeError(realm, "Reflect.construct newTarget is not a constructor");
 
-    // Allocate the instance with [[Prototype]] = newTarget.prototype
-    // (per §10.1.13 OrdinaryCreateFromConstructor — newTarget
-    // controls the proto, not target).
+    // §10.1.13 OrdinaryCreateFromConstructor → §10.1.14
+    // GetPrototypeFromConstructor — Get(newTarget, "prototype")
+    // through the accessor path so a user-installed getter on a
+    // bound NewTarget fires (per the WeakRef /
+    // FinalizationRegistry / ArrayBuffer
+    // `prototype-from-newtarget-*.js` fixtures).
+    const proto_lookup = interpreter.getPrototypeFromConstructor(realm.allocator, realm, new_target, target.prototype) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const resolved_proto: ?*@import("../object.zig").JSObject = switch (proto_lookup) {
+        .proto => |p| p,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
     const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
-    instance.prototype = new_target.prototype;
+    instance.prototype = resolved_proto;
     const this_arg = heap_mod.taggedObject(instance);
 
     const outcome = interpreter.callJSFunction(realm.allocator, realm, target, this_arg, ctor_args.items) catch |err| switch (err) {

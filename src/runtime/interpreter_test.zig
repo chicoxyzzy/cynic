@@ -2990,3 +2990,57 @@ test "later: %ThrowTypeError% is frozen" {
         \\Object.isFrozen(Object.getOwnPropertyDescriptor(function() { "use strict"; return arguments; }(), "callee").get) ? "yes" : "no";
     , "yes");
 }
+
+// ── §10.1.8 / §10.1.14 — JSFunction accessor support ────────────
+//
+// JSFunction grew an `accessors` map mirroring JSObject.accessors,
+// so `Object.defineProperty(fn, key, {get, set})` lands as an
+// accessor descriptor instead of being silently coerced to a data
+// property. The `new`-path GetPrototypeFromConstructor (§10.1.14)
+// reads `prototype` through this map so user-installed getters
+// on a NewTarget fire.
+
+test "later: defineProperty(fn, key, {get}) fires getter on read" {
+    try expectScriptIntWithBuiltins(
+        \\function f() {}
+        \\Object.defineProperty(f, 'p', { get: function() { return 42; } });
+        \\f.p;
+    , 42);
+}
+
+test "later: getOwnPropertyDescriptor(fn, key) reports accessor shape" {
+    try expectScriptStringWithBuiltins(
+        \\function f() {}
+        \\const g = function() { return 7; };
+        \\Object.defineProperty(f, 'p', { get: g });
+        \\const d = Object.getOwnPropertyDescriptor(f, 'p');
+        \\(d.get === g) + ":" + ("value" in d);
+    , "true:false");
+}
+
+test "later: GetPrototypeFromConstructor honors accessor on bound NewTarget" {
+    // Mirrors built-ins/WeakRef/prototype-from-newtarget-custom.js
+    // — the bound function carries an accessor on `prototype`,
+    // §10.1.14 returns whatever the getter produces.
+    try expectScriptStringWithBuiltins(
+        \\var newTarget = function() {}.bind(null);
+        \\Object.defineProperty(newTarget, 'prototype', {
+        \\  get: function() { return Array.prototype; }
+        \\});
+        \\var wr = Reflect.construct(WeakRef, [{}], newTarget);
+        \\Object.getPrototypeOf(wr) === Array.prototype ? "ok" : "no";
+    , "ok");
+}
+
+test "later: GetPrototypeFromConstructor propagates abrupt getter throw" {
+    // Mirrors built-ins/WeakRef/prototype-from-newtarget-abrupt.js
+    // — getter throws, the throw escapes Reflect.construct.
+    try expectScriptStringWithBuiltins(
+        \\var newTarget = function() {}.bind(null);
+        \\Object.defineProperty(newTarget, 'prototype', {
+        \\  get: function() { throw new Error('abrupt'); }
+        \\});
+        \\try { Reflect.construct(WeakRef, [{}], newTarget); "no-throw"; }
+        \\catch (e) { e.message; }
+    , "abrupt");
+}

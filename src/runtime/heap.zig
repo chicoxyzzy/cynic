@@ -442,6 +442,17 @@ pub const Heap = struct {
                 if (f.captured_env) |env| self.markEnvironment(env);
                 var it = f.properties.iterator();
                 while (it.next()) |entry| self.markValue(entry.value_ptr.*);
+                // §10.1.8 accessor descriptors on the function
+                // object itself (e.g. `Object.defineProperty(fn,
+                // 'prototype', {get: …})`). The accessor functions
+                // are roots — without this walk a getter installed
+                // on a NewTarget gets swept while the registry of
+                // pending constructions still holds the function.
+                var fait = f.accessors.iterator();
+                while (fait.next()) |entry| {
+                    if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
+                    if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+                }
                 if (f.prototype) |p| self.markValue(taggedObject(p));
                 // §10.4.1 BoundFunction state — keep target +
                 // bound this + bound args alive.
