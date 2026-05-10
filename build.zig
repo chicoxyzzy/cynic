@@ -143,17 +143,14 @@ pub fn build(b: *std.Build) void {
     });
     t262_mod.addImport("cynic", lib_mod_fast);
 
-    // Inject the working-tree git SHA and the test262 submodule SHA as
-    // build-time strings so `--write-results` can record them in the
-    // score history. Build-time (vs runtime) keeps the harness free of
-    // any subprocess dependency at run time, and the SHA is pinned to
-    // the binary that produced the row. Falls back to "unknown" if git
-    // isn't available, the lookup fails, or the working tree has no
-    // commits yet (e.g. before the first commit).
-    const t262_options = b.addOptions();
-    t262_options.addOption([]const u8, "cynic_sha", gitShortSha(b, ".") orelse "unknown");
-    t262_options.addOption([]const u8, "test262_sha", gitShortSha(b, "vendor/test262") orelse "unknown");
-    t262_mod.addOptions("build_options", t262_options);
+    // Note: the cynic / test262 SHAs stamped into `--write-results`
+    // rows are captured at *write time* by `tools/test262.zig`, not
+    // here. Capturing at build time looked tidier but the Zig build
+    // cache reuses the previous configure when nothing in the build
+    // graph changes, so commits made between two `zig build test262`
+    // invocations would not invalidate a build-time `git rev-parse`
+    // and the row would land with a stale SHA. See `currentShortSha`
+    // in tools/test262.zig.
 
     const t262_exe = b.addExecutable(.{
         .name = "test262",
@@ -170,20 +167,4 @@ pub fn build(b: *std.Build) void {
     const t262_tests = b.addTest(.{ .root_module = t262_mod });
     const run_t262_tests = b.addRunArtifact(t262_tests);
     test_step.dependOn(&run_t262_tests.step);
-}
-
-/// Best-effort short git SHA for the repo (or submodule) at `dir`.
-/// Returns null if git isn't available, the path isn't a working
-/// tree, the working tree has no commits yet, or the lookup
-/// otherwise fails — the build keeps going with a fallback string.
-fn gitShortSha(b: *std.Build, dir: []const u8) ?[]const u8 {
-    var code: u8 = undefined;
-    const stdout = b.runAllowFail(
-        &.{ "git", "-C", dir, "rev-parse", "--short", "HEAD" },
-        &code,
-        .ignore,
-    ) catch return null;
-    const trimmed = std.mem.trim(u8, stdout, " \r\n\t");
-    if (trimmed.len == 0) return null;
-    return b.allocator.dupe(u8, trimmed) catch null;
 }

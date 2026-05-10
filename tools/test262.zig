@@ -31,7 +31,6 @@
 
 const std = @import("std");
 const cynic = @import("cynic");
-const build_options = @import("build_options");
 
 const frontmatter = @import("test262/frontmatter.zig");
 const skip_rules = @import("test262/skip.zig");
@@ -1643,6 +1642,18 @@ fn writeResults(
     }
     try parsePrevBucketPass(gpa, &prev_bucket_pass, existing);
 
+    // Capture the SHAs at write time (not build time): Zig's build
+    // cache reuses the previous configure when nothing in the build
+    // graph changes, so a build-time `git rev-parse` would happily
+    // bake in a stale SHA across new commits. Shelling out here keeps
+    // the row honest.
+    const cynic_sha_owned = currentShortSha(gpa, io, ".");
+    defer if (cynic_sha_owned) |s| gpa.free(s);
+    const test262_sha_owned = currentShortSha(gpa, io, "vendor/test262");
+    defer if (test262_sha_owned) |s| gpa.free(s);
+    const cynic_sha: []const u8 = cynic_sha_owned orelse "unknown";
+    const test262_sha: []const u8 = test262_sha_owned orelse "unknown";
+
     var line_buf: [32]u8 = undefined;
     const date = formatDateUtc(epoch_seconds, &line_buf);
 
@@ -1660,7 +1671,7 @@ fn writeResults(
         }
     }
 
-    try rows.append(gpa, makeRow(date, mode, stats));
+    try rows.append(gpa, makeRow(date, mode, stats, cynic_sha, test262_sha));
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(gpa);
@@ -1669,20 +1680,49 @@ fn writeResults(
     try cwd.writeFile(io, .{ .sub_path = path, .data = buf.items });
 }
 
-fn makeRow(date: []const u8, mode: Mode, stats: *const Stats) Row {
+fn makeRow(
+    date: []const u8,
+    mode: Mode,
+    stats: *const Stats,
+    cynic_sha: []const u8,
+    test262_sha: []const u8,
+) Row {
     const spec_pct: f64 = if (stats.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(stats.pass())) / @as(f64, @floatFromInt(stats.total));
     const attempted = stats.pass() + stats.fail();
     const att_pct: f64 = if (attempted == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(stats.pass())) / @as(f64, @floatFromInt(attempted));
     return .{
         .date = date,
         .mode = mode,
-        .cynic_sha = build_options.cynic_sha,
-        .test262_sha = build_options.test262_sha,
+        .cynic_sha = cynic_sha,
+        .test262_sha = test262_sha,
         .total = stats.total,
         .pass = stats.pass(),
         .spec_pct = spec_pct,
         .attempted_pct = att_pct,
     };
+}
+
+/// Best-effort short git SHA for the working tree (or submodule)
+/// at `dir`. Returns null if git isn't available, the path isn't
+/// a working tree, or the lookup otherwise fails — callers fall
+/// back to "unknown". Captured at write time, not build time, so
+/// new commits between two `zig build test262` invocations don't
+/// land in the row with a cached, stale SHA.
+fn currentShortSha(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ?[]u8 {
+    const result = std.process.run(gpa, io, .{
+        .argv = &.{ "git", "-C", dir, "rev-parse", "--short", "HEAD" },
+        .stdout_limit = .limited(64),
+        .stderr_limit = .limited(256),
+    }) catch return null;
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| if (code != 0) return null,
+        else => return null,
+    }
+    const trimmed = std.mem.trim(u8, result.stdout, " \r\n\t");
+    if (trimmed.len == 0) return null;
+    return gpa.dupe(u8, trimmed) catch null;
 }
 
 /// Read rows from the legacy linear table (`| date | mode |
