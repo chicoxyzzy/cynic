@@ -412,6 +412,14 @@ pub const JSObject = struct {
                 // descriptor flags survive. The corresponding
                 // elements slot stays as a hole; reads check the
                 // property bag first via the `set` / `get` paths.
+                // §10.4.2.1 step 4 — length auto-extends when
+                // the index is at or past the current length,
+                // even when the indexed slot is bag-promoted.
+                const new_len: usize = @as(usize, idx) + 1;
+                if (self.elements.items.len < new_len) {
+                    try self.ensureElementsLen(allocator, new_len);
+                    try self.syncLengthProperty(allocator);
+                }
                 if (idx < self.elements.items.len) {
                     self.elements.items[idx] = Value.hole_;
                 }
@@ -438,10 +446,17 @@ pub const JSObject = struct {
     /// the descriptor flags it wants. User-driven writes go
     /// through `setIfWritable` (which respects flags).
     pub fn set(self: *JSObject, allocator: std.mem.Allocator, key: []const u8, v: Value) !void {
-        // §10.4.2 Array exotic — integer-indexed keys land in the
-        // packed `elements` vector, not the named-property bag.
+        // §10.4.2 Array exotic — integer-indexed keys land in
+        // the packed `elements` vector, unless the slot has been
+        // demoted to the named-property bag (descriptor flags
+        // override). The bypass `set` skips the writability gate
+        // by design (internal installers).
         if (self.is_array_exotic) {
             if (canonicalIntegerIndex(key)) |idx| {
+                if (self.properties.contains(key)) {
+                    try self.properties.put(allocator, key, v);
+                    return;
+                }
                 return self.setIndexed(allocator, idx, v);
             }
         }
@@ -460,10 +475,18 @@ pub const JSObject = struct {
     /// checks the prototype chain for accessor setters before
     /// reaching here.
     pub fn setIfWritable(self: *JSObject, allocator: std.mem.Allocator, key: []const u8, v: Value) !bool {
-        // §10.4.2 Array exotic — indexed slots are always writable
-        // (Cynic doesn't yet support non-configurable indexed slots).
+        // §10.4.2 Array exotic — integer-indexed writes go to
+        // the packed `elements` vector unless the slot has been
+        // descriptor-flag-demoted to the named-property bag, in
+        // which case the bag's `writable` gate applies.
         if (self.is_array_exotic) {
             if (canonicalIntegerIndex(key)) |idx| {
+                if (self.properties.contains(key)) {
+                    const flags = self.flagsFor(key);
+                    if (!flags.writable) return false;
+                    try self.properties.put(allocator, key, v);
+                    return true;
+                }
                 try self.setIndexed(allocator, idx, v);
                 return true;
             }
@@ -689,13 +712,24 @@ pub const JSObject = struct {
     }
 
     /// §10.1.10 [[Delete]] — drop an own property by key. For
-    /// Array-exotic integer-indexed keys, routes to `removeIndexed`
-    /// (which holes the slot). For string keys, removes from
-    /// `properties` + `property_flags`. Returns whether the key
-    /// was present (the spec's [[Delete]] returns true on missing).
+    /// Array-exotic integer-indexed keys, holes the `elements`
+    /// slot AND (if the slot was descriptor-flag-demoted to the
+    /// named-property bag) removes the bag entry too. Returns
+    /// whether the property is absent after the call (true on
+    /// success / missing-already, false if a non-configurable
+    /// own slot blocked the delete).
     pub fn deleteOwn(self: *JSObject, key: []const u8) bool {
         if (self.is_array_exotic) {
-            if (canonicalIntegerIndex(key)) |idx| return self.removeIndexed(idx);
+            if (canonicalIntegerIndex(key)) |idx| {
+                _ = self.removeIndexed(idx);
+                if (self.properties.contains(key)) {
+                    const flags = self.property_flags.get(key) orelse PropertyFlags.default;
+                    if (!flags.configurable) return false;
+                    _ = self.properties.swapRemove(key);
+                    _ = self.property_flags.swapRemove(key);
+                }
+                return true;
+            }
         }
         if (self.accessors.contains(key)) {
             _ = self.accessors.swapRemove(key);

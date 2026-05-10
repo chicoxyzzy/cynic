@@ -615,8 +615,19 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
         if (parsed.has_configurable) flags.configurable = parsed.configurable;
 
         if (parsed.isAccessor()) {
-            // Replace any existing data slot.
+            // Replace any existing data slot — including the
+            // Array exotic's packed `elements` slot for indexed
+            // keys, otherwise reads via `JSObject.get` would
+            // see the (now-stale) element value instead of
+            // firing the accessor.
             _ = target.properties.swapRemove(key);
+            if (target.is_array_exotic) {
+                if (ObjMod.JSObject.canonicalIntegerIndex(key)) |idx| {
+                    if (idx < target.elements.items.len) {
+                        target.elements.items[idx] = Value.hole_;
+                    }
+                }
+            }
             const entry = target.accessors.getOrPut(realm.allocator, key) catch return error.OutOfMemory;
             // Preserve the half not specified in the new desc.
             const new_getter: ?*JSFunction = if (parsed.has_get) parsed.getter else if (cur_is_accessor) cur_getter else null;

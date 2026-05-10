@@ -668,14 +668,15 @@ pub fn openForInIterator(
 
             // §10.4.2 Array exotic — packed elements are own
             // integer-indexed properties for §14.7.5.6
-            // EnumerateObjectProperties / `for-in` / `Object.keys`
-            // purposes. Holes (slots equal to undefined) are
-            // skipped today (matches the spec's hole semantics
-            // closely enough for dense arrays; full sparse-hole
-            // representation is later).
+            // EnumerateObjectProperties / `for-in` / `Object.keys`.
+            // Holes (slot == hole sentinel) are either absent
+            // (sparse) or descriptor-flag-demoted to the named-
+            // property bag; the property-bag walker below picks
+            // up the latter, so we skip them here either way.
             if (cur.is_array_exotic) {
                 var ei: u32 = 0;
                 while (ei < cur.elements.items.len) : (ei += 1) {
+                    if (@import("object.zig").JSObject.isElementHole(cur.elements.items[ei])) continue;
                     var ibuf: [16]u8 = undefined;
                     const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ei}) catch continue;
                     const key_owned_str = realm.heap.allocateString(ks) catch return error.OutOfMemory;
@@ -4626,12 +4627,15 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
             _ = obj.property_flags.swapRemove(key);
             return .{ .ok = true };
         }
-        // §10.4.2 Array exotic — integer-indexed keys live in the
-        // packed `elements` vector. Holes get marked via undefined;
-        // length is unaffected (§13.5.1.2 step 5).
+        // §10.4.2 Array exotic — integer-indexed keys live in
+        // the packed `elements` vector, or (when descriptor-flag-
+        // demoted) the named-property bag. `JSObject.deleteOwn`
+        // handles both: it holes the slot and, if the slot was
+        // bag-promoted, removes the bag entry — failing on
+        // non-configurable.
         if (obj.is_array_exotic) {
-            if (obj_mod.JSObject.canonicalIntegerIndex(key)) |idx| {
-                _ = obj.removeIndexed(idx);
+            if (obj_mod.JSObject.canonicalIntegerIndex(key)) |_| {
+                if (!obj.deleteOwn(key)) return .{ .throw_typeerror = "Cannot delete non-configurable property" };
                 return .{ .ok = true };
             }
         }
@@ -4781,12 +4785,15 @@ fn strictSetPropertyAnchored(
         }
         // §10.4.2.1 [[DefineOwnProperty]] — Array exotic indexed
         // writes go straight to the packed `elements` vector via
-        // `setIndexed`, which also keeps `length` in sync. The
-        // §17 length-write-gating against
+        // `setIndexed`, which also keeps `length` in sync. A
+        // descriptor-flag-demoted slot lives in the named-property
+        // bag instead; the standard property path below picks it
+        // up and runs the §10.5.5 writability gate against the
+        // bag's flags. The §17 length-write-gating against
         // `length: { writable: false }` still applies.
         if (obj.is_array_exotic) {
             if (canonicalIntegerIndexInterp(key)) |idx| {
-                if (idx <= 0xFFFFFFFE) {
+                if (idx <= 0xFFFFFFFE and !obj.properties.contains(key)) {
                     if (obj.property_flags.get("length")) |flags| {
                         if (!flags.writable) {
                             const cur_len_v = obj.properties.get("length") orelse Value.fromInt32(0);
