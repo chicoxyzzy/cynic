@@ -326,6 +326,17 @@ pub const Op = enum(u8) {
     /// value isn't an object. Used by for-of, array spread, and
     /// iterable destructuring.
     iter_open,
+    /// `[op] [r_iter:u8] [r_done:u8]` — §7.4.4 IteratorStep on an
+    /// iterator opened by `iter_open` (or any spec-shaped iterator
+    /// in `r_iter`). If the iter is already marked done (via the
+    /// internal `__cynic_iter_done__` slot), or `.next()` returns
+    /// `{done: true}`, `acc` ends as `undefined` and the boolean
+    /// in `r_done` is set to `true`. Otherwise `acc` holds the
+    /// stepped `.value` and `r_done` is `false`. Reading `.done`
+    /// and `.value` goes through accessor-aware property reads
+    /// (§7.4.7 IteratorComplete / IteratorValue). Used by
+    /// `[a, b, ...rest] = src` destructuring.
+    iter_step,
     /// `[op]` — §14.7.5.6 EnumerateObjectProperties. Reads the
     /// object from acc, walks its own + inherited string-keyed
     /// properties (deduplicated), and produces an iterator that
@@ -554,7 +565,8 @@ pub const Op = enum(u8) {
             .mov,
             .array_rest_from,
             .object_rest_from,
-            => 2, // src:u8, dst:u8 (or r_src, start / r_excl)
+            .iter_step,
+            => 2, // src:u8, dst:u8 (or r_src, start / r_excl, or r_iter, r_done)
             .lda_constant,
             .jmp,
             .jmp_if_false,
@@ -661,6 +673,7 @@ pub const Op = enum(u8) {
             .gen_yield => "GenYield",
             .await_ => "Await",
             .iter_open => "IterOpen",
+            .iter_step => "IterStep",
             .for_in_open => "ForInOpen",
             .pop_env => "PopEnv",
             .module_load => "ModuleLoad",

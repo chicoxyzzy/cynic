@@ -4162,26 +4162,101 @@ fn compileDestructure(self: *Compiler, target: ast.statement.BindingTarget) Comp
             try self.assignToBinding(name, id.span);
         },
         .array => |arr_pat| {
-            for (arr_pat.elements, 0..) |maybe_elem, idx| {
+            // §14.3.3.5 IteratorBindingInitialization for an
+            // ArrayBindingPattern — open an iterator on `src`,
+            // step it once per pattern element (binding the
+            // result, or `undefined` on done), collect any rest
+            // through repeated `iter_step`, and close the iter
+            // afterwards if it didn't fully drain (§7.4.10).
+            try self.builder.emitOp(.ldar, target.span());
+            try self.builder.emitU8(r_src);
+            try self.builder.emitOp(.iter_open, target.span());
+            const r_iter = try self.reserveTemp();
+            defer self.releaseTemp();
+            try self.builder.emitOp(.star, target.span());
+            try self.builder.emitU8(r_iter);
+            const r_done = try self.reserveTemp();
+            defer self.releaseTemp();
+
+            for (arr_pat.elements) |maybe_elem| {
                 if (maybe_elem) |elem| {
-                    var idx_buf: [16]u8 = undefined;
-                    const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch unreachable;
-                    const k = try self.internString(idx_slice);
-                    try self.builder.emitOp(.ldar, elem.span);
-                    try self.builder.emitU8(r_src);
-                    try self.builder.emitOp(.lda_property, elem.span);
-                    try self.builder.emitU16(k);
+                    try self.builder.emitOp(.iter_step, elem.span);
+                    try self.builder.emitU8(r_iter);
+                    try self.builder.emitU8(r_done);
                     try self.applyDefaultIfNeeded(elem);
                     try self.assignPatternLeaf(elem.target);
+                } else {
+                    // Elision — step the iter, discard the value.
+                    try self.builder.emitOp(.iter_step, target.span());
+                    try self.builder.emitU8(r_iter);
+                    try self.builder.emitU8(r_done);
                 }
             }
+
             if (arr_pat.rest) |rest_target| {
-                // §14.3.3.4 BindingRestElement — rest collects
-                // src[N..length] into a fresh Array.
-                try self.builder.emitOp(.array_rest_from, target.span());
-                try self.builder.emitU8(r_src);
-                try self.builder.emitU8(@intCast(arr_pat.elements.len));
+                // §14.3.3.4 BindingRestElement — drain the iter
+                // into a fresh Array. `iter_step` marks the iter
+                // done when it surfaces `done: true`, so the
+                // closing `iter_close` below is a no-op for the
+                // rest case.
+                const r_rest = try self.reserveTemp();
+                defer self.releaseTemp();
+                const r_idx = try self.reserveTemp();
+                defer self.releaseTemp();
+                try self.builder.emitOp(.make_array, target.span());
+                try self.builder.emitOp(.star, target.span());
+                try self.builder.emitU8(r_rest);
+                try self.builder.emitOp(.lda_smi, target.span());
+                try self.builder.emitI32(0);
+                try self.builder.emitOp(.star, target.span());
+                try self.builder.emitU8(r_idx);
+
+                const r_val = try self.reserveTemp();
+                defer self.releaseTemp();
+                const loop_start = self.builder.here();
+                try self.builder.emitOp(.iter_step, target.span());
+                try self.builder.emitU8(r_iter);
+                try self.builder.emitU8(r_done);
+                // Snapshot the stepped value — the `ldar r_done`
+                // below clobbers `acc`.
+                try self.builder.emitOp(.star, target.span());
+                try self.builder.emitU8(r_val);
+                // if (r_done) jmp loop_end
+                try self.builder.emitOp(.ldar, target.span());
+                try self.builder.emitU8(r_done);
+                try self.builder.emitOp(.jmp_if_true, target.span());
+                const exit_patch = self.builder.here();
+                try self.builder.emitI16(0);
+                // rest[idx] = value
+                try self.builder.emitOp(.ldar, target.span());
+                try self.builder.emitU8(r_val);
+                try self.builder.emitOp(.sta_computed, target.span());
+                try self.builder.emitU8(r_rest);
+                try self.builder.emitU8(r_idx);
+                // idx += 1 — `add r` is `acc = registers[r] + acc`.
+                try self.builder.emitOp(.lda_smi, target.span());
+                try self.builder.emitI32(1);
+                try self.builder.emitOp(.add, target.span());
+                try self.builder.emitU8(r_idx);
+                try self.builder.emitOp(.star, target.span());
+                try self.builder.emitU8(r_idx);
+                try self.builder.emitOp(.jmp, target.span());
+                const back_patch = self.builder.here();
+                try self.builder.emitI16(0);
+                try self.builder.patchI16(back_patch, loop_start);
+                const exit_target = self.builder.here();
+                try self.builder.patchI16(exit_patch, exit_target);
+
+                // rest array → leaf
+                try self.builder.emitOp(.ldar, target.span());
+                try self.builder.emitU8(r_rest);
                 try self.assignPatternLeaf(rest_target.*);
+            } else {
+                // §7.4.10 IteratorClose — if the iter is not yet
+                // done (e.g. `[a, b] = source` where source has
+                // more than two elements), call `.return()`.
+                try self.builder.emitOp(.iter_close, target.span());
+                try self.builder.emitU8(r_iter);
             }
         },
         .object => |obj_pat| {
@@ -4278,8 +4353,11 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
 
     switch (target) {
         .array_literal => |al| {
-            // Find the trailing rest (if any) and the count of
-            // non-rest elements. Spread can only appear last.
+            // §13.15.5.5 ArrayAssignmentPattern — open an
+            // iterator on `src` and step it per non-elision
+            // element, then drain (if there's a rest) or close.
+            // Spread (`[...rest]`) can only appear as the last
+            // element per the parser.
             var rest_arg: ?*ast.expression.Expression = null;
             var elem_count = al.elements.len;
             if (al.elements.len > 0) {
@@ -4291,23 +4369,83 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
                 }
             }
 
-            for (al.elements[0..elem_count], 0..) |maybe_elt, idx| {
-                const elt = maybe_elt orelse continue; // elision: skip
-                var idx_buf: [16]u8 = undefined;
-                const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch unreachable;
-                const k = try self.internString(idx_slice);
-                try self.builder.emitOp(.ldar, target.span());
-                try self.builder.emitU8(r_src);
-                try self.builder.emitOp(.lda_property, target.span());
-                try self.builder.emitU16(k);
-                try self.assignAssignmentPatternElem(elt);
+            try self.builder.emitOp(.ldar, target.span());
+            try self.builder.emitU8(r_src);
+            try self.builder.emitOp(.iter_open, target.span());
+            const r_iter = try self.reserveTemp();
+            defer self.releaseTemp();
+            try self.builder.emitOp(.star, target.span());
+            try self.builder.emitU8(r_iter);
+            const r_done = try self.reserveTemp();
+            defer self.releaseTemp();
+
+            for (al.elements[0..elem_count]) |maybe_elt| {
+                if (maybe_elt) |elt| {
+                    try self.builder.emitOp(.iter_step, target.span());
+                    try self.builder.emitU8(r_iter);
+                    try self.builder.emitU8(r_done);
+                    try self.assignAssignmentPatternElem(elt);
+                } else {
+                    // Elision — step and discard.
+                    try self.builder.emitOp(.iter_step, target.span());
+                    try self.builder.emitU8(r_iter);
+                    try self.builder.emitU8(r_done);
+                }
             }
 
             if (rest_arg) |arg| {
-                try self.builder.emitOp(.array_rest_from, target.span());
-                try self.builder.emitU8(r_src);
-                try self.builder.emitU8(@intCast(elem_count));
+                // Drain the iterator into a fresh Array, then
+                // bind it to the rest leaf.
+                const r_rest = try self.reserveTemp();
+                defer self.releaseTemp();
+                const r_idx = try self.reserveTemp();
+                defer self.releaseTemp();
+                const r_val = try self.reserveTemp();
+                defer self.releaseTemp();
+                try self.builder.emitOp(.make_array, target.span());
+                try self.builder.emitOp(.star, target.span());
+                try self.builder.emitU8(r_rest);
+                try self.builder.emitOp(.lda_smi, target.span());
+                try self.builder.emitI32(0);
+                try self.builder.emitOp(.star, target.span());
+                try self.builder.emitU8(r_idx);
+
+                const loop_start = self.builder.here();
+                try self.builder.emitOp(.iter_step, target.span());
+                try self.builder.emitU8(r_iter);
+                try self.builder.emitU8(r_done);
+                try self.builder.emitOp(.star, target.span());
+                try self.builder.emitU8(r_val);
+                try self.builder.emitOp(.ldar, target.span());
+                try self.builder.emitU8(r_done);
+                try self.builder.emitOp(.jmp_if_true, target.span());
+                const exit_patch = self.builder.here();
+                try self.builder.emitI16(0);
+                try self.builder.emitOp(.ldar, target.span());
+                try self.builder.emitU8(r_val);
+                try self.builder.emitOp(.sta_computed, target.span());
+                try self.builder.emitU8(r_rest);
+                try self.builder.emitU8(r_idx);
+                try self.builder.emitOp(.lda_smi, target.span());
+                try self.builder.emitI32(1);
+                try self.builder.emitOp(.add, target.span());
+                try self.builder.emitU8(r_idx);
+                try self.builder.emitOp(.star, target.span());
+                try self.builder.emitU8(r_idx);
+                try self.builder.emitOp(.jmp, target.span());
+                const back_patch = self.builder.here();
+                try self.builder.emitI16(0);
+                try self.builder.patchI16(back_patch, loop_start);
+                const exit_target = self.builder.here();
+                try self.builder.patchI16(exit_patch, exit_target);
+
+                try self.builder.emitOp(.ldar, target.span());
+                try self.builder.emitU8(r_rest);
                 try self.assignAssignmentPatternLeaf(arg.*);
+            } else {
+                // §7.4.10 — close iter if still open.
+                try self.builder.emitOp(.iter_close, target.span());
+                try self.builder.emitU8(r_iter);
             }
         },
         .object_literal => |ol| {

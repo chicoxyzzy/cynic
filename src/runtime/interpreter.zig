@@ -2828,6 +2828,14 @@ fn runFrames(
                 ip += 1;
                 const iter_v = registers[r];
                 if (heap_mod.valueAsPlainObject(iter_v)) |iter_obj| {
+                    // §7.4.10 IteratorClose step 1 — only run when
+                    // `iteratorRecord.[[Done]]` is false. Cynic
+                    // tracks this on the iter object itself via
+                    // the `__cynic_iter_done__` slot that
+                    // `iter_step` maintains.
+                    if (iter_obj.properties.get("__cynic_iter_done__")) |dv| {
+                        if (toBoolean(dv)) continue;
+                    }
                     const ret_v = iter_obj.get("return");
                     if (heap_mod.valueAsFunction(ret_v)) |ret_fn| {
                         // Spec wants errors here to propagate when the
@@ -3207,6 +3215,131 @@ fn runFrames(
                     error.InvalidOpcode => return error.InvalidOpcode,
                 };
                 acc = new_iter;
+            },
+
+            .iter_step => {
+                // §7.4.4 IteratorStep — step the iter in `r_iter`,
+                // produce its next value (or `undefined` on done)
+                // in `acc`, and stash the boolean `done` in
+                // `r_done`. Reads `.done` / `.value` through the
+                // accessor-aware path (§7.4.7) so poisoned-iter
+                // getters fire.
+                const r_iter = code[ip];
+                const r_done = code[ip + 1];
+                ip += 2;
+                const iter_v = registers[r_iter];
+                const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse {
+                    acc = Value.undefined_;
+                    registers[r_done] = Value.true_;
+                    continue;
+                };
+                // Cynic-internal `__cynic_iter_done__` short-circuit:
+                // once the iter has surfaced `done: true` we stop
+                // calling `.next()` so subsequent pattern slots
+                // bind to `undefined` without re-entering the
+                // generator / iterator body.
+                if (iter_obj.properties.get("__cynic_iter_done__")) |dv| {
+                    if (toBoolean(dv)) {
+                        acc = Value.undefined_;
+                        registers[r_done] = Value.true_;
+                        continue;
+                    }
+                }
+                const next_v = intrinsics_mod.getPropertyChain(realm, iter_obj, "next") catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => {
+                        const ex = consumePendingException(realm) orelse try makeTypeError(realm, "iterator.next read failed");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
+                    },
+                };
+                const next_fn = heap_mod.valueAsFunction(next_v) orelse {
+                    const ex = try makeTypeError(realm, "iterator.next is not callable");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                };
+                const outcome = callJSFunction(allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.InvalidOpcode,
+                };
+                const result_v = switch (outcome) {
+                    .value, .yielded => |v| v,
+                    .thrown => |ex| {
+                        // Mark done so an `iter_close` after the
+                        // pattern walk doesn't re-enter `.return()`
+                        // — §7.4.10 step 5 swallows the second
+                        // throw.
+                        iter_obj.set(allocator, "__cynic_iter_done__", Value.true_) catch {};
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
+                    },
+                };
+                if (heap_mod.valueAsPlainObject(result_v)) |result_obj| {
+                    const done_v = intrinsics_mod.getPropertyChain(realm, result_obj, "done") catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => {
+                            iter_obj.set(allocator, "__cynic_iter_done__", Value.true_) catch {};
+                            const ex = consumePendingException(realm) orelse try makeTypeError(realm, "iterator result .done read failed");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue;
+                        },
+                    };
+                    if (toBoolean(done_v)) {
+                        iter_obj.set(allocator, "__cynic_iter_done__", Value.true_) catch return error.OutOfMemory;
+                        acc = Value.undefined_;
+                        registers[r_done] = Value.true_;
+                        continue;
+                    }
+                    const value_v = intrinsics_mod.getPropertyChain(realm, result_obj, "value") catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => {
+                            iter_obj.set(allocator, "__cynic_iter_done__", Value.true_) catch {};
+                            const ex = consumePendingException(realm) orelse try makeTypeError(realm, "iterator result .value read failed");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue;
+                        },
+                    };
+                    acc = value_v;
+                    registers[r_done] = Value.false_;
+                } else {
+                    // §7.4.4 step 5 — `next()` result is not an
+                    // object → TypeError. Mark done so the
+                    // pattern walk's trailing `iter_close` no-ops.
+                    iter_obj.set(allocator, "__cynic_iter_done__", Value.true_) catch return error.OutOfMemory;
+                    const ex = try makeTypeError(realm, "iterator result is not an object");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                }
             },
 
             .for_in_open => {

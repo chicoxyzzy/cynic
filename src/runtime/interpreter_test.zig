@@ -3270,3 +3270,71 @@ test "later: delete arr[i] holes the slot but leaves length" {
         \\a.length + ":" + (1 in a ? "y" : "n") + ":" + a[1];
     , "3:n:undefined");
 }
+
+// ── §14.3.3.5 / §13.15.5.5 — Array destructuring uses iterator protocol ──
+
+test "later: var [a, b] = generator binds the first two yields" {
+    try expectScriptStringWithBuiltins(
+        \\function* g() { yield "a"; yield "b"; yield "c"; }
+        \\var [a, b] = g();
+        \\a + ":" + b;
+    , "a:b");
+}
+
+test "later: var [a, ...rest] = generator drains the rest" {
+    try expectScriptStringWithBuiltins(
+        \\function* g() { yield 1; yield 2; yield 3; yield 4; }
+        \\var [a, ...rest] = g();
+        \\a + ":" + rest.join(",");
+    , "1:2,3,4");
+}
+
+test "later: array destructuring closes the iter on partial bind" {
+    // §7.4.10 — when more elements remain in the iter than slots
+    // in the pattern, IteratorClose calls `.return()` once.
+    try expectScriptIntWithBuiltins(
+        \\var closed = 0;
+        \\var iter = {
+        \\  i: 0,
+        \\  [Symbol.iterator]() { return this; },
+        \\  next() { this.i++; return this.i > 5 ? {done:true} : {value: this.i, done:false}; },
+        \\  return() { closed++; return {}; },
+        \\};
+        \\var [x, y] = iter;
+        \\closed;
+    , 1);
+}
+
+test "later: rest element drains iter; no IteratorClose call" {
+    try expectScriptIntWithBuiltins(
+        \\var closed = 0;
+        \\var iter = {
+        \\  i: 0,
+        \\  [Symbol.iterator]() { return this; },
+        \\  next() { this.i++; return this.i > 3 ? {done:true} : {value: this.i, done:false}; },
+        \\  return() { closed++; return {}; },
+        \\};
+        \\var [a, ...rest] = iter;
+        \\closed;
+    , 0);
+}
+
+test "later: assignment destructuring through iterator protocol" {
+    try expectScriptStringWithBuiltins(
+        \\function* g() { yield 10; yield 20; }
+        \\var a, b;
+        \\[a, b] = g();
+        \\a + ":" + b;
+    , "10:20");
+}
+
+test "later: array destructuring elision steps the iter" {
+    // `[,,] = g` consumes 2 yields without binding them
+    try expectScriptIntWithBuiltins(
+        \\var count = 0;
+        \\var g = function*() { count++; yield; count++; yield; count++; yield; };
+        \\var src = g();
+        \\[,,] = src;
+        \\count;
+    , 2);
+}
