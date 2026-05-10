@@ -299,14 +299,39 @@ pub fn install(realm: *Realm) !void {
     // synthesise a plain object exposing the realm's globals so
     // `globalThis.X` reads work the same as `X`. Two-way live
     // binding is later.
+    //
+    // §17 — built-in globals install with `{ writable: true,
+    // enumerable: false, configurable: true }` (the standard
+    // built-in objects clause). The few §19.1 read-only globals
+    // (`undefined`, `NaN`, `Infinity`) are non-writable /
+    // non-configurable; they're patched up after the bulk fill.
     {
         const gt = try realm.heap.allocateObject();
         gt.prototype = realm.intrinsics.object_prototype;
         var it = realm.globals.iterator();
         while (it.next()) |entry| {
-            try gt.set(realm.allocator, entry.key_ptr.*, entry.value_ptr.*);
+            try gt.setWithFlags(realm.allocator, entry.key_ptr.*, entry.value_ptr.*, .{
+                .writable = true,
+                .enumerable = false,
+                .configurable = true,
+            });
         }
-        try gt.set(realm.allocator, "globalThis", heap_mod.taggedObject(gt));
+        // §19.1 — `undefined`, `NaN`, `Infinity` are
+        // `{ w:false, e:false, c:false }`.
+        for ([_][]const u8{ "undefined", "NaN", "Infinity" }) |k| {
+            if (gt.properties.contains(k)) {
+                try gt.property_flags.put(realm.allocator, k, .{
+                    .writable = false,
+                    .enumerable = false,
+                    .configurable = false,
+                });
+            }
+        }
+        try gt.setWithFlags(realm.allocator, "globalThis", heap_mod.taggedObject(gt), .{
+            .writable = true,
+            .enumerable = false,
+            .configurable = true,
+        });
         try realm.globals.put(realm.allocator, "globalThis", heap_mod.taggedObject(gt));
     }
 
@@ -378,10 +403,15 @@ pub fn install(realm: *Realm) !void {
     // installed after its initial creation (Map/Set/Date/Promise/
     // __drainMicrotasks/etc.). Two-way live binding is later;
     // this catch-up pass is enough for `globalThis.X` reads.
+    // §17 spec flags `{ w:true, e:false, c:true }` apply.
     if (heap_mod.valueAsPlainObject(realm.globals.get("globalThis") orelse Value.undefined_)) |gt| {
         var it = realm.globals.iterator();
         while (it.next()) |entry| {
-            try gt.set(realm.allocator, entry.key_ptr.*, entry.value_ptr.*);
+            try gt.setWithFlags(realm.allocator, entry.key_ptr.*, entry.value_ptr.*, .{
+                .writable = true,
+                .enumerable = false,
+                .configurable = true,
+            });
         }
     }
 }

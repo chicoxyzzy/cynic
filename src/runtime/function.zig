@@ -377,7 +377,15 @@ pub const JSFunction = struct {
     pub fn flagsForOwn(self: *const JSFunction, key: []const u8) PropertyFlags {
         if (self.property_flags.get(key)) |f| return f;
         if (std.mem.eql(u8, key, "prototype")) {
-            return .{ .writable = true, .enumerable = false, .configurable = false };
+            // §10.2.4 — ordinary functions: `{w:true, e:false, c:false}`.
+            // §17 — built-in constructors and `class C` constructors
+            // ([[ConstructorKind]] = "derived"): `{w:false, e:false, c:false}`.
+            // `is_class_constructor` is set both for `class …` literals and
+            // by `installConstructor` for the built-ins.
+            return if (self.is_class_constructor)
+                .{ .writable = false, .enumerable = false, .configurable = false }
+            else
+                .{ .writable = true, .enumerable = false, .configurable = false };
         }
         return PropertyFlags.default;
     }
@@ -448,10 +456,9 @@ test "JSFunction: flagsForOwn synthesizes prototype defaults" {
     var chunk = try b.finish();
     defer chunk.deinit(testing.allocator);
 
+    // Ordinary function: §10.2.4 — `prototype` is { w:true, e:false, c:false }.
     const f = try JSFunction.init(testing.allocator, &chunk, 0, null, false, null);
     defer f.deinit(testing.allocator);
-
-    // §10.2.4 — `prototype` is writable, non-enumerable, non-configurable.
     const proto_flags = f.flagsForOwn("prototype");
     try testing.expectEqual(true, proto_flags.writable);
     try testing.expectEqual(false, proto_flags.enumerable);
@@ -462,6 +469,15 @@ test "JSFunction: flagsForOwn synthesizes prototype defaults" {
     try testing.expectEqual(true, other.writable);
     try testing.expectEqual(true, other.enumerable);
     try testing.expectEqual(true, other.configurable);
+
+    // Class / built-in constructor: §17 — `prototype` is non-writable.
+    const cls = try JSFunction.init(testing.allocator, &chunk, 0, null, false, null);
+    defer cls.deinit(testing.allocator);
+    cls.is_class_constructor = true;
+    const cls_proto_flags = cls.flagsForOwn("prototype");
+    try testing.expectEqual(false, cls_proto_flags.writable);
+    try testing.expectEqual(false, cls_proto_flags.enumerable);
+    try testing.expectEqual(false, cls_proto_flags.configurable);
 }
 
 test "JSFunction: setWithFlags overrides flagsForOwn" {
