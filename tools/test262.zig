@@ -26,6 +26,8 @@
 //! --gc-threshold=<n>      Per-fixture allocation-pressure GC threshold. Default 65,536.
 //! --gc-stats              Per-realm one-line stderr report after every GC cycle.
 //! --top-slow=<n>          Print the N slowest fixtures (≥50ms) after the final tally.
+//! --top-rss=<n>           Print the N memory-heaviest fixtures (≥8MB RSS delta) after the
+//!                         final tally. Pair with `--threads=1` for clean readings.
 
 const std = @import("std");
 const cynic = @import("cynic");
@@ -313,6 +315,14 @@ const Options = struct {
     /// per fixture; only fixtures over `slow_threshold_ms`
     /// (50ms) are recorded to keep the per-worker buffer cheap.
     top_slow: u32 = 0,
+    /// When >0, print the top-N memory-heaviest fixtures after
+    /// the final tally. Captures the per-fixture RSS delta
+    /// (process RSS after the fixture minus before). Use with
+    /// `--threads=1` for clean readings — with multiple workers
+    /// the deltas are racy because RSS is a process-wide watermark.
+    /// Only fixtures over `heavy_threshold_mb` (8 MiB) are
+    /// recorded to keep noise out.
+    top_rss: u32 = 0,
 };
 
 /// Path of the pass-cache, written at the repo root after every
@@ -560,6 +570,11 @@ pub fn main(init: std.process.Init) !void {
         for (slow.items) |e| gpa.free(e.path);
         slow.deinit(gpa);
     }
+    var heavy: std.ArrayListUnmanaged(HeavyEntry) = .empty;
+    defer {
+        for (heavy.items) |e| gpa.free(e.path);
+        heavy.deinit(gpa);
+    }
 
     // `--only-failing` shortcut: any test path present in the
     // cache is counted as a pass without being classified or
@@ -652,12 +667,20 @@ pub fn main(init: std.process.Init) !void {
 
             const harness_pair: ?harness_mod.HarnessSources = harness_sources;
             const fx_start = if (opts.top_slow > 0) std.Io.Clock.now(.awake, io) else undefined;
+            const fx_rss_pre: u64 = if (opts.top_rss > 0) (currentRssMb() orelse 0) else 0;
             const outcome = try classifyAndRun(arena, io, corpus, rel, opts.mode, harness_pair, opts.gc_threshold, opts.gc_stats);
             if (opts.top_slow > 0) {
                 const ms_i = fx_start.untilNow(io, .awake).toMilliseconds();
                 const ms_u: u64 = if (ms_i > 0) @intCast(ms_i) else 0;
                 if (ms_u >= slow_threshold_ms) {
                     try slow.append(gpa, .{ .path = try gpa.dupe(u8, rel), .ms = ms_u });
+                }
+            }
+            if (opts.top_rss > 0) {
+                const rss_post: u64 = currentRssMb() orelse fx_rss_pre;
+                const delta: u64 = if (rss_post > fx_rss_pre) rss_post - fx_rss_pre else 0;
+                if (delta >= heavy_threshold_mb) {
+                    try heavy.append(gpa, .{ .path = try gpa.dupe(u8, rel), .mb = delta });
                 }
             }
             try recordOutcome(gpa, &stats, &buckets, &failures, &pass_paths, rel, outcome, is_full_run);
@@ -708,6 +731,7 @@ pub fn main(init: std.process.Init) !void {
                 .global_failures = &failures,
                 .global_pass_paths = &pass_paths,
                 .global_slow = &slow,
+                .global_heavy = &heavy,
                 .is_full_run = is_full_run,
                 .worker_id = wid,
                 .current_paths = current_paths,
@@ -756,6 +780,9 @@ pub fn main(init: std.process.Init) !void {
     if (opts.top_slow > 0 and slow.items.len > 0) {
         try printTopSlow(io, slow.items, opts.top_slow);
     }
+    if (opts.top_rss > 0 and heavy.items.len > 0) {
+        try printTopHeavy(io, heavy.items, opts.top_rss);
+    }
     if (opts.write_results) {
         const now_ts = std.Io.Clock.now(.real, io);
         try writeResults(gpa, io, &stats, &buckets, now_ts.toSeconds(), opts.mode);
@@ -790,6 +817,18 @@ const SlowEntry = struct {
 /// fixtures interesting enough to debug almost always run at
 /// least this long under the runtime mode.
 const slow_threshold_ms: u64 = 50;
+
+/// `--top-rss=N` capture. Pairs the per-fixture RSS delta with
+/// the test path. Same merge / print shape as `SlowEntry`.
+const HeavyEntry = struct {
+    path: []const u8,
+    mb: u64,
+};
+
+/// Filter out trivial fixtures from the heavy report. With 4
+/// workers most fixtures churn allocations under 8 MiB; the
+/// interesting tail is what actually pushed RSS up.
+const heavy_threshold_mb: u64 = 8;
 
 const RunResult = struct {
     kind: Outcome,
@@ -868,6 +907,7 @@ const WorkerCtx = struct {
     global_failures: *std.ArrayListUnmanaged(Failure),
     global_pass_paths: *std.ArrayListUnmanaged([]const u8),
     global_slow: *std.ArrayListUnmanaged(SlowEntry),
+    global_heavy: *std.ArrayListUnmanaged(HeavyEntry),
     is_full_run: bool,
     /// Worker's identity (0..thread_count-1). Used to claim a
     /// slot in `current_paths` so the progress monitor can name
@@ -897,8 +937,9 @@ fn worker(ctx: WorkerCtx) void {
     var local_buckets: BucketMap = .init(ctx.gpa);
     var local_pass_paths: std.ArrayListUnmanaged([]const u8) = .empty;
     var local_slow: std.ArrayListUnmanaged(SlowEntry) = .empty;
+    var local_heavy: std.ArrayListUnmanaged(HeavyEntry) = .empty;
 
-    workerLoop(ctx, &local_arena, &local_stats, &local_buckets, &local_failures, &local_pass_paths, &local_slow) catch {
+    workerLoop(ctx, &local_arena, &local_stats, &local_buckets, &local_failures, &local_pass_paths, &local_slow, &local_heavy) catch {
         // Best-effort: skip merging silently on OOM / IO blow-up.
         // The rolled-up totals will be slightly low, but the run
         // doesn't deadlock and the surviving workers still merge.
@@ -911,12 +952,14 @@ fn worker(ctx: WorkerCtx) void {
     ctx.global_failures.appendSlice(ctx.gpa, local_failures.items) catch {};
     ctx.global_pass_paths.appendSlice(ctx.gpa, local_pass_paths.items) catch {};
     ctx.global_slow.appendSlice(ctx.gpa, local_slow.items) catch {};
+    ctx.global_heavy.appendSlice(ctx.gpa, local_heavy.items) catch {};
 
     // The merged-out arrays own their inner strings; we transferred
     // those via `appendSlice`. Free the spine arrays only.
     local_failures.deinit(ctx.gpa);
     local_pass_paths.deinit(ctx.gpa);
     local_slow.deinit(ctx.gpa);
+    local_heavy.deinit(ctx.gpa);
     local_buckets.deinit();
 }
 
@@ -928,6 +971,7 @@ fn workerLoop(
     failures: *std.ArrayListUnmanaged(Failure),
     pass_paths: *std.ArrayListUnmanaged([]const u8),
     slow: *std.ArrayListUnmanaged(SlowEntry),
+    heavy: *std.ArrayListUnmanaged(HeavyEntry),
 ) !void {
     defer ctx.current_paths[ctx.worker_id].store(idle_slot, .release);
     while (true) {
@@ -953,6 +997,7 @@ fn workerLoop(
         const arena = arena_state.allocator();
 
         const fx_start = if (ctx.opts.top_slow > 0) std.Io.Clock.now(.awake, ctx.io) else undefined;
+        const fx_rss_pre: u64 = if (ctx.opts.top_rss > 0) (currentRssMb() orelse 0) else 0;
         const outcome = classifyAndRun(arena, ctx.io, ctx.corpus, rel, ctx.opts.mode, ctx.harness_sources, ctx.opts.gc_threshold, ctx.opts.gc_stats) catch |err| {
             if (err == error.OutOfMemory) return err;
             try recordOutcome(ctx.gpa, stats, buckets, failures, pass_paths, rel, .{ .kind = .fail_false_reject }, ctx.is_full_run);
@@ -963,6 +1008,13 @@ fn workerLoop(
             const ms_u: u64 = if (ms_i > 0) @intCast(ms_i) else 0;
             if (ms_u >= slow_threshold_ms) {
                 try slow.append(ctx.gpa, .{ .path = try ctx.gpa.dupe(u8, rel), .ms = ms_u });
+            }
+        }
+        if (ctx.opts.top_rss > 0) {
+            const rss_post: u64 = currentRssMb() orelse fx_rss_pre;
+            const delta: u64 = if (rss_post > fx_rss_pre) rss_post - fx_rss_pre else 0;
+            if (delta >= heavy_threshold_mb) {
+                try heavy.append(ctx.gpa, .{ .path = try ctx.gpa.dupe(u8, rel), .mb = delta });
             }
         }
         try recordOutcome(ctx.gpa, stats, buckets, failures, pass_paths, rel, outcome, ctx.is_full_run);
@@ -1502,6 +1554,25 @@ fn printTopSlow(io: std.Io, slow: []SlowEntry, n: u32) !void {
     try std.Io.File.stdout().writeStreamingAll(io, head);
     for (slow[0..limit]) |e| {
         const line = try std.fmt.bufPrint(&buf, "  {d:>6}ms  {s}\n", .{ e.ms, e.path });
+        try std.Io.File.stdout().writeStreamingAll(io, line);
+    }
+}
+
+/// Sort the captured heavy-fixture entries descending and print
+/// the top N. Use `--threads=1` to keep RSS deltas sane;
+/// concurrent allocation makes the per-fixture watermark racy.
+fn printTopHeavy(io: std.Io, heavy: []HeavyEntry, n: u32) !void {
+    std.mem.sort(HeavyEntry, heavy, {}, struct {
+        fn lt(_: void, a: HeavyEntry, b: HeavyEntry) bool {
+            return a.mb > b.mb;
+        }
+    }.lt);
+    var buf: [1024]u8 = undefined;
+    const limit = @min(@as(usize, n), heavy.len);
+    const head = try std.fmt.bufPrint(&buf, "\ntop {d} heaviest fixtures by RSS delta (≥{d}MB):\n", .{ limit, heavy_threshold_mb });
+    try std.Io.File.stdout().writeStreamingAll(io, head);
+    for (heavy[0..limit]) |e| {
+        const line = try std.fmt.bufPrint(&buf, "  {d:>6}MB  {s}\n", .{ e.mb, e.path });
         try std.Io.File.stdout().writeStreamingAll(io, line);
     }
 }
@@ -2166,6 +2237,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.gc_stats = true;
         } else if (std.mem.startsWith(u8, arg, "--top-slow=")) {
             opts.top_slow = std.fmt.parseInt(u32, arg["--top-slow=".len..], 10) catch 0;
+        } else if (std.mem.startsWith(u8, arg, "--top-rss=")) {
+            opts.top_rss = std.fmt.parseInt(u32, arg["--top-rss=".len..], 10) catch 0;
         }
     }
     return opts;
