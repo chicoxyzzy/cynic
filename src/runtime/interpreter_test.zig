@@ -2484,6 +2484,70 @@ test "later: Set.prototype.isDisjointFrom — false case" {
     , 0);
 }
 
+// §27.5.1 — `%GeneratorPrototype%.[[Prototype]]` is
+// `%IteratorPrototype%`. Without this link, `g().map(...)` on a
+// generator instance is `undefined` and the iterator-helpers
+// fixtures all fall over at the first method dispatch.
+test "later: generator instance inherits .map from %Iterator.prototype%" {
+    try expectScriptStringWithBuiltins(
+        \\function* g() { yield 1; yield 2; yield 3; }
+        \\typeof g().map;
+    , "function");
+}
+
+// §27.1.4.1.1.1 step 5.b.iv — mapper is called as
+// `Call(mapper, undefined, « value, 𝔽(counter) »)`. The counter
+// starts at 0 and increments per yielded value, regardless of
+// what the mapper returns.
+test "later: Iterator.prototype.map passes (value, counter) to mapper" {
+    try expectScriptStringWithBuiltins(
+        \\function* g() { yield "a"; yield "b"; yield "c"; }
+        \\const acc = [];
+        \\for (const _ of g().map((v, i) => { acc.push(v + i); return v; }));
+        \\acc.join(",");
+    , "a0,b1,c2");
+}
+
+// §27.1.4.1.1 — `Iterator.prototype.map` returns an Iterator
+// helper whose [[Prototype]] chains to `%Iterator.prototype%`.
+// `instanceof Iterator` is the user-visible consequence.
+test "later: Iterator.prototype.map result is instanceof Iterator" {
+    try expectScriptStringWithBuiltins(
+        \\function* g() { yield 1; }
+        \\(g().map(v => v) instanceof Iterator) + "";
+    , "true");
+}
+
+// §27.1.4.1.1 / §7.4.10 — GetIteratorDirect snapshots `next`
+// once at helper construction. Subsequent steps must NOT re-
+// trigger a `get next` accessor on the underlying iterator.
+test "later: Iterator.from snapshots next exactly once" {
+    try expectScriptStringWithBuiltins(
+        \\let nextGets = 0;
+        \\const src = {
+        \\  get next() {
+        \\    ++nextGets;
+        \\    let i = 0;
+        \\    return function () {
+        \\      return i < 3 ? { value: i++, done: false } : { value: undefined, done: true };
+        \\    };
+        \\  },
+        \\};
+        \\const it = Iterator.from(src);
+        \\it.toArray();
+        \\String(nextGets);
+    , "1");
+}
+
+// §27.1.4.1.1.5 (toArray): drains the iterator. Smoke-test the
+// generator → helper → terminal chain.
+test "later: g().filter(...).toArray() returns an array" {
+    try expectScriptStringWithBuiltins(
+        \\function* g() { yield 1; yield 2; yield 3; yield 4; }
+        \\g().filter(v => v % 2 === 0).toArray().join(",");
+    , "2,4");
+}
+
 test "later: Set methods accept any set-like (Map keys + has + size)" {
     // Spec says `other` is any set-like — { size, has, keys }.
     // A Map satisfies that protocol via its own size/has/keys.

@@ -88,12 +88,21 @@ fn iteratorConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
 }
 
 /// `Iterator.from(x)` — wrap any iterable in an Iterator instance.
+/// §27.1.4.1 step 2 calls §7.4.6 GetIteratorFlattenable(`iterate`)
+/// which: (a) calls `x[@@iterator]()` if present, otherwise
+/// (b) treats `x` itself as an iterator if it carries a callable
+/// `next` (the duck-typed-iterator path the
+/// `from/get-next-method-only-once.js` family relies on).
 fn iteratorFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
-    const inner = interpreter.openIterator(realm.allocator, realm, arg) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return throwTypeError(realm, "Iterator.from argument is not iterable"),
+    // Try @@iterator first via the flattenable path. If the arg
+    // carries `@@iterator` we call it; otherwise we treat the arg
+    // itself as an iterator (returning it directly so wrapIterator
+    // snapshots `arg.next` once, not an extra time).
+    const inner = getIteratorFlattenable(realm, arg, false) catch |err| {
+        if (err == error.NativeThrew) return error.NativeThrew;
+        return throwTypeError(realm, "Iterator.from argument is not iterable");
     };
     return wrapIterator(realm, inner);
 }
@@ -104,9 +113,15 @@ fn iteratorFrom(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 fn wrapIterator(realm: *Realm, source: Value) NativeError!Value {
     const ctor_v = realm.globals.get("Iterator") orelse return source;
     const ctor = heap_mod.valueAsFunction(ctor_v) orelse return source;
+    // §27.1.4.1.1 step 4 — `Iterator.from(O)` does GetIteratorFlattenable
+    // which reads `O.next` exactly once via GetMethod. Cache it on
+    // the wrapper so `wrappedNext` doesn't re-read the source's
+    // (possibly-getter) `next` every step.
+    const cached_next = try snapshotNext(realm, source);
     const wrap = realm.heap.allocateObject() catch return error.OutOfMemory;
     wrap.prototype = ctor.prototype;
     wrap.set(realm.allocator, "__cynic_iter_source__", source) catch return error.OutOfMemory;
+    wrap.set(realm.allocator, "__cynic_iter_next_fn__", heap_mod.taggedFunction(cached_next)) catch return error.OutOfMemory;
     const next_fn = realm.heap.allocateFunctionNative(wrappedNext, 0, "next") catch return error.OutOfMemory;
     next_fn.has_construct = false;
     wrap.setWithFlags(realm.allocator, "next", heap_mod.taggedFunction(next_fn), .{
@@ -121,13 +136,25 @@ fn wrappedNext(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Iterator next on non-object");
     const src = obj.get("__cynic_iter_source__");
-    return invokeIterNext(realm, src);
+    const next_fn = try cachedNextFn(realm, obj, src);
+    return invokeIterNextFn(realm, src, next_fn);
 }
 
 fn invokeIterNext(realm: *Realm, iter: Value) NativeError!Value {
     const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return throwTypeError(realm, "iterator is not an object");
     const next_v = iter_obj.get("next");
     const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "iterator has no callable next");
+    return invokeIterNextFn(realm, iter, next_fn);
+}
+
+/// §7.4.10 IteratorClose / GetIteratorDirect — once a helper has
+/// snapshotted `iter.next` into its IteratorRecord, every step
+/// dispatches through that snapshot rather than re-reading
+/// `iter.next` (which would re-run a getter each step). Used by
+/// the lazy-helper machinery below: each wrapper stores the
+/// source iterator's `next` function once, at construction time,
+/// so subsequent steps don't re-trigger the source's `get next`.
+fn invokeIterNextFn(realm: *Realm, iter: Value, next_fn: *JSFunction) NativeError!Value {
     const out = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
@@ -139,6 +166,42 @@ fn invokeIterNext(realm: *Realm, iter: Value) NativeError!Value {
             return error.NativeThrew;
         },
     };
+}
+
+/// §7.4.2 GetIteratorDirect step 2 — `Get(obj, "next")`. Returns
+/// the read value WITHOUT a callability check (spec defers that
+/// to §7.4.4 IteratorNext, which throws TypeError when the
+/// stored next is not callable at step time). Called at every
+/// helper-construction site so the wrapper's stored
+/// `__cynic_iter_next_fn__` slot is populated up front. The
+/// `get next()` accessor fires here exactly once.
+fn snapshotNextValue(realm: *Realm, source: Value) NativeError!Value {
+    if (heap_mod.valueAsPlainObject(source) == null) return throwTypeError(realm, "iterator is not an object");
+    return iterGet(realm, source, "next");
+}
+
+/// Strict version that throws on non-callable. Used at terminal-
+/// helper entry points (`toArray`, `forEach`, …) where the spec's
+/// surrounding loop would have called §7.4.4 immediately anyway,
+/// so reporting at snapshot time gives the same observable error.
+fn snapshotNext(realm: *Realm, source: Value) NativeError!*JSFunction {
+    const v = try snapshotNextValue(realm, source);
+    return heap_mod.valueAsFunction(v) orelse return throwTypeError(realm, "iterator has no callable next");
+}
+
+/// Pull the cached next *value* out of a wrapper's slot and
+/// coerce to a callable function — this is the §7.4.4
+/// IteratorNext callability check. If the stored value isn't
+/// callable, throw TypeError now (this is the "step time"
+/// site the `this-non-callable-next.js` family probes). If the
+/// slot is missing entirely (e.g. terminal helper called on a
+/// raw user iterator), snapshot now.
+fn cachedNextFn(realm: *Realm, wrapper: *JSObject, source: Value) NativeError!*JSFunction {
+    if (wrapper.properties.contains("__cynic_iter_next_fn__")) {
+        const cached = wrapper.get("__cynic_iter_next_fn__");
+        return heap_mod.valueAsFunction(cached) orelse return throwTypeError(realm, "iterator has no callable next");
+    }
+    return snapshotNext(realm, source);
 }
 
 /// Accessor-aware [[Get]] on an iterator-result object: if a
@@ -297,9 +360,19 @@ fn iteratorFlatMap(realm: *Realm, this_value: Value, args: []const Value) Native
     }
     const ctor_v = realm.globals.get("Iterator") orelse return throwTypeError(realm, "Iterator constructor missing");
     const ctor = heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "Iterator constructor missing");
+    // §27.1.4.1.1.4 step 3 — GetIteratorDirect snapshots `next` once.
+    // Callability deferred to step time per §7.4.4.
+    const cached_next_v = snapshotNextValue(realm, this_value) catch |err| {
+        if (err == error.NativeThrew) {
+            const ex = realm.pending_exception orelse Value.undefined_;
+            return throwAfterClose(realm, this_value, ex);
+        }
+        return err;
+    };
     const wrap = realm.heap.allocateObject() catch return error.OutOfMemory;
     wrap.prototype = ctor.prototype;
     wrap.set(realm.allocator, "__cynic_iter_source__", this_value) catch return error.OutOfMemory;
+    wrap.set(realm.allocator, "__cynic_iter_next_fn__", cached_next_v) catch return error.OutOfMemory;
     wrap.set(realm.allocator, "__cynic_iter_payload__", cb_v) catch return error.OutOfMemory;
     wrap.set(realm.allocator, "__cynic_iter_count__", Value.fromInt32(0)) catch return error.OutOfMemory;
     wrap.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(false)) catch return error.OutOfMemory;
@@ -356,6 +429,7 @@ fn flatMapNext(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     defer clearRunning(obj, realm.allocator);
 
     const src = obj.get("__cynic_iter_source__");
+    const outer_next = try cachedNextFn(realm, obj, src);
     const cb = heap_mod.valueAsFunction(obj.get("__cynic_iter_payload__")) orelse return doneResult(realm);
 
     while (true) {
@@ -395,7 +469,7 @@ fn flatMapNext(realm: *Realm, this_value: Value, args: []const Value) NativeErro
         }
 
         // 2. No active inner — pull next value from outer.
-        const result = invokeIterNext(realm, src) catch |err| {
+        const result = invokeIterNextFn(realm, src, outer_next) catch |err| {
             obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
             return err;
         };
@@ -501,9 +575,25 @@ fn iteratorDrop(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 fn buildLazy(realm: *Realm, source: Value, payload: Value, next_fn: @import("../function.zig").NativeFn) NativeError!Value {
     const ctor_v = realm.globals.get("Iterator") orelse return throwTypeError(realm, "Iterator constructor missing");
     const ctor = heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "Iterator constructor missing");
+    // §27.1.4.x — every lazy helper does GetIteratorDirect on
+    // `this`, which snapshots `this.next` once (§7.4.2; the
+    // callability check is deferred to step time per §7.4.4).
+    // Cache the raw value on the wrapper so subsequent steps
+    // don't re-trigger a `get next` accessor on the source
+    // (the `get-next-method-only-once.js` family) and a
+    // non-callable `next` defers its TypeError to `.next()`
+    // time (the `this-non-callable-next.js` family).
+    const cached_next_v = snapshotNextValue(realm, source) catch |err| {
+        if (err == error.NativeThrew) {
+            const ex = realm.pending_exception orelse Value.undefined_;
+            return throwAfterClose(realm, source, ex);
+        }
+        return err;
+    };
     const wrap = realm.heap.allocateObject() catch return error.OutOfMemory;
     wrap.prototype = ctor.prototype;
     wrap.set(realm.allocator, "__cynic_iter_source__", source) catch return error.OutOfMemory;
+    wrap.set(realm.allocator, "__cynic_iter_next_fn__", cached_next_v) catch return error.OutOfMemory;
     wrap.set(realm.allocator, "__cynic_iter_payload__", payload) catch return error.OutOfMemory;
     wrap.set(realm.allocator, "__cynic_iter_count__", Value.fromInt32(0)) catch return error.OutOfMemory;
     wrap.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(false)) catch return error.OutOfMemory;
@@ -570,7 +660,8 @@ fn mapNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
     markRunning(obj, realm.allocator);
     defer clearRunning(obj, realm.allocator);
     const src = obj.get("__cynic_iter_source__");
-    const result = invokeIterNext(realm, src) catch |err| {
+    const next_fn = try cachedNextFn(realm, obj, src);
+    const result = invokeIterNextFn(realm, src, next_fn) catch |err| {
         // `next` itself threw — wrapper is done, but spec does
         // not call return on this path.
         obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
@@ -626,9 +717,10 @@ fn filterNext(realm: *Realm, this_value: Value, args: []const Value) NativeError
     markRunning(obj, realm.allocator);
     defer clearRunning(obj, realm.allocator);
     const src = obj.get("__cynic_iter_source__");
+    const next_fn = try cachedNextFn(realm, obj, src);
     const cb = heap_mod.valueAsFunction(obj.get("__cynic_iter_payload__")) orelse return doneResult(realm);
     while (true) {
-        const result = invokeIterNext(realm, src) catch |err| {
+        const result = invokeIterNextFn(realm, src, next_fn) catch |err| {
             obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
             return err;
         };
@@ -691,7 +783,8 @@ fn takeNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
         return doneResult(realm);
     }
     obj.set(realm.allocator, "__cynic_iter_count__", Value.fromInt32(idx + 1)) catch return error.OutOfMemory;
-    const result = invokeIterNext(realm, src) catch |err| {
+    const next_fn = try cachedNextFn(realm, obj, src);
+    const result = invokeIterNextFn(realm, src, next_fn) catch |err| {
         obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
         return err;
     };
@@ -724,8 +817,9 @@ fn dropNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
     const drop_v = obj.get("__cynic_iter_payload__");
     var drop_remaining: i32 = if (drop_v.isInt32()) drop_v.asInt32() else 0;
     const src = obj.get("__cynic_iter_source__");
+    const next_fn = try cachedNextFn(realm, obj, src);
     while (drop_remaining > 0) : (drop_remaining -= 1) {
-        const r = invokeIterNext(realm, src) catch |err| {
+        const r = invokeIterNextFn(realm, src, next_fn) catch |err| {
             obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
             return err;
         };
@@ -744,7 +838,7 @@ fn dropNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
         }
     }
     obj.set(realm.allocator, "__cynic_iter_payload__", Value.fromInt32(0)) catch return error.OutOfMemory;
-    const result = invokeIterNext(realm, src) catch |err| {
+    const result = invokeIterNextFn(realm, src, next_fn) catch |err| {
         obj.set(realm.allocator, "__cynic_iter_done__", Value.fromBool(true)) catch {};
         return err;
     };
@@ -771,7 +865,10 @@ fn dropNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
 
 fn iteratorToArray(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    if (heap_mod.valueAsPlainObject(this_value) == null) return throwTypeError(realm, "Iterator.prototype.toArray called on non-object");
+    const this_obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Iterator.prototype.toArray called on non-object");
+    // §27.1.4.1.1.5 step 1 — GetIteratorDirect snapshots `next` once.
+    _ = this_obj;
+    const next_fn = try snapshotNext(realm, this_value);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     var idx: i32 = 0;
@@ -779,7 +876,7 @@ fn iteratorToArray(realm: *Realm, this_value: Value, args: []const Value) Native
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
     while (step < max_iter) : (step += 1) {
-        const r = try invokeIterNext(realm, this_value);
+        const r = try invokeIterNextFn(realm, this_value, next_fn);
         if (heap_mod.valueAsPlainObject(r) == null) {
             return typeErrorAfterClose(realm, this_value, "Iterator result is not an object");
         }
@@ -796,16 +893,19 @@ fn iteratorToArray(realm: *Realm, this_value: Value, args: []const Value) Native
 }
 
 fn iteratorForEach(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (heap_mod.valueAsPlainObject(this_value) == null) return throwTypeError(realm, "Iterator.prototype.forEach called on non-object");
+    const this_obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Iterator.prototype.forEach called on non-object");
     const cb_v = argOr(args, 0, Value.undefined_);
     const cb = heap_mod.valueAsFunction(cb_v) orelse {
         return typeErrorAfterClose(realm, this_value, "Iterator.prototype.forEach callback is not callable");
     };
+    // §27.1.4.1.1.6 step 2 — GetIteratorDirect snapshots `next`.
+    _ = this_obj;
+    const next_fn = try snapshotNext(realm, this_value);
     var idx: i32 = 0;
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
     while (step < max_iter) : (step += 1) {
-        const r = try invokeIterNext(realm, this_value);
+        const r = try invokeIterNextFn(realm, this_value, next_fn);
         if (heap_mod.valueAsPlainObject(r) == null) {
             return typeErrorAfterClose(realm, this_value, "Iterator result is not an object");
         }
@@ -827,16 +927,18 @@ fn iteratorForEach(realm: *Realm, this_value: Value, args: []const Value) Native
 }
 
 fn iteratorFind(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (heap_mod.valueAsPlainObject(this_value) == null) return throwTypeError(realm, "Iterator.prototype.find called on non-object");
+    const this_obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Iterator.prototype.find called on non-object");
     const cb_v = argOr(args, 0, Value.undefined_);
     const cb = heap_mod.valueAsFunction(cb_v) orelse {
         return typeErrorAfterClose(realm, this_value, "Iterator.prototype.find predicate is not callable");
     };
+    _ = this_obj;
+    const next_fn = try snapshotNext(realm, this_value);
     var idx: i32 = 0;
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
     while (step < max_iter) : (step += 1) {
-        const r = try invokeIterNext(realm, this_value);
+        const r = try invokeIterNextFn(realm, this_value, next_fn);
         if (heap_mod.valueAsPlainObject(r) == null) {
             return typeErrorAfterClose(realm, this_value, "Iterator result is not an object");
         }
@@ -863,16 +965,18 @@ fn iteratorFind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 }
 
 fn iteratorSome(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (heap_mod.valueAsPlainObject(this_value) == null) return throwTypeError(realm, "Iterator.prototype.some called on non-object");
+    const this_obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Iterator.prototype.some called on non-object");
     const cb_v = argOr(args, 0, Value.undefined_);
     const cb = heap_mod.valueAsFunction(cb_v) orelse {
         return typeErrorAfterClose(realm, this_value, "Iterator.prototype.some predicate is not callable");
     };
+    _ = this_obj;
+    const next_fn = try snapshotNext(realm, this_value);
     var idx: i32 = 0;
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
     while (step < max_iter) : (step += 1) {
-        const r = try invokeIterNext(realm, this_value);
+        const r = try invokeIterNextFn(realm, this_value, next_fn);
         if (heap_mod.valueAsPlainObject(r) == null) {
             return typeErrorAfterClose(realm, this_value, "Iterator result is not an object");
         }
@@ -898,16 +1002,18 @@ fn iteratorSome(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 }
 
 fn iteratorEvery(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (heap_mod.valueAsPlainObject(this_value) == null) return throwTypeError(realm, "Iterator.prototype.every called on non-object");
+    const this_obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Iterator.prototype.every called on non-object");
     const cb_v = argOr(args, 0, Value.undefined_);
     const cb = heap_mod.valueAsFunction(cb_v) orelse {
         return typeErrorAfterClose(realm, this_value, "Iterator.prototype.every predicate is not callable");
     };
+    _ = this_obj;
+    const next_fn = try snapshotNext(realm, this_value);
     var idx: i32 = 0;
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
     while (step < max_iter) : (step += 1) {
-        const r = try invokeIterNext(realm, this_value);
+        const r = try invokeIterNextFn(realm, this_value, next_fn);
         if (heap_mod.valueAsPlainObject(r) == null) {
             return typeErrorAfterClose(realm, this_value, "Iterator result is not an object");
         }
@@ -933,18 +1039,20 @@ fn iteratorEvery(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 }
 
 fn iteratorReduce(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (heap_mod.valueAsPlainObject(this_value) == null) return throwTypeError(realm, "Iterator.prototype.reduce called on non-object");
+    const this_obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Iterator.prototype.reduce called on non-object");
     const cb_v = argOr(args, 0, Value.undefined_);
     const cb = heap_mod.valueAsFunction(cb_v) orelse {
         return typeErrorAfterClose(realm, this_value, "Iterator.prototype.reduce reducer is not callable");
     };
+    _ = this_obj;
+    const next_fn = try snapshotNext(realm, this_value);
     var has_acc: bool = args.len >= 2;
     var acc: Value = if (has_acc) args[1] else Value.undefined_;
     var idx: i32 = 0;
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
     while (step < max_iter) : (step += 1) {
-        const r = try invokeIterNext(realm, this_value);
+        const r = try invokeIterNextFn(realm, this_value, next_fn);
         if (heap_mod.valueAsPlainObject(r) == null) {
             return typeErrorAfterClose(realm, this_value, "Iterator result is not an object");
         }

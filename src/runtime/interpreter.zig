@@ -313,17 +313,32 @@ pub fn wrapAsyncGenerator(
 /// `next` / `return` / `throw` / `[Symbol.iterator]` methods
 /// that walk the wrapper's `generator_ref`.
 ///
-/// TODO: per §27.5.1 the `[[Prototype]]` should be
-/// `%IteratorPrototype%` so generator iterators inherit
-/// `.map` / `.filter` / `.every` / etc. from the
-/// iterator-helpers proposal. Wiring it through triggers a
-/// SEGV in some `built-ins/Iterator/prototype/map/` fixtures —
-/// the chain is still `Object.prototype` until that's tracked
-/// down.
+/// §27.5.1 — `%GeneratorPrototype%.[[Prototype]]` is
+/// `%IteratorPrototype%`, so generator instances inherit the
+/// iterator-helpers (`.map` / `.filter` / `.take` / `.drop` /
+/// `.toArray` / `.forEach` / …) from the Iterator built-in.
+/// We resolve that proto from the realm's `Iterator` global
+/// (installed at `installBuiltins` time, before any user code
+/// runs that could trigger this lazy-init path); if for some
+/// reason it's missing we fall back to `%Object.prototype%`
+/// so the generator still works at the protocol level.
+/// Look up `%Iterator.prototype%` via the realm's `Iterator`
+/// global (installed by `installBuiltins`). Falls back to
+/// `%Object.prototype%` if Iterator isn't present (e.g. a realm
+/// that only loaded core intrinsics).
+fn iteratorPrototypeOrObjectPrototype(realm: *Realm) ?*JSObject {
+    if (realm.globals.get("Iterator")) |ctor_v| {
+        if (heap_mod.valueAsFunction(ctor_v)) |ctor| {
+            if (ctor.prototype) |p| return p;
+        }
+    }
+    return realm.intrinsics.object_prototype;
+}
+
 fn ensureGeneratorPrototype(realm: *Realm) !*JSObject {
     if (realm.intrinsics.generator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
-    proto.prototype = realm.intrinsics.object_prototype;
+    proto.prototype = iteratorPrototypeOrObjectPrototype(realm);
 
     const next_fn = try realm.heap.allocateFunctionNative(genNext, 1, "next");
     next_fn.proto = realm.intrinsics.function_prototype;
@@ -375,6 +390,12 @@ fn genResultObject(realm: *Realm, value: Value, done: bool) !Value {
 fn ensureAsyncGeneratorPrototype(realm: *Realm) !*JSObject {
     if (realm.intrinsics.async_generator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
+    // §27.6.1 — `%AsyncGeneratorPrototype%.[[Prototype]]` is
+    // `%AsyncIteratorPrototype%`. Cynic doesn't yet ship a
+    // dedicated AsyncIterator prototype object, so for now we
+    // chain to `%Object.prototype%` here (mirrors the pre-fix
+    // sync path). When async iterator helpers land they'll wire
+    // an analogous lookup.
     proto.prototype = realm.intrinsics.object_prototype;
 
     const next_fn = try realm.heap.allocateFunctionNative(asyncGenNext, 1, "next");
