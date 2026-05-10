@@ -109,6 +109,38 @@ pub const SetEntry = struct {
     deleted: bool = false,
 };
 
+/// §26.2.1.1 [[Cells]] storage for FinalizationRegistry.
+/// `cleanup_callback` is the callable supplied at construction;
+/// `cells` holds the live registrations. Cynic's FinalizationRegistry
+/// is a strong-ref impl (mirrors WeakMap/WeakSet at `runtime/builtins/
+/// collections.zig:7-9` — observable behaviour matches; actual
+/// finalisation requires real weak refs). `register` appends; `unregister`
+/// flips `deleted = true` so an in-progress walk doesn't shift indices.
+pub const FinalizationData = struct {
+    cleanup_callback: Value = Value.undefined_,
+    cells: std.ArrayListUnmanaged(FinalizationCell) = .empty,
+
+    pub fn deinit(self: *FinalizationData, allocator: std.mem.Allocator) void {
+        self.cells.deinit(allocator);
+        allocator.destroy(self);
+    }
+};
+
+/// §26.2.1.1 — one Cell record. `[[WeakRefTarget]]`,
+/// `[[HeldValue]]`, `[[UnregisterToken]]` (per §26.2.1.1, the
+/// last is `~empty~` when the call site omitted the token).
+/// `has_token = false` corresponds to the `~empty~` sentinel.
+pub const FinalizationCell = struct {
+    target: Value,
+    held_value: Value,
+    unregister_token: Value = Value.undefined_,
+    has_token: bool = false,
+    /// Tombstoned by `unregister` and during cleanup; skipped on
+    /// walk. Matches `MapEntry.deleted` shape so an iteration
+    /// path concurrent with mutation doesn't reshuffle indices.
+    deleted: bool = false,
+};
+
 pub const JSObject = struct {
     /// Discriminator — must remain the first field. Mirrors the
     /// `kind` field on `JSFunction` so runtime dispatch on a
@@ -248,6 +280,13 @@ pub const JSObject = struct {
     /// call to `.exec`/`.test` parses the `source` + `flags` and
     /// caches the bytecode here. The runtime owns the allocation.
     regex_bytecode: ?[]u8 = null,
+    /// `[[Cells]]` (§26.2.1) — only set on `new FinalizationRegistry(cb)`
+    /// instances. Carries the cleanup callback plus the list of
+    /// registered cells. Allocated on construction; deinit releases
+    /// the storage. The cleanup callback and per-cell values are
+    /// strong-rooted via `Heap.markValue` (see `markValue` and
+    /// the `finalization_cells` walk there).
+    finalization_cells: ?*FinalizationData = null,
     /// §26.1 WeakRef — `[[WeakRefTarget]]` internal slot. Set on
     /// `new WeakRef(target)` instances. `is_weak_ref` is the brand
     /// (`deref.call(plainObj)` must throw a TypeError per §26.1.3.2
@@ -281,6 +320,7 @@ pub const JSObject = struct {
         self.accessors.deinit(allocator);
         if (self.map_data) |m| m.deinit(allocator);
         if (self.set_data) |s| s.deinit(allocator);
+        if (self.finalization_cells) |fc| fc.deinit(allocator);
         if (self.array_buffer) |ab| allocator.free(ab);
         self.promise_waiters.deinit(allocator);
         self.promise_reactions.deinit(allocator);

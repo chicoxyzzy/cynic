@@ -489,6 +489,22 @@ pub const Heap = struct {
                 // (only marked while inside a job that has observed
                 // `.deref()`, per §9.10 AddToKeptObjects).
                 if (o.is_weak_ref) self.markValue(o.weak_ref_target);
+                // §26.2 FinalizationRegistry — strong-mark the
+                // cleanup callback plus every live cell's target /
+                // heldValue / unregister token. Cynic's FR is a
+                // strong-ref impl (see object.zig FinalizationData
+                // doc); without these marks the cleanup closure
+                // and the still-registered targets would be swept
+                // out from under a reachable registry.
+                if (o.finalization_cells) |fc| {
+                    self.markValue(fc.cleanup_callback);
+                    for (fc.cells.items) |cell| {
+                        if (cell.deleted) continue;
+                        self.markValue(cell.target);
+                        self.markValue(cell.held_value);
+                        if (cell.has_token) self.markValue(cell.unregister_token);
+                    }
+                }
                 // Heap-allocated JSStrings whose `.bytes` slice
                 // backs a property key. The property hash maps
                 // store `[]const u8`, not pointers; without this

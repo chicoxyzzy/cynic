@@ -277,6 +277,10 @@ pub fn install(realm: *Realm) !void {
         try collections.installWeakMap(realm);
         try collections.installWeakSet(realm);
     }
+    // §26.2 FinalizationRegistry — strong-ref impl (matches
+    // WeakMap/WeakSet); cleanup callback never fires today,
+    // which the spec explicitly permits.
+    try @import("builtins/finalization_registry.zig").install(realm);
     try @import("builtins/date.zig").install(realm);
     try @import("builtins/reflect.zig").install(realm);
     try @import("builtins/symbol.zig").install(realm);

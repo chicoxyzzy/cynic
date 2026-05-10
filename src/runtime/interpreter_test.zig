@@ -2685,7 +2685,7 @@ test "GC: property-bag growth survives gc_threshold=1" {
 // indexed slots, no string keys).
 
 // ---------------------------------------------------------------------------
-// §26.1 WeakRef
+// §26.2 FinalizationRegistry
 // ---------------------------------------------------------------------------
 
 fn expectScriptThrowsWithBuiltins(source: []const u8) !void {
@@ -2698,6 +2698,100 @@ fn expectScriptThrowsWithBuiltins(source: []const u8) !void {
         .thrown => {},
     }
 }
+
+test "later: FinalizationRegistry constructor exists" {
+    try expectScriptStringWithBuiltins(
+        \\typeof FinalizationRegistry;
+    , "function");
+}
+
+test "later: FinalizationRegistry rejects non-callable cleanupCallback" {
+    // §26.2.1.1 step 2 — IsCallable(cleanupCallback) is false → TypeError.
+    try expectScriptThrowsWithBuiltins("new FinalizationRegistry({});");
+    try expectScriptThrowsWithBuiltins("new FinalizationRegistry();");
+    try expectScriptThrowsWithBuiltins("new FinalizationRegistry(null);");
+    try expectScriptThrowsWithBuiltins("new FinalizationRegistry(42);");
+}
+
+test "later: FinalizationRegistry register returns undefined" {
+    // §26.2.3.2 step 8 — register returns undefined.
+    try expectScriptStringWithBuiltins(
+        \\const fr = new FinalizationRegistry(function() {});
+        \\const t = {};
+        \\typeof fr.register(t, "held");
+    , "undefined");
+}
+
+test "later: FinalizationRegistry register rejects non-weakly-holdable target" {
+    // §26.2.3.2 step 3 — CanBeHeldWeakly(target) false → TypeError.
+    try expectScriptThrowsWithBuiltins(
+        \\const fr = new FinalizationRegistry(function() {});
+        \\fr.register(undefined);
+    );
+    try expectScriptThrowsWithBuiltins(
+        \\const fr = new FinalizationRegistry(function() {});
+        \\fr.register(42);
+    );
+    try expectScriptThrowsWithBuiltins(
+        \\const fr = new FinalizationRegistry(function() {});
+        \\fr.register("not weakly holdable");
+    );
+}
+
+test "later: FinalizationRegistry register rejects target same as heldValue" {
+    // §26.2.3.2 step 4 — SameValue(target, heldValue) → TypeError.
+    try expectScriptThrowsWithBuiltins(
+        \\const fr = new FinalizationRegistry(function() {});
+        \\const t = {};
+        \\fr.register(t, t);
+    );
+}
+
+test "later: FinalizationRegistry unregister returns true when token matched" {
+    // §26.2.3.3 step 6 — return whether anything was removed.
+    try expectScriptIntWithBuiltins(
+        \\const fr = new FinalizationRegistry(function() {});
+        \\const t = {};
+        \\const tok = {};
+        \\fr.register(t, "held", tok);
+        \\fr.unregister(tok) ? 1 : 0;
+    , 1);
+}
+
+test "later: FinalizationRegistry unregister returns false when no match" {
+    try expectScriptIntWithBuiltins(
+        \\const fr = new FinalizationRegistry(function() {});
+        \\const tok = {};
+        \\fr.unregister(tok) ? 1 : 0;
+    , 0);
+}
+
+test "later: FinalizationRegistry unregister rejects non-weakly-holdable token" {
+    // §26.2.3.3 step 3 — CanBeHeldWeakly(unregisterToken) false → TypeError.
+    try expectScriptThrowsWithBuiltins(
+        \\const fr = new FinalizationRegistry(function() {});
+        \\fr.unregister(42);
+    );
+    try expectScriptThrowsWithBuiltins(
+        \\const fr = new FinalizationRegistry(function() {});
+        \\fr.unregister(undefined);
+    );
+}
+
+test "later: FinalizationRegistry register/unregister survive prototype crossover" {
+    // §26.2.3.2 step 2 / §26.2.3.3 step 2 — RequireInternalSlot([[Cells]])
+    // → TypeError when called on receivers without [[Cells]].
+    try expectScriptThrowsWithBuiltins(
+        \\FinalizationRegistry.prototype.register.call({}, {});
+    );
+    try expectScriptThrowsWithBuiltins(
+        \\FinalizationRegistry.prototype.unregister.call({}, {});
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §26.1 WeakRef
+// ---------------------------------------------------------------------------
 
 test "later: WeakRef constructor accepts an object target" {
     try expectScriptIntWithBuiltins(
