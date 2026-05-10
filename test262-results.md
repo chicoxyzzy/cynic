@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 |
-| **runtime** | 52.80 % | 64.13 % | 24458 / 46320 |
+| **runtime** | 53.02 % | 64.38 % | 24557 / 46320 |
 
 ## Legend
 
@@ -25,17 +25,17 @@
 
 ## History
 
-### 2026-05-10 — cynic `7e729f6`, test262 `d0c1b455`
+### 2026-05-10 — cynic `9b90164`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 | +464 |
-| **runtime** | 52.80 % | 64.13 % | 24458 / 46320 | +545 |
+| **runtime** | 53.02 % | 64.38 % | 24557 / 46320 | +644 |
 
 Biggest movers (runtime):
 
-- `language/statements` +2869
-- `language/expressions` +2800
+- `language/statements` +2867
+- `language/expressions` +2703
 - `built-ins/TypedArray` -763
 - `built-ins/Array` +491
 - `built-ins/TypedArrayConstructors` -352
