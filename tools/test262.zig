@@ -291,15 +291,15 @@ const Options = struct {
     threads: u32 = 0,
     /// Per-test allocation-pressure GC threshold. Forwarded to
     /// each fresh realm's `heap.gc_threshold` before the body
-    /// runs. Default tuned for harness wall-time: 32,768 keeps
-    /// per-fixture peak RSS bounded but halves the GC-cycle
-    /// count vs the engine's stock 16,384, which matters once
-    /// the marker has to walk `key_anchors` / `frame_stacks` /
-    /// promise reactions per cycle. Tighter values surface the
-    /// still-open root gaps tracked in `docs/handbook/gc.md`
-    /// and inflate per-fixture overhead. `0` falls through to
-    /// the engine default.
-    gc_threshold: u32 = 65536,
+    /// runs. Default 4,096 — aggressive collection; bounds
+    /// per-fixture peak RSS at the cost of more GC cycles per
+    /// fixture. We landed three GC root-gap fixes (frame stacks,
+    /// promise reactions, key anchors) and chunk-pin so the
+    /// marker stays cheap, which makes a low default safe.
+    /// Tighter values still surface the open root gaps tracked
+    /// in `docs/handbook/gc.md`. `0` falls through to the
+    /// engine default.
+    gc_threshold: u32 = 4096,
     /// When true, every per-fixture realm prints a one-line
     /// stderr report after every GC cycle. Diagnostic for
     /// finding leaks or oversized roots; pair with `--filter`
