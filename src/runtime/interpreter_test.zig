@@ -2876,3 +2876,117 @@ test "later: WeakRef.prototype.deref on primitive throws" {
         \\WeakRef.prototype.deref.call(undefined);
     );
 }
+
+// ---------------------------------------------------------------------------
+// §24.1.5 %MapIteratorPrototype% / §24.2.5 %SetIteratorPrototype%
+// ---------------------------------------------------------------------------
+
+test "later: MapIteratorPrototype is shared across .entries/.keys/.values" {
+    // §24.1.5.1 — every Map iterator shares one prototype object.
+    try expectScriptStringWithBuiltins(
+        \\const m = new Map();
+        \\const a = Object.getPrototypeOf(m.entries());
+        \\const b = Object.getPrototypeOf(m.keys());
+        \\const c = Object.getPrototypeOf(m.values());
+        \\(a === b && b === c) ? "ok" : "no";
+    , "ok");
+}
+
+test "later: MapIteratorPrototype Symbol.toStringTag is 'Map Iterator'" {
+    // §24.1.5.2.2 — initial @@toStringTag is "Map Iterator".
+    try expectScriptStringWithBuiltins(
+        \\Object.getPrototypeOf(new Map().values())[Symbol.toStringTag];
+    , "Map Iterator");
+}
+
+test "later: MapIteratorPrototype.next.length is 0 and name is 'next'" {
+    try expectScriptStringWithBuiltins(
+        \\const p = Object.getPrototypeOf(new Map().values());
+        \\p.next.length + ":" + p.next.name;
+    , "0:next");
+}
+
+test "later: MapIteratorPrototype.next throws on non-object this" {
+    // §24.1.5.1 step 1 — RequireInternalSlot([[IteratedObject]]).
+    try expectScriptThrowsWithBuiltins(
+        \\const it = new Map().values();
+        \\it.next.call(false);
+    );
+}
+
+test "later: MapIteratorPrototype.next throws on plain {} this" {
+    // §24.1.5.1 — missing internal slot → TypeError.
+    try expectScriptThrowsWithBuiltins(
+        \\const it = new Map().values();
+        \\it.next.call({});
+    );
+}
+
+test "later: SetIteratorPrototype is shared across .values/.entries" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new Set();
+        \\const a = Object.getPrototypeOf(s.values());
+        \\const b = Object.getPrototypeOf(s.entries());
+        \\(a === b) ? "ok" : "no";
+    , "ok");
+}
+
+test "later: SetIteratorPrototype Symbol.toStringTag is 'Set Iterator'" {
+    try expectScriptStringWithBuiltins(
+        \\Object.getPrototypeOf(new Set().values())[Symbol.toStringTag];
+    , "Set Iterator");
+}
+
+test "later: SetIteratorPrototype.next throws on non-object this" {
+    try expectScriptThrowsWithBuiltins(
+        \\const it = new Set().values();
+        \\it.next.call(undefined);
+    );
+}
+
+test "later: SetIteratorPrototype.next throws on plain {} this" {
+    try expectScriptThrowsWithBuiltins(
+        \\const it = new Set().values();
+        \\it.next.call({});
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §10.2.4 %ThrowTypeError%
+// ---------------------------------------------------------------------------
+
+test "later: %ThrowTypeError% is the callee getter on a strict arguments object" {
+    // §10.4.4.7 step 5 — strict-mode arguments has a "callee"
+    // accessor whose [[Get]] and [[Set]] are %ThrowTypeError%.
+    try expectScriptStringWithBuiltins(
+        \\typeof Object.getOwnPropertyDescriptor(function() { "use strict"; return arguments; }(), "callee").get;
+    , "function");
+}
+
+test "later: %ThrowTypeError% throws TypeError when invoked" {
+    try expectScriptThrowsWithBuiltins(
+        \\const t = Object.getOwnPropertyDescriptor(function() { "use strict"; return arguments; }(), "callee").get;
+        \\t();
+    );
+}
+
+test "later: %ThrowTypeError% is unique per realm" {
+    // §10.2.4 — one %ThrowTypeError% per realm; callee.get and
+    // callee.set are the same function object.
+    try expectScriptStringWithBuiltins(
+        \\const d = Object.getOwnPropertyDescriptor(function() { "use strict"; return arguments; }(), "callee");
+        \\(d.get === d.set) ? "ok" : "no";
+    , "ok");
+}
+
+test "later: %ThrowTypeError%.length is 0" {
+    try expectScriptIntWithBuiltins(
+        \\Object.getOwnPropertyDescriptor(function() { "use strict"; return arguments; }(), "callee").get.length;
+    , 0);
+}
+
+test "later: %ThrowTypeError% is frozen" {
+    try expectScriptStringWithBuiltins(
+        \\Object.isFrozen(Object.getOwnPropertyDescriptor(function() { "use strict"; return arguments; }(), "callee").get) ? "yes" : "no";
+    , "yes");
+}

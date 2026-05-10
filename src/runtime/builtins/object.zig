@@ -758,7 +758,32 @@ fn objectGetOwnPropertyDescriptors(realm: *Realm, this_value: Value, args: []con
 
 fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.getOwnPropertyNames target is not an object");
+    const target = argOr(args, 0, Value.undefined_);
+    // §17 — built-in function objects are ordinary objects too.
+    // Without a function path here, every test262 fixture that
+    // does `Object.getOwnPropertyNames(builtin)` (e.g.
+    // ThrowTypeError/property-order, scoping length+name) raises
+    // a TypeError instead of returning ["length", "name", …].
+    if (heap_mod.valueAsFunction(target)) |fn_obj| {
+        const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+        out.prototype = realm.intrinsics.array_prototype;
+        var len: i32 = 0;
+        var fit = fn_obj.properties.iterator();
+        while (fit.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (std.mem.startsWith(u8, key, "__cynic_")) continue;
+            if (isSymbolKey(key)) continue;
+            var ibuf: [16]u8 = undefined;
+            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
+            const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+            const k_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
+            out.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
+            len += 1;
+        }
+        out.set(realm.allocator, "length", Value.fromInt32(len)) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(out);
+    }
+    const obj = heap_mod.valueAsPlainObject(target) orelse return throwTypeError(realm, "Object.getOwnPropertyNames target is not an object");
     const keys = try ownPropertyKeysOrdered(realm, obj);
     defer realm.allocator.free(keys);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;

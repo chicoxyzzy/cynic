@@ -64,6 +64,17 @@ pub fn installMap(realm: *Realm) !void {
     // `.size` is an accessor in spec; we expose as a getter so
     // `m.size` evaluates to the live count.
     try installNativeGetter(realm, proto, "size", mapSizeGetter);
+
+    // §24.1.5.2 %MapIteratorPrototype% — one shared prototype per
+    // realm; every Map-iterator instance chains to it. Carries
+    // `next`, `@@iterator` (returns self), and the well-known
+    // toStringTag.
+    const it_proto = try realm.heap.allocateObject();
+    it_proto.prototype = realm.intrinsics.object_prototype;
+    try installNativeMethodOnProto(realm, it_proto, "next", mapIterNext, 0);
+    try installNativeMethodOnProto(realm, it_proto, "@@iterator", iteratorReturnsSelf, 0);
+    try intrinsics.installToStringTag(realm, it_proto, "Map Iterator");
+    realm.intrinsics.map_iterator_prototype = it_proto;
 }
 
 /// Iterator factory for Map. `kind` selects entries / keys /
@@ -72,23 +83,24 @@ pub fn installMap(realm: *Realm) !void {
 /// `__cynic_idx__` (next entry index). later: switch to a
 /// real iterator-prototype chain so users can swap in custom
 /// `[Symbol.iterator]` implementations.
+/// §24.1.5.1 CreateMapIterator — allocate an iterator instance
+/// with `[[Map]]`, `[[MapNextIndex]]`, and `[[MapIterationKind]]`
+/// internal slots, all chained to %MapIteratorPrototype% so
+/// `next` / `@@iterator` / `@@toStringTag` come from the shared
+/// proto (§24.1.5.2). The `__cynic_map__` own slot doubles as
+/// the brand check inside `next` (its presence == "has the
+/// internal slots of a Map Iterator Instance").
 fn makeMapIterator(realm: *Realm, src: Value, kind: enum { entries, keys, values }) !Value {
     const it = try realm.heap.allocateObject();
-    it.prototype = realm.intrinsics.object_prototype;
+    it.prototype = realm.intrinsics.map_iterator_prototype orelse realm.intrinsics.object_prototype;
     try it.set(realm.allocator, "__cynic_map__", src);
     try it.set(realm.allocator, "__cynic_idx__", Value.fromInt32(0));
-    const native: @import("../function.zig").NativeFn = switch (kind) {
-        .entries => mapIterEntriesNext,
-        .keys => mapIterKeysNext,
-        .values => mapIterValuesNext,
+    const kind_tag: i32 = switch (kind) {
+        .entries => 0,
+        .keys => 1,
+        .values => 2,
     };
-    const next_fn = try realm.heap.allocateFunctionNative(native, 0, "next");
-    next_fn.proto = realm.intrinsics.function_prototype;
-    try it.set(realm.allocator, "next", heap_mod.taggedFunction(next_fn));
-    // The iterator is also iterable (returns itself).
-    const self_iter_fn = try realm.heap.allocateFunctionNative(iteratorReturnsSelf, 0, "[Symbol.iterator]");
-    self_iter_fn.proto = realm.intrinsics.function_prototype;
-    try it.set(realm.allocator, "@@iterator", heap_mod.taggedFunction(self_iter_fn));
+    try it.set(realm.allocator, "__cynic_kind__", Value.fromInt32(kind_tag));
     return heap_mod.taggedObject(it);
 }
 
@@ -239,6 +251,11 @@ fn iterResult(realm: *Realm, value: Value, done: bool) !Value {
 fn mapIterAdvance(realm: *Realm, this_value: Value) ?struct { key: Value, value: Value } {
     const it = heap_mod.valueAsPlainObject(this_value) orelse return null;
     const src = it.get("__cynic_map__");
+    // §24.1.5.1 step 5 — once the iterator exhausts we set
+    // O.[[Map]] to undefined so a later mutation of the source
+    // can't revive iteration. We mirror that with a sentinel
+    // undefined in the `__cynic_map__` slot.
+    if (src.isUndefined()) return null;
     const idx_v = it.get("__cynic_idx__");
     var idx: usize = if (idx_v.isInt32()) @intCast(idx_v.asInt32()) else 0;
     const d = mapDataOf(src) orelse return null;
@@ -249,35 +266,40 @@ fn mapIterAdvance(realm: *Realm, this_value: Value) ?struct { key: Value, value:
             return .{ .key = d.entries.items[idx].key, .value = d.entries.items[idx].value };
         }
     }
-    it.set(realm.allocator, "__cynic_idx__", Value.fromInt32(@intCast(idx))) catch return null;
+    // Exhausted — clear `[[Map]]` so subsequent next() calls
+    // skip the data lookup and stay done even if entries grow.
+    it.set(realm.allocator, "__cynic_map__", Value.undefined_) catch return null;
     return null;
 }
 
-fn mapIterEntriesNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+/// §24.1.5.1 %MapIteratorPrototype%.next — single dispatch entry
+/// shared by entries/keys/values. Steps:
+///   1. RequireInternalSlot(O, [[Map]]) — `this` must be an
+///      Object with the `__cynic_map__` own slot we install in
+///      makeMapIterator. Anything else (primitive, plain `{}`,
+///      a different iterator kind) is a TypeError.
+///   2. Read `[[MapIterationKind]]` to decide value shape.
+fn mapIterNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
+    const it = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "MapIteratorPrototype.next called on non-object");
+    if (!it.hasOwn("__cynic_map__"))
+        return throwTypeError(realm, "MapIteratorPrototype.next called on incompatible receiver");
+    const kind_v = it.get("__cynic_kind__");
+    const kind: i32 = if (kind_v.isInt32()) kind_v.asInt32() else 0;
     if (mapIterAdvance(realm, this_value)) |kv| {
-        // Build a fresh `[k, v]` array per call; matches spec's
-        // CreateArrayFromList. later: a real JSArray kind.
-        const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
-        arr.prototype = realm.intrinsics.array_prototype;
-        arr.set(realm.allocator, "0", kv.key) catch return error.OutOfMemory;
-        arr.set(realm.allocator, "1", kv.value) catch return error.OutOfMemory;
-        arr.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
-        return iterResult(realm, heap_mod.taggedObject(arr), false) catch return error.OutOfMemory;
-    }
-    return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory;
-}
-fn mapIterKeysNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    if (mapIterAdvance(realm, this_value)) |kv| {
-        return iterResult(realm, kv.key, false) catch return error.OutOfMemory;
-    }
-    return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory;
-}
-fn mapIterValuesNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    if (mapIterAdvance(realm, this_value)) |kv| {
-        return iterResult(realm, kv.value, false) catch return error.OutOfMemory;
+        switch (kind) {
+            1 => return iterResult(realm, kv.key, false) catch return error.OutOfMemory,
+            2 => return iterResult(realm, kv.value, false) catch return error.OutOfMemory,
+            else => {
+                const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
+                arr.prototype = realm.intrinsics.array_prototype;
+                arr.set(realm.allocator, "0", kv.key) catch return error.OutOfMemory;
+                arr.set(realm.allocator, "1", kv.value) catch return error.OutOfMemory;
+                arr.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
+                return iterResult(realm, heap_mod.taggedObject(arr), false) catch return error.OutOfMemory;
+            },
+        }
     }
     return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory;
 }
@@ -691,23 +713,30 @@ pub fn installSet(realm: *Realm) !void {
     try installNativeGetter(realm, proto, "size", setSizeGetter);
 
     realm.intrinsics.set_prototype = proto;
+
+    // §24.2.5.2 %SetIteratorPrototype% — shared prototype for
+    // Set-iterator instances. Same shape as %MapIteratorPrototype%.
+    const it_proto = try realm.heap.allocateObject();
+    it_proto.prototype = realm.intrinsics.object_prototype;
+    try installNativeMethodOnProto(realm, it_proto, "next", setIterNext, 0);
+    try installNativeMethodOnProto(realm, it_proto, "@@iterator", iteratorReturnsSelf, 0);
+    try intrinsics.installToStringTag(realm, it_proto, "Set Iterator");
+    realm.intrinsics.set_iterator_prototype = it_proto;
 }
 
+/// §24.2.5.1 CreateSetIterator. Mirrors makeMapIterator — the
+/// `__cynic_set__` own slot is the brand check; the kind tag
+/// (0 = values, 1 = entries) lets a single shared next dispatch.
 fn makeSetIterator(realm: *Realm, src: Value, kind: enum { values, entries }) !Value {
     const it = try realm.heap.allocateObject();
-    it.prototype = realm.intrinsics.object_prototype;
+    it.prototype = realm.intrinsics.set_iterator_prototype orelse realm.intrinsics.object_prototype;
     try it.set(realm.allocator, "__cynic_set__", src);
     try it.set(realm.allocator, "__cynic_idx__", Value.fromInt32(0));
-    const native: @import("../function.zig").NativeFn = switch (kind) {
-        .values => setIterValuesNext,
-        .entries => setIterEntriesNext,
+    const kind_tag: i32 = switch (kind) {
+        .values => 0,
+        .entries => 1,
     };
-    const next_fn = try realm.heap.allocateFunctionNative(native, 0, "next");
-    next_fn.proto = realm.intrinsics.function_prototype;
-    try it.set(realm.allocator, "next", heap_mod.taggedFunction(next_fn));
-    const self_iter_fn = try realm.heap.allocateFunctionNative(iteratorReturnsSelf, 0, "[Symbol.iterator]");
-    self_iter_fn.proto = realm.intrinsics.function_prototype;
-    try it.set(realm.allocator, "@@iterator", heap_mod.taggedFunction(self_iter_fn));
+    try it.set(realm.allocator, "__cynic_kind__", Value.fromInt32(kind_tag));
     return heap_mod.taggedObject(it);
 }
 
@@ -725,6 +754,10 @@ fn setEntriesMethod(realm: *Realm, this_value: Value, args: []const Value) Nativ
 fn setIterAdvance(realm: *Realm, this_value: Value) ?Value {
     const it = heap_mod.valueAsPlainObject(this_value) orelse return null;
     const src = it.get("__cynic_set__");
+    // §24.2.5.1 step 5 — once exhausted, [[IteratedSet]] is
+    // cleared so post-exhaustion `add()` calls don't revive
+    // iteration. Sentinel: undefined.
+    if (src.isUndefined()) return null;
     const idx_v = it.get("__cynic_idx__");
     var idx: usize = if (idx_v.isInt32()) @intCast(idx_v.asInt32()) else 0;
     const d = setDataOf(src) orelse return null;
@@ -734,26 +767,31 @@ fn setIterAdvance(realm: *Realm, this_value: Value) ?Value {
             return d.entries.items[idx].value;
         }
     }
-    it.set(realm.allocator, "__cynic_idx__", Value.fromInt32(@intCast(idx))) catch return null;
+    it.set(realm.allocator, "__cynic_set__", Value.undefined_) catch return null;
     return null;
 }
 
-fn setIterValuesNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+/// §24.2.5.1 %SetIteratorPrototype%.next — RequireInternalSlot
+/// on `[[IteratedSet]]` (presence of `__cynic_set__`), then
+/// dispatch on the iteration kind.
+fn setIterNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
+    const it = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "SetIteratorPrototype.next called on non-object");
+    if (!it.hasOwn("__cynic_set__"))
+        return throwTypeError(realm, "SetIteratorPrototype.next called on incompatible receiver");
+    const kind_v = it.get("__cynic_kind__");
+    const kind: i32 = if (kind_v.isInt32()) kind_v.asInt32() else 0;
     if (setIterAdvance(realm, this_value)) |v| {
+        if (kind == 1) {
+            const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
+            arr.prototype = realm.intrinsics.array_prototype;
+            arr.set(realm.allocator, "0", v) catch return error.OutOfMemory;
+            arr.set(realm.allocator, "1", v) catch return error.OutOfMemory;
+            arr.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
+            return iterResult(realm, heap_mod.taggedObject(arr), false) catch return error.OutOfMemory;
+        }
         return iterResult(realm, v, false) catch return error.OutOfMemory;
-    }
-    return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory;
-}
-fn setIterEntriesNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    if (setIterAdvance(realm, this_value)) |v| {
-        const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
-        arr.prototype = realm.intrinsics.array_prototype;
-        arr.set(realm.allocator, "0", v) catch return error.OutOfMemory;
-        arr.set(realm.allocator, "1", v) catch return error.OutOfMemory;
-        arr.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
-        return iterResult(realm, heap_mod.taggedObject(arr), false) catch return error.OutOfMemory;
     }
     return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory;
 }

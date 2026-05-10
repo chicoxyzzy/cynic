@@ -114,6 +114,31 @@ pub const Intrinsics = struct {
     /// to wire the prototype of fresh result sets they allocate
     /// outside the constructor flow.
     set_prototype: ?*JSObject = null,
+
+    /// `%MapIteratorPrototype%` (§24.1.5.2). Shared prototype of
+    /// every Map-iterator instance returned by `Map.prototype.{entries,
+    /// keys, values}` and `Map.prototype[@@iterator]`. Carries
+    /// `next`, `@@iterator`, and `Symbol.toStringTag = "Map Iterator"`.
+    map_iterator_prototype: ?*JSObject = null,
+    /// `%SetIteratorPrototype%` (§24.2.5.2). Shared prototype of
+    /// every Set-iterator instance returned by `Set.prototype.{values,
+    /// keys, entries}` and `Set.prototype[@@iterator]`. Carries
+    /// `next`, `@@iterator`, and `Symbol.toStringTag = "Set Iterator"`.
+    set_iterator_prototype: ?*JSObject = null,
+
+    /// `%RegExpStringIteratorPrototype%` (§22.2.9.2). Shared
+    /// prototype for the iterator returned by
+    /// `String.prototype.matchAll` / `RegExp.prototype[@@matchAll]`.
+    /// Carries `next`, `@@iterator`, and `@@toStringTag =
+    /// "RegExp String Iterator"`.
+    regexp_string_iterator_prototype: ?*JSObject = null,
+
+    /// `%ThrowTypeError%` (§10.2.4). The unique anonymous, frozen,
+    /// length-0 native that throws TypeError when called. Reused
+    /// as the [[Get]] / [[Set]] of the strict-arguments `callee`
+    /// accessor (§10.4.4.7 step 5). Stored on the realm so every
+    /// strict-mode `arguments` object shares one identity.
+    throw_type_error: ?*JSFunction = null,
 };
 
 /// Install the later intrinsics on `realm`. Wires the constructor
@@ -168,6 +193,51 @@ pub fn install(realm: *Realm) !void {
 
     // Function.prototype.call /.apply /.bind
     try @import("builtins/function.zig").installPrototypeMethods(realm);
+
+    // §10.2.4 %ThrowTypeError% — the unique anonymous, frozen,
+    // length-0 function used as the [[Get]] / [[Set]] of strict
+    // `arguments.callee` (§10.4.4.7 step 5). Install once per
+    // realm; pin on `realm.intrinsics.throw_type_error` so the
+    // `lda_arguments` opcode can wire the same function into
+    // every strict-mode arguments object.
+    {
+        const t = try realm.heap.allocateFunctionNative(throwTypeErrorThrower, 0, "");
+        t.proto = realm.intrinsics.function_prototype;
+        t.has_construct = false;
+        // §10.2.4 — non-extensible. `length` and `name` are
+        // already non-writable / non-configurable per §17 (set in
+        // `installFunctionLengthAndName`); but the spec requires
+        // `configurable: false` for both on %ThrowTypeError%, so
+        // override the default `configurable: true`.
+        const frozen_flags: @import("object.zig").PropertyFlags = .{
+            .writable = false, .enumerable = false, .configurable = false,
+        };
+        try t.property_flags.put(realm.allocator, "length", frozen_flags);
+        try t.property_flags.put(realm.allocator, "name", frozen_flags);
+        // `extensible` for JSFunction isn't a heap-side flag yet —
+        // `Object.isExtensible(fn)` already returns false because
+        // `valueAsPlainObject` rejects functions (§10.2.4 alignment
+        // is incidental but matches the spec for now).
+        realm.intrinsics.throw_type_error = t;
+
+        // §10.2.4 — Function.prototype.arguments and
+        // Function.prototype.caller are accessor properties whose
+        // [[Get]] and [[Set]] are both %ThrowTypeError%. test262
+        // `built-ins/ThrowTypeError/unique-per-realm-function-proto`
+        // verifies the same singleton lands in both descriptors.
+        if (realm.intrinsics.function_prototype) |fn_proto| {
+            const a_entry = fn_proto.accessors.getOrPut(realm.allocator, "arguments") catch return error.OutOfMemory;
+            a_entry.value_ptr.* = .{ .getter = t, .setter = t };
+            try fn_proto.property_flags.put(realm.allocator, "arguments", .{
+                .writable = false, .enumerable = false, .configurable = true,
+            });
+            const c_entry = fn_proto.accessors.getOrPut(realm.allocator, "caller") catch return error.OutOfMemory;
+            c_entry.value_ptr.* = .{ .getter = t, .setter = t };
+            try fn_proto.property_flags.put(realm.allocator, "caller", .{
+                .writable = false, .enumerable = false, .configurable = true,
+            });
+        }
+    }
 
     // Object statics + Object.prototype methods.
     try @import("builtins/object.zig").install(realm);
@@ -697,6 +767,15 @@ fn clampArrayLengthOr(realm: *Realm, len: i64) NativeError!i64 {
 fn throwNative(realm: *Realm, ex: Value) NativeError {
     realm.pending_exception = ex;
     return error.NativeThrew;
+}
+
+/// §10.2.4 %ThrowTypeError% body — "throwerSteps". Always throws
+/// a fresh TypeError, regardless of receiver / args. Cynic uses
+/// it for the strict-`arguments` `callee` accessor traps.
+fn throwTypeErrorThrower(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    _ = args;
+    return throwTypeError(realm, "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them");
 }
 
 /// Convenience: throw a real `TypeError(msg)` from a native.

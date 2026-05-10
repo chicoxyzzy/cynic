@@ -3190,6 +3190,21 @@ fn runFrames(
                     obj.set(allocator, owned.bytes, registers[i]) catch return error.OutOfMemory;
                 }
                 obj.set(allocator, "length", Value.fromInt32(@intCast(f.argc))) catch return error.OutOfMemory;
+                // §10.4.4.7 step 5 — strict-mode unmapped arguments
+                // installs a `callee` accessor whose [[Get]] and
+                // [[Set]] are both %ThrowTypeError%. Cynic is
+                // strict-only, so every `arguments` object lands
+                // here. The thrower function is a per-realm
+                // singleton (§10.2.4); reuse it from intrinsics.
+                if (realm.intrinsics.throw_type_error) |thrower| {
+                    const entry = obj.accessors.getOrPut(allocator, "callee") catch return error.OutOfMemory;
+                    entry.value_ptr.* = .{ .getter = thrower, .setter = thrower };
+                    obj.property_flags.put(allocator, "callee", .{
+                        .writable = false,
+                        .enumerable = false,
+                        .configurable = false,
+                    }) catch return error.OutOfMemory;
+                }
                 acc = heap_mod.taggedObject(obj);
             },
 

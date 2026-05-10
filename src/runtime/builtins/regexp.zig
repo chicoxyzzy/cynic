@@ -94,8 +94,31 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, proto, "test", regexpTest, 1);
     try installNativeMethodOnProto(realm, proto, "exec", regexpExec, 1);
     try installNativeMethodOnProto(realm, proto, "toString", regexpToString, 0);
+    // §22.2.6.5 RegExp.prototype[@@matchAll] — minimal wiring so
+    // `re[Symbol.matchAll](s)` returns a RegExpStringIterator.
+    // Spec-faithful flag-cloning + species lookup is later; this
+    // path lets test262 reach %RegExpStringIteratorPrototype%.
+    try installNativeMethodOnProto(realm, proto, "@@matchAll", regexpProtoMatchAll, 1);
 
     try installNativeMethod(realm, fn_obj, "escape", regexpEscape, 1);
+}
+
+/// §22.2.6.5 RegExp.prototype [ @@matchAll ] ( S ). Allocates a
+/// RegExpStringIterator chained to `%RegExpStringIteratorPrototype%`.
+/// Cynic shortcut: reuses the same own-slot layout that
+/// String.prototype.matchAll uses, so the shared `next` works
+/// for both entry points. Species + flag cloning per §22.2.6.5
+/// steps 5-9 are later.
+fn regexpProtoMatchAll(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const re = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "RegExp.prototype[@@matchAll] requires a regex receiver");
+    const s_str = stringifyArg(realm, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
+    const iter = realm.heap.allocateObject() catch return error.OutOfMemory;
+    iter.prototype = realm.intrinsics.regexp_string_iterator_prototype orelse realm.intrinsics.object_prototype;
+    iter.set(realm.allocator, "__cynic_matchall_re__", heap_mod.taggedObject(re)) catch return error.OutOfMemory;
+    iter.set(realm.allocator, "__cynic_matchall_input__", Value.fromString(s_str)) catch return error.OutOfMemory;
+    iter.set(realm.allocator, "__cynic_matchall_done__", Value.fromBool(false)) catch return error.OutOfMemory;
+    re.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(iter);
 }
 
 fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

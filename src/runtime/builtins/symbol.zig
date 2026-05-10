@@ -63,6 +63,7 @@ pub fn install(realm: *Realm) !void {
     try installWellKnownSymbol(realm, fn_obj, "replace", "@@replace");
     try installWellKnownSymbol(realm, fn_obj, "search", "@@search");
     try installWellKnownSymbol(realm, fn_obj, "split", "@@split");
+    try installWellKnownSymbol(realm, fn_obj, "matchAll", "@@matchAll");
     try installWellKnownSymbol(realm, fn_obj, "unscopables", "@@unscopables");
 
     try installNativeMethod(realm, fn_obj, "for", symbolFor, 1);

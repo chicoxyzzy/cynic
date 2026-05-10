@@ -75,6 +75,49 @@ pub fn install(realm: *Realm) !void {
         try intrinsics.installNativeMethod(realm, str_ctor, "fromCharCode", stringFromCharCode, 1);
         try intrinsics.installNativeMethod(realm, str_ctor, "fromCodePoint", stringFromCodePoint, 1);
     }
+
+    // §22.2.9.2 %RegExpStringIteratorPrototype% — shared
+    // prototype object for the iterator that
+    // String.prototype.matchAll returns. Owns `next`,
+    // `@@iterator`, and the `RegExp String Iterator`
+    // toStringTag. Each instance only carries its `[[IteratingRegExp]]`
+    // / `[[IteratedString]]` / `[[Done]]` state in own slots,
+    // brand-checked here as the `__cynic_matchall_re__` slot.
+    const re_iter_proto = try realm.heap.allocateObject();
+    re_iter_proto.prototype = realm.intrinsics.object_prototype;
+    try installNativeMethodOnProto(realm, re_iter_proto, "next", regexpStringIterNext, 0);
+    try installNativeMethodOnProto(realm, re_iter_proto, "@@iterator", regexpStringIterReturnsSelf, 0);
+    try intrinsics.installToStringTag(realm, re_iter_proto, "RegExp String Iterator");
+    realm.intrinsics.regexp_string_iterator_prototype = re_iter_proto;
+}
+
+fn regexpStringIterReturnsSelf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = args;
+    return this_value;
+}
+
+/// §22.2.9.1 %RegExpStringIteratorPrototype%.next — RequireInternalSlot
+/// on `[[IteratingRegExp]]` (presence of `__cynic_matchall_re__`).
+fn regexpStringIterNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const it = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "RegExpStringIteratorPrototype.next called on non-object");
+    if (!it.hasOwn("__cynic_matchall_re__"))
+        return throwTypeError(realm, "RegExpStringIteratorPrototype.next called on incompatible receiver");
+    if (it.get("__cynic_matchall_done__").asBool()) {
+        return iterResult(realm, Value.undefined_, true);
+    }
+    const re_v = it.get("__cynic_matchall_re__");
+    const re_obj = heap_mod.valueAsPlainObject(re_v) orelse return iterResult(realm, Value.undefined_, true);
+    const input_v = it.get("__cynic_matchall_input__");
+    const input: *JSString = if (input_v.isString()) @ptrCast(@alignCast(input_v.asString())) else return iterResult(realm, Value.undefined_, true);
+    const exec_result = try regexExecCall(realm, re_obj, input);
+    if (exec_result.isNull()) {
+        it.set(realm.allocator, "__cynic_matchall_done__", Value.fromBool(true)) catch return error.OutOfMemory;
+        return iterResult(realm, Value.undefined_, true);
+    }
+    return iterResult(realm, exec_result, false);
 }
 
 /// §22.1.2.1 String.fromCharCode(...codeUnits). Each argument is
@@ -160,54 +203,18 @@ fn stringMatchAll(realm: *Realm, this_value: Value, args: []const Value) NativeE
     if (!flagsHas(regex_obj, 'g')) {
         return throwTypeError(realm, "String.prototype.matchAll requires a global regex");
     }
-    // Build a fresh iterator object with private state for the
-    // current regex + input. `next` reads the state, drives the
-    // regex's exec, and yields `{value, done}` records.
+    // §22.2.9.1 CreateRegExpStringIterator — allocate the
+    // iterator with its `[[IteratingRegExp]]`, `[[IteratedString]]`,
+    // and `[[Done]]` slots. `next` / `@@iterator` /
+    // `Symbol.toStringTag` come from %RegExpStringIteratorPrototype%
+    // (§22.2.9.2), wired by `install` above.
     const iter = realm.heap.allocateObject() catch return error.OutOfMemory;
-    iter.prototype = realm.intrinsics.object_prototype;
+    iter.prototype = realm.intrinsics.regexp_string_iterator_prototype orelse realm.intrinsics.object_prototype;
     iter.set(realm.allocator, "__cynic_matchall_re__", heap_mod.taggedObject(regex_obj)) catch return error.OutOfMemory;
     iter.set(realm.allocator, "__cynic_matchall_input__", Value.fromString(s)) catch return error.OutOfMemory;
     iter.set(realm.allocator, "__cynic_matchall_done__", Value.fromBool(false)) catch return error.OutOfMemory;
     regex_obj.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
-    const next_fn = realm.heap.allocateFunctionNative(matchAllNext, 0, "next") catch return error.OutOfMemory;
-    next_fn.has_construct = false;
-    iter.setWithFlags(realm.allocator, "next", heap_mod.taggedFunction(next_fn), .{
-        .writable = true,
-        .enumerable = false,
-        .configurable = true,
-    }) catch return error.OutOfMemory;
-    const sym_iter = realm.heap.allocateFunctionNative(matchAllSymbolIterator, 0, "[Symbol.iterator]") catch return error.OutOfMemory;
-    sym_iter.has_construct = false;
-    iter.setWithFlags(realm.allocator, "@@iterator", heap_mod.taggedFunction(sym_iter), .{
-        .writable = true,
-        .enumerable = false,
-        .configurable = true,
-    }) catch return error.OutOfMemory;
     return heap_mod.taggedObject(iter);
-}
-
-fn matchAllNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    const iter = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "matchAll iterator next called on non-object");
-    if (iter.get("__cynic_matchall_done__").asBool()) {
-        return iterResult(realm, Value.undefined_, true);
-    }
-    const re_v = iter.get("__cynic_matchall_re__");
-    const re_obj = heap_mod.valueAsPlainObject(re_v) orelse return iterResult(realm, Value.undefined_, true);
-    const input_v = iter.get("__cynic_matchall_input__");
-    const input: *JSString = if (input_v.isString()) @ptrCast(@alignCast(input_v.asString())) else return iterResult(realm, Value.undefined_, true);
-    const exec_result = try regexExecCall(realm, re_obj, input);
-    if (exec_result.isNull()) {
-        iter.set(realm.allocator, "__cynic_matchall_done__", Value.fromBool(true)) catch return error.OutOfMemory;
-        return iterResult(realm, Value.undefined_, true);
-    }
-    return iterResult(realm, exec_result, false);
-}
-
-fn matchAllSymbolIterator(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
-    _ = args;
-    return this_value;
 }
 
 fn iterResult(realm: *Realm, value: Value, done: bool) NativeError!Value {
