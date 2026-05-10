@@ -341,55 +341,129 @@ fn promiseReject(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 /// thrown value pinned to `realm.pending_exception` so the
 /// aggregator's caller can convert it into a rejected promise
 /// rather than re-throw synchronously (§27.2.4.1.1 step 6).
+/// §7.4.1 Iterator Records — captures the open iterator + its
+/// pre-resolved `next` method. `done` flips true when the iterator
+/// reports done OR when an abrupt completion makes IteratorClose
+/// the caller's responsibility.
+const IteratorRecord = struct {
+    iter: *JSObject,
+    iter_v: Value,
+    next_fn: *JSFunction,
+    done: bool = false,
+};
+
+/// §7.4.2 GetIterator — open `source_v`'s `@@iterator`. Returns
+/// `null` when the source has no iterator method (caller falls
+/// back to the array-like path); otherwise an open record the
+/// caller must close (or ride to completion). Errors during
+/// `@@iterator` invocation, `next` lookup, or shape checks raise
+/// `error.NativeThrew` with `realm.pending_exception` set.
+fn iteratorOpen(realm: *Realm, source_v: Value) NativeError!?IteratorRecord {
+    const interp = @import("../interpreter.zig");
+    const obj = heap_mod.valueAsPlainObject(source_v) orelse return null;
+    const iter_method_v = try getPropertyChain(realm, obj, "@@iterator");
+    const iter_method = heap_mod.valueAsFunction(iter_method_v) orelse return null;
+    const iter_outcome = interp.callJSFunction(realm.allocator, realm, iter_method, source_v, &.{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const iter_v = switch (iter_outcome) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+    const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse return throwTypeError(realm, "iterator: @@iterator did not return an object");
+    const next_v = try getPropertyChain(realm, iter_obj, "next");
+    const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "iterator: missing callable 'next'");
+    return IteratorRecord{ .iter = iter_obj, .iter_v = iter_v, .next_fn = next_fn };
+}
+
+/// §7.4.6 IteratorStep — call `next()`, return null on done OR
+/// the yielded value. Sets `rec.done` on done OR abrupt. Per
+/// §7.4.7 IteratorComplete / IteratorValue, the `done` and
+/// `value` reads go through ordinary [[Get]]; accessor
+/// descriptors invoke their getters and an abrupt completion
+/// from a getter propagates as a NativeThrew.
+fn iteratorStep(realm: *Realm, rec: *IteratorRecord) NativeError!?Value {
+    const interp = @import("../interpreter.zig");
+    const result_outcome = interp.callJSFunction(realm.allocator, realm, rec.next_fn, rec.iter_v, &.{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            rec.done = true;
+            return error.NativeThrew;
+        },
+    };
+    const result = switch (result_outcome) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| {
+            rec.done = true;
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+    const result_obj = heap_mod.valueAsPlainObject(result) orelse {
+        rec.done = true;
+        return throwTypeError(realm, "iterator next() did not return an object");
+    };
+    const arr_helpers = @import("array.zig");
+    const done_v = intrinsics.getPropertyChain(realm, result_obj, "done") catch |err| {
+        rec.done = true;
+        return err;
+    };
+    if (arr_helpers.toBoolean(done_v)) {
+        rec.done = true;
+        return null;
+    }
+    return intrinsics.getPropertyChain(realm, result_obj, "value") catch |err| {
+        rec.done = true;
+        return err;
+    };
+}
+
+/// §7.4.10 IteratorClose — invoke `iter.return()` if present.
+/// `inner_completion` is the abrupt that we're closing on top
+/// of; preserves the original throw if `return` itself throws
+/// (per spec, except `return`'s throw replaces normal completion).
+/// Caller has already pulled the abrupt into `realm.pending_exception`.
+fn iteratorClose(realm: *Realm, rec: *IteratorRecord) void {
+    if (rec.done) return;
+    rec.done = true;
+    const interp = @import("../interpreter.zig");
+    const ret_v = getPropertyChain(realm, rec.iter, "return") catch return;
+    const ret_fn = heap_mod.valueAsFunction(ret_v) orelse return;
+    const outcome = interp.callJSFunction(realm.allocator, realm, ret_fn, rec.iter_v, &.{}) catch return;
+    // Abrupt from `return` is suppressed when we're already
+    // unwinding an abrupt completion (which we always are here —
+    // close is only called on early exit). The pre-existing
+    // `pending_exception` is what propagates.
+    _ = outcome;
+}
+
+/// Collect every value an iterable yields into a list, with no
+/// per-item processing. Used by aggregators that only need to
+/// drain (`Promise.allSettled`, etc.) — but **prefer** the
+/// `collectAndProcess` shape below when the per-item step can
+/// throw, so iterator-close fires on abrupt.
 fn collectIterable(realm: *Realm, source_v: Value) NativeError!std.ArrayList(Value) {
     var list: std.ArrayList(Value) = .empty;
     errdefer list.deinit(realm.allocator);
-    const interp = @import("../interpreter.zig");
 
     const obj = heap_mod.valueAsPlainObject(source_v) orelse {
         return throwTypeError(realm, "Promise aggregator requires an iterable");
     };
 
-    // Iterable path.
-    const iter_method_v = try getPropertyChain(realm, obj, "@@iterator");
-    if (heap_mod.valueAsFunction(iter_method_v)) |iter_method| {
-        const iter_outcome = interp.callJSFunction(realm.allocator, realm, iter_method, source_v, &.{}) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.NativeThrew,
-        };
-        const iter = switch (iter_outcome) {
-            .value, .yielded => |v| v,
-            .thrown => |ex| {
-                realm.pending_exception = ex;
-                return error.NativeThrew;
-            },
-        };
-        const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return throwTypeError(realm, "Promise aggregator: @@iterator did not return an object");
-        const next_v = try getPropertyChain(realm, iter_obj, "next");
-        const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "Promise aggregator: iterator missing callable 'next'");
+    if (try iteratorOpen(realm, source_v)) |rec_in| {
+        var rec = rec_in;
         const max_iter: usize = 1 << 24;
         var step: usize = 0;
         while (step < max_iter) : (step += 1) {
-            const result_outcome = interp.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.NativeThrew,
-            };
-            const result = switch (result_outcome) {
-                .value, .yielded => |v| v,
-                .thrown => |ex| {
-                    realm.pending_exception = ex;
-                    return error.NativeThrew;
-                },
-            };
-            const result_obj = heap_mod.valueAsPlainObject(result) orelse return throwTypeError(realm, "Promise aggregator: iterator next() did not return an object");
-            const arr_helpers = @import("array.zig");
-            // §7.4.7 IteratorComplete / IteratorValue go through
-            // ordinary [[Get]]; accessor descriptors on `done` /
-            // `value` (poisoned-iterator fixtures) must invoke the
-            // getter and propagate any throw. Plain `obj.get` is
-            // accessor-blind and would silently keep iterating.
-            if (arr_helpers.toBoolean(try intrinsics.getPropertyChain(realm, result_obj, "done"))) break;
-            const v = try intrinsics.getPropertyChain(realm, result_obj, "value");
+            const v = iteratorStep(realm, &rec) catch |err| {
+                // Iterator close not needed: rec.done is set by step
+                // already on an abrupt completion or normal end.
+                return err;
+            } orelse break;
             try list.append(realm.allocator, v);
         }
         return list;
@@ -405,6 +479,102 @@ fn collectIterable(realm: *Realm, source_v: Value) NativeError!std.ArrayList(Val
         try list.append(realm.allocator, v);
     }
     return list;
+}
+
+/// §27.2.4.1.2 / §27.2.4.4.1 / etc. — Promise aggregator main
+/// loop. Walks the iterable, looking up `constructor.resolve` per
+/// item and calling it; the result is forwarded to `process`. If
+/// `constructor.resolve` throws OR `process` returns a sentinel
+/// short-circuit (race / any), IteratorClose fires before the
+/// caller surfaces the abrupt. Without this loop the `Promise.resolve`
+/// override that test262 fixtures install never gets a chance to
+/// throw, so the iterator (often poisoned to never-finish) burns
+/// to the 16M cap.
+const IterStepAction = enum { continue_, short_circuit };
+fn iterateAggregator(
+    realm: *Realm,
+    ctor: *JSFunction,
+    source_v: Value,
+    ctx: *anyopaque,
+    process: *const fn (ctx: *anyopaque, realm: *Realm, ctor: *JSFunction, idx: usize, resolved: Value) NativeError!IterStepAction,
+) NativeError!void {
+    const interp = @import("../interpreter.zig");
+    const obj = heap_mod.valueAsPlainObject(source_v) orelse return throwTypeError(realm, "Promise aggregator requires an iterable");
+
+    if (try iteratorOpen(realm, source_v)) |rec_in| {
+        var rec = rec_in;
+        const max_iter: usize = 1 << 24;
+        var idx: usize = 0;
+        while (idx < max_iter) : (idx += 1) {
+            const next_v = iteratorStep(realm, &rec) catch |err| {
+                // Step itself flagged abrupt; close is not our job
+                // here (rec.done is true).
+                return err;
+            } orelse return;
+
+            // §27.2.4.1.2 step 8.h.iv —
+            //   `Let nextPromise be ? Invoke(C, "resolve", « nextValue »)`.
+            // Look up `constructor.resolve` per item: the spec is
+            // explicit that user code can override it
+            // (`Promise.resolve = function(){ throw … };`), and
+            // that throw must IteratorClose the source.
+            const resolve_v = ctor.get("resolve");
+            const resolve_fn = heap_mod.valueAsFunction(resolve_v) orelse {
+                iteratorClose(realm, &rec);
+                return throwTypeError(realm, "Promise aggregator: resolve is not a function");
+            };
+
+            const r_outcome = interp.callJSFunction(realm.allocator, realm, resolve_fn, heap_mod.taggedFunction(ctor), &.{next_v}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    iteratorClose(realm, &rec);
+                    return error.NativeThrew;
+                },
+            };
+            const resolved = switch (r_outcome) {
+                .value, .yielded => |v| v,
+                .thrown => |ex| {
+                    iteratorClose(realm, &rec);
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            };
+
+            const action = process(ctx, realm, ctor, idx, resolved) catch |err| {
+                iteratorClose(realm, &rec);
+                return err;
+            };
+            if (action == .short_circuit) {
+                iteratorClose(realm, &rec);
+                return;
+            }
+        }
+        return;
+    }
+
+    // Array-like fallback.
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    var i: i64 = 0;
+    while (i < len) : (i += 1) {
+        var ibuf: [24]u8 = undefined;
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+        const v = try getPropertyChain(realm, obj, islice);
+        const resolve_v: Value = ctor.get("resolve");
+        const resolve_fn = heap_mod.valueAsFunction(resolve_v) orelse return throwTypeError(realm, "Promise aggregator: resolve is not a function");
+        const r_outcome = interp.callJSFunction(realm.allocator, realm, resolve_fn, heap_mod.taggedFunction(ctor), &.{v}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        const resolved = switch (r_outcome) {
+            .value, .yielded => |rv| rv,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        };
+        const action = try process(ctx, realm, ctor, @intCast(i), resolved);
+        if (action == .short_circuit) return;
+    }
 }
 
 /// Convert a synchronously-thrown error inside an aggregator into
@@ -488,152 +658,201 @@ fn resolveInputAsPromise(realm: *Realm, ctor: *JSFunction, v: Value) NativeError
     return allocatePromiseFor(realm, ctor, .fulfilled, v) catch return error.OutOfMemory;
 }
 
+/// §27.2.4.1.2 PerformPromiseAll. Per-item callback for the
+/// shared aggregator loop: appends the resolved value (or rejects
+/// the whole result Promise on the first input that's already
+/// rejected). Pending inputs ride through unwrapped — Cynic
+/// settles synchronously, so a still-pending entry means a
+/// genuinely-pending thenable that won't observe later.
+const AllCtx = struct {
+    out: *JSObject,
+    count: u32 = 0,
+    rejected: ?Value = null,
+};
+fn allProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, idx: usize, resolved: Value) NativeError!IterStepAction {
+    _ = ctor;
+    _ = idx;
+    const ctx: *AllCtx = @ptrCast(@alignCast(ctx_ptr));
+    const stash: Value = if (promiseStateOf(resolved)) |state| blk: {
+        if (std.mem.eql(u8, state, "rejected") and ctx.rejected == null) {
+            ctx.rejected = promiseValueOf(resolved);
+            // Per spec §27.2.4.1.2 we keep iterating so
+            // `Promise.resolve` is invoked for every input — the
+            // result Promise's rejection just settles before the
+            // later `.then` reactions fire. Don't short-circuit.
+        }
+        break :blk promiseValueOf(resolved);
+    } else resolved;
+    var ibuf: [24]u8 = undefined;
+    const islice = std.fmt.bufPrint(&ibuf, "{d}", .{ctx.count}) catch unreachable;
+    const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+    ctx.out.set(realm.allocator, owned.bytes, stash) catch return error.OutOfMemory;
+    ctx.count += 1;
+    return .continue_;
+}
+
 fn promiseAll(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctor = try thisAsPromiseCtor(realm, this_value, "all");
-    var list = collectIterable(realm, argOr(args, 0, Value.undefined_)) catch |err| switch (err) {
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    out.prototype = realm.intrinsics.array_prototype;
+    var ctx = AllCtx{ .out = out };
+    iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, allProcess) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NativeThrew => return aggregatorRejectFromPending(realm, ctor),
     };
-    defer list.deinit(realm.allocator);
-
-    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
-    for (list.items, 0..) |raw_v, idx| {
-        const v = try resolveInputAsPromise(realm, ctor, raw_v);
-        const unwrapped = if (promiseStateOf(v)) |state|
-            if (std.mem.eql(u8, state, "rejected"))
-                return allocatePromiseFor(realm, ctor, .rejected, promiseValueOf(v)) catch return error.OutOfMemory
-            else
-                promiseValueOf(v)
-        else
-            v;
-        var ibuf: [24]u8 = undefined;
-        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
-        const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, unwrapped) catch return error.OutOfMemory;
+    if (ctx.rejected) |rv| {
+        return allocatePromiseFor(realm, ctor, .rejected, rv) catch return error.OutOfMemory;
     }
-    setLength(realm, out, @intCast(list.items.len)) catch return error.OutOfMemory;
+    setLength(realm, out, @intCast(ctx.count)) catch return error.OutOfMemory;
     return allocatePromiseFor(realm, ctor, .fulfilled, heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+}
+
+/// §27.2.4.2.1 PerformPromiseAllSettled. Per-item callback —
+/// every input contributes a `{status, value|reason}` entry,
+/// even rejections. Pending inputs (a thenable that hasn't
+/// settled by aggregator return) contribute `{status: "fulfilled",
+/// value}` since Cynic's sync-resolution model can't observe a
+/// later settlement.
+const AllSettledCtx = struct {
+    out: *JSObject,
+    count: u32 = 0,
+    fulfilled_str: *@import("../string.zig").JSString,
+    rejected_str: *@import("../string.zig").JSString,
+};
+fn allSettledProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, idx: usize, resolved: Value) NativeError!IterStepAction {
+    _ = ctor;
+    _ = idx;
+    const ctx: *AllSettledCtx = @ptrCast(@alignCast(ctx_ptr));
+    const entry = realm.heap.allocateObject() catch return error.OutOfMemory;
+    entry.prototype = realm.intrinsics.object_prototype;
+    if (promiseStateOf(resolved)) |state| {
+        if (std.mem.eql(u8, state, "rejected")) {
+            entry.set(realm.allocator, "status", Value.fromString(ctx.rejected_str)) catch return error.OutOfMemory;
+            entry.set(realm.allocator, "reason", promiseValueOf(resolved)) catch return error.OutOfMemory;
+        } else {
+            entry.set(realm.allocator, "status", Value.fromString(ctx.fulfilled_str)) catch return error.OutOfMemory;
+            entry.set(realm.allocator, "value", promiseValueOf(resolved)) catch return error.OutOfMemory;
+        }
+    } else {
+        entry.set(realm.allocator, "status", Value.fromString(ctx.fulfilled_str)) catch return error.OutOfMemory;
+        entry.set(realm.allocator, "value", resolved) catch return error.OutOfMemory;
+    }
+    var ibuf: [24]u8 = undefined;
+    const islice = std.fmt.bufPrint(&ibuf, "{d}", .{ctx.count}) catch unreachable;
+    const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+    ctx.out.set(realm.allocator, owned.bytes, heap_mod.taggedObject(entry)) catch return error.OutOfMemory;
+    ctx.count += 1;
+    return .continue_;
 }
 
 fn promiseAllSettled(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctor = try thisAsPromiseCtor(realm, this_value, "allSettled");
-    var list = collectIterable(realm, argOr(args, 0, Value.undefined_)) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.NativeThrew => return aggregatorRejectFromPending(realm, ctor),
-    };
-    defer list.deinit(realm.allocator);
-
-    // Build [{status, value|reason}, …]. §27.2.4.2.1 — fulfilled
-    // entries get `{status: "fulfilled", value}`; rejected ones get
-    // `{status: "rejected", reason}`. Non-promise inputs count as
-    // fulfilled with their own value.
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     const fulfilled_str = realm.heap.allocateString("fulfilled") catch return error.OutOfMemory;
     const rejected_str = realm.heap.allocateString("rejected") catch return error.OutOfMemory;
-    for (list.items, 0..) |raw_v, idx| {
-        const v = try resolveInputAsPromise(realm, ctor, raw_v);
-        const entry = realm.heap.allocateObject() catch return error.OutOfMemory;
-        entry.prototype = realm.intrinsics.object_prototype;
-        if (promiseStateOf(v)) |state| {
-            if (std.mem.eql(u8, state, "rejected")) {
-                entry.set(realm.allocator, "status", Value.fromString(rejected_str)) catch return error.OutOfMemory;
-                entry.set(realm.allocator, "reason", promiseValueOf(v)) catch return error.OutOfMemory;
-            } else if (std.mem.eql(u8, state, "fulfilled")) {
-                entry.set(realm.allocator, "status", Value.fromString(fulfilled_str)) catch return error.OutOfMemory;
-                entry.set(realm.allocator, "value", promiseValueOf(v)) catch return error.OutOfMemory;
-            } else {
-                // Pending — Cynic resolves synchronously, so a
-                // pending input means user code didn't settle it.
-                // Treat the carried value as the fulfillment value
-                // for now (better than dropping).
-                entry.set(realm.allocator, "status", Value.fromString(fulfilled_str)) catch return error.OutOfMemory;
-                entry.set(realm.allocator, "value", promiseValueOf(v)) catch return error.OutOfMemory;
-            }
-        } else {
-            entry.set(realm.allocator, "status", Value.fromString(fulfilled_str)) catch return error.OutOfMemory;
-            entry.set(realm.allocator, "value", v) catch return error.OutOfMemory;
-        }
-        var ibuf: [24]u8 = undefined;
-        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
-        const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, heap_mod.taggedObject(entry)) catch return error.OutOfMemory;
-    }
-    setLength(realm, out, @intCast(list.items.len)) catch return error.OutOfMemory;
+    var ctx = AllSettledCtx{ .out = out, .fulfilled_str = fulfilled_str, .rejected_str = rejected_str };
+    iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, allSettledProcess) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NativeThrew => return aggregatorRejectFromPending(realm, ctor),
+    };
+    setLength(realm, out, @intCast(ctx.count)) catch return error.OutOfMemory;
     return allocatePromiseFor(realm, ctor, .fulfilled, heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+}
+
+/// §27.2.4.4.1 PerformPromiseRace. The first input that's already
+/// settled wins; non-promise inputs settle immediately
+/// (Promise.resolve has fulfilled them). Pending inputs ride
+/// through and the loop keeps looking — Cynic's sync-resolution
+/// model can't observe later settlement.
+const RaceCtx = struct {
+    found: ?struct { state: PromiseState, value: Value } = null,
+};
+fn raceProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, idx: usize, resolved: Value) NativeError!IterStepAction {
+    _ = realm;
+    _ = ctor;
+    _ = idx;
+    const ctx: *RaceCtx = @ptrCast(@alignCast(ctx_ptr));
+    // §27.2.4.4.1 — `Promise.resolve` is invoked for every
+    // iterable item even after we've decided what to settle the
+    // result with. Record the first settled state and keep going
+    // so user code observes the full call sequence (test262
+    // `invoke-resolve-on-values-every-iteration-of-promise.js`
+    // counts the calls).
+    if (ctx.found != null) return .continue_;
+    if (promiseStateOf(resolved)) |state| {
+        if (std.mem.eql(u8, state, "rejected")) {
+            ctx.found = .{ .state = .rejected, .value = promiseValueOf(resolved) };
+        } else if (std.mem.eql(u8, state, "fulfilled")) {
+            ctx.found = .{ .state = .fulfilled, .value = promiseValueOf(resolved) };
+        }
+        return .continue_;
+    }
+    ctx.found = .{ .state = .fulfilled, .value = resolved };
+    return .continue_;
 }
 
 fn promiseRace(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctor = try thisAsPromiseCtor(realm, this_value, "race");
-    var list = collectIterable(realm, argOr(args, 0, Value.undefined_)) catch |err| switch (err) {
+    var ctx = RaceCtx{};
+    iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, raceProcess) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NativeThrew => return aggregatorRejectFromPending(realm, ctor),
     };
-    defer list.deinit(realm.allocator);
-
-    // §27.2.4.4.1 step 3 — if the iterable is empty, the result
-    // Promise stays pending forever. Otherwise the first already-
-    // settled input wins; non-promise inputs are treated as
-    // synchronously-fulfilled per `Promise.resolve(v)`.
-    if (list.items.len == 0) return allocatePromiseFor(realm, ctor, .pending, Value.undefined_) catch return error.OutOfMemory;
-    for (list.items) |raw_v| {
-        const v = try resolveInputAsPromise(realm, ctor, raw_v);
-        if (promiseStateOf(v)) |state| {
-            if (std.mem.eql(u8, state, "rejected")) {
-                return allocatePromiseFor(realm, ctor, .rejected, promiseValueOf(v)) catch return error.OutOfMemory;
-            }
-            if (std.mem.eql(u8, state, "fulfilled")) {
-                return allocatePromiseFor(realm, ctor, .fulfilled, promiseValueOf(v)) catch return error.OutOfMemory;
-            }
-            // Pending — keep looking; otherwise fall through.
-        } else {
-            // Non-promise input — settles immediately.
-            return allocatePromiseFor(realm, ctor, .fulfilled, v) catch return error.OutOfMemory;
-        }
+    if (ctx.found) |hit| {
+        return allocatePromiseFor(realm, ctor, hit.state, hit.value) catch return error.OutOfMemory;
     }
-    // All inputs are pending — the result Promise stays pending.
+    // Empty iterable OR every input pending — result Promise
+    // stays pending (§27.2.4.4.1 step 3).
     return allocatePromiseFor(realm, ctor, .pending, Value.undefined_) catch return error.OutOfMemory;
 }
 
-/// §27.2.4.3 Promise.any ( iterable ) — fulfils on the first
-/// input that fulfils; if every input rejects, rejects with an
-/// `AggregateError` whose `errors` array is the rejection reasons
-/// in input order. Mirrors `Promise.all` structurally with the
-/// success/failure roles swapped.
+/// §27.2.4.3.1 PerformPromiseAny. First fulfilled input wins; if
+/// every input rejected, reject with a fresh `AggregateError`
+/// listing the reasons in input order.
+const AnyCtx = struct {
+    reasons: *JSObject,
+    count: u32 = 0,
+    found: ?Value = null,
+};
+fn anyProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, idx: usize, resolved: Value) NativeError!IterStepAction {
+    _ = ctor;
+    _ = idx;
+    const ctx: *AnyCtx = @ptrCast(@alignCast(ctx_ptr));
+    // §27.2.4.3.1 — Promise.resolve fires for every input even
+    // after a fulfillment is found. Keep iterating; just stop
+    // recording reasons once we have a fulfillment.
+    if (ctx.found != null) return .continue_;
+    if (promiseStateOf(resolved)) |state| {
+        if (std.mem.eql(u8, state, "fulfilled")) {
+            ctx.found = promiseValueOf(resolved);
+            return .continue_;
+        }
+        var ibuf: [24]u8 = undefined;
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{ctx.count}) catch unreachable;
+        const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+        ctx.reasons.set(realm.allocator, owned.bytes, promiseValueOf(resolved)) catch return error.OutOfMemory;
+        ctx.count += 1;
+        return .continue_;
+    }
+    ctx.found = resolved;
+    return .continue_;
+}
+
 fn promiseAny(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctor = try thisAsPromiseCtor(realm, this_value, "any");
-    var list = collectIterable(realm, argOr(args, 0, Value.undefined_)) catch |err| switch (err) {
+    const reasons = realm.heap.allocateObject() catch return error.OutOfMemory;
+    reasons.prototype = realm.intrinsics.array_prototype;
+    var ctx = AnyCtx{ .reasons = reasons };
+    iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, anyProcess) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NativeThrew => return aggregatorRejectFromPending(realm, ctor),
     };
-    defer list.deinit(realm.allocator);
-
-    // Reasons array — built up during iteration; only used if every
-    // input rejects (otherwise discarded with the deinit below).
-    const reasons = realm.heap.allocateObject() catch return error.OutOfMemory;
-    reasons.prototype = realm.intrinsics.array_prototype;
-    for (list.items, 0..) |raw_v, idx| {
-        const v = try resolveInputAsPromise(realm, ctor, raw_v);
-        if (promiseStateOf(v)) |state| {
-            if (std.mem.eql(u8, state, "fulfilled")) {
-                return allocatePromiseFor(realm, ctor, .fulfilled, promiseValueOf(v)) catch return error.OutOfMemory;
-            }
-            // .rejected or .pending — record the reason (or carried
-            // value for pending) and keep looking.
-            var ibuf: [24]u8 = undefined;
-            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
-            const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-            reasons.set(realm.allocator, owned.bytes, promiseValueOf(v)) catch return error.OutOfMemory;
-        } else {
-            // Non-promise input — Promise.resolve(v) is fulfilled.
-            return allocatePromiseFor(realm, ctor, .fulfilled, v) catch return error.OutOfMemory;
-        }
+    if (ctx.found) |fv| {
+        return allocatePromiseFor(realm, ctor, .fulfilled, fv) catch return error.OutOfMemory;
     }
-    setLength(realm, reasons, @intCast(list.items.len)) catch return error.OutOfMemory;
+    setLength(realm, reasons, @intCast(ctx.count)) catch return error.OutOfMemory;
 
-    // §27.2.4.3.1 step 12 — every input rejected. Reject with a
-    // fresh `AggregateError(reasons, "All promises were rejected")`.
     const agg_proto = realm.intrinsics.aggregate_error_prototype orelse realm.intrinsics.error_prototype.?;
     const agg = realm.heap.allocateObject() catch return error.OutOfMemory;
     agg.prototype = agg_proto;
@@ -644,8 +863,6 @@ fn promiseAny(realm: *Realm, this_value: Value, args: []const Value) NativeError
     }) catch return error.OutOfMemory;
     const msg_str = realm.heap.allocateString("All promises were rejected") catch return error.OutOfMemory;
     agg.set(realm.allocator, "message", Value.fromString(msg_str)) catch return error.OutOfMemory;
-
-    // Empty-iterable case: spec says reject with AggregateError too.
     return allocatePromiseFor(realm, ctor, .rejected, heap_mod.taggedObject(agg)) catch return error.OutOfMemory;
 }
 
