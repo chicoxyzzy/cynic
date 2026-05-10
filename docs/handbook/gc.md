@@ -189,12 +189,17 @@ the fix isn't *which* container to anchor in, it's getting integer-
 indexed property writes off the string-keyed property map entirely.
 That means a real `JSArray` heap kind with packed indexed elements
 (V8 / JSC / SM all do this — "elements" storage is a separate slot
-vector from the named-property dictionary). Until that lands, the
-spread loop uses the unrooted `target.set` path; the fixture passes
-in practice because the JSStrings get reallocated at addresses
-that happen to keep the in-flight slices valid through the loop's
-trapped exception. It's not memory-correct under arbitrary GC
-schedules, just under ours.
+vector from the named-property dictionary).
+
+Until that lands, two things keep this from biting in practice:
+the spread loop uses the unrooted `target.set` path (so JSStrings
+get reallocated at addresses that happen to keep the in-flight
+slices valid through the loop's trapped exception — not memory-
+correct under arbitrary GC schedules, just under ours), AND the
+iterator-step accessor walks invoke poisoned `done` / `value`
+getters per §7.4.7. The latter is what actually bounds the
+test262 poisoned-iterator fixtures: the throw fires on the first
+`.next()` call instead of letting the loop run to its 16M cap.
 
 ### Future work
 
@@ -210,8 +215,10 @@ The README has these as future work and they remain so:
 - **Concurrent / parallel sweep.** Useful once the heap is big enough
   that a single-threaded sweep eats real wall-time. Not a current
   bottleneck — test262's typical resident set is well under 50 MB.
-- **A `--gc-threshold` CLI flag.** Tunable from the host today only by
-  poking `realm.heap.gc_threshold` directly.
+- **A `--gc-threshold` CLI flag for `cynic run`.** The test262
+  harness already exposes `--gc-threshold=N` (and `--top-rss=N`
+  for the per-fixture RSS-delta report); the runtime CLI doesn't
+  yet thread it through.
 
 ## Prior art
 

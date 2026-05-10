@@ -136,7 +136,11 @@ code construction (aligns with SES).
   caveats).
 - `Map`, `Set`, `WeakMap`, `WeakSet` with `groupBy` statics.
 - `Promise` static methods (`all`, `allSettled`, `any`, `race`,
-  `resolve`, `reject`) + prototype `then` / `catch` / `finally`.
+  `resolve`, `reject`, `try`, `withResolvers`) + prototype `then`
+  / `catch` / `finally`. Aggregators go through §27.2.1.5
+  NewPromiseCapability and forward each item via
+  `Invoke(item, "then", « cap.resolve, cap.reject »)`, so
+  microtask ordering matches the spec.
 - `Reflect` covering `apply`, `construct`, `defineProperty`,
   `deleteProperty`, `get`, `getOwnPropertyDescriptor`,
   `getPrototypeOf`, `has`, `isExtensible`, `ownKeys`,
@@ -150,11 +154,12 @@ code construction (aligns with SES).
   `replace`, `replaceAll`, `search`, `split`) all dispatch
   through it.
 - `Iterator` global with `from` + prototype helpers (`map`,
-  `filter`, `take`, `drop`, `toArray`, `forEach`, `find`,
-  `some`, `every`, `reduce`).
+  `filter`, `take`, `drop`, `flatMap`, `toArray`, `forEach`,
+  `find`, `some`, `every`, `reduce`).
 - TypedArrays + DataView covering the common surface.
 - Error class hierarchy: `Error`, `TypeError`, `RangeError`,
-  `ReferenceError`, `SyntaxError`, `URIError`.
+  `ReferenceError`, `SyntaxError`, `URIError`, `EvalError`,
+  `AggregateError`.
 
 **Caveats / planned.**
 
@@ -166,7 +171,6 @@ code construction (aligns with SES).
 - `Set.prototype.{union, intersection, difference,
   symmetricDifference, isSubsetOf, isSupersetOf, isDisjointFrom}`
   (ES2025) — not yet wired.
-- `Promise.{try, withResolvers}` — not yet.
 - `WeakRef` / `FinalizationRegistry` — not yet.
 - `Function.prototype.toString` returning real source — currently
   approximate.

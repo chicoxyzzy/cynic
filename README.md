@@ -82,7 +82,8 @@ The shape, in broad strokes — the per-bucket numbers live in the
   `Boolean` / `BigInt` / `Symbol` (real primitives, not polyfills),
   `Math`, `JSON`, `Map` / `Set` / `WeakMap` / `WeakSet`,
   `Reflect`, ES2025 `Set` ops (`union` / `intersection` / …),
-  `Iterator` helpers (`map` / `filter` / `take` / `drop` / etc.),
+  `Iterator` helpers (`map` / `filter` / `take` / `drop` /
+  `flatMap` / etc.),
   `Proxy` (most traps), `Date` (UTC-only), the URI globals, the
   standard error hierarchy with `error-cause`.
 - **TypedArrays** — `ArrayBuffer`, `DataView`, the typed-array
