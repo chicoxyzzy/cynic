@@ -4614,7 +4614,15 @@ fn proxyGetTrap(
     const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
     const handler = proxy.proxy_handler orelse return .{ .fallthrough = target };
     const trap_v = handler.get("get");
-    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return .{ .fallthrough = target };
+    // §7.3.11 GetMethod — undefined/null fall through; any other
+    // non-callable value throws TypeError before the trap runs.
+    if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
+    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
+        const ex = try makeTypeError(realm, "Proxy 'get' trap is not callable");
+        f.ip = ip;
+        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+        return .handled;
+    };
     const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
     const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str), receiver };
     const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);
@@ -4653,7 +4661,13 @@ fn proxyDeleteTrap(
     const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
     const handler = proxy.proxy_handler orelse return .{ .fallthrough = target };
     const trap_v = handler.get("deleteProperty");
-    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return .{ .fallthrough = target };
+    if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
+    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
+        const ex = try makeTypeError(realm, "Proxy 'deleteProperty' trap is not callable");
+        f.ip = ip;
+        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+        return .handled;
+    };
     const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
     const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str) };
     const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);
@@ -4693,7 +4707,13 @@ fn proxyHasTrap(
     const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
     const handler = proxy.proxy_handler orelse return .{ .fallthrough = target };
     const trap_v = handler.get("has");
-    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return .{ .fallthrough = target };
+    if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
+    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
+        const ex = try makeTypeError(realm, "Proxy 'has' trap is not callable");
+        f.ip = ip;
+        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+        return .handled;
+    };
     const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
     const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str) };
     const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);
@@ -4736,7 +4756,13 @@ fn proxySetTrap(
     const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
     const handler = proxy.proxy_handler orelse return .{ .fallthrough = target };
     const trap_v = handler.get("set");
-    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return .{ .fallthrough = target };
+    if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
+    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
+        const ex = try makeTypeError(realm, "Proxy 'set' trap is not callable");
+        f.ip = ip;
+        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+        return .handled;
+    };
     const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
     const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str), value, receiver };
     const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);

@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 62.53 % | 95.52 % | 28986 / 46357 |
-| **runtime** | 51.58 % | 62.65 % | 23913 / 46357 |
+| **runtime** | 51.59 % | 62.66 % | 23917 / 46357 |
 
 ## Where the runtime stands, by area
 
@@ -31,7 +31,7 @@ browser-era built-ins …).
 | `built-ins/Iterator` | 280 | 224 | 6 | 55 % | 56 % |
 | `built-ins/Object` | 2730 | 596 | 85 | 80 % | 82 % |
 | `built-ins/Promise` | 329 | 345 | 3 | 49 % | 49 % |
-| `built-ins/Proxy` | 116 | 183 | 12 | 37 % | 39 % |
+| `built-ins/Proxy` | 120 | 179 | 12 | 39 % | 40 % |
 | `built-ins/RegExp` | 1197 | 521 | 161 | 64 % | 70 % |
 | `built-ins/String` | 849 | 369 | 5 | 69 % | 70 % |
 | `built-ins/TypedArray` | 768 | 454 | 216 | 53 % | 63 % |
@@ -136,12 +136,12 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-10 — cynic `5cbe6be`, test262 `d0c1b455`
+### 2026-05-10 — cynic `9e5be83`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
 | **parser** | 62.53 % | 95.52 % | 28986 / 46357 | +192 |
-| **runtime** | 51.58 % | 62.65 % | 23913 / 46357 | ±0 |
+| **runtime** | 51.59 % | 62.66 % | 23917 / 46357 | +4 |
 
 ### 2026-05-09 — cynic `fcc5543`, test262 `d0c1b455`
 
