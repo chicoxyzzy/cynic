@@ -231,6 +231,13 @@ pub const Parser = struct {
             .diagnostics = self.diagnostics,
         };
         try validator.run(&program);
+        // §16.2.1.1 Module — top-level early errors. Script's top-level
+        // rules differ (function declarations are VarDeclaredNames there,
+        // not LexicallyDeclaredNames), so this pass is module-only for
+        // now.
+        if (source_kind == .module) {
+            try self.validateModuleBindings(program.body);
+        }
         return program;
     }
 
@@ -1662,6 +1669,201 @@ pub const Parser = struct {
                     if (maybe_elem) |elem| try self.collectTargetNames(elem.target, out);
                 if (arr.rest) |rest_target| try self.collectTargetNames(rest_target.*, out);
             },
+        }
+    }
+
+    /// §16.2.1.1 Module — Static Semantics: Early Errors over a top-level
+    /// ModuleItemList.
+    ///
+    /// • LexicallyDeclaredNames must not contain duplicates.
+    /// • LexicallyDeclaredNames ∩ VarDeclaredNames must be empty.
+    /// • ExportedNames must not contain duplicates.
+    ///
+    /// Differs from §14.2.1 / §15.2.1 in two ways:
+    ///   1. At the top level of a Module, function declarations contribute
+    ///      to LexicallyDeclaredNames (NOT VarDeclaredNames as they do in
+    ///      Script bodies).
+    ///   2. ImportDeclaration locals (default / namespace / named) and
+    ///      ExportDeclaration bindings (including the synthetic `*default*`
+    ///      from `export default …`) feed LDN as well.
+    fn validateModuleBindings(self: *Parser, body: []const Statement) ParseError!void {
+        var lex_names: std.ArrayListUnmanaged(NameSpan) = .empty;
+        defer lex_names.deinit(self.arena);
+        var var_names: std.ArrayListUnmanaged(NameSpan) = .empty;
+        defer var_names.deinit(self.arena);
+        var exported_names: std.ArrayListUnmanaged(NameSpan) = .empty;
+        defer exported_names.deinit(self.arena);
+
+        for (body) |stmt| try self.collectModuleLDN(stmt, &lex_names);
+        for (body) |stmt| try self.collectModuleVDN(stmt, &var_names);
+        for (body) |stmt| try self.collectModuleExportedNames(stmt, &exported_names);
+
+        // Duplicates within LDN.
+        var i: usize = 0;
+        while (i < lex_names.items.len) : (i += 1) {
+            var j: usize = 0;
+            while (j < i) : (j += 1) {
+                if (std.mem.eql(u8, lex_names.items[i].name, lex_names.items[j].name)) {
+                    try self.report(.duplicate_lexical_binding, lex_names.items[i].span);
+                    break;
+                }
+            }
+        }
+        // LDN ∩ VDN.
+        for (lex_names.items) |ln| {
+            for (var_names.items) |vn| {
+                if (std.mem.eql(u8, ln.name, vn.name)) {
+                    try self.report(.duplicate_lexical_binding, ln.span);
+                    break;
+                }
+            }
+        }
+        // Duplicates within ExportedNames.
+        i = 0;
+        while (i < exported_names.items.len) : (i += 1) {
+            var j: usize = 0;
+            while (j < i) : (j += 1) {
+                if (std.mem.eql(u8, exported_names.items[i].name, exported_names.items[j].name)) {
+                    try self.report(.duplicate_lexical_binding, exported_names.items[i].span);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// LexicallyDeclaredNames at module top level (§16.2.1.6).
+    fn collectModuleLDN(
+        self: *Parser,
+        stmt: Statement,
+        out: *std.ArrayListUnmanaged(NameSpan),
+    ) ParseError!void {
+        switch (stmt) {
+            .lexical => |lex| {
+                if (lex.kind == .var_) return;
+                for (lex.declarators) |decl| try self.collectTargetNames(decl.name, out);
+            },
+            .class_decl => |cd| try out.append(self.arena, .{
+                .name = self.source[cd.name.span.start..cd.name.span.end],
+                .span = cd.name.span,
+            }),
+            .function_decl => |fd| try out.append(self.arena, .{
+                .name = self.source[fd.name.span.start..fd.name.span.end],
+                .span = fd.name.span,
+            }),
+            .import_decl => |id| {
+                if (id.default) |d| try out.append(self.arena, .{
+                    .name = self.source[d.span.start..d.span.end],
+                    .span = d.span,
+                });
+                if (id.namespace) |n| try out.append(self.arena, .{
+                    .name = self.source[n.span.start..n.span.end],
+                    .span = n.span,
+                });
+                for (id.named) |spec| try out.append(self.arena, .{
+                    .name = self.source[spec.local.span.start..spec.local.span.end],
+                    .span = spec.local.span,
+                });
+            },
+            .export_decl => |ed| switch (ed.body) {
+                .declaration => |inner| {
+                    // `export let/const/class/function …` — the inner
+                    // declaration's BoundNames feed LDN (var feeds VDN
+                    // and is handled in collectModuleVDN).
+                    try self.collectModuleLDN(inner.*, out);
+                },
+                .default_value => {
+                    // `export default …` introduces a sentinel binding
+                    // "*default*" (§16.2.3.7). Two of these in one
+                    // module collide and surface as a duplicate.
+                    try out.append(self.arena, .{
+                        .name = "*default*",
+                        .span = ed.span,
+                    });
+                },
+                // `export { … }` and `export * …` do not introduce new
+                // local bindings; they feed ExportedNames only.
+                .named, .all => {},
+            },
+            else => {},
+        }
+    }
+
+    /// VarDeclaredNames at module top level. Same shape as the Block-
+    /// level walker but additionally descends through `export var …`.
+    fn collectModuleVDN(
+        self: *Parser,
+        stmt: Statement,
+        out: *std.ArrayListUnmanaged(NameSpan),
+    ) ParseError!void {
+        switch (stmt) {
+            .export_decl => |ed| switch (ed.body) {
+                .declaration => |inner| try self.collectModuleVDN(inner.*, out),
+                else => {},
+            },
+            else => try self.collectVDN(stmt, out),
+        }
+    }
+
+    /// ExportedNames at module top level (§16.2.3.5).
+    fn collectModuleExportedNames(
+        self: *Parser,
+        stmt: Statement,
+        out: *std.ArrayListUnmanaged(NameSpan),
+    ) ParseError!void {
+        const ed = switch (stmt) {
+            .export_decl => |e| e,
+            else => return,
+        };
+        switch (ed.body) {
+            .named => |nb| {
+                for (nb.specifiers) |spec| try out.append(self.arena, .{
+                    .name = self.source[spec.exported_span.start..spec.exported_span.end],
+                    .span = spec.exported_span,
+                });
+            },
+            .all => |ab| {
+                if (ab.namespace_local) |ns| try out.append(self.arena, .{
+                    .name = self.source[ns.start..ns.end],
+                    .span = ns,
+                });
+                // Bare `export * from …` contributes nothing to
+                // ExportedNames at parse time.
+            },
+            .default_value => try out.append(self.arena, .{
+                .name = "default",
+                .span = ed.span,
+            }),
+            .declaration => |inner| {
+                // `export let/const/var/class/function name` —
+                // ExportedNames includes the inner declaration's
+                // BoundNames.
+                var bound: std.ArrayListUnmanaged(NameSpan) = .empty;
+                defer bound.deinit(self.arena);
+                try self.collectDeclBoundNames(inner.*, &bound);
+                for (bound.items) |b| try out.append(self.arena, b);
+            },
+        }
+    }
+
+    /// BoundNames of a declaration Statement (§8.5).
+    fn collectDeclBoundNames(
+        self: *Parser,
+        stmt: Statement,
+        out: *std.ArrayListUnmanaged(NameSpan),
+    ) ParseError!void {
+        switch (stmt) {
+            .lexical => |lex| {
+                for (lex.declarators) |decl| try self.collectTargetNames(decl.name, out);
+            },
+            .class_decl => |cd| try out.append(self.arena, .{
+                .name = self.source[cd.name.span.start..cd.name.span.end],
+                .span = cd.name.span,
+            }),
+            .function_decl => |fd| try out.append(self.arena, .{
+                .name = self.source[fd.name.span.start..fd.name.span.end],
+                .span = fd.name.span,
+            }),
+            else => {},
         }
     }
 
