@@ -437,8 +437,13 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
                 .thrown => return error.NativeThrew,
             };
             const result_obj = heap_mod.valueAsPlainObject(result) orelse return throwTypeError(realm, "Array.from: iterator next() did not return an object");
-            if (intrinsics.toBoolean(result_obj.get("done"))) break;
-            const raw_v = result_obj.get("value");
+            // §7.4.7 IteratorComplete / IteratorValue go through
+            // ordinary [[Get]] — accessor descriptors on `done` /
+            // `value` (poisoned-iterator fixtures) must invoke the
+            // getter and propagate any throw. Plain `obj.get` is
+            // accessor-blind and would silently keep iterating.
+            if (intrinsics.toBoolean(try getPropertyChain(realm, result_obj, "done"))) break;
+            const raw_v = try getPropertyChain(realm, result_obj, "value");
             const elem: Value = blk: {
                 if (mapfn) |mf| {
                     const cb_args = [_]Value{ raw_v, numberFromI64(k) };

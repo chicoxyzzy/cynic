@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.15 % | 96.48 % | 29276 / 46357 |
-| **runtime** | 51.68 % | 62.77 % | 23957 / 46357 |
+| **runtime** | 51.73 % | 62.83 % | 23981 / 46357 |
 
 ## Where the runtime stands, by area
 
@@ -23,14 +23,14 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_1000+ fails_** | | | | | |
-| `language/expressions` | 5901 | 4166 | 971 | 53 % | 59 % |
+| `language/expressions` | 5907 | 4160 | 971 | 54 % | 59 % |
 | `language/statements` | 4460 | 4210 | 667 | 48 % | 51 % |
 | **_100–999 fails_** | | | | | |
-| `built-ins/Array` | 2013 | 857 | 211 | 65 % | 70 % |
+| `built-ins/Array` | 2014 | 856 | 211 | 65 % | 70 % |
 | `built-ins/Function` | 173 | 247 | 89 | 34 % | 41 % |
 | `built-ins/Iterator` | 280 | 224 | 6 | 55 % | 56 % |
 | `built-ins/Object` | 2730 | 596 | 85 | 80 % | 82 % |
-| `built-ins/Promise` | 329 | 345 | 3 | 49 % | 49 % |
+| `built-ins/Promise` | 345 | 329 | 3 | 51 % | 51 % |
 | `built-ins/Proxy` | 120 | 179 | 12 | 39 % | 40 % |
 | `built-ins/RegExp` | 1197 | 521 | 161 | 64 % | 70 % |
 | `built-ins/String` | 849 | 369 | 5 | 69 % | 70 % |
@@ -38,7 +38,7 @@ browser-era built-ins …).
 | `built-ins/TypedArrayConstructors` | 372 | 340 | 24 | 51 % | 52 % |
 | `language/module-code` | 369 | 213 | 14 | 62 % | 63 % |
 | **_10–99 fails_** | | | | | |
-| `built-ins/AggregateError` | 11 | 14 | 0 | 44 % | 44 % |
+| `built-ins/AggregateError` | 12 | 13 | 0 | 48 % | 48 % |
 | `built-ins/ArrayBuffer` | 33 | 51 | 112 | 17 % | 39 % |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 0 | 38 | 0 | 0 % | 0 % |
 | `built-ins/AsyncGeneratorFunction` | 4 | 19 | 0 | 17 % | 17 % |
@@ -136,12 +136,12 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-10 — cynic `35db5f8`, test262 `d0c1b455`
+### 2026-05-10 — cynic `789886f`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
 | **parser** | 63.15 % | 96.48 % | 29276 / 46357 | +482 |
-| **runtime** | 51.68 % | 62.77 % | 23957 / 46357 | +44 |
+| **runtime** | 51.73 % | 62.83 % | 23981 / 46357 | +68 |
 
 ### 2026-05-09 — cynic `fcc5543`, test262 `d0c1b455`
 

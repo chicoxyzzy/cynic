@@ -319,8 +319,8 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
             .thrown => return error.NativeThrew,
         };
         const result = heap_mod.valueAsPlainObject(result_v) orelse break;
-        if (intrinsics.toBoolean(result.get("done"))) break;
-        const item = result.get("value");
+        if (intrinsics.toBoolean(try intrinsics.getPropertyChain(realm, result, "done"))) break;
+        const item = try intrinsics.getPropertyChain(realm, result, "value");
         const cb_args = [_]Value{ item, Value.fromInt32(@intCast(i)) };
         const key_outcome = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &cb_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -966,8 +966,9 @@ fn forEachSetLikeKey(
             .thrown => return error.NativeThrew,
         };
         const ro = heap_mod.valueAsPlainObject(result) orelse return throwTypeError(realm, "iterator next() did not return an object");
-        if (intrinsics.toBoolean(ro.get("done"))) return;
-        each(ctx, ro.get("value")) catch |err| switch (err) {
+        if (intrinsics.toBoolean(try intrinsics.getPropertyChain(realm, ro, "done"))) return;
+        const v = try intrinsics.getPropertyChain(realm, ro, "value");
+        each(ctx, v) catch |err| switch (err) {
             error.IterStop => return,
             else => |e2| return e2,
         };

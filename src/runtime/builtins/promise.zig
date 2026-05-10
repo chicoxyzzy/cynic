@@ -383,8 +383,14 @@ fn collectIterable(realm: *Realm, source_v: Value) NativeError!std.ArrayList(Val
             };
             const result_obj = heap_mod.valueAsPlainObject(result) orelse return throwTypeError(realm, "Promise aggregator: iterator next() did not return an object");
             const arr_helpers = @import("array.zig");
-            if (arr_helpers.toBoolean(result_obj.get("done"))) break;
-            try list.append(realm.allocator, result_obj.get("value"));
+            // §7.4.7 IteratorComplete / IteratorValue go through
+            // ordinary [[Get]]; accessor descriptors on `done` /
+            // `value` (poisoned-iterator fixtures) must invoke the
+            // getter and propagate any throw. Plain `obj.get` is
+            // accessor-blind and would silently keep iterating.
+            if (arr_helpers.toBoolean(try intrinsics.getPropertyChain(realm, result_obj, "done"))) break;
+            const v = try intrinsics.getPropertyChain(realm, result_obj, "value");
+            try list.append(realm.allocator, v);
         }
         return list;
     }

@@ -193,8 +193,10 @@ fn aggregateErrorMaterialiseErrors(realm: *Realm, errors_v: Value) NativeError!V
                 },
             };
             const result_obj = heap_mod.valueAsPlainObject(result) orelse return intrinsics.throwTypeError(realm, "AggregateError: iterator next() did not return an object");
-            if (intrinsics.toBoolean(result_obj.get("done"))) break;
-            const elem = result_obj.get("value");
+            // §7.4.7 — IteratorComplete / IteratorValue invoke
+            // accessor descriptors on `done` / `value`.
+            if (intrinsics.toBoolean(try intrinsics.getPropertyChain(realm, result_obj, "done"))) break;
+            const elem = try intrinsics.getPropertyChain(realm, result_obj, "value");
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{k}) catch unreachable;
             const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;

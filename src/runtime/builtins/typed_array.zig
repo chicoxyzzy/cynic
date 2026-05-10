@@ -24,6 +24,7 @@ const intrinsics = @import("../intrinsics.zig");
 
 const installConstructor = intrinsics.installConstructor;
 const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
+const getPropertyChain = intrinsics.getPropertyChain;
 const installNativeGetter = intrinsics.installNativeGetter;
 const installToStringTag = intrinsics.installToStringTag;
 const setNonEnumerable = intrinsics.setNonEnumerable;
@@ -413,8 +414,10 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind) NativeFn {
                             .thrown => return error.NativeThrew,
                         };
                         const result_obj = heap_mod.valueAsPlainObject(result) orelse return throwTypeError(realm, "TypedArray: iterator next() did not return an object");
-                        if (toBoolean(result_obj.get("done"))) break;
-                        const item = result_obj.get("value");
+                        // §7.4.7 IteratorComplete / IteratorValue invoke
+                        // accessors; bare `obj.get` is accessor-blind.
+                        if (toBoolean(try getPropertyChain(realm, result_obj, "done"))) break;
+                        const item = try getPropertyChain(realm, result_obj, "value");
                         scope.push(item) catch return error.OutOfMemory;
                         collected.append(realm.allocator, item) catch return error.OutOfMemory;
                     }

@@ -3554,8 +3554,40 @@ fn runFrames(
                         },
                     };
                     const result_obj = heap_mod.valueAsPlainObject(result_v) orelse break;
-                    if (toBoolean(result_obj.get("done"))) break;
-                    const elem = result_obj.get("value");
+                    // §7.4.7 IteratorComplete / IteratorValue —
+                    // accessor descriptors must invoke the getter.
+                    // Without this the poisoned-iterator fixtures
+                    // (`spread-err-itr-value.js`) never see the
+                    // throw and spin to 16M iters.
+                    const done_v = intrinsics_mod.getPropertyChain(realm, result_obj, "done") catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => {
+                            const ex = realm.pending_exception orelse Value.undefined_;
+                            realm.pending_exception = Value.undefined_;
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            break;
+                        },
+                    };
+                    if (toBoolean(done_v)) break;
+                    const elem = intrinsics_mod.getPropertyChain(realm, result_obj, "value") catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => {
+                            const ex = realm.pending_exception orelse Value.undefined_;
+                            realm.pending_exception = Value.undefined_;
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            break;
+                        },
+                    };
                     var db: [24]u8 = undefined;
                     const ds = std.fmt.bufPrint(&db, "{d}", .{target_len}) catch unreachable;
                     const owned = realm.heap.allocateString(ds) catch return error.OutOfMemory;

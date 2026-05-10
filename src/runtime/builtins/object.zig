@@ -1055,8 +1055,8 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
             .thrown => return error.NativeThrew,
         };
         const result = heap_mod.valueAsPlainObject(result_v) orelse break;
-        if (toBoolean(result.get("done"))) break;
-        const item = result.get("value");
+        if (toBoolean(try getPropertyChain(realm, result, "done"))) break;
+        const item = try getPropertyChain(realm, result, "value");
         const cb_args = [_]Value{ item, Value.fromInt32(@intCast(i)) };
         const key_outcome = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &cb_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
