@@ -20,6 +20,18 @@ These are project rules — they apply to everyone.
 - **Spec-faithful naming.** Internal function names mirror
   ECMA-262 abstract operations so test262 failures map cleanly to
   spec sections.
+- **Microtasks are spec-conformant.** Cynic ships a real
+  microtask queue (see `realm.microtask_queue` and
+  `interpreter.drainMicrotasks`). `.then` always defers — settled
+  Promises queue the reaction at `.then` time, pending Promises
+  register on the source and queue at settlement. The aggregators
+  (`Promise.{all, allSettled, race, any}`) build a fresh
+  capability via §27.2.1.5 NewPromiseCapability and forward each
+  item via `Invoke(item, "then", « cap.resolve, cap.reject »)`,
+  so user-installed `.then` reactions interleave per spec. Don't
+  introduce new code paths that settle a Promise synchronously
+  in user-observable order — Workers, Deno, and SES all rely on
+  the spec ordering.
 - **Strict-only, non-browser-host target.** Cynic targets edge
   runtimes (Workers / Deno / server JS) — not browsers. So:
   - **Annex B language extensions** — out (no sloppy mode, no

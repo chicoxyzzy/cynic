@@ -1792,6 +1792,43 @@ test "later: Promise.resolve + .then is microtask-deferred" {
     , "sync,then1,");
 }
 
+test "later: Promise.race goes through the microtask queue (not sync settle)" {
+    // §27.2.4.4.1 step 4.g — `Invoke(nextPromise, "then",
+    // « cap.resolve, cap.reject »)`. Each item is forwarded
+    // through `.then`, which queues a microtask; the result
+    // capability's reactions only fire after that microtask
+    // runs. So a `.then` reaction on a sibling Promise enqueued
+    // BEFORE the race-result's reaction must fire FIRST. The
+    // V8/spec order for the canonical fixture is [1,2,3,4,5];
+    // a synchronous-settle implementation produced [1,2,3,5,4].
+    try expectScriptStringWithBuiltins(
+        \\let a = new Promise(resolve => resolve('a'));
+        \\let b = new Promise(resolve => resolve('b'));
+        \\let sequence = [1];
+        \\a.then(() => sequence.push(3));
+        \\Promise.race([a, b]).then(() => sequence.push(5));
+        \\b.then(() => sequence.push(4));
+        \\sequence.push(2);
+        \\globalThis.__drainMicrotasks();
+        \\sequence.join(",");
+    , "1,2,3,4,5");
+}
+
+test "later: Promise.race honors a user-overridden .then on items" {
+    // §27.2.4.4.1 step 4.g uses `Invoke(item, "then", …)` —
+    // a `[[Get]]("then")` lookup that picks up the override.
+    // Cynic's race must NOT call its native `then` impl
+    // directly; user code is observably called.
+    try expectScriptIntWithBuiltins(
+        \\let calls = 0;
+        \\const p = Promise.resolve(1);
+        \\p.then = function() { calls += 1; return Promise.resolve(); };
+        \\Promise.race([p]);
+        \\globalThis.__drainMicrotasks();
+        \\calls;
+    , 1);
+}
+
 test "later: async function returns a Promise" {
     try expectScriptStringWithBuiltins(
         \\async function f() { return 42; }

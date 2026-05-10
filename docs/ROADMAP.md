@@ -73,10 +73,10 @@ code construction (aligns with SES).
   synthetic-handler for finally-on-throw and inlining of finally
   bodies on `return`.
 - Functions: arrows, methods, generators, async, async generators
-  (with synchronously-settled and pending-promise yield-await
-  chaining), bound functions, classes (constructors, methods,
-  static, private fields + methods, accessors, `extends` /
-  `super` / `super[expr]`).
+  (with microtask-deferred `.then` reactions and pending-promise
+  yield-await chaining), bound functions, classes (constructors,
+  methods, static, private fields + methods, accessors, `extends`
+  / `super` / `super[expr]`).
 - Object model: own data + accessor properties with descriptor
   flags, prototype chain, `[[Extensible]]`, frozen / sealed /
   prevent-extensions, integer-indexed properties, ArraySetLength

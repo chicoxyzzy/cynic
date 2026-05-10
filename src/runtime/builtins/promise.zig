@@ -1,13 +1,26 @@
-//! §27 Promise — extracted from `intrinsics.zig`. Cynic ships
-//! a fully-functional (synchronous-resolution) Promise model:
+//! §27 Promise — extracted from `intrinsics.zig`.
+//!
+//! Cynic implements the spec's Promise / microtask machinery:
 //! • `new Promise(executor)` runs the executor immediately;
 //! resolve/reject use a bound-function trampoline so the
 //! target Promise is captured via `bound_this`.
-//! • `.then` registers reactions; settled Promises queue a
-//! microtask, pending Promises queue on the source.
-//! • Static `Promise.resolve` / `.reject` / `.all` /
-//! `.allSettled` / `.race` honor the receiver constructor
-//! for subclassing.
+//! • Settling a Promise stores the state; `.then` ALWAYS
+//! schedules its handler as a microtask (on already-settled
+//! sources the reaction is queued immediately; on pending
+//! sources it's stored on the source and queued at
+//! settlement). The queue drains at script end, at `await`
+//! boundaries, and on the host's `globalThis.__drainMicrotasks`
+//! hook.
+//! • Aggregators (`Promise.{all, allSettled, race, any}`) go
+//! through §27.2.1.5 NewPromiseCapability and forward each
+//! resolved item via `Invoke(nextPromise, "then", « cap.resolve,
+//! cap.reject »)` — a microtask schedule, NOT a synchronous
+//! settle. That preserves the spec's interleaving with user-
+//! installed `.then` reactions and lets `Promise.race` produce
+//! the right downstream-`.then` order. User-overridable
+//! methods (`Promise.resolve`, `then`) are looked up
+//! dynamically per spec; subclassed constructors see their
+//! own executor and can intercept settlement.
 //!
 //! Microtask draining is in `interpreter.drainMicrotasks`;
 //! suspendable `await` is implemented in `runtime/interpreter.zig`
@@ -34,16 +47,18 @@ const setLength = intrinsics.setLength;
 const toLengthOf = intrinsics.toLengthOf;
 const getPropertyChain = intrinsics.getPropertyChain;
 
-// ── §27 Promise (stub — eager / synchronous resolution model) ──────────────
+// ── §27 Promise — install constructors, prototype, statics ────────────────
 
 pub fn install(realm: *Realm) !void {
-    // Cynic's Promise is a synchronous-resolution stub: `new
-    // Promise(executor)` runs the executor immediately; `then`
-    // schedules a callback that runs synchronously when the
-    // promise is already settled. This is observably wrong for
-    // microtask-ordering tests but right enough for tests that
-    // just check the API surface (constructor exists, returns
-    // an object with `.then` etc.).
+    // `new Promise(executor)` runs the executor immediately and
+    // resolves / rejects through bound-function trampolines.
+    // `.then` always defers — settled sources queue the reaction
+    // as a microtask, pending sources register on the source.
+    // Static aggregators (`Promise.{all, allSettled, race, any}`)
+    // build a fresh capability via `NewPromiseCapability(C)` and
+    // route each item through `Invoke(item, "then", «
+    // cap.resolve, cap.reject »)` — a microtask schedule, so
+    // downstream `.then` chains see the spec-required order.
     const r = try installConstructor(realm, .{
         .name = "Promise", .ctor = promiseConstructor, .arity = 1,
         .to_string_tag = "Promise",
@@ -929,55 +944,67 @@ fn promiseAllSettled(realm: *Realm, this_value: Value, args: []const Value) Nati
     return aggregatorSettleResolve(realm, ctor, cap, heap_mod.taggedObject(out));
 }
 
-/// §27.2.4.4.1 PerformPromiseRace. The first input that's already
-/// settled wins; non-promise inputs settle immediately
-/// (Promise.resolve has fulfilled them). Pending inputs ride
-/// through and the loop keeps looking — Cynic's sync-resolution
-/// model can't observe later settlement.
+/// §27.2.4.4.1 PerformPromiseRace. Per spec step 4.f-g, each
+/// resolved item's settlement is forwarded to the result
+/// capability via `.then(cap.resolve, cap.reject)`. That's a
+/// microtask schedule, NOT a synchronous settle — which preserves
+/// the spec's interleaving with other `.then` reactions and lets
+/// downstream `.then` chains observe the right order.
 const RaceCtx = struct {
-    found: ?struct { state: PromiseState, value: Value } = null,
+    cap: PromiseCapability,
 };
 fn raceProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, idx: usize, resolved: Value) NativeError!IterStepAction {
-    _ = realm;
     _ = ctor;
     _ = idx;
     const ctx: *RaceCtx = @ptrCast(@alignCast(ctx_ptr));
-    // §27.2.4.4.1 — `Promise.resolve` is invoked for every
-    // iterable item even after we've decided what to settle the
-    // result with. Record the first settled state and keep going
-    // so user code observes the full call sequence (test262
-    // `invoke-resolve-on-values-every-iteration-of-promise.js`
-    // counts the calls).
-    if (ctx.found != null) return .continue_;
-    if (promiseStateOf(resolved)) |state| {
-        if (std.mem.eql(u8, state, "rejected")) {
-            ctx.found = .{ .state = .rejected, .value = promiseValueOf(resolved) };
-        } else if (std.mem.eql(u8, state, "fulfilled")) {
-            ctx.found = .{ .state = .fulfilled, .value = promiseValueOf(resolved) };
-        }
-        return .continue_;
+    // §27.2.4.4.1 step 4.g — `Invoke(nextPromise, "then",
+    // « cap.resolve, cap.reject »)`. We must call the
+    // user-observable `.then` method through `[[Get]]` so a
+    // user override (test262 `invoke-then-error-close.js`
+    // installs `promise.then = () => { throw }`) sees the call
+    // and IteratorClose can fire on the abrupt.
+    return invokeThenForward(realm, resolved, ctx.cap);
+}
+
+/// Shared helper for the aggregator microtask path: takes a
+/// resolved item and forwards its settlement into the result
+/// capability via `Invoke(item, "then", « cap.resolve,
+/// cap.reject »)`. Honors user-defined `then` overrides per
+/// §27.2.4.x step 4.g. On abrupt completion, sets
+/// `realm.pending_exception` and returns `error.NativeThrew`
+/// so the surrounding aggregator does IteratorClose.
+fn invokeThenForward(realm: *Realm, resolved: Value, cap: PromiseCapability) NativeError!IterStepAction {
+    const interp = @import("../interpreter.zig");
+    const obj = heap_mod.valueAsPlainObject(resolved) orelse return throwTypeError(realm, "Promise aggregator: resolve did not return an object");
+    const then_v = try getPropertyChain(realm, obj, "then");
+    const then_fn = heap_mod.valueAsFunction(then_v) orelse return throwTypeError(realm, "Promise aggregator: 'then' is not callable");
+    const then_args = [_]Value{ heap_mod.taggedFunction(cap.resolve), heap_mod.taggedFunction(cap.reject) };
+    const outcome = interp.callJSFunction(realm.allocator, realm, then_fn, resolved, &then_args) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    switch (outcome) {
+        .value, .yielded => return .continue_,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
     }
-    ctx.found = .{ .state = .fulfilled, .value = resolved };
-    return .continue_;
 }
 
 fn promiseRace(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctor = try thisAsPromiseCtor(realm, this_value, "race");
-    const cap = if (isBuiltinPromise(realm, ctor)) null_cap else try newPromiseCapability(realm, ctor);
-    var ctx = RaceCtx{};
+    // §27.2.4.4 step 2 — always go through NewPromiseCapability.
+    // The cap.resolve / cap.reject closures are what we hand to
+    // each `.then` call, so we need them populated even for the
+    // built-in Promise constructor.
+    const cap = try newPromiseCapability(realm, ctor);
+    var ctx = RaceCtx{ .cap = cap };
     iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, raceProcess) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NativeThrew => return aggregatorRejectThroughCap(realm, ctor, cap),
     };
-    if (ctx.found) |hit| {
-        if (hit.state == .rejected) return aggregatorSettleReject(realm, ctor, cap, hit.value);
-        if (hit.state == .fulfilled) return aggregatorSettleResolve(realm, ctor, cap, hit.value);
-    }
-    // Empty iterable OR every input pending — result Promise
-    // stays pending (§27.2.4.4.1 step 3). Capability path: just
-    // return its (still-pending) Promise; fast path: allocate.
-    if (cap) |c| return c.promise;
-    return allocatePromiseFor(realm, ctor, .pending, Value.undefined_) catch return error.OutOfMemory;
+    return cap.promise;
 }
 
 /// §27.2.4.3.1 PerformPromiseAny. First fulfilled input wins; if
