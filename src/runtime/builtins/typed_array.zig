@@ -655,6 +655,83 @@ fn taMakeNew(realm: *Realm, kind: ObjMod.TypedKind, length: usize) NativeError!*
     return inst;
 }
 
+/// §23.2.4.7 TypedArraySpeciesCreate(exemplar, argumentList).
+///
+/// Reads `exemplar.constructor`, then `constructor[@@species]`,
+/// falling back to the default constructor (`%Int8Array%` etc.)
+/// when either step yields undefined/null. The resolved
+/// constructor is invoked with `new ctor(length)` and the
+/// result is type-checked: must be a TypedArray instance of
+/// matching `kind` and at least `length` long.
+///
+/// Tests routinely subclass `Uint8Array` and override
+/// `@@species` to return a stub constructor — this matters for
+/// `slice` / `filter` / `map` whose spec text invokes
+/// SpeciesCreate so user subclasses interpose.
+fn taSpeciesCreate(realm: *Realm, exemplar: *JSObject, kind: ObjMod.TypedKind, length: usize) NativeError!*JSObject {
+    // §7.3.22 SpeciesConstructor step 1 — Get(exemplar, "constructor").
+    const ctor_prop = intrinsics.getPropertyChain(realm, exemplar, "constructor") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    // §7.3.22 step 2 — undefined → default constructor.
+    var species_v = Value.undefined_;
+    if (!ctor_prop.isUndefined()) {
+        // §7.3.22 step 3 — non-object → TypeError.
+        const ctor_obj_or_fn = heap_mod.valueAsPlainObject(ctor_prop) orelse blk: {
+            if (heap_mod.valueAsFunction(ctor_prop)) |fn_obj| {
+                // Use the function's accessor lookup chain.
+                species_v = fn_obj.get("@@species");
+                break :blk @as(?*JSObject, null);
+            }
+            return throwTypeError(realm, "exemplar.constructor is not an object");
+        };
+        if (ctor_obj_or_fn) |obj| {
+            species_v = intrinsics.getPropertyChain(realm, obj, "@@species") catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+        }
+        // If `species_v` is the constructor itself with no override,
+        // it'll be the original ctor; we still go through the
+        // construct path below for spec-correctness.
+    }
+
+    // §7.3.22 step 5 — undefined/null → default.
+    if (species_v.isUndefined() or species_v.isNull()) {
+        return taMakeNew(realm, kind, length);
+    }
+    // §7.3.22 step 6 — must be a constructor.
+    const species_fn = heap_mod.valueAsFunction(species_v) orelse return throwTypeError(realm, "TypedArray @@species is not a constructor");
+
+    // Construct: `new species(length)`. Pass `length` as Number.
+    // Open a HandleScope: `constructValue` re-enters the
+    // interpreter and may trigger GC, which would sweep
+    // ephemeral pointers held in stack-locals here.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const ctor_args = [_]Value{Value.fromInt32(@as(i32, @intCast(@min(length, std.math.maxInt(i32)))))};
+    const interpreter = @import("../interpreter.zig");
+    const callee_v = heap_mod.taggedFunction(species_fn);
+    const outcome = interpreter.constructValue(realm.allocator, realm, callee_v, &ctor_args, callee_v) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const result_v = switch (outcome) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+    // §23.2.4.7 step 4 — result must be a TypedArray with matching kind and >= length.
+    const result_obj = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "TypedArray species ctor returned non-object");
+    const result_tv = result_obj.typed_view orelse return throwTypeError(realm, "TypedArray species ctor returned non-TypedArray");
+    if (result_tv.kind != kind) return throwTypeError(realm, "TypedArray species ctor returned wrong content type");
+    if (result_tv.length < length) return throwTypeError(realm, "TypedArray species ctor returned too-short TypedArray");
+    return result_obj;
+}
+
 fn nameForTypedKind(kind: ObjMod.TypedKind) []const u8 {
     return switch (kind) {
         .int8 => "Int8Array",
@@ -1011,18 +1088,35 @@ fn typedArrayReverse(realm: *Realm, this_value: Value, args: []const Value) Nati
 // ── TypedArray prototype: methods that allocate a new TA ─────────────────────
 
 fn typedArraySlice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const tv = taViewOf(this_value) orelse return throwTypeError(realm, "slice on non-TypedArray");
-    const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
-    const len: i64 = @intCast(tv.length);
+    const self = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "slice on non-TypedArray");
+    const tv_pre = self.typed_view orelse return throwTypeError(realm, "slice on non-TypedArray");
+    const len: i64 = @intCast(tv_pre.length);
     const start = taResolveIndex(argOr(args, 0, Value.fromInt32(0)), len, 0);
     const end = taResolveIndex(argOr(args, 1, Value.undefined_), len, len);
     const new_len: usize = if (end > start) @intCast(end - start) else 0;
-    const out = try taMakeNew(realm, tv.kind, new_len);
+    const kind = tv_pre.kind;
+    // §23.2.3.27 step 13 — TypedArraySpeciesCreate(O, « count »).
+    // The construct call re-enters the interpreter; user
+    // species ctors can detach the buffer mid-call. Re-read tv
+    // and buf AFTER the construct so we don't dereference a
+    // freed pointer.
+    const out = try taSpeciesCreate(realm, self, kind, new_len);
     if (new_len > 0) {
-        const elem_size = tv.kind.elementSize();
-        const out_buf = out.typed_view.?.viewed.array_buffer.?;
+        const tv = self.typed_view orelse return throwTypeError(realm, "TypedArray detached during slice");
+        const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached during slice");
+        const elem_size = kind.elementSize();
+        const out_tv = out.typed_view orelse return throwTypeError(realm, "Species ctor returned non-TypedArray");
+        const out_buf = out_tv.viewed.array_buffer orelse return throwTypeError(realm, "Species ctor returned detached buffer");
         const src_off = tv.byte_offset + @as(usize, @intCast(start)) * elem_size;
-        @memcpy(out_buf[0 .. new_len * elem_size], buf[src_off .. src_off + new_len * elem_size]);
+        // Clamp copy to what's actually available in source (the
+        // ctor may have resized the underlying buffer mid-call).
+        const avail = if (src_off + new_len * elem_size <= buf.len)
+            new_len * elem_size
+        else if (src_off < buf.len)
+            buf.len - src_off
+        else
+            0;
+        if (avail > 0) @memcpy(out_buf[0..avail], buf[src_off .. src_off + avail]);
     }
     return heap_mod.taggedObject(out);
 }
@@ -1052,7 +1146,8 @@ fn typedArraySubarray(realm: *Realm, this_value: Value, args: []const Value) Nat
 fn typedArrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
     const elem_size = ctx.tv.kind.elementSize();
-    const out = try taMakeNew(realm, ctx.tv.kind, ctx.tv.length);
+    // §23.2.3.19 step 6 — TypedArraySpeciesCreate(O, « len »).
+    const out = try taSpeciesCreate(realm, ctx.self_obj, ctx.tv.kind, ctx.tv.length);
     const out_buf = out.typed_view.?.viewed.array_buffer.?;
     var i: usize = 0;
     while (i < ctx.tv.length) : (i += 1) {
@@ -1078,7 +1173,8 @@ fn typedArrayFilter(realm: *Realm, this_value: Value, args: []const Value) Nativ
         const r = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
         if (toBoolean(r)) kept.append(realm.allocator, i) catch return error.OutOfMemory;
     }
-    const out = try taMakeNew(realm, ctx.tv.kind, kept.items.len);
+    // §23.2.3.10 step 12 — TypedArraySpeciesCreate(O, « kept.length »).
+    const out = try taSpeciesCreate(realm, ctx.self_obj, ctx.tv.kind, kept.items.len);
     const out_buf = out.typed_view.?.viewed.array_buffer.?;
     for (kept.items, 0..) |src_i, dst_i| {
         const src_off = ctx.tv.byte_offset + src_i * elem_size;
