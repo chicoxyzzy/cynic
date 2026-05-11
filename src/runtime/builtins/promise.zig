@@ -81,6 +81,19 @@ pub fn install(realm: *Realm) !void {
 
     realm.intrinsics.promise_prototype = proto;
 
+    // §27.2.4.6 — get Promise [ @@species ] returns `this`.
+    // The static accessor lives on the constructor (a JSFunction),
+    // so we install directly into its `accessors` map; spec flags
+    // are `{ enumerable: false, configurable: true }` (no writable
+    // on accessors).
+    const species_getter = try realm.heap.allocateFunctionNative(promiseSpeciesGetter, 0, "[Symbol.species]");
+    species_getter.proto = realm.intrinsics.function_prototype;
+    const sp_entry = try fn_obj.accessors.getOrPut(realm.allocator, "@@species");
+    sp_entry.value_ptr.* = .{ .getter = species_getter };
+    try fn_obj.property_flags.put(realm.allocator, "@@species", .{
+        .writable = false, .enumerable = false, .configurable = true,
+    });
+
     // Cynic-only host hook: lets tests + the CLI explicitly
     // drain the microtask queue. Real ECMAScript hosts drain
     // automatically at "completion of a job" — Cynic's CLI does
@@ -89,6 +102,16 @@ pub fn install(realm: *Realm) !void {
     // Lives on `globalThis.__drainMicrotasks`; not in the spec.
     const drain_fn = try realm.heap.allocateFunctionNative(microtaskDrainNative, 0, "__drainMicrotasks");
     try realm.globals.put(realm.allocator, "__drainMicrotasks", heap_mod.taggedFunction(drain_fn));
+}
+
+/// §27.2.4.6 `get Promise [ @@species ]`. The spec says "Return
+/// the `this` value." Subclasses inherit this getter, so
+/// `Foo.prototype[Symbol.species] === Foo` for any
+/// `class Foo extends Promise {}`.
+fn promiseSpeciesGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = args;
+    return this_value;
 }
 
 fn microtaskDrainNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -638,6 +661,32 @@ fn collectIterable(realm: *Realm, source_v: Value) NativeError!std.ArrayList(Val
 /// override that test262 fixtures install never gets a chance to
 /// throw, so the iterator (often poisoned to never-finish) burns
 /// to the 16M cap.
+/// §10.1.8.1 OrdinaryGet variant for a JSFunction receiver. Fires
+/// own accessor getters (`Object.defineProperty(Promise, "resolve",
+/// { get(){} })`), falls back to the data-bag, then walks the
+/// prototype chain like `JSFunction.get`. Used by aggregators
+/// that must observe user-overridden `Promise.resolve` per spec.
+fn ctorGetMember(realm: *Realm, ctor: *JSFunction, key: []const u8) NativeError!Value {
+    if (ctor.accessors.get(key)) |acc| {
+        if (acc.getter) |getter| {
+            const interp = @import("../interpreter.zig");
+            const outcome = interp.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(ctor), &.{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            switch (outcome) {
+                .value, .yielded => |v| return v,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            }
+        }
+        return Value.undefined_;
+    }
+    return ctor.get(key);
+}
+
 const IterStepAction = enum { continue_, short_circuit };
 fn iterateAggregator(
     realm: *Realm,
@@ -649,6 +698,17 @@ fn iterateAggregator(
     const interp = @import("../interpreter.zig");
     const obj = heap_mod.valueAsPlainObject(source_v) orelse return throwTypeError(realm, "Promise aggregator requires an iterable");
 
+    // §27.2.4.1.1 GetPromiseResolve — `Get(promiseConstructor, "resolve")`
+    // runs ONCE before the loop. Fixtures count the resolve
+    // getter calls and assert it fires exactly once per
+    // `Promise.all(iter)` invocation; the per-element lookup is
+    // a spec bug.
+    const resolve_v = ctorGetMember(realm, ctor, "resolve") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const resolve_fn = heap_mod.valueAsFunction(resolve_v) orelse return throwTypeError(realm, "Promise aggregator: resolve is not a function");
+
     if (try iteratorOpen(realm, source_v)) |rec_in| {
         var rec = rec_in;
         const max_iter: usize = 1 << 24;
@@ -659,18 +719,6 @@ fn iterateAggregator(
                 // here (rec.done is true).
                 return err;
             } orelse return;
-
-            // §27.2.4.1.2 step 8.h.iv —
-            //   `Let nextPromise be ? Invoke(C, "resolve", « nextValue »)`.
-            // Look up `constructor.resolve` per item: the spec is
-            // explicit that user code can override it
-            // (`Promise.resolve = function(){ throw … };`), and
-            // that throw must IteratorClose the source.
-            const resolve_v = ctor.get("resolve");
-            const resolve_fn = heap_mod.valueAsFunction(resolve_v) orelse {
-                iteratorClose(realm, &rec);
-                return throwTypeError(realm, "Promise aggregator: resolve is not a function");
-            };
 
             const r_outcome = interp.callJSFunction(realm.allocator, realm, resolve_fn, heap_mod.taggedFunction(ctor), &.{next_v}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -707,8 +755,6 @@ fn iterateAggregator(
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         const v = try getPropertyChain(realm, obj, islice);
-        const resolve_v: Value = ctor.get("resolve");
-        const resolve_fn = heap_mod.valueAsFunction(resolve_v) orelse return throwTypeError(realm, "Promise aggregator: resolve is not a function");
         const r_outcome = interp.callJSFunction(realm.allocator, realm, resolve_fn, heap_mod.taggedFunction(ctor), &.{v}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
