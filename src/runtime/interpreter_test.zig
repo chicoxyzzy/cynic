@@ -3393,3 +3393,49 @@ test "later: static private brand check throws on cross-instance" {
         \\try { A.peek(B); "no throw"; } catch (e) { e.constructor.name; }
     , "TypeError");
 }
+
+// ── §14.7.5 / §27.1.4.3 — for-await-of ──────────────────────────────────────
+
+test "later: for-await-of drives an async generator" {
+    try expectScriptStringWithBuiltins(
+        \\let log = "";
+        \\async function* g() { yield "a"; yield "b"; yield "c"; }
+        \\async function run() {
+        \\  for await (const v of g()) log += v;
+        \\  return log;
+        \\}
+        \\let out;
+        \\run().then(r => out = r);
+        \\__drainMicrotasks();
+        \\out;
+    , "abc");
+}
+
+test "later: for-await-of over a sync iterable still works (await unwraps non-Promises)" {
+    try expectScriptStringWithBuiltins(
+        \\async function run() {
+        \\  let s = "";
+        \\  for await (const v of [10, 20, 30]) s += v + ",";
+        \\  return s;
+        \\}
+        \\let out;
+        \\run().then(r => out = r);
+        \\__drainMicrotasks();
+        \\out;
+    , "10,20,30,");
+}
+
+test "later: for-await-of unwraps Promise-of-value yields" {
+    try expectScriptStringWithBuiltins(
+        \\async function* g() { yield Promise.resolve("x"); yield "y"; yield Promise.resolve("z"); }
+        \\async function run() {
+        \\  let s = "";
+        \\  for await (const v of g()) s += v;
+        \\  return s;
+        \\}
+        \\let out;
+        \\run().then(r => out = r);
+        \\__drainMicrotasks();
+        \\out;
+    , "xyz");
+}

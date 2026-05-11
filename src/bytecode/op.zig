@@ -326,6 +326,12 @@ pub const Op = enum(u8) {
     /// value isn't an object. Used by for-of, array spread, and
     /// iterable destructuring.
     iter_open,
+    /// `[op]` — §27.1.4.3 GetIterator(acc, async). Prefers
+    /// `@@asyncIterator`; on absence falls back to the sync
+    /// `@@iterator` (the surrounding for-await-of step `await`s
+    /// each `next()` result, so a sync iter still composes).
+    /// Result lands in `acc`.
+    async_iter_open,
     /// `[op] [r_iter:u8] [r_done:u8]` — §7.4.4 IteratorStep on an
     /// iterator opened by `iter_open` (or any spec-shaped iterator
     /// in `r_iter`). If the iter is already marked done (via the
@@ -517,6 +523,7 @@ pub const Op = enum(u8) {
             .gen_yield,
             .await_,
             .iter_open,
+            .async_iter_open,
             .for_in_open,
             .pop_env,
             .negate,
@@ -673,6 +680,7 @@ pub const Op = enum(u8) {
             .gen_yield => "GenYield",
             .await_ => "Await",
             .iter_open => "IterOpen",
+            .async_iter_open => "AsyncIterOpen",
             .iter_step => "IterStep",
             .for_in_open => "ForInOpen",
             .pop_env => "PopEnv",

@@ -581,6 +581,40 @@ pub const IterError = error{
 /// fallback is observably correct (returns `{value, done}` from
 /// `.next()`) for the test262 surface that just calls `for-of`
 /// over arrays.
+/// §27.1.4.3 GetIterator(obj, async) — async variant. Prefers
+/// `@@asyncIterator`; if absent, falls back to the sync
+/// `@@iterator` (or the array-like-length walk). The for-await
+/// step path awaits each `.next()` result, so a sync iterator
+/// produces a resolved promise per step automatically via the
+/// `await_` opcode.
+pub fn openAsyncIterator(
+    _: std.mem.Allocator,
+    realm: *Realm,
+    iterable: Value,
+) IterError!Value {
+    if (heap_mod.valueAsPlainObject(iterable)) |obj| {
+        const iter_fn_v = obj.get("@@asyncIterator");
+        if (heap_mod.valueAsFunction(iter_fn_v)) |iter_fn| {
+            const result = callJSFunction(realm.allocator, realm, iter_fn, iterable, &.{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidOpcode,
+            };
+            switch (result) {
+                .value, .yielded => |v| {
+                    if (heap_mod.valueAsPlainObject(v) == null) return error.NotIterable;
+                    return v;
+                },
+                .thrown => return error.NotIterable,
+            }
+        }
+    }
+    // Fall back to the sync iterator. §27.1.4.4 says we should
+    // wrap with CreateAsyncFromSyncIterator; for now we just hand
+    // back the sync iter — `await` on a non-Promise next() result
+    // resolves to the value, which is the observable shape.
+    return openIterator(realm.allocator, realm, iterable);
+}
+
 pub fn openIterator(
     _: std.mem.Allocator,
     realm: *Realm,
@@ -3276,6 +3310,25 @@ fn runFrames(
                     error.OutOfMemory => return error.OutOfMemory,
                     error.NotIterable => {
                         const ex = try makeTypeError(realm, "value is not iterable");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
+                    },
+                    error.InvalidOpcode => return error.InvalidOpcode,
+                };
+                acc = new_iter;
+            },
+
+            .async_iter_open => {
+                const iterable = acc;
+                const new_iter = openAsyncIterator(allocator, realm, iterable) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NotIterable => {
+                        const ex = try makeTypeError(realm, "value is not async iterable");
                         f.ip = ip;
                         f.accumulator = acc;
                         committed = true;

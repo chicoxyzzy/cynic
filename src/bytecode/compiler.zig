@@ -2776,7 +2776,11 @@ fn emitBindingRead(self: *Compiler, name: []const u8, span: Span) CompileError!v
 /// + strings, which is the bulk of test262's for-of use.
 /// `for-in` and `for await` are deferred.
 fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!void {
-    if (s.is_await) return error.UnsupportedStatement;
+    // §14.7.5 `for await … of` — emits the same skeleton as
+    // `for-of` but opens an async iterator (`@@asyncIterator`
+    // first, sync fallback) and awaits each `next()` result.
+    // The surrounding function must be async (or async generator)
+    // for `await` to suspend; the parser already enforces that.
 
     // Determine the binding shape early — we need it before
     // opening the loop scope so we know whether to mark it as
@@ -2879,7 +2883,12 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
     // §14.7.5.6 EnumerateObjectProperties), then drive
     // `it.next()` until `result.done`.
     try self.compileExpression(&s.right);
-    const open_op: Op = if (s.kind == .in_) .for_in_open else .iter_open;
+    const open_op: Op = if (s.kind == .in_)
+        .for_in_open
+    else if (s.is_await)
+        .async_iter_open
+    else
+        .iter_open;
     try self.builder.emitOp(open_op, s.span);
     const r_iter = try self.reserveTemp();
     defer self.releaseTemp();
@@ -2910,6 +2919,11 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
     try self.builder.emitU8(r_iter);
     try self.builder.emitU8(r_next_fn);
     try self.builder.emitU8(0);
+    // §14.7.5 / §27.1.4.4 — for-await-of awaits each next()
+    // result. Sync iters return `{done, value}` directly;
+    // `await` on a non-Promise resolves to the value as-is, so
+    // the sync fallback in `async_iter_open` composes.
+    if (s.is_await) try self.builder.emitOp(.await_, s.span);
     try self.builder.emitOp(.star, s.span);
     try self.builder.emitU8(r_result);
 
