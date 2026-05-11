@@ -703,7 +703,7 @@ pub const JSObject = struct {
     /// own properties; reads fall through to the prototype
     /// chain). Promotes dense → sparse when the growth gap
     /// exceeds `sparse_gap_threshold`. No-op if already big enough.
-    fn ensureElementsLen(self: *JSObject, allocator: std.mem.Allocator, new_len: usize) !void {
+    pub fn ensureElementsLen(self: *JSObject, allocator: std.mem.Allocator, new_len: usize) !void {
         if (self.is_sparse) {
             if (new_len > self.sparse_length) {
                 if (new_len > std.math.maxInt(u32)) return error.OutOfMemory;

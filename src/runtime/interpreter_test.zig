@@ -2840,6 +2840,30 @@ test "Array.prototype.findLastIndex: walks prototype chain" {
     , 0);
 }
 
+test "Object.defineProperty: accessor at index >= length extends length" {
+    // §10.4.2.4 ArraySetLength step 3.h — defining ANY property
+    // (data OR accessor) at index P where P ≥ length sets
+    // length to P + 1. The data path always did this; the
+    // accessor path historically didn't, leaving Array.prototype.X
+    // fixtures over a single-accessor array iterating zero times.
+    try expectScriptIntWithBuiltins(
+        \\const a = [];
+        \\Object.defineProperty(a, "0", { get() { return 7; }, configurable: true });
+        \\a.length;
+    , 1);
+    try expectScriptIntWithBuiltins(
+        \\const a = [];
+        \\Object.defineProperty(a, "5", { get() { return 7; }, configurable: true });
+        \\a.length;
+    , 6);
+    try expectScriptIntWithBuiltins(
+        \\const a = [];
+        \\Object.defineProperty(a, "0", { get() { return 7; }, configurable: true });
+        \\const r = a.map(v => v * 2);
+        \\r[0];
+    , 14);
+}
+
 test "Array.prototype.reduceRight: empty array without initial throws TypeError" {
     // §23.1.3.27 step 7 — TypeError, not opaque NativeThrew.
     try expectScriptStringWithBuiltins(

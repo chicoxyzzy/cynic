@@ -633,6 +633,20 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             if (target.is_array_exotic) {
                 if (ObjMod.JSObject.canonicalIntegerIndex(key)) |idx| {
                     target.holeIndexed(idx);
+                    // §10.4.2.4 ArraySetLength step 3.h — defining
+                    // ANY property (data OR accessor) at index P
+                    // where P ≥ length sets length to P + 1. The
+                    // packed-data path inside `setWithFlags` does
+                    // this; the accessor path historically didn't,
+                    // so `Object.defineProperty([], "0", {get})`
+                    // left `length === 0` and all subsequent
+                    // `.map / .forEach / .filter` over-the-accessor
+                    // fixtures saw an empty array.
+                    const new_len: usize = @as(usize, idx) + 1;
+                    if (target.arrayLength() < new_len) {
+                        target.ensureElementsLen(realm.allocator, new_len) catch return error.OutOfMemory;
+                        target.syncLengthProperty(realm.allocator) catch return error.OutOfMemory;
+                    }
                 }
             }
             const entry = target.accessors.getOrPut(realm.allocator, key) catch return error.OutOfMemory;
