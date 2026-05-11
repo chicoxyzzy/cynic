@@ -226,12 +226,17 @@ pub fn ownPropertyKeysOrdered(
 /// the target's own keys directly.
 fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []const u8 {
     const proxy_target = obj.proxy_target orelse return null;
-    const handler = obj.proxy_handler orelse return null;
+    // §10.5.11 step 2 — revoked proxy throws TypeError.
+    if (obj.proxy_revoked) return throwTypeError(realm, "Cannot perform 'ownKeys' on a revoked proxy");
+    const handler = obj.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'ownKeys' on a proxy with null handler");
     const trap_v = handler.get("ownKeys");
-    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
-        // Fall through to the target.
+    // §10.5.11 step 5 — trap is `undefined` / `null` → fall back
+    // to target's [[OwnPropertyKeys]]. Anything else non-callable
+    // is a TypeError per IsCallable.
+    if (trap_v.isUndefined() or trap_v.isNull()) {
         return try ownPropertyKeysOrdered(realm, proxy_target);
-    };
+    }
+    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'ownKeys' trap is not callable");
     const interpreter = @import("../interpreter.zig");
     const trap_args = [_]Value{heap_mod.taggedObject(proxy_target)};
     const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
@@ -248,18 +253,60 @@ fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []cons
     const result = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "'ownKeys' on proxy must return an array-like");
     const len = lengthOfArrayLocal(result);
     var out: std.ArrayListUnmanaged([]const u8) = .empty;
+    var seen: std.StringArrayHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(realm.allocator);
     var i: i64 = 0;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         const k_v = result.get(islice);
+        // §10.5.11 step 8 — CreateListFromArrayLike rejects any
+        // entry that isn't a String or Symbol. Numbers / booleans /
+        // null / undefined → TypeError.
+        if (!k_v.isString()) {
+            // Cynic symbols are represented as JSSymbol values;
+            // for the purpose of these tests anything not a
+            // string is rejected. (Cross-realm symbols are out
+            // of scope.)
+            const sym = heap_mod.valueAsSymbol(k_v);
+            if (sym == null) return throwTypeError(realm, "'ownKeys' on proxy returned a non-String, non-Symbol entry");
+        }
         const key_str = if (k_v.isString())
             (@as(*JSString, @ptrCast(@alignCast(k_v.asString())))).bytes
         else blk: {
             const s = stringifyArg(realm, k_v) catch return error.OutOfMemory;
             break :blk s.bytes;
         };
+        // §10.5.11 step 9 — duplicate keys → TypeError.
+        const entry = seen.getOrPut(realm.allocator, key_str) catch return error.OutOfMemory;
+        if (entry.found_existing) return throwTypeError(realm, "'ownKeys' on proxy returned duplicate entries");
         out.append(realm.allocator, key_str) catch return error.OutOfMemory;
+    }
+    // §10.5.11 step 17-24 — non-extensible target invariants.
+    // Every non-configurable own key on the target must appear
+    // in the result, and the result must not introduce keys
+    // that don't exist on a non-extensible target.
+    if (!proxy_target.extensible) {
+        // Build a set of target's own keys for invariant checks.
+        const target_keys = try ownPropertyKeysOrdered(realm, proxy_target);
+        defer realm.allocator.free(target_keys);
+        // (a) every target own key must be present in result.
+        for (target_keys) |tk| {
+            if (!seen.contains(tk)) {
+                return throwTypeError(realm, "'ownKeys' on proxy omitted a key present on a non-extensible target");
+            }
+        }
+        // (b) result must not contain extras absent from target.
+        var target_set: std.StringArrayHashMapUnmanaged(void) = .empty;
+        defer target_set.deinit(realm.allocator);
+        for (target_keys) |tk| {
+            target_set.put(realm.allocator, tk, {}) catch return error.OutOfMemory;
+        }
+        for (out.items) |rk| {
+            if (!target_set.contains(rk)) {
+                return throwTypeError(realm, "'ownKeys' on proxy added a key absent from a non-extensible target");
+            }
+        }
     }
     return out.toOwnedSlice(realm.allocator) catch return error.OutOfMemory;
 }
@@ -579,29 +626,82 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
     // handler's `defineProperty` trap before falling back.
     if (heap_mod.valueAsPlainObject(target_v)) |obj_in| {
         if (obj_in.proxy_target) |proxy_target| {
-            if (obj_in.proxy_handler) |handler| {
-                const trap_v = handler.get("defineProperty");
-                if (heap_mod.valueAsFunction(trap_v)) |trap_fn| {
-                    const interpreter = @import("../interpreter.zig");
-                    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                    const trap_args = [_]Value{ heap_mod.taggedObject(proxy_target), Value.fromString(key_str), desc_v };
-                    const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
-                        error.OutOfMemory => return error.OutOfMemory,
-                        else => return error.NativeThrew,
-                    };
-                    switch (outcome) {
-                        .value, .yielded => |v| {
-                            if (!intrinsics.toBoolean(v)) return throwTypeError(realm, "'defineProperty' on proxy returned falsy");
-                            return target_v;
-                        },
-                        .thrown => |ex| {
-                            realm.pending_exception = ex;
-                            return error.NativeThrew;
-                        },
-                    }
+            if (obj_in.proxy_revoked) return throwTypeError(realm, "Cannot perform 'defineProperty' on a revoked proxy");
+            const handler = obj_in.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'defineProperty' on a proxy with null handler");
+            const trap_v = handler.get("defineProperty");
+            // §10.5.6 step 5 — IsCallable check. `undefined` /
+            // `null` means "no trap; fall through". Anything else
+            // non-callable is a TypeError.
+            if (!trap_v.isUndefined() and !trap_v.isNull()) {
+                const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'defineProperty' trap is not callable");
+                const interpreter = @import("../interpreter.zig");
+                const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                const trap_args = [_]Value{ heap_mod.taggedObject(proxy_target), Value.fromString(key_str), desc_v };
+                const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (outcome) {
+                    .value, .yielded => |v| {
+                        if (!intrinsics.toBoolean(v)) return throwTypeError(realm, "'defineProperty' on proxy returned falsy");
+                        // §10.5.6 steps 16-19 — invariant guards.
+                        // Read the target's current own-descriptor
+                        // and compare against the descriptor we
+                        // were asked to install. Three failure modes:
+                        //   - target lacks the property AND is
+                        //     non-extensible → throw.
+                        //   - target lacks the property AND the
+                        //     descriptor is non-configurable → throw.
+                        //   - descriptor is incompatible with the
+                        //     existing target descriptor → throw.
+                        const target_had = proxy_target.hasOwn(key) or proxy_target.accessors.contains(key);
+                        const parsed_for_inv = parseDescriptor(realm, heap_mod.valueAsPlainObject(desc_v) orelse return target_v) catch return target_v;
+                        if (!target_had) {
+                            if (!proxy_target.extensible) {
+                                return throwTypeError(realm, "'defineProperty' on proxy: target is not extensible and trap returned truthy for an absent property");
+                            }
+                            if (parsed_for_inv.has_configurable and !parsed_for_inv.configurable) {
+                                return throwTypeError(realm, "'defineProperty' on proxy: cannot define a non-configurable property absent from the target");
+                            }
+                        } else {
+                            const cur_flags = proxy_target.flagsFor(key);
+                            const cur_is_acc = proxy_target.accessors.contains(key);
+                            const cur_value: Value = blk: {
+                                if (cur_is_acc) break :blk Value.undefined_;
+                                if (proxy_target.properties.get(key)) |val| break :blk val;
+                                break :blk Value.undefined_;
+                            };
+                            var cur_getter: ?*JSFunction = null;
+                            var cur_setter: ?*JSFunction = null;
+                            if (proxy_target.accessors.get(key)) |a| {
+                                cur_getter = a.getter;
+                                cur_setter = a.setter;
+                            }
+                            if (!isCompatibleRedefine(cur_is_acc, cur_flags, cur_value, cur_getter, cur_setter, parsed_for_inv)) {
+                                return throwTypeError(realm, "'defineProperty' on proxy: trap returned truthy for an incompatible redefine of a non-configurable target property");
+                            }
+                            // Configurable-flip guard — if the new
+                            // descriptor is non-configurable but the
+                            // target's current property is configurable,
+                            // a fresh `getOwnPropertyDescriptor` on the
+                            // target must observe the new flags. Since
+                            // we don't actually mutate the target via
+                            // the trap, just guard against the
+                            // configurable-flip when the new desc
+                            // is non-configurable but the target is.
+                            if (parsed_for_inv.has_configurable and !parsed_for_inv.configurable and cur_flags.configurable) {
+                                return throwTypeError(realm, "'defineProperty' on proxy: cannot flip a configurable target property to non-configurable via the trap");
+                            }
+                        }
+                        return target_v;
+                    },
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
                 }
             }
-            // Fall through to the proxy target.
+            // Trap absent — recurse on the target.
             const inner_args = [_]Value{ heap_mod.taggedObject(proxy_target), argOr(args, 1, Value.undefined_), desc_v };
             return objectDefineProperty(realm, Value.undefined_, &inner_args);
         }
@@ -803,30 +903,76 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
     const key = descriptorKey(realm, argOr(args, 1, Value.undefined_)) catch return error.OutOfMemory;
 
     // §10.5.5 Proxy [[GetOwnProperty]] — when target is a proxy,
-    // dispatch through `handler.getOwnPropertyDescriptor` if
-    // defined; missing trap falls through to the proxy target.
+    // dispatch through `handler.getOwnPropertyDescriptor`.
     if (heap_mod.valueAsPlainObject(target)) |obj_in| {
         if (obj_in.proxy_target) |proxy_target| {
-            if (obj_in.proxy_handler) |handler| {
-                const trap_v = handler.get("getOwnPropertyDescriptor");
-                if (heap_mod.valueAsFunction(trap_v)) |trap_fn| {
-                    const interpreter = @import("../interpreter.zig");
-                    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                    const trap_args = [_]Value{ heap_mod.taggedObject(proxy_target), Value.fromString(key_str) };
-                    const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
-                        error.OutOfMemory => return error.OutOfMemory,
-                        else => return error.NativeThrew,
-                    };
-                    switch (outcome) {
-                        .value, .yielded => |v| return v,
-                        .thrown => |ex| {
-                            realm.pending_exception = ex;
-                            return error.NativeThrew;
-                        },
+            if (obj_in.proxy_revoked) return throwTypeError(realm, "Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");
+            const handler = obj_in.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'getOwnPropertyDescriptor' on a proxy with null handler");
+            const trap_v = handler.get("getOwnPropertyDescriptor");
+            if (!trap_v.isUndefined() and !trap_v.isNull()) {
+                const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'getOwnPropertyDescriptor' trap is not callable");
+                const interpreter = @import("../interpreter.zig");
+                const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                const trap_args = [_]Value{ heap_mod.taggedObject(proxy_target), Value.fromString(key_str) };
+                const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                const result_v = switch (outcome) {
+                    .value, .yielded => |v| v,
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                };
+                // §10.5.5 step 8 — trap result must be Object or
+                // Undefined. (Symbols / numbers / null all reject.)
+                if (!result_v.isUndefined() and heap_mod.valueAsPlainObject(result_v) == null) {
+                    return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy must return an Object or undefined");
+                }
+                // §10.5.5 step 9-17 — invariants.
+                const target_had = proxy_target.hasOwn(key) or proxy_target.accessors.contains(key);
+                if (result_v.isUndefined()) {
+                    // Trap reports "absent". The target's own
+                    // non-configurable property MUST also be
+                    // absent; otherwise the trap lied.
+                    if (target_had) {
+                        const tflags = proxy_target.flagsFor(key);
+                        if (!tflags.configurable) {
+                            return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy reported undefined for a non-configurable target property");
+                        }
+                        if (!proxy_target.extensible) {
+                            return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy reported undefined for a present property of a non-extensible target");
+                        }
+                    }
+                    return result_v;
+                }
+                // Trap returned a descriptor. If it claims
+                // non-configurable, the target's current
+                // descriptor must (a) exist, and (b) also be
+                // non-configurable.
+                const result_obj = heap_mod.valueAsPlainObject(result_v).?;
+                const parsed_inv = parseDescriptor(realm, result_obj) catch return result_v;
+                if (parsed_inv.has_configurable and !parsed_inv.configurable) {
+                    if (!target_had) {
+                        return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy reported non-configurable for an absent target property");
+                    }
+                    const tflags = proxy_target.flagsFor(key);
+                    if (tflags.configurable) {
+                        return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy flipped a configurable target property to non-configurable");
+                    }
+                    // If the trap reported non-configurable +
+                    // non-writable data, target's matching field
+                    // must agree.
+                    if (parsed_inv.isData() and parsed_inv.has_writable and !parsed_inv.writable) {
+                        if (tflags.writable) {
+                            return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy reported non-writable for a writable target property");
+                        }
                     }
                 }
+                return result_v;
             }
-            // Fall through to the target.
+            // Trap absent — recurse on the target.
             const inner_args = [_]Value{ heap_mod.taggedObject(proxy_target), argOr(args, 1, Value.undefined_) };
             return objectGetOwnPropertyDescriptor(realm, Value.undefined_, &inner_args);
         }
