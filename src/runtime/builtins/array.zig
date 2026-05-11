@@ -708,9 +708,9 @@ fn lastStartIndexFrom(args: []const Value, len: i64) ?i64 {
 
 fn arrayFindLast(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.findLast callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
     var i: i64 = len - 1;
     while (i >= 0) : (i -= 1) {
         var ibuf: [24]u8 = undefined;
@@ -723,14 +723,15 @@ fn arrayFindLast(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 }
 
 fn arrayFindLastIndex(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = try toObjectThis(realm, this_value);
-    const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.findLastIndex callback must be a function");
-    const this_arg = argOr(args, 1, Value.undefined_);
     // §23.1.3.12 — spec mandates `LengthOfArrayLike(O)` (via
     // `Get(O, "length")`) and `Get(O, ! ToString(k))` for each
     // step, so callers can observe an overridden `length` getter
     // and inherited indexed accessors on the prototype chain.
+    // Step order: ToObject → length → IsCallable.
+    const obj = try toObjectThis(realm, this_value);
     const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.findLastIndex callback must be a function");
+    const this_arg = argOr(args, 1, Value.undefined_);
     var i: i64 = len - 1;
     while (i >= 0) : (i -= 1) {
         var ibuf: [24]u8 = undefined;
@@ -743,12 +744,17 @@ fn arrayFindLastIndex(realm: *Realm, this_value: Value, args: []const Value) Nat
 }
 
 fn arrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = try toObjectThis(realm, this_value);
-    const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.reduceRight callback must be a function");
     // §23.1.3.27 — `LengthOfArrayLike(O)` + `HasProperty` /
     // `Get` on each step. Walks the prototype chain so an
     // inherited indexed accessor / `Boolean.prototype[0]` style
-    // fixture works.
+    // fixture works. Step order: ToObject → length → IsCallable.
+    const obj = try toObjectThis(realm, this_value);
+    // We re-read length below in the sparse fast path; the eager
+    // up-front read here also fixes step-order fixtures that
+    // expect a throwing length-getter to win over a missing
+    // callback.
+    _ = try toLengthOf(realm, obj);
+    const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.reduceRight callback must be a function");
     var acc: Value = Value.undefined_;
     var have_acc = args.len >= 2;
     if (have_acc) acc = args[1];
@@ -1248,10 +1254,16 @@ pub fn invokeCallback(
 }
 
 fn arrayForEach(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.1.3.16 — spec step order is ToObject → LengthOfArrayLike
+    // → IsCallable check, so a throwing length getter wins over the
+    // callback-not-callable TypeError. Fixture 15.4.4.18-4-11
+    // installs `obj.length` with a poisoned `toString` and passes
+    // `undefined` as the callback; the test expects the length-
+    // coercion throw to propagate, not the IsCallable error.
     const obj = try toObjectThis(realm, this_value);
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.forEach callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
     var i: i64 = 0;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
@@ -1264,10 +1276,12 @@ fn arrayForEach(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 }
 
 fn arrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.1.3.19 — spec step order is ToObject → LengthOfArrayLike
+    // → callback IsCallable check, so a throwing length wins.
     const obj = try toObjectThis(realm, this_value);
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.map callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
 
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
@@ -1287,10 +1301,11 @@ fn arrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
 }
 
 fn arrayFilter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.1.3.8 spec step order: ToObject → length → IsCallable.
     const obj = try toObjectThis(realm, this_value);
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.filter callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
 
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
@@ -1316,10 +1331,11 @@ fn arrayFilter(realm: *Realm, this_value: Value, args: []const Value) NativeErro
 }
 
 fn arrayEvery(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.1.3.6 spec step order: ToObject → length → IsCallable.
     const obj = try toObjectThis(realm, this_value);
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.every callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
     var i: i64 = 0;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
@@ -1334,9 +1350,9 @@ fn arrayEvery(realm: *Realm, this_value: Value, args: []const Value) NativeError
 
 fn arraySome(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.some callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
     var i: i64 = 0;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
@@ -1351,9 +1367,9 @@ fn arraySome(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 
 fn arrayFind(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.find callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
     var i: i64 = 0;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
@@ -1367,9 +1383,9 @@ fn arrayFind(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 
 fn arrayFindIndex(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.findIndex callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
     var i: i64 = 0;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
@@ -1383,8 +1399,8 @@ fn arrayFindIndex(realm: *Realm, this_value: Value, args: []const Value) NativeE
 
 fn arrayReduce(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.reduce callback must be a function");
     const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.reduce callback must be a function");
     var acc: Value = Value.undefined_;
     var have_acc = args.len >= 2;
     if (have_acc) acc = args[1];
