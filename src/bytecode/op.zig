@@ -204,6 +204,17 @@ pub const Op = enum(u8) {
     /// `super[expr]`. Same semantics as `super_get` but the key
     /// is computed at runtime and arrives in the accumulator.
     super_get_computed,
+    /// `[op] [k:u16] [r_value:u8]` — `super.<key> = registers[r_value]`.
+    /// Walks `home.[[Prototype]]` to find a setter (or data
+    /// property to override); calls the setter with `this` from
+    /// the current frame. The new value lands in `acc` (so the
+    /// surrounding assignment expression evaluates to it).
+    /// §13.3.7.
+    super_set,
+    /// `[op] [r_key:u8] [r_value:u8]` — `super[r_key] = r_value`.
+    /// Same shape as `super_set` but the key is computed at
+    /// runtime.
+    super_set_computed,
     /// `[op] [r_args:u8] [argc:u8]` — invoke the parent
     /// constructor (`home.[[Prototype]].constructor` of the
     /// executing function) with `this` from the current frame
@@ -218,6 +229,13 @@ pub const Op = enum(u8) {
     /// but without rest-params support we read the frame's
     /// recorded `argc` directly. No operands.
     super_call_forward,
+    /// `[op] [r_args_array:u8]` — `super(...spread)` form. The
+    /// args list comes from a runtime-built Array at
+    /// `registers[r_args_array]`; the parent constructor runs
+    /// with `this` from the current frame and one positional
+    /// arg per `arr[i]` for `i` in `[0, arr.length)`. The
+    /// returned `this` lands in `acc`.
+    super_call_spread,
     /// Run the class instance-field initializers on the current
     /// frame's `this`. Reads the executing function's
     /// `home_object` (which is the class prototype), iterates
@@ -562,6 +580,7 @@ pub const Op = enum(u8) {
             .instanceof_,
             .in_op,
             .iter_close,
+            .super_call_spread,
             .array_spread,
             .object_spread,
             .set_proto_literal,
@@ -596,11 +615,11 @@ pub const Op = enum(u8) {
             .lda_env,
             .sta_env,
             => 2, // u8 + u8
-            .sta_property, .sta_private => 3, // k:u16 + r_obj:u8
+            .sta_property, .sta_private, .super_set => 3, // k:u16 + r_obj:u8
             .def_accessor => 4, // k:u16 + r_obj:u8 + is_setter:u8
             .def_computed_accessor => 3, // r_obj:u8 + r_key:u8 + is_setter:u8
             .lda_computed => 1, // r_obj:u8 (key in acc)
-            .sta_computed => 2, // r_obj:u8 + r_key:u8
+            .sta_computed, .super_set_computed => 2, // r_obj:u8 + r_key:u8
             .del_named_property => 3, // k:u16 + r_obj:u8
             .del_computed_property => 2, // r_obj:u8 + r_key:u8
             .call_method => 3, // r_recv:u8 + r_callee:u8 + argc:u8
@@ -666,6 +685,9 @@ pub const Op = enum(u8) {
             .super_get => "SuperGet",
             .super_get_computed => "SuperGetComputed",
             .super_call => "SuperCall",
+            .super_call_spread => "SuperCallSpread",
+            .super_set => "SuperSet",
+            .super_set_computed => "SuperSetComputed",
             .super_call_forward => "SuperCallForward",
             .init_instance_fields => "InitInstanceFields",
             .lda_private => "LdaPrivate",

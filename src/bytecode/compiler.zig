@@ -1422,6 +1422,43 @@ pub const Compiler = struct {
         const m = a.target.member;
         if (m.optional) return error.UnsupportedExpression;
 
+        // §13.3.7 — `super.x = v` and `super[expr] = v`. Walks the
+        // home object's prototype for a setter; falls back to a
+        // plain `this[key] = v` write. Compound forms (`super.x +=
+        // v` etc.) flow through the read-modify-write helper at
+        // the bottom of this function, which doesn't yet handle
+        // super receivers — surface that as an UnsupportedExpression
+        // until the compound form is wired (~handful of fixtures).
+        if (m.object.* == .super_) {
+            if (a.op != .eq) return error.UnsupportedExpression;
+            try self.compileExpression(a.value);
+            const r_val = try self.reserveTemp();
+            defer self.releaseTemp();
+            try self.builder.emitOp(.star, a.span);
+            try self.builder.emitU8(r_val);
+            switch (m.property) {
+                .ident => |span| {
+                    const raw = self.source[span.start..span.end];
+                    if (raw.len > 0 and raw[0] == '#') return error.UnsupportedExpression;
+                    const k = try self.internString(try self.decodeIdentifierName(raw));
+                    try self.builder.emitOp(.super_set, m.span);
+                    try self.builder.emitU16(k);
+                    try self.builder.emitU8(r_val);
+                },
+                .computed => |key_expr| {
+                    try self.compileExpression(key_expr);
+                    const r_key = try self.reserveTemp();
+                    defer self.releaseTemp();
+                    try self.builder.emitOp(.star, a.span);
+                    try self.builder.emitU8(r_key);
+                    try self.builder.emitOp(.super_set_computed, m.span);
+                    try self.builder.emitU8(r_key);
+                    try self.builder.emitU8(r_val);
+                },
+            }
+            return;
+        }
+
         try self.compileExpression(m.object);
         const r_obj = try self.reserveTemp();
         defer self.releaseTemp();
@@ -1702,8 +1739,10 @@ pub const Compiler = struct {
         // arguments compile into consecutive temps; emit
         // `super_call r_args argc`.
         if (c.callee.* == .super_) {
-            // Spread in super-call args: defer to apply path
-            // by checking; for α we only emit the simple form.
+            // §13.3.7 — `super(...spread)`. Build an args array
+            // using the same `array_spread` + numeric-index
+            // shape as `compileSpreadCall`, then dispatch via
+            // `super_call_spread` which unpacks at runtime.
             var has_spread = false;
             for (c.arguments) |*arg| {
                 if (arg.* == .spread) {
@@ -1711,7 +1750,57 @@ pub const Compiler = struct {
                     break;
                 }
             }
-            if (has_spread) return error.UnsupportedExpression;
+            if (has_spread) {
+                const r_args = try self.reserveTemp();
+                defer self.releaseTemp();
+                try self.builder.emitOp(.make_array, c.span);
+                try self.builder.emitOp(.star, c.span);
+                try self.builder.emitU8(r_args);
+                const k_length = try self.internString("length");
+                try self.builder.emitOp(.lda_smi, c.span);
+                try self.builder.emitI32(0);
+                try self.builder.emitOp(.sta_property, c.span);
+                try self.builder.emitU16(k_length);
+                try self.builder.emitU8(r_args);
+                for (c.arguments) |*arg| {
+                    if (arg.* == .spread) {
+                        try self.compileExpression(arg.spread.argument);
+                        try self.builder.emitOp(.array_spread, c.span);
+                        try self.builder.emitU8(r_args);
+                    } else {
+                        try self.compileExpression(arg);
+                        const r_val = try self.reserveTemp();
+                        defer self.releaseTemp();
+                        try self.builder.emitOp(.star, c.span);
+                        try self.builder.emitU8(r_val);
+                        try self.builder.emitOp(.ldar, c.span);
+                        try self.builder.emitU8(r_args);
+                        try self.builder.emitOp(.lda_property, c.span);
+                        try self.builder.emitU16(k_length);
+                        const r_idx = try self.reserveTemp();
+                        defer self.releaseTemp();
+                        try self.builder.emitOp(.star, c.span);
+                        try self.builder.emitU8(r_idx);
+                        try self.builder.emitOp(.ldar, c.span);
+                        try self.builder.emitU8(r_val);
+                        try self.builder.emitOp(.sta_computed, c.span);
+                        try self.builder.emitU8(r_args);
+                        try self.builder.emitU8(r_idx);
+                        // length = length + 1
+                        try self.builder.emitOp(.lda_smi, c.span);
+                        try self.builder.emitI32(1);
+                        try self.builder.emitOp(.add, c.span);
+                        try self.builder.emitU8(r_idx);
+                        try self.builder.emitOp(.sta_property, c.span);
+                        try self.builder.emitU16(k_length);
+                        try self.builder.emitU8(r_args);
+                    }
+                }
+                try self.builder.emitOp(.super_call_spread, c.span);
+                try self.builder.emitU8(r_args);
+                try self.builder.emitOp(.init_instance_fields, c.span);
+                return;
+            }
             const r_first = if (c.arguments.len > 0) try self.reserveTemp() else @as(u8, 0);
             var reserved: u8 = 0;
             if (c.arguments.len > 0) {

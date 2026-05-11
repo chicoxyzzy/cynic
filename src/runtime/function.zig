@@ -124,6 +124,14 @@ pub const JSFunction = struct {
     /// to find the parent prototype to look up on. `null` for
     /// non-method functions.
     home_object: ?*JSObject = null,
+    /// `[[HomeObject]]` for static methods, where the home is
+    /// the class constructor (a JSFunction) rather than the
+    /// class prototype object. Cynic's `home_object` is typed
+    /// `*JSObject`, so static methods need this parallel slot.
+    /// `super.x` inside a static reads `home_function.proto`
+    /// (the parent constructor) when this is set. Only one of
+    /// `home_object` / `home_function` is set on any given fn.
+    home_function: ?*@This() = null,
     /// `[[ConstructorKind]]` (§10.2.1) — `base` (default) or
     /// `derived` (constructor of `class C extends …`). later
     /// treats both identically at the call site; the precise

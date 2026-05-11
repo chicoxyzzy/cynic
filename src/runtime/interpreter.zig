@@ -95,6 +95,11 @@ pub const CallFrame = struct {
     /// `JSFunction.home_object`. `super_get` / `super_call`
     /// resolve through the home object's `[[Prototype]]`.
     home_object: ?*JSObject = null,
+    /// `[[HomeObject]]` for static methods (where the home is the
+    /// class constructor function). Mutually exclusive with
+    /// `home_object` — when this is set, super lookups walk
+    /// `home_function.proto`.
+    home_function: ?*JSFunction = null,
     /// Number of arguments the caller actually passed. Recorded
     /// at frame-push time so a synthesised
     /// `class B extends A {}` default constructor (which lowers
@@ -1130,6 +1135,7 @@ pub fn resumeAsyncFunction(
         .env = gen.env,
         .this_value = gen.this_value,
         .home_object = gen.home_object,
+        .home_function = gen.home_function,
         .argc = gen.argc,
         .generator = gen,
         .owns_registers = false,
@@ -1255,6 +1261,7 @@ pub fn resumeGenerator(
         .env = gen.env,
         .this_value = gen.this_value,
         .home_object = gen.home_object,
+        .home_function = gen.home_function,
         .argc = gen.argc,
         .generator = gen,
         .owns_registers = false,
@@ -1574,6 +1581,7 @@ pub fn callJSFunction(
         .env = callee.captured_env,
         .this_value = callee_this,
         .home_object = callee.home_object,
+        .home_function = callee.home_function,
         .argc = @intCast(@min(args.len, std.math.maxInt(u8))),
         .wrap_return_in_promise = false,
     });
@@ -2303,6 +2311,7 @@ fn runFrames(
                     .env = callee_fn.captured_env,
                     .this_value = callee_this,
                     .home_object = callee_fn.home_object,
+                    .home_function = callee_fn.home_function,
                     .argc = argc,
                     .wrap_return_in_promise = false,
                 }) catch {
@@ -2485,6 +2494,7 @@ fn runFrames(
                     .env = callee_fn.captured_env,
                     .this_value = callee_this,
                     .home_object = callee_fn.home_object,
+                    .home_function = callee_fn.home_function,
                     .argc = argc,
                     .wrap_return_in_promise = false,
                 }) catch {
@@ -2724,6 +2734,7 @@ fn runFrames(
                     .this_value = this_value,
                     .is_construct = true,
                     .home_object = callee_fn.home_object,
+                    .home_function = callee_fn.home_function,
                     .argc = argc,
                 }) catch {
                     allocator.free(callee_regs);
@@ -2973,6 +2984,40 @@ fn runFrames(
                 const key_v = local_chunk.constants[k];
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+                // §13.3.7 static-method form — home is the class
+                // constructor (a JSFunction); super walks
+                // `ctor.static_parent` which is the parent class.
+                if (f.home_function) |hf| {
+                    if (hf.static_parent) |parent_fn| {
+                        // §10.1.8.1 OrdinaryGet — accessor descriptor
+                        // wins; getter fires with `this` =
+                        // f.this_value (the current class).
+                        if (parent_fn.accessors.get(key_s.bytes)) |acc_pair| {
+                            if (acc_pair.getter) |getter| {
+                                const outcome = try callJSFunction(allocator, realm, getter, f.this_value, &.{});
+                                switch (outcome) {
+                                    .value, .yielded => |v| acc = v,
+                                    .thrown => |ex| {
+                                        f.ip = ip;
+                                        f.accumulator = acc;
+                                        committed = true;
+                                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                            return .{ .thrown = ex };
+                                        }
+                                        continue;
+                                    },
+                                }
+                            } else {
+                                acc = Value.undefined_;
+                            }
+                        } else {
+                            acc = parent_fn.get(key_s.bytes);
+                        }
+                    } else {
+                        acc = Value.undefined_;
+                    }
+                    continue;
+                }
                 const home = f.home_object orelse {
                     const ex = try makeTypeError(realm, "super used outside a method");
                     f.ip = ip;
@@ -3016,6 +3061,24 @@ fn runFrames(
             },
 
             .super_get_computed => {
+                if (f.home_function) |hf| {
+                    const key_v_static = switch (try coerceToPropertyKey(allocator, realm, frames, f, ip, acc)) {
+                        .ok => |v| v,
+                        .handled => {
+                            committed = true;
+                            continue;
+                        },
+                        .uncaught => |ex| return .{ .thrown = ex },
+                    };
+                    var key_buf_s: [64]u8 = undefined;
+                    const key_slice_s = computedKeyToString(key_v_static, &key_buf_s);
+                    if (hf.static_parent) |parent_fn| {
+                        acc = parent_fn.get(key_slice_s);
+                    } else {
+                        acc = Value.undefined_;
+                    }
+                    continue;
+                }
                 const home = f.home_object orelse {
                     const ex = try makeTypeError(realm, "super used outside a method");
                     f.ip = ip;
@@ -3062,6 +3125,156 @@ fn runFrames(
                     continue;
                 }
                 acc = parent_proto.get(key_slice);
+            },
+
+            .super_set => {
+                // §13.3.7 — `super.<key> = registers[r_value]`.
+                // Walk `home.[[Prototype]]` for an accessor; if a
+                // setter is found, call it with `this = f.this_value`.
+                // Otherwise, define the property on `this` (the
+                // §10.1.9.2 OrdinarySetWithOwnDescriptor receiver
+                // path, simplified). The new value is left in
+                // `acc` so the surrounding assignment-expression
+                // result is correct (§13.15.2 step 5).
+                const k = readU16(code, ip);
+                const r_value = code[ip + 2];
+                ip += 3;
+                if (k >= local_chunk.constants.len) return error.InvalidOpcode;
+                const key_v = local_chunk.constants[k];
+                if (!key_v.isString()) return error.InvalidOpcode;
+                const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+                const value = registers[r_value];
+                // §13.3.7 static-method form — `this` is the
+                // current class; super setter dispatch reads the
+                // parent JSFunction's `accessors` map.
+                if (f.home_function) |hf| {
+                    if (hf.static_parent) |parent_fn| {
+                        if (parent_fn.accessors.get(key_s.bytes)) |acc_pair| {
+                            if (acc_pair.setter) |setter| {
+                                const args_one = [_]Value{value};
+                                const outcome = try callJSFunction(allocator, realm, setter, f.this_value, &args_one);
+                                switch (outcome) {
+                                    .value, .yielded => {},
+                                    .thrown => |ex| {
+                                        f.ip = ip;
+                                        f.accumulator = acc;
+                                        committed = true;
+                                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                            return .{ .thrown = ex };
+                                        }
+                                        continue;
+                                    },
+                                }
+                                acc = value;
+                                continue;
+                            }
+                        }
+                    }
+                    // Fall back to writing on `this` (the
+                    // current constructor, since this is static).
+                    if (heap_mod.valueAsFunction(f.this_value)) |this_fn| {
+                        this_fn.set(allocator, key_s.bytes, value) catch return error.OutOfMemory;
+                    } else if (heap_mod.valueAsPlainObject(f.this_value)) |this_obj| {
+                        this_obj.set(allocator, key_s.bytes, value) catch return error.OutOfMemory;
+                    }
+                    acc = value;
+                    continue;
+                }
+                const home = f.home_object orelse {
+                    const ex = try makeTypeError(realm, "super used outside a method");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                };
+                const parent_proto = home.prototype;
+                var did_setter = false;
+                if (parent_proto) |p| {
+                    if (lookupAccessor(p, key_s.bytes)) |acc_pair| {
+                        if (acc_pair.setter) |setter| {
+                            const args_one = [_]Value{value};
+                            const outcome = try callJSFunction(allocator, realm, setter, f.this_value, &args_one);
+                            switch (outcome) {
+                                .value, .yielded => {},
+                                .thrown => |ex| {
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    continue;
+                                },
+                            }
+                            did_setter = true;
+                        }
+                    }
+                }
+                if (!did_setter) {
+                    // Fall back to a plain `this[key] = value`
+                    // write per §10.1.9.2 — the receiver is the
+                    // current `this`, not the parent prototype.
+                    if (heap_mod.valueAsPlainObject(f.this_value)) |this_obj| {
+                        this_obj.set(allocator, key_s.bytes, value) catch return error.OutOfMemory;
+                    }
+                }
+                acc = value;
+            },
+
+            .super_set_computed => {
+                // §13.3.7 — `super[key] = value`. `r_key` holds
+                // the key after ToPropertyKey, `r_value` the
+                // value to write. Same dispatch shape as
+                // `super_set`.
+                const r_key = code[ip];
+                const r_value = code[ip + 1];
+                ip += 2;
+                const key_v = registers[r_key];
+                const value = registers[r_value];
+                const home = f.home_object orelse {
+                    const ex = try makeTypeError(realm, "super used outside a method");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                };
+                var key_buf: [64]u8 = undefined;
+                const key_slice = computedKeyToString(key_v, &key_buf);
+                const parent_proto = home.prototype;
+                var did_setter = false;
+                if (parent_proto) |p| {
+                    if (lookupAccessor(p, key_slice)) |acc_pair| {
+                        if (acc_pair.setter) |setter| {
+                            const args_one = [_]Value{value};
+                            const outcome = try callJSFunction(allocator, realm, setter, f.this_value, &args_one);
+                            switch (outcome) {
+                                .value, .yielded => {},
+                                .thrown => |ex| {
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    continue;
+                                },
+                            }
+                            did_setter = true;
+                        }
+                    }
+                }
+                if (!did_setter) {
+                    if (heap_mod.valueAsPlainObject(f.this_value)) |this_obj| {
+                        this_obj.set(allocator, key_slice, value) catch return error.OutOfMemory;
+                    }
+                }
+                acc = value;
             },
 
             .init_instance_fields => {
@@ -3225,6 +3438,7 @@ fn runFrames(
                 gen.env = f.env;
                 gen.this_value = f.this_value;
                 gen.home_object = f.home_object;
+                gen.home_function = f.home_function;
                 gen.argc = f.argc;
                 f.ip = ip;
                 f.accumulator = acc;
@@ -3280,6 +3494,7 @@ fn runFrames(
                                     gen.env = f.env;
                                     gen.this_value = f.this_value;
                                     gen.home_object = f.home_object;
+                                    gen.home_function = f.home_function;
                                     gen.argc = f.argc;
                                     f.ip = ip;
                                     f.accumulator = Value.undefined_;
@@ -3842,13 +4057,43 @@ fn runFrames(
                 }
             },
 
-            .super_call, .super_call_forward => {
+            .super_call, .super_call_forward, .super_call_spread => {
                 var args: []const Value = &.{};
+                var spread_args: std.ArrayListUnmanaged(Value) = .empty;
+                defer spread_args.deinit(allocator);
                 if (op == .super_call) {
                     const r_args = code[ip];
                     const argc = code[ip + 1];
                     ip += 2;
                     args = registers[r_args .. @as(usize, r_args) + argc];
+                } else if (op == .super_call_spread) {
+                    // §13.3.7 — `super(...spread)`. The runtime-
+                    // built args array is in r_args_array; walk
+                    // its packed elements into a fresh stack-side
+                    // list to hand to the parent ctor.
+                    const r_args_arr = code[ip];
+                    ip += 1;
+                    const arr_v = registers[r_args_arr];
+                    const arr_obj = heap_mod.valueAsPlainObject(arr_v) orelse return error.InvalidOpcode;
+                    if (arr_obj.is_array_exotic) {
+                        for (arr_obj.elements.items) |v| {
+                            if (@import("object.zig").JSObject.isElementHole(v)) {
+                                spread_args.append(allocator, Value.undefined_) catch return error.OutOfMemory;
+                            } else {
+                                spread_args.append(allocator, v) catch return error.OutOfMemory;
+                            }
+                        }
+                    } else {
+                        const len_v = arr_obj.get("length");
+                        const len: i64 = if (len_v.isInt32()) len_v.asInt32() else if (len_v.isDouble()) @intFromFloat(@trunc(len_v.asDouble())) else 0;
+                        var i: i64 = 0;
+                        while (i < len) : (i += 1) {
+                            var buf: [24]u8 = undefined;
+                            const ks = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+                            spread_args.append(allocator, arr_obj.get(ks)) catch return error.OutOfMemory;
+                        }
+                    }
+                    args = spread_args.items;
                 } else {
                     // super_call_forward: replay the caller's args
                     // (compiler-synthesised default-derived ctor).

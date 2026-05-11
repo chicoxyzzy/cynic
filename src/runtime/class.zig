@@ -279,6 +279,11 @@ pub fn buildClass(
         else
             realm.intrinsics.function_prototype;
         fn_obj.source = m.source;
+        // §15.7.14 step 21 — HomeObject of a static method is the
+        // class constructor itself (a function). Set
+        // `home_function` so `super.x` from inside the static
+        // method walks `ctor.proto` to reach the parent class.
+        fn_obj.home_function = ctor;
         const is_priv_static = std.mem.startsWith(u8, m.name, template.private_prefix);
         switch (m.kind) {
             .method => if (is_priv_static) {

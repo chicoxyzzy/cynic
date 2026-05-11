@@ -3439,3 +3439,53 @@ test "later: for-await-of unwraps Promise-of-value yields" {
         \\out;
     , "xyz");
 }
+
+// ── §13.3.7 — super.x = v, super(...spread), super in static methods ───────
+
+test "later: super.method() chain works" {
+    try expectScriptStringWithBuiltins(
+        \\class A { foo() { return "A.foo"; } }
+        \\class B extends A { foo() { return "B." + super.foo(); } }
+        \\new B().foo();
+    , "B.A.foo");
+}
+
+test "later: super.x = v invokes parent setter" {
+    try expectScriptIntWithBuiltins(
+        \\class P { set p(v) { this._p = v * 2; } }
+        \\class C extends P { setIt(v) { super.p = v; return this._p; } }
+        \\new C().setIt(7);
+    , 14);
+}
+
+test "later: super(...spread) forwards arguments" {
+    try expectScriptStringWithBuiltins(
+        \\class A { constructor(...args) { this.args = args; } }
+        \\class B extends A { constructor() { super(...[1, 2, 3]); } }
+        \\new B().args.join(",");
+    , "1,2,3");
+}
+
+test "later: super.method() in static method walks ctor.[[Prototype]]" {
+    try expectScriptStringWithBuiltins(
+        \\class I { static greet() { return "I"; } }
+        \\class J extends I { static who() { return "J/" + super.greet(); } }
+        \\J.who();
+    , "J/I");
+}
+
+test "later: super.x in static reads parent's static accessor" {
+    try expectScriptIntWithBuiltins(
+        \\class A { static get p() { return 42; } }
+        \\class B extends A { static getIt() { return super.p; } }
+        \\B.getIt();
+    , 42);
+}
+
+test "later: super.x = v in static invokes parent's static setter" {
+    try expectScriptIntWithBuiltins(
+        \\class A { static set p(v) { A._p = v; } static get p() { return A._p; } }
+        \\class B extends A { static setIt(v) { super.p = v; return super.p; } }
+        \\B.setIt(99);
+    , 99);
+}

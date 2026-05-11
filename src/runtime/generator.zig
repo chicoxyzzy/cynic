@@ -59,6 +59,7 @@ pub const JSGenerator = struct {
     env: ?*Environment,
     this_value: Value = Value.undefined_,
     home_object: ?*JSObject = null,
+    home_function: ?*@import("function.zig").JSFunction = null,
     argc: u8 = 0,
     state: GeneratorState = .initial,
     marked: bool = false,
