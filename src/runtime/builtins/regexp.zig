@@ -94,6 +94,18 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, proto, "test", regexpTest, 1);
     try installNativeMethodOnProto(realm, proto, "exec", regexpExec, 1);
     try installNativeMethodOnProto(realm, proto, "toString", regexpToString, 0);
+    // §22.2.6.{7, 10, 12, 13} RegExp.prototype[@@{match, replace,
+    // search, split}] — required by the spec architecture (String
+    // methods delegate to these). The implementations here are
+    // minimal: each Symbol method delegates to the existing
+    // String.prototype.X path with `this` swapped. The String
+    // paths already consult `re.get("exec")` dynamically and walk
+    // `re.flags` / `re.lastIndex` via `get`, so user-overridden
+    // subclass behaviour mostly works through the back door.
+    try installNativeMethodOnProto(realm, proto, "@@match", regexpProtoMatch, 1);
+    try installNativeMethodOnProto(realm, proto, "@@replace", regexpProtoReplace, 2);
+    try installNativeMethodOnProto(realm, proto, "@@search", regexpProtoSearch, 1);
+    try installNativeMethodOnProto(realm, proto, "@@split", regexpProtoSplit, 2);
     // §22.2.6.5 RegExp.prototype[@@matchAll] — minimal wiring so
     // `re[Symbol.matchAll](s)` returns a RegExpStringIterator.
     // Spec-faithful flag-cloning + species lookup is later; this
@@ -101,6 +113,43 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, proto, "@@matchAll", regexpProtoMatchAll, 1);
 
     try installNativeMethod(realm, fn_obj, "escape", regexpEscape, 1);
+}
+
+/// §22.2.6.7 RegExp.prototype [ @@match ] ( string ). The
+/// `this`-and-arg shape is swapped from `String.prototype.match`,
+/// so we just call `stringMatch` with the receiver and argument
+/// flipped. The shared implementation walks `this.exec` /
+/// `this.flags` / `this.lastIndex` via dynamic `Get`, so most
+/// user-overridable subclass behaviour falls out naturally.
+fn regexpProtoMatch(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (heap_mod.valueAsPlainObject(this_value) == null) return throwTypeError(realm, "RegExp.prototype[Symbol.match] called on non-object");
+    const string_mod = @import("string.zig");
+    const inner = [_]Value{this_value};
+    return string_mod.stringMatch(realm, argOr(args, 0, Value.undefined_), &inner);
+}
+
+/// §22.2.6.10 RegExp.prototype [ @@replace ] ( string, replaceValue ).
+fn regexpProtoReplace(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (heap_mod.valueAsPlainObject(this_value) == null) return throwTypeError(realm, "RegExp.prototype[Symbol.replace] called on non-object");
+    const string_mod = @import("string.zig");
+    const inner = [_]Value{ this_value, argOr(args, 1, Value.undefined_) };
+    return string_mod.stringReplace(realm, argOr(args, 0, Value.undefined_), &inner);
+}
+
+/// §22.2.6.12 RegExp.prototype [ @@search ] ( string ).
+fn regexpProtoSearch(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (heap_mod.valueAsPlainObject(this_value) == null) return throwTypeError(realm, "RegExp.prototype[Symbol.search] called on non-object");
+    const string_mod = @import("string.zig");
+    const inner = [_]Value{this_value};
+    return string_mod.stringSearch(realm, argOr(args, 0, Value.undefined_), &inner);
+}
+
+/// §22.2.6.13 RegExp.prototype [ @@split ] ( string, limit ).
+fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (heap_mod.valueAsPlainObject(this_value) == null) return throwTypeError(realm, "RegExp.prototype[Symbol.split] called on non-object");
+    const string_mod = @import("string.zig");
+    const inner = [_]Value{ this_value, argOr(args, 1, Value.undefined_) };
+    return string_mod.stringSplit(realm, argOr(args, 0, Value.undefined_), &inner);
 }
 
 /// §22.2.6.5 RegExp.prototype [ @@matchAll ] ( S ). Allocates a

@@ -229,7 +229,7 @@ fn iterResult(realm: *Realm, value: Value, done: bool) NativeError!Value {
 /// RegExp (constructing if needed), then invoke its `exec`. For
 /// the global flag, iterates `exec` calls and returns an array
 /// of whole-match strings (no captures, no `index`).
-fn stringMatch(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+pub fn stringMatch(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const re = try ensureRegExp(realm, argOr(args, 0, Value.undefined_));
     const re_obj = heap_mod.valueAsPlainObject(re) orelse return Value.null_;
@@ -294,7 +294,7 @@ fn stringMatch(realm: *Realm, this_value: Value, args: []const Value) NativeErro
 /// §22.1.3.13 String.prototype.search — return the index of the
 /// first match, or -1 if none. Doesn't update lastIndex on the
 /// regex.
-fn stringSearch(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+pub fn stringSearch(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const re = try ensureRegExp(realm, argOr(args, 0, Value.undefined_));
     const re_obj = heap_mod.valueAsPlainObject(re) orelse return Value.fromInt32(-1);
@@ -637,7 +637,7 @@ fn stringRepeat(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 
 // ── Additional String methods ───────────────────────────────────────────────
 
-fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+pub fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const sep_v = argOr(args, 0, Value.undefined_);
     const limit_v = argOr(args, 1, Value.undefined_);
@@ -907,7 +907,7 @@ fn flagsHas(regex_obj: *JSObject, flag: u8) bool {
     return std.mem.indexOfScalar(u8, f.bytes, flag) != null;
 }
 
-fn stringReplace(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+pub fn stringReplace(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const pat_v = argOr(args, 0, Value.undefined_);
     const repl_v = argOr(args, 1, Value.undefined_);
