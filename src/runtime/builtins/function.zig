@@ -76,10 +76,19 @@ fn functionHasInstance(realm: *Realm, this_value: Value, args: []const Value) Na
     var target_fn = heap_mod.valueAsFunction(this_value) orelse return Value.false_;
     while (target_fn.bound_target) |inner| target_fn = inner;
 
+    // §7.3.20 OrdinaryHasInstance step 6 — `Let P be ? Get(C,
+    // "prototype")`. Read the JS-visible `prototype` property
+    // (which honors user assignment like `f.prototype = "x"`,
+    // landing in the property bag and shadowing the
+    // auto-allocated `.prototype` slot). Per step 6.b, if `P` is
+    // not an Object, throw TypeError — primitive `prototype`s
+    // (`'string'`, `Symbol()`, `86`, etc.) all hit this.
+    const target_proto_v = target_fn.get("prototype");
+    const target_proto: *JSObject = heap_mod.valueAsPlainObject(target_proto_v) orelse {
+        return throwTypeError(realm, "Function has non-object prototype in instanceof check");
+    };
+
     if (heap_mod.valueAsPlainObject(v)) |v_obj| {
-        const target_proto = target_fn.prototype orelse {
-            return throwTypeError(realm, "Function has non-object prototype in instanceof check");
-        };
         var cursor: ?*JSObject = v_obj.prototype;
         while (cursor) |p| : (cursor = p.prototype) {
             if (p == target_proto) return Value.true_;
@@ -87,9 +96,6 @@ fn functionHasInstance(realm: *Realm, this_value: Value, args: []const Value) Na
         return Value.false_;
     }
     if (heap_mod.valueAsFunction(v)) |fv| {
-        const target_proto = target_fn.prototype orelse {
-            return throwTypeError(realm, "Function has non-object prototype in instanceof check");
-        };
         var cursor: ?*JSObject = fv.proto;
         while (cursor) |p| : (cursor = p.prototype) {
             if (p == target_proto) return Value.true_;
@@ -146,18 +152,26 @@ fn functionApply(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         if (arg_array.isUndefined() or arg_array.isNull()) {
             // No extra args.
         } else if (heap_mod.valueAsPlainObject(arg_array)) |arr| {
-            const len = try clampArrayLength(lengthOfArray(arr));
+            // §20.2.3.1 step 4 → §7.3.18 CreateListFromArrayLike:
+            // both `Get(O, "length")` and `Get(O, ! ToString(i))`
+            // are `?`-prefixed (abrupt). Use accessor-aware reads
+            // so a getter that throws propagates instead of being
+            // silently squashed to `undefined`.
+            const len = try clampArrayLength(try intrinsics.toLengthOf(realm, arr));
             var i: i64 = 0;
             while (i < len) : (i += 1) {
                 var ibuf: [24]u8 = undefined;
                 const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-                apply_args.append(realm.allocator, arr.get(islice)) catch return error.OutOfMemory;
+                const v = try intrinsics.getPropertyChain(realm, arr, islice);
+                apply_args.append(realm.allocator, v) catch return error.OutOfMemory;
             }
         } else if (heap_mod.valueAsFunction(arg_array)) |fn_arr| {
             // §20.2.3.1 / §7.3.18 CreateListFromArrayLike — any
             // object with a `length` and indexed properties is a
             // valid argArray. Functions count: e.g.
             // `fn.apply(x, Array)` reads `Array.length` (== 1).
+            // No accessors on JSFunction's own length/indices, so
+            // plain `.get` is fine here.
             const len_v = fn_arr.get("length");
             const raw_len: i64 = if (len_v.isInt32()) len_v.asInt32() else if (len_v.isDouble()) blk: {
                 const d = len_v.asDouble();
@@ -235,10 +249,13 @@ fn functionBind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     }
 
     // §20.2.3.2 step 4-6 — name = "bound " + (target.name if String else "").
+    // Use `JSFunction.get` (data-bag + slot fallback) so a
+    // user-written `target.name = "x"` reads back; a JS function
+    // doesn't typically have a `name` accessor descriptor.
     var name_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer name_buf.deinit(realm.allocator);
     name_buf.appendSlice(realm.allocator, "bound ") catch return error.OutOfMemory;
-    const target_name_v = target.properties.get("name") orelse Value.undefined_;
+    const target_name_v = target.get("name");
     if (target_name_v.isString()) {
         const ts: *JSString = @ptrCast(@alignCast(target_name_v.asString()));
         name_buf.appendSlice(realm.allocator, ts.bytes) catch return error.OutOfMemory;

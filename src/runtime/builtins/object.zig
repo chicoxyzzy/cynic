@@ -1289,9 +1289,18 @@ fn objectProtoPropertyIsEnumerable(realm: *Realm, this_value: Value, args: []con
 fn objectProtoIsPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = realm;
     const target_v = argOr(args, 0, Value.undefined_);
-    const target = heap_mod.valueAsPlainObject(target_v) orelse return Value.false_;
+    // §20.1.3.4 — walk target's `[[Prototype]]` chain looking
+    // for `this`. The target can be a plain Object OR a Function
+    // (e.g. `Function.prototype.isPrototypeOf(boundFn)`); the
+    // function case used to short-circuit to `false` because
+    // `valueAsPlainObject` rejects function values. Seed the
+    // walk from `fn.proto` (a `*JSObject`) for callable targets.
+    var p: ?*@import("../object.zig").JSObject = blk: {
+        if (heap_mod.valueAsPlainObject(target_v)) |o| break :blk o.prototype;
+        if (heap_mod.valueAsFunction(target_v)) |fn_obj| break :blk fn_obj.proto;
+        return Value.false_;
+    };
     const this_obj = heap_mod.valueAsPlainObject(this_value) orelse return Value.false_;
-    var p: ?*@import("../object.zig").JSObject = target.prototype;
     while (p) |proto| {
         if (proto == this_obj) return Value.true_;
         p = proto.prototype;
