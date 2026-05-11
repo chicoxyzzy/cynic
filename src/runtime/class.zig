@@ -90,6 +90,16 @@ pub fn buildClass(
     const proto = try realm.heap.allocateObject();
     proto.prototype = parent_proto orelse realm.intrinsics.object_prototype;
 
+    // Pin `proto` (and shortly `ctor`) across the rest of class
+    // construction. Computed-key evaluation re-enters the
+    // interpreter via `callJSFunction`, which CAN trigger a GC.
+    // Until ctor.prototype is wired and ctor itself is on the
+    // accumulator at the call site, neither object is reachable
+    // from JS-level roots — the HandleScope keeps them alive.
+    var class_scope = try realm.heap.openScope();
+    defer class_scope.close();
+    try class_scope.push(heap_mod.taggedObject(proto));
+
     // 3. Allocate the constructor.
     const ctor = try realm.heap.allocateFunction(
         &template.constructor_chunk,
@@ -98,6 +108,7 @@ pub fn buildClass(
         false, // is_arrow
         captured_env,
     );
+    try class_scope.push(heap_mod.taggedFunction(ctor));
     ctor.is_class_constructor = true;
     if (parent_ctor != null) ctor.constructor_kind = .derived;
     // Wire the ctor's [[Prototype]] for `Function.prototype.call`/`apply`/`bind`.
@@ -164,10 +175,14 @@ pub fn buildClass(
     var pm_idx: usize = 0;
 
     for (template.instance_methods) |*m| {
+        // §13.2.5 ComputedPropertyName — if the method's key
+        // was `[expr]`, evaluate the key chunk to get the
+        // runtime key. Otherwise use the static `m.name`.
+        const runtime_name = try resolveComputedKey(realm, optChunkPtr(&m.key_chunk), m.name, captured_env, proto);
         const fn_obj = try realm.heap.allocateFunction(
             &m.chunk,
             m.param_count,
-            m.name,
+            runtime_name,
             false,
             captured_env,
         );
@@ -207,14 +222,14 @@ pub fn buildClass(
         }
 
         switch (m.kind) {
-            .method => try proto.set(realm.allocator, m.name, heap_mod.taggedFunction(fn_obj)),
+            .method => try proto.set(realm.allocator, runtime_name, heap_mod.taggedFunction(fn_obj)),
             .getter => {
-                const entry = try proto.accessors.getOrPut(realm.allocator, m.name);
+                const entry = try proto.accessors.getOrPut(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 entry.value_ptr.*.getter = fn_obj;
             },
             .setter => {
-                const entry = try proto.accessors.getOrPut(realm.allocator, m.name);
+                const entry = try proto.accessors.getOrPut(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 entry.value_ptr.*.setter = fn_obj;
             },
@@ -229,8 +244,9 @@ pub fn buildClass(
     if (template.instance_fields.len > 0) {
         var inits = try realm.classAllocator().alloc(ObjMod.FieldInit, template.instance_fields.len);
         for (template.instance_fields, 0..) |*ft, i| {
+            const runtime_name = try resolveComputedKey(realm, optChunkPtr(&ft.key_chunk), ft.name, captured_env, proto);
             const init_fn: ?*JSFunction = if (ft.init_chunk) |*c|
-                try realm.heap.allocateFunction(c, 0, ft.name, false, captured_env)
+                try realm.heap.allocateFunction(c, 0, runtime_name, false, captured_env)
             else
                 null;
             if (init_fn) |fp| {
@@ -238,9 +254,9 @@ pub fn buildClass(
                 fp.proto = realm.intrinsics.function_prototype;
             }
             inits[i] = .{
-                .name = ft.name,
+                .name = runtime_name,
                 .init_fn = init_fn,
-                .is_private = std.mem.startsWith(u8, ft.name, template.private_prefix),
+                .is_private = std.mem.startsWith(u8, runtime_name, template.private_prefix),
             };
         }
         proto.instance_field_inits = inits;
@@ -261,10 +277,11 @@ pub fn buildClass(
     // test262 fixtures using `super` in static methods are a
     // small fraction of the class-test cluster.
     for (template.static_methods) |*m| {
+        const runtime_name = try resolveComputedKey(realm, optChunkPtr(&m.key_chunk), m.name, captured_env, proto);
         const fn_obj = try realm.heap.allocateFunction(
             &m.chunk,
             m.param_count,
-            m.name,
+            runtime_name,
             false,
             captured_env,
         );
@@ -284,31 +301,31 @@ pub fn buildClass(
         // `home_function` so `super.x` from inside the static
         // method walks `ctor.proto` to reach the parent class.
         fn_obj.home_function = ctor;
-        const is_priv_static = std.mem.startsWith(u8, m.name, template.private_prefix);
+        const is_priv_static = std.mem.startsWith(u8, runtime_name, template.private_prefix);
         switch (m.kind) {
             .method => if (is_priv_static) {
-                try ctor.private_properties.put(realm.allocator, m.name, heap_mod.taggedFunction(fn_obj));
+                try ctor.private_properties.put(realm.allocator, runtime_name, heap_mod.taggedFunction(fn_obj));
             } else {
-                try ctor.set(realm.allocator, m.name, heap_mod.taggedFunction(fn_obj));
+                try ctor.set(realm.allocator, runtime_name, heap_mod.taggedFunction(fn_obj));
             },
             .getter => if (is_priv_static) {
-                const entry = try ctor.private_accessors.getOrPut(realm.allocator, m.name);
+                const entry = try ctor.private_accessors.getOrPut(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 entry.value_ptr.*.getter = fn_obj;
             } else {
                 // §17 static accessor on a class constructor —
                 // landed in the JSFunction's `accessors` map
                 // (added in the JSFunction-accessors commit).
-                const entry = try ctor.accessors.getOrPut(realm.allocator, m.name);
+                const entry = try ctor.accessors.getOrPut(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 entry.value_ptr.*.getter = fn_obj;
             },
             .setter => if (is_priv_static) {
-                const entry = try ctor.private_accessors.getOrPut(realm.allocator, m.name);
+                const entry = try ctor.private_accessors.getOrPut(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 entry.value_ptr.*.setter = fn_obj;
             } else {
-                const entry = try ctor.accessors.getOrPut(realm.allocator, m.name);
+                const entry = try ctor.accessors.getOrPut(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 entry.value_ptr.*.setter = fn_obj;
             },
@@ -320,9 +337,10 @@ pub fn buildClass(
     const interpreter = @import("interpreter.zig");
     const ctor_value = heap_mod.taggedFunction(ctor);
     for (template.static_fields) |*ft| {
+        const runtime_name = try resolveComputedKey(realm, optChunkPtr(&ft.key_chunk), ft.name, captured_env, proto);
         var v: Value = Value.undefined_;
         if (ft.init_chunk) |*c| {
-            const init_fn = try realm.heap.allocateFunction(c, 0, ft.name, false, captured_env);
+            const init_fn = try realm.heap.allocateFunction(c, 0, runtime_name, false, captured_env);
             init_fn.home_object = proto;
             init_fn.proto = realm.intrinsics.function_prototype;
             const outcome = interpreter.callJSFunction(realm.allocator, realm, init_fn, ctor_value, &.{}) catch |err| switch (err) {
@@ -334,13 +352,13 @@ pub fn buildClass(
                 .thrown => v = Value.undefined_,
             }
         }
-        if (std.mem.startsWith(u8, ft.name, template.private_prefix)) {
+        if (std.mem.startsWith(u8, runtime_name, template.private_prefix)) {
             // §15.7 — `static #x = expr` lands in the
             // constructor's private slot, not the regular
             // property bag.
-            try ctor.private_properties.put(realm.allocator, ft.name, v);
+            try ctor.private_properties.put(realm.allocator, runtime_name, v);
         } else {
-            try ctor.set(realm.allocator, ft.name, v);
+            try ctor.set(realm.allocator, runtime_name, v);
         }
     }
 
@@ -357,4 +375,68 @@ pub fn buildClass(
     }
 
     return heap_mod.taggedFunction(ctor);
+}
+
+/// §13.2.5 — evaluate a ComputedPropertyName chunk and coerce
+/// the result via ToPropertyKey into a borrowed string slice
+/// suitable for use as a property key. Caller passes a JSObject
+/// (the prototype or constructor) on which to anchor the heap-
+/// allocated key string so it survives GC for the lifetime of
+/// the class. When `key_chunk` is null, returns `fallback`
+/// unchanged.
+/// Convert `*const ?Chunk` to `?*const Chunk` — needed because
+/// `?T` doesn't auto-promote and we want a pointer into the
+/// owning MethodTemplate / FieldTemplate (not a stack copy).
+fn optChunkPtr(opt: *const ?ChunkMod.Chunk) ?*const ChunkMod.Chunk {
+    if (opt.*) |*c| return c;
+    return null;
+}
+
+fn resolveComputedKey(
+    realm: *Realm,
+    key_chunk: ?*const ChunkMod.Chunk,
+    fallback: []const u8,
+    captured_env: ?*@import("environment.zig").Environment,
+    anchor: *JSObject,
+) !([]const u8) {
+    const chunk_ptr = key_chunk orelse return fallback;
+    const interpreter = @import("interpreter.zig");
+    const heap_mod_ = @import("heap.zig");
+    // `allocateFunction` stores the chunk pointer; it must
+    // outlive the JSFunction. Pass through the
+    // MethodTemplate's / FieldTemplate's owning chunk directly
+    // instead of a stack copy (which would dangle the moment
+    // this function returned).
+    //
+    // `is_arrow=true` skips the auto-allocated prototype JSObject
+    // — this ephemeral function is never user-visible and only
+    // exists to evaluate the key expression. Without this every
+    // computed-key resolution costs 2 heap objects (JSFunction +
+    // its prototype) that pile up under heavy class-creation
+    // loops and pressure both the GC and libc malloc.
+    const ks_fn = try realm.heap.allocateFunction(chunk_ptr, 0, null, true, captured_env);
+    ks_fn.proto = realm.intrinsics.function_prototype;
+    const outcome = interpreter.callJSFunction(realm.allocator, realm, ks_fn, Value.undefined_, &.{}) catch return fallback;
+    const key_v = switch (outcome) {
+        .value, .yielded => |v| v,
+        .thrown => return fallback,
+    };
+    if (heap_mod_.valueAsSymbol(key_v)) |sym| {
+        // Well-known symbols in Cynic carry their `@@`-prefixed
+        // name as the description, so the description IS the
+        // slot key. For user symbols without a description, fall
+        // back to a synthetic id (we don't have one — the
+        // fallback name keeps the engine moving).
+        if (sym.description) |desc| return desc;
+        return fallback;
+    }
+    const intrinsics = @import("intrinsics.zig");
+    const s = intrinsics.stringifyArg(realm, key_v) catch return fallback;
+    // §13.2.5 / §10.4.2 — anchor the heap-allocated key string
+    // on the host object so the GC keeps it alive for as long
+    // as the class prototype is reachable. Without anchoring,
+    // a later GC cycle sweeps the JSString and the property
+    // bag's borrowed `[]const u8` key slice dangles.
+    anchor.key_anchors.append(realm.allocator, s) catch return fallback;
+    return s.bytes;
 }

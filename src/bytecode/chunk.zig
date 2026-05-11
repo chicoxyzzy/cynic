@@ -142,13 +142,25 @@ pub const ClassTemplate = struct {
 
     pub fn deinit(self: *ClassTemplate, allocator: std.mem.Allocator) void {
         self.constructor_chunk.deinit(allocator);
-        for (self.instance_methods) |*m| m.chunk.deinit(allocator);
+        for (self.instance_methods) |*m| {
+            m.chunk.deinit(allocator);
+            if (m.key_chunk) |*c| c.deinit(allocator);
+        }
         allocator.free(self.instance_methods);
-        for (self.static_methods) |*m| m.chunk.deinit(allocator);
+        for (self.static_methods) |*m| {
+            m.chunk.deinit(allocator);
+            if (m.key_chunk) |*c| c.deinit(allocator);
+        }
         allocator.free(self.static_methods);
-        for (self.instance_fields) |*f| if (f.init_chunk) |*c| c.deinit(allocator);
+        for (self.instance_fields) |*f| {
+            if (f.init_chunk) |*c| c.deinit(allocator);
+            if (f.key_chunk) |*c| c.deinit(allocator);
+        }
         allocator.free(self.instance_fields);
-        for (self.static_fields) |*f| if (f.init_chunk) |*c| c.deinit(allocator);
+        for (self.static_fields) |*f| {
+            if (f.init_chunk) |*c| c.deinit(allocator);
+            if (f.key_chunk) |*c| c.deinit(allocator);
+        }
         allocator.free(self.static_fields);
         for (self.static_blocks) |*c| c.deinit(allocator);
         allocator.free(self.static_blocks);
@@ -161,7 +173,7 @@ pub const MethodTemplate = struct {
     /// Method name (`m`, `toString`, etc.). Borrowed slice into
     /// source. For private methods the compiler prefixes the
     /// name with the class's `private_prefix` so brand checks
-    /// route correctly.
+    /// route correctly. Ignored when `key_chunk != null`.
     name: []const u8,
     chunk: Chunk,
     param_count: u8,
@@ -177,6 +189,11 @@ pub const MethodTemplate = struct {
     /// in the original source. `null` for the engine-synthesised
     /// default constructor and any other non-source-backed method.
     source: ?[]const u8 = null,
+    /// §13.2.5 ComputedPropertyName — when set, `name` is a
+    /// placeholder; the real key is whatever this chunk
+    /// evaluates to (after ToPropertyKey). Run at
+    /// class-instantiation time in `class.zig`.
+    key_chunk: ?Chunk = null,
 };
 
 pub const FieldTemplate = struct {
@@ -186,6 +203,9 @@ pub const FieldTemplate = struct {
     /// fields). `null` for `class C { x; }` declared without
     /// an initializer — assigned `undefined` at runtime.
     init_chunk: ?Chunk,
+    /// §13.2.5 ComputedPropertyName for `class C { [expr] = v; }`.
+    /// When set, `name` is a placeholder.
+    key_chunk: ?Chunk = null,
 };
 
 pub const Chunk = struct {

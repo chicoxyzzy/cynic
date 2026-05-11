@@ -3520,8 +3520,17 @@ fn compileClassTemplate(
             // MakeClass time so the call site allocates a
             // generator / wraps in a Promise as appropriate.
             const is_priv = m.key == .private;
-            const key_name = methodKeyName(self.source, m.key) orelse return error.UnsupportedStatement;
             _ = is_priv;
+            // §13.2.5 — computed-key methods can't be the
+            // constructor (the name "constructor" isn't a
+            // ComputedPropertyName the parser would route through
+            // the static-name path). Count and emit; class.zig
+            // resolves the runtime key.
+            if (m.key == .computed) {
+                if (m.is_static) static_method_count += 1 else instance_method_count += 1;
+                continue;
+            }
+            const key_name = methodKeyName(self.source, m.key) orelse return error.UnsupportedStatement;
             if (!m.is_static and std.mem.eql(u8, key_name, "constructor")) {
                 if (ctor_def != null) return error.UnsupportedStatement; // duplicate
                 ctor_def = m;
@@ -3552,7 +3561,15 @@ fn compileClassTemplate(
     var i_sb: usize = 0;
     for (body) |member| switch (member) {
         .field => |fd| {
+            // §13.2.5 — `class C { [expr] = init; }` — compile
+            // the key expression to a sub-chunk and let the class
+            // installer evaluate it at definition time.
+            var fkey_chunk: ?ChunkMod.Chunk = null;
             const key_name = blk: {
+                if (fd.key == .computed) {
+                    fkey_chunk = try compileFieldInitChunk(self, fd.key.computed, fd.span);
+                    break :blk "__cynic_computed__";
+                }
                 const raw = methodKeyName(self.source, fd.key) orelse return error.UnsupportedStatement;
                 if (fd.key == .private) {
                     // `#x` — prefix with the class identity.
@@ -3567,6 +3584,7 @@ fn compileClassTemplate(
             const tmpl = ChunkMod.FieldTemplate{
                 .name = key_name,
                 .init_chunk = init_chunk,
+                .key_chunk = fkey_chunk,
             };
             if (fd.is_static) {
                 static_fields[i_sf] = tmpl;
@@ -3634,17 +3652,34 @@ fn compileClassTemplate(
     var i_stat: usize = 0;
     for (body) |member| switch (member) {
         .method => |m| {
-            const raw_key = methodKeyName(self.source, m.key) orelse return error.UnsupportedStatement;
-            if (!m.is_static and std.mem.eql(u8, raw_key, "constructor")) continue;
-            const key_name = switch (m.key) {
-                .private => std.fmt.allocPrint(arena, "{s}{s}", .{ private_prefix, raw_key }) catch return error.OutOfMemory,
-                // §12.7.1 — `\u…` escapes in IdentifierName decode to
-                // the source character, so `class C { if(){} }`
-                // installs `if`. String / numeric keys are already the
-                // PropertyKey value once their literal frame is stripped.
-                .ident => try self.decodeIdentifierName(raw_key),
-                else => raw_key,
+            // §13.2.5 ComputedPropertyName — `class C { [expr]() {} }`.
+            // Compile the key expression into a sub-chunk that
+            // returns the value; the class installer runs it at
+            // class-definition time and uses the (post-
+            // ToPropertyKey) result as the property key.
+            var key_chunk: ?ChunkMod.Chunk = null;
+            const key_name: []const u8 = if (m.key == .computed) blk: {
+                key_chunk = try compileFieldInitChunk(self, m.key.computed, m.span);
+                break :blk "__cynic_computed__";
+            } else blk: {
+                const raw_key = methodKeyName(self.source, m.key) orelse return error.UnsupportedStatement;
+                if (!m.is_static and std.mem.eql(u8, raw_key, "constructor")) {
+                    // Constructor — skip (already compiled separately).
+                    continue;
+                }
+                break :blk switch (m.key) {
+                    .private => std.fmt.allocPrint(arena, "{s}{s}", .{ private_prefix, raw_key }) catch return error.OutOfMemory,
+                    // §12.7.1 — `\u…` escapes in IdentifierName decode
+                    // to the source character, so `class C { if(){} }`
+                    // installs `if`. String / numeric keys are already
+                    // the PropertyKey value once their literal frame
+                    // is stripped.
+                    .ident => try self.decodeIdentifierName(raw_key),
+                    else => raw_key,
+                };
             };
+            // Computed-key constructor check needs to wait for
+            // runtime; the static-name path handles it above.
             const method_chunk = try compileMethodBody(self, m.params, m.body.body, false, false, m.is_async, m.span);
             const tmpl = ChunkMod.MethodTemplate{
                 .name = key_name,
@@ -3663,6 +3698,7 @@ fn compileClassTemplate(
                     self.source[m.span.start..m.span.end]
                 else
                     null,
+                .key_chunk = key_chunk,
             };
             if (m.is_static) {
                 static_methods[i_stat] = tmpl;
