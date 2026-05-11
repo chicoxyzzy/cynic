@@ -80,10 +80,27 @@ fn reflectDefineProperty(realm: *Realm, this_value: Value, args: []const Value) 
 
 fn reflectHas(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Reflect.has target must be an object");
+    const arg = argOr(args, 0, Value.undefined_);
     const key_v = argOr(args, 1, Value.undefined_);
     var key_buf: [64]u8 = undefined;
     const key_slice = computedKeyForReflect(key_v, &key_buf);
+    // §28.1.2.6 Reflect.has — target must be an Object. Functions
+    // are objects too. Seed the walk from `fn_obj.proto` for the
+    // callable case; the function's own data-bag covers its
+    // own `length` / `name` / user-installed statics.
+    if (heap_mod.valueAsFunction(arg)) |fn_obj| {
+        if (fn_obj.properties.contains(key_slice)) return Value.true_;
+        if (fn_obj.accessors.contains(key_slice)) return Value.true_;
+        if (std.mem.eql(u8, key_slice, "prototype") and fn_obj.prototype != null) return Value.true_;
+        if (std.mem.eql(u8, key_slice, "name") and fn_obj.name != null) return Value.true_;
+        var cursor: ?*@import("../object.zig").JSObject = fn_obj.proto;
+        while (cursor) |c| : (cursor = c.prototype) {
+            if (c.properties.contains(key_slice)) return Value.true_;
+            if (c.accessors.contains(key_slice)) return Value.true_;
+        }
+        return Value.false_;
+    }
+    const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.has target must be an object");
     var cursor: ?*@import("../object.zig").JSObject = target;
     while (cursor) |c| : (cursor = c.prototype) {
         if (c.properties.contains(key_slice)) return Value.true_;
@@ -94,41 +111,68 @@ fn reflectHas(realm: *Realm, this_value: Value, args: []const Value) NativeError
 
 fn reflectGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Reflect.get target must be an object");
+    const arg = argOr(args, 0, Value.undefined_);
     const key_v = argOr(args, 1, Value.undefined_);
     var key_buf: [64]u8 = undefined;
     const key_slice = computedKeyForReflect(key_v, &key_buf);
+    if (heap_mod.valueAsFunction(arg)) |fn_obj| return fn_obj.get(key_slice);
+    const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.get target must be an object");
     return target.get(key_slice);
 }
 
 fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Reflect.set target must be an object");
+    const arg = argOr(args, 0, Value.undefined_);
     const key_v = argOr(args, 1, Value.undefined_);
     var key_buf: [64]u8 = undefined;
     const key_slice = computedKeyForReflect(key_v, &key_buf);
     const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
-    target.set(realm.allocator, owned.bytes, argOr(args, 2, Value.undefined_)) catch return error.OutOfMemory;
+    const v = argOr(args, 2, Value.undefined_);
+    if (heap_mod.valueAsFunction(arg)) |fn_obj| {
+        const ok = fn_obj.setIfWritable(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+        return Value.fromBool(ok);
+    }
+    const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.set target must be an object");
+    target.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
     return Value.true_;
 }
 
 fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Reflect.deleteProperty target must be an object");
+    const arg = argOr(args, 0, Value.undefined_);
     const key_v = argOr(args, 1, Value.undefined_);
     var key_buf: [64]u8 = undefined;
     const key_slice = computedKeyForReflect(key_v, &key_buf);
+    if (heap_mod.valueAsFunction(arg)) |fn_obj| {
+        _ = fn_obj.properties.swapRemove(key_slice);
+        return Value.true_;
+    }
+    const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.deleteProperty target must be an object");
     _ = target.properties.swapRemove(key_slice);
     return Value.true_;
 }
 
 fn reflectOwnKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Reflect.ownKeys target must be an object");
+    const arg = argOr(args, 0, Value.undefined_);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     var idx: usize = 0;
+    if (heap_mod.valueAsFunction(arg)) |fn_obj| {
+        var fit = fn_obj.properties.iterator();
+        while (fit.next()) |entry| : (idx += 1) {
+            const k = entry.key_ptr.*;
+            const key_str = realm.heap.allocateString(k) catch return error.OutOfMemory;
+            var ibuf: [24]u8 = undefined;
+            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
+            const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+            out.set(realm.allocator, owned.bytes, Value.fromString(key_str)) catch return error.OutOfMemory;
+        }
+        out.set(realm.allocator, "length", Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(out);
+    }
+    const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.ownKeys target must be an object");
     var it = target.properties.iterator();
     while (it.next()) |entry| : (idx += 1) {
         const key_str = realm.heap.allocateString(entry.key_ptr.*) catch return error.OutOfMemory;

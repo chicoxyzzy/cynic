@@ -3756,6 +3756,12 @@ fn methodKeyName(source: []const u8, key: ast.expression.PropertyKey) ?[]const u
             if (raw.len > 0 and raw[0] == '#') break :blk raw[1..];
             break :blk raw;
         },
+        // §13.2.5 — numeric-literal class field names like
+        // `class C { 0 = "bar"; 1.5 = "x"; }`. The slot key is
+        // the source text's literal form (e.g. "0", "1.5"); the
+        // ECMA-262 canonical-numeric-index normalisation happens
+        // elsewhere (only for Array exotics).
+        .numeric => |s| source[s.start..s.end],
         else => null,
     };
 }
