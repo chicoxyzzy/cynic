@@ -5581,6 +5581,23 @@ fn strictSetPropertyAnchored(
         return .ok;
     }
     if (heap_mod.valueAsFunction(recv)) |fn_obj| {
+        // §10.1.9 [[Set]] for functions — accessor descriptors win
+        // over data slots. Static `set [K](v) {}` on a class lands
+        // in `fn_obj.accessors`; without this branch the assignment
+        // fell through to `setIfWritable` which treats every entry
+        // as a data prop and tripped the read-only guard.
+        if (fn_obj.accessors.get(key)) |acc_pair| {
+            if (acc_pair.setter) |setter| {
+                const args = [_]Value{value};
+                const outcome = try callJSFunction(allocator, realm, setter, recv, &args);
+                switch (outcome) {
+                    .value, .yielded => return .ok,
+                    .thrown => |ex| return throwInSetter(realm, frames, f, ip, value, ex),
+                }
+            }
+            const ex = try makeTypeError(realm, "Cannot set property which has only a getter");
+            return throwInSetter(realm, frames, f, ip, value, ex);
+        }
         const ok = fn_obj.setIfWritable(allocator, key, value) catch return error.OutOfMemory;
         if (!ok) {
             const ex = try makeTypeError(realm, "Cannot assign to read-only property");
