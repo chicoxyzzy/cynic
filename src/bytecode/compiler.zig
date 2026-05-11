@@ -142,6 +142,11 @@ pub const Compiler = struct {
     /// to find their patch lists / continue target. Nesting is
     /// handled by save/restore in each loop's compile routine.
     current_loop: ?*LoopContext = null,
+    /// True when the enclosing function is `async function` /
+    /// `async function*` / async arrow / async method. `yield*`
+    /// uses this to decide whether to emit an `await` on each
+    /// inner-iterator step (async-generator yield* per §27.6.3.7).
+    current_is_async: bool = false,
     /// True when compiling a module body. Toggles
     /// whether `import` declarations emit `module_load` ops and
     /// whether `export` declarations emit `module_export` ops.
@@ -560,13 +565,138 @@ pub const Compiler = struct {
     }
 
     fn compileYield(self: *Compiler, y: ast.expression.YieldExpr) CompileError!void {
-        if (y.delegate) return error.UnsupportedExpression; // `yield*`
+        if (y.delegate) {
+            // §14.4.14 / §27.6.3.7 — `yield* expr` delegates to
+            // another iterator. Open an iterator (async-flavour
+            // when the enclosing function is async), loop
+            // stepping it, and yield each non-done value to the
+            // outer consumer. Inner iterator's final value
+            // becomes the value of the `yield*` expression.
+            // Resume-arg forwarding (next-with-value /
+            // return / throw completion routing) is approximated
+            // — only the `next` path is wired today.
+            return self.compileYieldDelegate(y);
+        }
         if (y.argument) |arg| {
             try self.compileExpression(arg);
         } else {
             try self.builder.emitOp(.lda_undefined, y.span);
         }
         try self.builder.emitOp(.gen_yield, y.span);
+    }
+
+    fn compileYieldDelegate(self: *Compiler, y: ast.expression.YieldExpr) CompileError!void {
+        const arg = y.argument orelse return error.UnsupportedExpression;
+        const is_async = self.current_is_async;
+        try self.compileExpression(arg);
+        if (is_async) {
+            try self.builder.emitOp(.async_iter_open, y.span);
+        } else {
+            try self.builder.emitOp(.iter_open, y.span);
+        }
+        const r_iter = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, y.span);
+        try self.builder.emitU8(r_iter);
+        const r_val = try self.reserveTemp();
+        defer self.releaseTemp();
+
+        if (is_async) {
+            // §27.6.3.7 async yield* — inline the iterator-step
+            // + await dance. We can't use `iter_step` here
+            // because async iters return Promise<{value, done}>
+            // from `next()`; the await happens BEFORE the
+            // `.done` / `.value` reads. Mirrors the for-await-of
+            // shape in compileForInOf.
+            const k_next = try self.internString("next");
+            const k_value = try self.internString("value");
+            const k_done = try self.internString("done");
+            const r_next_fn = try self.reserveTemp();
+            defer self.releaseTemp();
+            const r_result = try self.reserveTemp();
+            defer self.releaseTemp();
+
+            const loop_start = self.builder.here();
+            // r_result = await r_iter.next()
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_iter);
+            try self.builder.emitOp(.lda_property, y.span);
+            try self.builder.emitU16(k_next);
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_next_fn);
+            try self.builder.emitOp(.call_method, y.span);
+            try self.builder.emitU8(r_iter);
+            try self.builder.emitU8(r_next_fn);
+            try self.builder.emitU8(0);
+            try self.builder.emitOp(.await_, y.span);
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_result);
+            // if (r_result.done) break.
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_result);
+            try self.builder.emitOp(.lda_property, y.span);
+            try self.builder.emitU16(k_done);
+            try self.builder.emitOp(.jmp_if_true, y.span);
+            const exit_patch = self.builder.here();
+            try self.builder.emitI16(0);
+            // r_val = r_result.value
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_result);
+            try self.builder.emitOp(.lda_property, y.span);
+            try self.builder.emitU16(k_value);
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_val);
+            // yield r_val to outer consumer.
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_val);
+            try self.builder.emitOp(.gen_yield, y.span);
+            // Loop.
+            try self.builder.emitOp(.jmp, y.span);
+            const back_patch = self.builder.here();
+            try self.builder.emitI16(0);
+            try self.builder.patchI16(back_patch, loop_start);
+            const exit_target = self.builder.here();
+            try self.builder.patchI16(exit_patch, exit_target);
+            // §14.4.14 step 5.b.ii.6 — value of yield* is the
+            // inner iterator's final `.value`.
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_result);
+            try self.builder.emitOp(.lda_property, y.span);
+            try self.builder.emitU16(k_value);
+            return;
+        }
+
+        // Sync yield* — `iter_step` already returns the value
+        // directly (sets `r_done` to true on done).
+        const r_done = try self.reserveTemp();
+        defer self.releaseTemp();
+        const loop_start = self.builder.here();
+        try self.builder.emitOp(.iter_step, y.span);
+        try self.builder.emitU8(r_iter);
+        try self.builder.emitU8(r_done);
+        try self.builder.emitOp(.star, y.span);
+        try self.builder.emitU8(r_val);
+
+        try self.builder.emitOp(.ldar, y.span);
+        try self.builder.emitU8(r_done);
+        try self.builder.emitOp(.jmp_if_true, y.span);
+        const exit_patch = self.builder.here();
+        try self.builder.emitI16(0);
+
+        try self.builder.emitOp(.ldar, y.span);
+        try self.builder.emitU8(r_val);
+        try self.builder.emitOp(.gen_yield, y.span);
+
+        try self.builder.emitOp(.jmp, y.span);
+        const back_patch = self.builder.here();
+        try self.builder.emitI16(0);
+        try self.builder.patchI16(back_patch, loop_start);
+
+        const exit_target = self.builder.here();
+        try self.builder.patchI16(exit_patch, exit_target);
+
+        try self.builder.emitOp(.ldar, y.span);
+        try self.builder.emitU8(r_val);
     }
 
     fn compileAwait(self: *Compiler, a: ast.expression.AwaitExpr) CompileError!void {
@@ -3515,7 +3645,7 @@ fn compileClassTemplate(
                 .ident => try self.decodeIdentifierName(raw_key),
                 else => raw_key,
             };
-            const method_chunk = try compileMethodBody(self, m.params, m.body.body, false, false, m.span);
+            const method_chunk = try compileMethodBody(self, m.params, m.body.body, false, false, m.is_async, m.span);
             const tmpl = ChunkMod.MethodTemplate{
                 .name = key_name,
                 .chunk = method_chunk,
@@ -3810,6 +3940,7 @@ fn compileMethodBody(
     body_stmts: []ast.statement.Statement,
     is_constructor: bool,
     derived: bool,
+    is_async: bool,
     span: Span,
 ) CompileError!@import("chunk.zig").Chunk {
     _ = is_constructor;
@@ -3821,6 +3952,7 @@ fn compileMethodBody(
     const saved_temps_in_use = self.temps_in_use;
     const saved_env_depth = self.env_depth;
     const saved_current_loop = self.current_loop;
+    const saved_is_async = self.current_is_async;
 
     self.builder = @import("chunk.zig").Builder.init(self.allocator);
     var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
@@ -3829,6 +3961,7 @@ fn compileMethodBody(
     self.temps_in_use = 0;
     self.env_depth = saved_env_depth + 1;
     self.current_loop = null;
+    self.current_is_async = is_async;
 
     var inner_finished = false;
     defer {
@@ -3885,6 +4018,7 @@ fn compileMethodBody(
     self.temps_in_use = saved_temps_in_use;
     self.env_depth = saved_env_depth;
     self.current_loop = saved_current_loop;
+    self.current_is_async = saved_is_async;
 
     return inner_chunk;
 }
@@ -5501,6 +5635,7 @@ fn compileFunctionTemplateExt(
     const saved_temps_in_use = self.temps_in_use;
     const saved_env_depth = self.env_depth;
     const saved_current_loop = self.current_loop;
+    const saved_is_async = self.current_is_async;
 
     // Reset to a fresh inner state.
     self.builder = @import("chunk.zig").Builder.init(self.allocator);
@@ -5510,6 +5645,7 @@ fn compileFunctionTemplateExt(
     self.temps_in_use = 0;
     self.env_depth = saved_env_depth + 1;
     self.current_loop = null;
+    self.current_is_async = is_async;
 
     var inner_finished = false;
     defer {
@@ -5522,6 +5658,7 @@ fn compileFunctionTemplateExt(
             self.temps_in_use = saved_temps_in_use;
             self.env_depth = saved_env_depth;
             self.current_loop = saved_current_loop;
+            self.current_is_async = saved_is_async;
         }
     }
 
@@ -5595,6 +5732,7 @@ fn compileFunctionTemplateExt(
     self.temps_in_use = saved_temps_in_use;
     self.env_depth = saved_env_depth;
     self.current_loop = saved_current_loop;
+    self.current_is_async = saved_is_async;
 
     return self.builder.addFunctionTemplate(.{
         .chunk = inner_chunk,

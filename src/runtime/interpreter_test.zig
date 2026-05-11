@@ -3505,3 +3505,36 @@ test "later: rest with numeric-key object pattern" {
         \\f([7, 8, 9]);
     , "7:8:3");
 }
+
+// ── §14.4.14 / §27.6.3.7 — yield* delegation ───────────────────────────────
+
+test "later: sync yield* delegates to a generator" {
+    try expectScriptStringWithBuiltins(
+        \\function* a() { yield 1; yield 2; }
+        \\function* b() { yield 0; yield* a(); yield 3; }
+        \\var out = [];
+        \\for (var v of b()) out.push(v);
+        \\out.join(",");
+    , "0,1,2,3");
+}
+
+test "later: sync yield* of an array iterable" {
+    try expectScriptStringWithBuiltins(
+        \\function* g() { yield 0; yield* [10, 20]; yield 30; }
+        \\var out = [];
+        \\for (var v of g()) out.push(v);
+        \\out.join(",");
+    , "0,10,20,30");
+}
+
+test "later: async yield* delegates to an async generator" {
+    try expectScriptStringWithBuiltins(
+        \\async function* a() { yield 1; yield 2; }
+        \\async function* b() { yield 0; yield* a(); yield 3; }
+        \\async function run() { var out = []; for await (var v of b()) out.push(v); return out.join(","); }
+        \\var got;
+        \\run().then(r => got = r);
+        \\__drainMicrotasks();
+        \\got;
+    , "0,1,2,3");
+}
