@@ -590,6 +590,11 @@ fn arrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // clamp to `len - 1`. Negative values offset from the end;
     // if the result is < 0 the loop never runs and we return -1.
     const start = lastStartIndexFrom(args, raw_len) orelse return Value.fromInt32(-1);
+    // Sparse fast path — see `sparseReverseSearch`.
+    if (obj.is_array_exotic and obj.is_sparse) {
+        if (try sparseReverseSearch(realm, obj, start, target)) |found| return numberFromI64(found);
+        return Value.fromInt32(-1);
+    }
     const len = try clampArrayLength(raw_len);
     // Iteration cap can't truncate above `start` — but if the
     // raw length exceeded the cap, `start` might too. Clamp.
@@ -602,6 +607,54 @@ fn arrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nativ
         if (strictEqualsLite(v, target)) return numberFromI64(i);
     }
     return Value.fromInt32(-1);
+}
+
+/// Sparse-aware reverse search. When the receiver is an array
+/// exotic in sparse mode, iterating `start..0` linearly hits
+/// `clampArrayLength`'s 16M cap (intentional — the cap exists
+/// to avoid OOM on `arr.length = 2**32 - 1`). Walk own sparse
+/// keys ≤ `start` in descending order instead.
+///
+/// Returns the index of the first key whose value strict-equals
+/// `target`, or `null` if none matches. The walk is over OWN
+/// keys only — inherited indexed accessors on the prototype
+/// chain are NOT consulted (spec would have us hit every k from
+/// `start` down to 0). The typical sparse fixture uses default
+/// `Array.prototype` (no indexed accessors), so this trades
+/// strict §10.1.7 HasProperty completeness for tractable RSS.
+fn sparseReverseSearch(realm: *Realm, arr: *JSObject, start: i64, target: Value) NativeError!?i64 {
+    const keys = try sparseDescendingKeys(realm, arr, start);
+    defer realm.allocator.free(keys);
+    for (keys) |k| {
+        const v = arr.sparse_elements.get(k) orelse continue;
+        if (strictEqualsLite(v, target)) return @as(i64, k);
+    }
+    return null;
+}
+
+/// Return a heap-allocated slice of `arr`'s sparse-mode own
+/// keys ≤ `start`, sorted descending. Caller frees with
+/// `realm.allocator.free`. Skips hole entries (defensive — the
+/// sparse map shouldn't store them, but `holeIndexed`'s
+/// invariant is checked at the caller boundary).
+fn sparseDescendingKeys(realm: *Realm, arr: *JSObject, start: i64) NativeError![]u32 {
+    if (start < 0) return realm.allocator.alloc(u32, 0) catch return error.OutOfMemory;
+    const start_u32: u32 = if (start > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(start);
+    var keys: std.ArrayListUnmanaged(u32) = .empty;
+    errdefer keys.deinit(realm.allocator);
+    keys.ensureTotalCapacity(realm.allocator, arr.sparse_elements.count()) catch return error.OutOfMemory;
+    var it = arr.sparse_elements.iterator();
+    while (it.next()) |entry| {
+        if (entry.key_ptr.* > start_u32) continue;
+        if (JSObject.isElementHole(entry.value_ptr.*)) continue;
+        keys.appendAssumeCapacity(entry.key_ptr.*);
+    }
+    std.mem.sort(u32, keys.items, {}, struct {
+        fn descending(_: void, a: u32, b: u32) bool {
+            return a > b;
+        }
+    }.descending);
+    return keys.toOwnedSlice(realm.allocator) catch return error.OutOfMemory;
 }
 
 /// §23.1.3.20 steps 4-7 — clamp the optional `fromIndex` arg
@@ -674,11 +727,47 @@ fn arrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // `Get` on each step. Walks the prototype chain so an
     // inherited indexed accessor / `Boolean.prototype[0]` style
     // fixture works.
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
     var acc: Value = Value.undefined_;
     var have_acc = args.len >= 2;
     if (have_acc) acc = args[1];
 
+    // Sparse fast path — walk own keys in descending order.
+    // Like §23.1.3.27 step 5 (initial-acc seeding from the
+    // rightmost present element), the descending sort means the
+    // first iteration produces the initial acc when no explicit
+    // one was passed.
+    if (obj.is_array_exotic and obj.is_sparse) {
+        const raw_len = try toLengthOf(realm, obj);
+        if (raw_len <= 0) {
+            if (have_acc) return acc;
+            return throwTypeError(realm, "Reduce of empty array with no initial value");
+        }
+        const ks = try sparseDescendingKeys(realm, obj, raw_len - 1);
+        defer realm.allocator.free(ks);
+        var idx: usize = 0;
+        if (!have_acc) {
+            if (ks.len == 0) return throwTypeError(realm, "Reduce of empty array with no initial value");
+            acc = obj.sparse_elements.get(ks[0]) orelse Value.undefined_;
+            have_acc = true;
+            idx = 1;
+        }
+        while (idx < ks.len) : (idx += 1) {
+            const k = ks[idx];
+            const elem = obj.sparse_elements.get(k) orelse continue;
+            const cb_args = [_]Value{ acc, elem, numberFromI64(@as(i64, k)), heap_mod.taggedObject(obj) };
+            const outcome = interpreter.callJSFunction(realm.allocator, realm, callback, Value.undefined_, &cb_args) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            switch (outcome) {
+                .value, .yielded => |v| acc = v,
+                .thrown => return error.NativeThrew,
+            }
+        }
+        return acc;
+    }
+
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
     var i: i64 = len - 1;
     if (!have_acc) {
         while (i >= 0) : (i -= 1) {

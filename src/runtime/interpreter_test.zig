@@ -2840,6 +2840,58 @@ test "Array.prototype.findLastIndex: walks prototype chain" {
     , 0);
 }
 
+test "Array.prototype.lastIndexOf: sparse fast path walks own keys descending" {
+    // `arr[2**32 - 2] = null` puts a single own slot at idx
+    // 4294967294 with length = 4294967295. A naive linear walk
+    // from `len - 1` hits `clampArrayLength`'s 16M cap and
+    // returns -1; the sparse fast path walks `sparse_elements`
+    // keys in descending order and finds it.
+    try expectScriptStringWithBuiltins(
+        \\const arr = [];
+        \\arr[Math.pow(2, 32) - 2] = null;
+        \\String(arr.lastIndexOf(null, Infinity));
+    , "4294967294");
+    try expectScriptStringWithBuiltins(
+        \\const arr = [];
+        \\arr[Math.pow(2, 32) - 2] = "x";
+        \\arr[100] = "x";
+        \\String(arr.lastIndexOf("x"));
+    , "4294967294");
+    try expectScriptIntWithBuiltins(
+        \\const arr = [];
+        \\arr[Math.pow(2, 32) - 2] = "x";
+        \\arr[100] = "x";
+        \\arr.lastIndexOf("x", 200);
+    , 100);
+    try expectScriptIntWithBuiltins(
+        \\const arr = [];
+        \\arr[Math.pow(2, 32) - 2] = "x";
+        \\arr.lastIndexOf("missing");
+    , -1);
+}
+
+test "Array.prototype.reduceRight: sparse fast path walks own keys descending" {
+    // Three sparse own keys at 50, 100, 4294967294. reduceRight
+    // visits them right-to-left; with an initial acc the
+    // first iteration multiplies acc by the rightmost value.
+    try expectScriptStringWithBuiltins(
+        \\const arr = [];
+        \\arr[Math.pow(2, 32) - 2] = 10;
+        \\arr[100] = 1;
+        \\arr[50] = 2;
+        \\arr.reduceRight((acc, v, i) => acc + ":" + v + "@" + i, "S");
+    , "S:10@4294967294:1@100:2@50");
+}
+
+test "Array.prototype.reduceRight: sparse without initial acc seeds from rightmost present" {
+    try expectScriptIntWithBuiltins(
+        \\const arr = [];
+        \\arr[Math.pow(2, 32) - 2] = 100;
+        \\arr[5] = 3;
+        \\arr.reduceRight((acc, v) => acc + v);
+    , 103);
+}
+
 test "Object.defineProperty: accessor at index >= length extends length" {
     // §10.4.2.4 ArraySetLength step 3.h — defining ANY property
     // (data OR accessor) at index P where P ≥ length sets
