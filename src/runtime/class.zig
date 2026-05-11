@@ -221,17 +221,39 @@ pub fn buildClass(
             continue;
         }
 
+        // §15.7.10 ClassDefinitionEvaluation step 14 → §10.2.2
+        // DefineMethod step 5 / §15.5.6.4 step 7: class methods
+        // and accessors install with `{ writable: true,
+        // enumerable: false, configurable: true }`. The default
+        // `proto.set` lands data props at the all-true default
+        // flags — visible as `enumerable: true` and trips the
+        // `verifyProperty` fixtures.
+        const method_flags: @import("object.zig").PropertyFlags = .{
+            .writable = true,
+            .enumerable = false,
+            .configurable = true,
+        };
         switch (m.kind) {
-            .method => try proto.set(realm.allocator, runtime_name, heap_mod.taggedFunction(fn_obj)),
+            .method => try proto.setWithFlags(realm.allocator, runtime_name, heap_mod.taggedFunction(fn_obj), method_flags),
             .getter => {
                 const entry = try proto.accessors.getOrPut(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 entry.value_ptr.*.getter = fn_obj;
+                try proto.property_flags.put(realm.allocator, runtime_name, .{
+                    .writable = false,
+                    .enumerable = false,
+                    .configurable = true,
+                });
             },
             .setter => {
                 const entry = try proto.accessors.getOrPut(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 entry.value_ptr.*.setter = fn_obj;
+                try proto.property_flags.put(realm.allocator, runtime_name, .{
+                    .writable = false,
+                    .enumerable = false,
+                    .configurable = true,
+                });
             },
         }
     }
@@ -302,11 +324,26 @@ pub fn buildClass(
         // method walks `ctor.proto` to reach the parent class.
         fn_obj.home_function = ctor;
         const is_priv_static = std.mem.startsWith(u8, runtime_name, template.private_prefix);
+        // §15.7.10 / §10.2.2 — same descriptor flags as instance
+        // methods: `{ writable: true, enumerable: false,
+        // configurable: true }` for data; `{ writable: false,
+        // enumerable: false, configurable: true }` for accessor.
+        const static_method_flags: @import("object.zig").PropertyFlags = .{
+            .writable = true,
+            .enumerable = false,
+            .configurable = true,
+        };
+        const static_accessor_flags: @import("object.zig").PropertyFlags = .{
+            .writable = false,
+            .enumerable = false,
+            .configurable = true,
+        };
         switch (m.kind) {
             .method => if (is_priv_static) {
                 try ctor.private_properties.put(realm.allocator, runtime_name, heap_mod.taggedFunction(fn_obj));
             } else {
                 try ctor.set(realm.allocator, runtime_name, heap_mod.taggedFunction(fn_obj));
+                try ctor.property_flags.put(realm.allocator, runtime_name, static_method_flags);
             },
             .getter => if (is_priv_static) {
                 const entry = try ctor.private_accessors.getOrPut(realm.allocator, runtime_name);
@@ -319,6 +356,7 @@ pub fn buildClass(
                 const entry = try ctor.accessors.getOrPut(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 entry.value_ptr.*.getter = fn_obj;
+                try ctor.property_flags.put(realm.allocator, runtime_name, static_accessor_flags);
             },
             .setter => if (is_priv_static) {
                 const entry = try ctor.private_accessors.getOrPut(realm.allocator, runtime_name);
@@ -328,6 +366,7 @@ pub fn buildClass(
                 const entry = try ctor.accessors.getOrPut(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 entry.value_ptr.*.setter = fn_obj;
+                try ctor.property_flags.put(realm.allocator, runtime_name, static_accessor_flags);
             },
         }
     }
