@@ -109,6 +109,12 @@ pub const Intrinsics = struct {
     /// `slice`, `every`, `some`, `find`, etc.). Each concrete
     /// `<Kind>Array.prototype` chains here.
     typed_array_prototype: ?*JSObject = null,
+    /// `%RegExp.prototype%` — populated by `installRegExp`. The
+    /// flag/source getters need to recognise it as a special
+    /// receiver: `RegExp.prototype.source === "(?:)"` per
+    /// §22.2.6.10 final clause, even though the prototype itself
+    /// has no `[[OriginalSource]]` internal slot.
+    regexp_prototype: ?*JSObject = null,
     /// `%Set.prototype%` — populated by `installSet`. The ES2025
     /// composition methods (`union`, `intersection`, …) need it
     /// to wire the prototype of fresh result sets they allocate

@@ -23,6 +23,7 @@ const intrinsics = @import("../intrinsics.zig");
 const installConstructor = intrinsics.installConstructor;
 const installNativeMethod = intrinsics.installNativeMethod;
 const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
+const installNativeGetter = intrinsics.installNativeGetter;
 const argOr = intrinsics.argOr;
 const stringifyArg = intrinsics.stringifyArg;
 const throwTypeError = intrinsics.throwTypeError;
@@ -90,6 +91,7 @@ pub fn install(realm: *Realm) !void {
     });
     const fn_obj = r.ctor;
     const proto = r.proto;
+    realm.intrinsics.regexp_prototype = proto;
 
     try installNativeMethodOnProto(realm, proto, "test", regexpTest, 1);
     try installNativeMethodOnProto(realm, proto, "exec", regexpExec, 1);
@@ -111,6 +113,23 @@ pub fn install(realm: *Realm) !void {
     // Spec-faithful flag-cloning + species lookup is later; this
     // path lets test262 reach %RegExpStringIteratorPrototype%.
     try installNativeMethodOnProto(realm, proto, "@@matchAll", regexpProtoMatchAll, 1);
+
+    // §22.2.6.{3, 4, 5, 6, 7, 9, 10, 11, 13, 14} — accessors on
+    // RegExp.prototype that surface the instance's
+    // `[[OriginalSource]]` / `[[OriginalFlags]]` slots. Each is
+    // installed via `installNativeGetter` which marks the
+    // descriptor `{ enumerable: false, configurable: true }`
+    // and clears `writable` (N/A on accessors).
+    try installNativeGetter(realm, proto, "source", regexpSourceGetter);
+    try installNativeGetter(realm, proto, "flags", regexpFlagsGetter);
+    try installNativeGetter(realm, proto, "global", regexpGlobalGetter);
+    try installNativeGetter(realm, proto, "hasIndices", regexpHasIndicesGetter);
+    try installNativeGetter(realm, proto, "ignoreCase", regexpIgnoreCaseGetter);
+    try installNativeGetter(realm, proto, "multiline", regexpMultilineGetter);
+    try installNativeGetter(realm, proto, "dotAll", regexpDotAllGetter);
+    try installNativeGetter(realm, proto, "unicode", regexpUnicodeGetter);
+    try installNativeGetter(realm, proto, "unicodeSets", regexpUnicodeSetsGetter);
+    try installNativeGetter(realm, proto, "sticky", regexpStickyGetter);
 
     try installNativeMethod(realm, fn_obj, "escape", regexpEscape, 1);
 }
@@ -182,8 +201,14 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
         realm.heap.allocateString("") catch return error.OutOfMemory
     else
         stringifyArg(realm, flags_v) catch return error.OutOfMemory;
-    inst.set(realm.allocator, "source", Value.fromString(pat_s)) catch return error.OutOfMemory;
-    inst.set(realm.allocator, "flags", Value.fromString(flag_s)) catch return error.OutOfMemory;
+    // §22.2.4 — the spec's `[[OriginalSource]]` / `[[OriginalFlags]]`
+    // internal slots, surfaced via accessors on `RegExp.prototype`
+    // (installed in `install`). Stored under `__cynic_*` so the
+    // prototype getter shadows the namespace and a user
+    // `Object.getOwnPropertyDescriptor(re, "source")` correctly
+    // sees no own property.
+    inst.set(realm.allocator, "__cynic_re_src__", Value.fromString(pat_s)) catch return error.OutOfMemory;
+    inst.set(realm.allocator, "__cynic_re_flags__", Value.fromString(flag_s)) catch return error.OutOfMemory;
     inst.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
     // §22.2.3.2 RegExpInitialize step 12 — compile the pattern
     // eagerly so syntactic errors raise SyntaxError at
@@ -214,8 +239,8 @@ fn parseFlags(s: []const u8) c_int {
 
 fn ensureBytecode(realm: *Realm, regex_obj: *JSObject) NativeError!?[]u8 {
     if (regex_obj.regex_bytecode) |bc| return bc;
-    const src_v = regex_obj.get("source");
-    const flags_v = regex_obj.get("flags");
+    const src_v = regex_obj.get("__cynic_re_src__");
+    const flags_v = regex_obj.get("__cynic_re_flags__");
     if (!src_v.isString()) return null;
     const src_s: *JSString = @ptrCast(@alignCast(src_v.asString()));
     const flag_str: []const u8 = if (flags_v.isString()) (@as(*JSString, @ptrCast(@alignCast(flags_v.asString())))).bytes else "";
@@ -421,8 +446,18 @@ fn regexpTest(realm: *Realm, this_value: Value, args: []const Value) NativeError
 fn regexpToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "RegExp.toString on non-object");
-    const src_v = obj.get("source");
-    const flags_v = obj.get("flags");
+    // §22.2.6.15 step 3-4 — `Get(R, "source")` / `Get(R, "flags")`
+    // route through the prototype accessor chain so user-overridden
+    // getters fire. Use accessor-aware lookups instead of the raw
+    // internal slot reads.
+    const src_v = intrinsics.getPropertyChain(realm, obj, "source") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const flags_v = intrinsics.getPropertyChain(realm, obj, "flags") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
     out.append(realm.allocator, '/') catch return error.OutOfMemory;
@@ -441,6 +476,153 @@ fn regexpToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
 
 /// §22.2.7.1 RegExp.escape ( S ) — ES2025. Per-codepoint
 /// transform of `S` so the result, used as a regex pattern,
+// ── RegExp.prototype getters (§22.2.6.{3,4,5,6,7,9,10,11,13,14}) ───
+//
+// Each accessor reads from the instance's `[[OriginalSource]]` /
+// `[[OriginalFlags]]` internal slots (stored as the
+// `__cynic_re_src__` / `__cynic_re_flags__` own data props by
+// the constructor). The receiver must be a RegExp instance —
+// `RegExp.prototype.source` (called with `this` = the prototype
+// itself, which has no internal slots) is special-cased to
+// return the placeholder `(?:)` for `source` and `""` for `flags`.
+
+/// `this` is the RegExp.prototype object itself — used by the
+/// spec-mandated `RegExp.prototype.source === "(?:)"` invariant.
+fn isRegExpPrototypeReceiver(realm: *Realm, this_value: Value) bool {
+    const this_obj = heap_mod.valueAsPlainObject(this_value) orelse return false;
+    if (realm.intrinsics.regexp_prototype) |p| return this_obj == p;
+    return false;
+}
+
+fn regexpInternalString(this_value: Value, key: []const u8) ?[]const u8 {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
+    const v = obj.get(key);
+    if (!v.isString()) return null;
+    const s: *JSString = @ptrCast(@alignCast(v.asString()));
+    return s.bytes;
+}
+
+fn regexpInternalFlagHas(this_value: Value, ch: u8) ?bool {
+    const flags = regexpInternalString(this_value, "__cynic_re_flags__") orelse return null;
+    return std.mem.indexOfScalar(u8, flags, ch) != null;
+}
+
+/// §22.2.6.10 — `EscapeRegExpPattern(P, F)`. Per spec, escape
+/// `/` and line terminators in the source so the result, when
+/// embedded between forward slashes, parses back to an
+/// equivalent pattern. Empty source maps to `(?:)`.
+fn escapeRegExpPattern(realm: *Realm, src: []const u8) NativeError!*JSString {
+    if (src.len == 0) {
+        return realm.heap.allocateString("(?:)") catch return error.OutOfMemory;
+    }
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(realm.allocator);
+    var i: usize = 0;
+    var prev_backslash = false;
+    while (i < src.len) : (i += 1) {
+        const ch = src[i];
+        if (ch == '/' and !prev_backslash) {
+            out.appendSlice(realm.allocator, "\\/") catch return error.OutOfMemory;
+        } else if (ch == '\n' and !prev_backslash) {
+            out.appendSlice(realm.allocator, "\\n") catch return error.OutOfMemory;
+        } else if (ch == '\r' and !prev_backslash) {
+            out.appendSlice(realm.allocator, "\\r") catch return error.OutOfMemory;
+        } else {
+            out.append(realm.allocator, ch) catch return error.OutOfMemory;
+        }
+        prev_backslash = (ch == '\\') and !prev_backslash;
+    }
+    return realm.heap.allocateString(out.items) catch return error.OutOfMemory;
+}
+
+/// §22.2.6.10 `get RegExp.prototype.source`.
+fn regexpSourceGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    if (isRegExpPrototypeReceiver(realm, this_value)) {
+        const s = realm.heap.allocateString("(?:)") catch return error.OutOfMemory;
+        return Value.fromString(s);
+    }
+    const src = regexpInternalString(this_value, "__cynic_re_src__") orelse return throwTypeError(realm, "RegExp.prototype.source called on non-RegExp");
+    const escaped = try escapeRegExpPattern(realm, src);
+    return Value.fromString(escaped);
+}
+
+/// §22.2.6.4 `get RegExp.prototype.flags` — synthesises the
+/// flag string from the individual boolean accessors in spec
+/// order (`d g i m s u v y`). Reads via `Get(R, "X")` so a
+/// user-overridden boolean getter participates.
+fn regexpFlagsGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "RegExp.prototype.flags called on non-object");
+    var buf: [8]u8 = undefined;
+    var n: usize = 0;
+    const keys = [_]struct { name: []const u8, ch: u8 }{
+        .{ .name = "hasIndices", .ch = 'd' },
+        .{ .name = "global", .ch = 'g' },
+        .{ .name = "ignoreCase", .ch = 'i' },
+        .{ .name = "multiline", .ch = 'm' },
+        .{ .name = "dotAll", .ch = 's' },
+        .{ .name = "unicode", .ch = 'u' },
+        .{ .name = "unicodeSets", .ch = 'v' },
+        .{ .name = "sticky", .ch = 'y' },
+    };
+    for (keys) |k| {
+        const v = intrinsics.getPropertyChain(realm, obj, k.name) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        if (intrinsics.toBoolean(v)) {
+            buf[n] = k.ch;
+            n += 1;
+        }
+    }
+    const s = realm.heap.allocateString(buf[0..n]) catch return error.OutOfMemory;
+    return Value.fromString(s);
+}
+
+fn regexpFlagBoolGetter(realm: *Realm, this_value: Value, flag_char: u8, name: []const u8) NativeError!Value {
+    if (isRegExpPrototypeReceiver(realm, this_value)) return Value.undefined_;
+    const has = regexpInternalFlagHas(this_value, flag_char) orelse {
+        const msg = std.fmt.allocPrint(realm.allocator, "RegExp.prototype.{s} called on non-RegExp", .{name}) catch return error.OutOfMemory;
+        defer realm.allocator.free(msg);
+        return throwTypeError(realm, msg);
+    };
+    return Value.fromBool(has);
+}
+
+fn regexpGlobalGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    return regexpFlagBoolGetter(realm, this_value, 'g', "global");
+}
+fn regexpIgnoreCaseGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    return regexpFlagBoolGetter(realm, this_value, 'i', "ignoreCase");
+}
+fn regexpMultilineGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    return regexpFlagBoolGetter(realm, this_value, 'm', "multiline");
+}
+fn regexpDotAllGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    return regexpFlagBoolGetter(realm, this_value, 's', "dotAll");
+}
+fn regexpUnicodeGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    return regexpFlagBoolGetter(realm, this_value, 'u', "unicode");
+}
+fn regexpUnicodeSetsGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    return regexpFlagBoolGetter(realm, this_value, 'v', "unicodeSets");
+}
+fn regexpStickyGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    return regexpFlagBoolGetter(realm, this_value, 'y', "sticky");
+}
+fn regexpHasIndicesGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    return regexpFlagBoolGetter(realm, this_value, 'd', "hasIndices");
+}
+
 /// matches the original string literally. Cynic strings are
 /// UTF-8 internally; the spec talks in codepoints + UTF-16
 /// units, so we decode → branch → re-encode.
