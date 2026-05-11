@@ -206,6 +206,14 @@ pub const JSFunction = struct {
     /// `new_call` consult this map before the data property bag,
     /// per §10.1.8.1 OrdinaryGet step 4 (accessor descriptor wins).
     accessors: std.StringArrayHashMapUnmanaged(Accessor) = .empty,
+    /// §15.7 static private slots — `class C { static #x = 1;
+    /// static #y() {}; static get #z() {} }` lands here when the
+    /// class constructor is built. Storage shape mirrors
+    /// `JSObject.private_properties` / `JSObject.private_accessors`;
+    /// `lda_private` / `sta_private` consult these when the
+    /// receiver is the constructor function itself.
+    private_properties: std.StringArrayHashMapUnmanaged(Value) = .empty,
+    private_accessors: std.StringArrayHashMapUnmanaged(Accessor) = .empty,
     /// `Function.prototype` — the object that becomes the
     /// `[[Prototype]]` of instances created by `new f(…)`. Auto-
     /// allocated for non-arrow functions at construction time
@@ -272,6 +280,8 @@ pub const JSFunction = struct {
         self.properties.deinit(allocator);
         self.property_flags.deinit(allocator);
         self.accessors.deinit(allocator);
+        self.private_properties.deinit(allocator);
+        self.private_accessors.deinit(allocator);
         if (self.bound_args) |a| allocator.free(a);
         allocator.destroy(self);
     }

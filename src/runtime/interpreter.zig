@@ -3040,7 +3040,19 @@ fn runFrames(
                     if (heap_mod.valueAsPlainObject(f.this_value)) |inst| {
                         for (inits) |entry| {
                             if (entry.init_fn) |fn_obj| {
-                                inst.private_properties.put(allocator, entry.name, heap_mod.taggedFunction(fn_obj)) catch return error.OutOfMemory;
+                                switch (entry.accessor_kind) {
+                                    .none => inst.private_properties.put(allocator, entry.name, heap_mod.taggedFunction(fn_obj)) catch return error.OutOfMemory,
+                                    .getter => {
+                                        const ent = inst.private_accessors.getOrPut(allocator, entry.name) catch return error.OutOfMemory;
+                                        if (!ent.found_existing) ent.value_ptr.* = .{};
+                                        ent.value_ptr.*.getter = fn_obj;
+                                    },
+                                    .setter => {
+                                        const ent = inst.private_accessors.getOrPut(allocator, entry.name) catch return error.OutOfMemory;
+                                        if (!ent.found_existing) ent.value_ptr.* = .{};
+                                        ent.value_ptr.*.setter = fn_obj;
+                                    },
+                                }
                             }
                         }
                     }
@@ -3082,6 +3094,44 @@ fn runFrames(
                 const key_v = local_chunk.constants[k];
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+                // §15.7 — `class C { static #x = …; static M() { return C.#x; } }`
+                // routes the read through the constructor's
+                // private slots when the receiver is the class
+                // function itself.
+                if (heap_mod.valueAsFunction(acc)) |fn_recv| {
+                    if (fn_recv.private_accessors.get(key_s.bytes)) |pa| {
+                        if (pa.getter) |getter| {
+                            const outcome = try callJSFunction(allocator, realm, getter, acc, &.{});
+                            switch (outcome) {
+                                .value, .yielded => |v| acc = v,
+                                .thrown => |ex| {
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    continue;
+                                },
+                            }
+                        } else {
+                            acc = Value.undefined_;
+                        }
+                        continue;
+                    }
+                    if (fn_recv.private_properties.get(key_s.bytes)) |v| {
+                        acc = v;
+                        continue;
+                    }
+                    const ex = try makeTypeError(realm, "Cannot read private field — brand check failed");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                }
                 const recv = heap_mod.valueAsPlainObject(acc) orelse {
                     const ex = try makeTypeError(realm, "Cannot read private field on non-object");
                     f.ip = ip;
@@ -3092,7 +3142,29 @@ fn runFrames(
                     }
                     continue;
                 };
-                if (recv.private_properties.get(key_s.bytes)) |v| {
+                // §15.7 — private accessor descriptors win over
+                // data slots on read. A read of a write-only
+                // accessor (`set #x` without `get #x`) returns
+                // `undefined` per §10.1.8.1 step 4.b.
+                if (recv.private_accessors.get(key_s.bytes)) |pa| {
+                    if (pa.getter) |getter| {
+                        const outcome = try callJSFunction(allocator, realm, getter, heap_mod.taggedObject(recv), &.{});
+                        switch (outcome) {
+                            .value, .yielded => |v| acc = v,
+                            .thrown => |ex| {
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue;
+                            },
+                        }
+                    } else {
+                        acc = Value.undefined_;
+                    }
+                } else if (recv.private_properties.get(key_s.bytes)) |v| {
                     acc = v;
                 } else {
                     const ex = try makeTypeError(realm, "Cannot read private field — brand check failed");
@@ -3618,6 +3690,51 @@ fn runFrames(
                 const key_v = local_chunk.constants[k];
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+                // §15.7 static private — receiver is the class
+                // constructor function. Mirror the JSObject path
+                // (accessor wins, then data, then brand-check
+                // failure).
+                if (heap_mod.valueAsFunction(registers[r_obj])) |fn_recv| {
+                    if (fn_recv.private_accessors.get(key_s.bytes)) |pa| {
+                        if (pa.setter) |setter| {
+                            const args_one = [_]Value{acc};
+                            const outcome = try callJSFunction(allocator, realm, setter, registers[r_obj], &args_one);
+                            switch (outcome) {
+                                .value, .yielded => {},
+                                .thrown => |ex| {
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    continue;
+                                },
+                            }
+                        } else {
+                            const ex = try makeTypeError(realm, "Cannot write to private accessor with no setter");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue;
+                        }
+                    } else if (!fn_recv.private_properties.contains(key_s.bytes)) {
+                        const ex = try makeTypeError(realm, "Cannot write private field — brand check failed");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
+                    } else {
+                        fn_recv.private_properties.put(allocator, key_s.bytes, acc) catch return error.OutOfMemory;
+                    }
+                    continue;
+                }
                 const recv = heap_mod.valueAsPlainObject(registers[r_obj]) orelse {
                     const ex = try makeTypeError(realm, "Cannot write private field on non-object");
                     f.ip = ip;
@@ -3628,7 +3745,37 @@ fn runFrames(
                     }
                     continue;
                 };
-                if (!recv.private_properties.contains(key_s.bytes)) {
+                // §15.7 — private accessor descriptors win over
+                // data slots on write. A write to a read-only
+                // accessor (`get #x` without `set #x`) throws
+                // TypeError per §10.1.9.1 step 6.b.
+                if (recv.private_accessors.get(key_s.bytes)) |pa| {
+                    if (pa.setter) |setter| {
+                        const args_one = [_]Value{acc};
+                        const outcome = try callJSFunction(allocator, realm, setter, heap_mod.taggedObject(recv), &args_one);
+                        switch (outcome) {
+                            .value, .yielded => {},
+                            .thrown => |ex| {
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue;
+                            },
+                        }
+                    } else {
+                        const ex = try makeTypeError(realm, "Cannot write to private accessor with no setter");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
+                    }
+                } else if (!recv.private_properties.contains(key_s.bytes)) {
                     const ex = try makeTypeError(realm, "Cannot write private field — brand check failed");
                     f.ip = ip;
                     f.accumulator = acc;
@@ -3637,8 +3784,9 @@ fn runFrames(
                         return .{ .thrown = ex };
                     }
                     continue;
+                } else {
+                    recv.private_properties.put(allocator, key_s.bytes, acc) catch return error.OutOfMemory;
                 }
-                recv.private_properties.put(allocator, key_s.bytes, acc) catch return error.OutOfMemory;
             },
 
             .super_call, .super_call_forward => {

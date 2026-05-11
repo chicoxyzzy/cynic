@@ -37,6 +37,19 @@ pub const FieldInit = struct {
     /// fields write into `properties`. Distinguished here rather
     /// than by name-prefix so the runtime is clean.
     is_private: bool = false,
+    /// §15.7 — private methods can be plain methods or accessors.
+    /// Plain methods land in `private_properties` (the function
+    /// itself is the value). Accessor kinds land in
+    /// `private_accessors[name].{getter, setter}` so a read /
+    /// write through `this.#x` invokes the function instead of
+    /// returning it.
+    accessor_kind: AccessorKind = .none,
+};
+
+pub const AccessorKind = enum(u8) {
+    none,
+    getter,
+    setter,
 };
 
 /// Accessor pair (§10.1.8 [[Get]] / §10.1.9 [[Set]]). Either
@@ -164,6 +177,12 @@ pub const JSObject = struct {
     /// storage. §7.3.27 PrivateElementFind brand-checks via this
     /// map: a lookup miss is a TypeError.
     private_properties: std.StringArrayHashMapUnmanaged(Value) = .empty,
+    /// §15.7 — private getters / setters declared as
+    /// `class C { get #x() {} set #x(v) {} }`. Parallel to
+    /// `private_properties` but routes reads through the getter
+    /// and writes through the setter when present. Read-only or
+    /// write-only pairs leave the other half `null`.
+    private_accessors: std.StringArrayHashMapUnmanaged(Accessor) = .empty,
     /// Accessor descriptors — getter / setter pairs. Checked
     /// before `properties` on read and write. Walks the prototype
     /// chain like data properties.
@@ -337,6 +356,7 @@ pub const JSObject = struct {
         self.properties.deinit(allocator);
         self.property_flags.deinit(allocator);
         self.private_properties.deinit(allocator);
+        self.private_accessors.deinit(allocator);
         self.accessors.deinit(allocator);
         if (self.map_data) |m| m.deinit(allocator);
         if (self.set_data) |s| s.deinit(allocator);

@@ -190,11 +190,18 @@ pub fn buildClass(
         fn_obj.source = m.source;
 
         if (std.mem.startsWith(u8, m.name, template.private_prefix)) {
-            // Private method — record in private_method_inits so
-            // each new instance gets a binding. NOT installed on
-            // the prototype's properties (that would let any
-            // object access it via the chain).
-            private_methods[pm_idx] = .{ .name = m.name, .init_fn = fn_obj };
+            // Private method / accessor — record in
+            // private_method_inits so each new instance gets the
+            // binding installed. Plain methods land in
+            // `private_properties`; getter / setter halves land
+            // in `private_accessors` and dispatch through the
+            // function at access time.
+            const ak: ObjMod.AccessorKind = switch (m.kind) {
+                .method => .none,
+                .getter => .getter,
+                .setter => .setter,
+            };
+            private_methods[pm_idx] = .{ .name = m.name, .init_fn = fn_obj, .accessor_kind = ak };
             pm_idx += 1;
             continue;
         }
@@ -272,13 +279,33 @@ pub fn buildClass(
         else
             realm.intrinsics.function_prototype;
         fn_obj.source = m.source;
+        const is_priv_static = std.mem.startsWith(u8, m.name, template.private_prefix);
         switch (m.kind) {
-            .method => try ctor.set(realm.allocator, m.name, heap_mod.taggedFunction(fn_obj)),
-            .getter, .setter => {
-                // For now later treats static accessors as
-                // regular methods — the function-object accessor
-                // model isn't generalised yet. later.
+            .method => if (is_priv_static) {
+                try ctor.private_properties.put(realm.allocator, m.name, heap_mod.taggedFunction(fn_obj));
+            } else {
                 try ctor.set(realm.allocator, m.name, heap_mod.taggedFunction(fn_obj));
+            },
+            .getter => if (is_priv_static) {
+                const entry = try ctor.private_accessors.getOrPut(realm.allocator, m.name);
+                if (!entry.found_existing) entry.value_ptr.* = .{};
+                entry.value_ptr.*.getter = fn_obj;
+            } else {
+                // §17 static accessor on a class constructor —
+                // landed in the JSFunction's `accessors` map
+                // (added in the JSFunction-accessors commit).
+                const entry = try ctor.accessors.getOrPut(realm.allocator, m.name);
+                if (!entry.found_existing) entry.value_ptr.* = .{};
+                entry.value_ptr.*.getter = fn_obj;
+            },
+            .setter => if (is_priv_static) {
+                const entry = try ctor.private_accessors.getOrPut(realm.allocator, m.name);
+                if (!entry.found_existing) entry.value_ptr.* = .{};
+                entry.value_ptr.*.setter = fn_obj;
+            } else {
+                const entry = try ctor.accessors.getOrPut(realm.allocator, m.name);
+                if (!entry.found_existing) entry.value_ptr.* = .{};
+                entry.value_ptr.*.setter = fn_obj;
             },
         }
     }
@@ -302,7 +329,14 @@ pub fn buildClass(
                 .thrown => v = Value.undefined_,
             }
         }
-        try ctor.set(realm.allocator, ft.name, v);
+        if (std.mem.startsWith(u8, ft.name, template.private_prefix)) {
+            // §15.7 — `static #x = expr` lands in the
+            // constructor's private slot, not the regular
+            // property bag.
+            try ctor.private_properties.put(realm.allocator, ft.name, v);
+        } else {
+            try ctor.set(realm.allocator, ft.name, v);
+        }
     }
 
     // 9. Static blocks — run with this=ctor. §15.7.13.

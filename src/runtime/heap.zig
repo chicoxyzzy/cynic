@@ -453,6 +453,16 @@ pub const Heap = struct {
                     if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
                     if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
                 }
+                // §15.7 static private slots on the class
+                // constructor — `static #x = …` data slots and
+                // `static get/set #y` accessor halves.
+                var fpit = f.private_properties.iterator();
+                while (fpit.next()) |entry| self.markValue(entry.value_ptr.*);
+                var fpait = f.private_accessors.iterator();
+                while (fpait.next()) |entry| {
+                    if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
+                    if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+                }
                 if (f.prototype) |p| self.markValue(taggedObject(p));
                 // §10.4.1 BoundFunction state — keep target +
                 // bound this + bound args alive.
@@ -474,6 +484,11 @@ pub const Heap = struct {
                 while (it.next()) |entry| self.markValue(entry.value_ptr.*);
                 var pit = o.private_properties.iterator();
                 while (pit.next()) |entry| self.markValue(entry.value_ptr.*);
+                var pait = o.private_accessors.iterator();
+                while (pait.next()) |entry| {
+                    if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
+                    if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+                }
                 var ait = o.accessors.iterator();
                 while (ait.next()) |entry| {
                     if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));

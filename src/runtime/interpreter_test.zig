@@ -3338,3 +3338,58 @@ test "later: array destructuring elision steps the iter" {
         \\count;
     , 2);
 }
+
+// ── §15.7 — Private accessors + static private ──────────────────────────────
+
+test "later: private getter dispatches as accessor" {
+    try expectScriptIntWithBuiltins(
+        \\class C { get #x() { return 42; } getX() { return this.#x; } }
+        \\new C().getX();
+    , 42);
+}
+
+test "later: private setter dispatches as accessor" {
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  #buf = 0;
+        \\  set #x(v) { this.#buf = v * 10; }
+        \\  setX(v) { this.#x = v; return this.#buf; }
+        \\}
+        \\new C().setX(7);
+    , 70);
+}
+
+test "later: read of write-only private accessor returns undefined" {
+    try expectScriptStringWithBuiltins(
+        \\class C { set #x(v) {} readX() { return this.#x; } }
+        \\String(new C().readX());
+    , "undefined");
+}
+
+test "later: static private field reads back via this.#x" {
+    try expectScriptIntWithBuiltins(
+        \\class C { static #x = 42; static getX() { return this.#x; } }
+        \\C.getX();
+    , 42);
+}
+
+test "later: static private accessor + method round-trip" {
+    try expectScriptStringWithBuiltins(
+        \\class C {
+        \\  static #v = 1;
+        \\  static get #x() { return this.#v * 2; }
+        \\  static set #x(n) { this.#v = n; }
+        \\  static #m() { return "m"; }
+        \\  static api() { var a = this.#x; this.#x = 50; return a + ":" + this.#x + ":" + this.#m(); }
+        \\}
+        \\C.api();
+    , "2:100:m");
+}
+
+test "later: static private brand check throws on cross-instance" {
+    try expectScriptStringWithBuiltins(
+        \\class A { static #x = 1; static peek(o) { return o.#x; } }
+        \\class B {}
+        \\try { A.peek(B); "no throw"; } catch (e) { e.constructor.name; }
+    , "TypeError");
+}
