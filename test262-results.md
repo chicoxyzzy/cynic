@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 |
-| **runtime** | 62.77 % | 76.23 % | 29075 / 46320 |
+| **runtime** | 62.94 % | 76.44 % | 29154 / 46320 |
 
 ## Where the runtime stands, by area
 
@@ -28,11 +28,11 @@ browser-era built-ins …).
 | **_100–999 fails_** | | | | | |
 | `built-ins/Array` | 2207 | 663 | 211 | 72 % | 77 % |
 | `built-ins/Function` | 213 | 207 | 89 | 42 % | 51 % |
-| `built-ins/Object` | 2754 | 572 | 85 | 81 % | 83 % |
+| `built-ins/Object` | 2758 | 568 | 85 | 81 % | 83 % |
 | `built-ins/Promise` | 500 | 174 | 3 | 74 % | 74 % |
 | `built-ins/Proxy` | 174 | 125 | 12 | 56 % | 58 % |
-| `built-ins/RegExp` | 1197 | 521 | 161 | 64 % | 70 % |
-| `built-ins/String` | 851 | 367 | 5 | 70 % | 70 % |
+| `built-ins/RegExp` | 1282 | 436 | 161 | 68 % | 75 % |
+| `built-ins/String` | 835 | 383 | 5 | 68 % | 69 % |
 | `built-ins/TypedArray` | 876 | 346 | 216 | 61 % | 72 % |
 | `built-ins/TypedArrayConstructors` | 383 | 329 | 24 | 52 % | 54 % |
 | `language/module-code` | 381 | 201 | 14 | 64 % | 65 % |
@@ -70,7 +70,7 @@ browser-era built-ins …).
 | `language/global-code` | 18 | 19 | 5 | 43 % | 49 % |
 | `language/identifiers` | 252 | 16 | 0 | 94 % | 94 % |
 | `language/line-terminators` | 29 | 12 | 0 | 71 % | 71 % |
-| `language/literals` | 398 | 39 | 97 | 75 % | 91 % |
+| `language/literals` | 404 | 33 | 97 | 76 % | 92 % |
 | `language/statementList` | 27 | 53 | 0 | 34 % | 34 % |
 | `language/types` | 92 | 12 | 9 | 81 % | 88 % |
 | `language/white-space` | 51 | 16 | 0 | 76 % | 76 % |
@@ -140,14 +140,14 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 | ±0 |
-| **runtime** | 62.77 % | 76.23 % | 29075 / 46320 | +3897 |
+| **runtime** | 62.94 % | 76.44 % | 29154 / 46320 | +3976 |
 
 Biggest movers (runtime):
 
-- `built-ins/TypedArray` +19
-- `built-ins/Promise` +7
-- `language/expressions` +3
-- `language/statements` +1
+- `built-ins/RegExp` +85
+- `built-ins/String` -16
+- `language/literals` +6
+- `built-ins/Object` +4
 
 ### 2026-05-10 — cynic `c5c12a0`, test262 `d0c1b455`
 
