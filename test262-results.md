@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 |
-| **runtime** | 61.43 % | 74.60 % | 28455 / 46320 |
+| **runtime** | 61.53 % | 74.72 % | 28500 / 46320 |
 
 ## Where the runtime stands, by area
 
@@ -28,12 +28,12 @@ browser-era built-ins …).
 | **_100–999 fails_** | | | | | |
 | `built-ins/Array` | 2207 | 663 | 211 | 72 % | 77 % |
 | `built-ins/Function` | 210 | 210 | 89 | 41 % | 50 % |
-| `built-ins/Object` | 2749 | 577 | 85 | 81 % | 83 % |
+| `built-ins/Object` | 2753 | 573 | 85 | 81 % | 83 % |
 | `built-ins/Promise` | 471 | 203 | 3 | 70 % | 70 % |
-| `built-ins/Proxy` | 125 | 174 | 12 | 40 % | 42 % |
+| `built-ins/Proxy` | 151 | 148 | 12 | 49 % | 51 % |
 | `built-ins/RegExp` | 1137 | 581 | 161 | 61 % | 66 % |
 | `built-ins/String` | 851 | 367 | 5 | 70 % | 70 % |
-| `built-ins/TypedArray` | 766 | 456 | 216 | 53 % | 63 % |
+| `built-ins/TypedArray` | 779 | 443 | 216 | 54 % | 64 % |
 | `built-ins/TypedArrayConstructors` | 383 | 329 | 24 | 52 % | 54 % |
 | `language/module-code` | 381 | 201 | 14 | 64 % | 65 % |
 | **_10–99 fails_** | | | | | |
@@ -53,7 +53,7 @@ browser-era built-ins …).
 | `built-ins/Map` | 143 | 60 | 1 | 70 % | 70 % |
 | `built-ins/NativeErrors` | 68 | 26 | 0 | 72 % | 72 % |
 | `built-ins/Number` | 272 | 68 | 0 | 80 % | 80 % |
-| `built-ins/Reflect` | 94 | 59 | 0 | 61 % | 61 % |
+| `built-ins/Reflect` | 96 | 57 | 0 | 63 % | 63 % |
 | `built-ins/RegExpStringIteratorPrototype` | 7 | 10 | 0 | 41 % | 41 % |
 | `built-ins/Set` | 318 | 64 | 1 | 83 % | 83 % |
 | `built-ins/Symbol` | 42 | 48 | 8 | 43 % | 47 % |
@@ -140,15 +140,14 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 | ±0 |
-| **runtime** | 61.43 % | 74.60 % | 28455 / 46320 | +3277 |
+| **runtime** | 61.53 % | 74.72 % | 28500 / 46320 | +3322 |
 
 Biggest movers (runtime):
 
-- `built-ins/Promise` +5
-- `built-ins/AsyncGeneratorFunction` +1
-- `built-ins/GeneratorFunction` +1
-- `language/expressions` +1
-- `language/statements` +1
+- `built-ins/Proxy` +26
+- `built-ins/TypedArray` +13
+- `built-ins/Object` +4
+- `built-ins/Reflect` +2
 
 ### 2026-05-10 — cynic `c5c12a0`, test262 `d0c1b455`
 
