@@ -450,10 +450,34 @@ fn asyncGenNext(realm: *Realm, this_value: Value, args: []const Value) @import("
         else => return error.NativeThrew,
     };
     switch (outcome) {
-        .yielded => |raw| return wrapAsyncGenResult(realm, raw, false),
+        .yielded => |raw| {
+            // §27.6.3.6 AsyncGeneratorYield — `yield X` does
+            // `Await(X)` first; if Await rejects, the rejection
+            // propagates inside the gen body as a throw, which
+            // (uncaught) closes the gen. Approximate the closed
+            // tail by transitioning state to .completed when the
+            // yielded value is a synchronously-rejected promise.
+            // Subsequent `.next()` calls then return
+            // `{done: true, value: undefined}` per §27.6.3.2
+            // step 5. The full Await-propagation rework (so
+            // try/catch around yield observes the rejection)
+            // is deferred.
+            if (isSyncRejectedPromise(raw)) gen.state = .completed;
+            return wrapAsyncGenResult(realm, raw, false);
+        },
         .value => |raw| return wrapAsyncGenResult(realm, raw, true),
         .thrown => |ex| return intrinsics_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory,
     }
+}
+
+/// True iff `v` is a Promise object already in the `rejected`
+/// state. Used by async-gen yield's close-on-reject shim.
+fn isSyncRejectedPromise(v: Value) bool {
+    const obj = heap_mod.valueAsPlainObject(v) orelse return false;
+    const state_v = obj.get("__cynic_promise_state__");
+    if (!state_v.isString()) return false;
+    const state: *@import("string.zig").JSString = @ptrCast(@alignCast(state_v.asString()));
+    return std.mem.eql(u8, state.bytes, "rejected");
 }
 
 /// §27.6.1 — async generators carry a brand on their wrapper
