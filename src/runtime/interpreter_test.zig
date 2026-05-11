@@ -3489,3 +3489,19 @@ test "later: super.x = v in static invokes parent's static setter" {
         \\B.setIt(99);
     , 99);
 }
+
+// ── §13.15.5 — Numeric-key object destructuring ─────────────────────────────
+
+test "later: destructuring {0: a, 1: b} pulls indexed slots" {
+    try expectScriptStringWithBuiltins(
+        \\var {0: a, 1: b} = ["x", "y", "z"];
+        \\a + ":" + b;
+    , "x:y");
+}
+
+test "later: rest with numeric-key object pattern" {
+    try expectScriptStringWithBuiltins(
+        \\function f([...{0: v, 1: w, length: z}]) { return v + ":" + w + ":" + z; }
+        \\f([7, 8, 9]);
+    , "7:8:3");
+}

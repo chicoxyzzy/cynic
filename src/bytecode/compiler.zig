@@ -4374,6 +4374,7 @@ fn compileDestructure(self: *Compiler, target: ast.statement.BindingTarget) Comp
                 const key_span: Span = switch (prop.key) {
                     .ident => |s| s,
                     .string => |s| s,
+                    .numeric => |s| s,
                     else => return error.UnsupportedStatement,
                 };
                 const key_slice: []const u8 = blk: {
@@ -4412,6 +4413,7 @@ fn compileDestructure(self: *Compiler, target: ast.statement.BindingTarget) Comp
                     const key_span: Span = switch (prop.key) {
                         .ident => |s| s,
                         .string => |s| s,
+                        .numeric => |s| s,
                         else => return error.UnsupportedStatement,
                     };
                     const key_slice: []const u8 = blk: {
