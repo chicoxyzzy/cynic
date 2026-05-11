@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 |
-| **runtime** | 62.94 % | 76.44 % | 29154 / 46320 |
+| **runtime** | 63.95 % | 77.66 % | 29621 / 46320 |
 
 ## Where the runtime stands, by area
 
@@ -23,8 +23,8 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_1000+ fails_** | | | | | |
-| `language/expressions` | 7645 | 2422 | 971 | 69 % | 76 % |
-| `language/statements` | 6814 | 1856 | 667 | 73 % | 79 % |
+| `language/expressions` | 7876 | 2191 | 971 | 71 % | 78 % |
+| `language/statements` | 7045 | 1625 | 667 | 75 % | 81 % |
 | **_100–999 fails_** | | | | | |
 | `built-ins/Array` | 2207 | 663 | 211 | 72 % | 77 % |
 | `built-ins/Function` | 213 | 207 | 89 | 42 % | 51 % |
@@ -65,7 +65,7 @@ browser-era built-ins …).
 | `built-ins/isFinite` | 4 | 11 | 0 | 27 % | 27 % |
 | `built-ins/isNaN` | 4 | 11 | 0 | 27 % | 27 % |
 | `language/arguments-object` | 177 | 29 | 57 | 67 % | 86 % |
-| `language/computed-property-names` | 31 | 17 | 0 | 65 % | 65 % |
+| `language/computed-property-names` | 36 | 12 | 0 | 75 % | 75 % |
 | `language/function-code` | 85 | 23 | 109 | 39 % | 79 % |
 | `language/global-code` | 18 | 19 | 5 | 43 % | 49 % |
 | `language/identifiers` | 252 | 16 | 0 | 94 % | 94 % |
@@ -140,14 +140,13 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 | ±0 |
-| **runtime** | 62.94 % | 76.44 % | 29154 / 46320 | +3976 |
+| **runtime** | 63.95 % | 77.66 % | 29621 / 46320 | +4443 |
 
 Biggest movers (runtime):
 
-- `built-ins/RegExp` +85
-- `built-ins/String` -16
-- `language/literals` +6
-- `built-ins/Object` +4
+- `language/expressions` +231
+- `language/statements` +231
+- `language/computed-property-names` +5
 
 ### 2026-05-10 — cynic `c5c12a0`, test262 `d0c1b455`
 
