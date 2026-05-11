@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 |
-| **runtime** | 64.09 % | 77.84 % | 29688 / 46320 |
+| **runtime** | 64.15 % | 77.90 % | 29712 / 46320 |
 
 ## Where the runtime stands, by area
 
@@ -23,12 +23,12 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_1000+ fails_** | | | | | |
-| `language/expressions` | 7909 | 2158 | 971 | 72 % | 79 % |
-| `language/statements` | 7079 | 1591 | 667 | 76 % | 82 % |
+| `language/expressions` | 7918 | 2149 | 971 | 72 % | 79 % |
+| `language/statements` | 7090 | 1580 | 667 | 76 % | 82 % |
 | **_100–999 fails_** | | | | | |
 | `built-ins/Array` | 2207 | 663 | 211 | 72 % | 77 % |
 | `built-ins/Function` | 213 | 207 | 89 | 42 % | 51 % |
-| `built-ins/Object` | 2758 | 568 | 85 | 81 % | 83 % |
+| `built-ins/Object` | 2760 | 566 | 85 | 81 % | 83 % |
 | `built-ins/Promise` | 500 | 174 | 3 | 74 % | 74 % |
 | `built-ins/Proxy` | 174 | 125 | 12 | 56 % | 58 % |
 | `built-ins/RegExp` | 1282 | 436 | 161 | 68 % | 75 % |
@@ -65,7 +65,7 @@ browser-era built-ins …).
 | `built-ins/isFinite` | 4 | 11 | 0 | 27 % | 27 % |
 | `built-ins/isNaN` | 4 | 11 | 0 | 27 % | 27 % |
 | `language/arguments-object` | 177 | 29 | 57 | 67 % | 86 % |
-| `language/computed-property-names` | 36 | 12 | 0 | 75 % | 75 % |
+| `language/computed-property-names` | 38 | 10 | 0 | 79 % | 79 % |
 | `language/function-code` | 85 | 23 | 109 | 39 % | 79 % |
 | `language/global-code` | 18 | 19 | 5 | 43 % | 49 % |
 | `language/identifiers` | 252 | 16 | 0 | 94 % | 94 % |
@@ -140,12 +140,14 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 | ±0 |
-| **runtime** | 64.09 % | 77.84 % | 29688 / 46320 | +4510 |
+| **runtime** | 64.15 % | 77.90 % | 29712 / 46320 | +4534 |
 
 Biggest movers (runtime):
 
-- `language/statements` +34
-- `language/expressions` +33
+- `language/statements` +11
+- `language/expressions` +9
+- `built-ins/Object` +2
+- `language/computed-property-names` +2
 
 ### 2026-05-10 — cynic `c5c12a0`, test262 `d0c1b455`
 
