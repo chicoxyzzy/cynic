@@ -713,13 +713,25 @@ pub fn openForInIterator(
             // property bag; the property-bag walker below picks
             // up the latter, so we skip them here either way.
             if (cur.is_array_exotic) {
-                var ei: u32 = 0;
-                while (ei < cur.elements.items.len) : (ei += 1) {
-                    if (@import("object.zig").JSObject.isElementHole(cur.elements.items[ei])) continue;
-                    var ibuf: [16]u8 = undefined;
-                    const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ei}) catch continue;
-                    const key_owned_str = realm.heap.allocateString(ks) catch return error.OutOfMemory;
-                    int_keys.append(realm.allocator, .{ .idx = ei, .key = key_owned_str.bytes }) catch return error.OutOfMemory;
+                if (cur.is_sparse) {
+                    var sit = cur.sparse_elements.iterator();
+                    while (sit.next()) |entry| {
+                        if (@import("object.zig").JSObject.isElementHole(entry.value_ptr.*)) continue;
+                        const idx = entry.key_ptr.*;
+                        var ibuf: [16]u8 = undefined;
+                        const ks = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch continue;
+                        const key_owned_str = realm.heap.allocateString(ks) catch return error.OutOfMemory;
+                        int_keys.append(realm.allocator, .{ .idx = idx, .key = key_owned_str.bytes }) catch return error.OutOfMemory;
+                    }
+                } else {
+                    var ei: u32 = 0;
+                    while (ei < cur.elements.items.len) : (ei += 1) {
+                        if (@import("object.zig").JSObject.isElementHole(cur.elements.items[ei])) continue;
+                        var ibuf: [16]u8 = undefined;
+                        const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ei}) catch continue;
+                        const key_owned_str = realm.heap.allocateString(ks) catch return error.OutOfMemory;
+                        int_keys.append(realm.allocator, .{ .idx = ei, .key = key_owned_str.bytes }) catch return error.OutOfMemory;
+                    }
                 }
             }
 
@@ -4076,12 +4088,14 @@ fn runFrames(
                     const arr_v = registers[r_args_arr];
                     const arr_obj = heap_mod.valueAsPlainObject(arr_v) orelse return error.InvalidOpcode;
                     if (arr_obj.is_array_exotic) {
-                        for (arr_obj.elements.items) |v| {
-                            if (@import("object.zig").JSObject.isElementHole(v)) {
-                                spread_args.append(allocator, Value.undefined_) catch return error.OutOfMemory;
-                            } else {
-                                spread_args.append(allocator, v) catch return error.OutOfMemory;
-                            }
+                        // The compiler-built spread array is always
+                        // dense, but route through the indexed API
+                        // so the sparse path remains correct if a
+                        // future site reuses this opcode.
+                        const len_u32 = arr_obj.arrayLength();
+                        var i: u32 = 0;
+                        while (i < len_u32) : (i += 1) {
+                            spread_args.append(allocator, arr_obj.getIndexed(i)) catch return error.OutOfMemory;
                         }
                     } else {
                         const len_v = arr_obj.get("length");
@@ -5801,9 +5815,7 @@ fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, target_le
     // promoting a slot into the named-property bag), so the
     // walk is a single resize.
     if (obj.is_array_exotic) {
-        if (target_len < obj.elements.items.len) {
-            obj.elements.resize(allocator, target_len) catch return .{ .final_length = target_len, .blocked = false };
-        }
+        _ = obj.truncateIndexed(allocator, target_len) catch return .{ .final_length = target_len, .blocked = false };
         return .{ .final_length = target_len, .blocked = false };
     }
     // Pre-array-exotic fallback for any object (e.g. an array-

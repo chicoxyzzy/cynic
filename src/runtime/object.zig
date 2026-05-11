@@ -336,6 +336,17 @@ pub const JSObject = struct {
     /// data descriptor as the spec demands.
     is_array_exotic: bool = false,
     elements: std.ArrayListUnmanaged(Value) = .empty,
+    /// §10.4.2 Array exotic — dictionary mode (V8-style). When a
+    /// single indexed write would extend `elements` by more than
+    /// `sparse_gap_threshold` slots (e.g. `arr[2**32 - 2] = v` on
+    /// an empty array), demote to a `u32 → Value` map keyed by
+    /// present indices. Absent keys are holes; `sparse_length`
+    /// is the logical array length (mirrors `elements.items.len`
+    /// in dense mode). Once sparse, stays sparse — no re-pack on
+    /// shrink. Off by default; only Array exotics flip this.
+    is_sparse: bool = false,
+    sparse_elements: std.AutoHashMapUnmanaged(u32, Value) = .empty,
+    sparse_length: u32 = 0,
     /// Heap-allocated JSStrings whose `bytes` slice backs a key
     /// in `properties` / `accessors` / `private_properties` /
     /// `property_flags`. The hash maps store `[]const u8` slices,
@@ -366,6 +377,7 @@ pub const JSObject = struct {
         self.promise_reactions.deinit(allocator);
         self.key_anchors.deinit(allocator);
         self.elements.deinit(allocator);
+        self.sparse_elements.deinit(allocator);
         // instance_field_inits / private_method_inits are
         // borrowed slices owned by class.zig (allocated against
         // the realm allocator and tracked by the realm); freeing
@@ -436,13 +448,11 @@ pub const JSObject = struct {
                 // the index is at or past the current length,
                 // even when the indexed slot is bag-promoted.
                 const new_len: usize = @as(usize, idx) + 1;
-                if (self.elements.items.len < new_len) {
+                if (self.arrayLength() < new_len) {
                     try self.ensureElementsLen(allocator, new_len);
                     try self.syncLengthProperty(allocator);
                 }
-                if (idx < self.elements.items.len) {
-                    self.elements.items[idx] = Value.hole_;
-                }
+                self.holeIndexed(idx);
             }
         }
         try self.properties.put(allocator, key, v);
@@ -523,15 +533,13 @@ pub const JSObject = struct {
     /// prototype chain. Returns `undefined` when absent.
     pub fn get(self: *const JSObject, key: []const u8) Value {
         // §10.4.2 Array exotic — integer-indexed reads come from
-        // `elements`. Holes (§10.4.2.1) fall through to the
-        // prototype chain. `length` stays in `properties` and is
-        // read by the regular path below.
+        // the indexed storage (packed `elements` or `sparse_elements`).
+        // Holes (§10.4.2.1) fall through to the prototype chain.
+        // `length` stays in `properties` and is read by the regular
+        // path below.
         if (self.is_array_exotic) {
             if (canonicalIntegerIndex(key)) |idx| {
-                if (idx < self.elements.items.len) {
-                    const v = self.elements.items[idx];
-                    if (!isElementHole(v)) return v;
-                }
+                if (self.tryGetIndexedOwn(idx)) |v| return v;
             }
         }
         if (self.properties.get(key)) |v| return v;
@@ -591,15 +599,50 @@ pub const JSObject = struct {
         return @intCast(n);
     }
 
+    /// Promotion gap — when an indexed write or length-grow
+    /// would extend `elements` by more than this many slots in
+    /// a single step (i.e. would pad more than this many holes),
+    /// the array demotes to `sparse_elements`. Incremental dense
+    /// growth (`arr.push` in a loop) stays packed because each
+    /// step grows by 1. Picked to comfortably exceed any normal
+    /// pre-allocate-and-fill pattern while keeping the worst-case
+    /// dense allocation bounded to ~512 KB.
+    const sparse_gap_threshold: usize = 1 << 16;
+
+    /// Logical array length. Dense → `elements.items.len`;
+    /// sparse → `sparse_length`. Callers should prefer this
+    /// helper over poking the underlying storage directly.
+    pub fn arrayLength(self: *const JSObject) u32 {
+        if (self.is_sparse) return self.sparse_length;
+        return @intCast(self.elements.items.len);
+    }
+
+    /// Own indexed slot read that distinguishes hole from
+    /// present-value. Returns `null` for out-of-range or hole,
+    /// the value otherwise. `getIndexed` is the §10.4.2.1 step 2
+    /// view (hole → undefined); this one preserves the
+    /// distinction for callers like `defineProperty`'s
+    /// compatible-redefine guard.
+    pub fn tryGetIndexedOwn(self: *const JSObject, idx: u32) ?Value {
+        if (self.is_sparse) {
+            if (self.sparse_elements.get(idx)) |v| {
+                if (isElementHole(v)) return null;
+                return v;
+            }
+            return null;
+        }
+        if (idx >= self.elements.items.len) return null;
+        const v = self.elements.items[idx];
+        if (isElementHole(v)) return null;
+        return v;
+    }
+
     /// Indexed read — own only; does NOT walk the prototype
     /// chain. Returns `undefined` for out-of-range or hole.
     /// (§10.4.2.1 step 2 — a hole on an Array exotic delegates
     /// up the prototype chain via the caller.)
     pub fn getIndexed(self: *const JSObject, idx: u32) Value {
-        if (idx >= self.elements.items.len) return Value.undefined_;
-        const v = self.elements.items[idx];
-        if (isElementHole(v)) return Value.undefined_;
-        return v;
+        return self.tryGetIndexedOwn(idx) orelse Value.undefined_;
     }
 
     /// §10.4.2.1 — an Array exotic's indexed slot is an own
@@ -609,8 +652,7 @@ pub const JSObject = struct {
     /// `undefined`. The two are distinguishable here via the
     /// `Value.hole_` sentinel re-used from the TDZ encoding.
     pub fn hasOwnIndexedSlot(self: *const JSObject, idx: u32) bool {
-        if (idx >= self.elements.items.len) return false;
-        return !isElementHole(self.elements.items[idx]);
+        return self.tryGetIndexedOwn(idx) != null;
     }
 
     /// True iff the slot value is the engine's reserved hole
@@ -624,9 +666,9 @@ pub const JSObject = struct {
     }
 
     /// §10.4.2.1 [[DefineOwnProperty]] step 4 — write `v` at
-    /// `idx`, growing `elements` (padding with `undefined`) and
-    /// updating `length` so `length === idx + 1` whenever
-    /// `idx >= length`.
+    /// `idx`, growing the indexed storage (padding with holes)
+    /// and updating `length` so `length === idx + 1` whenever
+    /// `idx >= length`. May promote dense → sparse.
     pub fn setIndexed(
         self: *JSObject,
         allocator: std.mem.Allocator,
@@ -635,17 +677,46 @@ pub const JSObject = struct {
     ) !void {
         const new_len: usize = @as(usize, idx) + 1;
         try self.ensureElementsLen(allocator, new_len);
-        self.elements.items[idx] = v;
+        if (self.is_sparse) {
+            try self.sparse_elements.put(allocator, idx, v);
+        } else {
+            self.elements.items[idx] = v;
+        }
         try self.syncLengthProperty(allocator);
     }
 
-    /// Grow `elements` to `new_len`, filling any new slots with
-    /// the hole sentinel (§10.4.2.1 — sparse holes are NOT own
-    /// properties; reads fall through to the prototype chain).
-    /// No-op if already big enough.
+    /// Mirror of `setIndexed` for the hole sentinel — used by
+    /// the descriptor-flag-demoted path (the slot's value lives
+    /// in the named-property bag; the indexed slot exists only
+    /// to count as a hole for `[[Get]]` / `[[HasProperty]]`).
+    /// Does NOT sync length; caller is responsible.
+    pub fn holeIndexed(self: *JSObject, idx: u32) void {
+        if (self.is_sparse) {
+            _ = self.sparse_elements.remove(idx);
+        } else if (idx < self.elements.items.len) {
+            self.elements.items[idx] = Value.hole_;
+        }
+    }
+
+    /// Grow indexed storage to `new_len`, filling any new slots
+    /// with the hole sentinel (§10.4.2.1 — sparse holes are NOT
+    /// own properties; reads fall through to the prototype
+    /// chain). Promotes dense → sparse when the growth gap
+    /// exceeds `sparse_gap_threshold`. No-op if already big enough.
     fn ensureElementsLen(self: *JSObject, allocator: std.mem.Allocator, new_len: usize) !void {
+        if (self.is_sparse) {
+            if (new_len > self.sparse_length) {
+                if (new_len > std.math.maxInt(u32)) return error.OutOfMemory;
+                self.sparse_length = @intCast(new_len);
+            }
+            return;
+        }
         const old_len = self.elements.items.len;
         if (new_len <= old_len) return;
+        if (new_len - old_len > sparse_gap_threshold) {
+            try self.promoteToSparse(allocator, new_len);
+            return;
+        }
         try self.elements.resize(allocator, new_len);
         var i = old_len;
         while (i < new_len) : (i += 1) {
@@ -653,11 +724,29 @@ pub const JSObject = struct {
         }
     }
 
-    /// Write `length === elements.items.len` into `properties`.
+    /// Migrate `elements` into `sparse_elements`. Existing non-
+    /// hole slots become map entries; holes become absent keys.
+    /// `sparse_length` is set to `new_len`. Caller has already
+    /// validated `new_len <= 2^32`.
+    fn promoteToSparse(self: *JSObject, allocator: std.mem.Allocator, new_len: usize) !void {
+        std.debug.assert(!self.is_sparse);
+        std.debug.assert(new_len <= std.math.maxInt(u32));
+        var i: u32 = 0;
+        while (i < self.elements.items.len) : (i += 1) {
+            const v = self.elements.items[i];
+            if (isElementHole(v)) continue;
+            try self.sparse_elements.put(allocator, i, v);
+        }
+        self.elements.clearAndFree(allocator);
+        self.sparse_length = @intCast(new_len);
+        self.is_sparse = true;
+    }
+
+    /// Write `length === arrayLength()` into `properties`.
     /// Called from every indexed mutator so the data property
-    /// stays in sync with the vector's true size.
+    /// stays in sync with the storage's logical length.
     pub fn syncLengthProperty(self: *JSObject, allocator: std.mem.Allocator) !void {
-        const len_now: u64 = @intCast(self.elements.items.len);
+        const len_now: u64 = self.arrayLength();
         const len_v: Value = if (len_now <= std.math.maxInt(i32))
             Value.fromInt32(@intCast(len_now))
         else
@@ -665,7 +754,7 @@ pub const JSObject = struct {
         try self.properties.put(allocator, "length", len_v);
     }
 
-    /// Truncate the elements vector to `new_len`. Used by
+    /// Truncate indexed storage to `new_len`. Used by
     /// §10.4.2.4 ArraySetLength and the `length`-write fast path.
     /// Returns `false` on the first non-configurable element
     /// from the right (spec sets length to that index + 1 and
@@ -674,6 +763,20 @@ pub const JSObject = struct {
     /// the future when `Object.defineProperty(arr, "0", {configurable: false})`
     /// promotes a slot into the named-property bag.
     pub fn truncateIndexed(self: *JSObject, allocator: std.mem.Allocator, new_len: u32) !bool {
+        if (self.is_sparse) {
+            // Collect keys to remove (can't mutate while iterating).
+            var to_remove: std.ArrayListUnmanaged(u32) = .empty;
+            defer to_remove.deinit(allocator);
+            var it = self.sparse_elements.iterator();
+            while (it.next()) |entry| {
+                if (entry.key_ptr.* >= new_len) {
+                    try to_remove.append(allocator, entry.key_ptr.*);
+                }
+            }
+            for (to_remove.items) |k| _ = self.sparse_elements.remove(k);
+            if (new_len < self.sparse_length) self.sparse_length = new_len;
+            return true;
+        }
         const cur: usize = self.elements.items.len;
         const want: usize = new_len;
         if (want >= cur) return true;
@@ -682,10 +785,10 @@ pub const JSObject = struct {
     }
 
     /// §10.4.2.4 ArraySetLength — set the array length to
-    /// `new_len`, truncating `elements` if shrinking and
-    /// growing-with-holes if expanding. Caller is responsible
-    /// for the length-writability gate (§10.4.2.4 step 4); this
-    /// helper is the storage-level effect.
+    /// `new_len`, truncating storage if shrinking and growing-
+    /// with-holes if expanding. Caller is responsible for the
+    /// length-writability gate (§10.4.2.4 step 4); this helper
+    /// is the storage-level effect.
     pub fn setArrayLength(self: *JSObject, allocator: std.mem.Allocator, new_len: u32) !void {
         if (!self.is_array_exotic) {
             // Plain object — length is just a data property.
@@ -696,9 +799,9 @@ pub const JSObject = struct {
             try self.properties.put(allocator, "length", v);
             return;
         }
-        const cur_len = self.elements.items.len;
+        const cur_len = self.arrayLength();
         if (new_len < cur_len) {
-            try self.elements.resize(allocator, new_len);
+            _ = try self.truncateIndexed(allocator, new_len);
         } else if (new_len > cur_len) {
             try self.ensureElementsLen(allocator, new_len);
         }
@@ -726,6 +829,10 @@ pub const JSObject = struct {
     /// prototype chain (§13.5.1.2 [[Delete]] step 5: leaves
     /// length alone, just removes the own property).
     pub fn removeIndexed(self: *JSObject, idx: u32) bool {
+        if (self.is_sparse) {
+            _ = self.sparse_elements.remove(idx);
+            return true;
+        }
         if (idx >= self.elements.items.len) return true; // already absent
         self.elements.items[idx] = Value.hole_;
         return true;
@@ -872,4 +979,91 @@ test "JSObject: hasOwn does not walk prototype chain" {
     obj.prototype = proto;
     try testing.expect(!obj.hasOwn("p"));
     try testing.expect(obj.get("p").asBool());
+}
+
+// ── Sparse-array representation (§10.4.2) ──────────────────────────
+
+test "JSObject: setIndexed past threshold promotes to sparse" {
+    const o = try JSObject.init(testing.allocator);
+    defer o.deinit(testing.allocator);
+    try o.markAsArrayExotic(testing.allocator);
+
+    try o.setIndexed(testing.allocator, 4_294_967_294, Value.fromInt32(100));
+    try testing.expect(o.is_sparse);
+    try testing.expectEqual(@as(usize, 0), o.elements.items.len);
+    try testing.expectEqual(@as(u32, 4_294_967_295), o.arrayLength());
+    try testing.expectEqual(@as(i32, 100), o.getIndexed(4_294_967_294).asInt32());
+    try testing.expect(o.hasOwnIndexedSlot(4_294_967_294));
+    try testing.expect(!o.hasOwnIndexedSlot(0));
+    try testing.expect(o.getIndexed(0).isUndefined());
+}
+
+test "JSObject: dense growth stays packed below threshold" {
+    const o = try JSObject.init(testing.allocator);
+    defer o.deinit(testing.allocator);
+    try o.markAsArrayExotic(testing.allocator);
+
+    try o.setIndexed(testing.allocator, 4, Value.fromInt32(7));
+    try testing.expect(!o.is_sparse);
+    try testing.expectEqual(@as(u32, 5), o.arrayLength());
+    try testing.expect(!o.hasOwnIndexedSlot(0));
+    try testing.expectEqual(@as(i32, 7), o.getIndexed(4).asInt32());
+}
+
+test "JSObject: setArrayLength truncates sparse entries" {
+    const o = try JSObject.init(testing.allocator);
+    defer o.deinit(testing.allocator);
+    try o.markAsArrayExotic(testing.allocator);
+
+    try o.setIndexed(testing.allocator, 0, Value.fromInt32(10));
+    try o.setIndexed(testing.allocator, 1, Value.fromInt32(11));
+    try o.setIndexed(testing.allocator, 4_294_967_294, Value.fromInt32(12));
+    try testing.expect(o.is_sparse);
+
+    try o.setArrayLength(testing.allocator, 2);
+    try testing.expectEqual(@as(u32, 2), o.arrayLength());
+    try testing.expectEqual(@as(i32, 10), o.getIndexed(0).asInt32());
+    try testing.expectEqual(@as(i32, 11), o.getIndexed(1).asInt32());
+    try testing.expect(!o.hasOwnIndexedSlot(4_294_967_294));
+    try testing.expect(o.getIndexed(4_294_967_294).isUndefined());
+}
+
+test "JSObject: setArrayLength grow on sparse just bumps length" {
+    const o = try JSObject.init(testing.allocator);
+    defer o.deinit(testing.allocator);
+    try o.markAsArrayExotic(testing.allocator);
+
+    try o.setIndexed(testing.allocator, 4_294_967_294, Value.fromInt32(1));
+    try testing.expect(o.is_sparse);
+
+    try o.setArrayLength(testing.allocator, 4_294_967_295);
+    try testing.expectEqual(@as(u32, 4_294_967_295), o.arrayLength());
+}
+
+test "JSObject: removeIndexed on sparse drops the slot" {
+    const o = try JSObject.init(testing.allocator);
+    defer o.deinit(testing.allocator);
+    try o.markAsArrayExotic(testing.allocator);
+
+    try o.setIndexed(testing.allocator, 4_294_967_294, Value.fromInt32(42));
+    try testing.expect(o.hasOwnIndexedSlot(4_294_967_294));
+    _ = o.removeIndexed(4_294_967_294);
+    try testing.expect(!o.hasOwnIndexedSlot(4_294_967_294));
+    try testing.expectEqual(@as(u32, 4_294_967_295), o.arrayLength());
+}
+
+test "JSObject: defineProperty-style flagged write past threshold goes sparse" {
+    const o = try JSObject.init(testing.allocator);
+    defer o.deinit(testing.allocator);
+    try o.markAsArrayExotic(testing.allocator);
+
+    try o.setWithFlags(testing.allocator, "4294967294", Value.fromInt32(100), .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    });
+    try testing.expect(o.is_sparse);
+    try testing.expectEqual(@as(usize, 0), o.elements.items.len);
+    try testing.expectEqual(@as(u32, 4_294_967_295), o.arrayLength());
+    try testing.expectEqual(@as(i32, 100), o.get("4294967294").asInt32());
 }

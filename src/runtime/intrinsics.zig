@@ -748,10 +748,7 @@ pub fn getPropertyChain(realm: *Realm, obj: *JSObject, key: []const u8) NativeEr
         // prototype chain (matches §10.4.2.1 step 2).
         if (o.is_array_exotic) {
             if (JSObject.canonicalIntegerIndex(key)) |idx| {
-                if (idx < o.elements.items.len) {
-                    const v = o.elements.items[idx];
-                    if (!JSObject.isElementHole(v)) return v;
-                }
+                if (o.tryGetIndexedOwn(idx)) |v| return v;
             }
         }
         if (o.properties.get(key)) |v| return v;

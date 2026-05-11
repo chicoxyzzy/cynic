@@ -154,13 +154,25 @@ pub fn ownPropertyKeysOrdered(
     // Holes (slots equal to the hole sentinel) are NOT own
     // properties (§10.4.2.1 step 2) and are skipped here.
     if (obj.is_array_exotic) {
-        var ei: u32 = 0;
-        while (ei < obj.elements.items.len) : (ei += 1) {
-            if (JSObject.isElementHole(obj.elements.items[ei])) continue;
-            var ibuf: [16]u8 = undefined;
-            const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ei}) catch continue;
-            const owned = realm.heap.allocateString(ks) catch return error.OutOfMemory;
-            integer_keys.append(realm.allocator, .{ .idx = ei, .key = owned.bytes }) catch return error.OutOfMemory;
+        if (obj.is_sparse) {
+            var sit = obj.sparse_elements.iterator();
+            while (sit.next()) |entry| {
+                const idx = entry.key_ptr.*;
+                if (JSObject.isElementHole(entry.value_ptr.*)) continue;
+                var ibuf: [16]u8 = undefined;
+                const ks = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch continue;
+                const owned = realm.heap.allocateString(ks) catch return error.OutOfMemory;
+                integer_keys.append(realm.allocator, .{ .idx = idx, .key = owned.bytes }) catch return error.OutOfMemory;
+            }
+        } else {
+            var ei: u32 = 0;
+            while (ei < obj.elements.items.len) : (ei += 1) {
+                if (JSObject.isElementHole(obj.elements.items[ei])) continue;
+                var ibuf: [16]u8 = undefined;
+                const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ei}) catch continue;
+                const owned = realm.heap.allocateString(ks) catch return error.OutOfMemory;
+                integer_keys.append(realm.allocator, .{ .idx = ei, .key = owned.bytes }) catch return error.OutOfMemory;
+            }
         }
     }
     var it = obj.properties.iterator();
@@ -582,10 +594,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             if (target.properties.get(key)) |v| break :blk_cv v;
             if (target.is_array_exotic) {
                 if (ObjMod.JSObject.canonicalIntegerIndex(key)) |idx| {
-                    if (idx < target.elements.items.len) {
-                        const ev = target.elements.items[idx];
-                        if (!ObjMod.JSObject.isElementHole(ev)) break :blk_cv ev;
-                    }
+                    if (target.tryGetIndexedOwn(idx)) |ev| break :blk_cv ev;
                 }
             }
             break :blk_cv Value.undefined_;
@@ -623,9 +632,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             _ = target.properties.swapRemove(key);
             if (target.is_array_exotic) {
                 if (ObjMod.JSObject.canonicalIntegerIndex(key)) |idx| {
-                    if (idx < target.elements.items.len) {
-                        target.elements.items[idx] = Value.hole_;
-                    }
+                    target.holeIndexed(idx);
                 }
             }
             const entry = target.accessors.getOrPut(realm.allocator, key) catch return error.OutOfMemory;

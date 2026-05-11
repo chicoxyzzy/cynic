@@ -513,7 +513,12 @@ pub const Heap = struct {
                 // are part of the JSObject's own state; mark each
                 // slot to keep referenced values alive.
                 if (o.is_array_exotic) {
-                    for (o.elements.items) |elem| self.markValue(elem);
+                    if (o.is_sparse) {
+                        var sit = o.sparse_elements.iterator();
+                        while (sit.next()) |entry| self.markValue(entry.value_ptr.*);
+                    } else {
+                        for (o.elements.items) |elem| self.markValue(elem);
+                    }
                 }
                 // §26.1 WeakRef — strong-ref impl: keep target alive
                 // for the lifetime of the WeakRef. Once Cynic grows
