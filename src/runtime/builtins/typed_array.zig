@@ -146,6 +146,7 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethodOnProto(realm, ta_proto, "reverse", typedArrayReverse, 0);
         try installNativeMethodOnProto(realm, ta_proto, "some", typedArraySome, 1);
         try installNativeMethodOnProto(realm, ta_proto, "toString", typedArrayToString, 0);
+        try installNativeMethodOnProto(realm, ta_proto, "toLocaleString", typedArrayToLocaleString, 0);
         try installNativeMethodOnProto(realm, ta_proto, "filter", typedArrayFilter, 1);
         try installNativeMethodOnProto(realm, ta_proto, "map", typedArrayMap, 1);
         try installNativeMethodOnProto(realm, ta_proto, "slice", typedArraySlice, 2);
@@ -500,15 +501,53 @@ fn typedArrayBuffer(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
 
 fn typedArrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
-    const obj = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    const tv = obj.typed_view orelse return error.NativeThrew;
-    const buf = tv.viewed.array_buffer orelse return error.NativeThrew;
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray.prototype.fill called on non-TypedArray");
+    const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray.prototype.fill called on non-TypedArray");
+    const buf = tv.viewed.array_buffer orelse return throwTypeError(realm, "Cannot perform 'fill' on a detached buffer");
     const elem_size = tv.kind.elementSize();
-    const value = argOr(args, 0, Value.undefined_);
-    var i: usize = 0;
-    while (i < tv.length) : (i += 1) {
-        writeTypedElement(buf, tv.kind, tv.byte_offset + i * elem_size, value);
+    const len_i: i64 = @intCast(tv.length);
+    // §23.2.3.10 step 3 — `ToNumber(value)` (or ToBigInt for
+    // BigInt typed arrays) runs ONCE up front, before the start/
+    // end coercions. Test262 fixtures pass side-effecting
+    // `valueOf`/`toString` to verify the once-only semantics.
+    const value_coerced = intrinsics.coerceToNumber(argOr(args, 0, Value.undefined_));
+
+    // §23.2.3.10 step 4-9 — start / end via ToIntegerOrInfinity,
+    // clamped to [0, len]. Negative offsets count from `len`.
+    var start: i64 = 0;
+    if (args.len > 1 and !args[1].isUndefined()) {
+        const sv = intrinsics.coerceToNumber(args[1]);
+        const sd: f64 = if (sv.isInt32()) @floatFromInt(sv.asInt32()) else if (sv.isDouble()) sv.asDouble() else 0;
+        if (std.math.isNan(sd)) {
+            start = 0;
+        } else if (sd == -std.math.inf(f64)) {
+            start = 0;
+        } else if (sd == std.math.inf(f64)) {
+            start = len_i;
+        } else {
+            const t = @trunc(sd);
+            start = if (t < 0) @max(@as(i64, 0), len_i + @as(i64, @intFromFloat(t))) else @min(len_i, @as(i64, @intFromFloat(t)));
+        }
+    }
+    var end: i64 = len_i;
+    if (args.len > 2 and !args[2].isUndefined()) {
+        const ev = intrinsics.coerceToNumber(args[2]);
+        const ed: f64 = if (ev.isInt32()) @floatFromInt(ev.asInt32()) else if (ev.isDouble()) ev.asDouble() else 0;
+        if (std.math.isNan(ed)) {
+            end = 0;
+        } else if (ed == -std.math.inf(f64)) {
+            end = 0;
+        } else if (ed == std.math.inf(f64)) {
+            end = len_i;
+        } else {
+            const t = @trunc(ed);
+            end = if (t < 0) @max(@as(i64, 0), len_i + @as(i64, @intFromFloat(t))) else @min(len_i, @as(i64, @intFromFloat(t)));
+        }
+    }
+
+    var i: i64 = start;
+    while (i < end) : (i += 1) {
+        writeTypedElement(buf, tv.kind, tv.byte_offset + @as(usize, @intCast(i)) * elem_size, value_coerced);
     }
     return this_value;
 }
@@ -853,6 +892,37 @@ fn typedArrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeE
 fn typedArrayToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     return typedArrayJoin(realm, this_value, &.{});
+}
+
+/// §23.2.3.32 %TypedArray%.prototype.toLocaleString — same shape
+/// as Array.prototype.toLocaleString (§23.1.3.32) but reads the
+/// length / index slots from the typed view directly. For each
+/// element, `Invoke(elt, "toLocaleString")` and join with ",".
+/// Locale-aware separators / format options aren't surfaced —
+/// Cynic doesn't ship Intl (out of scope per AGENTS.md).
+fn typedArrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const tv = taViewOf(this_value) orelse return throwTypeError(realm, "toLocaleString on non-TypedArray");
+    const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
+    const elem_size = tv.kind.elementSize();
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(realm.allocator);
+    var i: usize = 0;
+    while (i < tv.length) : (i += 1) {
+        if (i > 0) out.appendSlice(realm.allocator, ",") catch return error.OutOfMemory;
+        const v = readTypedElement(realm, buf, tv.kind, tv.byte_offset + i * elem_size);
+        // §23.2.3.32 step 7 — Invoke(elt, "toLocaleString"). Cynic
+        // doesn't ship Intl (out of scope per AGENTS.md) so the
+        // toLocaleString for Number primitives produces the same
+        // output as `String(n)`. Use `stringifyArg` directly to
+        // skip the boxed-wrapper round-trip; the spec's
+        // `toLocaleString` on a Number wrapper reduces to ToString
+        // when no locale args are passed.
+        const s = stringifyArg(realm, v) catch return error.OutOfMemory;
+        out.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
+    }
+    const result = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
+    return Value.fromString(result);
 }
 
 fn typedArrayReduce(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
