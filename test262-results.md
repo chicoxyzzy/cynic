@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 |
-| **runtime** | 61.88 % | 75.15 % | 28662 / 46320 |
+| **runtime** | 62.66 % | 76.09 % | 29023 / 46320 |
 
 ## Where the runtime stands, by area
 
@@ -23,11 +23,11 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_1000+ fails_** | | | | | |
-| `language/expressions` | 7297 | 2770 | 971 | 66 % | 72 % |
+| `language/expressions` | 7642 | 2425 | 971 | 69 % | 76 % |
 | `language/statements` | 6813 | 1857 | 667 | 73 % | 79 % |
 | **_100–999 fails_** | | | | | |
 | `built-ins/Array` | 2207 | 663 | 211 | 72 % | 77 % |
-| `built-ins/Function` | 210 | 210 | 89 | 41 % | 50 % |
+| `built-ins/Function` | 213 | 207 | 89 | 42 % | 51 % |
 | `built-ins/Object` | 2754 | 572 | 85 | 81 % | 83 % |
 | `built-ins/Promise` | 471 | 203 | 3 | 70 % | 70 % |
 | `built-ins/Proxy` | 174 | 125 | 12 | 56 % | 58 % |
@@ -55,7 +55,7 @@ browser-era built-ins …).
 | `built-ins/Number` | 272 | 68 | 0 | 80 % | 80 % |
 | `built-ins/Reflect` | 96 | 57 | 0 | 63 % | 63 % |
 | `built-ins/RegExpStringIteratorPrototype` | 7 | 10 | 0 | 41 % | 41 % |
-| `built-ins/Set` | 318 | 64 | 1 | 83 % | 83 % |
+| `built-ins/Set` | 321 | 61 | 1 | 84 % | 84 % |
 | `built-ins/Symbol` | 42 | 48 | 8 | 43 % | 47 % |
 | `built-ins/WeakMap` | 121 | 20 | 0 | 86 % | 86 % |
 | `built-ins/WeakSet` | 72 | 13 | 0 | 85 % | 85 % |
@@ -64,8 +64,8 @@ browser-era built-ins …).
 | `built-ins/global` | 16 | 13 | 0 | 55 % | 55 % |
 | `built-ins/isFinite` | 4 | 11 | 0 | 27 % | 27 % |
 | `built-ins/isNaN` | 4 | 11 | 0 | 27 % | 27 % |
-| `language/arguments-object` | 168 | 38 | 57 | 64 % | 82 % |
-| `language/computed-property-names` | 30 | 18 | 0 | 63 % | 63 % |
+| `language/arguments-object` | 177 | 29 | 57 | 67 % | 86 % |
+| `language/computed-property-names` | 31 | 17 | 0 | 65 % | 65 % |
 | `language/function-code` | 85 | 23 | 109 | 39 % | 79 % |
 | `language/global-code` | 18 | 19 | 5 | 43 % | 49 % |
 | `language/identifiers` | 252 | 16 | 0 | 94 % | 94 % |
@@ -140,11 +140,15 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 | ±0 |
-| **runtime** | 61.88 % | 75.15 % | 28662 / 46320 | +3484 |
+| **runtime** | 62.66 % | 76.09 % | 29023 / 46320 | +3845 |
 
 Biggest movers (runtime):
 
-- `built-ins/RegExp` +60
+- `language/expressions` +345
+- `language/arguments-object` +9
+- `built-ins/Function` +3
+- `built-ins/Set` +3
+- `language/computed-property-names` +1
 
 ### 2026-05-10 — cynic `c5c12a0`, test262 `d0c1b455`
 
