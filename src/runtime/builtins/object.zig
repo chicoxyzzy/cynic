@@ -354,9 +354,40 @@ fn objectEntries(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 
 pub fn objectGetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    _ = realm;
     const arg = argOr(args, 0, Value.undefined_);
+    // §10.5.1 Proxy [[GetPrototypeOf]] — dispatch through the
+    // handler's `getPrototypeOf` trap before falling back.
     if (heap_mod.valueAsPlainObject(arg)) |obj| {
+        if (obj.proxy_target) |proxy_target| {
+            if (obj.proxy_revoked) return throwTypeError(realm, "Cannot perform 'getPrototypeOf' on a revoked proxy");
+            const handler = obj.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'getPrototypeOf' on a proxy with null handler");
+            const trap_v = handler.get("getPrototypeOf");
+            if (heap_mod.valueAsFunction(trap_v)) |trap_fn| {
+                const interpreter = @import("../interpreter.zig");
+                const trap_args = [_]Value{heap_mod.taggedObject(proxy_target)};
+                const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (outcome) {
+                    .value, .yielded => |v| {
+                        // §10.5.1 step 7 — trap result must be
+                        // Object or Null.
+                        if (!v.isNull() and heap_mod.valueAsPlainObject(v) == null and heap_mod.valueAsFunction(v) == null) {
+                            return throwTypeError(realm, "'getPrototypeOf' on proxy must return an object or null");
+                        }
+                        return v;
+                    },
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                }
+            }
+            // Trap absent — recurse on the target.
+            const inner_args = [_]Value{heap_mod.taggedObject(proxy_target)};
+            return objectGetPrototypeOf(realm, Value.undefined_, &inner_args);
+        }
         if (obj.prototype) |p| return heap_mod.taggedObject(p);
         return Value.null_;
     }
@@ -1100,18 +1131,86 @@ fn objectIsSealed(realm: *Realm, this_value: Value, args: []const Value) NativeE
 }
 
 pub fn objectPreventExtensions(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
-    if (heap_mod.valueAsPlainObject(arg)) |obj| obj.extensible = false;
+    if (heap_mod.valueAsPlainObject(arg)) |obj| {
+        // §10.5.4 Proxy [[PreventExtensions]] — trap dispatch
+        // with the proxy-revoked / null-handler guards.
+        if (obj.proxy_target) |proxy_target| {
+            if (obj.proxy_revoked) return throwTypeError(realm, "Cannot perform 'preventExtensions' on a revoked proxy");
+            const handler = obj.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'preventExtensions' on a proxy with null handler");
+            const trap_v = handler.get("preventExtensions");
+            if (heap_mod.valueAsFunction(trap_v)) |trap_fn| {
+                const interpreter = @import("../interpreter.zig");
+                const trap_args = [_]Value{heap_mod.taggedObject(proxy_target)};
+                const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (outcome) {
+                    .value, .yielded => |v| {
+                        if (!intrinsics.toBoolean(v)) {
+                            return throwTypeError(realm, "'preventExtensions' on proxy returned falsy");
+                        }
+                        // §10.5.4 step 8 — invariant: when the
+                        // trap reports success, the target must
+                        // actually be non-extensible.
+                        if (proxy_target.extensible) {
+                            return throwTypeError(realm, "'preventExtensions' on proxy reported success but target is still extensible");
+                        }
+                        return arg;
+                    },
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                }
+            }
+            const inner_args = [_]Value{heap_mod.taggedObject(proxy_target)};
+            return objectPreventExtensions(realm, Value.undefined_, &inner_args);
+        }
+        obj.extensible = false;
+    }
     return arg;
 }
 
 fn objectIsExtensible(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
     const obj = heap_mod.valueAsPlainObject(arg) orelse return Value.false_;
+    // §10.5.3 Proxy [[IsExtensible]] — trap dispatch with the
+    // invariant that the result must match the target's actual
+    // extensibility.
+    if (obj.proxy_target) |proxy_target| {
+        if (obj.proxy_revoked) return throwTypeError(realm, "Cannot perform 'isExtensible' on a revoked proxy");
+        const handler = obj.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'isExtensible' on a proxy with null handler");
+        const trap_v = handler.get("isExtensible");
+        if (heap_mod.valueAsFunction(trap_v)) |trap_fn| {
+            const interpreter = @import("../interpreter.zig");
+            const trap_args = [_]Value{heap_mod.taggedObject(proxy_target)};
+            const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            switch (outcome) {
+                .value, .yielded => |v| {
+                    const reported = intrinsics.toBoolean(v);
+                    // §10.5.3 step 8 — invariant: trap result
+                    // must SameValue target.[[IsExtensible]]().
+                    if (reported != proxy_target.extensible) {
+                        return throwTypeError(realm, "'isExtensible' on proxy returned a value inconsistent with the target");
+                    }
+                    return Value.fromBool(reported);
+                },
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            }
+        }
+        const inner_args = [_]Value{heap_mod.taggedObject(proxy_target)};
+        return objectIsExtensible(realm, Value.undefined_, &inner_args);
+    }
     return Value.fromBool(obj.extensible);
 }
 
@@ -1164,15 +1263,45 @@ fn objectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) N
     _ = this_value;
     const target_v = argOr(args, 0, Value.undefined_);
     const proto_v = argOr(args, 1, Value.undefined_);
+    // §20.1.2.20 step 1 — proto arg must be Object or Null.
+    if (!proto_v.isNull() and heap_mod.valueAsPlainObject(proto_v) == null and heap_mod.valueAsFunction(proto_v) == null) {
+        return throwTypeError(realm, "prototype must be an Object or null");
+    }
     if (heap_mod.valueAsPlainObject(target_v)) |obj| {
+        // §10.5.2 Proxy [[SetPrototypeOf]] — trap dispatch.
+        if (obj.proxy_target) |proxy_target| {
+            if (obj.proxy_revoked) return throwTypeError(realm, "Cannot perform 'setPrototypeOf' on a revoked proxy");
+            const handler = obj.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'setPrototypeOf' on a proxy with null handler");
+            const trap_v = handler.get("setPrototypeOf");
+            if (heap_mod.valueAsFunction(trap_v)) |trap_fn| {
+                const interpreter = @import("../interpreter.zig");
+                const trap_args = [_]Value{ heap_mod.taggedObject(proxy_target), proto_v };
+                const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (outcome) {
+                    .value, .yielded => |v| {
+                        if (!intrinsics.toBoolean(v)) {
+                            return throwTypeError(realm, "'setPrototypeOf' on proxy returned falsy");
+                        }
+                        return target_v;
+                    },
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                }
+            }
+            const inner_args = [_]Value{ heap_mod.taggedObject(proxy_target), proto_v };
+            return objectSetPrototypeOf(realm, Value.undefined_, &inner_args);
+        }
         if (proto_v.isNull()) {
             obj.prototype = null;
         } else if (heap_mod.valueAsPlainObject(proto_v)) |p| {
             obj.prototype = p;
         } else if (heap_mod.valueAsFunction(proto_v)) |fn_obj| {
             obj.prototype = fn_obj.prototype;
-        } else {
-            return throwTypeError(realm, "prototype must be an Object or null");
         }
     }
     return target_v;
