@@ -255,38 +255,31 @@ pub fn installError(
 // will let an explicit object return win when used with `new`.
 
 fn errorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value;
-    return constructErrorInstance(realm, realm.intrinsics.error_prototype.?, args);
+    return constructErrorInstance(realm, this_value, realm.intrinsics.error_prototype.?, args);
 }
 
 fn typeErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value;
-    return constructErrorInstance(realm, realm.intrinsics.type_error_prototype.?, args);
+    return constructErrorInstance(realm, this_value, realm.intrinsics.type_error_prototype.?, args);
 }
 
 fn rangeErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value;
-    return constructErrorInstance(realm, realm.intrinsics.range_error_prototype.?, args);
+    return constructErrorInstance(realm, this_value, realm.intrinsics.range_error_prototype.?, args);
 }
 
 fn referenceErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value;
-    return constructErrorInstance(realm, realm.intrinsics.reference_error_prototype.?, args);
+    return constructErrorInstance(realm, this_value, realm.intrinsics.reference_error_prototype.?, args);
 }
 
 fn syntaxErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value;
-    return constructErrorInstance(realm, realm.intrinsics.syntax_error_prototype.?, args);
+    return constructErrorInstance(realm, this_value, realm.intrinsics.syntax_error_prototype.?, args);
 }
 
 fn uriErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value;
-    return constructErrorInstance(realm, realm.intrinsics.uri_error_prototype.?, args);
+    return constructErrorInstance(realm, this_value, realm.intrinsics.uri_error_prototype.?, args);
 }
 
 fn evalErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value;
-    return constructErrorInstance(realm, realm.intrinsics.eval_error_prototype.?, args);
+    return constructErrorInstance(realm, this_value, realm.intrinsics.eval_error_prototype.?, args);
 }
 
 /// §20.5.6.3.2 — initial value of `<NativeError>.prototype.message`
@@ -336,9 +329,21 @@ fn errorPrototypeToString(realm: *Realm, this_value: Value, args: []const Value)
     return Value.fromString(out);
 }
 
-fn constructErrorInstance(realm: *Realm, proto: *JSObject, args: []const Value) NativeError!Value {
-    const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
-    instance.prototype = proto;
+fn constructErrorInstance(realm: *Realm, this_value: Value, proto: *JSObject, args: []const Value) NativeError!Value {
+    // §20.5.1.1 Error / NativeError — when called via `new`
+    // (including via `super(...)` from a derived class), the
+    // engine has already allocated `this_value` as an object
+    // whose `[[Prototype]]` is the right `<X>Error.prototype`.
+    // Initialise that instance in-place so user subclassing
+    // (e.g. `class CustomError extends Error {}`) sees the
+    // message land on the right object. When `this_value`
+    // isn't an object — `Error()` called as a function — fall
+    // back to allocating fresh with the default prototype.
+    const instance = if (heap_mod.valueAsPlainObject(this_value)) |o| o else blk: {
+        const fresh = realm.heap.allocateObject() catch return error.OutOfMemory;
+        fresh.prototype = proto;
+        break :blk fresh;
+    };
     // §20.5.1.1 step 4 — DefinePropertyOrThrow with descriptor
     // `{[[Value]]: msg, [[Writable]]: true, [[Enumerable]]: false,
     //  [[Configurable]]: true}`.
