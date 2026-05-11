@@ -3155,6 +3155,22 @@ fn runFrames(
                         }
                         break :blk Value.undefined_;
                     },
+                    error.Propagated => blk: {
+                        // §13.2.5.5 step 1.b — class-element key
+                        // (or initializer / ToPrimitive coercion)
+                        // threw. The value lives in
+                        // `realm.pending_exception`; surface it
+                        // into the frame stack.
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "Class definition threw");
+                        realm.pending_exception = null;
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        break :blk Value.undefined_;
+                    },
                 };
                 if (committed) continue;
             },

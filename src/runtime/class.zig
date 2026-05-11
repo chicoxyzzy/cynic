@@ -35,6 +35,13 @@ pub const ClassError = error{
     /// The heritage expression resolved to a non-callable (or
     /// callable but non-constructor) value. §15.7.14 step 5.
     HeritageNotConstructor,
+    /// Class-definition evaluation observed user code (a computed
+    /// key, a ToPrimitive coercion, a class-element initializer)
+    /// that threw. The thrown value lives in
+    /// `realm.pending_exception`; the caller surfaces it back into
+    /// the interpreter's frame stack instead of synthesizing a
+    /// generic error.
+    Propagated,
 };
 
 /// Mirror of §15.7.14 OrdinaryClassDefinition.
@@ -468,10 +475,19 @@ fn resolveComputedKey(
     // loops and pressure both the GC and libc malloc.
     const ks_fn = try realm.heap.allocateFunction(chunk_ptr, 0, null, true, captured_env);
     ks_fn.proto = realm.intrinsics.function_prototype;
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, ks_fn, Value.undefined_, &.{}) catch return fallback;
+    // §13.2.5.5 PropertyDefinitionEvaluation step 1.b — an abrupt
+    // completion from the key expression propagates up through
+    // class-definition evaluation as a user-visible throw.
+    const outcome = interpreter.callJSFunction(realm.allocator, realm, ks_fn, Value.undefined_, &.{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Propagated,
+    };
     const key_v = switch (outcome) {
         .value, .yielded => |v| v,
-        .thrown => return fallback,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.Propagated;
+        },
     };
     if (heap_mod_.valueAsSymbol(key_v)) |sym| {
         // Well-known symbols in Cynic carry their `@@`-prefixed
@@ -483,7 +499,14 @@ fn resolveComputedKey(
         return fallback;
     }
     const intrinsics = @import("intrinsics.zig");
-    const s = intrinsics.stringifyArg(realm, key_v) catch return fallback;
+    // §13.2.5.5 step 1.c — `ToPropertyKey(propName)` runs
+    // ToPrimitive which can throw. Surface the thrown value back
+    // via `realm.pending_exception` instead of silently coercing
+    // to a fallback string.
+    const s = intrinsics.stringifyArg(realm, key_v) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Propagated,
+    };
     // §13.2.5 / §10.4.2 — anchor the heap-allocated key string
     // on the host object so the GC keeps it alive for as long
     // as the class prototype is reachable. Without anchoring,
