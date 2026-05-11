@@ -328,7 +328,32 @@ fn lengthOfArrayLocal(obj: *JSObject) i64 {
 
 fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.keys called on non-object");
+    const arg = argOr(args, 0, Value.undefined_);
+    // §17 — Function objects are also ordinary objects. Build
+    // the result the same way as for a plain JSObject so
+    // `Object.keys(class C { static x = 1 })` produces `["x"]`.
+    if (heap_mod.valueAsFunction(arg)) |fn_obj| {
+        const result = realm.heap.allocateObject() catch return error.OutOfMemory;
+        result.prototype = realm.intrinsics.array_prototype;
+        result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+        var idx: usize = 0;
+        var fit = fn_obj.properties.iterator();
+        while (fit.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (std.mem.startsWith(u8, key, "__cynic_")) continue;
+            if (isSymbolKey(key)) continue;
+            if (!fn_obj.flagsForOwn(key).enumerable) continue;
+            const key_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
+            var ibuf: [16]u8 = undefined;
+            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
+            const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+            result.set(realm.allocator, idx_owned.bytes, Value.fromString(key_owned)) catch return error.OutOfMemory;
+            idx += 1;
+        }
+        result.set(realm.allocator, "length", Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(result);
+    }
+    const obj = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Object.keys called on non-object");
     const keys = if (try proxyOwnKeysOrNull(realm, obj)) |k| k else try ownPropertyKeysOrdered(realm, obj);
     defer realm.allocator.free(keys);
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;

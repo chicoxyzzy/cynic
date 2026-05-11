@@ -179,10 +179,18 @@ pub fn buildClass(
         // was `[expr]`, evaluate the key chunk to get the
         // runtime key. Otherwise use the static `m.name`.
         const runtime_name = try resolveComputedKey(realm, optChunkPtr(&m.key_chunk), m.name, captured_env, proto);
+        // §15.7 — private method `.name` is the bare `#method`,
+        // not the class-identity-prefixed mangled key. Strip
+        // the `P<uid>#` prefix used for the slot lookup. The
+        // accessor `get / set` prefix is added below per kind.
+        const display_name = if (std.mem.startsWith(u8, runtime_name, template.private_prefix))
+            runtime_name[template.private_prefix.len - 1 ..]
+        else
+            runtime_name;
         const fn_obj = try realm.heap.allocateFunction(
             &m.chunk,
             m.param_count,
-            runtime_name,
+            display_name,
             false,
             captured_env,
         );
@@ -300,10 +308,15 @@ pub fn buildClass(
     // small fraction of the class-test cluster.
     for (template.static_methods) |*m| {
         const runtime_name = try resolveComputedKey(realm, optChunkPtr(&m.key_chunk), m.name, captured_env, proto);
+        // §15.7 — bare `#method` for private static .name.
+        const display_name = if (std.mem.startsWith(u8, runtime_name, template.private_prefix))
+            runtime_name[template.private_prefix.len - 1 ..]
+        else
+            runtime_name;
         const fn_obj = try realm.heap.allocateFunction(
             &m.chunk,
             m.param_count,
-            runtime_name,
+            display_name,
             false,
             captured_env,
         );
