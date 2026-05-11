@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 |
-| **runtime** | 62.66 % | 76.09 % | 29023 / 46320 |
+| **runtime** | 62.71 % | 76.15 % | 29045 / 46320 |
 
 ## Where the runtime stands, by area
 
@@ -29,7 +29,7 @@ browser-era built-ins …).
 | `built-ins/Array` | 2207 | 663 | 211 | 72 % | 77 % |
 | `built-ins/Function` | 213 | 207 | 89 | 42 % | 51 % |
 | `built-ins/Object` | 2754 | 572 | 85 | 81 % | 83 % |
-| `built-ins/Promise` | 471 | 203 | 3 | 70 % | 70 % |
+| `built-ins/Promise` | 493 | 181 | 3 | 73 % | 73 % |
 | `built-ins/Proxy` | 174 | 125 | 12 | 56 % | 58 % |
 | `built-ins/RegExp` | 1197 | 521 | 161 | 64 % | 70 % |
 | `built-ins/String` | 851 | 367 | 5 | 70 % | 70 % |
@@ -140,15 +140,11 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 | ±0 |
-| **runtime** | 62.66 % | 76.09 % | 29023 / 46320 | +3845 |
+| **runtime** | 62.71 % | 76.15 % | 29045 / 46320 | +3867 |
 
 Biggest movers (runtime):
 
-- `language/expressions` +345
-- `language/arguments-object` +9
-- `built-ins/Function` +3
-- `built-ins/Set` +3
-- `language/computed-property-names` +1
+- `built-ins/Promise` +22
 
 ### 2026-05-10 — cynic `c5c12a0`, test262 `d0c1b455`
 
