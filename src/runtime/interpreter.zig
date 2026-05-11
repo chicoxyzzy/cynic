@@ -2197,6 +2197,23 @@ fn runFrames(
                 if (tmpl.is_arrow) fn_obj.captured_this = f.this_value;
                 fn_obj.is_generator = tmpl.is_generator;
                 fn_obj.is_async = tmpl.is_async;
+                // §27.3.5 / §27.4.5 — `function*(){}.prototype` /
+                // `async function*(){}.prototype` is an ordinary
+                // object whose `[[Prototype]]` is `%GeneratorPrototype%`
+                // / `%AsyncGeneratorPrototype%`, with NO own
+                // `constructor` property. `allocateFunction` always
+                // installs `constructor` for non-arrows — undo for
+                // the generator variants and rewire the proto chain.
+                if (tmpl.is_generator) {
+                    if (fn_obj.prototype) |proto| {
+                        _ = proto.properties.swapRemove("constructor");
+                        _ = proto.property_flags.swapRemove("constructor");
+                        proto.prototype = if (tmpl.is_async)
+                            ensureAsyncGeneratorPrototype(realm) catch realm.intrinsics.object_prototype
+                        else
+                            ensureGeneratorPrototype(realm) catch realm.intrinsics.object_prototype;
+                    }
+                }
                 // §20.2.3.5 — borrow the template's source slice
                 // for `Function.prototype.toString`. The slice
                 // borrows from the chunk's source, which is

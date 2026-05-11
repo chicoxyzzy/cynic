@@ -1122,25 +1122,97 @@ fn typedArraySlice(realm: *Realm, this_value: Value, args: []const Value) Native
 }
 
 fn typedArraySubarray(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const tv = taViewOf(this_value) orelse return throwTypeError(realm, "subarray on non-TypedArray");
+    const self = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "subarray on non-TypedArray");
+    const tv = self.typed_view orelse return throwTypeError(realm, "subarray on non-TypedArray");
     const len: i64 = @intCast(tv.length);
     const begin = taResolveIndex(argOr(args, 0, Value.fromInt32(0)), len, 0);
     const end = taResolveIndex(argOr(args, 1, Value.undefined_), len, len);
     const new_len: usize = if (end > begin) @intCast(end - begin) else 0;
-    // Subarray VIEWS the same buffer rather than copying. Allocate
-    // a fresh wrapper and reuse the existing ArrayBuffer.
-    const ctor_name = nameForTypedKind(tv.kind);
-    const ctor = heap_mod.valueAsFunction(realm.globals.get(ctor_name) orelse Value.undefined_) orelse return throwTypeError(realm, "TypedArray constructor not found");
-    const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
-    inst.prototype = ctor.prototype;
     const elem_size = tv.kind.elementSize();
-    inst.typed_view = .{
-        .kind = tv.kind,
-        .viewed = tv.viewed,
-        .byte_offset = tv.byte_offset + @as(usize, @intCast(begin)) * elem_size,
-        .length = new_len,
+    const new_offset = tv.byte_offset + @as(usize, @intCast(begin)) * elem_size;
+
+    // §23.2.3.30 step 14 — `TypedArraySpeciesCreate(O, «
+    // buffer, byteOffset, newLength »)`. Three-arg shape, unlike
+    // `slice`/`map`/`filter` (one arg = length); use a dedicated
+    // helper instead of `taSpeciesCreate`. Default case (no
+    // override) builds a view directly on the shared buffer.
+    const out_obj = try taSpeciesCreateSubarray(realm, self, tv.kind, tv.viewed, new_offset, new_len);
+    return heap_mod.taggedObject(out_obj);
+}
+
+/// §23.2.3.30 — TypedArraySpeciesCreate for subarray. Distinct
+/// from `taSpeciesCreate` because the constructor receives
+/// `(buffer, byteOffset, length)`, not `(length)`. When there's
+/// no user-installed `@@species`, we build the view inline
+/// without going through the constructor (faster, no
+/// re-entry).
+fn taSpeciesCreateSubarray(
+    realm: *Realm,
+    exemplar: *JSObject,
+    kind: ObjMod.TypedKind,
+    buffer: *JSObject,
+    byte_offset: usize,
+    length: usize,
+) NativeError!*JSObject {
+    const ctor_prop = intrinsics.getPropertyChain(realm, exemplar, "constructor") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
     };
-    return heap_mod.taggedObject(inst);
+    var species_v = Value.undefined_;
+    if (!ctor_prop.isUndefined()) {
+        const ctor_obj_or_fn = heap_mod.valueAsPlainObject(ctor_prop) orelse blk: {
+            if (heap_mod.valueAsFunction(ctor_prop)) |fn_obj| {
+                species_v = fn_obj.get("@@species");
+                break :blk @as(?*JSObject, null);
+            }
+            return throwTypeError(realm, "exemplar.constructor is not an object");
+        };
+        if (ctor_obj_or_fn) |obj| {
+            species_v = intrinsics.getPropertyChain(realm, obj, "@@species") catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+        }
+    }
+
+    if (species_v.isUndefined() or species_v.isNull()) {
+        // Default — build inline, reusing the shared buffer.
+        const ctor = heap_mod.valueAsFunction(realm.globals.get(nameForTypedKind(kind)) orelse Value.undefined_) orelse return throwTypeError(realm, "TypedArray constructor not found");
+        const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
+        inst.prototype = ctor.prototype;
+        inst.typed_view = .{
+            .kind = kind,
+            .viewed = buffer,
+            .byte_offset = byte_offset,
+            .length = length,
+        };
+        return inst;
+    }
+    const species_fn = heap_mod.valueAsFunction(species_v) orelse return throwTypeError(realm, "TypedArray @@species is not a constructor");
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const ctor_args = [_]Value{
+        heap_mod.taggedObject(buffer),
+        Value.fromInt32(@as(i32, @intCast(@min(byte_offset, std.math.maxInt(i32))))),
+        Value.fromInt32(@as(i32, @intCast(@min(length, std.math.maxInt(i32))))),
+    };
+    const interpreter = @import("../interpreter.zig");
+    const callee_v = heap_mod.taggedFunction(species_fn);
+    const outcome = interpreter.constructValue(realm.allocator, realm, callee_v, &ctor_args, callee_v) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const result_v = switch (outcome) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+    const result_obj = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "TypedArray species ctor returned non-object");
+    const result_tv = result_obj.typed_view orelse return throwTypeError(realm, "TypedArray species ctor returned non-TypedArray");
+    if (result_tv.kind != kind) return throwTypeError(realm, "TypedArray species ctor returned wrong content type");
+    return result_obj;
 }
 
 fn typedArrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

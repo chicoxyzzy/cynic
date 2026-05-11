@@ -453,13 +453,108 @@ fn promiseCatch(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const real_args = [_]Value{ Value.undefined_, cb };
     return promiseThen(realm, this_value, &real_args);
 }
+/// §27.2.5.3 Promise.prototype.finally(onFinally).
+///
+/// Three branches:
+/// 1. Receiver must be an Object → else TypeError.
+/// 2. `onFinally` not callable → `this.then(onFinally, onFinally)`
+///    per step 6 (the spec's "Promise.prototype.finally as
+///    transparent passthrough"). The non-function then-args are
+///    silently dropped by `then`'s own filter.
+/// 3. `onFinally` callable → build `thenFinally` / `catchFinally`
+///    wrappers that invoke `onFinally`, ignore its result, and
+///    propagate the original value / re-throw the reason.
+///
+/// Cynic shortcut: we don't yet wrap the callback's return value
+/// through `Promise.resolve` (§27.2.5.3 step 6.c). Fixtures that
+/// expect `finally` to wait on a thenable result still time the
+/// resolution one tick early. Tracked in the Promise triage.
 fn promiseFinally(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
-    _ = args;
-    // invoke the callback and forward state/value.
-    // For now the test surface that just calls.finally() and
-    // chains accepts the receiver back.
-    return this_value;
+    if (heap_mod.valueAsPlainObject(this_value) == null) {
+        return throwTypeError(realm, "Promise.prototype.finally called on non-object");
+    }
+    const on_finally = argOr(args, 0, Value.undefined_);
+    const on_finally_fn = heap_mod.valueAsFunction(on_finally);
+    if (on_finally_fn == null) {
+        // Step 6 fall-through — `then` filters non-callable args.
+        const passthrough_args = [_]Value{ on_finally, on_finally };
+        return promiseThen(realm, this_value, &passthrough_args);
+    }
+    // Build the two wrapper closures. They share state via a
+    // small heap-allocated object that carries the user's
+    // onFinally and a sign bit ("rethrow on catch").
+    const ctx = realm.heap.allocateObject() catch return error.OutOfMemory;
+    ctx.prototype = realm.intrinsics.object_prototype;
+    ctx.set(realm.allocator, "__cynic_finally_cb__", on_finally) catch return error.OutOfMemory;
+
+    // Mark the closures `is_arrow = true` so the call path
+    // substitutes `captured_this` for whatever the reaction
+    // callback was invoked with — `enqueuePromiseReaction`
+    // doesn't pass a meaningful `this`, and we need the
+    // per-`.finally()` context to flow into the native body.
+    const then_fn = realm.heap.allocateFunctionNative(finallyThenReaction, 1, "") catch return error.OutOfMemory;
+    then_fn.proto = realm.intrinsics.function_prototype;
+    then_fn.is_arrow = true;
+    then_fn.captured_this = heap_mod.taggedObject(ctx);
+
+    const catch_fn = realm.heap.allocateFunctionNative(finallyCatchReaction, 1, "") catch return error.OutOfMemory;
+    catch_fn.proto = realm.intrinsics.function_prototype;
+    catch_fn.is_arrow = true;
+    catch_fn.captured_this = heap_mod.taggedObject(ctx);
+
+    const then_args = [_]Value{ heap_mod.taggedFunction(then_fn), heap_mod.taggedFunction(catch_fn) };
+    return promiseThen(realm, this_value, &then_args);
+}
+
+/// Step 6.a-d of §27.2.5.3 — invoke `onFinally()`, ignore the
+/// result, propagate the original fulfilled value. The per-
+/// `.finally()` context flows in as `this_value` thanks to the
+/// `is_arrow + captured_this` setup at the install site.
+fn finallyThenReaction(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const value = argOr(args, 0, Value.undefined_);
+    const ctx = heap_mod.valueAsPlainObject(this_value) orelse return value;
+    const cb = heap_mod.valueAsFunction(ctx.get("__cynic_finally_cb__")) orelse return value;
+    const interp = @import("../interpreter.zig");
+    const outcome = interp.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &.{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    switch (outcome) {
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+        else => {},
+    }
+    return value;
+}
+
+/// Step 6.e-g — invoke `onFinally()`, then RE-THROW the original
+/// rejection reason. If onFinally itself throws, that throw wins.
+fn finallyCatchReaction(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const reason = argOr(args, 0, Value.undefined_);
+    const ctx = heap_mod.valueAsPlainObject(this_value) orelse {
+        realm.pending_exception = reason;
+        return error.NativeThrew;
+    };
+    const cb = heap_mod.valueAsFunction(ctx.get("__cynic_finally_cb__")) orelse {
+        realm.pending_exception = reason;
+        return error.NativeThrew;
+    };
+    const interp = @import("../interpreter.zig");
+    const outcome = interp.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &.{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    switch (outcome) {
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+        else => {},
+    }
+    realm.pending_exception = reason;
+    return error.NativeThrew;
 }
 
 /// §27.2.4.7 Promise.resolve. When the receiver is a subclassed
