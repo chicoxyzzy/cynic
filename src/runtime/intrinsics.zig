@@ -389,6 +389,12 @@ pub fn install(realm: *Realm) !void {
     try @import("builtins/regexp.zig").install(realm);
     try @import("builtins/json.zig").install(realm);
     try @import("builtins/iterator.zig").install(realm);
+    // Iterator.prototype is now live — wire
+    // %GeneratorFunction.prototype.prototype% and %AsyncGeneratorFunction.prototype.prototype%
+    // so `Object.getPrototypeOf(function*(){}).prototype` lands
+    // on the right object (and its proto chain goes through
+    // Iterator.prototype per §27.5.1).
+    try @import("builtins/function.zig").wireVariantInstancePrototypes(realm);
 
     // Final pass — wire every heap-allocated function (including
     // the built-ins we just installed) to %Function.prototype%

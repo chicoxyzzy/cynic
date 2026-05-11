@@ -301,6 +301,35 @@ pub fn installVariantPrototypes(realm: *Realm) !void {
     realm.intrinsics.async_generator_function_prototype = try installVariantCtor(realm, "AsyncGeneratorFunction");
 }
 
+/// §27.3.4.3 GeneratorFunction.prototype.prototype = %GeneratorPrototype%
+/// §27.4.3.4 AsyncGeneratorFunction.prototype.prototype = %AsyncGeneratorPrototype%
+///
+/// Tests routinely walk `Object.getPrototypeOf(function*(){}).prototype`
+/// to reach the prototype with `next` / `return` / `throw`;
+/// without these wirings that lookup yields `undefined`. Runs
+/// AFTER `iterator.install` so the generator prototype's
+/// `[[Prototype]]` resolves to `%Iterator.prototype%` per
+/// §27.5.1 step 1.b of OrdinaryGeneratorObjectPrototype.
+pub fn wireVariantInstancePrototypes(realm: *Realm) !void {
+    const interp = @import("../interpreter.zig");
+    if (realm.intrinsics.generator_function_prototype) |gfp| {
+        const gp = try interp.ensureGeneratorPrototype(realm);
+        try gfp.setWithFlags(realm.allocator, "prototype", heap_mod.taggedObject(gp), .{
+            .writable = false,
+            .enumerable = false,
+            .configurable = false,
+        });
+    }
+    if (realm.intrinsics.async_generator_function_prototype) |agfp| {
+        const agp = try interp.ensureAsyncGeneratorPrototype(realm);
+        try agfp.setWithFlags(realm.allocator, "prototype", heap_mod.taggedObject(agp), .{
+            .writable = false,
+            .enumerable = false,
+            .configurable = false,
+        });
+    }
+}
+
 fn installVariantCtor(realm: *Realm, name: []const u8) !*JSObject {
     const fn_obj = try realm.heap.allocateFunctionNative(variantCtorThrows, 1, name);
     fn_obj.proto = realm.intrinsics.function_prototype;

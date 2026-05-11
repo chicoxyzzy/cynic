@@ -340,7 +340,7 @@ fn iteratorPrototypeOrObjectPrototype(realm: *Realm) ?*JSObject {
     return realm.intrinsics.object_prototype;
 }
 
-fn ensureGeneratorPrototype(realm: *Realm) !*JSObject {
+pub fn ensureGeneratorPrototype(realm: *Realm) !*JSObject {
     if (realm.intrinsics.generator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
     proto.prototype = iteratorPrototypeOrObjectPrototype(realm);
@@ -392,7 +392,7 @@ fn genResultObject(realm: *Realm, value: Value, done: bool) !Value {
 /// sync generator prototype but the methods produce Promises:
 /// • `next()` / `return()` resolve to `{value, done}`.
 /// • `throw()` rejects with the thrown value.
-fn ensureAsyncGeneratorPrototype(realm: *Realm) !*JSObject {
+pub fn ensureAsyncGeneratorPrototype(realm: *Realm) !*JSObject {
     if (realm.intrinsics.async_generator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
     // §27.6.1 — `%AsyncGeneratorPrototype%.[[Prototype]]` is
@@ -434,8 +434,16 @@ fn ensureAsyncGeneratorPrototype(realm: *Realm) !*JSObject {
 }
 
 fn asyncGenNext(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
-    const obj = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    const gen = obj.generator_ref orelse return error.NativeThrew;
+    // §27.6.1.2 step 2 — IfAbruptRejectPromise on the
+    // brand-check. `this` must be an async-generator object;
+    // anything else turns into Promise.reject(TypeError), NOT a
+    // thrown TypeError (the test fixture inspects the rejection
+    // reason, so synchronous throws bypass `.then`'s onRejected
+    // and trip a different code path).
+    const brand_err = asyncGenBrandCheck(realm, this_value, "Async generator method called on a non-async-generator");
+    if (brand_err) |ex| return intrinsics_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
+    const obj = heap_mod.valueAsPlainObject(this_value).?;
+    const gen = obj.generator_ref.?;
     const sent: Value = if (args.len > 0) args[0] else Value.undefined_;
     const outcome = resumeGenerator(realm.allocator, realm, gen, sent) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -446,6 +454,25 @@ fn asyncGenNext(realm: *Realm, this_value: Value, args: []const Value) @import("
         .value => |raw| return wrapAsyncGenResult(realm, raw, true),
         .thrown => |ex| return intrinsics_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory,
     }
+}
+
+/// §27.6.1 — async generators carry a brand on their wrapper
+/// JSObject. Tests routinely call `AsyncGeneratorPrototype.X.call(notAGen)`
+/// and check that the returned promise rejects with TypeError.
+/// Returns the prebuilt TypeError value when `this` fails the
+/// check; null when it's a real async generator (caller proceeds
+/// with the unwrapped `obj.generator_ref`).
+fn asyncGenBrandCheck(realm: *Realm, this_value: Value, msg: []const u8) ?Value {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse {
+        return makeTypeError(realm, msg) catch return null;
+    };
+    const gen = obj.generator_ref orelse {
+        return makeTypeError(realm, msg) catch return null;
+    };
+    if (!gen.is_async) {
+        return makeTypeError(realm, msg) catch return null;
+    }
+    return null;
 }
 
 /// §27.6.3.6 AsyncGeneratorYield — produce the next() promise.
@@ -521,8 +548,12 @@ fn unwrapSettledPromise(v: Value) SettledOutcome {
 }
 
 fn asyncGenReturn(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
-    const obj = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    const gen = obj.generator_ref orelse return error.NativeThrew;
+    // §27.6.1.3 step 2 — IfAbruptRejectPromise on brand check.
+    if (asyncGenBrandCheck(realm, this_value, "AsyncGenerator.prototype.return called on non-async-generator")) |ex| {
+        return intrinsics_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
+    }
+    const obj = heap_mod.valueAsPlainObject(this_value).?;
+    const gen = obj.generator_ref.?;
     gen.state = .completed;
     const ret_v: Value = if (args.len > 0) args[0] else Value.undefined_;
     const result = genResultObject(realm, ret_v, true) catch return error.OutOfMemory;
@@ -530,7 +561,10 @@ fn asyncGenReturn(realm: *Realm, this_value: Value, args: []const Value) @import
 }
 
 fn asyncGenThrow(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
-    _ = this_value;
+    // §27.6.1.4 step 2 — IfAbruptRejectPromise on brand check.
+    if (asyncGenBrandCheck(realm, this_value, "AsyncGenerator.prototype.throw called on non-async-generator")) |ex| {
+        return intrinsics_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
+    }
     const ex: Value = if (args.len > 0) args[0] else Value.undefined_;
     return intrinsics_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
 }
@@ -576,6 +610,14 @@ pub const IterError = error{
     OutOfMemory,
     NotIterable,
     InvalidOpcode,
+    /// Iterator-setup observed user code (an accessor getter, a
+    /// `next` method call, etc.) that threw. The thrown value
+    /// lives in `realm.pending_exception`; the caller must
+    /// propagate it instead of synthesising "value is not
+    /// iterable" TypeError. §27.1.4.3 GetIterator step 1.a
+    /// (`GetMethod` throws) and step 1.b.i (sync fallback
+    /// throws) both surface here.
+    Propagated,
 };
 
 /// §7.4.1 GetIterator. Produce an iterator object for an
@@ -598,25 +640,42 @@ pub fn openAsyncIterator(
     iterable: Value,
 ) IterError!Value {
     if (heap_mod.valueAsPlainObject(iterable)) |obj| {
-        const iter_fn_v = obj.get("@@asyncIterator");
-        if (heap_mod.valueAsFunction(iter_fn_v)) |iter_fn| {
+        // §27.1.4.3 step 1.a — GetMethod(obj, @@asyncIterator).
+        // Use `getPropertyChain` (accessor-aware); a thrown getter
+        // propagates as `Propagated` so the caller hands the
+        // user's exception value back instead of synthesising
+        // "not async iterable".
+        const iter_fn_v = intrinsics_mod.getPropertyChain(realm, obj, "@@asyncIterator") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.Propagated,
+        };
+        // §27.1.4.3 step 1.b — method is undefined → fall through
+        // to the sync iterator. A callable (function) goes through
+        // the async branch.
+        if (!iter_fn_v.isUndefined() and !iter_fn_v.isNull()) {
+            const iter_fn = heap_mod.valueAsFunction(iter_fn_v) orelse return error.NotIterable;
             const result = callJSFunction(realm.allocator, realm, iter_fn, iterable, &.{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.InvalidOpcode,
             };
             switch (result) {
                 .value, .yielded => |v| {
+                    // §7.4.2 GetIteratorDirect step 3 — the
+                    // returned value must be an Object.
                     if (heap_mod.valueAsPlainObject(v) == null) return error.NotIterable;
                     return v;
                 },
-                .thrown => return error.NotIterable,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.Propagated;
+                },
             }
         }
     }
-    // Fall back to the sync iterator. §27.1.4.4 says we should
-    // wrap with CreateAsyncFromSyncIterator; for now we just hand
-    // back the sync iter — `await` on a non-Promise next() result
-    // resolves to the value, which is the observable shape.
+    // §27.1.4.3 step 1.b — fall back to sync `@@iterator`.
+    // CreateAsyncFromSyncIterator wrapping is approximated: we
+    // hand back the sync iter and the `await` in the consumer
+    // (for-await-of / yield* lowering) resolves the sync result.
     return openIterator(realm.allocator, realm, iterable);
 }
 
@@ -630,8 +689,16 @@ pub fn openIterator(
     // represented by the literal string `"@@iterator"` until
     // Symbol becomes a Value-tag primitive.
     if (heap_mod.valueAsPlainObject(iterable)) |obj| {
-        const iter_fn_v = obj.get("@@iterator");
-        if (heap_mod.valueAsFunction(iter_fn_v)) |iter_fn| {
+        // §7.4.2 GetIterator — accessor-aware so a `get
+        // [Symbol.iterator]() { throw … }` style fixture
+        // propagates the user exception instead of being
+        // squashed to "not iterable".
+        const iter_fn_v = intrinsics_mod.getPropertyChain(realm, obj, "@@iterator") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.Propagated,
+        };
+        if (!iter_fn_v.isUndefined() and !iter_fn_v.isNull()) {
+            const iter_fn = heap_mod.valueAsFunction(iter_fn_v) orelse return error.NotIterable;
             const result = callJSFunction(realm.allocator, realm, iter_fn, iterable, &.{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.InvalidOpcode,
@@ -641,7 +708,10 @@ pub fn openIterator(
                     if (heap_mod.valueAsPlainObject(v) == null) return error.NotIterable;
                     return v;
                 },
-                .thrown => return error.NotIterable,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.Propagated;
+                },
             }
         }
     }
@@ -3535,8 +3605,12 @@ fn runFrames(
                 const iterable = acc;
                 const new_iter = openIterator(allocator, realm, iterable) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
-                    error.NotIterable => {
-                        const ex = try makeTypeError(realm, "value is not iterable");
+                    error.NotIterable, error.Propagated => |e| {
+                        const ex = if (e == error.Propagated and realm.pending_exception != null) blk: {
+                            const px = realm.pending_exception.?;
+                            realm.pending_exception = null;
+                            break :blk px;
+                        } else try makeTypeError(realm, "value is not iterable");
                         f.ip = ip;
                         f.accumulator = acc;
                         committed = true;
@@ -3554,8 +3628,12 @@ fn runFrames(
                 const iterable = acc;
                 const new_iter = openAsyncIterator(allocator, realm, iterable) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
-                    error.NotIterable => {
-                        const ex = try makeTypeError(realm, "value is not async iterable");
+                    error.NotIterable, error.Propagated => |e| {
+                        const ex = if (e == error.Propagated and realm.pending_exception != null) blk: {
+                            const px = realm.pending_exception.?;
+                            realm.pending_exception = null;
+                            break :blk px;
+                        } else try makeTypeError(realm, "value is not async iterable");
                         f.ip = ip;
                         f.accumulator = acc;
                         committed = true;
@@ -4242,8 +4320,12 @@ fn runFrames(
                 const iter = openIterator(allocator, realm, acc) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.InvalidOpcode => return error.InvalidOpcode,
-                    error.NotIterable => {
-                        const ex = try makeTypeError(realm, "spread source is not iterable");
+                    error.NotIterable, error.Propagated => |e| {
+                        const ex = if (e == error.Propagated and realm.pending_exception != null) blk: {
+                            const px = realm.pending_exception.?;
+                            realm.pending_exception = null;
+                            break :blk px;
+                        } else try makeTypeError(realm, "spread source is not iterable");
                         f.ip = ip;
                         f.accumulator = acc;
                         committed = true;
