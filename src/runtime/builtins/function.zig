@@ -354,7 +354,15 @@ fn installVariantCtor(realm: *Realm, name: []const u8) !*JSObject {
     // §27.3 — these prototypes inherit from %Function.prototype%
     // (NOT %Object.prototype%) so e.g. `bind` / `call` resolve.
     proto.prototype = realm.intrinsics.function_prototype;
-    try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
+    // §27.3.4.1 / §27.4.3.1 — `constructor` is
+    // { w:false, e:false, c:true } on the variant prototypes.
+    // `setNonEnumerable` defaults to writable=true; use
+    // `setWithFlags` directly with the spec-mandated flags.
+    try proto.setWithFlags(realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj), .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = true,
+    });
     // §27.3.3 — GeneratorFunction.prototype[@@toStringTag] etc.
     try installToStringTag(realm, proto, name);
     fn_obj.prototype = proto;
