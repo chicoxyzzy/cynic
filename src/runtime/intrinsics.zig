@@ -1085,8 +1085,15 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
         .string => "string",
     };
     if (heap_mod.valueAsPlainObject(value)) |obj| {
-        // Symbol.toPrimitive override.
-        const exotic = obj.get("@@toPrimitive");
+        // Symbol.toPrimitive override. Use `getPropertyChain` so
+        // an accessor `get [Symbol.toPrimitive]() {…}` fires
+        // (fixtures install poisoned getters and assert the
+        // throw propagates). A plain data-slot lookup would miss
+        // those.
+        const exotic = getPropertyChain(realm, obj, "@@toPrimitive") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
         if (heap_mod.valueAsFunction(exotic)) |fn_obj| {
             const hint_v = realm.heap.allocateString(hint_str) catch return error.OutOfMemory;
             const args = [_]Value{Value.fromString(hint_v)};
@@ -1111,11 +1118,18 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
             }
         }
         // OrdinaryToPrimitive: `valueOf` then `toString` for
-        // number/default hint; reverse for string.
+        // number/default hint; reverse for string. `getPropertyChain`
+        // fires inherited or accessor-installed getters — fixtures
+        // like `trimStart/this-value-object-tostring-call-err.js`
+        // install `get toString() { throw ... }` and expect the
+        // getter throw to propagate.
         const first_name: []const u8 = if (hint == .string) "toString" else "valueOf";
         const second_name: []const u8 = if (hint == .string) "valueOf" else "toString";
         for ([_][]const u8{ first_name, second_name }) |name| {
-            const method = obj.get(name);
+            const method = getPropertyChain(realm, obj, name) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
             if (heap_mod.valueAsFunction(method)) |fn_obj| {
                 const outcome = interp.callJSFunction(realm.allocator, realm, fn_obj, value, &[_]Value{}) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
