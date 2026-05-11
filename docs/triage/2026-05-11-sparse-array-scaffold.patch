@@ -1,0 +1,110 @@
+src/runtime/object.zig | 101 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 101 insertions(+)
+
+--- Changes ---
+
+src/runtime/object.zig
+  @@ -873,3 +873,104 @@ test "JSObject: hasOwn does not walk prototype chain" {
+  +
+  +// ── Sparse-array representation (§10.4.2) ──────────────────────────
+  +//
+  +// Demote a packed elements vector into a dictionary when an indexed
+  +// write would otherwise force a multi-GB hole-padded allocation
+  +// (e.g. `arr[2**32 - 2] = v`). The sparse map keys present slots by
+  +// `u32` index; absent keys are holes (same observable behaviour as
+  +// the packed `Value.hole_` sentinel).
+  +
+  +test "JSObject: setIndexed past threshold promotes to sparse" {
+  +    const o = try JSObject.init(testing.allocator);
+  +    defer o.deinit(testing.allocator);
+  +    try o.markAsArrayExotic(testing.allocator);
+  +
+  +    // A single far-out write must NOT grow `elements` to idx+1 —
+  +    // the whole point of demotion.
+  +    try o.setIndexed(testing.allocator, 4_294_967_294, Value.fromInt32(100));
+  +    try testing.expect(o.is_sparse);
+  +    try testing.expectEqual(@as(usize, 0), o.elements.items.len);
+  +    try testing.expectEqual(@as(u32, 4_294_967_295), o.arrayLength());
+  +    try testing.expectEqual(@as(i32, 100), o.getIndexed(4_294_967_294).asInt32());
+  +    try testing.expect(o.hasOwnIndexedSlot(4_294_967_294));
+  +    try testing.expect(!o.hasOwnIndexedSlot(0));
+  +    try testing.expect(o.getIndexed(0).isUndefined());
+  +}
+  +
+  +test "JSObject: dense growth stays packed below threshold" {
+  +    const o = try JSObject.init(testing.allocator);
+  +    defer o.deinit(testing.allocator);
+  +    try o.markAsArrayExotic(testing.allocator);
+  +
+  +    try o.setIndexed(testing.allocator, 4, Value.fromInt32(7));
+  +    try testing.expect(!o.is_sparse);
+  +    try testing.expectEqual(@as(u32, 5), o.arrayLength());
+  +    try testing.expect(!o.hasOwnIndexedSlot(0));
+  +    try testing.expectEqual(@as(i32, 7), o.getIndexed(4).asInt32());
+  +}
+  +
+  +test "JSObject: setArrayLength truncates sparse entries" {
+  +    const o = try JSObject.init(testing.allocator);
+  +    defer o.deinit(testing.allocator);
+  +    try o.markAsArrayExotic(testing.allocator);
+  +
+  +    try o.setIndexed(testing.allocator, 0, Value.fromInt32(10));
+  +    try o.setIndexed(testing.allocator, 1, Value.fromInt32(11));
+  +    try o.setIndexed(testing.allocator, 4_294_967_294, Value.fromInt32(12));
+  +    try testing.expect(o.is_sparse);
+  +
+  +    try o.setArrayLength(testing.allocator, 2);
+  +    try testing.expectEqual(@as(u32, 2), o.arrayLength());
+  +    try testing.expectEqual(@as(i32, 10), o.getIndexed(0).asInt32());
+  +    try testing.expectEqual(@as(i32, 11), o.getIndexed(1).asInt32());
+  +    try testing.expect(!o.hasOwnIndexedSlot(4_294_967_294));
+  +    try testing.expect(o.getIndexed(4_294_967_294).isUndefined());
+  +}
+  +
+  +test "JSObject: setArrayLength grow on sparse just bumps length" {
+  +    const o = try JSObject.init(testing.allocator);
+  +    defer o.deinit(testing.allocator);
+  +    try o.markAsArrayExotic(testing.allocator);
+  +
+  +    try o.setIndexed(testing.allocator, 4_294_967_294, Value.fromInt32(1));
+  +    try testing.expect(o.is_sparse);
+  +    const len_before = o.arrayLength();
+  +
+  +    try o.setArrayLength(testing.allocator, 4_294_967_295);
+  +    try testing.expectEqual(@as(u32, 4_294_967_295), o.arrayLength());
+  +    _ = len_before;
+  +}
+  +
+  +test "JSObject: removeIndexed on sparse drops the slot" {
+  +    const o = try JSObject.init(testing.allocator);
+  +    defer o.deinit(testing.allocator);
+  +    try o.markAsArrayExotic(testing.allocator);
+  +
+  +    try o.setIndexed(testing.allocator, 4_294_967_294, Value.fromInt32(42));
+  +    try testing.expect(o.hasOwnIndexedSlot(4_294_967_294));
+  +    _ = o.removeIndexed(4_294_967_294);
+  +    try testing.expect(!o.hasOwnIndexedSlot(4_294_967_294));
+  +    try testing.expectEqual(@as(u32, 4_294_967_295), o.arrayLength());
+  +}
+  +
+  +test "JSObject: defineProperty-style flagged write past threshold goes sparse" {
+  +    // §10.4.2.1 step 4 — indexed write with non-default flags
+  +    // demotes to the named-property bag but must still extend
+  +    // length without materialising idx+1 packed slots.
+  +    const o = try JSObject.init(testing.allocator);
+  +    defer o.deinit(testing.allocator);
+  +    try o.markAsArrayExotic(testing.allocator);
+  +
+  +    try o.setWithFlags(testing.allocator, "4294967294", Value.fromInt32(100), .{
+  +        .writable = true,
+  +        .enumerable = false,
+  +        .configurable = true,
+  +    });
+  +    try testing.expect(o.is_sparse);
+  +    try testing.expectEqual(@as(usize, 0), o.elements.items.len);
+  +    try testing.expectEqual(@as(u32, 4_294_967_295), o.arrayLength());
+  +    // Value lives in the bag (non-default flags), not the indexed slot.
+  +    try testing.expectEqual(@as(i32, 100), o.get("4294967294").asInt32());
+  ... (1 lines truncated)
+  +101 -0
+[full diff: rtk git diff --no-compact]

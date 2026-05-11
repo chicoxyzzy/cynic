@@ -2787,6 +2787,68 @@ test "GC: non-computed class method survives gc_threshold=1" {
 // give the real coverage.
 
 // ---------------------------------------------------------------------------
+// §23.1.3 Array.prototype — receiver coercion + spec dispatch regressions.
+//
+// 2026-05-11 — Lever #2 (`Array.prototype` Get(O, ToString(k)) dispatch).
+// Three buckets of bugs, pinned here so future refactors don't slip
+// back: (1) `lastIndexOf` was completely ignoring its `fromIndex`
+// argument; (2) `findLastIndex` / `reduceRight` / `flatMap` skipped
+// the prototype-chain walk, so an inherited indexed accessor was
+// invisible; (3) failure paths returned an opaque `NativeThrew`
+// instead of an explicit TypeError. test262's `15.4.4.X-*` legacy
+// suite hits all three.
+// ---------------------------------------------------------------------------
+
+test "Array.prototype.lastIndexOf: respects fromIndex" {
+    // §23.1.3.20 — fromIndex must clamp the search end. Previously
+    // we ignored args[1] entirely and searched the whole array.
+    try expectScriptIntWithBuiltins("[1, 2, 1].lastIndexOf(2, 1);", 1);
+    try expectScriptIntWithBuiltins("[1, 2, 1].lastIndexOf(2, 0);", -1);
+    try expectScriptIntWithBuiltins("[1, 2, 1].lastIndexOf(2, -1);", 1);
+    try expectScriptIntWithBuiltins("[1, 2, 1].lastIndexOf(2, -3);", -1);
+}
+
+test "Array.prototype.lastIndexOf: coerces fromIndex via ToIntegerOrInfinity" {
+    // Booleans coerce to 0 / 1; strings via ToNumber.
+    try expectScriptIntWithBuiltins("[1, 2, 1].lastIndexOf(2, true);", 1);
+    try expectScriptIntWithBuiltins("[1, 2, 1].lastIndexOf(2, false);", -1);
+    try expectScriptIntWithBuiltins("[1, 2, 1].lastIndexOf(2, \"1\");", 1);
+}
+
+test "Array.prototype.reduceRight: walks prototype chain for indexed reads" {
+    // Install an indexed accessor on Object.prototype — the
+    // sparse slot in the array must surface it (spec uses
+    // `HasProperty` + `Get`, both of which descend the chain).
+    try expectScriptIntWithBuiltins(
+        \\Object.defineProperty(Object.prototype, "0", { get() { return 10; }, configurable: true });
+        \\const a = [];
+        \\a.length = 1;
+        \\const r = a.reduceRight((acc, v) => acc + v, 0);
+        \\delete Object.prototype[0];
+        \\r;
+    , 10);
+}
+
+test "Array.prototype.findLastIndex: walks prototype chain" {
+    try expectScriptIntWithBuiltins(
+        \\Object.defineProperty(Object.prototype, "0", { get() { return 42; }, configurable: true });
+        \\const a = [];
+        \\a.length = 1;
+        \\const r = a.findLastIndex(v => v === 42);
+        \\delete Object.prototype[0];
+        \\r;
+    , 0);
+}
+
+test "Array.prototype.reduceRight: empty array without initial throws TypeError" {
+    // §23.1.3.27 step 7 — TypeError, not opaque NativeThrew.
+    try expectScriptStringWithBuiltins(
+        \\try { [].reduceRight((a, b) => a + b); "no throw" }
+        \\catch (e) { e.constructor.name }
+    , "TypeError");
+}
+
+// ---------------------------------------------------------------------------
 // §26.2 FinalizationRegistry
 // ---------------------------------------------------------------------------
 

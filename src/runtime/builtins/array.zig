@@ -583,9 +583,17 @@ fn arrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 fn arrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
     const target = argOr(args, 0, Value.undefined_);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
-    if (len == 0) return Value.fromInt32(-1);
-    var i: i64 = len - 1;
+    const raw_len = try toLengthOf(realm, obj);
+    if (raw_len <= 0) return Value.fromInt32(-1);
+    // §23.1.3.20 steps 4-7 — fromIndex handling. Default to
+    // `len - 1`. -∞ short-circuits (return -1). Positive values
+    // clamp to `len - 1`. Negative values offset from the end;
+    // if the result is < 0 the loop never runs and we return -1.
+    const start = lastStartIndexFrom(args, raw_len) orelse return Value.fromInt32(-1);
+    const len = try clampArrayLength(raw_len);
+    // Iteration cap can't truncate above `start` — but if the
+    // raw length exceeded the cap, `start` might too. Clamp.
+    var i: i64 = if (start >= len) len - 1 else start;
     while (i >= 0) : (i -= 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
@@ -594,6 +602,33 @@ fn arrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nativ
         if (strictEqualsLite(v, target)) return numberFromI64(i);
     }
     return Value.fromInt32(-1);
+}
+
+/// §23.1.3.20 steps 4-7 — clamp the optional `fromIndex` arg
+/// for `lastIndexOf`. Returns the starting index (iteration goes
+/// downward) or `null` when the start is < 0 (caller short-
+/// circuits to -1). When fromIndex is absent, start = len - 1.
+fn lastStartIndexFrom(args: []const Value, len: i64) ?i64 {
+    if (args.len < 2) return len - 1;
+    const v = args[1];
+    const nv = if (v.isString()) intrinsics.coerceToNumber(v) else v;
+    const n: f64 = if (nv.isUndefined()) 0 else if (nv.isInt32()) @floatFromInt(nv.asInt32()) else if (nv.isDouble()) nv.asDouble() else if (nv.isBool()) (if (nv.asBool()) @as(f64, 1) else @as(f64, 0)) else if (nv.isNull()) @as(f64, 0) else 0;
+    if (std.math.isNan(n)) return 0;
+    // -∞ short-circuits per spec: "If n is -∞, return -1."
+    if (n == -std.math.inf(f64)) return null;
+    if (n == std.math.inf(f64)) return len - 1;
+    const trunc_n = @trunc(n);
+    if (trunc_n >= 0) {
+        const flen: f64 = @floatFromInt(len);
+        if (trunc_n >= flen - 1) return len - 1;
+        return @intFromFloat(trunc_n);
+    }
+    // Negative — count from the end. `len + trunc_n < 0` means
+    // the start is before the array; loop never runs → return -1.
+    const flen: f64 = @floatFromInt(len);
+    const adjusted = flen + trunc_n;
+    if (adjusted < 0) return null;
+    return @intFromFloat(adjusted);
 }
 
 fn arrayFindLast(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -614,14 +649,18 @@ fn arrayFindLast(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 
 fn arrayFindLastIndex(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return error.NativeThrew;
+    const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.findLastIndex callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
-    const len = try clampArrayLength(lengthOfArray(obj));
+    // §23.1.3.12 — spec mandates `LengthOfArrayLike(O)` (via
+    // `Get(O, "length")`) and `Get(O, ! ToString(k))` for each
+    // step, so callers can observe an overridden `length` getter
+    // and inherited indexed accessors on the prototype chain.
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
     var i: i64 = len - 1;
     while (i >= 0) : (i -= 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        const elem = obj.get(islice);
+        const elem = try getPropertyChain(realm, obj, islice);
         const v = try invokeCallback(realm, callback, this_arg, elem, i, obj);
         if (toBoolean(v)) return numberFromI64(i);
     }
@@ -630,8 +669,12 @@ fn arrayFindLastIndex(realm: *Realm, this_value: Value, args: []const Value) Nat
 
 fn arrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return error.NativeThrew;
-    const len = try clampArrayLength(lengthOfArray(obj));
+    const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.reduceRight callback must be a function");
+    // §23.1.3.27 — `LengthOfArrayLike(O)` + `HasProperty` /
+    // `Get` on each step. Walks the prototype chain so an
+    // inherited indexed accessor / `Boolean.prototype[0]` style
+    // fixture works.
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
     var acc: Value = Value.undefined_;
     var have_acc = args.len >= 2;
     if (have_acc) acc = args[1];
@@ -641,21 +684,21 @@ fn arrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) Nativ
         while (i >= 0) : (i -= 1) {
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-            if (obj.hasOwn(islice)) {
-                acc = obj.get(islice);
+            if (obj.hasProperty(islice)) {
+                acc = try getPropertyChain(realm, obj, islice);
                 have_acc = true;
                 i -= 1;
                 break;
             }
         }
-        if (!have_acc) return error.NativeThrew;
+        if (!have_acc) return throwTypeError(realm, "Reduce of empty array with no initial value");
     }
 
     while (i >= 0) : (i -= 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        if (!obj.hasOwn(islice)) continue;
-        const elem = obj.get(islice);
+        if (!obj.hasProperty(islice)) continue;
+        const elem = try getPropertyChain(realm, obj, islice);
 
         const cb_args = [_]Value{ acc, elem, numberFromI64(i), heap_mod.taggedObject(obj) };
         const outcome = interpreter.callJSFunction(realm.allocator, realm, callback, Value.undefined_, &cb_args) catch |err| switch (err) {
@@ -730,9 +773,13 @@ pub fn isArrayLike(v: Value) bool {
 
 fn arrayFlatMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return error.NativeThrew;
+    const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.flatMap callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
-    const len = try clampArrayLength(lengthOfArray(obj));
+    // §23.1.3.10 — `LengthOfArrayLike(O)` + `Get(O, ! ToString(P))`
+    // walks the prototype chain (so a fixture that maps over
+    // `Array.prototype.flatMap.call(false, cb)` sees inherited
+    // accessors from `Boolean.prototype`).
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
 
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
@@ -742,17 +789,17 @@ fn arrayFlatMap(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        if (!obj.hasOwn(islice)) continue;
-        const elem = obj.get(islice);
+        if (!obj.hasProperty(islice)) continue;
+        const elem = try getPropertyChain(realm, obj, islice);
         const mapped = try invokeCallback(realm, callback, this_arg, elem, i, obj);
         if (isArrayLike(mapped)) {
             const inner = heap_mod.valueAsPlainObject(mapped).?;
-            const inner_len = try clampArrayLength(lengthOfArray(inner));
+            const inner_len = try clampArrayLength(try toLengthOf(realm, inner));
             var j: i64 = 0;
             while (j < inner_len) : (j += 1) {
                 var jbuf: [24]u8 = undefined;
                 const jslice = std.fmt.bufPrint(&jbuf, "{d}", .{j}) catch unreachable;
-                const v = inner.get(jslice);
+                const v = try getPropertyChain(realm, inner, jslice);
                 var wbuf: [24]u8 = undefined;
                 const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{write_idx}) catch unreachable;
                 const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
