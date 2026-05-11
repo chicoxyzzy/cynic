@@ -1285,7 +1285,6 @@ pub const Compiler = struct {
                 try self.builder.emitU8(r_obj);
             },
             .method => |m| {
-                if (m.is_generator or m.is_async) return error.UnsupportedExpression;
                 // Computed-key method / accessor — evaluate the key,
                 // park it in a temp, compile the body, then dispatch:
                 //   .method  → `sta_computed`
@@ -1299,12 +1298,17 @@ pub const Compiler = struct {
                     defer self.releaseTemp();
                     try self.builder.emitOp(.star, m.span);
                     try self.builder.emitU8(r_key);
-                    const tk = try compileFunctionTemplate(
+                    // §10.2.5 — propagate is_generator / is_async
+                    // so `{ *gen() {} }` / `{ async fn() {} }`
+                    // produce the correct JSFunction shape.
+                    const tk = try compileFunctionTemplateExt(
                         self,
                         m.params,
                         FunctionBody{ .block = m.body.body },
                         null,
                         false,
+                        m.is_generator,
+                        m.is_async,
                         m.span,
                     );
                     try self.builder.emitOp(.make_function, m.span);
@@ -1371,12 +1375,18 @@ pub const Compiler = struct {
                     },
                 };
                 // Compile the method body as a function template.
-                const tk = try compileFunctionTemplate(
+                // §15.4 / §15.5 — propagate is_generator / is_async
+                // so `{ *gen() {} }` / `{ async fn() {} }` produce
+                // the right JSFunction shape (returns a generator
+                // wrapper / returns a Promise respectively).
+                const tk = try compileFunctionTemplateExt(
                     self,
                     m.params,
                     FunctionBody{ .block = m.body.body },
                     fn_name,
                     false,
+                    m.is_generator,
+                    m.is_async,
                     m.span,
                 );
                 try self.builder.emitOp(.make_function, m.span);
