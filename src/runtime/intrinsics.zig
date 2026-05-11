@@ -775,10 +775,14 @@ pub fn getPropertyChain(realm: *Realm, obj: *JSObject, key: []const u8) NativeEr
 /// fixtures behave per spec.
 pub fn toLengthOf(realm: *Realm, obj: *JSObject) NativeError!i64 {
     const v = try getPropertyChain(realm, obj, "length");
-    return toLengthValue(v);
+    return toLengthValuePropagating(realm, v);
 }
 
-fn toLengthValue(v: Value) i64 {
+/// §7.1.20 ToLength = F(ToIntegerOrInfinity(ToNumber(arg))).
+/// `ToNumber` on an Object triggers ToPrimitive — `valueOf` /
+/// `toString` — which can throw. Propagate that throw via
+/// `realm.pending_exception` instead of silently coercing to 0.
+fn toLengthValuePropagating(realm: *Realm, v: Value) NativeError!i64 {
     if (v.isInt32()) {
         const i = v.asInt32();
         return if (i < 0) 0 else i;
@@ -794,6 +798,53 @@ fn toLengthValue(v: Value) i64 {
         const d = std.fmt.parseFloat(f64, s.bytes) catch return 0;
         if (std.math.isNan(d) or d <= 0) return 0;
         return doubleToI64Saturating(d);
+    }
+    if (heap_mod.valueAsSymbol(v) != null) return throwTypeError(realm, "Cannot convert a Symbol value to a number");
+    // §7.1.4 ToNumber step 6 — Object: ToPrimitive(arg, hint
+    // "number") which invokes `@@toPrimitive` / `valueOf` /
+    // `toString` in that order. Any throw propagates.
+    if (heap_mod.valueAsPlainObject(v)) |o| {
+        // Try valueOf first.
+        const value_of = try getPropertyChain(realm, o, "valueOf");
+        if (heap_mod.valueAsFunction(value_of)) |vfn| {
+            const interp = @import("interpreter.zig");
+            const outcome = interp.callJSFunction(realm.allocator, realm, vfn, v, &.{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            switch (outcome) {
+                .value, .yielded => |rv| {
+                    if (!rv.isUndefined() and heap_mod.valueAsPlainObject(rv) == null) {
+                        return toLengthValuePropagating(realm, rv);
+                    }
+                },
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            }
+        }
+        const to_string = try getPropertyChain(realm, o, "toString");
+        if (heap_mod.valueAsFunction(to_string)) |tfn| {
+            const interp = @import("interpreter.zig");
+            const outcome = interp.callJSFunction(realm.allocator, realm, tfn, v, &.{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            switch (outcome) {
+                .value, .yielded => |rv| {
+                    if (!rv.isUndefined() and heap_mod.valueAsPlainObject(rv) == null) {
+                        return toLengthValuePropagating(realm, rv);
+                    }
+                    return throwTypeError(realm, "Cannot convert object to primitive value");
+                },
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            }
+        }
+        return throwTypeError(realm, "Cannot convert object to primitive value");
     }
     return 0;
 }

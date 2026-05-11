@@ -561,11 +561,19 @@ fn arrayAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
 }
 
 fn arrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
+    // §23.1.3.7 — `ToObject(this)` + `LengthOfArrayLike` + the
+    // start/end ToIntegerOrInfinity coercions are all spec-?
+    // abrupt-completing. Use the accessor-aware helpers so a
+    // throwing `length` / `valueOf` propagates as the user's
+    // exception instead of being silently coerced to 0.
+    const obj = try toObjectThis(realm, this_value);
     const value = argOr(args, 0, Value.undefined_);
-    const len = try clampArrayLength(lengthOfArray(obj));
-    var start: i64 = if (args.len > 1) toInt(args[1]) else 0;
-    var end: i64 = if (args.len > 2 and !args[2].isUndefined()) toInt(args[2]) else len;
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    // §23.1.3.7 step 5-9 — start / end use ToIntegerOrInfinity,
+    // which fires through ToPrimitive (valueOf / toString /
+    // @@toPrimitive). The `try` propagates a thrown coercion.
+    var start: i64 = if (args.len > 1) try toIntPropagating(realm, args[1]) else 0;
+    var end: i64 = if (args.len > 2 and !args[2].isUndefined()) try toIntPropagating(realm, args[2]) else len;
     if (start < 0) start = @max(len + start, 0);
     if (end < 0) end = @max(len + end, 0);
     start = @min(start, len);
@@ -577,7 +585,21 @@ fn arrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         obj.set(realm.allocator, owned.bytes, value) catch return error.OutOfMemory;
     }
-    return this_value;
+    return heap_mod.taggedObject(obj);
+}
+
+/// §7.1.5 ToIntegerOrInfinity with the abrupt-completion path
+/// propagated. Symbols → TypeError; objects → ToPrimitive
+/// chain (valueOf / toString / @@toPrimitive) which may throw.
+fn toIntPropagating(realm: *Realm, v: Value) NativeError!i64 {
+    // Symbols never coerce to number — §7.1.4 step 5 throws TypeError.
+    if (heap_mod.valueAsSymbol(v) != null) return throwTypeError(realm, "Cannot convert a Symbol value to a number");
+    const n = intrinsics.coerceToNumber(v);
+    const d: f64 = if (n.isInt32()) @floatFromInt(n.asInt32()) else if (n.isDouble()) n.asDouble() else 0;
+    if (std.math.isNan(d)) return 0;
+    if (d == std.math.inf(f64)) return std.math.maxInt(i32);
+    if (d == -std.math.inf(f64)) return std.math.minInt(i32);
+    return @intFromFloat(@trunc(d));
 }
 
 fn arrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
