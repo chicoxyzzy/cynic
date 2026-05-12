@@ -52,19 +52,26 @@ pub fn install(realm: *Realm) !void {
     // (`Symbol.iterator === Symbol.iterator`) because the
     // constructor stores a fixed JSSymbol pointer per well-known
     // name. Real symbol-keyed property tables are later.
-    try installWellKnownSymbol(realm, fn_obj, "iterator", "@@iterator");
-    try installWellKnownSymbol(realm, fn_obj, "asyncIterator", "@@asyncIterator");
-    try installWellKnownSymbol(realm, fn_obj, "hasInstance", "@@hasInstance");
-    try installWellKnownSymbol(realm, fn_obj, "toPrimitive", "@@toPrimitive");
-    try installWellKnownSymbol(realm, fn_obj, "toStringTag", "@@toStringTag");
-    try installWellKnownSymbol(realm, fn_obj, "isConcatSpreadable", "@@isConcatSpreadable");
-    try installWellKnownSymbol(realm, fn_obj, "species", "@@species");
-    try installWellKnownSymbol(realm, fn_obj, "match", "@@match");
-    try installWellKnownSymbol(realm, fn_obj, "replace", "@@replace");
-    try installWellKnownSymbol(realm, fn_obj, "search", "@@search");
-    try installWellKnownSymbol(realm, fn_obj, "split", "@@split");
-    try installWellKnownSymbol(realm, fn_obj, "matchAll", "@@matchAll");
-    try installWellKnownSymbol(realm, fn_obj, "unscopables", "@@unscopables");
+    // §20.4.2.* — well-known symbols' description-strings are
+    // their `"Symbol.<name>"` form per §20.4.3.4 (so
+    // `String(Symbol.iterator) === "Symbol(Symbol.iterator)"`).
+    // The third argument is the internal property-key Cynic uses
+    // to install methods like `obj["@@iterator"]`; user JS still
+    // reaches them via `obj[Symbol.iterator]` because the symbol
+    // value's `prop_key` is exactly that string.
+    try installWellKnownSymbol(realm, fn_obj, "iterator", "Symbol.iterator", "@@iterator");
+    try installWellKnownSymbol(realm, fn_obj, "asyncIterator", "Symbol.asyncIterator", "@@asyncIterator");
+    try installWellKnownSymbol(realm, fn_obj, "hasInstance", "Symbol.hasInstance", "@@hasInstance");
+    try installWellKnownSymbol(realm, fn_obj, "toPrimitive", "Symbol.toPrimitive", "@@toPrimitive");
+    try installWellKnownSymbol(realm, fn_obj, "toStringTag", "Symbol.toStringTag", "@@toStringTag");
+    try installWellKnownSymbol(realm, fn_obj, "isConcatSpreadable", "Symbol.isConcatSpreadable", "@@isConcatSpreadable");
+    try installWellKnownSymbol(realm, fn_obj, "species", "Symbol.species", "@@species");
+    try installWellKnownSymbol(realm, fn_obj, "match", "Symbol.match", "@@match");
+    try installWellKnownSymbol(realm, fn_obj, "replace", "Symbol.replace", "@@replace");
+    try installWellKnownSymbol(realm, fn_obj, "search", "Symbol.search", "@@search");
+    try installWellKnownSymbol(realm, fn_obj, "split", "Symbol.split", "@@split");
+    try installWellKnownSymbol(realm, fn_obj, "matchAll", "Symbol.matchAll", "@@matchAll");
+    try installWellKnownSymbol(realm, fn_obj, "unscopables", "Symbol.unscopables", "@@unscopables");
 
     try installNativeMethod(realm, fn_obj, "for", symbolFor, 1);
     try installNativeMethod(realm, fn_obj, "keyFor", symbolKeyFor, 1);
@@ -107,13 +114,15 @@ fn symbolDescriptionGetter(realm: *Realm, this_value: Value, args: []const Value
     return Value.undefined_;
 }
 
-fn installWellKnownSymbol(realm: *Realm, ctor: *JSFunction, name: []const u8, description: []const u8) !void {
+fn installWellKnownSymbol(
+    realm: *Realm,
+    ctor: *JSFunction,
+    name: []const u8,
+    description: []const u8,
+    prop_key: []const u8,
+) !void {
     const desc = try realm.heap.allocateString(description);
-    // The `description` doubles as the property-key string —
-    // intrinsic installations under e.g. `"@@iterator"` are
-    // reached via `obj[Symbol.iterator]` because the symbol's
-    // `prop_key` is exactly `"@@iterator"`.
-    const sym = try realm.heap.allocateWellKnownSymbol(desc.bytes, description);
+    const sym = try realm.heap.allocateWellKnownSymbol(desc.bytes, prop_key);
     // §20.4.2 — well-known symbols on the Symbol constructor are
     // frozen data properties: `{ w:false, e:false, c:false }`.
     try ctor.setWithFlags(realm.allocator, name, heap_mod.taggedSymbol(sym), .{

@@ -956,11 +956,23 @@ fn replaceGlobalNative(realm: *Realm, name: []const u8, native: NativeFn) !void 
 }
 
 fn stringConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §22.1.1.1 step 2.a — `String(symbol)` called as a function
+    // (no NewTarget) yields SymbolDescriptiveString, *not*
+    // TypeError. The `new String(symbol)` form still ToString's
+    // through.
+    const called_as_new = heap_mod.valueAsPlainObject(this_value) != null;
     const primitive: Value = if (args.len == 0) blk: {
         const s = realm.heap.allocateString("") catch return error.OutOfMemory;
         break :blk Value.fromString(s);
+    } else if (!called_as_new and heap_mod.valueAsSymbol(args[0]) != null) blk: {
+        const sym = heap_mod.valueAsSymbol(args[0]).?;
+        const desc: []const u8 = sym.description orelse "";
+        const formatted = std.fmt.allocPrint(realm.allocator, "Symbol({s})", .{desc}) catch return error.OutOfMemory;
+        defer realm.allocator.free(formatted);
+        const s = realm.heap.allocateString(formatted) catch return error.OutOfMemory;
+        break :blk Value.fromString(s);
     } else blk: {
-        const s = stringifyArg(realm, args[0]) catch return error.OutOfMemory;
+        const s = try stringifyArg(realm, args[0]);
         break :blk Value.fromString(s);
     };
     // §22.1.1.1 — when invoked as a constructor (NewTarget set),
