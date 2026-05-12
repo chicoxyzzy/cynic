@@ -483,17 +483,19 @@ fn parseFloatNative(realm: *Realm, this_value: Value, args: []const Value) Nativ
 }
 
 fn globalIsNaN(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
     _ = this_value;
-    const n = coerceToNumber(argOr(args, 0, Value.undefined_));
-    if (!n.isDouble()) return Value.false_;
-    return Value.fromBool(std.math.isNan(n.asDouble()));
+    // §19.2.4 isNaN — ToNumber(arg) must fire ToPrimitive on
+    // Object receivers, which can throw if @@toPrimitive /
+    // valueOf / toString returns non-primitive or throws.
+    const n = try intrinsics.toNumber(realm, argOr(args, 0, Value.undefined_));
+    if (n.isInt32()) return Value.false_;
+    if (n.isDouble()) return Value.fromBool(std.math.isNan(n.asDouble()));
+    return Value.false_;
 }
 
 fn globalIsFinite(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
     _ = this_value;
-    const n = coerceToNumber(argOr(args, 0, Value.undefined_));
+    const n = try intrinsics.toNumber(realm, argOr(args, 0, Value.undefined_));
     if (n.isInt32()) return Value.true_;
     if (n.isDouble()) {
         const d = n.asDouble();
