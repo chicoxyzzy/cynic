@@ -1224,6 +1224,15 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
 /// receivers. Returns either an int32 or double Value.
 pub fn toNumber(realm: *Realm, v: Value) NativeError!Value {
     const prim = try toPrimitive(realm, v, .number);
+    // §7.1.4 ToNumber step 4 — Symbol / BigInt operands throw
+    // TypeError (the silent coerceToNumber path returns NaN
+    // for Symbol, which masks the spec-mandated throw).
+    if (heap_mod.valueAsSymbol(prim) != null) {
+        return throwTypeError(realm, "Cannot convert a Symbol value to a number");
+    }
+    if (heap_mod.valueAsBigInt(prim) != null) {
+        return throwTypeError(realm, "Cannot convert a BigInt value to a number");
+    }
     return coerceToNumber(prim);
 }
 

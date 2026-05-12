@@ -86,10 +86,11 @@ fn primitiveNumberValue(this_value: Value) ?f64 {
 fn numberToFixed(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const x = primitiveNumberValue(this_value) orelse return throwTypeError(realm, "Number.prototype.toFixed called on non-number");
     // §21.1.3.3 step 2 — `Let f be ? ToIntegerOrInfinity(fractionDigits)`.
-    // ToIntegerOrInfinity maps NaN → 0 and truncates finite
-    // values; only ±∞ remain to fail the range guard. The old
-    // code treated NaN as out-of-range and threw RangeError.
-    const digits_v = coerceToNumber(argOr(args, 0, Value.fromInt32(0)));
+    // ToIntegerOrInfinity invokes ToNumber, which throws TypeError
+    // for Symbol / BigInt arguments. `coerceToNumber` (the
+    // non-throwing helper) returns NaN silently for those, so
+    // route through the realm-aware `toNumber` instead.
+    const digits_v = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
     const raw: f64 = if (digits_v.isInt32()) @floatFromInt(digits_v.asInt32()) else digits_v.asDouble();
     const dd: f64 = if (std.math.isNan(raw)) 0 else @trunc(raw);
     if (std.math.isInf(dd) or dd < 0 or dd > 100)

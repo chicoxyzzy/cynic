@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 |
-| **runtime** | 66.31 % | 79.39 % | 30701 / 46296 |
+| **runtime** | 66.33 % | 79.40 % | 30708 / 46296 |
 
 
 ## Where the runtime stands, by area
@@ -52,7 +52,7 @@ browser-era built-ins …).
 | `built-ins/Map` | 166 | 37 | 1 | 81 % | 82 % |
 | `built-ins/Math` | 306 | 11 | 10 | 94 % | 97 % |
 | `built-ins/NativeErrors` | 74 | 20 | 0 | 79 % | 79 % |
-| `built-ins/Number` | 296 | 44 | 0 | 87 % | 87 % |
+| `built-ins/Number` | 299 | 41 | 0 | 88 % | 88 % |
 | `built-ins/Proxy` | 201 | 98 | 12 | 65 % | 67 % |
 | `built-ins/Reflect` | 105 | 48 | 0 | 69 % | 69 % |
 | `built-ins/Set` | 334 | 48 | 1 | 87 % | 87 % |
@@ -83,8 +83,8 @@ browser-era built-ins …).
 | `built-ins/decodeURIComponent` | 53 | 3 | 0 | 95 % | 95 % |
 | `built-ins/encodeURI` | 25 | 6 | 0 | 81 % | 81 % |
 | `built-ins/encodeURIComponent` | 24 | 7 | 0 | 77 % | 77 % |
-| `built-ins/isFinite` | 10 | 5 | 0 | 67 % | 67 % |
-| `built-ins/isNaN` | 10 | 5 | 0 | 67 % | 67 % |
+| `built-ins/isFinite` | 12 | 3 | 0 | 80 % | 80 % |
+| `built-ins/isNaN` | 12 | 3 | 0 | 80 % | 80 % |
 | `built-ins/parseFloat` | 52 | 2 | 0 | 96 % | 96 % |
 | `built-ins/parseInt` | 48 | 7 | 0 | 87 % | 87 % |
 | `built-ins/undefined` | 4 | 1 | 3 | 50 % | 80 % |
@@ -142,11 +142,13 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 | +198 | 0.6 s |
-| **runtime** | 66.31 % | 79.39 % | 30701 / 46296 | +810 | 3m 24s |
+| **runtime** | 66.33 % | 79.40 % | 30708 / 46296 | +817 | 3m 32s |
 
 Biggest movers (runtime):
 
-- `built-ins/Reflect` +2
+- `built-ins/Number` +3
+- `built-ins/isFinite` +2
+- `built-ins/isNaN` +2
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
