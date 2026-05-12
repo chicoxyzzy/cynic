@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 |
-| **runtime** | 64.73 % | 78.61 % | 29983 / 46320 |
+| **runtime** | 64.77 % | 78.66 % | 30003 / 46320 |
 
 ## Where the runtime stands, by area
 
@@ -23,12 +23,12 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_1000+ fails_** | | | | | |
-| `language/expressions` | 7959 | 2108 | 971 | 72 % | 79 % |
+| `language/expressions` | 7960 | 2107 | 971 | 72 % | 79 % |
 | `language/statements` | 7134 | 1536 | 667 | 76 % | 82 % |
 | **_100–999 fails_** | | | | | |
 | `built-ins/Array` | 2321 | 549 | 211 | 75 % | 81 % |
 | `built-ins/Function` | 215 | 205 | 89 | 42 % | 51 % |
-| `built-ins/Object` | 2790 | 536 | 85 | 82 % | 84 % |
+| `built-ins/Object` | 2795 | 531 | 85 | 82 % | 84 % |
 | `built-ins/Promise` | 500 | 174 | 3 | 74 % | 74 % |
 | `built-ins/Proxy` | 174 | 125 | 12 | 56 % | 58 % |
 | `built-ins/RegExp` | 1284 | 434 | 161 | 68 % | 75 % |
@@ -52,7 +52,7 @@ browser-era built-ins …).
 | `built-ins/JSON` | 71 | 72 | 22 | 43 % | 50 % |
 | `built-ins/Map` | 145 | 58 | 1 | 71 % | 71 % |
 | `built-ins/NativeErrors` | 68 | 26 | 0 | 72 % | 72 % |
-| `built-ins/Number` | 276 | 64 | 0 | 81 % | 81 % |
+| `built-ins/Number` | 290 | 50 | 0 | 85 % | 85 % |
 | `built-ins/Reflect` | 96 | 57 | 0 | 63 % | 63 % |
 | `built-ins/RegExpStringIteratorPrototype` | 7 | 10 | 0 | 41 % | 41 % |
 | `built-ins/Set` | 323 | 59 | 1 | 84 % | 85 % |
@@ -135,17 +135,17 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-12 — cynic `d453479`, test262 `d0c1b455`
+### 2026-05-12 — cynic `05edbec`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 64.73 % | 78.61 % | 29983 / 46320 | +92 |
+| **runtime** | 64.77 % | 78.66 % | 30003 / 46320 | +112 |
 
 Biggest movers (runtime):
 
-- `language/expressions` +19
-- `language/statements` +12
-- `built-ins/Function` +1
+- `built-ins/Number` +14
+- `built-ins/Object` +5
+- `language/expressions` +1
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
