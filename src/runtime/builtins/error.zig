@@ -76,6 +76,13 @@ pub fn installAll(realm: *Realm, obj_proto: *JSObject) !void {
     // §20.5.3.4 Error.prototype.toString — installed only on the
     // Error prototype; NativeError instances inherit it.
     try intrinsics.installNativeMethodOnProto(realm, error_proto, "toString", errorPrototypeToString, 0);
+    // §20.5.2.1 Error.isError(arg) — ES2025. Returns true iff
+    // arg is an Object with an `[[ErrorData]]` internal slot.
+    // Cynic's brand check is structural: any object whose
+    // prototype chain reaches `%Error.prototype%` was created
+    // by an Error / NativeError / AggregateError ctor that
+    // installed the right prototype.
+    try intrinsics.installNativeMethod(realm, error_ctor, "isError", errorIsError, 1);
 
     // §20.5.7 AggregateError(errors, message, options) — the only
     // typed Error whose constructor takes a leading iterable.
@@ -307,6 +314,32 @@ fn installPrototypeMessage(realm: *Realm, proto: *JSObject) !void {
 /// 3. Let name be ? Get(O, "name"); default to "Error" if undefined.
 /// 4. Let msg be ? Get(O, "message"); default to "" if undefined.
 /// 5. If name === "" return msg.
+/// §20.5.2.1 Error.isError(arg) — ES2025. Returns true iff arg
+/// is an Object whose prototype chain reaches an Error prototype.
+fn errorIsError(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const arg = argOr(args, 0, Value.undefined_);
+    const obj = heap_mod.valueAsPlainObject(arg) orelse return Value.false_;
+    // Walk the prototype chain looking for any Error-family prototype.
+    const proto_set: [8]?*JSObject = .{
+        realm.intrinsics.error_prototype,
+        realm.intrinsics.type_error_prototype,
+        realm.intrinsics.range_error_prototype,
+        realm.intrinsics.reference_error_prototype,
+        realm.intrinsics.syntax_error_prototype,
+        realm.intrinsics.uri_error_prototype,
+        realm.intrinsics.eval_error_prototype,
+        realm.intrinsics.aggregate_error_prototype,
+    };
+    var cursor: ?*JSObject = obj;
+    while (cursor) |c| : (cursor = c.prototype) {
+        for (proto_set) |maybe_proto| {
+            if (maybe_proto) |p| if (c == p) return Value.true_;
+        }
+    }
+    return Value.false_;
+}
+
 /// 6. If msg === "" return name.
 /// 7. Return name + ": " + msg.
 fn errorPrototypeToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
