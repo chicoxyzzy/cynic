@@ -1882,6 +1882,11 @@ pub const Parser = struct {
     /// import * as ns from "x";
     /// import name, { a, b } from "x";
     /// import name, * as ns from "x";
+    ///
+    /// ES2025 also allows an optional `WithClause`:
+    /// import name from "x" with { type: "json" };
+    /// The clause is parsed but its content is currently discarded
+    /// — Cynic's module loader hook doesn't consume attributes yet.
     fn parseImportDeclaration(self: *Parser) ParseError!Statement {
         const start = self.current.span.start;
         _ = try self.bump(); // `import`
@@ -1893,6 +1898,7 @@ pub const Parser = struct {
         if (self.current.kind == .string_literal) {
             // Side-effect import: `import "x";` — no clause.
             const source_tok = try self.bump();
+            try self.parseOptionalWithClause();
             const stmt_end = try self.consumeSemicolon(source_tok.span.end);
             return .{ .import_decl = .{
                 .span = .{ .start = start, .end = stmt_end },
@@ -1931,6 +1937,7 @@ pub const Parser = struct {
             return error.ParseError;
         }
         const source_tok = try self.bump();
+        try self.parseOptionalWithClause();
         const stmt_end = try self.consumeSemicolon(source_tok.span.end);
 
         return .{ .import_decl = .{
@@ -1940,6 +1947,45 @@ pub const Parser = struct {
             .named = named,
             .source = source_tok.span,
         } };
+    }
+
+    /// §16.2.2 WithClause (ES2025). Optional `with { key: "value",
+    /// … }` tail on import / export-from. Empty body is legal, as
+    /// is a trailing comma. Keys are `IdentifierName | StringLiteral`;
+    /// values are `StringLiteral`.
+    ///
+    /// Cynic currently parses-and-discards: the module loader hook
+    /// doesn't consume attributes yet, but accepting the syntax
+    /// unblocks fixtures whose subject is something else
+    /// (parse-pass-then-runtime).
+    fn parseOptionalWithClause(self: *Parser) ParseError!void {
+        if (self.current.kind != .kw_with) return;
+        _ = try self.bump(); // `with`
+        _ = try self.expect(.lbrace);
+        while (self.current.kind != .rbrace and self.current.kind != .eof) {
+            // AttributeKey — IdentifierName or StringLiteral. The
+            // lexer surfaces reserved words as their `kw_*` kinds;
+            // `IdentifierName` includes those (§13.1), so we
+            // accept either an `identifier` or any `kw_*` token.
+            const key_tok = self.current;
+            if (key_tok.kind == .identifier or
+                key_tok.kind == .string_literal or
+                token_mod.isReservedWord(key_tok.kind))
+            {
+                _ = try self.bump();
+            } else {
+                try self.report(.unexpected_token, key_tok.span);
+                return error.ParseError;
+            }
+            _ = try self.expect(.colon);
+            if (self.current.kind != .string_literal) {
+                try self.report(.unexpected_token, self.current.span);
+                return error.ParseError;
+            }
+            _ = try self.bump(); // value
+            if (!try self.eat(.comma)) break;
+        }
+        _ = try self.expect(.rbrace);
     }
 
     fn parseNamespaceImport(self: *Parser) ParseError!stmt_mod.BindingIdentifier {
@@ -2035,6 +2081,7 @@ pub const Parser = struct {
             return error.ParseError;
         }
         const source_tok = try self.bump();
+        try self.parseOptionalWithClause();
         const stmt_end = try self.consumeSemicolon(source_tok.span.end);
         return .{ .export_decl = .{
             .span = .{ .start = start, .end = stmt_end },
@@ -2079,6 +2126,7 @@ pub const Parser = struct {
             }
             const source_tok = try self.bump();
             source = source_tok.span;
+            try self.parseOptionalWithClause();
         }
         const last_end: u32 = if (source) |s| s.end else self.current.span.start;
         const stmt_end = try self.consumeSemicolon(last_end);

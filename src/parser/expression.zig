@@ -1200,9 +1200,16 @@ fn parseImportExpression(p: *Parser) ParseError!Expression {
     if (p.peek().kind == .lparen) {
         _ = try p.bump();
         const arg = try parseAssignment(p);
-        // Permit a trailing comma per the import-attributes grammar
-        // shape, even though we don't yet model the attribute object.
-        _ = try p.eat(.comma);
+        // §13.3.10 ImportCall takes an optional `options` argument
+        // (ES2025 import-attributes). Trailing commas are also
+        // grammar-legal. Parse-and-discard the options — the
+        // runtime loader hook doesn't consume them yet.
+        if (try p.eat(.comma)) {
+            if (p.peek().kind != .rparen) {
+                _ = try parseAssignment(p);
+                _ = try p.eat(.comma);
+            }
+        }
         const rparen = try p.expect(.rparen);
         const arg_ptr = try p.arena.create(Expression);
         arg_ptr.* = arg;
