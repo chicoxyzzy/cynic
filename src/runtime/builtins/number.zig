@@ -115,7 +115,9 @@ fn numberToExponential(realm: *Realm, this_value: Value, args: []const Value) Na
     const digits_arg = argOr(args, 0, Value.undefined_);
     var digits: i32 = -1;
     if (!digits_arg.isUndefined()) {
-        const dv = coerceToNumber(digits_arg);
+        // §21.1.3.2 toExponential — ToIntegerOrInfinity routes
+        // through ToNumber, which throws on Symbol / BigInt.
+        const dv = try intrinsics.toNumber(realm, digits_arg);
         const raw: f64 = if (dv.isInt32()) @floatFromInt(dv.asInt32()) else dv.asDouble();
         // §21.1.3.2 step 2 — ToIntegerOrInfinity maps NaN → 0
         // and truncates finite values. The range guard kicks in
@@ -152,7 +154,9 @@ fn numberToPrecision(realm: *Realm, this_value: Value, args: []const Value) Nati
         const s = realm.heap.allocateString(slice) catch return error.OutOfMemory;
         return Value.fromString(s);
     }
-    const pv = coerceToNumber(prec_arg);
+    // §21.1.3.5 toPrecision — ToIntegerOrInfinity routes through
+    // ToNumber, which throws on Symbol / BigInt.
+    const pv = try intrinsics.toNumber(realm, prec_arg);
     const pd: f64 = if (pv.isInt32()) @floatFromInt(pv.asInt32()) else pv.asDouble();
     // §21.1.3.5 step 4 — non-finite `x` returns Number::toString
     // BEFORE the precision range check, so `Infinity.toPrecision(1000)`
