@@ -351,7 +351,12 @@ fn parseIntNative(realm: *Realm, this_value: Value, args: []const Value) NativeE
     var radix: u8 = 10;
     var explicit_radix = false;
     if (!radix_v.isUndefined()) {
-        const rn = coerceToNumber(radix_v);
+        // §19.2.5 step 7 — `R = ToInt32(radix)`. ToInt32 routes
+        // through ToNumber, which throws TypeError on Symbol /
+        // BigInt operands. Use the realm-aware `toNumber` so
+        // those throws propagate instead of being collapsed to
+        // NaN.
+        const rn = try intrinsics.toNumber(realm, radix_v);
         var r: i32 = 0;
         if (rn.isInt32()) {
             r = rn.asInt32();
