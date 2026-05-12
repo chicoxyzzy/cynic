@@ -200,7 +200,7 @@ fn stringMatchAll(realm: *Realm, this_value: Value, args: []const Value) NativeE
         const re_v = try ensureRegExp(realm, arg);
         break :blk heap_mod.valueAsPlainObject(re_v) orelse return throwTypeError(realm, "matchAll target is not a regex");
     };
-    if (!flagsHas(regex_obj, 'g')) {
+    if (!flagsHas(realm, regex_obj, 'g')) {
         return throwTypeError(realm, "String.prototype.matchAll requires a global regex");
     }
     // §22.2.9.1 CreateRegExpStringIterator — allocate the
@@ -303,7 +303,8 @@ pub fn stringSearch(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const re_obj = heap_mod.valueAsPlainObject(re) orelse return Value.fromInt32(-1);
     const saved_li = re_obj.get("lastIndex");
     re_obj.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
-    const exec_fn = heap_mod.valueAsFunction(re_obj.get("exec")) orelse return Value.fromInt32(-1);
+    const exec_fn_v = try intrinsics.getPropertyChain(realm, re_obj, "exec");
+    const exec_fn = heap_mod.valueAsFunction(exec_fn_v) orelse return Value.fromInt32(-1);
     const interp = @import("../interpreter.zig");
     const args_call = [_]Value{Value.fromString(s)};
     const out = interp.callJSFunction(realm.allocator, realm, exec_fn, re, &args_call) catch |err| switch (err) {
@@ -903,8 +904,12 @@ fn regexExecCall(realm: *Realm, regex_obj: *JSObject, input: *JSString) NativeEr
     };
 }
 
-fn flagsHas(regex_obj: *JSObject, flag: u8) bool {
-    const flags_v = regex_obj.get("flags");
+fn flagsHas(realm: *Realm, regex_obj: *JSObject, flag: u8) bool {
+    // §22.2.6.4 RegExp.prototype.flags is an accessor — bare
+    // `obj.get` misses it. Route through the accessor-aware
+    // chain walker (a throw bubbles up as `false`, which mirrors
+    // every caller's pre-existing missing-property handling).
+    const flags_v = intrinsics.getPropertyChain(realm, regex_obj, "flags") catch return false;
     if (!flags_v.isString()) return false;
     const f: *JSString = @ptrCast(@alignCast(flags_v.asString()));
     return std.mem.indexOfScalar(u8, f.bytes, flag) != null;
@@ -949,7 +954,7 @@ fn regexReplace(
     repl_v: Value,
     force_all: bool,
 ) NativeError!Value {
-    const is_global = flagsHas(regex_obj, 'g');
+    const is_global = flagsHas(realm, regex_obj, 'g');
     const all = is_global or force_all;
     // Reset lastIndex so we always start at 0.
     regex_obj.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
@@ -1151,7 +1156,7 @@ fn stringReplaceAll(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const repl_v = argOr(args, 1, Value.undefined_);
     if (isRegexLike(pat_v)) |regex_obj| {
         // §22.1.3.19 — regex argument MUST have the global flag.
-        if (!flagsHas(regex_obj, 'g')) {
+        if (!flagsHas(realm, regex_obj, 'g')) {
             return throwTypeError(realm, "String.prototype.replaceAll requires a global regex");
         }
         return regexReplace(realm, s, regex_obj, repl_v, true);
