@@ -115,6 +115,12 @@ pub fn buildClass(
         false, // is_arrow
         captured_env,
     );
+    // §15.7.7 FunctionLength — class constructor exposes
+    // `C.length` as the count of params before the first one
+    // with a default / rest / destructuring.
+    if (template.constructor_spec_length != template.constructor_param_count) {
+        try ctor.properties.put(realm.allocator, "length", @import("value.zig").Value.fromInt32(template.constructor_spec_length));
+    }
     try class_scope.push(heap_mod.taggedFunction(ctor));
     ctor.is_class_constructor = true;
     if (parent_ctor != null) ctor.constructor_kind = .derived;
@@ -201,6 +207,9 @@ pub fn buildClass(
             false,
             captured_env,
         );
+        if (m.spec_length != m.param_count) {
+            try fn_obj.properties.put(realm.allocator, "length", @import("value.zig").Value.fromInt32(m.spec_length));
+        }
         fn_obj.home_object = proto;
         fn_obj.is_generator = m.is_generator;
         fn_obj.is_async = m.is_async;
@@ -327,6 +336,9 @@ pub fn buildClass(
             false,
             captured_env,
         );
+        if (m.spec_length != m.param_count) {
+            try fn_obj.properties.put(realm.allocator, "length", @import("value.zig").Value.fromInt32(m.spec_length));
+        }
         fn_obj.is_generator = m.is_generator;
         fn_obj.is_async = m.is_async;
         fn_obj.proto = if (m.is_generator and m.is_async)

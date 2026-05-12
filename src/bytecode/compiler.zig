@@ -3647,6 +3647,7 @@ fn compileClassTemplate(
 
     // Compile the constructor (explicit or synthesised).
     const ctor_param_count: u8 = if (ctor_def) |c| @intCast(c.params.len) else 0;
+    const ctor_spec_length: u8 = if (ctor_def) |c| computeSpecLength(c.params) else 0;
     const ctor_chunk = if (ctor_def) |c|
         try compileConstructorBody(self, c.params, c.body.body, is_derived, has_init_work, span)
     else
@@ -3695,6 +3696,7 @@ fn compileClassTemplate(
                 .name = key_name,
                 .chunk = method_chunk,
                 .param_count = @intCast(m.params.len),
+                .spec_length = computeSpecLength(m.params),
                 .kind = switch (m.kind) {
                     .method => .method,
                     .getter => .getter,
@@ -3732,6 +3734,7 @@ fn compileClassTemplate(
         .private_prefix = private_prefix,
         .constructor_chunk = ctor_chunk,
         .constructor_param_count = ctor_param_count,
+        .constructor_spec_length = ctor_spec_length,
         .instance_methods = instance_methods,
         .static_methods = static_methods,
         .instance_fields = instance_fields,
@@ -5659,6 +5662,25 @@ pub const FunctionBody = union(enum) {
     expression: *const Expression,
 };
 
+/// §15.7.7 FunctionLength — count formal parameters BEFORE the
+/// first parameter that has an initializer, is a destructuring
+/// pattern, or is a rest element. This is the value `f.length`
+/// reports per the spec; engines that use the total declared
+/// count expose `f.length` incorrectly for any function with
+/// defaults / rest / patterns.
+fn computeSpecLength(params: []const ast.statement.FunctionParam) u8 {
+    var n: u8 = 0;
+    for (params) |p| switch (p) {
+        .simple => |sp| {
+            if (sp.default != null) break;
+            if (sp.target != .identifier) break;
+            n += 1;
+        },
+        .rest => break,
+    };
+    return n;
+}
+
 fn compileFunctionTemplate(
     self: *Compiler,
     params: []ast.statement.FunctionParam,
@@ -5786,9 +5808,11 @@ fn compileFunctionTemplateExt(
     self.current_loop = saved_current_loop;
     self.current_is_async = saved_is_async;
 
+    const sp_len = computeSpecLength(params);
     return self.builder.addFunctionTemplate(.{
         .chunk = inner_chunk,
         .param_count = @intCast(params.len),
+        .spec_length = sp_len,
         .name = name,
         .is_arrow = is_arrow,
         .is_generator = is_generator,

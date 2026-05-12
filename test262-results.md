@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 |
-| **runtime** | 65.96 % | 78.96 % | 30538 / 46296 |
+| **runtime** | 66.06 % | 79.09 % | 30585 / 46296 |
 
 
 ## Where the runtime stands, by area
@@ -24,8 +24,8 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_1000+ fails_** | | | | | |
-| `language/expressions` | 8012 | 2114 | 912 | 73 % | 79 % |
-| `language/statements` | 7113 | 1544 | 656 | 76 % | 82 % |
+| `language/expressions` | 8042 | 2084 | 912 | 73 % | 79 % |
+| `language/statements` | 7131 | 1526 | 656 | 77 % | 82 % |
 | **_100–999 fails_** | | | | | |
 | `built-ins/Array` | 2381 | 571 | 129 | 77 % | 81 % |
 | `built-ins/ArrayBuffer` | 88 | 108 | 0 | 45 % | 45 % |
@@ -94,10 +94,10 @@ browser-era built-ins …).
 | `language/asi` | 97 | 5 | 0 | 95 % | 95 % |
 | `language/block-scope` | 140 | 5 | 0 | 97 % | 97 % |
 | `language/comments` | 22 | 7 | 23 | 42 % | 76 % |
-| `language/destructuring` | 17 | 1 | 1 | 89 % | 94 % |
+| `language/destructuring` | 15 | 3 | 1 | 79 % | 83 % |
 | `language/identifier-resolution` | 7 | 2 | 5 | 50 % | 78 % |
 | `language/reserved-words` | 26 | 1 | 0 | 96 % | 96 % |
-| `language/rest-parameters` | 9 | 2 | 0 | 82 % | 82 % |
+| `language/rest-parameters` | 10 | 1 | 0 | 91 % | 91 % |
 | `language/source-text` | 0 | 1 | 0 | 0 % | 0 % |
 | **_0 fails (passing or wholly OOS)_** | | | | | |
 | ~~`built-ins/AbstractModuleSource`~~ | ~~0~~ | ~~0~~ | ~~8~~ | ~~0 %~~ | ~~0 %~~ |
@@ -142,11 +142,14 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 | +198 | 0.6 s |
-| **runtime** | 65.96 % | 78.96 % | 30538 / 46296 | +647 | 2m 15s |
+| **runtime** | 66.06 % | 79.09 % | 30585 / 46296 | +694 | 2m 30s |
 
 Biggest movers (runtime):
 
-- `built-ins/Iterator` +1
+- `language/expressions` +30
+- `language/statements` +18
+- `language/destructuring` -2
+- `language/rest-parameters` +1
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 

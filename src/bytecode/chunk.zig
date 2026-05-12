@@ -58,7 +58,14 @@ pub const Handler = struct {
 pub const FunctionTemplate = struct {
     /// Compiled body. Lifetime tied to the enclosing chunk.
     chunk: Chunk,
+    /// Total declared parameter count — used for env-slot sizing
+    /// and the call-site argument-receive plumbing.
     param_count: u8,
+    /// §15.7.7 FunctionLength — the value `f.length` exposes,
+    /// which is the count of parameters before the first one
+    /// with a default value, destructuring pattern, or rest
+    /// element. May be less than `param_count`.
+    spec_length: u8 = 0,
     /// Borrowed slice into the original source for the function's
     /// declared name. `null` for anonymous functions / arrows.
     name: ?[]const u8,
@@ -121,6 +128,9 @@ pub const ClassTemplate = struct {
     /// `constructor(...args) { super(...args); }` for derived).
     constructor_chunk: Chunk,
     constructor_param_count: u8,
+    /// §15.7.7 FunctionLength — spec value `ClassName.length`
+    /// exposes. Same rules as FunctionTemplate.spec_length.
+    constructor_spec_length: u8 = 0,
     /// Instance methods (member.is_static == false). Includes
     /// private methods — those have a name prefixed by the
     /// class's `private_prefix`.
@@ -176,7 +186,11 @@ pub const MethodTemplate = struct {
     /// route correctly. Ignored when `key_chunk != null`.
     name: []const u8,
     chunk: Chunk,
+    /// Total declared parameter count — see FunctionTemplate.
     param_count: u8,
+    /// §15.7.7 FunctionLength for this method. See
+    /// FunctionTemplate.spec_length.
+    spec_length: u8 = 0,
     /// `method` (default), `getter`, or `setter`. Class-body
     /// `get x() { … }` / `set x(v) { … }` get the latter two;
     /// installed as accessor descriptors at MakeClass time.

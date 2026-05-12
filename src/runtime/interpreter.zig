@@ -2239,6 +2239,14 @@ fn runFrames(
                     tmpl.is_arrow,
                     f.env,
                 ) catch return error.OutOfMemory;
+                // §15.7.7 FunctionLength — override `f.length`
+                // from total-params (what allocateFunction
+                // installed by default) to the spec count
+                // produced by the compiler. `function f(a, b=1, c)`
+                // exposes `f.length === 1`, not 3.
+                if (tmpl.spec_length != tmpl.param_count) {
+                    fn_obj.properties.put(allocator, "length", Value.fromInt32(tmpl.spec_length)) catch return error.OutOfMemory;
+                }
                 // §15.3 Arrow functions capture lexical `this` at
                 // creation. Non-arrow `make_function` ignores this
                 // slot — `this` comes from the call site.
