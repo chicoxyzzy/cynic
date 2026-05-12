@@ -133,6 +133,34 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         return Value.fromBool(ok);
     }
     const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.set target must be an object");
+    // §10.1.9.1 [[Set]] step 5.a — return false when the own
+    // data property exists with `writable: false`. Cynic was
+    // using the bypass-set path which silently overwrites.
+    const had_own = target.properties.contains(key_slice);
+    if (had_own) {
+        const flags = target.flagsFor(key_slice);
+        if (!flags.writable) return Value.false_;
+    }
+    // Accessor descriptor — call the setter if present.
+    if (target.accessors.get(key_slice)) |acc| {
+        if (acc.setter) |setter| {
+            const interp = @import("../interpreter.zig");
+            const setter_args = [_]Value{v};
+            const outcome = interp.callJSFunction(realm.allocator, realm, setter, heap_mod.taggedObject(target), &setter_args) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            switch (outcome) {
+                .value, .yielded => return Value.true_,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            }
+        }
+        // Getter-only accessor — Reflect.set returns false.
+        return Value.false_;
+    }
     target.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
     return Value.true_;
 }
