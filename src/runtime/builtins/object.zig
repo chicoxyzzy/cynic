@@ -56,6 +56,17 @@ pub fn objectConstructor(realm: *Realm, this_value: Value, args: []const Value) 
     if (arg.isObject() or heap_mod.valueAsFunction(arg) != null) {
         return arg;
     }
+    // §20.1.1.1 step 3 — non-null/non-undefined primitive →
+    // ToObject(value). Boxes Numbers / Booleans / Strings into
+    // the appropriate `<X>.prototype`-prototype wrapper so
+    // inherited `.toString` / `.valueOf` etc. resolve correctly.
+    // Without this, `new Object(42)` produced a plain `%Object.prototype%`
+    // object and `wrap.toString()` → "[object Object]" instead
+    // of "42".
+    if (!arg.isUndefined() and !arg.isNull()) {
+        const w = try intrinsics.toObjectThis(realm, arg);
+        return heap_mod.taggedObject(w);
+    }
     // `new Object(...)` path — `this_value` is the freshly
     // allocated object the interpreter built for us. For
     // null/undefined args, that empty object IS the result.

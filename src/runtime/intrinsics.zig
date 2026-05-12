@@ -699,6 +699,14 @@ pub fn toObjectThis(realm: *Realm, this_value: Value) NativeError!*JSObject {
     // and the loop exits — matching real engines.
     const w = realm.heap.allocateObject() catch return error.OutOfMemory;
     w.prototype = lookupPrimitivePrototype(realm, this_value) orelse realm.intrinsics.object_prototype;
+    // §6.1.6.1 Number wrapper / §6.1.5 BigInt / §6.1.3 Boolean —
+    // stash the primitive in `boxed_primitive` so
+    // `Number.prototype.toString` / `.valueOf` (and the matching
+    // Boolean / BigInt methods) can recover the underlying value
+    // for `new Object(42).toString()` style coercion.
+    if (this_value.isInt32() or this_value.isDouble() or this_value.isBool()) {
+        w.boxed_primitive = this_value;
+    }
     return w;
 }
 
