@@ -77,7 +77,7 @@ fn test262ModuleLoader(
 /// supplied (not undefined), the test failed. Cynic stashes
 /// the result on the realm so the runner can read it after
 /// draining microtasks.
-fn test262DoneNative(
+fn test262AsyncDoneSignal(
     realm: *cynic.runtime.Realm,
     this_value: cynic.runtime.Value,
     args: []const cynic.runtime.Value,
@@ -1266,7 +1266,7 @@ fn classifyAndRun(
     // `realm.async_done_called` / `async_done_error` after the
     // microtask queue drains.
     {
-        const done_fn = realm.heap.allocateFunctionNative(test262DoneNative, 1, "$DONE") catch return .{ .kind = .fail_false_reject };
+        const done_fn = realm.heap.allocateFunctionNative(test262AsyncDoneSignal, 1, "$DONE") catch return .{ .kind = .fail_false_reject };
         realm.globals.put(realm.allocator, "$DONE", cynic.runtime.heap.taggedFunction(done_fn)) catch return .{ .kind = .fail_false_reject };
     }
 
