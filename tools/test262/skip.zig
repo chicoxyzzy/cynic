@@ -82,9 +82,16 @@ pub const cynic_oos_path_prefixes = [_][]const u8{
 /// • Runtime features that don't affect the parser but indicate the
 /// test relies on harness/runtime support we don't have.
 pub const unsupported_features = [_][]const u8{
-    // Proposals / future syntax
+    // Stage-3 / future syntax — parser-affecting, not implemented.
+    // Each is in scope to eventually ship but skipping the
+    // fixtures avoids "missing progress" noise.
     "decorators",
-    "import-attributes",
+    // (import-attributes — ES2025 finished, in progress: parser
+    // stub, runtime treats the `with` clause as a pass-through
+    // payload to the module loader hook.)
+    // Pre-finalisation predecessor of import-attributes — the
+    // `assert {...}` syntax was withdrawn from the proposal in
+    // favour of `with`. Never reached ES; keep skipped.
     "import-assertions",
     "import-defer",
     "source-phase-imports",
@@ -119,12 +126,17 @@ pub const unsupported_features = [_][]const u8{
     // drop/toArray/forEach/find/some/every/reduce. Gate dropped.)
     "async-iterator-helpers",
     "Array.fromAsync",
-    "Float16Array",
-    "Math.f16round",
+    // (Float16Array, Math.f16round — ES2025 finished. Eventual
+    // implementation; left in the score corpus so the gap is
+    // visible. Implementing them needs IEEE 754 half-precision
+    // arithmetic + a new typed-array element kind.)
     "Math.sumPrecise",
     "uint8array-base64",
-    "arraybuffer-transfer",
-    "resizable-arraybuffer",
+    // (arraybuffer-transfer, resizable-arraybuffer — ES2024
+    // finished. Eventual implementation; left in the score
+    // corpus so the gap is visible. `arraybuffer-transfer` is
+    // a prerequisite for `align-detached-buffer-semantics-…`
+    // fixtures.)
     // (regexp-named-groups, regexp-lookbehind, regexp-match-indices,
     // regexp-unicode-property-escapes, regexp-v-flag — all supported
     // by the vendored libregexp; gates removed.)
