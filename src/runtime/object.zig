@@ -255,6 +255,14 @@ pub const JSObject = struct {
     /// unbox a wrapper receiver in O(1) instead of
     /// reconstructing the bytes from indexed slots.
     boxed_string: ?*@import("string.zig").JSString = null,
+    /// Opaque host-side pointer. Used by embedder code that
+    /// needs to associate a `*Realm` (or similar) with a JS
+    /// object — currently only the test262 harness, which
+    /// stashes the child Realm pointer on the wrapper returned
+    /// by `$262.createRealm()` so the trampoline `evalScript`
+    /// can dispatch to it. Not GC-traced; the harness keeps the
+    /// child Realm rooted in `parent.child_realms` separately.
+    host_data: ?*anyopaque = null,
     /// Internal async-await waiters for a pending Promise.
     /// Each entry is a `*JSGenerator` representing a suspended
     /// `async function` frame that is awaiting this Promise.

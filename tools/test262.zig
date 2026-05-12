@@ -168,6 +168,17 @@ fn dollar262DetachArrayBuffer(
     return cynic.runtime.Value.undefined_;
 }
 
+/// `$262.createRealm()` — INTERPRETING.md. Allocates a fresh
+/// `Realm` (own intrinsics + globals) sharing the parent's heap
+/// so cross-realm values stay GC-safe. Returns an object shaped
+/// like the parent's `$262`: `.global`, `.evalScript`, the
+/// nested `.createRealm`, plus the `Function` / `Symbol` / etc.
+/// constructors hoisted onto the new realm's global for tests
+/// that do `other.Function`, `other.Symbol`, …
+///
+/// Lifetime: the child Realm is heap-allocated and registered
+/// on the parent's `child_realms` list so it lives as long as
+/// the parent and gets torn down with it.
 fn dollar262CreateRealm(
     realm: *cynic.runtime.Realm,
     this_value: cynic.runtime.Value,
@@ -175,7 +186,79 @@ fn dollar262CreateRealm(
 ) cynic.runtime.function.NativeError!cynic.runtime.Value {
     _ = this_value;
     _ = args;
-    return throwTest262TypeError(realm, "$262.createRealm not supported in Cynic");
+    const child_ptr = realm.allocator.create(cynic.runtime.Realm) catch return error.OutOfMemory;
+    child_ptr.* = cynic.runtime.Realm.initChild(realm);
+    // installBuiltins wires every intrinsic constructor onto the
+    // child's globals and stashes them in `child.intrinsics`.
+    // The child shares the parent's heap so the allocations made
+    // here outlive only the child's globals map.
+    child_ptr.installBuiltins() catch return error.OutOfMemory;
+    // §6.1.5.1 — well-known symbols are agent-wide. Replace the
+    // child's freshly-allocated `Symbol.iterator` / etc. with
+    // the parent's pointers so identity holds across realms.
+    child_ptr.shareWellKnownSymbolsWith(realm) catch return error.OutOfMemory;
+    realm.child_realms.append(realm.allocator, child_ptr) catch return error.OutOfMemory;
+
+    // Build the `$262`-shaped wrapper that user JS sees.
+    const wrapper = realm.heap.allocateObject() catch return error.OutOfMemory;
+    wrapper.prototype = realm.intrinsics.object_prototype;
+
+    // `.global` — the child realm's globalThis. Tests use this
+    // to reach `other.global.X` for constructors and globals.
+    if (child_ptr.globals.get("globalThis")) |gt| {
+        wrapper.set(realm.allocator, "global", gt) catch return error.OutOfMemory;
+    } else {
+        wrapper.set(realm.allocator, "global", cynic.runtime.Value.undefined_) catch return error.OutOfMemory;
+    }
+
+    // Stash the child realm pointer on the wrapper. The
+    // `evalScript` trampoline reads it from `this_value` and
+    // dispatches into the child.
+    wrapper.host_data = @ptrCast(child_ptr);
+
+    // `.evalScript(source)` — evaluates `source` IN THE CHILD
+    // REALM. Receiver is the wrapper, which carries the child
+    // pointer in `host_data`.
+    const eval_trampoline = realm.heap.allocateFunctionNative(dollar262ChildEvalScript, 1, "evalScript") catch return error.OutOfMemory;
+    wrapper.set(realm.allocator, "evalScript", cynic.runtime.heap.taggedFunction(eval_trampoline)) catch return error.OutOfMemory;
+
+    // Pass-through hooks — operate on the parent's heap state
+    // because the relevant objects (ArrayBuffer storage etc.)
+    // live there too.
+    const gc_fn = realm.heap.allocateFunctionNative(dollar262Gc, 0, "gc") catch return error.OutOfMemory;
+    wrapper.set(realm.allocator, "gc", cynic.runtime.heap.taggedFunction(gc_fn)) catch return error.OutOfMemory;
+
+    return cynic.runtime.heap.taggedObject(wrapper);
+}
+
+/// Trampoline for `child262.evalScript(source)`. The receiver
+/// is the wrapper returned by `createRealm`; its `host_data`
+/// slot points at the child `Realm`.
+fn dollar262ChildEvalScript(
+    realm: *cynic.runtime.Realm,
+    this_value: cynic.runtime.Value,
+    args: []const cynic.runtime.Value,
+) cynic.runtime.function.NativeError!cynic.runtime.Value {
+    const this_obj = cynic.runtime.heap.valueAsPlainObject(this_value) orelse
+        return throwTest262TypeError(realm, "$262.evalScript: bad receiver");
+    const child_raw = this_obj.host_data orelse
+        return throwTest262TypeError(realm, "$262.evalScript: missing host realm");
+    const child: *cynic.runtime.Realm = @ptrCast(@alignCast(child_raw));
+    if (args.len == 0 or !args[0].isString()) {
+        return throwTest262TypeError(realm, "$262.evalScript: source must be a string");
+    }
+    const s: *cynic.runtime.JSString = @ptrCast(@alignCast(args[0].asString()));
+    const result = cynic.runtime.evaluateScript(child.allocator, child, s.bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return throwTest262SyntaxError(realm, "$262.evalScript: parse or compile error"),
+    };
+    switch (result) {
+        .value, .yielded => |v| return v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    }
 }
 
 /// Wrap `intrinsics.newTypeError` for the harness — installs
@@ -197,7 +280,7 @@ fn throwTest262SyntaxError(realm: *cynic.runtime.Realm, msg: []const u8) cynic.r
 /// Install the `$262` host object on `realm.globals`. Idempotent
 /// per realm (caller invokes once, before evaluating user code).
 fn install262(realm: *cynic.runtime.Realm) !void {
-    const heap = &realm.heap;
+    const heap = realm.heap;
     const obj = try heap.allocateObject();
     obj.prototype = realm.intrinsics.object_prototype;
 

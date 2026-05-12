@@ -83,7 +83,21 @@ pub const ModuleLoader = *const fn (
 
 pub const Realm = struct {
     allocator: std.mem.Allocator,
-    heap: Heap,
+    /// `*Heap` so multiple Realms can share one heap — required
+    /// by §9.3.1 InitializeHostDefinedRealm and the cross-realm
+    /// fixtures (one agent, one heap, multiple realms with their
+    /// own intrinsics + globals). When `owns_heap` is true the
+    /// Realm tears down the heap on `deinit`; child realms set
+    /// it false and the parent does the cleanup.
+    heap: *Heap,
+    /// True when this Realm allocated its own Heap (`Realm.init`).
+    /// False for child realms created via `Realm.initChild` that
+    /// borrow the parent's heap.
+    owns_heap: bool = true,
+    /// Child Realms allocated via `$262.createRealm()` or future
+    /// `new ShadowRealm()`. Owned by the parent; deinit walks
+    /// the list and tears each down before tearing itself down.
+    child_realms: std.ArrayListUnmanaged(*Realm) = .empty,
     /// Host-installed global bindings — `print`, `console`,
     /// `globalThis`, etc. Looked up by `lda_global` when an
     /// identifier reference doesn't resolve in any user scope.
@@ -176,10 +190,58 @@ pub const Realm = struct {
     frame_stacks: std.ArrayListUnmanaged(*std.ArrayListUnmanaged(@import("interpreter.zig").CallFrame)) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Realm {
+        const heap_ptr = allocator.create(Heap) catch unreachable;
+        heap_ptr.* = Heap.init(allocator);
         return .{
             .allocator = allocator,
-            .heap = Heap.init(allocator),
+            .heap = heap_ptr,
+            .owns_heap = true,
         };
+    }
+
+    /// Create a child Realm that shares `parent`'s heap. Used by
+    /// `$262.createRealm()` (test262 harness) and by future
+    /// ShadowRealm support — both need a fresh set of intrinsics
+    /// and globals but a single agent-wide heap so values can
+    /// cross realm boundaries without GC roots being split.
+    pub fn initChild(parent: *Realm) Realm {
+        return .{
+            .allocator = parent.allocator,
+            .heap = parent.heap,
+            .owns_heap = false,
+        };
+    }
+
+    /// §6.1.5.1 — well-known symbols (`Symbol.iterator`,
+    /// `Symbol.hasInstance`, …) are shared across all realms in
+    /// the same agent. After `installBuiltins` on a child realm
+    /// builds fresh per-realm intrinsics, this rewires the
+    /// child's `Symbol` constructor properties to point at the
+    /// parent's symbol objects so identity comparisons
+    /// (`a.Symbol.iterator === b.Symbol.iterator`) succeed per
+    /// spec.
+    pub fn shareWellKnownSymbolsWith(self: *Realm, parent: *const Realm) !void {
+        const parent_sym = heap_mod.valueAsFunction(parent.globals.get("Symbol") orelse return) orelse return;
+        const child_sym = heap_mod.valueAsFunction(self.globals.get("Symbol") orelse return) orelse return;
+        const names = [_][]const u8{
+            "iterator",       "asyncIterator", "hasInstance",
+            "toPrimitive",    "toStringTag",   "isConcatSpreadable",
+            "species",        "match",         "replace",
+            "search",         "split",         "matchAll",
+            "unscopables",
+        };
+        for (names) |name| {
+            const v = parent_sym.get(name);
+            if (v.isUndefined()) continue;
+            // setWithFlags overwrites both the data slot and the
+            // descriptor (well-known symbols are frozen:
+            // `{ w:false, e:false, c:false }`).
+            try child_sym.setWithFlags(self.allocator, name, v, .{
+                .writable = false,
+                .enumerable = false,
+                .configurable = false,
+            });
+        }
     }
 
     pub fn deinit(self: *Realm) void {
@@ -197,7 +259,22 @@ pub const Realm = struct {
         }
         self.script_chunks.deinit(self.allocator);
         self.frame_stacks.deinit(self.allocator);
-        self.heap.deinit();
+        // Tear down child realms (created via $262.createRealm)
+        // BEFORE the heap, so their globals/intrinsics maps free
+        // through allocator paths that don't depend on heap state.
+        // They borrow our heap (owns_heap=false), so each just
+        // releases its own maps.
+        for (self.child_realms.items) |child| {
+            child.deinit();
+            self.allocator.destroy(child);
+        }
+        self.child_realms.deinit(self.allocator);
+        // Only the Realm that allocated the heap frees it; child
+        // realms borrow and exit cleanly.
+        if (self.owns_heap) {
+            self.heap.deinit();
+            self.allocator.destroy(self.heap);
+        }
         if (self.class_arena) |*a| a.deinit();
     }
 
