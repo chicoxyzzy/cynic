@@ -153,9 +153,9 @@ fn numberToPrecision(realm: *Realm, this_value: Value, args: []const Value) Nati
     }
     const pv = coerceToNumber(prec_arg);
     const pd: f64 = if (pv.isInt32()) @floatFromInt(pv.asInt32()) else pv.asDouble();
-    if (std.math.isNan(pd) or std.math.isInf(pd) or pd < 1 or pd > 100)
-        return throwRangeError(realm, "toPrecision precision out of range [1, 100]");
-    const prec: i32 = @intFromFloat(@trunc(pd));
+    // §21.1.3.5 step 4 — non-finite `x` returns Number::toString
+    // BEFORE the precision range check, so `Infinity.toPrecision(1000)`
+    // returns `"Infinity"` rather than throwing RangeError.
     if (std.math.isNan(x)) {
         const s = realm.heap.allocateString("NaN") catch return error.OutOfMemory;
         return Value.fromString(s);
@@ -164,6 +164,9 @@ fn numberToPrecision(realm: *Realm, this_value: Value, args: []const Value) Nati
         const s = realm.heap.allocateString(if (x > 0) "Infinity" else "-Infinity") catch return error.OutOfMemory;
         return Value.fromString(s);
     }
+    if (std.math.isNan(pd) or std.math.isInf(pd) or pd < 1 or pd > 100)
+        return throwRangeError(realm, "toPrecision precision out of range [1, 100]");
+    const prec: i32 = @intFromFloat(@trunc(pd));
     // For later we approximate via Zig's default formatter
     // truncated to `prec` digits. Real spec semantics
     // (§21.1.3.5) round + decide between fixed / exponential
