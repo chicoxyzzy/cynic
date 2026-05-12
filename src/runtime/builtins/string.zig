@@ -233,10 +233,13 @@ pub fn stringMatch(realm: *Realm, this_value: Value, args: []const Value) Native
     const s = try coerceThisToJSString(realm, this_value);
     const re = try ensureRegExp(realm, argOr(args, 0, Value.undefined_));
     const re_obj = heap_mod.valueAsPlainObject(re) orelse return Value.null_;
-    const flags_v = re_obj.get("flags");
+    // `flags` is an accessor on `%RegExp.prototype%` (§22.2.6.4),
+    // so `obj.get` returns undefined unless we walk accessors.
+    // §22.1.3.10 step 4 forwards `regexp.flags` via Get + ToString.
+    const flags_v = try intrinsics.getPropertyChain(realm, re_obj, "flags");
     const flags_str: []const u8 = if (flags_v.isString()) (@as(*JSString, @ptrCast(@alignCast(flags_v.asString())))).bytes else "";
     const is_global = std.mem.indexOfScalar(u8, flags_str, 'g') != null;
-    const exec_fn_v = re_obj.get("exec");
+    const exec_fn_v = try intrinsics.getPropertyChain(realm, re_obj, "exec");
     const exec_fn = heap_mod.valueAsFunction(exec_fn_v) orelse return Value.null_;
     const interp = @import("../interpreter.zig");
     if (!is_global) {
