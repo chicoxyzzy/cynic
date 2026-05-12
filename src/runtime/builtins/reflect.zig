@@ -35,9 +35,14 @@ pub fn install(realm: *Realm) !void {
     const obj = try realm.heap.allocateObject();
     obj.prototype = realm.intrinsics.object_prototype;
     try installToStringTag(realm, obj, "Reflect");
+    // §28.1.* — spec `.length` values reflect REQUIRED args,
+    // not declared. Reflect.get(target, key, receiver?) is
+    // length 2; Reflect.set(target, key, value, receiver?) is
+    // length 3. The optional `receiver` doesn't count toward
+    // the spec length.
     try installNativeMethodOnProto(realm, obj, "has", reflectHas, 2);
-    try installNativeMethodOnProto(realm, obj, "get", reflectGet, 3);
-    try installNativeMethodOnProto(realm, obj, "set", reflectSet, 4);
+    try installNativeMethodOnProto(realm, obj, "get", reflectGet, 2);
+    try installNativeMethodOnProto(realm, obj, "set", reflectSet, 3);
     try installNativeMethodOnProto(realm, obj, "deleteProperty", reflectDeleteProperty, 2);
     try installNativeMethodOnProto(realm, obj, "ownKeys", reflectOwnKeys, 1);
     try installNativeMethodOnProto(realm, obj, "getPrototypeOf", reflectGetPrototypeOf, 1);

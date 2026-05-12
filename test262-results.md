@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 |
-| **runtime** | 66.31 % | 79.38 % | 30699 / 46296 |
+| **runtime** | 66.31 % | 79.39 % | 30701 / 46296 |
 
 
 ## Where the runtime stands, by area
@@ -54,7 +54,7 @@ browser-era built-ins …).
 | `built-ins/NativeErrors` | 74 | 20 | 0 | 79 % | 79 % |
 | `built-ins/Number` | 296 | 44 | 0 | 87 % | 87 % |
 | `built-ins/Proxy` | 201 | 98 | 12 | 65 % | 67 % |
-| `built-ins/Reflect` | 103 | 50 | 0 | 67 % | 67 % |
+| `built-ins/Reflect` | 105 | 48 | 0 | 69 % | 69 % |
 | `built-ins/Set` | 334 | 48 | 1 | 87 % | 87 % |
 | `built-ins/Symbol` | 77 | 13 | 8 | 79 % | 86 % |
 | `built-ins/WeakMap` | 123 | 18 | 0 | 87 % | 87 % |
@@ -142,15 +142,11 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 | +198 | 0.6 s |
-| **runtime** | 66.31 % | 79.38 % | 30699 / 46296 | +808 | 3m 27s |
+| **runtime** | 66.31 % | 79.39 % | 30701 / 46296 | +810 | 3m 24s |
 
 Biggest movers (runtime):
 
-- `built-ins/Array` +22
-- `built-ins/String` +11
-- `built-ins/Object` +5
-- `built-ins/Iterator` +2
-- `language/expressions` +1
+- `built-ins/Reflect` +2
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
