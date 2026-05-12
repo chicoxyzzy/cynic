@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 |
-| **runtime** | 64.77 % | 78.66 % | 30003 / 46320 |
+| **runtime** | 64.80 % | 78.70 % | 30016 / 46320 |
 
 ## Where the runtime stands, by area
 
@@ -23,12 +23,12 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_1000+ fails_** | | | | | |
-| `language/expressions` | 7960 | 2107 | 971 | 72 % | 79 % |
+| `language/expressions` | 7963 | 2104 | 971 | 72 % | 79 % |
 | `language/statements` | 7134 | 1536 | 667 | 76 % | 82 % |
 | **_100–999 fails_** | | | | | |
 | `built-ins/Array` | 2321 | 549 | 211 | 75 % | 81 % |
 | `built-ins/Function` | 215 | 205 | 89 | 42 % | 51 % |
-| `built-ins/Object` | 2795 | 531 | 85 | 82 % | 84 % |
+| `built-ins/Object` | 2798 | 528 | 85 | 82 % | 84 % |
 | `built-ins/Promise` | 500 | 174 | 3 | 74 % | 74 % |
 | `built-ins/Proxy` | 174 | 125 | 12 | 56 % | 58 % |
 | `built-ins/RegExp` | 1284 | 434 | 161 | 68 % | 75 % |
@@ -80,10 +80,8 @@ browser-era built-ins …).
 | `built-ins/AsyncIteratorPrototype` | 0 | 4 | 9 | 0 % | 0 % |
 | `built-ins/Boolean` | 45 | 6 | 0 | 88 % | 88 % |
 | `built-ins/FinalizationRegistry` | 43 | 4 | 0 | 91 % | 91 % |
-| `built-ins/Infinity` | 2 | 2 | 2 | 33 % | 50 % |
 | `built-ins/MapIteratorPrototype` | 10 | 1 | 0 | 91 % | 91 % |
 | `built-ins/Math` | 305 | 7 | 15 | 93 % | 98 % |
-| `built-ins/NaN` | 2 | 2 | 2 | 33 % | 50 % |
 | `built-ins/SetIteratorPrototype` | 10 | 1 | 0 | 91 % | 91 % |
 | `built-ins/StringIteratorPrototype` | 2 | 5 | 0 | 29 % | 29 % |
 | `built-ins/ThrowTypeError` | 13 | 1 | 0 | 93 % | 93 % |
@@ -92,7 +90,7 @@ browser-era built-ins …).
 | `built-ins/decodeURIComponent` | 53 | 3 | 0 | 95 % | 95 % |
 | `built-ins/parseFloat` | 52 | 2 | 0 | 96 % | 96 % |
 | `built-ins/parseInt` | 48 | 7 | 0 | 87 % | 87 % |
-| `built-ins/undefined` | 1 | 4 | 3 | 13 % | 20 % |
+| `built-ins/undefined` | 4 | 1 | 3 | 50 % | 80 % |
 | `language/asi` | 97 | 5 | 0 | 95 % | 95 % |
 | `language/block-scope` | 140 | 5 | 0 | 97 % | 97 % |
 | `language/comments` | 20 | 3 | 29 | 38 % | 87 % |
@@ -104,6 +102,8 @@ browser-era built-ins …).
 | ~~`built-ins/AbstractModuleSource`~~ | ~~0~~ | ~~0~~ | ~~8~~ | ~~0 %~~ | ~~0 %~~ |
 | ~~`built-ins/AsyncDisposableStack`~~ | ~~0~~ | ~~0~~ | ~~104~~ | ~~0 %~~ | ~~0 %~~ |
 | ~~`built-ins/DisposableStack`~~ | ~~0~~ | ~~0~~ | ~~93~~ | ~~0 %~~ | ~~0 %~~ |
+| `built-ins/Infinity` | 4 | 0 | 2 | 67 % | 100 % |
+| `built-ins/NaN` | 4 | 0 | 2 | 67 % | 100 % |
 | ~~`built-ins/ShadowRealm`~~ | ~~0~~ | ~~0~~ | ~~64~~ | ~~0 %~~ | ~~0 %~~ |
 | ~~`built-ins/SuppressedError`~~ | ~~0~~ | ~~0~~ | ~~22~~ | ~~0 %~~ | ~~0 %~~ |
 | ~~`built-ins/Temporal`~~ | ~~0~~ | ~~0~~ | ~~4588~~ | ~~0 %~~ | ~~0 %~~ |
@@ -135,17 +135,19 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-12 — cynic `05edbec`, test262 `d0c1b455`
+### 2026-05-12 — cynic `69e7107`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 64.77 % | 78.66 % | 30003 / 46320 | +112 |
+| **runtime** | 64.80 % | 78.70 % | 30016 / 46320 | +125 |
 
 Biggest movers (runtime):
 
-- `built-ins/Number` +14
-- `built-ins/Object` +5
-- `language/expressions` +1
+- `built-ins/Object` +3
+- `built-ins/undefined` +3
+- `language/expressions` +3
+- `built-ins/Infinity` +2
+- `built-ins/NaN` +2
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
