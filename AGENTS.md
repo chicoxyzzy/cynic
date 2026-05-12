@@ -139,8 +139,10 @@ scoreboard sorted by raw fail count (so the top of the list is
 where the most fixtures move with the least work), and a
 `## History` section of per-day mini-tables — newest day first.
 Each history row shows the `Δ pass` against the previous run of
-the same mode; the most recent row also gets a "Biggest movers"
-sub-list naming the buckets that shifted most.
+the same mode and the `elapsed` wall-clock time of that run (full
+sweeps only; partial / filtered runs leave it blank). The most
+recent row also gets a "Biggest movers" sub-list naming the
+buckets that shifted most.
 
 **Build mode.** The test262 harness binary is built `ReleaseFast`
 by default (interpreters are 5-10× slower in Debug; the harness

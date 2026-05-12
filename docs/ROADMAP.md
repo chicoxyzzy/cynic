@@ -1,24 +1,22 @@
 # Cynic — Roadmap
 
-_Last refreshed at runtime conformance **45.40%** (21210 / 46714 test262
-runtime tests, Cynic-targeted scope; parser at 54.76%). Sections below
-are themes, not strict timelines — many run in parallel._
+_Sections below are themes, not strict timelines — many run in parallel._
 
 ## Status
 
+Live scores, per-area breakdown, and history are in
+[test262-results.md](../test262-results.md). That file is the
+single source of truth; this roadmap deliberately doesn't snapshot
+numbers so it can't drift.
+
 `spec%` is `pass / total` on the Cynic-targeted corpus (excludes
 universally out-of-scope paths — Annex B language extensions,
-`harness/`, `staging/`, `intl402/`, browser-era built-ins). `attempted%`
-is `pass / (pass + fail)` — quality of what's shipped, ignoring skips.
-
-| Layer | spec% | attempted% | pass / total | Notes |
-|---|---|---|---|---|
-| Parser | 54.76% | 95.61% | 28,542 / 52,125 | Strict-only; `InputElementRegExp` re-entry exposed for the parser |
-| Runtime | 45.40% | 55.39% | 21,210 / 46,714 | Bytecode interpreter; reaches everything the parser accepts that doesn't depend on a missing built-in |
+`harness/`, `staging/`, `intl402/`, browser-era built-ins).
+`attempted%` is `pass / (pass + fail)` — quality of what's shipped,
+ignoring skips.
 
 `zig build test` runs all unit tests; `zig build test262 -- --quiet`
-runs the conformance harness. Score history + per-area breakdown live
-in [test262-results.md](../test262-results.md).
+runs the conformance harness.
 
 ## Lexer & parser
 
