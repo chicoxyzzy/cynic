@@ -900,6 +900,13 @@ pub const TypedKind = enum(u8) {
             .float64, .biguint64, .bigint64 => 8,
         };
     }
+
+    /// True for the two BigInt-typed-array element kinds. Used
+    /// by `fill` / `set` / etc. to branch between ToNumber
+    /// (regular typed arrays) and ToBigInt (BigInt variants).
+    pub fn isBigInt(k: TypedKind) bool {
+        return k == .biguint64 or k == .bigint64;
+    }
 };
 
 pub const TypedView = struct {

@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 |
-| **runtime** | 66.44 % | 79.54 % | 30759 / 46296 |
+| **runtime** | 66.48 % | 79.58 % | 30777 / 46296 |
 
 
 ## Where the runtime stands, by area
@@ -35,7 +35,7 @@ browser-era built-ins …).
 | `built-ins/Promise` | 506 | 131 | 40 | 75 % | 79 % |
 | `built-ins/RegExp` | 1322 | 396 | 161 | 70 % | 77 % |
 | `built-ins/String` | 907 | 311 | 5 | 74 % | 74 % |
-| `built-ins/TypedArray` | 885 | 545 | 8 | 62 % | 62 % |
+| `built-ins/TypedArray` | 903 | 527 | 8 | 63 % | 63 % |
 | `built-ins/TypedArrayConstructors` | 408 | 312 | 16 | 55 % | 57 % |
 | `language/module-code` | 392 | 202 | 2 | 66 % | 66 % |
 | **_10–99 fails_** | | | | | |
@@ -142,12 +142,11 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 | +198 | 0.6 s |
-| **runtime** | 66.44 % | 79.54 % | 30759 / 46296 | +868 | 2m 40s |
+| **runtime** | 66.48 % | 79.58 % | 30777 / 46296 | +886 | 4m 12s |
 
 Biggest movers (runtime):
 
-- `built-ins/TypedArrayConstructors` +8
-- `built-ins/ArrayBuffer` +3
+- `built-ins/TypedArray` +17
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 

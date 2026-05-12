@@ -630,13 +630,23 @@ fn typedArrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // BigInt typed arrays) runs ONCE up front, before the start/
     // end coercions. Test262 fixtures pass side-effecting
     // `valueOf`/`toString` to verify the once-only semantics.
-    const value_coerced = intrinsics.coerceToNumber(argOr(args, 0, Value.undefined_));
+    // Route through realm-aware `toNumber` so user valueOf
+    // throws propagate; non-BigInt typed arrays accept the
+    // returned Value as-is. BigInt typed arrays follow a
+    // separate ToBigInt path that's handled inside
+    // `writeTypedElement` for now.
+    const value_arg = argOr(args, 0, Value.undefined_);
+    const value_coerced = if (tv.kind.isBigInt())
+        value_arg
+    else
+        try intrinsics.toNumber(realm, value_arg);
 
     // §23.2.3.10 step 4-9 — start / end via ToIntegerOrInfinity,
-    // clamped to [0, len]. Negative offsets count from `len`.
+    // clamped to [0, len]. Route through `toNumber` for the
+    // same ToPrimitive ordering / Symbol-throw semantics.
     var start: i64 = 0;
     if (args.len > 1 and !args[1].isUndefined()) {
-        const sv = intrinsics.coerceToNumber(args[1]);
+        const sv = try intrinsics.toNumber(realm, args[1]);
         const sd: f64 = if (sv.isInt32()) @floatFromInt(sv.asInt32()) else if (sv.isDouble()) sv.asDouble() else 0;
         if (std.math.isNan(sd)) {
             start = 0;
@@ -651,7 +661,7 @@ fn typedArrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeE
     }
     var end: i64 = len_i;
     if (args.len > 2 and !args[2].isUndefined()) {
-        const ev = intrinsics.coerceToNumber(args[2]);
+        const ev = try intrinsics.toNumber(realm, args[2]);
         const ed: f64 = if (ev.isInt32()) @floatFromInt(ev.asInt32()) else if (ev.isDouble()) ev.asDouble() else 0;
         if (std.math.isNan(ed)) {
             end = 0;
@@ -1789,9 +1799,11 @@ fn typedArrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const idx_arg = argOr(args, 0, Value.fromInt32(0));
     const value = argOr(args, 1, Value.undefined_);
     // §23.2.3.39 step 2 — ToIntegerOrInfinity(relativeIndex)
-    // applies ToNumber first. Strings ("1", "-1", "dog"), bools,
-    // NaN all flow through here; non-finite values handled below.
-    const idx_num = coerceToNumber(idx_arg);
+    // applies ToNumber first, which fires ToPrimitive →
+    // valueOf / toString on objects and throws on Symbol /
+    // BigInt. Route through `toNumber` (realm-aware) so user
+    // valueOf throws propagate before we touch `value`.
+    const idx_num = try intrinsics.toNumber(realm, idx_arg);
     const idx_n: f64 = if (idx_num.isInt32())
         @floatFromInt(idx_num.asInt32())
     else if (idx_num.isDouble())
