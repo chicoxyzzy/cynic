@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 |
-| **runtime** | 66.15 % | 79.19 % | 30627 / 46296 |
+| **runtime** | 66.20 % | 79.25 % | 30650 / 46296 |
 
 
 ## Where the runtime stands, by area
@@ -47,7 +47,7 @@ browser-era built-ins …).
 | `built-ins/Error` | 45 | 13 | 0 | 78 % | 78 % |
 | `built-ins/GeneratorFunction` | 7 | 16 | 0 | 30 % | 30 % |
 | `built-ins/GeneratorPrototype` | 32 | 29 | 0 | 52 % | 52 % |
-| `built-ins/Iterator` | 439 | 65 | 6 | 86 % | 87 % |
+| `built-ins/Iterator` | 440 | 64 | 6 | 86 % | 87 % |
 | `built-ins/JSON` | 109 | 35 | 21 | 66 % | 76 % |
 | `built-ins/Map` | 166 | 37 | 1 | 81 % | 82 % |
 | `built-ins/Math` | 306 | 11 | 10 | 94 % | 97 % |
@@ -60,7 +60,6 @@ browser-era built-ins …).
 | `built-ins/WeakMap` | 123 | 18 | 0 | 87 % | 87 % |
 | `built-ins/WeakSet` | 73 | 12 | 0 | 86 % | 86 % |
 | `built-ins/global` | 16 | 13 | 0 | 55 % | 55 % |
-| `language/arguments-object` | 178 | 28 | 57 | 68 % | 86 % |
 | `language/function-code` | 85 | 23 | 109 | 39 % | 79 % |
 | `language/global-code` | 18 | 19 | 5 | 43 % | 49 % |
 | `language/identifiers` | 252 | 16 | 0 | 94 % | 94 % |
@@ -89,6 +88,7 @@ browser-era built-ins …).
 | `built-ins/parseFloat` | 52 | 2 | 0 | 96 % | 96 % |
 | `built-ins/parseInt` | 48 | 7 | 0 | 87 % | 87 % |
 | `built-ins/undefined` | 4 | 1 | 3 | 50 % | 80 % |
+| `language/arguments-object` | 200 | 6 | 57 | 76 % | 97 % |
 | `language/asi` | 97 | 5 | 0 | 95 % | 95 % |
 | `language/block-scope` | 140 | 5 | 0 | 97 % | 97 % |
 | `language/comments` | 22 | 7 | 23 | 42 % | 76 % |
@@ -142,12 +142,12 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 | +198 | 0.6 s |
-| **runtime** | 66.15 % | 79.19 % | 30627 / 46296 | +736 | 3m 15s |
+| **runtime** | 66.20 % | 79.25 % | 30650 / 46296 | +759 | 3m 24s |
 
 Biggest movers (runtime):
 
-- `built-ins/AsyncIteratorPrototype` +4
-- `language/statements` +1
+- `language/arguments-object` +22
+- `built-ins/Iterator` +1
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 

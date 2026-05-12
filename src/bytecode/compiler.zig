@@ -1978,6 +1978,15 @@ pub const Compiler = struct {
             if (m.object.* == .super_) {
                 return self.compileSuperMethodCall(c, m);
             }
+            // `obj.method(...spread)` — spread in args needs the
+            // apply-style lowering, but with `this = obj`. Route
+            // through `compileSpreadMethodCall` instead of the
+            // generic spread path (which uses `this = undefined`).
+            for (c.arguments) |*arg| {
+                if (arg.* == .spread) {
+                    return self.compileSpreadMethodCall(c, m);
+                }
+            }
             return self.compileMethodCall(c, m);
         }
 
@@ -2197,6 +2206,137 @@ pub const Compiler = struct {
     /// `super.method(args)` — look up `method` through the home
     /// object's prototype, then call with `this` bound to the
     /// CURRENT `this` (not the home object). §13.3.7.
+    /// `obj.method(...spread)` — receiver lookup once + build args
+    /// array + `.apply(obj, args)`. Same shape as `compileSpreadCall`
+    /// but routes `this` to the receiver instead of `undefined`.
+    fn compileSpreadMethodCall(
+        self: *Compiler,
+        c: ast.expression.CallExpr,
+        m: ast.expression.MemberExpr,
+    ) CompileError!void {
+        // 1. Evaluate `obj` once into r_recv. Used as the `this`
+        //    binding AND as the base for the method lookup.
+        try self.compileExpression(m.object);
+        const r_recv = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, c.span);
+        try self.builder.emitU8(r_recv);
+
+        // 2. Look up the method on `obj` → r_callee.
+        switch (m.property) {
+            .ident => |span| {
+                const key_slice = self.source[span.start..span.end];
+                if (key_slice.len > 0 and key_slice[0] == '#') {
+                    if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
+                    const prefix = self.class_stack.items[self.class_stack.items.len - 1].private_prefix;
+                    const arena = self.realm.classAllocator();
+                    const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, key_slice[1..] }) catch return error.OutOfMemory;
+                    const k = try self.internString(mangled);
+                    try self.builder.emitOp(.ldar, c.span);
+                    try self.builder.emitU8(r_recv);
+                    try self.builder.emitOp(.lda_private, c.span);
+                    try self.builder.emitU16(k);
+                } else {
+                    const k = try self.internString(key_slice);
+                    try self.builder.emitOp(.ldar, c.span);
+                    try self.builder.emitU8(r_recv);
+                    try self.builder.emitOp(.lda_property, c.span);
+                    try self.builder.emitU16(k);
+                }
+            },
+            .computed => |key_expr| {
+                try self.compileExpression(key_expr);
+                try self.builder.emitOp(.lda_computed, c.span);
+                try self.builder.emitU8(r_recv);
+            },
+        }
+        const r_callee = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, c.span);
+        try self.builder.emitU8(r_callee);
+
+        // 3. Build args array using the same shape as
+        //    compileSpreadCall.
+        const r_args = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.make_array, c.span);
+        try self.builder.emitOp(.star, c.span);
+        try self.builder.emitU8(r_args);
+        const k_length = try self.internString("length");
+        try self.builder.emitOp(.lda_smi, c.span);
+        try self.builder.emitI32(0);
+        try self.builder.emitOp(.sta_property, c.span);
+        try self.builder.emitU16(k_length);
+        try self.builder.emitU8(r_args);
+
+        for (c.arguments) |*arg| {
+            if (arg.* == .spread) {
+                try self.compileExpression(arg.spread.argument);
+                try self.builder.emitOp(.array_spread, c.span);
+                try self.builder.emitU8(r_args);
+            } else {
+                try self.compileExpression(arg);
+                const r_val = try self.reserveTemp();
+                try self.builder.emitOp(.star, c.span);
+                try self.builder.emitU8(r_val);
+                try self.builder.emitOp(.ldar, c.span);
+                try self.builder.emitU8(r_args);
+                try self.builder.emitOp(.lda_property, c.span);
+                try self.builder.emitU16(k_length);
+                const r_idx = try self.reserveTemp();
+                try self.builder.emitOp(.star, c.span);
+                try self.builder.emitU8(r_idx);
+                try self.builder.emitOp(.ldar, c.span);
+                try self.builder.emitU8(r_val);
+                try self.builder.emitOp(.sta_computed, c.span);
+                try self.builder.emitU8(r_args);
+                try self.builder.emitU8(r_idx);
+                try self.builder.emitOp(.ldar, c.span);
+                try self.builder.emitU8(r_idx);
+                try self.builder.emitOp(.lda_smi, c.span);
+                try self.builder.emitI32(1);
+                try self.builder.emitOp(.add, c.span);
+                try self.builder.emitU8(r_idx);
+                try self.builder.emitOp(.sta_property, c.span);
+                try self.builder.emitU16(k_length);
+                try self.builder.emitU8(r_args);
+                self.releaseTemp();
+                self.releaseTemp();
+            }
+        }
+
+        // 4. Look up `.apply` on the callee → r_apply, then call
+        //    apply with `(r_recv, r_args)`.
+        const k_apply = try self.internString("apply");
+        try self.builder.emitOp(.ldar, c.span);
+        try self.builder.emitU8(r_callee);
+        try self.builder.emitOp(.lda_property, c.span);
+        try self.builder.emitU16(k_apply);
+        const r_apply = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, c.span);
+        try self.builder.emitU8(r_apply);
+
+        // 5. Stage args at r_apply + 1, r_apply + 2.
+        const r_this = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.ldar, c.span);
+        try self.builder.emitU8(r_recv);
+        try self.builder.emitOp(.star, c.span);
+        try self.builder.emitU8(r_this);
+        const r_args_pos = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.ldar, c.span);
+        try self.builder.emitU8(r_args);
+        try self.builder.emitOp(.star, c.span);
+        try self.builder.emitU8(r_args_pos);
+
+        try self.builder.emitOp(.call_method, c.span);
+        try self.builder.emitU8(r_callee);
+        try self.builder.emitU8(r_apply);
+        try self.builder.emitU8(2);
+    }
+
     fn compileSuperMethodCall(
         self: *Compiler,
         c: ast.expression.CallExpr,
