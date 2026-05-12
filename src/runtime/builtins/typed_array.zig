@@ -60,6 +60,18 @@ pub fn install(realm: *Realm) !void {
         const proto = r.proto;
         try installNativeGetter(realm, proto, "byteLength", arrayBufferByteLength);
         try installNativeMethodOnProto(realm, proto, "slice", arrayBufferSlice, 2);
+        // §25.1.5.{3,4} ArrayBuffer.prototype.{transfer, transferToFixedLength}
+        // — ES2024. Both detach the source and return a fresh
+        // ArrayBuffer holding the data. Cynic's implementation
+        // matches `transferToFixedLength` for both: we don't
+        // model resizable ArrayBuffers, so there's no
+        // distinction.
+        try installNativeMethodOnProto(realm, proto, "transfer", arrayBufferTransfer, 0);
+        try installNativeMethodOnProto(realm, proto, "transferToFixedLength", arrayBufferTransfer, 0);
+        // §25.1.5.2 `get ArrayBuffer.prototype.detached` — ES2024
+        // companion of `.transfer`. Reads `[[ArrayBufferData]]
+        // === null`.
+        try installNativeGetter(realm, proto, "detached", arrayBufferDetached);
         // §25.1.4.3 ArrayBuffer.isView(arg) — returns true iff
         // arg is an Object with a `[[ViewedArrayBuffer]]` slot
         // (TypedArray or DataView instance). Cynic tracks both
@@ -284,6 +296,63 @@ fn arrayBufferByteLength(realm: *Realm, this_value: Value, args: []const Value) 
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return Value.fromInt32(0);
     if (obj.array_buffer) |ab| return Value.fromInt32(@intCast(ab.len));
     return Value.fromInt32(0);
+}
+
+/// §25.1.5.2 `get ArrayBuffer.prototype.detached`. ES2024.
+/// Returns true iff `[[ArrayBufferData]]` is null — which is
+/// Cynic's representation of a transferred buffer.
+fn arrayBufferDetached(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "get ArrayBuffer.prototype.detached requires an ArrayBuffer receiver");
+    return Value.fromBool(obj.array_buffer == null);
+}
+
+/// §25.1.5.{3,4} ArrayBuffer.prototype.{transfer, transferToFixedLength}.
+/// Allocate a fresh buffer of the requested `newLength` (default
+/// = source byteLength), copy the source bytes into the prefix,
+/// detach the source, return the fresh buffer.
+fn arrayBufferTransfer(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const src = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "ArrayBuffer.prototype.transfer requires an ArrayBuffer receiver");
+    const src_buf = src.array_buffer orelse
+        return throwTypeError(realm, "Cannot transfer a detached ArrayBuffer");
+
+    // newLength defaults to source byteLength. ToIntegerOrInfinity
+    // applied per §25.1.5.3 step 4.b; negative or non-finite is
+    // a RangeError.
+    const new_len: usize = blk: {
+        if (args.len == 0 or args[0].isUndefined()) break :blk src_buf.len;
+        const v = coerceToNumber(args[0]);
+        const d: f64 = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
+        if (std.math.isNan(d) or d < 0 or std.math.isInf(d)) {
+            return @import("../intrinsics.zig").throwRangeError(realm, "ArrayBuffer.prototype.transfer: newLength out of range");
+        }
+        break :blk @intFromFloat(@trunc(d));
+    };
+
+    const new_bytes = realm.allocator.alloc(u8, new_len) catch return error.OutOfMemory;
+    // §25.1.3.1 CopyDataBlockBytes — copy min(src, new) bytes,
+    // zero-fill any tail beyond src.
+    const copy_n = @min(src_buf.len, new_len);
+    @memcpy(new_bytes[0..copy_n], src_buf[0..copy_n]);
+    if (new_len > copy_n) @memset(new_bytes[copy_n..], 0);
+
+    // Detach the source — DetachArrayBuffer per §25.1.3.4.
+    realm.allocator.free(src_buf);
+    src.array_buffer = null;
+
+    // Allocate the result buffer object. Mirrors the layout
+    // `arrayBufferConstructor` produces: same prototype, single
+    // `array_buffer` slot.
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    if (heap_mod.valueAsFunction(realm.globals.get("ArrayBuffer") orelse Value.undefined_)) |ab_ctor| {
+        out.prototype = ab_ctor.prototype;
+    } else {
+        out.prototype = realm.intrinsics.object_prototype;
+    }
+    out.array_buffer = new_bytes;
+    return heap_mod.taggedObject(out);
 }
 
 fn arrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

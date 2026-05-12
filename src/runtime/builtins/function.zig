@@ -65,6 +65,55 @@ pub fn installPrototypeMethods(realm: *Realm) !void {
     try fn_proto.setWithFlags(realm.allocator, "@@hasInstance", heap_mod.taggedFunction(hi_fn), .{
         .writable = false, .enumerable = false, .configurable = false,
     });
+
+    // Replace the Function constructor stub. Cynic permanently
+    // does not implement source-string compilation
+    // (`new Function("return 1")` and friends), but the no-args
+    // form `new Function()` is benign — it returns an empty
+    // function that returns undefined. Real-world fixtures use
+    // it as a fresh constructor object for `Reflect.construct(…,
+    // NewTarget)` patterns.
+    if (heap_mod.valueAsFunction(realm.globals.get("Function").?)) |fn_ctor| {
+        fn_ctor.native_callback = functionConstructor;
+    }
+}
+
+/// §20.2.1 The Function Constructor.
+///
+/// Cynic-only behaviour: the 0-arg form returns a fresh empty
+/// function (no source text, returns undefined). The 1+-arg
+/// form throws TypeError because Cynic doesn't ship runtime
+/// source compilation — aligns with SES / Hardened JavaScript.
+fn functionConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (args.len > 0) {
+        return throwTypeError(realm, "Function constructor with source string is not supported (Cynic ships no eval / runtime code construction)");
+    }
+    // Allocate an empty anonymous function. The native body
+    // returns undefined regardless of arguments — matches the
+    // spec semantics of `Function()` (a function whose body is
+    // the empty string).
+    const empty = realm.heap.allocateFunctionNative(emptyFunctionBody, 0, "anonymous") catch return error.OutOfMemory;
+    empty.proto = realm.intrinsics.function_prototype;
+    // Wire up a normal `.prototype` object so users can
+    // `Reflect.construct(C)` with our function as NewTarget.
+    const proto = realm.heap.allocateObject() catch return error.OutOfMemory;
+    proto.prototype = realm.intrinsics.object_prototype;
+    proto.setWithFlags(realm.allocator, "constructor", heap_mod.taggedFunction(empty), .{
+        .writable = true, .enumerable = false, .configurable = true,
+    }) catch return error.OutOfMemory;
+    empty.prototype = proto;
+    // If called via `new`, the interpreter pre-allocated `this`;
+    // ConstructResult prefers our return value (the empty fn) per
+    // §13.3.5.1.1 when it's an Object. Plain-call returns it too.
+    _ = this_value;
+    return heap_mod.taggedFunction(empty);
+}
+
+fn emptyFunctionBody(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = this_value;
+    _ = args;
+    return Value.undefined_;
 }
 
 // ── §20.2.3.6 / §7.3.20 Function.prototype[@@hasInstance] ──────────────
