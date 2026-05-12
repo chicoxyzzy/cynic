@@ -80,6 +80,28 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, proto, "toString", symbolToString, 0);
     try installNativeMethodOnProto(realm, proto, "valueOf", symbolValueOf, 0);
     try installNativeGetter(realm, proto, "description", symbolDescriptionGetter);
+
+    // §20.4.3.4 Symbol.prototype [ @@toPrimitive ] (hint) —
+    // returns the underlying Symbol primitive regardless of
+    // hint. Descriptor `{ w:false, e:false, c:true }` per the
+    // spec; `.length === 1` because it accepts the hint arg.
+    const to_prim = try realm.heap.allocateFunctionNative(symbolToPrimitive, 1, "[Symbol.toPrimitive]");
+    to_prim.proto = realm.intrinsics.function_prototype;
+    to_prim.has_construct = false;
+    try proto.setWithFlags(realm.allocator, "@@toPrimitive", heap_mod.taggedFunction(to_prim), .{
+        .writable = false, .enumerable = false, .configurable = true,
+    });
+}
+
+/// §20.4.3.4 Symbol.prototype [ @@toPrimitive ]. The hint is
+/// ignored — symbols never coerce to a number, and ToString /
+/// String conversion is handled by stringConstructor's special
+/// case. Always returns the underlying Symbol primitive, or
+/// throws TypeError if the receiver isn't a Symbol / boxed
+/// Symbol wrapper.
+fn symbolToPrimitive(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    return symbolValueOf(realm, this_value, &.{});
 }
 
 fn symbolToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
