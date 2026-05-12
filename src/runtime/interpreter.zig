@@ -5939,6 +5939,26 @@ fn coerceForCompare(
     value: Value,
     hint: intrinsics_mod.ToPrimitiveHint,
 ) RunError!CompareOutcome {
+    // Functions are objects per §6.1.7; coerce via ToString
+    // (their source / "function() { [native code] }" placeholder)
+    // so a computed key `{ [() => {}]: 1 }` lands under the
+    // arrow's source text instead of the "[object]" fallback.
+    if (heap_mod.valueAsFunction(value)) |_| {
+        const s = intrinsics_mod.stringifyArg(realm, value) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NativeThrew => {
+                const ex = realm.pending_exception orelse try makeTypeError(realm, "ToString failed");
+                realm.pending_exception = null;
+                f.ip = ip;
+                f.accumulator = value;
+                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                    return .{ .uncaught = ex };
+                }
+                return .handled;
+            },
+        };
+        return .{ .ok = Value.fromString(s) };
+    }
     if (!value.isObject()) return .{ .ok = value };
     const prim = intrinsics_mod.toPrimitive(realm, value, hint) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -5973,6 +5993,14 @@ fn coerceToPropertyKey(
     ip: usize,
     value: Value,
 ) RunError!CompareOutcome {
+    // §7.1.19 ToPropertyKey: ToPrimitive(arg, "string") then
+    // ToString unless result is a Symbol. Function values are
+    // objects per §6.1.7; without this branch a computed key
+    // like `{ [() => {}]: 1 }` skipped coercion and the slot
+    // ended up under the literal "[object]" placeholder.
+    if (heap_mod.valueAsFunction(value) != null) {
+        return coerceForCompare(allocator, realm, frames, f, ip, value, .string);
+    }
     if (!value.isObject()) return .{ .ok = value };
     if (heap_mod.valueAsSymbol(value) != null) return .{ .ok = value };
     if (heap_mod.valueAsBigInt(value) != null) return .{ .ok = value };
