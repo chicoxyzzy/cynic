@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 |
-| **runtime** | 64.81 % | 78.71 % | 30019 / 46320 |
+| **runtime** | 64.88 % | 78.80 % | 30054 / 46320 |
 
 ## Where the runtime stands, by area
 
@@ -23,38 +23,38 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_1000+ fails_** | | | | | |
-| `language/expressions` | 7963 | 2104 | 971 | 72 % | 79 % |
+| `language/expressions` | 7964 | 2103 | 971 | 72 % | 79 % |
 | `language/statements` | 7134 | 1536 | 667 | 76 % | 82 % |
 | **_100–999 fails_** | | | | | |
 | `built-ins/Array` | 2321 | 549 | 211 | 75 % | 81 % |
-| `built-ins/Function` | 215 | 205 | 89 | 42 % | 51 % |
-| `built-ins/Object` | 2798 | 528 | 85 | 82 % | 84 % |
-| `built-ins/Promise` | 500 | 174 | 3 | 74 % | 74 % |
-| `built-ins/Proxy` | 174 | 125 | 12 | 56 % | 58 % |
+| `built-ins/Function` | 216 | 204 | 89 | 42 % | 51 % |
+| `built-ins/Object` | 2809 | 517 | 85 | 82 % | 84 % |
+| `built-ins/Promise` | 507 | 167 | 3 | 75 % | 75 % |
+| `built-ins/Proxy` | 176 | 123 | 12 | 57 % | 59 % |
 | `built-ins/RegExp` | 1284 | 434 | 161 | 68 % | 75 % |
 | `built-ins/String` | 859 | 359 | 5 | 70 % | 71 % |
 | `built-ins/TypedArray` | 876 | 346 | 216 | 61 % | 72 % |
 | `built-ins/TypedArrayConstructors` | 383 | 329 | 24 | 52 % | 54 % |
 | `language/module-code` | 381 | 201 | 14 | 64 % | 65 % |
 | **_10–99 fails_** | | | | | |
-| `built-ins/ArrayBuffer` | 36 | 48 | 112 | 18 % | 43 % |
+| `built-ins/ArrayBuffer` | 37 | 47 | 112 | 19 % | 44 % |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 8 | 30 | 0 | 21 % | 21 % |
-| `built-ins/AsyncGeneratorFunction` | 5 | 18 | 0 | 22 % | 22 % |
+| `built-ins/AsyncGeneratorFunction` | 6 | 17 | 0 | 26 % | 26 % |
 | `built-ins/AsyncGeneratorPrototype` | 22 | 26 | 0 | 46 % | 46 % |
 | `built-ins/BigInt` | 40 | 37 | 0 | 52 % | 52 % |
-| `built-ins/DataView` | 424 | 65 | 72 | 76 % | 87 % |
-| `built-ins/Date` | 504 | 82 | 8 | 85 % | 86 % |
+| `built-ins/DataView` | 425 | 64 | 72 | 76 % | 87 % |
+| `built-ins/Date` | 505 | 81 | 8 | 85 % | 86 % |
 | `built-ins/Error` | 35 | 23 | 0 | 60 % | 60 % |
-| `built-ins/GeneratorFunction` | 5 | 18 | 0 | 22 % | 22 % |
+| `built-ins/GeneratorFunction` | 6 | 17 | 0 | 26 % | 26 % |
 | `built-ins/GeneratorPrototype` | 30 | 31 | 0 | 49 % | 49 % |
 | `built-ins/Iterator` | 439 | 65 | 6 | 86 % | 87 % |
-| `built-ins/JSON` | 71 | 72 | 22 | 43 % | 50 % |
+| `built-ins/JSON` | 73 | 70 | 22 | 44 % | 51 % |
 | `built-ins/Map` | 145 | 58 | 1 | 71 % | 71 % |
 | `built-ins/NativeErrors` | 68 | 26 | 0 | 72 % | 72 % |
 | `built-ins/Number` | 290 | 50 | 0 | 85 % | 85 % |
 | `built-ins/Reflect` | 96 | 57 | 0 | 63 % | 63 % |
 | `built-ins/RegExpStringIteratorPrototype` | 7 | 10 | 0 | 41 % | 41 % |
-| `built-ins/Set` | 323 | 59 | 1 | 84 % | 85 % |
+| `built-ins/Set` | 330 | 52 | 1 | 86 % | 86 % |
 | `built-ins/Symbol` | 42 | 48 | 8 | 43 % | 47 % |
 | `built-ins/WeakMap` | 121 | 20 | 0 | 86 % | 86 % |
 | `built-ins/WeakSet` | 72 | 13 | 0 | 85 % | 85 % |
@@ -84,7 +84,7 @@ browser-era built-ins …).
 | `built-ins/Math` | 305 | 7 | 15 | 93 % | 98 % |
 | `built-ins/SetIteratorPrototype` | 10 | 1 | 0 | 91 % | 91 % |
 | `built-ins/StringIteratorPrototype` | 2 | 5 | 0 | 29 % | 29 % |
-| `built-ins/ThrowTypeError` | 13 | 1 | 0 | 93 % | 93 % |
+| `built-ins/ThrowTypeError` | 12 | 2 | 0 | 86 % | 86 % |
 | `built-ins/WeakRef` | 25 | 4 | 0 | 86 % | 86 % |
 | `built-ins/decodeURI` | 51 | 4 | 0 | 93 % | 93 % |
 | `built-ins/decodeURIComponent` | 53 | 3 | 0 | 95 % | 95 % |
@@ -135,15 +135,19 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-12 — cynic `f1fba1f`, test262 `d0c1b455`
+### 2026-05-12 — cynic `1311a63`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 64.81 % | 78.71 % | 30019 / 46320 | +128 |
+| **runtime** | 64.88 % | 78.80 % | 30054 / 46320 | +163 |
 
 Biggest movers (runtime):
 
-- `built-ins/AggregateError` +3
+- `built-ins/Object` +11
+- `built-ins/Promise` +7
+- `built-ins/Set` +7
+- `built-ins/JSON` +2
+- `built-ins/Proxy` +2
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
