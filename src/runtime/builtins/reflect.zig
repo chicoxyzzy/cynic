@@ -144,11 +144,21 @@ fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) 
     var key_buf: [64]u8 = undefined;
     const key_slice = computedKeyForReflect(key_v, &key_buf);
     if (heap_mod.valueAsFunction(arg)) |fn_obj| {
+        // §10.1.10.1 [[Delete]] step 4 — return false when the
+        // own property is non-configurable.
+        if (fn_obj.flagsForOwn(key_slice).configurable == false and (fn_obj.properties.contains(key_slice) or fn_obj.accessors.contains(key_slice))) return Value.false_;
         _ = fn_obj.properties.swapRemove(key_slice);
+        _ = fn_obj.accessors.swapRemove(key_slice);
+        _ = fn_obj.property_flags.swapRemove(key_slice);
         return Value.true_;
     }
     const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.deleteProperty target must be an object");
+    // §10.1.10.1 — non-configurable own property → return false
+    // (no mutation). Includes frozen / sealed objects.
+    if (target.flagsFor(key_slice).configurable == false and (target.properties.contains(key_slice) or target.accessors.contains(key_slice))) return Value.false_;
     _ = target.properties.swapRemove(key_slice);
+    _ = target.accessors.swapRemove(key_slice);
+    _ = target.property_flags.swapRemove(key_slice);
     return Value.true_;
 }
 
