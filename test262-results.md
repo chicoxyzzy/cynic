@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 |
-| **runtime** | 64.89 % | 78.81 % | 30059 / 46320 |
+| **runtime** | 64.91 % | 78.83 % | 30068 / 46320 |
 
 ## Where the runtime stands, by area
 
@@ -44,7 +44,7 @@ browser-era built-ins …).
 | `built-ins/BigInt` | 40 | 37 | 0 | 52 % | 52 % |
 | `built-ins/DataView` | 425 | 64 | 72 | 76 % | 87 % |
 | `built-ins/Date` | 505 | 81 | 8 | 85 % | 86 % |
-| `built-ins/Error` | 35 | 23 | 0 | 60 % | 60 % |
+| `built-ins/Error` | 44 | 14 | 0 | 76 % | 76 % |
 | `built-ins/GeneratorFunction` | 6 | 17 | 0 | 26 % | 26 % |
 | `built-ins/GeneratorPrototype` | 30 | 31 | 0 | 49 % | 49 % |
 | `built-ins/Iterator` | 439 | 65 | 6 | 86 % | 87 % |
@@ -135,16 +135,15 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-12 — cynic `c8c957e`, test262 `d0c1b455`
+### 2026-05-12 — cynic `d12ad8f`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 64.89 % | 78.81 % | 30059 / 46320 | +168 |
+| **runtime** | 64.91 % | 78.83 % | 30068 / 46320 | +177 |
 
 Biggest movers (runtime):
 
-- `built-ins/Reflect` +2
-- `built-ins/TypedArrayConstructors` +2
+- `built-ins/Error` +9
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
