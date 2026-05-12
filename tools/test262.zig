@@ -784,7 +784,12 @@ pub fn main(init: std.process.Init) !void {
     }
     if (opts.write_results) {
         const now_ts = std.Io.Clock.now(.real, io);
-        try writeResults(gpa, io, &stats, &buckets, now_ts.toSeconds(), opts.mode);
+        // Elapsed is only carried into the row when we ran the
+        // whole corpus — a filtered run's wall-time isn't
+        // comparable to yesterday's full sweep, so a fresh row
+        // would skew the regression signal.
+        const elapsed_for_row: ?u64 = if (is_full_run and elapsed > 0) @intCast(elapsed) else null;
+        try writeResults(gpa, io, &stats, &buckets, now_ts.toSeconds(), opts.mode, elapsed_for_row);
     }
     // Refresh the pass cache only on full runs — partial runs
     // (filtered or `--only-failing`) would shrink the recorded
@@ -1590,6 +1595,12 @@ const Row = struct {
     pass: u32,
     spec_pct: f64,
     attempted_pct: f64,
+    /// Wall-clock duration of the run that produced this row, in
+    /// milliseconds. `null` on rows imported from history files
+    /// that predate the `elapsed` column and on partial runs
+    /// (filtered / `--only-failing`) where the number wouldn't be
+    /// comparable to a full sweep.
+    elapsed_ms: ?u64 = null,
 };
 
 /// Update test262-results.md with today's row for the run that
@@ -1608,6 +1619,7 @@ fn writeResults(
     buckets: *const BucketMap,
     epoch_seconds: i64,
     mode: Mode,
+    elapsed_ms: ?u64,
 ) !void {
     const cwd = std.Io.Dir.cwd();
     const path = "test262-results.md";
@@ -1671,7 +1683,7 @@ fn writeResults(
         }
     }
 
-    try rows.append(gpa, makeRow(date, mode, stats, cynic_sha, test262_sha));
+    try rows.append(gpa, makeRow(date, mode, stats, cynic_sha, test262_sha, elapsed_ms));
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(gpa);
@@ -1686,6 +1698,7 @@ fn makeRow(
     stats: *const Stats,
     cynic_sha: []const u8,
     test262_sha: []const u8,
+    elapsed_ms: ?u64,
 ) Row {
     const spec_pct: f64 = if (stats.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(stats.pass())) / @as(f64, @floatFromInt(stats.total));
     const attempted = stats.pass() + stats.fail();
@@ -1699,6 +1712,7 @@ fn makeRow(
         .pass = stats.pass(),
         .spec_pct = spec_pct,
         .attempted_pct = att_pct,
+        .elapsed_ms = elapsed_ms,
     };
 }
 
@@ -1840,6 +1854,18 @@ fn parsePerDayRows(
         const slash = std.mem.indexOf(u8, pt_cell, "/") orelse continue;
         const pass = std.fmt.parseInt(u32, std.mem.trim(u8, pt_cell[0..slash], " "), 10) catch continue;
         const total = std.fmt.parseInt(u32, std.mem.trim(u8, pt_cell[slash + 1 ..], " "), 10) catch continue;
+        // The Δ-pass cell is computed fresh per render — skip it.
+        // The next cell, if present, is the `elapsed` column added
+        // 2026-05-12. Rows from older history files don't have it;
+        // either tokenizer.next() returns null (no `|` tail) or
+        // returns an empty cell. Either case leaves elapsed_ms null.
+        _ = it.next();
+        const elapsed_ms: ?u64 = blk: {
+            const cell_raw = it.next() orelse break :blk null;
+            const cell = std.mem.trim(u8, cell_raw, " ");
+            if (cell.len == 0) break :blk null;
+            break :blk parseElapsedCell(cell);
+        };
         try rows.append(gpa, .{
             .date = date,
             .mode = mode,
@@ -1849,8 +1875,30 @@ fn parsePerDayRows(
             .pass = pass,
             .spec_pct = spec_pct,
             .attempted_pct = att_pct,
+            .elapsed_ms = elapsed_ms,
         });
     }
+}
+
+/// Parse the `elapsed` cell back to milliseconds. Accepts both
+/// `12.3 s` (sub-minute) and `2m 40s` (minute+ runs). Anything
+/// unrecognized returns null so we don't fail a re-write because
+/// of a future format extension.
+fn parseElapsedCell(cell: []const u8) ?u64 {
+    if (std.mem.indexOfScalar(u8, cell, 'm')) |m_off| {
+        // `Xm YYs` form.
+        const mins_part = std.mem.trim(u8, cell[0..m_off], " ");
+        const mins = std.fmt.parseInt(u64, mins_part, 10) catch return null;
+        const rest = std.mem.trim(u8, cell[m_off + 1 ..], " ");
+        const s_off = std.mem.indexOfScalar(u8, rest, 's') orelse return null;
+        const secs = std.fmt.parseInt(u64, rest[0..s_off], 10) catch return null;
+        return (mins * 60 + secs) * 1000;
+    }
+    // `12.3 s` form.
+    const s_off = std.mem.indexOfScalar(u8, cell, 's') orelse return null;
+    const num_part = std.mem.trim(u8, cell[0..s_off], " ");
+    const secs = std.fmt.parseFloat(f64, num_part) catch return null;
+    return @intFromFloat(secs * 1000.0);
 }
 
 fn stripBackticks(s: []const u8) []const u8 {
@@ -1918,6 +1966,7 @@ fn writeFileBody(
         \\- **attempted%** — `pass / (pass + fail)`. Of the tests we actually ran, the fraction that passed. Skips drop out. Measures the quality of what's shipped, independent of coverage. Same definition in the rolled-up rows and in the by-area scoreboard; skip-only buckets render as `0 %`.
         \\- **pass / total** — raw counts. `total` is the Cynic-targeted corpus (see below); `fail` is `attempted - pass`; `skip` is `total - attempted`.
         \\- **Δ pass** (history) — change in `pass` versus the row immediately above (chronologically previous run of the same `mode`).
+        \\- **elapsed** (history) — wall-clock time of the run that produced the row. Recorded only for full sweeps (no `--filter`, no `--only-failing`); partial runs leave it blank to keep the regression signal clean. Sub-minute as `12.3 s`, minute+ as `2m 40s`.
         \\
         \\**Scope.** `total` excludes paths universally out of scope (`harness/`, `staging/`, `intl402/`), Annex B language extensions, and browser-era built-ins Cynic doesn't ship (`escape` / `unescape`, `String.prototype` HTML wrappers, `Date.{getYear, setYear}`).
         \\
@@ -1948,8 +1997,8 @@ fn writeFileBody(
         }
         try out.appendSlice(gpa, "\n\n");
         try out.appendSlice(gpa,
-            \\|         | spec% | attempted% | pass / total | Δ pass |
-            \\|---|---|---|---|---:|
+            \\|         | spec% | attempted% | pass / total | Δ pass | elapsed |
+            \\|---|---|---|---|---:|---:|
             \\
         );
 
@@ -1988,6 +2037,22 @@ fn writeMiniRow(
     try out.appendSlice(gpa, line);
 }
 
+/// Render an elapsed-cell. Empty for rows imported from history
+/// files that predate the column. Sub-minute runs print as
+/// `12.3 s`; longer runs use `2m 40s` so the regression-glance
+/// scale is intuitive.
+fn formatElapsedCell(buf: []u8, elapsed_ms: ?u64) ![]const u8 {
+    const ms = elapsed_ms orelse return "";
+    if (ms < 60_000) {
+        const secs: f64 = @as(f64, @floatFromInt(ms)) / 1000.0;
+        return try std.fmt.bufPrint(buf, "{d:.1} s", .{secs});
+    }
+    const total_s: u64 = ms / 1000;
+    const minutes: u64 = total_s / 60;
+    const seconds: u64 = total_s % 60;
+    return try std.fmt.bufPrint(buf, "{d}m {d:0>2}s", .{ minutes, seconds });
+}
+
 fn writeHistoryRow(
     gpa: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
@@ -1995,22 +2060,24 @@ fn writeHistoryRow(
     prev_pass: ?u32,
 ) !void {
     var buf: [320]u8 = undefined;
+    var elapsed_buf: [32]u8 = undefined;
+    const elapsed_cell = try formatElapsedCell(&elapsed_buf, r.elapsed_ms);
     if (prev_pass) |p| {
         const delta: i64 = @as(i64, r.pass) - @as(i64, p);
         const sign: u8 = if (delta > 0) '+' else if (delta < 0) '-' else 0;
         const mag: u64 = @abs(delta);
         const line = if (sign == 0)
-            try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | ±0 |\n", .{
-                @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total,
+            try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | ±0 | {s} |\n", .{
+                @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, elapsed_cell,
             })
         else
-            try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {c}{d} |\n", .{
-                @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, sign, mag,
+            try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {c}{d} | {s} |\n", .{
+                @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, sign, mag, elapsed_cell,
             });
         try out.appendSlice(gpa, line);
     } else {
-        const line = try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | n/a |\n", .{
-            @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total,
+        const line = try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | n/a | {s} |\n", .{
+            @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, elapsed_cell,
         });
         try out.appendSlice(gpa, line);
     }
