@@ -35,6 +35,25 @@ const readTypedElement = intrinsics.readTypedElement;
 
 // ── §24.1 Map ───────────────────────────────────────────────────────────────
 
+/// §24.1.2.2 / §24.2.2.2 / §22.1.2.5 / §22.2.5.2 — `get
+/// <Map|Set|Array|RegExp> [ @@species ]` returns `this`. Spec
+/// flags `{ enumerable: false, configurable: true }`.
+fn speciesReturnsThis(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = args;
+    return this_value;
+}
+
+fn installSpeciesGetter(realm: *Realm, ctor: *@import("../function.zig").JSFunction) !void {
+    const getter = try realm.heap.allocateFunctionNative(speciesReturnsThis, 0, "[Symbol.species]");
+    getter.proto = realm.intrinsics.function_prototype;
+    const entry = try ctor.accessors.getOrPut(realm.allocator, "@@species");
+    entry.value_ptr.* = .{ .getter = getter };
+    try ctor.property_flags.put(realm.allocator, "@@species", .{
+        .writable = false, .enumerable = false, .configurable = true,
+    });
+}
+
 pub fn installMap(realm: *Realm) !void {
     _ = ObjMod;
     const r = try installConstructor(realm, .{
@@ -45,6 +64,8 @@ pub fn installMap(realm: *Realm) !void {
     const proto = r.proto;
 
     try intrinsics.installNativeMethod(realm, ctor, "groupBy", mapGroupBy, 2);
+    // §24.1.2.2 get Map [ @@species ] returns this.
+    try installSpeciesGetter(realm, ctor);
 
     try installNativeMethodOnProto(realm, proto, "set", mapSet, 2);
     try installNativeMethodOnProto(realm, proto, "get", mapGet, 1);
@@ -680,8 +701,10 @@ pub fn installSet(realm: *Realm) !void {
         .name = "Set", .ctor = setConstructor, .arity = 0,
         .to_string_tag = "Set",
     });
-    _ = r.ctor;
+    const ctor = r.ctor;
     const proto = r.proto;
+    // §24.2.2.2 get Set [ @@species ] returns this.
+    try installSpeciesGetter(realm, ctor);
 
     try installNativeMethodOnProto(realm, proto, "add", setAdd, 1);
     try installNativeMethodOnProto(realm, proto, "has", setHas, 1);

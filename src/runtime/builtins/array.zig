@@ -96,7 +96,21 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethod(realm, arr_ctor, "isArray", arrayIsArray, 1);
         try installNativeMethod(realm, arr_ctor, "of", arrayOf, 0);
         try installNativeMethod(realm, arr_ctor, "from", arrayFrom, 1);
+        // §22.1.2.5 get Array [ @@species ] returns this.
+        const species_getter = try realm.heap.allocateFunctionNative(arraySpeciesGetter, 0, "[Symbol.species]");
+        species_getter.proto = realm.intrinsics.function_prototype;
+        const entry = try arr_ctor.accessors.getOrPut(realm.allocator, "@@species");
+        entry.value_ptr.* = .{ .getter = species_getter };
+        try arr_ctor.property_flags.put(realm.allocator, "@@species", .{
+            .writable = false, .enumerable = false, .configurable = true,
+        });
     }
+}
+
+fn arraySpeciesGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = args;
+    return this_value;
 }
 
 /// §22.1.1 Array(...) — both `new` and plain-call.
