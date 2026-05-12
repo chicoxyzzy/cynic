@@ -90,6 +90,13 @@ pub const CallFrame = struct {
     /// constructor returned an object, that wins; otherwise the
     /// freshly allocated `this` does (§13.3.5.1.1).
     is_construct: bool = false,
+    /// `[[ConstructorKind]] === derived` (§10.2.1) — set when
+    /// the callee is the constructor of a `class C extends …`.
+    /// On the `Return` op, a derived constructor that produces
+    /// a non-Object, non-undefined value throws TypeError per
+    /// §10.2.1.4 step 14 (instead of falling back to `this`,
+    /// which is the base-class behavior).
+    is_derived_ctor: bool = false,
     /// `[[HomeObject]]` (§10.2.5) of the function executing in
     /// this frame. Set on entry from the callee's
     /// `JSFunction.home_object`. `super_get` / `super_call`
@@ -2930,6 +2937,7 @@ fn runFrames(
                     .env = callee_fn.captured_env,
                     .this_value = this_value,
                     .is_construct = true,
+                    .is_derived_ctor = callee_fn.constructor_kind == .derived,
                     .home_object = callee_fn.home_object,
                     .home_function = callee_fn.home_function,
                     .argc = argc,
@@ -5260,7 +5268,26 @@ fn runFrames(
                     const returned_object =
                         heap_mod.valueAsPlainObject(acc) != null or
                         heap_mod.valueAsFunction(acc) != null;
-                    if (!returned_object) ret = f.this_value;
+                    if (!returned_object) {
+                        // §10.2.1.4 step 14 — a derived
+                        // constructor MUST return either an
+                        // Object or undefined. Returning a
+                        // primitive (number / string / null /
+                        // bool / symbol / bigint) is a
+                        // TypeError. Base constructors fall back
+                        // to `this` for non-Object returns.
+                        if (f.is_derived_ctor and !acc.isUndefined()) {
+                            const ex = try makeTypeError(realm, "Derived constructor must return an Object or undefined");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue;
+                        }
+                        ret = f.this_value;
+                    }
                 }
                 // §27.7 AsyncFunctionStart — an async function's
                 // normal completion fulfils the Promise it
