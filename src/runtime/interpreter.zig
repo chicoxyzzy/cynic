@@ -392,16 +392,33 @@ fn genResultObject(realm: *Realm, value: Value, done: bool) !Value {
 /// sync generator prototype but the methods produce Promises:
 /// • `next()` / `return()` resolve to `{value, done}`.
 /// • `throw()` rejects with the thrown value.
+/// §27.1.3 %AsyncIteratorPrototype% — the common ancestor of
+/// every async iterator (async generators, AsyncFromSyncIterator,
+/// user-defined async iterators). Only one property: an
+/// `@@asyncIterator` method that returns `this`. This is the
+/// hook by which `for await (… of obj)` recognises async
+/// iterables.
+pub fn ensureAsyncIteratorPrototype(realm: *Realm) !*JSObject {
+    if (realm.intrinsics.async_iterator_prototype) |p| return p;
+    const proto = try realm.heap.allocateObject();
+    proto.prototype = realm.intrinsics.object_prototype;
+    const sym_iter_fn = try realm.heap.allocateFunctionNative(genSymbolIterator, 0, "[Symbol.asyncIterator]");
+    sym_iter_fn.proto = realm.intrinsics.function_prototype;
+    try proto.setWithFlags(realm.allocator, "@@asyncIterator", heap_mod.taggedFunction(sym_iter_fn), .{
+        .writable = true, .enumerable = false, .configurable = true,
+    });
+    realm.intrinsics.async_iterator_prototype = proto;
+    return proto;
+}
+
 pub fn ensureAsyncGeneratorPrototype(realm: *Realm) !*JSObject {
     if (realm.intrinsics.async_generator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
     // §27.6.1 — `%AsyncGeneratorPrototype%.[[Prototype]]` is
-    // `%AsyncIteratorPrototype%`. Cynic doesn't yet ship a
-    // dedicated AsyncIterator prototype object, so for now we
-    // chain to `%Object.prototype%` here (mirrors the pre-fix
-    // sync path). When async iterator helpers land they'll wire
-    // an analogous lookup.
-    proto.prototype = realm.intrinsics.object_prototype;
+    // `%AsyncIteratorPrototype%`. That's where `@@asyncIterator`
+    // lives — inheriting it here means `for await (... of asyncGen)`
+    // resolves the method through the chain.
+    proto.prototype = try ensureAsyncIteratorPrototype(realm);
 
     const next_fn = try realm.heap.allocateFunctionNative(asyncGenNext, 1, "next");
     next_fn.proto = realm.intrinsics.function_prototype;
@@ -414,13 +431,6 @@ pub fn ensureAsyncGeneratorPrototype(realm: *Realm) !*JSObject {
     const throw_fn = try realm.heap.allocateFunctionNative(asyncGenThrow, 1, "throw");
     throw_fn.proto = realm.intrinsics.function_prototype;
     try proto.set(realm.allocator, "throw", heap_mod.taggedFunction(throw_fn));
-
-    // Async generators are themselves async iterables — `@@asyncIterator`
-    // returns the generator. The well-known string is what the
-    // for-await-of opcode looks up.
-    const sym_iter_fn = try realm.heap.allocateFunctionNative(genSymbolIterator, 0, "[Symbol.asyncIterator]");
-    sym_iter_fn.proto = realm.intrinsics.function_prototype;
-    try proto.set(realm.allocator, "@@asyncIterator", heap_mod.taggedFunction(sym_iter_fn));
 
     const tag_str = try realm.heap.allocateString("AsyncGenerator");
     try proto.setWithFlags(realm.allocator, "@@toStringTag", Value.fromString(tag_str), .{

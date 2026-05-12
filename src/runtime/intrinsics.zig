@@ -81,6 +81,9 @@ pub const Intrinsics = struct {
     /// Promise. Lazily installed on first `async function*`
     /// invocation.
     async_generator_prototype: ?*JSObject = null,
+    /// §27.1.3 %AsyncIteratorPrototype% — ancestor of every
+    /// async iterator. Houses `@@asyncIterator` (returns this).
+    async_iterator_prototype: ?*JSObject = null,
 
     /// `%PromisePrototype%` — installed by `installPromise` so
     /// instances of the realm's `Promise` constructor share one

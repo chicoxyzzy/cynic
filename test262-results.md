@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 |
-| **runtime** | 66.14 % | 79.18 % | 30622 / 46296 |
+| **runtime** | 66.15 % | 79.19 % | 30627 / 46296 |
 
 
 ## Where the runtime stands, by area
@@ -25,7 +25,7 @@ browser-era built-ins …).
 |---|---:|---:|---:|---:|---:|
 | **_1000+ fails_** | | | | | |
 | `language/expressions` | 8042 | 2084 | 912 | 73 % | 79 % |
-| `language/statements` | 7131 | 1526 | 656 | 77 % | 82 % |
+| `language/statements` | 7132 | 1525 | 656 | 77 % | 82 % |
 | **_100–999 fails_** | | | | | |
 | `built-ins/Array` | 2381 | 571 | 129 | 77 % | 81 % |
 | `built-ins/ArrayBuffer` | 88 | 108 | 0 | 45 % | 45 % |
@@ -74,7 +74,6 @@ browser-era built-ins …).
 | `built-ins/AggregateError` | 17 | 8 | 0 | 68 % | 68 % |
 | `built-ins/ArrayIteratorPrototype` | 10 | 9 | 8 | 37 % | 53 % |
 | `built-ins/AsyncFunction` | 11 | 7 | 0 | 61 % | 61 % |
-| `built-ins/AsyncIteratorPrototype` | 0 | 4 | 9 | 0 % | 0 % |
 | `built-ins/Boolean` | 47 | 4 | 0 | 92 % | 92 % |
 | `built-ins/FinalizationRegistry` | 44 | 3 | 0 | 94 % | 94 % |
 | `built-ins/RegExpStringIteratorPrototype` | 8 | 9 | 0 | 47 % | 47 % |
@@ -102,6 +101,7 @@ browser-era built-ins …).
 | **_0 fails (passing or wholly OOS)_** | | | | | |
 | ~~`built-ins/AbstractModuleSource`~~ | ~~0~~ | ~~0~~ | ~~8~~ | ~~0 %~~ | ~~0 %~~ |
 | ~~`built-ins/AsyncDisposableStack`~~ | ~~0~~ | ~~0~~ | ~~104~~ | ~~0 %~~ | ~~0 %~~ |
+| `built-ins/AsyncIteratorPrototype` | 4 | 0 | 9 | 31 % | 100 % |
 | ~~`built-ins/DisposableStack`~~ | ~~0~~ | ~~0~~ | ~~93~~ | ~~0 %~~ | ~~0 %~~ |
 | `built-ins/Infinity` | 4 | 0 | 2 | 67 % | 100 % |
 | `built-ins/MapIteratorPrototype` | 11 | 0 | 0 | 100 % | 100 % |
@@ -142,11 +142,12 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 | +198 | 0.6 s |
-| **runtime** | 66.14 % | 79.18 % | 30622 / 46296 | +731 | 2m 24s |
+| **runtime** | 66.15 % | 79.19 % | 30627 / 46296 | +736 | 3m 15s |
 
 Biggest movers (runtime):
 
-- `built-ins/Symbol` +4
+- `built-ins/AsyncIteratorPrototype` +4
+- `language/statements` +1
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
