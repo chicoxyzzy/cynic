@@ -155,6 +155,11 @@ pub const Op = enum(u8) {
     /// compiler arranges for that by emitting `LdaThis` against
     /// the lexically enclosing frame's binding.
     lda_this,
+    /// `[op]` — acc = new.target of the current frame.
+    /// §13.3.12 NewTarget. Reads `f.new_target`, which is set
+    /// to the constructing function when the frame was entered
+    /// via `new f(args)` and stays `undefined` for plain calls.
+    lda_new_target,
     /// `[op] [r:u8]` — acc = (reg instanceof acc).
     /// §13.10.2 InstanceofOperator. The right-hand side must be a
     /// callable; if it isn't, throws TypeError. Walks the LHS's

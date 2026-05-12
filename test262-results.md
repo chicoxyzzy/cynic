@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 |
-| **runtime** | 66.35 % | 79.43 % | 30719 / 46296 |
+| **runtime** | 66.41 % | 79.49 % | 30743 / 46296 |
 
 
 ## Where the runtime stands, by area
@@ -24,8 +24,8 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_1000+ fails_** | | | | | |
-| `language/expressions` | 8043 | 2083 | 912 | 73 % | 79 % |
-| `language/statements` | 7139 | 1518 | 656 | 77 % | 82 % |
+| `language/expressions` | 8061 | 2065 | 912 | 73 % | 80 % |
+| `language/statements` | 7145 | 1512 | 656 | 77 % | 83 % |
 | **_100–999 fails_** | | | | | |
 | `built-ins/Array` | 2403 | 549 | 129 | 78 % | 81 % |
 | `built-ins/ArrayBuffer` | 91 | 105 | 0 | 46 % | 46 % |
@@ -142,11 +142,12 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 | +198 | 0.6 s |
-| **runtime** | 66.35 % | 79.43 % | 30719 / 46296 | +828 | 2m 34s |
+| **runtime** | 66.41 % | 79.49 % | 30743 / 46296 | +852 | 2m 35s |
 
 Biggest movers (runtime):
 
-- `built-ins/ArrayBuffer` +3
+- `language/expressions` +18
+- `language/statements` +6
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 

@@ -90,6 +90,14 @@ pub const CallFrame = struct {
     /// constructor returned an object, that wins; otherwise the
     /// freshly allocated `this` does (§13.3.5.1.1).
     is_construct: bool = false,
+    /// §13.3.12 NewTarget — the constructor function that was
+    /// originally invoked via `new` for this call chain.
+    /// `undefined` for plain calls. Set on frame entry from the
+    /// `new_call` opcode's site; preserved across `super(...)`
+    /// hops so the derived constructor sees the original
+    /// `new.target` even though `super()` invokes the parent
+    /// constructor.
+    new_target: Value = Value.undefined_,
     /// `[[ConstructorKind]] === derived` (§10.2.1) — set when
     /// the callee is the constructor of a `class C extends …`.
     /// On the `Return` op, a derived constructor that produces
@@ -2938,6 +2946,7 @@ fn runFrames(
                     .this_value = this_value,
                     .is_construct = true,
                     .is_derived_ctor = callee_fn.constructor_kind == .derived,
+                    .new_target = heap_mod.taggedFunction(callee_fn),
                     .home_object = callee_fn.home_object,
                     .home_function = callee_fn.home_function,
                     .argc = argc,
@@ -2949,6 +2958,10 @@ fn runFrames(
 
             .lda_this => {
                 acc = f.this_value;
+            },
+
+            .lda_new_target => {
+                acc = f.new_target;
             },
 
             .instanceof_ => {

@@ -377,6 +377,7 @@ pub const Compiler = struct {
             .yield => |y| try self.compileYield(y),
             .await_ => |a| try self.compileAwait(a),
             .this_expr => |t| try self.builder.emitOp(.lda_this, t.span),
+            .new_target => |t| try self.builder.emitOp(.lda_new_target, t.span),
             .chain => |ch| try self.compileChain(ch),
             .regex_literal => |rl| try self.compileRegexLiteral(rl.span),
             .import_meta => |im| try self.compileImportMeta(im.span),
