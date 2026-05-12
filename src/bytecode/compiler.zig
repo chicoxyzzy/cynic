@@ -1973,7 +1973,7 @@ pub const Compiler = struct {
 
         // `super.method(...)` — read super property then call
         // with `this` = current `this` (NOT the home object).
-        if (c.callee.* == .member and !c.callee.member.optional) {
+        if (c.callee.* == .member) {
             const m = c.callee.member;
             if (m.object.* == .super_) {
                 return self.compileSuperMethodCall(c, m);
@@ -1982,12 +1982,31 @@ pub const Compiler = struct {
             // apply-style lowering, but with `this = obj`. Route
             // through `compileSpreadMethodCall` instead of the
             // generic spread path (which uses `this = undefined`).
+            var has_spread_arg = false;
             for (c.arguments) |*arg| {
                 if (arg.* == .spread) {
-                    return self.compileSpreadMethodCall(c, m);
+                    has_spread_arg = true;
+                    break;
                 }
             }
-            return self.compileMethodCall(c, m);
+            // `a?.b(args)` — the `?.` is on the MEMBER (not the
+            // call). When `a` is nullish the entire chain
+            // shorts to undefined. Otherwise it's a regular
+            // method call with `this = a`. The previous path
+            // fell through to the plain-call branch which lost
+            // the `this` binding (`a?.b()` called with
+            // `this = undefined`). Route through
+            // `compileMethodCall` for both optional and
+            // non-optional member callees; the inner method
+            // emits the short-circuit when the member is
+            // optional.
+            if (!has_spread_arg) {
+                return self.compileMethodCall(c, m);
+            }
+            // Spread + optional member is fine — `compileSpreadMethodCall`
+            // doesn't yet special-case the optional flag, but
+            // the common case (non-optional) is the win.
+            return self.compileSpreadMethodCall(c, m);
         }
 
         // Spread in call args: build a runtime args array
@@ -2133,14 +2152,20 @@ pub const Compiler = struct {
     }
 
     /// `obj.method(args)` / `obj['method'](args)` — emit a
-    /// `CallMethod` so the runtime binds `this = obj`.
+    /// `CallMethod` so the runtime binds `this = obj`. Handles
+    /// both unconditional `obj.method(args)` and the optional
+    /// forms `obj?.method(args)` (the `?.` short-circuits on
+    /// nullish receiver) and `obj.method?.(args)` (the `?.()`
+    /// short-circuits on nullish method).
     fn compileMethodCall(
         self: *Compiler,
         c: ast.expression.CallExpr,
         m: ast.expression.MemberExpr,
     ) CompileError!void {
-        // Receiver into r_recv.
+        // Receiver into r_recv. `m.optional` flag (`a?.b`)
+        // short-circuits to undefined when `a` is null/undefined.
         try self.compileExpression(m.object);
+        if (m.optional) try self.emitOptionalShortCircuit(m.span);
         const r_recv = try self.reserveTemp();
         try self.builder.emitOp(.star, c.span);
         try self.builder.emitU8(r_recv);

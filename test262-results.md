@@ -142,12 +142,7 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 | +198 | 0.6 s |
-| **runtime** | 66.22 % | 79.27 % | 30657 / 46296 | +766 | 3m 19s |
-
-Biggest movers (runtime):
-
-- `language/statements` +6
-- `built-ins/Function` +1
+| **runtime** | 66.22 % | 79.27 % | 30657 / 46296 | +766 | 2m 48s |
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
