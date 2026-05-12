@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 |
-| **runtime** | 65.15 % | 79.12 % | 30177 / 46320 |
+| **runtime** | 65.15 % | 79.12 % | 30179 / 46320 |
 
 ## Where the runtime stands, by area
 
@@ -46,7 +46,7 @@ browser-era built-ins …).
 | `built-ins/Date` | 505 | 81 | 8 | 85 % | 86 % |
 | `built-ins/Error` | 44 | 14 | 0 | 76 % | 76 % |
 | `built-ins/GeneratorFunction` | 6 | 17 | 0 | 26 % | 26 % |
-| `built-ins/GeneratorPrototype` | 30 | 31 | 0 | 49 % | 49 % |
+| `built-ins/GeneratorPrototype` | 32 | 29 | 0 | 52 % | 52 % |
 | `built-ins/Iterator` | 439 | 65 | 6 | 86 % | 87 % |
 | `built-ins/JSON` | 73 | 70 | 22 | 44 % | 51 % |
 | `built-ins/Map` | 146 | 57 | 1 | 72 % | 72 % |
@@ -135,19 +135,15 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-12 — cynic `e1fc065`, test262 `d0c1b455`
+### 2026-05-12 — cynic `9bf3d99`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 65.15 % | 79.12 % | 30177 / 46320 | +286 |
+| **runtime** | 65.15 % | 79.12 % | 30179 / 46320 | +288 |
 
 Biggest movers (runtime):
 
-- `built-ins/RegExp` +10
-- `built-ins/TypedArray` +4
-- `built-ins/DataView` +3
-- `built-ins/ArrayBuffer` +1
-- `built-ins/Map` +1
+- `built-ins/GeneratorPrototype` +2
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
