@@ -546,9 +546,24 @@ fn jsonParse(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 
     var parser = JsonParser{ .input = src.bytes, .pos = 0, .realm = realm };
     parser.skipWs();
-    const result = parser.parseValue() catch return error.NativeThrew;
+    const result = parser.parseValue() catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NativeThrew => return error.NativeThrew,
+        error.Malformed => {
+            // §25.5.1 step 5 — malformed input becomes a real
+            // SyntaxError so `assert.throws(SyntaxError, …)`
+            // can catch it.
+            const ex = intrinsics.newSyntaxError(realm, "JSON.parse: malformed JSON text") catch return error.OutOfMemory;
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
     parser.skipWs();
-    if (parser.pos != src.bytes.len) return error.NativeThrew;
+    if (parser.pos != src.bytes.len) {
+        const ex = intrinsics.newSyntaxError(realm, "JSON.parse: unexpected trailing characters") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
 
     // §25.5.1 step 7 — when reviver IsCallable, wrap the unfiltered
     // value in `{ "": value }` and run InternalizeJSONProperty.
@@ -779,6 +794,10 @@ const JsonParser = struct {
                     else => return error.Malformed,
                 }
             } else {
+                // §25.5.1.3 JSONString grammar — U+0000…U+001F are
+                // not valid JSONStringCharacters and must produce
+                // a SyntaxError.
+                if (c < 0x20) return error.Malformed;
                 buf.append(self.realm.allocator, c) catch return error.OutOfMemory;
             }
         }
