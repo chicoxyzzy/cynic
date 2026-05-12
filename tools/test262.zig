@@ -1768,9 +1768,18 @@ fn writeResults(
 
     try rows.append(gpa, makeRow(date, mode, stats, cynic_sha, test262_sha, elapsed_ms));
 
+    // When this run was parser mode, we don't have a fresh
+    // runtime per-area scoreboard. Preserve the one already in
+    // the file by extracting its raw text so a parser refresh
+    // doesn't wipe the per-bucket signal.
+    const preserved_scoreboard: ?[]const u8 = if (mode == .runtime)
+        null
+    else
+        extractScoreboardSection(existing);
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(gpa);
-    try writeFileBody(gpa, &buf, rows.items, buckets, &prev_bucket_pass, mode);
+    try writeFileBody(gpa, &buf, rows.items, buckets, &prev_bucket_pass, mode, preserved_scoreboard);
 
     try cwd.writeFile(io, .{ .sub_path = path, .data = buf.items });
 }
@@ -2010,6 +2019,13 @@ fn writeFileBody(
     buckets: *const BucketMap,
     prev_bucket_pass: *const std.StringHashMapUnmanaged(u32),
     mode_just_run: Mode,
+    /// Verbatim text of the previous `## Where the runtime …`
+    /// section, used when `mode_just_run != .runtime` so a
+    /// parser refresh doesn't drop the scoreboard from the last
+    /// runtime sweep. `null` when no scoreboard exists yet (the
+    /// scoreboard appears for the first time only after a
+    /// runtime run).
+    preserved_scoreboard: ?[]const u8,
 ) !void {
     try out.appendSlice(gpa,
         \\# test262 conformance score history
@@ -2023,15 +2039,18 @@ fn writeFileBody(
     inline for (.{ Mode.parser, Mode.runtime }) |m| {
         if (latestRow(rows, m)) |r| try writeMiniRow(gpa, out, r);
     }
+    try out.append(gpa, '\n');
 
-    // Per-area scoreboard. Only emit when this run was a
-    // runtime run (parser is uniformly ≥95% per area; the
-    // signal is in the rolled-up totals). Always rendered
-    // for the freshly-collected `buckets` — the snapshot is
-    // "as of the most recent runtime run that wrote to this
-    // file", not a per-day archive.
+    // Per-area scoreboard. When THIS run was a runtime run,
+    // generate fresh from `buckets`. Otherwise (parser run)
+    // re-emit the verbatim scoreboard from the previous file
+    // contents so the per-bucket signal survives parser
+    // refreshes. Either way it's "as of the most recent
+    // runtime run."
     if (mode_just_run == .runtime and buckets.map.count() > 0) {
         try writeScoreboard(gpa, out, buckets);
+    } else if (preserved_scoreboard) |s| {
+        try out.appendSlice(gpa, s);
     }
 
     try out.appendSlice(gpa,
@@ -2093,14 +2112,14 @@ fn writeFileBody(
         try out.appendSlice(gpa, "\n");
 
         // Biggest movers callout — only on the topmost (most
-        // recent) day, and only for the mode just run, since
-        // bucket data is fresh only for that mode.
-        if (first_day and prev_bucket_pass.count() > 0) {
-            for (rows[idx..j]) |r| {
-                if (r.mode != mode_just_run) continue;
-                try writeBiggestMovers(gpa, out, buckets, prev_bucket_pass);
-                break;
-            }
+        // recent) day, AND only when the run that just finished
+        // was runtime mode. Parser-mode buckets aren't
+        // comparable to the stored runtime baseline (they count
+        // parse-positive/negative only) so the deltas would be
+        // misleading. Parser refreshes preserve the previous
+        // runtime scoreboard verbatim; the callout stays with it.
+        if (first_day and mode_just_run == .runtime and prev_bucket_pass.count() > 0) {
+            try writeBiggestMovers(gpa, out, buckets, prev_bucket_pass);
         }
 
         idx = j;
@@ -2300,6 +2319,24 @@ fn writeBiggestMovers(
         try out.appendSlice(gpa, line);
     }
     try out.appendSlice(gpa, "\n");
+}
+
+/// Return the raw text of the `## Where the runtime stands,
+/// by area` section (heading + blurb + table), including the
+/// trailing blank line. Used to preserve the scoreboard
+/// verbatim across parser-mode refreshes that don't regenerate
+/// per-bucket data. Returns `null` when the file doesn't have
+/// the section yet.
+fn extractScoreboardSection(existing: []const u8) ?[]const u8 {
+    const heading = "## Where the runtime stands, by area";
+    const start = std.mem.indexOf(u8, existing, heading) orelse return null;
+    const stop_marker = "\n## ";
+    const stop = std.mem.indexOfPos(u8, existing, start + heading.len, stop_marker) orelse return null;
+    // Trim trailing blank line(s) before the next `## `.
+    var end = stop;
+    while (end > start and existing[end - 1] == '\n') end -= 1;
+    end += 1; // keep exactly one trailing newline
+    return existing[start..end];
 }
 
 /// Read pass counts from the most recent `## Where the runtime
