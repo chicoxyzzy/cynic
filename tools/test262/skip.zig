@@ -4,177 +4,88 @@
 
 const std = @import("std");
 
-/// Path-prefix exclusions (relative to `vendor/test262/test/`). Tests
-/// matching any prefix are skipped before frontmatter parsing.
+/// Universal path-prefix exclusions (relative to
+/// `vendor/test262/test/`). Tests matching any prefix are
+/// skipped before frontmatter parsing.
 pub const skip_path_prefixes = [_][]const u8{
     "harness/",
     "staging/",
     "intl402/",
 };
 
-/// Additional path-prefix exclusions that apply ONLY when running in
-/// `--scope=cynic` mode. Test paths Cynic explicitly considers
-/// out-of-scope: Annex B language extensions (sloppy-mode-only),
-/// Annex B browser-era built-ins we don't ship (`escape`/`unescape`,
-/// String HTML wrappers, `Date.{getYear, setYear}`,
-/// `RegExp.prototype.compile`), and sloppy-mode regex literals.
-///
-/// Excluded from the per-row score in `--scope=cynic` so the number
-/// reflects what Cynic *targets* rather than what the entire spec
-/// demands. The default `--scope=full` keeps measuring against
-/// everything.
+/// Additional path-prefix exclusions for `--scope=cynic` mode.
+/// Excluded from the per-row score so the number reflects what
+/// Cynic *targets* rather than what the entire spec demands.
+/// `--scope=full` keeps measuring against everything.
 pub const cynic_oos_path_prefixes = [_][]const u8{
-    // Annex B in its entirety — language extensions (sloppy
-    // mode, legacy octals, HTML-like comments, sloppy-mode
-    // function-in-block, for-in initializer, labels) plus the
-    // browser-era built-ins (`escape` / `unescape` /
-    // `String.prototype` HTML wrappers / `Date.{getYear,
-    // setYear}` / legacy-regex extensions). The few normative
-    // aliases Cynic *does* ship (`String.prototype.{substr,
-    // trimLeft, trimRight}`, `Date.prototype.toGMTString`) are
-    // already covered by the standard-path test262 fixtures
-    // under `built-ins/...`, so the parallel `annexB/built-ins/...`
-    // tree is pure duplication that we exclude from the scope
-    // denominator.
+    // Annex B in its entirety — language extensions + browser-
+    // era built-ins. The few normative aliases Cynic ships
+    // (`String.prototype.{substr, trimLeft, trimRight}`,
+    // `Date.prototype.toGMTString`) are covered by the
+    // standard-path test262 fixtures; the parallel
+    // `annexB/built-ins/...` tree is pure duplication.
     "annexB/",
-    // Shared-memory primitives — explicitly out of scope per
-    // docs/ROADMAP.md. Aligns with SES / Hardened JavaScript:
-    // shared memory enables side channels that defeat strong
-    // isolation between workers / agents. Cynic targets edge
-    // runtimes where the host model is single-agent-per-isolate
-    // anyway, so there's nothing for `SharedArrayBuffer` /
-    // `Atomics` to share with.
+    // Shared memory — out per ROADMAP.md (SES alignment;
+    // single-agent-per-isolate target).
     "built-ins/Atomics/",
     "built-ins/SharedArrayBuffer/",
-    // `eval` and runtime code construction — out permanently
-    // (AGENTS.md, ROADMAP.md). Aligns with SES / Hardened
-    // JavaScript. Fixtures under `language/eval-code/` and the
-    // `built-ins/eval/` prototype-and-properties tree directly
-    // call `eval(...)` with no escape hatch, so they all
-    // false-reject under our config; reclassifying them here
-    // stops the harness from advertising progress on something
-    // we've already decided not to do.
+    // `eval` and runtime code construction — permanently out
+    // (AGENTS.md, ROADMAP.md). Fixtures call `eval(...)` with
+    // no escape hatch.
     "language/eval-code/",
     "built-ins/eval/",
     // Labelled statements (§13.13) — Cynic's parser doesn't
-    // implement `label: stmt`, `break label`, or `continue
-    // label`. Tests under `language/statements/labeled/` test
-    // the production directly. The `labels` feature flag in
-    // frontmatter catches Annex B labelled function
-    // declarations, but most labeled-statement fixtures don't
-    // declare it — path-skip the whole bucket so we stop
-    // counting it as missing progress. (Implementing labels
-    // would reclaim ~24 fixtures here plus ~25 inside
-    // `language/statementList/` that mix labels with other
-    // StatementList productions.)
+    // ship `label: stmt`, `break/continue label`. Path-skip
+    // until the parser lands them.
     "language/statements/labeled/",
 };
 
-/// `features` names we know we don't support. When a test's frontmatter
-/// includes any of these, we skip it. Unknown feature names that we
-/// haven't classified default to "attempt anyway"; some will pass, some
-/// won't, and over time we move them into one bucket or the other.
-///
-/// Roughly grouped by reason:
-/// • Stage-3-or-newer proposals that aren't implemented in any
-/// parser-affecting form.
-/// • Annex B features (Cynic deliberately rejects Annex B).
-/// • Runtime features that don't affect the parser but indicate the
-/// test relies on harness/runtime support we don't have.
+/// `features` names we know we don't support. Tests whose
+/// frontmatter declares any of these are skipped.
 pub const unsupported_features = [_][]const u8{
-    // Stage-3 / future syntax — parser-affecting, not implemented.
-    // Each is in scope to eventually ship but skipping the
-    // fixtures avoids "missing progress" noise.
+    // Stage 3 syntax — parser-affecting, not implemented.
     "decorators",
-    // (import-attributes — ES2025 finished, in progress: parser
-    // stub, runtime treats the `with` clause as a pass-through
-    // payload to the module loader hook.)
-    // Pre-finalisation predecessor of import-attributes — the
-    // `assert {...}` syntax was withdrawn from the proposal in
-    // favour of `with`. Never reached ES; keep skipped.
-    "import-assertions",
     "import-defer",
     "source-phase-imports",
     "explicit-resource-management",
     "async-explicit-resource-management",
-    // RegExp feature gates that *used* to live here moved out
-    // when the vendored QuickJS-NG `libregexp.c` was wired up:
-    // named groups, lookbehind, `u`-flag, match indices, and
-    // Unicode property escapes are all fully supported. The
-    // `v`-flag is left ungated even though libregexp's support
-    // is *partial*: basic patterns, `\p{…}` intersection
-    // (`&&`), and string literals (`\q{ab|cd}`) work; set
-    // difference (`[\p{Letter}--A]`) throws. Net-net we get
-    // more passes than fails by attempting them. The ones
-    // below remain skipped because libregexp doesn't ship them
-    // at all:
-    //   • `regexp-duplicate-named-groups` — ES2025 grammar
-    //     change to allow the same name in alternative branches.
-    //   • `regexp-modifiers` — ES2024 inline (?i:…)/(?-i:…)
-    //     flag scoping.
-    "regexp-duplicate-named-groups",
-    "regexp-modifiers",
+    // Withdrawn predecessor of import-attributes — `assert`
+    // clause was dropped from the proposal in favour of `with`.
+    "import-assertions",
+    // libregexp (the vendored QuickJS-NG matcher) doesn't ship
+    // these regex grammar additions.
+    "regexp-duplicate-named-groups", // ES2025
+    "regexp-modifiers", // ES2024 inline (?i:…)/(?-i:…)
+    // Deferred per ROADMAP.md — Temporal is a multi-week
+    // project with its own tzdata story; intentionally counts
+    // against spec% to mark the largest known gap.
     "Temporal",
+    // Stage 3 — needs `evaluate(source)` (collides with no-eval
+    // policy). `importValue` could ship without; not yet.
     "ShadowRealm",
-    // Atomics.waitAsync / Atomics.pause used to be listed here,
-    // but the whole `built-ins/Atomics/` tree is now path-skipped
-    // as out-of-scope (SES / single-agent-per-isolate). Same for
-    // SharedArrayBuffer.
+    // Stage 3 — module-loader proposals, no runtime impl yet.
     "json-modules",
     "json-parse-with-source",
-    // (iterator-helpers — Cynic ships Iterator.from + map/filter/take/
-    // drop/toArray/forEach/find/some/every/reduce. Gate dropped.)
+    // Stage 3 — async iterator helpers / Array.fromAsync /
+    // Math.sumPrecise / Uint8Array base64-hex methods.
     "async-iterator-helpers",
     "Array.fromAsync",
-    // (Float16Array, Math.f16round — ES2025 finished. Eventual
-    // implementation; left in the score corpus so the gap is
-    // visible. Implementing them needs IEEE 754 half-precision
-    // arithmetic + a new typed-array element kind.)
     "Math.sumPrecise",
     "uint8array-base64",
-    // (arraybuffer-transfer, resizable-arraybuffer — ES2024
-    // finished. Eventual implementation; left in the score
-    // corpus so the gap is visible. `arraybuffer-transfer` is
-    // a prerequisite for `align-detached-buffer-semantics-…`
-    // fixtures.)
-    // (regexp-named-groups, regexp-lookbehind, regexp-match-indices,
-    // regexp-unicode-property-escapes, regexp-v-flag — all supported
-    // by the vendored libregexp; gates removed.)
-    // (error-cause — ES2022 `new Error(msg, {cause}).cause` — shipped.)
-    // (well-formed-json-stringify — ES2019 lone-surrogate
-    // `\uXXXX` escaping — shipped.)
-    // (hashbang — ES2023 `#!/usr/bin/env node` comments — shipped.)
-    // (change-array-by-copy — ES2023 toSorted/toReversed/with/
-    // toSpliced — shipped.)
-    // (upsert — Map.prototype.getOrInsert{,Computed} — shipped.)
-    // (dynamic-import, top-level-await, cross-realm,
-    // align-detached-buffer-semantics-with-web-reality,
-    // tail-call-optimization — tried as skip candidates but
-    // they're too coarse: each appears in `features: […]`
-    // lists for tests whose actual subject is something
-    // unrelated that we do pass. Path-skipping the dedicated
-    // buckets (`language/expressions/dynamic-import/` etc.)
-    // would be a better fit if we want to revisit later.)
-    // Stage-2 `await-dictionary` — `Promise.allKeyed`. Not
-    // implemented.
+    // Stage 2 — Promise.allKeyed.
     "await-dictionary",
-    // `eval` and runtime-code-construction friends — Cynic
-    // permanently doesn't ship these. Aligns with SES /
-    // Hardened JavaScript and removes a major optimization fence.
+    // Permanent policy (AGENTS.md, ROADMAP.md) — SES alignment.
     "eval",
-    // Annex B — we deliberately reject these.
+    // Annex B browser-legacy.
     "__getter__",
     "__setter__",
-    "__proto__",
-    "Reflect.parse",
-    "legacy-regexp",
-    "IsHTMLDDA",
-    // Cynic-out-of-scope syntax (labels)
+    "__proto__", // accessor form; the literal {__proto__: x} is main-spec
+    "Reflect.parse", // SpiderMonkey-only
+    "legacy-regexp", // RegExp.$1 / .input / .leftContext
+    "IsHTMLDDA", // [[IsHTMLDDA]] slot for document.all mimicry
+    // Annex B B.3.1 LabelledFunctionDeclaration. The main-spec
+    // §13.13 form is unimplemented but path-skipped above.
     "labels",
-    // Runtime-only features (parser parses fine, but tests need runtime
-    // semantics). We keep these out of the unsupported list so they
-    // exercise the parser; comment lists any we'd want to skip
-    // explicitly later if signal/noise gets bad.
 };
 
 pub fn pathIsSkipped(rel_path: []const u8) bool {
@@ -213,11 +124,6 @@ test "skip: known path prefixes" {
 }
 
 test "skip: cynic out-of-scope paths" {
-    // The whole `annexB/` tree is OOS — legacy browser-era
-    // built-ins, sloppy-mode language extensions, and the
-    // duplicate-of-standard-path fixtures for the few aliases
-    // Cynic does ship (covered by `built-ins/.../substr/...`
-    // etc.).
     try testing.expect(pathIsCynicOutOfScope("annexB/built-ins/escape/empty-string.js"));
     try testing.expect(pathIsCynicOutOfScope("annexB/built-ins/String/prototype/blink/B.2.3.4.js"));
     try testing.expect(pathIsCynicOutOfScope("annexB/built-ins/Date/prototype/setYear/year-nan.js"));
