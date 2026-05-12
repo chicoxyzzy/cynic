@@ -1768,6 +1768,63 @@ pub fn callJSFunction(
     return runFrames(allocator, realm, &frames);
 }
 
+/// Invoke `parent_fn` as the parent constructor of a `super(...)`
+/// call. Same shape as `callJSFunction` but seeds the new frame's
+/// `new_target` slot from the caller's so a derived class's
+/// inherited `new.target` reads correctly inside the parent
+/// constructor body.
+pub fn callJSFunctionAsSuper(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    callee: *JSFunction,
+    this_value: Value,
+    args: []const Value,
+    new_target: Value,
+) RunError!RunResult {
+    // Native / generator / async / bound paths don't observe
+    // new.target via a frame slot — they receive `this` and
+    // args directly. Fall back to the regular call there; the
+    // new_target threading only matters for plain JS-function
+    // bodies (the only ones with a CallFrame).
+    if (callee.bound_target != null or callee.native_callback != null or
+        callee.is_generator or callee.is_async)
+    {
+        return callJSFunction(allocator, realm, callee, this_value, args);
+    }
+    const callee_chunk = callee.chunk orelse return error.InvalidOpcode;
+
+    var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
+    defer {
+        for (frames.items) |*f| if (f.owns_registers) allocator.free(f.registers);
+        frames.deinit(allocator);
+    }
+
+    const regs = try allocator.alloc(Value, @max(@as(usize, callee_chunk.register_count), args.len));
+    @memset(regs, Value.undefined_);
+    var i: usize = 0;
+    while (i < args.len and i < regs.len) : (i += 1) regs[i] = args[i];
+    try frames.append(allocator, .{
+        .chunk = callee_chunk,
+        .ip = 0,
+        .accumulator = Value.undefined_,
+        .registers = regs,
+        .env = callee.captured_env,
+        .this_value = this_value,
+        .new_target = new_target,
+        // §10.2.1.4 — the parent body runs in construct context
+        // for purposes of `new.target`, but we deliberately leave
+        // `is_construct = false` so the return-coercion path
+        // doesn't second-guess the derived ctor (which performs
+        // its own ConstructResult after the super_call returns).
+        .home_object = callee.home_object,
+        .home_function = callee.home_function,
+        .argc = @intCast(@min(args.len, std.math.maxInt(u8))),
+        .wrap_return_in_promise = false,
+    });
+
+    return runFrames(allocator, realm, &frames);
+}
+
 /// Start a fresh `async function` call: allocate the
 /// `result_promise` (pending), allocate the backing
 /// `JSGenerator`, and synchronously run the body. The body
@@ -4407,7 +4464,15 @@ fn runFrames(
                     }
                     continue;
                 };
-                const outcome = try callJSFunction(allocator, realm, parent_fn, f.this_value, args);
+                // §13.3.7 / §10.2.1.4 — `super(...)` invokes the
+                // parent constructor with `[[NewTarget]]` of the
+                // CURRENT frame (i.e. the original `new` site that
+                // started the derived-class chain), not the parent
+                // function itself. Without this propagation, a
+                // derived class's `new.target` inside its parent
+                // body would read as the parent — fixtures verify
+                // it stays as the original NewTarget.
+                const outcome = try callJSFunctionAsSuper(allocator, realm, parent_fn, f.this_value, args, f.new_target);
                 switch (outcome) {
                     .value, .yielded => |v| acc = v,
                     .thrown => |ex| {
