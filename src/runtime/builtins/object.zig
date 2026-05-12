@@ -1252,14 +1252,25 @@ fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const arg = argOr(args, 0, Value.undefined_);
     const obj = heap_mod.valueAsPlainObject(arg) orelse return arg; // §20.1.2.5 — primitives pass through
     obj.extensible = false;
-    // Mark every existing data property non-writable +
-    // non-configurable per §10.1.4.1 SetIntegrityLevel(O, frozen).
+    // §10.1.4.1 SetIntegrityLevel(O, frozen) — mark every own
+    // data property `{ writable: false, configurable: false }`
+    // and every accessor `{ configurable: false }`.
     var it = obj.properties.iterator();
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
         const cur = obj.flagsFor(key);
         obj.property_flags.put(realm.allocator, key, .{
             .writable = false,
+            .enumerable = cur.enumerable,
+            .configurable = false,
+        }) catch return error.OutOfMemory;
+    }
+    var ait = obj.accessors.iterator();
+    while (ait.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const cur = obj.flagsFor(key);
+        obj.property_flags.put(realm.allocator, key, .{
+            .writable = false, // N/A on accessors; spec says omitted.
             .enumerable = cur.enumerable,
             .configurable = false,
         }) catch return error.OutOfMemory;
@@ -1278,6 +1289,13 @@ fn objectIsFrozen(realm: *Realm, this_value: Value, args: []const Value) NativeE
         const flags = obj.flagsFor(entry.key_ptr.*);
         if (flags.writable or flags.configurable) return Value.false_;
     }
+    // Accessor descriptors only need `configurable: false` to be
+    // frozen; `writable` is N/A on accessors.
+    var ait = obj.accessors.iterator();
+    while (ait.next()) |entry| {
+        const flags = obj.flagsFor(entry.key_ptr.*);
+        if (flags.configurable) return Value.false_;
+    }
     return Value.true_;
 }
 
@@ -1286,8 +1304,21 @@ fn objectSeal(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const arg = argOr(args, 0, Value.undefined_);
     const obj = heap_mod.valueAsPlainObject(arg) orelse return arg;
     obj.extensible = false;
+    // §10.1.4.1 SetIntegrityLevel(O, sealed) — every own property
+    // (data + accessor) loses configurability; writable bits
+    // stay.
     var it = obj.properties.iterator();
     while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const cur = obj.flagsFor(key);
+        obj.property_flags.put(realm.allocator, key, .{
+            .writable = cur.writable,
+            .enumerable = cur.enumerable,
+            .configurable = false,
+        }) catch return error.OutOfMemory;
+    }
+    var ait = obj.accessors.iterator();
+    while (ait.next()) |entry| {
         const key = entry.key_ptr.*;
         const cur = obj.flagsFor(key);
         obj.property_flags.put(realm.allocator, key, .{
@@ -1307,6 +1338,10 @@ fn objectIsSealed(realm: *Realm, this_value: Value, args: []const Value) NativeE
     if (obj.extensible) return Value.false_;
     var it = obj.properties.iterator();
     while (it.next()) |entry| {
+        if (obj.flagsFor(entry.key_ptr.*).configurable) return Value.false_;
+    }
+    var ait = obj.accessors.iterator();
+    while (ait.next()) |entry| {
         if (obj.flagsFor(entry.key_ptr.*).configurable) return Value.false_;
     }
     return Value.true_;
