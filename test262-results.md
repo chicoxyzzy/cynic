@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 |
-| **runtime** | 64.80 % | 78.70 % | 30016 / 46320 |
+| **runtime** | 64.81 % | 78.71 % | 30019 / 46320 |
 
 ## Where the runtime stands, by area
 
@@ -37,7 +37,6 @@ browser-era built-ins …).
 | `built-ins/TypedArrayConstructors` | 383 | 329 | 24 | 52 % | 54 % |
 | `language/module-code` | 381 | 201 | 14 | 64 % | 65 % |
 | **_10–99 fails_** | | | | | |
-| `built-ins/AggregateError` | 13 | 12 | 0 | 52 % | 52 % |
 | `built-ins/ArrayBuffer` | 36 | 48 | 112 | 18 % | 43 % |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 8 | 30 | 0 | 21 % | 21 % |
 | `built-ins/AsyncGeneratorFunction` | 5 | 18 | 0 | 22 % | 22 % |
@@ -75,6 +74,7 @@ browser-era built-ins …).
 | `language/types` | 92 | 12 | 9 | 81 % | 88 % |
 | `language/white-space` | 51 | 16 | 0 | 76 % | 76 % |
 | **_1–9 fails_** | | | | | |
+| `built-ins/AggregateError` | 16 | 9 | 0 | 64 % | 64 % |
 | `built-ins/ArrayIteratorPrototype` | 10 | 9 | 8 | 37 % | 53 % |
 | `built-ins/AsyncFunction` | 10 | 8 | 0 | 56 % | 56 % |
 | `built-ins/AsyncIteratorPrototype` | 0 | 4 | 9 | 0 % | 0 % |
@@ -135,19 +135,15 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-12 — cynic `69e7107`, test262 `d0c1b455`
+### 2026-05-12 — cynic `f1fba1f`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 64.80 % | 78.70 % | 30016 / 46320 | +125 |
+| **runtime** | 64.81 % | 78.71 % | 30019 / 46320 | +128 |
 
 Biggest movers (runtime):
 
-- `built-ins/Object` +3
-- `built-ins/undefined` +3
-- `language/expressions` +3
-- `built-ins/Infinity` +2
-- `built-ins/NaN` +2
+- `built-ins/AggregateError` +3
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
