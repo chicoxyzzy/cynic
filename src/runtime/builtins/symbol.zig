@@ -114,7 +114,11 @@ fn installWellKnownSymbol(realm: *Realm, ctor: *JSFunction, name: []const u8, de
     // reached via `obj[Symbol.iterator]` because the symbol's
     // `prop_key` is exactly `"@@iterator"`.
     const sym = try realm.heap.allocateWellKnownSymbol(desc.bytes, description);
-    try ctor.set(realm.allocator, name, heap_mod.taggedSymbol(sym));
+    // §20.4.2 — well-known symbols on the Symbol constructor are
+    // frozen data properties: `{ w:false, e:false, c:false }`.
+    try ctor.setWithFlags(realm.allocator, name, heap_mod.taggedSymbol(sym), .{
+        .writable = false, .enumerable = false, .configurable = false,
+    });
 }
 
 fn symbolConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
