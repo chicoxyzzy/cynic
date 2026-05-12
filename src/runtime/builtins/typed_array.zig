@@ -338,7 +338,7 @@ fn arrayBufferTransfer(realm: *Realm, this_value: Value, args: []const Value) Na
     // a RangeError.
     const new_len: usize = blk: {
         if (args.len == 0 or args[0].isUndefined()) break :blk src_buf.len;
-        const v = coerceToNumber(args[0]);
+        const v = try intrinsics.toNumber(realm, args[0]);
         const d: f64 = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
         if (std.math.isNan(d) or d < 0 or std.math.isInf(d)) {
             return @import("../intrinsics.zig").throwRangeError(realm, "ArrayBuffer.prototype.transfer: newLength out of range");
@@ -374,14 +374,17 @@ fn arrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const src = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "slice on non-ArrayBuffer");
     const buf = src.array_buffer orelse return throwTypeError(realm, "slice on non-ArrayBuffer");
     const total: i64 = @intCast(buf.len);
+    // §25.1.5.4 ArrayBuffer.prototype.slice — start / end go
+    // through ToIntegerOrInfinity, which routes through
+    // ToNumber and throws on Symbol / BigInt.
     var start_d: f64 = 0;
     if (args.len > 0) {
-        const v = coerceToNumber(args[0]);
+        const v = try intrinsics.toNumber(realm, args[0]);
         start_d = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
     }
     var end_d: f64 = @floatFromInt(total);
     if (args.len > 1 and !args[1].isUndefined()) {
-        const v = coerceToNumber(args[1]);
+        const v = try intrinsics.toNumber(realm, args[1]);
         end_d = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
     }
     const i64_max_f: f64 = @floatFromInt(std.math.maxInt(i64));
@@ -415,11 +418,20 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind) NativeFn {
             // 1. `new Uint8Array(N)` — allocate fresh buffer of N elements.
             // 2. `new Uint8Array(buffer, offset?, length?)` — view existing buffer.
             // 3. `new Uint8Array(arrayLikeOrIterable)` — copy elements from source.
-            if (arg.isInt32() or arg.isDouble() or arg.isUndefined()) {
+            // Symbol / BigInt arg → ToIndex throws TypeError per
+            // §23.2.5.1.1 step 4 (after the ToNumber inside ToIndex).
+            if (heap_mod.valueAsSymbol(arg) != null) {
+                return @import("../intrinsics.zig").throwTypeError(realm, "Cannot convert a Symbol to TypedArray length");
+            }
+            if (heap_mod.valueAsBigInt(arg) != null) {
+                return @import("../intrinsics.zig").throwTypeError(realm, "Cannot convert a BigInt to TypedArray length");
+            }
+            if (arg.isInt32() or arg.isDouble() or arg.isUndefined() or arg.isBool() or arg.isNull() or arg.isString()) {
                 // §23.2.5.1.1 — `new TypedArray()` allocates a
                 // zero-length view. `coerceToNumber(undefined)`
                 // would produce NaN and fall into the RangeError
-                // branch; short-circuit here.
+                // branch; short-circuit here. Strings / booleans
+                // ToNumber-coerce.
                 const n_d: f64 = if (arg.isUndefined()) 0 else blk: {
                     const n_v = coerceToNumber(arg);
                     break :blk if (n_v.isInt32()) @floatFromInt(n_v.asInt32()) else n_v.asDouble();
@@ -450,9 +462,12 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind) NativeFn {
             // ArrayBuffer source.
             if (heap_mod.valueAsPlainObject(arg)) |src| {
                 if (src.array_buffer) |ab| {
+                    // §23.2.5.1.4 — byteOffset / length both go
+                    // through ToIndex (ToNumber + bounds check),
+                    // which throws TypeError on Symbol / BigInt.
                     var byte_offset: usize = 0;
                     if (args.len > 1 and !args[1].isUndefined()) {
-                        const ov = coerceToNumber(args[1]);
+                        const ov = try intrinsics.toNumber(realm, args[1]);
                         const od: f64 = if (ov.isInt32()) @floatFromInt(ov.asInt32()) else ov.asDouble();
                         if (std.math.isNan(od) or od < 0) return throwRangeError(realm, "byteOffset out of range");
                         byte_offset = @intFromFloat(od);
@@ -463,7 +478,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind) NativeFn {
                     const remaining = ab.len - byte_offset;
                     var length: usize = remaining / elem_size;
                     if (args.len > 2 and !args[2].isUndefined()) {
-                        const lv = coerceToNumber(args[2]);
+                        const lv = try intrinsics.toNumber(realm, args[2]);
                         const ld: f64 = if (lv.isInt32()) @floatFromInt(lv.asInt32()) else lv.asDouble();
                         if (std.math.isNan(ld) or ld < 0) return throwRangeError(realm, "length out of range");
                         length = @intFromFloat(ld);
