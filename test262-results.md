@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 |
-| **runtime** | 64.66 % | 78.53 % | 29951 / 46320 |
+| **runtime** | 64.73 % | 78.61 % | 29983 / 46320 |
 
 ## Where the runtime stands, by area
 
@@ -23,11 +23,11 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_1000+ fails_** | | | | | |
-| `language/expressions` | 7940 | 2127 | 971 | 72 % | 79 % |
-| `language/statements` | 7122 | 1548 | 667 | 76 % | 82 % |
+| `language/expressions` | 7959 | 2108 | 971 | 72 % | 79 % |
+| `language/statements` | 7134 | 1536 | 667 | 76 % | 82 % |
 | **_100–999 fails_** | | | | | |
 | `built-ins/Array` | 2321 | 549 | 211 | 75 % | 81 % |
-| `built-ins/Function` | 214 | 206 | 89 | 42 % | 51 % |
+| `built-ins/Function` | 215 | 205 | 89 | 42 % | 51 % |
 | `built-ins/Object` | 2790 | 536 | 85 | 82 % | 84 % |
 | `built-ins/Promise` | 500 | 174 | 3 | 74 % | 74 % |
 | `built-ins/Proxy` | 174 | 125 | 12 | 56 % | 58 % |
@@ -135,17 +135,17 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-12 — cynic `b4ea5fd`, test262 `d0c1b455`
+### 2026-05-12 — cynic `d453479`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 64.66 % | 78.53 % | 29951 / 46320 | +60 |
+| **runtime** | 64.73 % | 78.61 % | 29983 / 46320 | +92 |
 
 Biggest movers (runtime):
 
-- `built-ins/Array` +2
-- `built-ins/Map` +2
-- `built-ins/Set` +2
+- `language/expressions` +19
+- `language/statements` +12
+- `built-ins/Function` +1
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
