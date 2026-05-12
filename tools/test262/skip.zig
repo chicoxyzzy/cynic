@@ -56,6 +56,18 @@ pub const cynic_oos_path_prefixes = [_][]const u8{
     // we've already decided not to do.
     "language/eval-code/",
     "built-ins/eval/",
+    // Labelled statements (§13.13) — Cynic's parser doesn't
+    // implement `label: stmt`, `break label`, or `continue
+    // label`. Tests under `language/statements/labeled/` test
+    // the production directly. The `labels` feature flag in
+    // frontmatter catches Annex B labelled function
+    // declarations, but most labeled-statement fixtures don't
+    // declare it — path-skip the whole bucket so we stop
+    // counting it as missing progress. (Implementing labels
+    // would reclaim ~24 fixtures here plus ~25 inside
+    // `language/statementList/` that mix labels with other
+    // StatementList productions.)
+    "language/statements/labeled/",
 };
 
 /// `features` names we know we don't support. When a test's frontmatter

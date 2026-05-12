@@ -35,8 +35,15 @@ These are project rules — they apply to everyone.
 - **Strict-only, non-browser-host target.** Cynic targets edge
   runtimes (Workers / Deno / server JS) — not browsers. So:
   - **Annex B language extensions** — out (no sloppy mode, no
-    labels, no HTML-like comments, no sloppy-mode function-in-
-    block, no legacy octal, no for-in initializer).
+    labelled function declarations (B.3.1), no HTML-like
+    comments, no sloppy-mode function-in-block, no legacy octal,
+    no for-in initializer).
+  - **Labelled statements (§13.13)** — main-spec, not Annex B,
+    but not implemented yet. `language/statements/labeled/` is
+    path-skipped in the harness until that lands; once it does
+    the skip comes off and we get ~24 fixtures back plus a tail
+    of `language/statementList/` tests that mix labels with
+    other StatementList productions.
   - **Annex B browser-era built-ins** — out where they're
     purely browser legacy: `escape` / `unescape` (broken-by-
     design for non-ASCII; `encodeURIComponent` is the answer);
