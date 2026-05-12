@@ -235,7 +235,12 @@ pub fn numericBinary(realm: *Realm, comptime op: NumericOp, lhs: Value, rhs: Val
                 if (o[1] == 0) return Value.fromInt32(o[0]);
             },
             .mod => {
-                if (b != 0) return Value.fromInt32(@mod(a, b));
+                // §13.6.2 — JS modulus is truncated, not
+                // Euclidean: the result's sign follows the
+                // dividend (a). `@mod` is Euclidean (always
+                // non-negative when b > 0); `@rem` is the
+                // C-style truncated remainder that matches JS.
+                if (b != 0) return Value.fromInt32(@rem(a, b));
             },
             .div, .pow => unreachable,
         }
@@ -248,7 +253,11 @@ pub fn numericBinary(realm: *Realm, comptime op: NumericOp, lhs: Value, rhs: Val
         .sub => a - b,
         .mul => a * b,
         .div => a / b,
-        .mod => @mod(a, b),
+        // §13.6.2 — truncated remainder (sign follows dividend),
+        // not Euclidean. `@rem` for f64 yields IEEE 754
+        // remainder by truncated division, matching `Math.fmod`
+        // / V8 / SM behaviour.
+        .mod => @rem(a, b),
         .pow => jsPow(a, b),
     });
 }
