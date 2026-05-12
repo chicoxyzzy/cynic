@@ -73,6 +73,12 @@ pub fn installMap(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, proto, "delete", mapDelete, 1);
     try installNativeMethodOnProto(realm, proto, "clear", mapClear, 0);
     try installNativeMethodOnProto(realm, proto, "forEach", mapForEach, 1);
+    // Stage-3 `upsert` proposal — atomic "get the value at this
+    // key, or insert a default if absent." `getOrInsert` takes
+    // a fixed default; `getOrInsertComputed` takes a callback
+    // that's invoked only on absence and stores its return.
+    try installNativeMethodOnProto(realm, proto, "getOrInsert", mapGetOrInsert, 2);
+    try installNativeMethodOnProto(realm, proto, "getOrInsertComputed", mapGetOrInsertComputed, 2);
     // §24.1.3 Map iterators — `entries()` is the default
     // (`@@iterator` aliases it), `keys()` and `values()` produce
     // single-element views. Each returns an iterator object
@@ -456,6 +462,51 @@ fn mapGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Val
     const d = mapDataOf(this_value) orelse return throwTypeError(realm, "Map.prototype.get called on non-Map");
     if (mapEntryIndex(d, argOr(args, 0, Value.undefined_))) |i| return d.entries.items[i].value;
     return Value.undefined_;
+}
+
+/// Stage-3 upsert — `Map.prototype.getOrInsert(key, value)`.
+/// Returns the existing value if `key` is present, otherwise
+/// inserts `value` and returns it. The default is materialised
+/// eagerly; for a callback-based version use
+/// `getOrInsertComputed`.
+fn mapGetOrInsert(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Map.prototype.getOrInsert called on non-Map");
+    if (inst.map_data == null) return throwTypeError(realm, "Map.prototype.getOrInsert called on non-Map");
+    const d = inst.map_data.?;
+    const key = argOr(args, 0, Value.undefined_);
+    const default_v = argOr(args, 1, Value.undefined_);
+    if (mapEntryIndex(d, key)) |i| return d.entries.items[i].value;
+    mapSetInternal(realm, inst, key, default_v) catch return error.OutOfMemory;
+    return default_v;
+}
+
+/// Stage-3 upsert — `Map.prototype.getOrInsertComputed(key, callbackfn)`.
+/// Like `getOrInsert` but the default value comes from
+/// `callbackfn(key)`, invoked only on absence. `callbackfn` must
+/// be callable per the proposal.
+fn mapGetOrInsertComputed(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Map.prototype.getOrInsertComputed called on non-Map");
+    if (inst.map_data == null) return throwTypeError(realm, "Map.prototype.getOrInsertComputed called on non-Map");
+    const d = inst.map_data.?;
+    const key = argOr(args, 0, Value.undefined_);
+    const cb_v = argOr(args, 1, Value.undefined_);
+    const cb = heap_mod.valueAsFunction(cb_v) orelse return throwTypeError(realm, "callbackfn must be a function");
+    if (mapEntryIndex(d, key)) |i| return d.entries.items[i].value;
+    // Spec: invoke `cb(key)` BEFORE we re-check membership. The
+    // callback can mutate the Map; the proposal says "use the
+    // newly-computed value regardless" (overwrites any concurrent
+    // insert).
+    const cb_args = [_]Value{key};
+    const outcome = interpreter.callJSFunction(realm.allocator, realm, cb, this_value, &cb_args) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const value = switch (outcome) {
+        .value, .yielded => |v| v,
+        .thrown => return error.NativeThrew,
+    };
+    mapSetInternal(realm, inst, key, value) catch return error.OutOfMemory;
+    return value;
 }
 
 fn mapHas(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

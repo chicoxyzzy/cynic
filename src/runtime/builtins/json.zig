@@ -503,21 +503,97 @@ fn serializeJSONArray(
 
 fn jsonAppendString(realm: *Realm, buf: *std.ArrayListUnmanaged(u8), bytes: []const u8) !void {
     try buf.append(realm.allocator, '"');
-    for (bytes) |c| switch (c) {
-        '"' => try buf.appendSlice(realm.allocator, "\\\""),
-        '\\' => try buf.appendSlice(realm.allocator, "\\\\"),
-        '\n' => try buf.appendSlice(realm.allocator, "\\n"),
-        '\r' => try buf.appendSlice(realm.allocator, "\\r"),
-        '\t' => try buf.appendSlice(realm.allocator, "\\t"),
-        0x08 => try buf.appendSlice(realm.allocator, "\\b"),
-        0x0c => try buf.appendSlice(realm.allocator, "\\f"),
-        0x00...0x07, 0x0b, 0x0e...0x1f => {
+    // §25.5.2.3 QuoteJSONString step 2.b (well-formed-JSON.stringify,
+    // ES2019). Walk codepoints rather than bytes so we can detect
+    // lone surrogates (U+D800..U+DFFF) — Cynic stores them as
+    // 3-byte CESU-8 sequences — and emit them as `\uXXXX`
+    // escapes, the same way real JS engines do.
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const c = bytes[i];
+        switch (c) {
+            '"' => {
+                try buf.appendSlice(realm.allocator, "\\\"");
+                i += 1;
+                continue;
+            },
+            '\\' => {
+                try buf.appendSlice(realm.allocator, "\\\\");
+                i += 1;
+                continue;
+            },
+            '\n' => {
+                try buf.appendSlice(realm.allocator, "\\n");
+                i += 1;
+                continue;
+            },
+            '\r' => {
+                try buf.appendSlice(realm.allocator, "\\r");
+                i += 1;
+                continue;
+            },
+            '\t' => {
+                try buf.appendSlice(realm.allocator, "\\t");
+                i += 1;
+                continue;
+            },
+            0x08 => {
+                try buf.appendSlice(realm.allocator, "\\b");
+                i += 1;
+                continue;
+            },
+            0x0c => {
+                try buf.appendSlice(realm.allocator, "\\f");
+                i += 1;
+                continue;
+            },
+            0x00...0x07, 0x0b, 0x0e...0x1f => {
+                var ub: [7]u8 = undefined;
+                const slc = std.fmt.bufPrint(&ub, "\\u{x:0>4}", .{c}) catch unreachable;
+                try buf.appendSlice(realm.allocator, slc);
+                i += 1;
+                continue;
+            },
+            else => {},
+        }
+        if (c < 0x80) {
+            // Printable ASCII passes through unchanged.
+            try buf.append(realm.allocator, c);
+            i += 1;
+            continue;
+        }
+        // Multi-byte UTF-8 — decode just enough to spot the
+        // surrogate range (0xED 0xA0..0xBF 0x80..0xBF, which is
+        // CESU-8 for U+D800..U+DFFF). All other code points pass
+        // through as their UTF-8 bytes.
+        const seq_len: usize = if (c & 0b1110_0000 == 0b1100_0000)
+            2
+        else if (c & 0b1111_0000 == 0b1110_0000)
+            3
+        else if (c & 0b1111_1000 == 0b1111_0000)
+            4
+        else
+            1;
+        if (i + seq_len > bytes.len) {
+            // Truncated — pass through whatever remains.
+            try buf.append(realm.allocator, c);
+            i += 1;
+            continue;
+        }
+        if (seq_len == 3 and c == 0xED and (bytes[i + 1] & 0xE0) == 0xA0) {
+            // Surrogate. Decode the 16-bit value and emit `\uXXXX`.
+            const cp: u16 = (@as(u16, c & 0x0F) << 12) |
+                (@as(u16, bytes[i + 1] & 0x3F) << 6) |
+                (@as(u16, bytes[i + 2] & 0x3F));
             var ub: [7]u8 = undefined;
-            const slc = std.fmt.bufPrint(&ub, "\\u{x:0>4}", .{c}) catch unreachable;
+            const slc = std.fmt.bufPrint(&ub, "\\u{x:0>4}", .{cp}) catch unreachable;
             try buf.appendSlice(realm.allocator, slc);
-        },
-        else => try buf.append(realm.allocator, c),
-    };
+            i += 3;
+            continue;
+        }
+        try buf.appendSlice(realm.allocator, bytes[i .. i + seq_len]);
+        i += seq_len;
+    }
     try buf.append(realm.allocator, '"');
 }
 

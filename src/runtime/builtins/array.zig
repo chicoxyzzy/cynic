@@ -82,6 +82,14 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethodOnProto(realm, arr_proto, "splice", arraySplice, 2);
         try installNativeMethodOnProto(realm, arr_proto, "copyWithin", arrayCopyWithin, 2);
         try installNativeMethodOnProto(realm, arr_proto, "sort", arraySort, 1);
+        // §23.1.3.{32-35} — ES2023 change-array-by-copy. Each
+        // method allocates a fresh array, applies the mutating
+        // operation to the copy, and leaves the receiver
+        // untouched.
+        try installNativeMethodOnProto(realm, arr_proto, "toSorted", arrayToSorted, 1);
+        try installNativeMethodOnProto(realm, arr_proto, "toReversed", arrayToReversed, 0);
+        try installNativeMethodOnProto(realm, arr_proto, "toSpliced", arrayToSpliced, 2);
+        try installNativeMethodOnProto(realm, arr_proto, "with", arrayWith, 2);
         // §23.1.3 — Array iterators. Implementations live in
         // `builtins/collections.zig` (shared with Map/Set).
         try installNativeMethodOnProto(realm, arr_proto, "values", collections.arrayLikeValuesMethod, 0);
@@ -1133,6 +1141,197 @@ fn arraySort(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         obj.set(realm.allocator, wslice, buf[@intCast(w)]) catch return error.OutOfMemory;
     }
     return this_value;
+}
+
+/// §23.1.3.34 Array.prototype.toSorted — non-mutating sibling
+/// of `sort`. Allocate a fresh array, copy the source values,
+/// sort the copy, return it; the receiver is untouched.
+///
+/// Spec step 1 requires the comparator (when provided) to be
+/// callable, throwing TypeError synchronously before any read.
+fn arrayToSorted(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
+    const cmp_v = argOr(args, 0, Value.undefined_);
+    const cmp_fn: ?*JSFunction = blk: {
+        if (cmp_v.isUndefined()) break :blk null;
+        if (heap_mod.valueAsFunction(cmp_v)) |f| break :blk f;
+        return intrinsics.throwTypeError(realm, "comparefn must be a function");
+    };
+    const len = try clampArrayLength(lengthOfArray(obj));
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    out.prototype = realm.intrinsics.array_prototype;
+    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    if (len == 0) {
+        setLength(realm, out, 0) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(out);
+    }
+
+    const buf = realm.allocator.alloc(Value, @intCast(len)) catch return error.OutOfMemory;
+    defer realm.allocator.free(buf);
+    var i: i64 = 0;
+    while (i < len) : (i += 1) {
+        var ibuf: [24]u8 = undefined;
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+        buf[@intCast(i)] = obj.get(islice);
+    }
+
+    // Same insertion-sort body as `sort`; lifted for a fresh
+    // buffer rather than the receiver. See `arraySort` for the
+    // rationale on the algorithm choice.
+    var n: usize = 1;
+    while (n < buf.len) : (n += 1) {
+        const key = buf[n];
+        var j: isize = @as(isize, @intCast(n)) - 1;
+        while (j >= 0) : (j -= 1) {
+            const should_swap = if (cmp_fn) |c| blk: {
+                const cb_args = [_]Value{ buf[@intCast(j)], key };
+                const outcome = interpreter.callJSFunction(realm.allocator, realm, c, Value.undefined_, &cb_args) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (outcome) {
+                    .value, .yielded => |v| {
+                        const num = coerceToNumber(v);
+                        const d = if (num.isInt32()) @as(f64, @floatFromInt(num.asInt32())) else num.asDouble();
+                        break :blk d > 0;
+                    },
+                    .thrown => return error.NativeThrew,
+                }
+            } else blk: {
+                var ab: [64]u8 = undefined;
+                var bb: [64]u8 = undefined;
+                const a_s = computedKeyForSort(buf[@intCast(j)], &ab);
+                const b_s = computedKeyForSort(key, &bb);
+                break :blk std.mem.order(u8, a_s, b_s) == .gt;
+            };
+            if (!should_swap) break;
+            buf[@intCast(j + 1)] = buf[@intCast(j)];
+        }
+        buf[@intCast(j + 1)] = key;
+    }
+
+    // Write sorted values into the fresh array.
+    var w: i64 = 0;
+    while (w < len) : (w += 1) {
+        var wbuf: [24]u8 = undefined;
+        const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{w}) catch unreachable;
+        const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.bytes, buf[@intCast(w)]) catch return error.OutOfMemory;
+    }
+    setLength(realm, out, len) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(out);
+}
+
+/// §23.1.3.33 Array.prototype.toReversed — non-mutating sibling
+/// of `reverse`. Allocate, copy back-to-front, return.
+fn arrayToReversed(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
+    const len = try clampArrayLength(lengthOfArray(obj));
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    out.prototype = realm.intrinsics.array_prototype;
+    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    var i: i64 = 0;
+    while (i < len) : (i += 1) {
+        var rb: [24]u8 = undefined;
+        var wb: [24]u8 = undefined;
+        const rslice = std.fmt.bufPrint(&rb, "{d}", .{len - 1 - i}) catch unreachable;
+        const wslice = std.fmt.bufPrint(&wb, "{d}", .{i}) catch unreachable;
+        const v = obj.get(rslice);
+        const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+    }
+    setLength(realm, out, len) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(out);
+}
+
+/// §23.1.3.35 Array.prototype.toSpliced — non-mutating sibling
+/// of `splice`. Shares the start/deleteCount clamping with the
+/// mutating version but writes into a fresh array.
+fn arrayToSpliced(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
+    const len = try clampArrayLength(lengthOfArray(obj));
+    var start: i64 = if (args.len > 0) toInt(args[0]) else 0;
+    if (start < 0) start = @max(len + start, 0);
+    start = @min(start, len);
+    var delete_count: i64 = if (args.len < 2)
+        // §23.1.3.35 step 6 — `toSpliced` with no `deleteCount`
+        // deletes nothing, unlike `splice` which deletes to the
+        // end. Trips up array-by-copy fixtures otherwise.
+        0
+    else
+        toInt(args[1]);
+    if (delete_count < 0) delete_count = 0;
+    if (delete_count > len - start) delete_count = len - start;
+    const insert_count: i64 = if (args.len > 2) @as(i64, @intCast(args.len - 2)) else 0;
+    const new_len = len - delete_count + insert_count;
+
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    out.prototype = realm.intrinsics.array_prototype;
+    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+
+    // [0..start) — copy from receiver.
+    var i: i64 = 0;
+    while (i < start) : (i += 1) {
+        var rb: [24]u8 = undefined;
+        const rslice = std.fmt.bufPrint(&rb, "{d}", .{i}) catch unreachable;
+        const owned = realm.heap.allocateString(rslice) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.bytes, obj.get(rslice)) catch return error.OutOfMemory;
+    }
+    // [start..start+insert_count) — items.
+    var k: i64 = 0;
+    while (k < insert_count) : (k += 1) {
+        var wb: [24]u8 = undefined;
+        const wslice = std.fmt.bufPrint(&wb, "{d}", .{start + k}) catch unreachable;
+        const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.bytes, args[2 + @as(usize, @intCast(k))]) catch return error.OutOfMemory;
+    }
+    // [start+insert_count..new_len) — tail of receiver after the gap.
+    var r: i64 = start + delete_count;
+    var w: i64 = start + insert_count;
+    while (r < len) : ({
+        r += 1;
+        w += 1;
+    }) {
+        var rb: [24]u8 = undefined;
+        var wb: [24]u8 = undefined;
+        const rslice = std.fmt.bufPrint(&rb, "{d}", .{r}) catch unreachable;
+        const wslice = std.fmt.bufPrint(&wb, "{d}", .{w}) catch unreachable;
+        const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.bytes, obj.get(rslice)) catch return error.OutOfMemory;
+    }
+    setLength(realm, out, new_len) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(out);
+}
+
+/// §23.1.3.39 Array.prototype.with — non-mutating slot-set. Copy
+/// the array, then overwrite the requested index. Negative
+/// indices count from the end; out-of-range throws RangeError.
+fn arrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
+    const len = try clampArrayLength(lengthOfArray(obj));
+    const idx_arg = argOr(args, 0, Value.undefined_);
+    var idx: i64 = toInt(idx_arg);
+    if (idx < 0) idx += len;
+    if (idx < 0 or idx >= len) {
+        const ex = intrinsics.newRangeError(realm, "invalid index") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
+    const value = argOr(args, 1, Value.undefined_);
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    out.prototype = realm.intrinsics.array_prototype;
+    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    var i: i64 = 0;
+    while (i < len) : (i += 1) {
+        var rb: [24]u8 = undefined;
+        const rslice = std.fmt.bufPrint(&rb, "{d}", .{i}) catch unreachable;
+        const v = if (i == idx) value else obj.get(rslice);
+        const owned = realm.heap.allocateString(rslice) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+    }
+    setLength(realm, out, len) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(out);
 }
 
 fn computedKeyForSort(v: Value, scratch: *[64]u8) []const u8 {

@@ -128,9 +128,24 @@ pub const unsupported_features = [_][]const u8{
     // (regexp-named-groups, regexp-lookbehind, regexp-match-indices,
     // regexp-unicode-property-escapes, regexp-v-flag — all supported
     // by the vendored libregexp; gates removed.)
-    "well-formed-json-stringify",
     // (error-cause — ES2022 `new Error(msg, {cause}).cause` — shipped.)
-    "hashbang",
+    // (well-formed-json-stringify — ES2019 lone-surrogate
+    // `\uXXXX` escaping — shipped.)
+    // (hashbang — ES2023 `#!/usr/bin/env node` comments — shipped.)
+    // (change-array-by-copy — ES2023 toSorted/toReversed/with/
+    // toSpliced — shipped.)
+    // (upsert — Map.prototype.getOrInsert{,Computed} — shipped.)
+    // (dynamic-import, top-level-await, cross-realm,
+    // align-detached-buffer-semantics-with-web-reality,
+    // tail-call-optimization — tried as skip candidates but
+    // they're too coarse: each appears in `features: […]`
+    // lists for tests whose actual subject is something
+    // unrelated that we do pass. Path-skipping the dedicated
+    // buckets (`language/expressions/dynamic-import/` etc.)
+    // would be a better fit if we want to revisit later.)
+    // Stage-2 `await-dictionary` — `Promise.allKeyed`. Not
+    // implemented.
+    "await-dictionary",
     // `eval` and runtime-code-construction friends — Cynic
     // permanently doesn't ship these. Aligns with SES /
     // Hardened JavaScript and removes a major optimization fence.
