@@ -1270,6 +1270,27 @@ pub fn doubleToI64Saturating(d: f64) i64 {
 /// `.constructor` is wired back to the function and `.name` is
 /// `name`.
 /// to keep the runtime well-defined.
+/// §6.1.6.1.13 Number::toString — exponent formatting. The
+/// Zig `{e}` format yields `1e22` / `1e-6`; the JS spec wants
+/// `1e+22` / `1e-6` (positive exponents get an explicit `+`).
+/// Some Zig versions also pad zero-byte exponents (`1e0`) and
+/// emit the sign differently. Normalise to spec form using
+/// `buf` as scratch.
+fn normalizeExponent(buf: []u8, raw: []const u8) []const u8 {
+    const e_idx = std.mem.indexOfScalar(u8, raw, 'e') orelse return raw;
+    const exp_start = e_idx + 1;
+    if (exp_start >= raw.len) return raw;
+    // If the next char is `+` or `-`, signed; otherwise add `+`.
+    if (raw[exp_start] == '+' or raw[exp_start] == '-') return raw;
+    // Insert `+` after `e`. Slide tail right by one byte using
+    // the caller-supplied buffer (raw points into `buf`).
+    if (raw.len + 1 > buf.len) return raw;
+    var i: usize = raw.len;
+    while (i > exp_start) : (i -= 1) buf[i] = buf[i - 1];
+    buf[exp_start] = '+';
+    return buf[0 .. raw.len + 1];
+}
+
 pub fn stringifyArg(realm: *Realm, v: Value) NativeError!*JSString {
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
@@ -1326,7 +1347,8 @@ pub fn stringifyArg(realm: *Realm, v: Value) NativeError!*JSString {
             // result fits in our scratch buffer.
             const a = @abs(d);
             if (a != 0 and (a < 1e-6 or a >= 1e21)) {
-                break :blk std.fmt.bufPrint(&buf, "{e}", .{d}) catch unreachable;
+                const raw = std.fmt.bufPrint(&buf, "{e}", .{d}) catch unreachable;
+                break :blk normalizeExponent(&buf, raw);
             }
             break :blk std.fmt.bufPrint(&buf, "{d}", .{d}) catch unreachable;
         } else if (v.isBool()) {

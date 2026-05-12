@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 |
-| **runtime** | 66.09 % | 79.12 % | 30597 / 46296 |
+| **runtime** | 66.13 % | 79.16 % | 30615 / 46296 |
 
 
 ## Where the runtime stands, by area
@@ -31,10 +31,10 @@ browser-era built-ins …).
 | `built-ins/ArrayBuffer` | 88 | 108 | 0 | 45 % | 45 % |
 | `built-ins/DataView` | 440 | 121 | 0 | 78 % | 78 % |
 | `built-ins/Function` | 209 | 212 | 88 | 41 % | 50 % |
-| `built-ins/Object` | 2866 | 465 | 80 | 84 % | 86 % |
+| `built-ins/Object` | 2876 | 455 | 80 | 84 % | 86 % |
 | `built-ins/Promise` | 506 | 131 | 40 | 75 % | 79 % |
 | `built-ins/RegExp` | 1322 | 396 | 161 | 70 % | 77 % |
-| `built-ins/String` | 887 | 331 | 5 | 73 % | 73 % |
+| `built-ins/String` | 894 | 324 | 5 | 73 % | 73 % |
 | `built-ins/TypedArray` | 885 | 545 | 8 | 62 % | 62 % |
 | `built-ins/TypedArrayConstructors` | 400 | 320 | 16 | 54 % | 56 % |
 | `language/module-code` | 392 | 202 | 2 | 66 % | 66 % |
@@ -61,7 +61,6 @@ browser-era built-ins …).
 | `built-ins/WeakSet` | 73 | 12 | 0 | 86 % | 86 % |
 | `built-ins/global` | 16 | 13 | 0 | 55 % | 55 % |
 | `language/arguments-object` | 178 | 28 | 57 | 68 % | 86 % |
-| `language/computed-property-names` | 38 | 10 | 0 | 79 % | 79 % |
 | `language/function-code` | 85 | 23 | 109 | 39 % | 79 % |
 | `language/global-code` | 18 | 19 | 5 | 43 % | 49 % |
 | `language/identifiers` | 252 | 16 | 0 | 94 % | 94 % |
@@ -94,6 +93,7 @@ browser-era built-ins …).
 | `language/asi` | 97 | 5 | 0 | 95 % | 95 % |
 | `language/block-scope` | 140 | 5 | 0 | 97 % | 97 % |
 | `language/comments` | 22 | 7 | 23 | 42 % | 76 % |
+| `language/computed-property-names` | 39 | 9 | 0 | 81 % | 81 % |
 | `language/destructuring` | 15 | 3 | 1 | 79 % | 83 % |
 | `language/identifier-resolution` | 7 | 2 | 5 | 50 % | 78 % |
 | `language/reserved-words` | 26 | 1 | 0 | 96 % | 96 % |
@@ -142,11 +142,13 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 | +198 | 0.6 s |
-| **runtime** | 66.09 % | 79.12 % | 30597 / 46296 | +706 | 2m 36s |
+| **runtime** | 66.13 % | 79.16 % | 30615 / 46296 | +724 | 2m 37s |
 
 Biggest movers (runtime):
 
-- `built-ins/Map` +1
+- `built-ins/Object` +10
+- `built-ins/String` +7
+- `language/computed-property-names` +1
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 

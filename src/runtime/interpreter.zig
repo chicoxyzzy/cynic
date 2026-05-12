@@ -5381,7 +5381,19 @@ pub fn formatDoubleSafe(scratch: *[64]u8, d: f64) []const u8 {
     // buffer with `{d}` — anything outside uses `{e}` instead,
     // which is bounded.
     if (a != 0 and (a < 1e-6 or a >= 1e21)) {
-        return std.fmt.bufPrint(scratch, "{e}", .{d}) catch unreachable;
+        const raw = std.fmt.bufPrint(scratch, "{e}", .{d}) catch unreachable;
+        // JS spec mandates `1e+22`-style sign on positive
+        // exponents; Zig's `{e}` emits `1e22`. Insert the `+`
+        // post-hoc using the same scratch buffer.
+        const e_idx = std.mem.indexOfScalar(u8, raw, 'e') orelse return raw;
+        const after = e_idx + 1;
+        if (after >= raw.len) return raw;
+        if (raw[after] == '+' or raw[after] == '-') return raw;
+        if (raw.len + 1 > scratch.len) return raw;
+        var i: usize = raw.len;
+        while (i > after) : (i -= 1) scratch[i] = scratch[i - 1];
+        scratch[after] = '+';
+        return scratch[0 .. raw.len + 1];
     }
     return std.fmt.bufPrint(scratch, "{d}", .{d}) catch unreachable;
 }
