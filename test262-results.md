@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 |
-| **runtime** | 66.48 % | 79.58 % | 30777 / 46296 |
+| **runtime** | 66.48 % | 79.59 % | 30778 / 46296 |
 
 
 ## Where the runtime stands, by area
@@ -43,7 +43,7 @@ browser-era built-ins …).
 | `built-ins/AsyncGeneratorFunction` | 7 | 16 | 0 | 30 % | 30 % |
 | `built-ins/AsyncGeneratorPrototype` | 22 | 26 | 0 | 46 % | 46 % |
 | `built-ins/BigInt` | 42 | 35 | 0 | 55 % | 55 % |
-| `built-ins/Date` | 505 | 81 | 8 | 85 % | 86 % |
+| `built-ins/Date` | 506 | 80 | 8 | 85 % | 86 % |
 | `built-ins/Error` | 45 | 13 | 0 | 78 % | 78 % |
 | `built-ins/GeneratorFunction` | 7 | 16 | 0 | 30 % | 30 % |
 | `built-ins/GeneratorPrototype` | 32 | 29 | 0 | 52 % | 52 % |
@@ -142,11 +142,11 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 | +198 | 0.6 s |
-| **runtime** | 66.48 % | 79.58 % | 30777 / 46296 | +886 | 4m 12s |
+| **runtime** | 66.48 % | 79.59 % | 30778 / 46296 | +887 | 3m 41s |
 
 Biggest movers (runtime):
 
-- `built-ins/TypedArray` +17
+- `built-ins/Date` +1
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
