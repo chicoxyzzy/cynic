@@ -1758,7 +1758,16 @@ fn typedArrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const len: i64 = @intCast(tv.length);
     const idx_arg = argOr(args, 0, Value.fromInt32(0));
     const value = argOr(args, 1, Value.undefined_);
-    const idx_n: f64 = if (idx_arg.isInt32()) @floatFromInt(idx_arg.asInt32()) else if (idx_arg.isDouble()) idx_arg.asDouble() else 0;
+    // §23.2.3.39 step 2 — ToIntegerOrInfinity(relativeIndex)
+    // applies ToNumber first. Strings ("1", "-1", "dog"), bools,
+    // NaN all flow through here; non-finite values handled below.
+    const idx_num = coerceToNumber(idx_arg);
+    const idx_n: f64 = if (idx_num.isInt32())
+        @floatFromInt(idx_num.asInt32())
+    else if (idx_num.isDouble())
+        idx_num.asDouble()
+    else
+        0;
     // §7.1.5 ToIntegerOrInfinity yields ±Infinity for an infinite
     // operand; the subsequent `actualIndex >= len` (or < 0) then
     // throws RangeError. Cynic's index path uses i64, so map

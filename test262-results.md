@@ -5,7 +5,8 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 |
-| **runtime** | 65.95 % | 78.95 % | 30531 / 46296 |
+| **runtime** | 65.95 % | 78.95 % | 30532 / 46296 |
+
 
 ## Where the runtime stands, by area
 
@@ -34,7 +35,7 @@ browser-era built-ins …).
 | `built-ins/Promise` | 506 | 131 | 40 | 75 % | 79 % |
 | `built-ins/RegExp` | 1311 | 407 | 161 | 70 % | 76 % |
 | `built-ins/String` | 887 | 331 | 5 | 73 % | 73 % |
-| `built-ins/TypedArray` | 884 | 546 | 8 | 61 % | 62 % |
+| `built-ins/TypedArray` | 885 | 545 | 8 | 62 % | 62 % |
 | `built-ins/TypedArrayConstructors` | 400 | 320 | 16 | 54 % | 56 % |
 | `language/module-code` | 392 | 202 | 2 | 66 % | 66 % |
 | **_10–99 fails_** | | | | | |
@@ -116,6 +117,7 @@ browser-era built-ins …).
 | `language/keywords` | 25 | 0 | 0 | 100 % | 100 % |
 | `language/punctuators` | 11 | 0 | 0 | 100 % | 100 % |
 
+
 ## Legend
 
 **Rows**
@@ -140,7 +142,11 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 | +198 | 0.6 s |
-| **runtime** | 65.95 % | 78.95 % | 30531 / 46296 | +640 | 2m 19s |
+| **runtime** | 65.95 % | 78.95 % | 30532 / 46296 | +641 | 2m 30s |
+
+Biggest movers (runtime):
+
+- `built-ins/TypedArray` +1
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
