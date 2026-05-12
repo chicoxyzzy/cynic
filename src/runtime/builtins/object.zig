@@ -1690,12 +1690,20 @@ fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value) Na
         if (heap_mod.isSymbol(this_value)) break :blk "Symbol";
         if (heap_mod.isBigInt(this_value)) break :blk "BigInt";
         if (heap_mod.valueAsPlainObject(this_value)) |obj| {
-            // Array detection: prototype === %Array.prototype%.
-            if (obj.prototype != null and obj.prototype == realm.intrinsics.array_prototype) {
-                break :blk "Array";
+            // §22.1.3.6 step 4 — pick the built-in tag from the
+            // internal slot present on the receiver. Order
+            // matters per the spec table.
+            if (obj.is_array_exotic) break :blk "Array";
+            if (obj.prototype != null and obj.prototype == realm.intrinsics.array_prototype) break :blk "Array";
+            if (obj.regex_bytecode != null) break :blk "RegExp";
+            if (obj.array_buffer != null) break :blk "Object"; // ArrayBuffer uses @@toStringTag
+            if (obj.boxed_primitive) |bp| {
+                if (bp.isBool()) break :blk "Boolean";
+                if (bp.isInt32() or bp.isDouble()) break :blk "Number";
             }
-            // Argument object: later (no tag yet).
-            // Otherwise: default "Object".
+            if (obj.boxed_string != null) break :blk "String";
+            // Date / Error / arguments: rely on @@toStringTag
+            // walked in step 5 below. Default falls through.
             break :blk "Object";
         }
         break :blk "Object";
