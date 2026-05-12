@@ -49,8 +49,10 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, sp, "startsWith", stringStartsWith, 1);
     try installNativeMethodOnProto(realm, sp, "endsWith", stringEndsWith, 1);
     try installNativeMethodOnProto(realm, sp, "split", stringSplit, 2);
-    try installNativeMethodOnProto(realm, sp, "padStart", stringPadStart, 2);
-    try installNativeMethodOnProto(realm, sp, "padEnd", stringPadEnd, 2);
+    // §22.1.3.{17,18} padStart / padEnd — spec `length: 1`, even
+    // though both accept (maxLength, fillString).
+    try installNativeMethodOnProto(realm, sp, "padStart", stringPadStart, 1);
+    try installNativeMethodOnProto(realm, sp, "padEnd", stringPadEnd, 1);
     try installNativeMethodOnProto(realm, sp, "at", stringAt, 1);
     try installNativeMethodOnProto(realm, sp, "lastIndexOf", stringLastIndexOf, 1);
     try installNativeMethodOnProto(realm, sp, "replace", stringReplace, 2);
