@@ -420,11 +420,18 @@ pub fn install(realm: *Realm) !void {
     // installed after its initial creation (Map/Set/Date/Promise/
     // __drainMicrotasks/etc.). Two-way live binding is later;
     // this catch-up pass is enough for `globalThis.X` reads.
-    // §17 spec flags `{ w:true, e:false, c:true }` apply.
+    // §17 spec flags `{ w:true, e:false, c:true }` apply to most
+    // built-ins, except `undefined` / `NaN` / `Infinity` which are
+    // §19.1 frozen data properties — skip those keys here so the
+    // earlier installer's `{ w,e,c = false }` flags survive.
     if (heap_mod.valueAsPlainObject(realm.globals.get("globalThis") orelse Value.undefined_)) |gt| {
         var it = realm.globals.iterator();
         while (it.next()) |entry| {
-            try gt.setWithFlags(realm.allocator, entry.key_ptr.*, entry.value_ptr.*, .{
+            const key = entry.key_ptr.*;
+            if (std.mem.eql(u8, key, "undefined") or std.mem.eql(u8, key, "NaN") or std.mem.eql(u8, key, "Infinity")) {
+                continue;
+            }
+            try gt.setWithFlags(realm.allocator, key, entry.value_ptr.*, .{
                 .writable = true,
                 .enumerable = false,
                 .configurable = true,
