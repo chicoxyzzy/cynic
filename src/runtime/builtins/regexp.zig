@@ -209,7 +209,12 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     // sees no own property.
     inst.set(realm.allocator, "__cynic_re_src__", Value.fromString(pat_s)) catch return error.OutOfMemory;
     inst.set(realm.allocator, "__cynic_re_flags__", Value.fromString(flag_s)) catch return error.OutOfMemory;
-    inst.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
+    // §22.2.4 step 13 — `lastIndex` is `{ w:true, e:false, c:false }`.
+    // Default `set` lands at all-true, so JSON.stringify({toJSON: /re/})
+    // surfaced "lastIndex" as an enumerable own key.
+    inst.setWithFlags(realm.allocator, "lastIndex", Value.fromInt32(0), .{
+        .writable = true, .enumerable = false, .configurable = false,
+    }) catch return error.OutOfMemory;
     // §22.2.3.2 RegExpInitialize step 12 — compile the pattern
     // eagerly so syntactic errors raise SyntaxError at
     // construction time rather than on the first match. The

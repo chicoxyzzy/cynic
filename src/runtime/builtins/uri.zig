@@ -50,17 +50,68 @@ fn isUriReserved(c: u8) bool {
 }
 
 fn encodeURIImpl(realm: *Realm, src: []const u8, full_uri: bool) NativeError!Value {
+    // §19.2.6.5 Encode. Walk codepoints (Cynic strings are UTF-8;
+    // an unpaired surrogate shows up as a single 3-byte 0xED 0xAX/BX
+    // 0x8X sequence — invalid UTF-8 in std.unicode but a valid JS
+    // code point in CESU-8 form). For each code point:
+    // • ASCII char in `unescapedSet` → pass through.
+    // • Unpaired surrogate → URIError per step 6.b.
+    // • Anything else → emit one %XX per UTF-8 byte.
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
-    for (src) |c| {
-        if (isUnreservedURI(c) or (full_uri and isUriReserved(c))) {
-            out.append(realm.allocator, c) catch return error.OutOfMemory;
-        } else {
-            const hex = "0123456789ABCDEF";
-            out.append(realm.allocator, '%') catch return error.OutOfMemory;
-            out.append(realm.allocator, hex[c >> 4]) catch return error.OutOfMemory;
-            out.append(realm.allocator, hex[c & 0x0F]) catch return error.OutOfMemory;
+    const hex = "0123456789ABCDEF";
+    var i: usize = 0;
+    while (i < src.len) {
+        const b0 = src[i];
+        // ASCII (high bit clear) — single byte.
+        if (b0 < 0x80) {
+            if (isUnreservedURI(b0) or (full_uri and isUriReserved(b0))) {
+                out.append(realm.allocator, b0) catch return error.OutOfMemory;
+            } else {
+                out.append(realm.allocator, '%') catch return error.OutOfMemory;
+                out.append(realm.allocator, hex[b0 >> 4]) catch return error.OutOfMemory;
+                out.append(realm.allocator, hex[b0 & 0x0F]) catch return error.OutOfMemory;
+            }
+            i += 1;
+            continue;
         }
+        // Multi-byte UTF-8 leader.
+        const seq_len: usize = if (b0 & 0b1110_0000 == 0b1100_0000)
+            2
+        else if (b0 & 0b1111_0000 == 0b1110_0000)
+            3
+        else if (b0 & 0b1111_1000 == 0b1111_0000)
+            4
+        else
+            return throwURIMalformed(realm);
+        if (i + seq_len > src.len) return throwURIMalformed(realm);
+        // Decode the codepoint.
+        var cp: u32 = switch (seq_len) {
+            2 => @as(u32, b0 & 0x1F),
+            3 => @as(u32, b0 & 0x0F),
+            4 => @as(u32, b0 & 0x07),
+            else => unreachable,
+        };
+        var j: usize = 1;
+        while (j < seq_len) : (j += 1) {
+            const cb = src[i + j];
+            if (cb & 0b1100_0000 != 0b1000_0000) return throwURIMalformed(realm);
+            cp = (cp << 6) | (cb & 0x3F);
+        }
+        // §19.2.6.5 step 6.b — unpaired surrogate is a URIError.
+        // (Cynic doesn't yet pair surrogates back into supplementary
+        // codepoints at parse time, so any 3-byte D800-DFFF here is
+        // by definition unpaired.)
+        if (cp >= 0xD800 and cp <= 0xDFFF) return throwURIMalformed(realm);
+        // Emit one %XX per UTF-8 byte.
+        var k: usize = 0;
+        while (k < seq_len) : (k += 1) {
+            const b = src[i + k];
+            out.append(realm.allocator, '%') catch return error.OutOfMemory;
+            out.append(realm.allocator, hex[b >> 4]) catch return error.OutOfMemory;
+            out.append(realm.allocator, hex[b & 0x0F]) catch return error.OutOfMemory;
+        }
+        i += seq_len;
     }
     const s = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
     return Value.fromString(s);
