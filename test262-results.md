@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 |
-| **runtime** | 65.07 % | 79.03 % | 30142 / 46320 |
+| **runtime** | 65.11 % | 79.07 % | 30157 / 46320 |
 
 ## Where the runtime stands, by area
 
@@ -26,13 +26,13 @@ browser-era built-ins …).
 | `language/expressions` | 7964 | 2103 | 971 | 72 % | 79 % |
 | `language/statements` | 7135 | 1535 | 667 | 76 % | 82 % |
 | **_100–999 fails_** | | | | | |
-| `built-ins/Array` | 2321 | 549 | 211 | 75 % | 81 % |
+| `built-ins/Array` | 2322 | 548 | 211 | 75 % | 81 % |
 | `built-ins/Function` | 216 | 204 | 89 | 42 % | 51 % |
-| `built-ins/Object` | 2832 | 494 | 85 | 83 % | 85 % |
+| `built-ins/Object` | 2836 | 490 | 85 | 83 % | 85 % |
 | `built-ins/Promise` | 507 | 167 | 3 | 75 % | 75 % |
 | `built-ins/Proxy` | 176 | 123 | 12 | 57 % | 59 % |
-| `built-ins/RegExp` | 1284 | 434 | 161 | 68 % | 75 % |
-| `built-ins/String` | 859 | 359 | 5 | 70 % | 71 % |
+| `built-ins/RegExp` | 1285 | 433 | 161 | 68 % | 75 % |
+| `built-ins/String` | 861 | 357 | 5 | 70 % | 71 % |
 | `built-ins/TypedArray` | 876 | 346 | 216 | 61 % | 72 % |
 | `built-ins/TypedArrayConstructors` | 385 | 327 | 24 | 52 % | 54 % |
 | `language/module-code` | 381 | 201 | 14 | 64 % | 65 % |
@@ -51,7 +51,7 @@ browser-era built-ins …).
 | `built-ins/JSON` | 73 | 70 | 22 | 44 % | 51 % |
 | `built-ins/Map` | 145 | 58 | 1 | 71 % | 71 % |
 | `built-ins/NativeErrors` | 74 | 20 | 0 | 79 % | 79 % |
-| `built-ins/Number` | 290 | 50 | 0 | 85 % | 85 % |
+| `built-ins/Number` | 295 | 45 | 0 | 87 % | 87 % |
 | `built-ins/Reflect` | 99 | 54 | 0 | 65 % | 65 % |
 | `built-ins/RegExpStringIteratorPrototype` | 7 | 10 | 0 | 41 % | 41 % |
 | `built-ins/Set` | 330 | 52 | 1 | 86 % | 86 % |
@@ -76,7 +76,7 @@ browser-era built-ins …).
 | `built-ins/ArrayIteratorPrototype` | 10 | 9 | 8 | 37 % | 53 % |
 | `built-ins/AsyncFunction` | 10 | 8 | 0 | 56 % | 56 % |
 | `built-ins/AsyncIteratorPrototype` | 0 | 4 | 9 | 0 % | 0 % |
-| `built-ins/Boolean` | 45 | 6 | 0 | 88 % | 88 % |
+| `built-ins/Boolean` | 47 | 4 | 0 | 92 % | 92 % |
 | `built-ins/FinalizationRegistry` | 43 | 4 | 0 | 91 % | 91 % |
 | `built-ins/MapIteratorPrototype` | 10 | 1 | 0 | 91 % | 91 % |
 | `built-ins/Math` | 305 | 7 | 15 | 93 % | 98 % |
@@ -135,17 +135,19 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-12 — cynic `14f2858`, test262 `d0c1b455`
+### 2026-05-12 — cynic `3328760`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 65.07 % | 79.03 % | 30142 / 46320 | +251 |
+| **runtime** | 65.11 % | 79.07 % | 30157 / 46320 | +266 |
 
 Biggest movers (runtime):
 
-- `built-ins/NativeErrors` +6
-- `built-ins/Object` +6
-- `built-ins/AggregateError` +1
+- `built-ins/Number` +5
+- `built-ins/Object` +4
+- `built-ins/Boolean` +2
+- `built-ins/String` +2
+- `built-ins/Array` +1
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
