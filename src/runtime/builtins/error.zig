@@ -105,10 +105,15 @@ fn installAggregateError(realm: *Realm, parent_proto: *JSObject) !*JSFunction {
 }
 
 fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value;
     const proto = realm.intrinsics.aggregate_error_prototype.?;
-    const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
-    instance.prototype = proto;
+    // §20.5.7.1.1 — Error subclass-aware: if `this_value` is an
+    // already-allocated object (via `new` or `super(...)`),
+    // initialise it in-place; otherwise allocate fresh.
+    const instance = if (heap_mod.valueAsPlainObject(this_value)) |o| o else blk: {
+        const fresh = realm.heap.allocateObject() catch return error.OutOfMemory;
+        fresh.prototype = proto;
+        break :blk fresh;
+    };
 
     // §20.5.7.1.1 step 4 — IteratorToList(GetIterator(errors)).
     // Cynic doesn't have a generic GetIterator helper at this
@@ -130,17 +135,23 @@ fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) N
     }) catch return error.OutOfMemory;
 
     // §20.5.7.1.1 step 2 — message is the second arg; if defined,
-    // ToString and pin as own.
+    // ToString and pin as own with `{ w:true, e:false, c:true }`
+    // per `CreateNonEnumerableDataPropertyOrThrow`.
     if (args.len > 1 and !args[1].isUndefined()) {
         const msg_str = stringifyArg(realm, args[1]) catch return error.OutOfMemory;
-        instance.set(realm.allocator, "message", Value.fromString(msg_str)) catch return error.OutOfMemory;
+        instance.setWithFlags(realm.allocator, "message", Value.fromString(msg_str), .{
+            .writable = true, .enumerable = false, .configurable = true,
+        }) catch return error.OutOfMemory;
     }
     // §20.5.8.1 InstallErrorCause — third arg is an options object;
-    // own `cause` key (if present) copies to instance.
+    // own `cause` key (if present) copies to instance with the
+    // same `{ w:true, e:false, c:true }` shape.
     if (args.len > 2) {
         if (heap_mod.valueAsPlainObject(args[2])) |opts| {
             if (opts.hasOwn("cause")) {
-                instance.set(realm.allocator, "cause", opts.get("cause")) catch return error.OutOfMemory;
+                instance.setWithFlags(realm.allocator, "cause", opts.get("cause"), .{
+                    .writable = true, .enumerable = false, .configurable = true,
+                }) catch return error.OutOfMemory;
             }
         }
     }
