@@ -264,11 +264,26 @@ fn typedArrayAbstractCtor(realm: *Realm, this_value: Value, args: []const Value)
 
 fn arrayBufferConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "ArrayBuffer constructor requires 'new'");
-    const len_v = coerceToNumber(argOr(args, 0, Value.fromInt32(0)));
-    const len_d: f64 = if (len_v.isInt32()) @floatFromInt(len_v.asInt32()) else len_v.asDouble();
-    if (std.math.isNan(len_d) or len_d < 0 or len_d > @as(f64, @floatFromInt(std.math.maxInt(u32))))
+    // §25.1.3.1 step 2 — `Let byteLength be ? ToIndex(length)`.
+    // ToIndex does ToIntegerOrInfinity (which truncates toward
+    // zero — `0.9` → 0, `-0.99999` → -0 → 0, `1.9` → 1) then
+    // requires the result in [0, 2^53-1].
+    const len_v = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
+    const len_raw: f64 = if (len_v.isInt32()) @floatFromInt(len_v.asInt32()) else len_v.asDouble();
+    // ToIntegerOrInfinity: NaN → 0; +/-Inf preserved; else trunc.
+    const len_trunc: f64 = if (std.math.isNan(len_raw)) 0 else if (std.math.isInf(len_raw)) len_raw else @trunc(len_raw);
+    // §7.1.22 ToIndex step 4 — integerIndex < 0 throws RangeError,
+    // BUT -0 is mathematically equal to 0 and passes. ToIntegerOrInfinity
+    // collapses -0.x → -0 which is f64 negative zero — `< 0` returns
+    // false for -0 (== +0). However `< 0` for any negative non-zero
+    // throws.
+    if (std.math.isInf(len_trunc) and len_trunc > 0)
         return throwRangeError(realm, "ArrayBuffer length out of range");
-    const len: usize = @intFromFloat(len_d);
+    if (len_trunc < 0)
+        return throwRangeError(realm, "ArrayBuffer length out of range");
+    if (len_trunc > @as(f64, @floatFromInt(std.math.maxInt(u32))))
+        return throwRangeError(realm, "ArrayBuffer length out of range");
+    const len: usize = @intFromFloat(len_trunc);
     const buf = realm.allocator.alloc(u8, len) catch return error.OutOfMemory;
     @memset(buf, 0);
     inst.array_buffer = buf;
