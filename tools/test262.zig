@@ -77,7 +77,7 @@ fn test262ModuleLoader(
 /// supplied (not undefined), the test failed. Cynic stashes
 /// the result on the realm so the runner can read it after
 /// draining microtasks.
-fn dollarDoneNative(
+fn test262DoneNative(
     realm: *cynic.runtime.Realm,
     this_value: cynic.runtime.Value,
     args: []const cynic.runtime.Value,
@@ -114,7 +114,7 @@ fn dollarDoneNative(
 // that's out of scope for this shim; tests gated on it skip
 // via the `cross-realm` feature filter.
 
-fn dollar262EvalScript(
+fn test262EvalScript(
     realm: *cynic.runtime.Realm,
     this_value: cynic.runtime.Value,
     args: []const cynic.runtime.Value,
@@ -140,7 +140,7 @@ fn dollar262EvalScript(
     }
 }
 
-fn dollar262Gc(
+fn test262Gc(
     realm: *cynic.runtime.Realm,
     this_value: cynic.runtime.Value,
     args: []const cynic.runtime.Value,
@@ -151,7 +151,7 @@ fn dollar262Gc(
     return cynic.runtime.Value.undefined_;
 }
 
-fn dollar262DetachArrayBuffer(
+fn test262DetachArrayBuffer(
     realm: *cynic.runtime.Realm,
     this_value: cynic.runtime.Value,
     args: []const cynic.runtime.Value,
@@ -179,7 +179,7 @@ fn dollar262DetachArrayBuffer(
 /// Lifetime: the child Realm is heap-allocated and registered
 /// on the parent's `child_realms` list so it lives as long as
 /// the parent and gets torn down with it.
-fn dollar262CreateRealm(
+fn test262CreateRealm(
     realm: *cynic.runtime.Realm,
     this_value: cynic.runtime.Value,
     args: []const cynic.runtime.Value,
@@ -219,13 +219,13 @@ fn dollar262CreateRealm(
     // `.evalScript(source)` — evaluates `source` IN THE CHILD
     // REALM. Receiver is the wrapper, which carries the child
     // pointer in `host_data`.
-    const eval_trampoline = realm.heap.allocateFunctionNative(dollar262ChildEvalScript, 1, "evalScript") catch return error.OutOfMemory;
+    const eval_trampoline = realm.heap.allocateFunctionNative(test262ChildEvalScript, 1, "evalScript") catch return error.OutOfMemory;
     wrapper.set(realm.allocator, "evalScript", cynic.runtime.heap.taggedFunction(eval_trampoline)) catch return error.OutOfMemory;
 
     // Pass-through hooks — operate on the parent's heap state
     // because the relevant objects (ArrayBuffer storage etc.)
     // live there too.
-    const gc_fn = realm.heap.allocateFunctionNative(dollar262Gc, 0, "gc") catch return error.OutOfMemory;
+    const gc_fn = realm.heap.allocateFunctionNative(test262Gc, 0, "gc") catch return error.OutOfMemory;
     wrapper.set(realm.allocator, "gc", cynic.runtime.heap.taggedFunction(gc_fn)) catch return error.OutOfMemory;
 
     return cynic.runtime.heap.taggedObject(wrapper);
@@ -234,7 +234,7 @@ fn dollar262CreateRealm(
 /// Trampoline for `child262.evalScript(source)`. The receiver
 /// is the wrapper returned by `createRealm`; its `host_data`
 /// slot points at the child `Realm`.
-fn dollar262ChildEvalScript(
+fn test262ChildEvalScript(
     realm: *cynic.runtime.Realm,
     this_value: cynic.runtime.Value,
     args: []const cynic.runtime.Value,
@@ -293,16 +293,16 @@ fn install262(realm: *cynic.runtime.Realm) !void {
         try obj.set(realm.allocator, "global", cynic.runtime.Value.undefined_);
     }
 
-    const eval_fn = try heap.allocateFunctionNative(dollar262EvalScript, 1, "evalScript");
+    const eval_fn = try heap.allocateFunctionNative(test262EvalScript, 1, "evalScript");
     try obj.set(realm.allocator, "evalScript", cynic.runtime.heap.taggedFunction(eval_fn));
 
-    const gc_fn = try heap.allocateFunctionNative(dollar262Gc, 0, "gc");
+    const gc_fn = try heap.allocateFunctionNative(test262Gc, 0, "gc");
     try obj.set(realm.allocator, "gc", cynic.runtime.heap.taggedFunction(gc_fn));
 
-    const detach_fn = try heap.allocateFunctionNative(dollar262DetachArrayBuffer, 1, "detachArrayBuffer");
+    const detach_fn = try heap.allocateFunctionNative(test262DetachArrayBuffer, 1, "detachArrayBuffer");
     try obj.set(realm.allocator, "detachArrayBuffer", cynic.runtime.heap.taggedFunction(detach_fn));
 
-    const cr_fn = try heap.allocateFunctionNative(dollar262CreateRealm, 0, "createRealm");
+    const cr_fn = try heap.allocateFunctionNative(test262CreateRealm, 0, "createRealm");
     try obj.set(realm.allocator, "createRealm", cynic.runtime.heap.taggedFunction(cr_fn));
 
     // Cynic doesn't have `IsHTMLDDA` — that feature is on our
@@ -1266,7 +1266,7 @@ fn classifyAndRun(
     // `realm.async_done_called` / `async_done_error` after the
     // microtask queue drains.
     {
-        const done_fn = realm.heap.allocateFunctionNative(dollarDoneNative, 1, "$DONE") catch return .{ .kind = .fail_false_reject };
+        const done_fn = realm.heap.allocateFunctionNative(test262DoneNative, 1, "$DONE") catch return .{ .kind = .fail_false_reject };
         realm.globals.put(realm.allocator, "$DONE", cynic.runtime.heap.taggedFunction(done_fn)) catch return .{ .kind = .fail_false_reject };
     }
 
