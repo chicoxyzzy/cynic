@@ -341,16 +341,21 @@ pub fn install(realm: *Realm) !void {
         try realm.globals.put(realm.allocator, "globalThis", heap_mod.taggedObject(gt));
     }
 
-    // Number static value properties.
+    // §21.1.2 Number static value properties. Each is a data
+    // property with `{ writable: false, enumerable: false,
+    // configurable: false }` per the table in §21.1.2.
     if (heap_mod.valueAsFunction(realm.globals.get("Number").?)) |num_ctor| {
-        try num_ctor.set(realm.allocator, "NaN", Value.fromDouble(std.math.nan(f64)));
-        try num_ctor.set(realm.allocator, "POSITIVE_INFINITY", Value.fromDouble(std.math.inf(f64)));
-        try num_ctor.set(realm.allocator, "NEGATIVE_INFINITY", Value.fromDouble(-std.math.inf(f64)));
-        try num_ctor.set(realm.allocator, "MAX_SAFE_INTEGER", Value.fromDouble(9007199254740991.0));
-        try num_ctor.set(realm.allocator, "MIN_SAFE_INTEGER", Value.fromDouble(-9007199254740991.0));
-        try num_ctor.set(realm.allocator, "MAX_VALUE", Value.fromDouble(std.math.floatMax(f64)));
-        try num_ctor.set(realm.allocator, "MIN_VALUE", Value.fromDouble(5e-324));
-        try num_ctor.set(realm.allocator, "EPSILON", Value.fromDouble(std.math.floatEps(f64)));
+        const num_const_flags: @import("object.zig").PropertyFlags = .{
+            .writable = false, .enumerable = false, .configurable = false,
+        };
+        try num_ctor.setWithFlags(realm.allocator, "NaN", Value.fromDouble(std.math.nan(f64)), num_const_flags);
+        try num_ctor.setWithFlags(realm.allocator, "POSITIVE_INFINITY", Value.fromDouble(std.math.inf(f64)), num_const_flags);
+        try num_ctor.setWithFlags(realm.allocator, "NEGATIVE_INFINITY", Value.fromDouble(-std.math.inf(f64)), num_const_flags);
+        try num_ctor.setWithFlags(realm.allocator, "MAX_SAFE_INTEGER", Value.fromDouble(9007199254740991.0), num_const_flags);
+        try num_ctor.setWithFlags(realm.allocator, "MIN_SAFE_INTEGER", Value.fromDouble(-9007199254740991.0), num_const_flags);
+        try num_ctor.setWithFlags(realm.allocator, "MAX_VALUE", Value.fromDouble(std.math.floatMax(f64)), num_const_flags);
+        try num_ctor.setWithFlags(realm.allocator, "MIN_VALUE", Value.fromDouble(5e-324), num_const_flags);
+        try num_ctor.setWithFlags(realm.allocator, "EPSILON", Value.fromDouble(std.math.floatEps(f64)), num_const_flags);
     }
 
     // Array.prototype + Array statics already installed earlier
