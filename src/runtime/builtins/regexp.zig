@@ -352,6 +352,14 @@ fn buildInputBuf(allocator: std.mem.Allocator, utf8: []const u8) !InputBuf {
 
 fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const regex_obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "RegExp.prototype.exec called on non-object");
+    // §22.2.6.2 step 2 — RequireInternalSlot(R, [[RegExpMatcher]]).
+    // Cynic encodes the slot as the `__cynic_re_src__` property
+    // (set by the RegExp constructor); plain `{}` doesn't have
+    // it. test262 fixtures verify that `RegExp.prototype.exec`
+    // / `.test` reject non-regex receivers with TypeError.
+    if (!regex_obj.hasOwn("__cynic_re_src__")) {
+        return throwTypeError(realm, "RegExp.prototype.exec called on non-RegExp");
+    }
     const input_s = stringifyArg(realm, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
     const bc = (try ensureBytecode(realm, regex_obj)) orelse return Value.null_;
 
