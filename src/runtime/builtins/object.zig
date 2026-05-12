@@ -1359,6 +1359,11 @@ pub fn objectPreventExtensions(realm: *Realm, this_value: Value, args: []const V
 fn objectIsExtensible(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
+    // §20.1.2.16 — when the receiver is not an Object, return
+    // `false`. Functions ARE objects (§6.1.7); they're always
+    // extensible (Cynic doesn't yet model `Object.preventExtensions`
+    // on a JSFunction receiver). Return `true` unconditionally.
+    if (heap_mod.valueAsFunction(arg) != null) return Value.true_;
     const obj = heap_mod.valueAsPlainObject(arg) orelse return Value.false_;
     // §10.5.3 Proxy [[IsExtensible]] — trap dispatch with the
     // invariant that the result must match the target's actual
