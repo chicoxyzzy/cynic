@@ -339,7 +339,15 @@ fn lengthOfArrayLocal(obj: *JSObject) i64 {
 
 fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const arg = argOr(args, 0, Value.undefined_);
+    const raw = argOr(args, 0, Value.undefined_);
+    // §20.1.2.18 step 1 — `Let obj be ? ToObject(O)`. ES2015+
+    // accepts primitives. Coerce non-object, non-function args
+    // through `toObjectThis` so `Object.keys(0)` returns `[]`
+    // instead of throwing.
+    const arg = if (raw.isInt32() or raw.isDouble() or raw.isString() or raw.isBool()) blk: {
+        const w = try intrinsics.toObjectThis(realm, raw);
+        break :blk heap_mod.taggedObject(w);
+    } else raw;
     // §17 — Function objects are also ordinary objects. Build
     // the result the same way as for a plain JSObject so
     // `Object.keys(class C { static x = 1 })` produces `["x"]`.
@@ -386,7 +394,13 @@ fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError
 
 fn objectValues(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.values called on non-object");
+    const raw = argOr(args, 0, Value.undefined_);
+    // §20.1.2.21 step 1 — ToObject; primitives coerce.
+    const coerced = if (raw.isInt32() or raw.isDouble() or raw.isString() or raw.isBool())
+        heap_mod.taggedObject(try intrinsics.toObjectThis(realm, raw))
+    else
+        raw;
+    const obj = heap_mod.valueAsPlainObject(coerced) orelse return throwTypeError(realm, "Object.values called on non-object");
     const keys = try ownPropertyKeysOrdered(realm, obj);
     defer realm.allocator.free(keys);
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
@@ -408,7 +422,12 @@ fn objectValues(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 
 fn objectEntries(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.entries called on non-object");
+    const raw = argOr(args, 0, Value.undefined_);
+    const coerced = if (raw.isInt32() or raw.isDouble() or raw.isString() or raw.isBool())
+        heap_mod.taggedObject(try intrinsics.toObjectThis(realm, raw))
+    else
+        raw;
+    const obj = heap_mod.valueAsPlainObject(coerced) orelse return throwTypeError(realm, "Object.entries called on non-object");
     const keys = try ownPropertyKeysOrdered(realm, obj);
     defer realm.allocator.free(keys);
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
@@ -1104,7 +1123,13 @@ fn objectGetOwnPropertyDescriptors(realm: *Realm, this_value: Value, args: []con
 
 fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const target = argOr(args, 0, Value.undefined_);
+    const raw = argOr(args, 0, Value.undefined_);
+    // §20.1.2.10 step 1 — `Let obj be ? ToObject(O)`. ES2015+
+    // primitive-coerces the arg.
+    const target = if (raw.isInt32() or raw.isDouble() or raw.isString() or raw.isBool())
+        heap_mod.taggedObject(try intrinsics.toObjectThis(realm, raw))
+    else
+        raw;
     // §17 — built-in function objects are ordinary objects too.
     // Without a function path here, every test262 fixture that
     // does `Object.getOwnPropertyNames(builtin)` (e.g.
