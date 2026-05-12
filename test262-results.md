@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 |
-| **runtime** | 66.09 % | 79.11 % | 30596 / 46296 |
+| **runtime** | 66.09 % | 79.12 % | 30597 / 46296 |
 
 
 ## Where the runtime stands, by area
@@ -49,7 +49,7 @@ browser-era built-ins …).
 | `built-ins/GeneratorPrototype` | 32 | 29 | 0 | 52 % | 52 % |
 | `built-ins/Iterator` | 439 | 65 | 6 | 86 % | 87 % |
 | `built-ins/JSON` | 109 | 35 | 21 | 66 % | 76 % |
-| `built-ins/Map` | 165 | 38 | 1 | 81 % | 81 % |
+| `built-ins/Map` | 166 | 37 | 1 | 81 % | 82 % |
 | `built-ins/Math` | 306 | 11 | 10 | 94 % | 97 % |
 | `built-ins/NativeErrors` | 74 | 20 | 0 | 79 % | 79 % |
 | `built-ins/Number` | 295 | 45 | 0 | 87 % | 87 % |
@@ -142,11 +142,11 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 | +198 | 0.6 s |
-| **runtime** | 66.09 % | 79.11 % | 30596 / 46296 | +705 | 2m 21s |
+| **runtime** | 66.09 % | 79.12 % | 30597 / 46296 | +706 | 2m 36s |
 
 Biggest movers (runtime):
 
-- `built-ins/RegExp` +11
+- `built-ins/Map` +1
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 

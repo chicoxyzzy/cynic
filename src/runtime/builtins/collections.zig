@@ -434,6 +434,16 @@ fn mapDataOf(this_value: Value) ?*@import("../object.zig").MapData {
     return obj.map_data;
 }
 
+/// §24.1.1.{8,12} CanonicalizeKeyedCollectionKey — Map / Set
+/// store -0 as +0. The conversion happens before the key is
+/// observed by user code (e.g. the callback to
+/// `getOrInsertComputed` sees +0, not -0) and before equality
+/// is checked against existing entries.
+fn canonicalizeKey(v: Value) Value {
+    if (v.isDouble() and v.asDouble() == 0.0) return Value.fromInt32(0);
+    return v;
+}
+
 fn mapEntryIndex(d: *@import("../object.zig").MapData, key: Value) ?usize {
     for (d.entries.items, 0..) |e, i| {
         if (e.deleted) continue;
@@ -454,13 +464,13 @@ fn mapSetInternal(realm: *Realm, inst: *@import("../object.zig").JSObject, key: 
 fn mapSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Map.prototype.set called on non-Map");
     if (inst.map_data == null) return throwTypeError(realm, "Map.prototype.set called on non-Map");
-    mapSetInternal(realm, inst, argOr(args, 0, Value.undefined_), argOr(args, 1, Value.undefined_)) catch return error.OutOfMemory;
+    mapSetInternal(realm, inst, canonicalizeKey(argOr(args, 0, Value.undefined_)), argOr(args, 1, Value.undefined_)) catch return error.OutOfMemory;
     return this_value;
 }
 
 fn mapGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const d = mapDataOf(this_value) orelse return throwTypeError(realm, "Map.prototype.get called on non-Map");
-    if (mapEntryIndex(d, argOr(args, 0, Value.undefined_))) |i| return d.entries.items[i].value;
+    if (mapEntryIndex(d, canonicalizeKey(argOr(args, 0, Value.undefined_)))) |i| return d.entries.items[i].value;
     return Value.undefined_;
 }
 
@@ -473,7 +483,10 @@ fn mapGetOrInsert(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Map.prototype.getOrInsert called on non-Map");
     if (inst.map_data == null) return throwTypeError(realm, "Map.prototype.getOrInsert called on non-Map");
     const d = inst.map_data.?;
-    const key = argOr(args, 0, Value.undefined_);
+    // §24.1.4.{N} upsert — CanonicalizeKeyedCollectionKey on
+    // the lookup key, so -0 finds the +0 entry and a fresh
+    // insert stores +0.
+    const key = canonicalizeKey(argOr(args, 0, Value.undefined_));
     const default_v = argOr(args, 1, Value.undefined_);
     if (mapEntryIndex(d, key)) |i| return d.entries.items[i].value;
     mapSetInternal(realm, inst, key, default_v) catch return error.OutOfMemory;
@@ -488,7 +501,11 @@ fn mapGetOrInsertComputed(realm: *Realm, this_value: Value, args: []const Value)
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Map.prototype.getOrInsertComputed called on non-Map");
     if (inst.map_data == null) return throwTypeError(realm, "Map.prototype.getOrInsertComputed called on non-Map");
     const d = inst.map_data.?;
-    const key = argOr(args, 0, Value.undefined_);
+    const raw_key = argOr(args, 0, Value.undefined_);
+    // Stage-3 upsert: per CanonicalizeKeyedCollectionKey, -0
+    // canonicalizes to +0 before any further use. The callback
+    // and the stored entry both see the canonical form.
+    const key = canonicalizeKey(raw_key);
     const cb_v = argOr(args, 1, Value.undefined_);
     const cb = heap_mod.valueAsFunction(cb_v) orelse return throwTypeError(realm, "callbackfn must be a function");
     if (mapEntryIndex(d, key)) |i| return d.entries.items[i].value;
@@ -511,12 +528,12 @@ fn mapGetOrInsertComputed(realm: *Realm, this_value: Value, args: []const Value)
 
 fn mapHas(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const d = mapDataOf(this_value) orelse return throwTypeError(realm, "Map.prototype.has called on non-Map");
-    return Value.fromBool(mapEntryIndex(d, argOr(args, 0, Value.undefined_)) != null);
+    return Value.fromBool(mapEntryIndex(d, canonicalizeKey(argOr(args, 0, Value.undefined_))) != null);
 }
 
 fn mapDelete(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const d = mapDataOf(this_value) orelse return throwTypeError(realm, "Map.prototype.delete called on non-Map");
-    if (mapEntryIndex(d, argOr(args, 0, Value.undefined_))) |i| {
+    if (mapEntryIndex(d, canonicalizeKey(argOr(args, 0, Value.undefined_)))) |i| {
         d.entries.items[i].deleted = true;
         return Value.true_;
     }
@@ -921,18 +938,18 @@ fn setAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Val
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Set.prototype.add called on non-Set");
     const d = inst.set_data orelse return throwTypeError(realm, "Set.prototype.add called on non-Set");
     if (d.is_weak) return throwTypeError(realm, "Set.prototype.add called on non-Set");
-    setAddInternal(realm, inst, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
+    setAddInternal(realm, inst, canonicalizeKey(argOr(args, 0, Value.undefined_))) catch return error.OutOfMemory;
     return this_value;
 }
 
 fn setHas(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const d = setDataOf(this_value) orelse return throwTypeError(realm, "Set.prototype.has called on non-Set");
-    return Value.fromBool(setIndex(d, argOr(args, 0, Value.undefined_)) != null);
+    return Value.fromBool(setIndex(d, canonicalizeKey(argOr(args, 0, Value.undefined_))) != null);
 }
 
 fn setDelete(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const d = setDataOf(this_value) orelse return throwTypeError(realm, "Set.prototype.delete called on non-Set");
-    if (setIndex(d, argOr(args, 0, Value.undefined_))) |i| {
+    if (setIndex(d, canonicalizeKey(argOr(args, 0, Value.undefined_)))) |i| {
         d.entries.items[i].deleted = true;
         return Value.true_;
     }
