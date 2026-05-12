@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.16 % | 96.48 % | 29258 / 46320 |
-| **runtime** | 64.88 % | 78.80 % | 30054 / 46320 |
+| **runtime** | 64.89 % | 78.80 % | 30055 / 46320 |
 
 ## Where the runtime stands, by area
 
@@ -52,7 +52,7 @@ browser-era built-ins …).
 | `built-ins/Map` | 145 | 58 | 1 | 71 % | 71 % |
 | `built-ins/NativeErrors` | 68 | 26 | 0 | 72 % | 72 % |
 | `built-ins/Number` | 290 | 50 | 0 | 85 % | 85 % |
-| `built-ins/Reflect` | 96 | 57 | 0 | 63 % | 63 % |
+| `built-ins/Reflect` | 97 | 56 | 0 | 63 % | 63 % |
 | `built-ins/RegExpStringIteratorPrototype` | 7 | 10 | 0 | 41 % | 41 % |
 | `built-ins/Set` | 330 | 52 | 1 | 86 % | 86 % |
 | `built-ins/Symbol` | 42 | 48 | 8 | 43 % | 47 % |
@@ -135,19 +135,15 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-12 — cynic `1311a63`, test262 `d0c1b455`
+### 2026-05-12 — cynic `62d8006`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass |
 |---|---|---|---|---:|
-| **runtime** | 64.88 % | 78.80 % | 30054 / 46320 | +163 |
+| **runtime** | 64.89 % | 78.80 % | 30055 / 46320 | +164 |
 
 Biggest movers (runtime):
 
-- `built-ins/Object` +11
-- `built-ins/Promise` +7
-- `built-ins/Set` +7
-- `built-ins/JSON` +2
-- `built-ins/Proxy` +2
+- `built-ins/Reflect` +1
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
