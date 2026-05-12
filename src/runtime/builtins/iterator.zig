@@ -1130,13 +1130,19 @@ fn callIteratorMethod(realm: *Realm, iter_fn: *JSFunction, this_v: Value) Native
 /// method).
 fn getIteratorFlattenable(realm: *Realm, v: Value, reject_strings: bool) NativeError!Value {
     if (heap_mod.valueAsPlainObject(v) == null) {
-        if (reject_strings) {
-            return throwTypeError(realm, "iterable is not an object");
+        if (v.isString() and !reject_strings) {
+            // §22.1.3.{34,36} String.prototype[@@iterator] yields
+            // a StringIterator. We don't have an explicit one
+            // installed on `String.prototype`; route through
+            // `openIterator` (which array-like-iterates strings)
+            // for the same shape.
+            const it = interpreter.openIterator(realm.allocator, realm, v) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return throwTypeError(realm, "could not open string iterator"),
+            };
+            return it;
         }
-        if (!v.isString()) return throwTypeError(realm, "iterable is not an object");
-        // string primitive — fall through with the string-as-value path.
-        // (Cynic doesn't yet have a String iterator, so reject anyway for safety.)
-        return throwTypeError(realm, "iterable is a primitive");
+        return throwTypeError(realm, "iterable is not an object");
     }
     // §7.4.6 step 2 — accessor-aware `@@iterator` read so the
     // `iterables-iteration*.js` family observes the spec's exact
