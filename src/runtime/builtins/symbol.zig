@@ -118,7 +118,14 @@ fn installWellKnownSymbol(realm: *Realm, ctor: *JSFunction, name: []const u8, de
 }
 
 fn symbolConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value;
+    // §20.4.1.1 step 1 — Symbol called as a constructor (`new
+    // Symbol(...)`) throws TypeError. The fresh `this_value`
+    // allocated for `new` is a JSObject; the plain-call form
+    // gets `undefined` (or globalThis). Functions called as
+    // constructors carry a non-undefined this; reject those.
+    if (heap_mod.valueAsPlainObject(this_value) != null) {
+        return throwTypeError(realm, "Symbol is not a constructor");
+    }
     var desc: ?[]const u8 = null;
     if (args.len > 0 and !args[0].isUndefined()) {
         const desc_str = stringifyArg(realm, args[0]) catch return error.OutOfMemory;
