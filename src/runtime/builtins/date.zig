@@ -92,8 +92,8 @@ pub fn install(realm: *Realm) !void {
     // year - 1900) and `setYear` (Y2K-quirky) are
     // intentionally NOT installed — pre-Y2K legacy that
     // doesn't make sense on modern non-browser hosts.
-    try installNativeMethodOnProto(realm, proto, "toGMTString", dateToString, 0);
-    try installNativeMethodOnProto(realm, proto, "toUTCString", dateToString, 0);
+    try installNativeMethodOnProto(realm, proto, "toGMTString", dateToUTCString, 0);
+    try installNativeMethodOnProto(realm, proto, "toUTCString", dateToUTCString, 0);
     try installNativeMethodOnProto(realm, proto, "toDateString", dateToDateString, 0);
     try installNativeMethodOnProto(realm, proto, "toTimeString", dateToTimeString, 0);
     try installNativeMethodOnProto(realm, proto, "toLocaleString", dateToString, 0);
@@ -127,33 +127,10 @@ fn dateToPrimitive(realm: *Realm, this_value: Value, args: []const Value) Native
     };
 }
 
-fn dateToDateString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    const ms = try requireDateMs(realm, this_value);
-    if (std.math.isNan(ms)) {
-        const s = realm.heap.allocateString("Invalid Date") catch return error.OutOfMemory;
-        return Value.fromString(s);
-    }
-    const p = dateParts(ms);
-    var buf: [40]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}-{d:0>2}", .{ p.year, p.month + 1, p.day }) catch return throwRangeError(realm, "Invalid Date");
-    const s = realm.heap.allocateString(text) catch return error.OutOfMemory;
-    return Value.fromString(s);
-}
-
-fn dateToTimeString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    const ms = try requireDateMs(realm, this_value);
-    if (std.math.isNan(ms)) {
-        const s = realm.heap.allocateString("Invalid Date") catch return error.OutOfMemory;
-        return Value.fromString(s);
-    }
-    const p = dateParts(ms);
-    var buf: [40]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf, "{d:0>2}:{d:0>2}:{d:0>2}", .{ p.hours, p.minutes, p.seconds }) catch return throwRangeError(realm, "Invalid Date");
-    const s = realm.heap.allocateString(text) catch return error.OutOfMemory;
-    return Value.fromString(s);
-}
+// (dateToDateString / dateToTimeString — moved below
+// dateToString to keep the spec-formatted variants together.
+// Previous YYYY-MM-DD / HH:mm:ss implementations were wrong:
+// §21.4.4.{35,42} mandate the locale-fixed English forms.)
 
 // ── Date setters (§21.4.4 — UTC-only since `getTimezoneOffset` is 0) ────────
 
@@ -677,7 +654,92 @@ fn dateToString(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         const s = realm.heap.allocateString("Invalid Date") catch return error.OutOfMemory;
         return Value.fromString(s);
     }
-    return dateToISOString(realm, this_value, &.{});
+    // §21.4.4.41 — `Day Mon DD YYYY HH:mm:ss GMT+0000 (Coordinated Universal Time)`
+    // Cynic doesn't carry locale; the timezone is always UTC.
+    const p = dateParts(ms);
+    var buf: [80]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{s} {s} {d:0>2} {d:0>4} {d:0>2}:{d:0>2}:{d:0>2} GMT+0000 (Coordinated Universal Time)", .{
+        weekdayName(p.weekday), monthName(p.month), u(p.day), u(p.year), u(p.hours), u(p.minutes), u(p.seconds),
+    }) catch return throwRangeError(realm, "Invalid Date");
+    const s = realm.heap.allocateString(text) catch return error.OutOfMemory;
+    return Value.fromString(s);
+}
+
+/// §21.4.4.43 Date.prototype.toUTCString. Format
+/// `Day, DD Mon YYYY HH:mm:ss GMT` per the RFC 7231 IMF-fixdate
+/// production. (Used as the date format in HTTP headers.)
+fn dateToUTCString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const ms = getDateMs(this_value) orelse return throwTypeError(realm, "Date.prototype.toUTCString called on non-Date");
+    if (std.math.isNan(ms)) {
+        const s = realm.heap.allocateString("Invalid Date") catch return error.OutOfMemory;
+        return Value.fromString(s);
+    }
+    const p = dateParts(ms);
+    var buf: [64]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{s}, {d:0>2} {s} {d:0>4} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
+        weekdayName(p.weekday), u(p.day), monthName(p.month), u(p.year), u(p.hours), u(p.minutes), u(p.seconds),
+    }) catch return throwRangeError(realm, "Invalid Date");
+    const s = realm.heap.allocateString(text) catch return error.OutOfMemory;
+    return Value.fromString(s);
+}
+
+/// §21.4.4.35 Date.prototype.toDateString. Format
+/// `Day Mon DD YYYY` (locale-fixed English per spec).
+fn dateToDateString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const ms = getDateMs(this_value) orelse return throwTypeError(realm, "Date.prototype.toDateString called on non-Date");
+    if (std.math.isNan(ms)) {
+        const s = realm.heap.allocateString("Invalid Date") catch return error.OutOfMemory;
+        return Value.fromString(s);
+    }
+    const p = dateParts(ms);
+    var buf: [32]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{s} {s} {d:0>2} {d:0>4}", .{
+        weekdayName(p.weekday), monthName(p.month), u(p.day), u(p.year),
+    }) catch return throwRangeError(realm, "Invalid Date");
+    const s = realm.heap.allocateString(text) catch return error.OutOfMemory;
+    return Value.fromString(s);
+}
+
+/// §21.4.4.42 Date.prototype.toTimeString. Format
+/// `HH:mm:ss GMT+0000 (Coordinated Universal Time)`.
+fn dateToTimeString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const ms = getDateMs(this_value) orelse return throwTypeError(realm, "Date.prototype.toTimeString called on non-Date");
+    if (std.math.isNan(ms)) {
+        const s = realm.heap.allocateString("Invalid Date") catch return error.OutOfMemory;
+        return Value.fromString(s);
+    }
+    const p = dateParts(ms);
+    var buf: [64]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{d:0>2}:{d:0>2}:{d:0>2} GMT+0000 (Coordinated Universal Time)", .{
+        u(p.hours), u(p.minutes), u(p.seconds),
+    }) catch return throwRangeError(realm, "Invalid Date");
+    const s = realm.heap.allocateString(text) catch return error.OutOfMemory;
+    return Value.fromString(s);
+}
+
+/// Convert a non-negative i64 to u64 for `{d:0>N}` formatting.
+/// Zig 0.17's signed formatter prints a leading `+` for
+/// non-negative values, which corrupts every fixed-width Date
+/// component ("+1970-+1-+1T+0..."). The Date parts (year, month,
+/// day, hours, minutes, seconds, ms) are all non-negative for
+/// any in-range Date, so casting to unsigned is safe.
+fn u(v: i64) u64 {
+    return @intCast(if (v < 0) 0 else v);
+}
+
+const day_names = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
+fn weekdayName(w: i64) []const u8 {
+    if (w < 0 or w > 6) return "???";
+    return day_names[@intCast(w)];
+}
+fn monthName(m: i64) []const u8 {
+    if (m < 0 or m > 11) return "???";
+    return month_names[@intCast(m)];
 }
 
 fn dateToISOString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -687,7 +749,7 @@ fn dateToISOString(realm: *Realm, this_value: Value, args: []const Value) Native
     const p = dateParts(ms);
     var buf: [40]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
-        p.year, p.month + 1, p.day, p.hours, p.minutes, p.seconds, p.ms,
+        u(p.year), u(p.month + 1), u(p.day), u(p.hours), u(p.minutes), u(p.seconds), u(p.ms),
     }) catch return throwRangeError(realm, "Invalid Date");
     const s = realm.heap.allocateString(text) catch return error.OutOfMemory;
     return Value.fromString(s);
