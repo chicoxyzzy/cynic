@@ -593,9 +593,33 @@ fn asyncGenThrow(realm: *Realm, this_value: Value, args: []const Value) @import(
     return intrinsics_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
 }
 
+/// §27.5.1 — Generator.prototype.{next,return,throw} require
+/// `this` to have a real `[[GeneratorState]]` slot. Cynic
+/// tracks it via `obj.generator_ref` (which must point at a
+/// non-async generator). Wrong-receiver → TypeError per spec.
+fn genBrandCheckTypeError(realm: *Realm, this_value: Value, msg: []const u8) ?@import("function.zig").NativeError {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse {
+        const ex = intrinsics_mod.newTypeError(realm, msg) catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    };
+    const gen = obj.generator_ref orelse {
+        const ex = intrinsics_mod.newTypeError(realm, msg) catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    };
+    if (gen.is_async) {
+        const ex = intrinsics_mod.newTypeError(realm, msg) catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
+    return null;
+}
+
 fn genNext(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
-    const obj = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    const gen = obj.generator_ref orelse return error.NativeThrew;
+    if (genBrandCheckTypeError(realm, this_value, "Generator method called on non-generator")) |err| return err;
+    const obj = heap_mod.valueAsPlainObject(this_value).?;
+    const gen = obj.generator_ref.?;
     const sent: Value = if (args.len > 0) args[0] else Value.undefined_;
     const outcome = resumeGenerator(realm.allocator, realm, gen, sent) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -612,14 +636,15 @@ fn genNext(realm: *Realm, this_value: Value, args: []const Value) @import("funct
 }
 
 fn genReturn(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
-    const obj = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    const gen = obj.generator_ref orelse return error.NativeThrew;
+    if (genBrandCheckTypeError(realm, this_value, "Generator.prototype.return called on non-generator")) |err| return err;
+    const obj = heap_mod.valueAsPlainObject(this_value).?;
+    const gen = obj.generator_ref.?;
     gen.state = .completed;
     return genResultObject(realm, if (args.len > 0) args[0] else Value.undefined_, true) catch return error.OutOfMemory;
 }
 
 fn genThrow(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
-    _ = this_value;
+    if (genBrandCheckTypeError(realm, this_value, "Generator.prototype.throw called on non-generator")) |err| return err;
     realm.pending_exception = if (args.len > 0) args[0] else Value.undefined_;
     return error.NativeThrew;
 }
