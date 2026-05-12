@@ -4003,7 +4003,13 @@ fn runFrames(
                     const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
                     obj.set(allocator, owned.bytes, registers[i]) catch return error.OutOfMemory;
                 }
-                obj.set(allocator, "length", Value.fromInt32(@intCast(f.argc))) catch return error.OutOfMemory;
+                // §10.4.4.6 step 8 — `length` is `{ writable: true,
+                // enumerable: false, configurable: true }`. Default
+                // `set` lands at all-true, so `Object.keys(arguments)`
+                // surfaced "length" as an enumerable own key.
+                obj.setWithFlags(allocator, "length", Value.fromInt32(@intCast(f.argc)), .{
+                    .writable = true, .enumerable = false, .configurable = true,
+                }) catch return error.OutOfMemory;
                 // §10.4.4.7 step 5 — strict-mode unmapped arguments
                 // installs a `callee` accessor whose [[Get]] and
                 // [[Set]] are both %ThrowTypeError%. Cynic is
