@@ -536,16 +536,93 @@ fn formatDoubleForJson(scratch: *[64]u8, d: f64) []const u8 {
 
 fn jsonParse(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
+    // §25.5.1 JSON.parse(text [, reviver]) step 1 — ToString(text).
+    // Spec is silent on non-string input but real engines coerce.
     const v = argOr(args, 0, Value.undefined_);
-    if (!v.isString()) return error.NativeThrew;
-    const src: *JSString = @ptrCast(@alignCast(v.asString()));
+    const src: *JSString = if (v.isString())
+        @ptrCast(@alignCast(v.asString()))
+    else
+        stringifyArg(realm, v) catch return error.OutOfMemory;
 
     var parser = JsonParser{ .input = src.bytes, .pos = 0, .realm = realm };
     parser.skipWs();
     const result = parser.parseValue() catch return error.NativeThrew;
     parser.skipWs();
     if (parser.pos != src.bytes.len) return error.NativeThrew;
-    return result;
+
+    // §25.5.1 step 7 — when reviver IsCallable, wrap the unfiltered
+    // value in `{ "": value }` and run InternalizeJSONProperty.
+    const reviver_v = argOr(args, 1, Value.undefined_);
+    const reviver_fn = heap_mod.valueAsFunction(reviver_v) orelse return result;
+    const root = realm.heap.allocateObject() catch return error.OutOfMemory;
+    root.prototype = realm.intrinsics.object_prototype;
+    root.set(realm.allocator, "", result) catch return error.OutOfMemory;
+    return internalizeJsonProperty(realm, root, "", reviver_fn);
+}
+
+/// §25.5.1.1 InternalizeJSONProperty — recursive reviver walk.
+/// `holder["name"]` is the value being filtered; recurse into
+/// arrays / plain objects before calling the reviver. Undefined
+/// return from the reviver deletes the slot; any other value
+/// CreateDataProperty's it back.
+fn internalizeJsonProperty(
+    realm: *Realm,
+    holder: *JSObject,
+    name: []const u8,
+    reviver: *JSFunction,
+) NativeError!Value {
+    const val = holder.get(name);
+    if (heap_mod.valueAsPlainObject(val)) |obj| {
+        if (obj.is_array_exotic) {
+            // Array branch — index 0..length-1 in numeric order.
+            const len_v = obj.get("length");
+            const len: i64 = if (len_v.isInt32()) len_v.asInt32() else 0;
+            var i: i64 = 0;
+            while (i < len) : (i += 1) {
+                var ibuf: [24]u8 = undefined;
+                const key = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+                const new_el = try internalizeJsonProperty(realm, obj, key, reviver);
+                if (new_el.isUndefined()) {
+                    _ = obj.deleteOwn(key);
+                } else {
+                    obj.set(realm.allocator, key, new_el) catch return error.OutOfMemory;
+                }
+            }
+        } else {
+            // Object branch — iterate own enumerable keys (insertion
+            // order, integer-keyed first per §6.1.7.1).
+            const keys = try ownPropertyKeysOrdered(realm, obj);
+            defer realm.allocator.free(keys);
+            for (keys) |key| {
+                const new_el = try internalizeJsonProperty(realm, obj, key, reviver);
+                if (new_el.isUndefined()) {
+                    _ = obj.deleteOwn(key);
+                } else {
+                    obj.set(realm.allocator, key, new_el) catch return error.OutOfMemory;
+                }
+            }
+        }
+    }
+    // Call reviver(holder, name, val).
+    const name_js = realm.heap.allocateString(name) catch return error.OutOfMemory;
+    const call_args = [_]Value{ Value.fromString(name_js), val };
+    const outcome = interpreter.callJSFunction(
+        realm.allocator,
+        realm,
+        reviver,
+        heap_mod.taggedObject(holder),
+        &call_args,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    return switch (outcome) {
+        .value, .yielded => |x| x,
+        .thrown => |ex| blk: {
+            realm.pending_exception = ex;
+            break :blk error.NativeThrew;
+        },
+    };
 }
 
 const JsonError = error{ Malformed, OutOfMemory, NativeThrew };
