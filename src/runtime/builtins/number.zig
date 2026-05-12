@@ -32,8 +32,6 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethod(realm, num_ctor, "isNaN", numberIsNaN, 1);
         try installNativeMethod(realm, num_ctor, "isInteger", numberIsInteger, 1);
         try installNativeMethod(realm, num_ctor, "isSafeInteger", numberIsSafeInteger, 1);
-        try installNativeMethod(realm, num_ctor, "parseInt", parseIntNative, 2);
-        try installNativeMethod(realm, num_ctor, "parseFloat", parseFloatNative, 1);
         if (num_ctor.prototype) |np| {
             try installNativeMethodOnProto(realm, np, "toFixed", numberToFixed, 1);
             try installNativeMethodOnProto(realm, np, "toPrecision", numberToPrecision, 1);
@@ -49,10 +47,22 @@ pub fn install(realm: *Realm) !void {
         }
     }
     // Top-level parseInt / parseFloat / isNaN / isFinite globals.
+    // §21.1.2.{12, 13} — `Number.parseInt === parseInt` and
+    // `Number.parseFloat === parseFloat`: the SAME function
+    // object on both bindings. Install once, then alias on
+    // Number with the spec-mandated `{ w, !e, c }` flags.
     const pi = try realm.heap.allocateFunctionNative(parseIntNative, 2, "parseInt");
     try realm.globals.put(realm.allocator, "parseInt", heap_mod.taggedFunction(pi));
     const pf = try realm.heap.allocateFunctionNative(parseFloatNative, 1, "parseFloat");
     try realm.globals.put(realm.allocator, "parseFloat", heap_mod.taggedFunction(pf));
+    if (heap_mod.valueAsFunction(realm.globals.get("Number").?)) |num_ctor| {
+        try num_ctor.setWithFlags(realm.allocator, "parseInt", heap_mod.taggedFunction(pi), .{
+            .writable = true, .enumerable = false, .configurable = true,
+        });
+        try num_ctor.setWithFlags(realm.allocator, "parseFloat", heap_mod.taggedFunction(pf), .{
+            .writable = true, .enumerable = false, .configurable = true,
+        });
+    }
     const inn = try realm.heap.allocateFunctionNative(globalIsNaN, 1, "isNaN");
     try realm.globals.put(realm.allocator, "isNaN", heap_mod.taggedFunction(inn));
     const ifn = try realm.heap.allocateFunctionNative(globalIsFinite, 1, "isFinite");
@@ -75,11 +85,16 @@ fn primitiveNumberValue(this_value: Value) ?f64 {
 
 fn numberToFixed(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const x = primitiveNumberValue(this_value) orelse return throwTypeError(realm, "Number.prototype.toFixed called on non-number");
+    // §21.1.3.3 step 2 — `Let f be ? ToIntegerOrInfinity(fractionDigits)`.
+    // ToIntegerOrInfinity maps NaN → 0 and truncates finite
+    // values; only ±∞ remain to fail the range guard. The old
+    // code treated NaN as out-of-range and threw RangeError.
     const digits_v = coerceToNumber(argOr(args, 0, Value.fromInt32(0)));
-    const dd: f64 = if (digits_v.isInt32()) @floatFromInt(digits_v.asInt32()) else digits_v.asDouble();
-    if (std.math.isNan(dd) or std.math.isInf(dd) or dd < 0 or dd > 100)
+    const raw: f64 = if (digits_v.isInt32()) @floatFromInt(digits_v.asInt32()) else digits_v.asDouble();
+    const dd: f64 = if (std.math.isNan(raw)) 0 else @trunc(raw);
+    if (std.math.isInf(dd) or dd < 0 or dd > 100)
         return throwRangeError(realm, "toFixed digits out of range [0, 100]");
-    const digits: i32 = @intFromFloat(@trunc(dd));
+    const digits: i32 = @intFromFloat(dd);
     if (std.math.isNan(x)) {
         const s = realm.heap.allocateString("NaN") catch return error.OutOfMemory;
         return Value.fromString(s);
@@ -100,10 +115,14 @@ fn numberToExponential(realm: *Realm, this_value: Value, args: []const Value) Na
     var digits: i32 = -1;
     if (!digits_arg.isUndefined()) {
         const dv = coerceToNumber(digits_arg);
-        const dd: f64 = if (dv.isInt32()) @floatFromInt(dv.asInt32()) else dv.asDouble();
-        if (std.math.isNan(dd) or std.math.isInf(dd) or dd < 0 or dd > 100)
+        const raw: f64 = if (dv.isInt32()) @floatFromInt(dv.asInt32()) else dv.asDouble();
+        // §21.1.3.2 step 2 — ToIntegerOrInfinity maps NaN → 0
+        // and truncates finite values. The range guard kicks in
+        // for ±∞ and out-of-bounds finite values, not NaN.
+        const dd: f64 = if (std.math.isNan(raw)) 0 else @trunc(raw);
+        if (std.math.isInf(dd) or dd < 0 or dd > 100)
             return throwRangeError(realm, "toExponential digits out of range [0, 100]");
-        digits = @intFromFloat(@trunc(dd));
+        digits = @intFromFloat(dd);
     }
     if (std.math.isNan(x)) {
         const s = realm.heap.allocateString("NaN") catch return error.OutOfMemory;
