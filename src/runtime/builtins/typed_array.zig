@@ -56,9 +56,15 @@ pub fn install(realm: *Realm) !void {
             .set_home_object = false,
             .to_string_tag = "ArrayBuffer",
         });
+        const ctor = r.ctor;
         const proto = r.proto;
         try installNativeGetter(realm, proto, "byteLength", arrayBufferByteLength);
         try installNativeMethodOnProto(realm, proto, "slice", arrayBufferSlice, 2);
+        // §25.1.4.3 ArrayBuffer.isView(arg) — returns true iff
+        // arg is an Object with a `[[ViewedArrayBuffer]]` slot
+        // (TypedArray or DataView instance). Cynic tracks both
+        // with `obj.typed_view`.
+        try intrinsics.installNativeMethod(realm, ctor, "isView", arrayBufferIsView, 1);
     }
 
     // §25.3 DataView constructor + prototype.
@@ -255,6 +261,21 @@ fn arrayBufferConstructor(realm: *Realm, this_value: Value, args: []const Value)
     @memset(buf, 0);
     inst.array_buffer = buf;
     return this_value;
+}
+
+/// §25.1.4.3 ArrayBuffer.isView(arg) — true iff arg is an
+/// Object with a `[[ViewedArrayBuffer]]` internal slot (i.e.
+/// any TypedArray or DataView instance). Cynic tracks both via
+/// `obj.typed_view`.
+fn arrayBufferIsView(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = this_value;
+    const arg = argOr(args, 0, Value.undefined_);
+    const obj = heap_mod.valueAsPlainObject(arg) orelse return Value.false_;
+    // §25.1.4.3 — true iff `[[ViewedArrayBuffer]]` is present.
+    // Cynic stores TypedArrays under `typed_view` and DataViews
+    // under `data_view`; either qualifies.
+    return Value.fromBool(obj.typed_view != null or obj.data_view != null);
 }
 
 fn arrayBufferByteLength(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
