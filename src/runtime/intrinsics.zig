@@ -991,7 +991,26 @@ fn stringConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
         // `String.prototype.toString` / `.valueOf` can unbox in
         // O(1) without an isString discriminator dance.
         if (primitive.isString()) {
-            inst.boxed_string = @ptrCast(@alignCast(primitive.asString()));
+            const ps: *JSString = @ptrCast(@alignCast(primitive.asString()));
+            inst.boxed_string = ps;
+            // §22.1.4 String exotic — instances have own `length`
+            // and indexed slots `[0]..[length-1]`, all
+            // non-writable / non-configurable per §10.4.3.4. Without
+            // these `new String("abc").length` was undefined and
+            // any iteration / index-access against the wrapper
+            // failed.
+            inst.setWithFlags(realm.allocator, "length", Value.fromInt32(@intCast(ps.bytes.len)), .{
+                .writable = false, .enumerable = false, .configurable = false,
+            }) catch return error.OutOfMemory;
+            var ibuf: [24]u8 = undefined;
+            for (ps.bytes, 0..) |b, i| {
+                const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+                const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+                const ch = realm.heap.allocateString(&[_]u8{b}) catch return error.OutOfMemory;
+                inst.setWithFlags(realm.allocator, owned.bytes, Value.fromString(ch), .{
+                    .writable = false, .enumerable = true, .configurable = false,
+                }) catch return error.OutOfMemory;
+            }
         }
         return this_value; // ConstructResult will keep it
     }

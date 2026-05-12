@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 |
-| **runtime** | 66.22 % | 79.27 % | 30657 / 46296 |
+| **runtime** | 66.31 % | 79.38 % | 30699 / 46296 |
 
 
 ## Where the runtime stands, by area
@@ -24,17 +24,17 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_1000+ fails_** | | | | | |
-| `language/expressions` | 8042 | 2084 | 912 | 73 % | 79 % |
-| `language/statements` | 7138 | 1519 | 656 | 77 % | 82 % |
+| `language/expressions` | 8043 | 2083 | 912 | 73 % | 79 % |
+| `language/statements` | 7139 | 1518 | 656 | 77 % | 82 % |
 | **_100–999 fails_** | | | | | |
-| `built-ins/Array` | 2381 | 571 | 129 | 77 % | 81 % |
+| `built-ins/Array` | 2403 | 549 | 129 | 78 % | 81 % |
 | `built-ins/ArrayBuffer` | 88 | 108 | 0 | 45 % | 45 % |
 | `built-ins/DataView` | 440 | 121 | 0 | 78 % | 78 % |
 | `built-ins/Function` | 210 | 211 | 88 | 41 % | 50 % |
-| `built-ins/Object` | 2876 | 455 | 80 | 84 % | 86 % |
+| `built-ins/Object` | 2881 | 450 | 80 | 84 % | 86 % |
 | `built-ins/Promise` | 506 | 131 | 40 | 75 % | 79 % |
 | `built-ins/RegExp` | 1322 | 396 | 161 | 70 % | 77 % |
-| `built-ins/String` | 896 | 322 | 5 | 73 % | 74 % |
+| `built-ins/String` | 907 | 311 | 5 | 74 % | 74 % |
 | `built-ins/TypedArray` | 885 | 545 | 8 | 62 % | 62 % |
 | `built-ins/TypedArrayConstructors` | 400 | 320 | 16 | 54 % | 56 % |
 | `language/module-code` | 392 | 202 | 2 | 66 % | 66 % |
@@ -47,7 +47,7 @@ browser-era built-ins …).
 | `built-ins/Error` | 45 | 13 | 0 | 78 % | 78 % |
 | `built-ins/GeneratorFunction` | 7 | 16 | 0 | 30 % | 30 % |
 | `built-ins/GeneratorPrototype` | 32 | 29 | 0 | 52 % | 52 % |
-| `built-ins/Iterator` | 440 | 64 | 6 | 86 % | 87 % |
+| `built-ins/Iterator` | 442 | 62 | 6 | 87 % | 88 % |
 | `built-ins/JSON` | 109 | 35 | 21 | 66 % | 76 % |
 | `built-ins/Map` | 166 | 37 | 1 | 81 % | 82 % |
 | `built-ins/Math` | 306 | 11 | 10 | 94 % | 97 % |
@@ -142,7 +142,15 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
 | **parser** | 63.63 % | 96.49 % | 29456 / 46296 | +198 | 0.6 s |
-| **runtime** | 66.22 % | 79.27 % | 30657 / 46296 | +766 | 2m 48s |
+| **runtime** | 66.31 % | 79.38 % | 30699 / 46296 | +808 | 3m 27s |
+
+Biggest movers (runtime):
+
+- `built-ins/Array` +22
+- `built-ins/String` +11
+- `built-ins/Object` +5
+- `built-ins/Iterator` +2
+- `language/expressions` +1
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 

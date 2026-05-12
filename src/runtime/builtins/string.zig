@@ -71,6 +71,13 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, sp, "match", stringMatch, 1);
     try installNativeMethodOnProto(realm, sp, "matchAll", stringMatchAll, 1);
     try installNativeMethodOnProto(realm, sp, "search", stringSearch, 1);
+    // §22.1.3.36 String.prototype[@@iterator] — yields each
+    // code-point of the string (or a code unit at the unicode
+    // boundary, but Cynic stores UTF-8 so we walk code points).
+    // Routed through `openIterator` which already builds the
+    // array-like iterator over `length` + indexed reads on the
+    // wrapper / primitive.
+    try installNativeMethodOnProto(realm, sp, "@@iterator", stringSymbolIterator, 0);
 
     // §22.1.2.* — String constructor statics.
     if (heap_mod.valueAsFunction(realm.globals.get("String").?)) |str_ctor| {
@@ -97,6 +104,23 @@ fn regexpStringIterReturnsSelf(realm: *Realm, this_value: Value, args: []const V
     _ = realm;
     _ = args;
     return this_value;
+}
+
+/// §22.1.3.36 String.prototype[@@iterator]. Returns an iterator
+/// over the receiver's characters. For a primitive string
+/// receiver or a String wrapper, `openIterator` already does
+/// the right thing — it falls through to the array-like-length
+/// path which walks indexed slots.
+fn stringSymbolIterator(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    // §22.1.3.36 step 1 — `this` must be a string-coercible
+    // (RequireObjectCoercible); `coerceThisToJSString` handles
+    // the wrapper-unbox and the null/undefined → TypeError.
+    const s = try coerceThisToJSString(realm, this_value);
+    return interpreter.openIterator(realm.allocator, realm, Value.fromString(s)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return throwTypeError(realm, "could not open string iterator"),
+    };
 }
 
 /// §22.2.9.1 %RegExpStringIteratorPrototype%.next — RequireInternalSlot
