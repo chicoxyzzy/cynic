@@ -587,7 +587,13 @@ pub fn installConstructor(realm: *Realm, spec: ConstructorSpec) !struct { ctor: 
 /// repeats at every `length` / `byteLength` / `size` /
 /// `description` site.
 pub fn installNativeGetter(realm: *Realm, proto: *JSObject, name: []const u8, getter_fn: NativeFn) !void {
-    const getter = try realm.heap.allocateFunctionNative(getter_fn, 0, name);
+    // §17 — built-in getter functions carry `name` = `"get <propname>"`
+    // (with the space). Test262 verifies via
+    // `Object.getOwnPropertyDescriptor(proto, key).get.name`.
+    // Allocate via the realm's class-arena so the slice lives
+    // for the realm's lifetime without leaking through GC.
+    const getter_name = std.fmt.allocPrint(realm.classAllocator(), "get {s}", .{name}) catch return error.OutOfMemory;
+    const getter = try realm.heap.allocateFunctionNative(getter_fn, 0, getter_name);
     getter.proto = realm.intrinsics.function_prototype;
     const entry = try proto.accessors.getOrPut(realm.allocator, name);
     entry.value_ptr.* = .{ .getter = getter };
