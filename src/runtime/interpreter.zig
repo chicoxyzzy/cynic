@@ -2261,6 +2261,14 @@ fn runFrames(
                         else
                             ensureGeneratorPrototype(realm) catch realm.intrinsics.object_prototype;
                     }
+                } else if (fn_obj.prototype) |proto| {
+                    // §10.2.4 — a regular function's `.prototype`
+                    // object inherits from `%Object.prototype%`.
+                    // `allocateFunction` couldn't set this without
+                    // the realm in scope, so wire it here.
+                    if (proto.prototype == null) {
+                        proto.prototype = realm.intrinsics.object_prototype;
+                    }
                 }
                 // §20.2.3.5 — borrow the template's source slice
                 // for `Function.prototype.toString`. The slice

@@ -1551,13 +1551,35 @@ fn objectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) N
             const inner_args = [_]Value{ heap_mod.taggedObject(proxy_target), proto_v };
             return objectSetPrototypeOf(realm, Value.undefined_, &inner_args);
         }
-        if (proto_v.isNull()) {
-            obj.prototype = null;
-        } else if (heap_mod.valueAsPlainObject(proto_v)) |p| {
-            obj.prototype = p;
-        } else if (heap_mod.valueAsFunction(proto_v)) |fn_obj| {
-            obj.prototype = fn_obj.prototype;
+        // §10.1.2.1 OrdinarySetPrototypeOf step 8 — if proto is
+        // already in obj's chain (or *is* obj), accepting would
+        // create a cycle and every subsequent chain walk would
+        // spin. Spec says return false, which Object.setPrototypeOf
+        // turns into TypeError.
+        const new_proto: ?*@import("../object.zig").JSObject = blk: {
+            if (proto_v.isNull()) break :blk null;
+            if (heap_mod.valueAsPlainObject(proto_v)) |p| break :blk p;
+            if (heap_mod.valueAsFunction(proto_v)) |fn_obj| break :blk fn_obj.prototype;
+            break :blk null;
+        };
+        // §10.4.7 — `%Object.prototype%` is an Immutable Prototype
+        // Exotic Object: [[SetPrototypeOf]] only succeeds if the
+        // new value SameValue's the current one. Object.setPrototypeOf
+        // then translates the `false` return into TypeError.
+        if (obj == realm.intrinsics.object_prototype.?) {
+            if (new_proto != obj.prototype) {
+                return throwTypeError(realm, "Immutable prototype object cannot have its prototype set");
+            }
+            return target_v;
         }
+        var cursor: ?*@import("../object.zig").JSObject = new_proto;
+        while (cursor) |node| {
+            if (node == obj) {
+                return throwTypeError(realm, "cyclic __proto__ value");
+            }
+            cursor = node.prototype;
+        }
+        obj.prototype = new_proto;
     }
     return target_v;
 }

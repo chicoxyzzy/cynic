@@ -229,14 +229,32 @@ fn reflectGetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) 
 
 fn reflectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    _ = realm;
     const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return Value.false_;
     const proto_v = argOr(args, 1, Value.null_);
-    if (proto_v.isNull()) {
-        target.prototype = null;
-        return Value.true_;
+    // §28.1.13 Reflect.setPrototypeOf — proto must be Object or null.
+    if (!proto_v.isNull() and heap_mod.valueAsPlainObject(proto_v) == null and heap_mod.valueAsFunction(proto_v) == null) {
+        return intrinsics.throwTypeError(realm, "prototype must be an Object or null");
     }
-    target.prototype = heap_mod.valueAsPlainObject(proto_v);
+    const new_proto: ?*@import("../object.zig").JSObject = blk: {
+        if (proto_v.isNull()) break :blk null;
+        if (heap_mod.valueAsPlainObject(proto_v)) |p| break :blk p;
+        if (heap_mod.valueAsFunction(proto_v)) |fn_obj| break :blk fn_obj.prototype;
+        break :blk null;
+    };
+    // §10.4.7 — `%Object.prototype%` is an Immutable Prototype
+    // Exotic Object. Its [[SetPrototypeOf]] returns true only if
+    // the requested value equals the current one (both null in
+    // the default case); otherwise returns false without modifying.
+    if (target == realm.intrinsics.object_prototype.?) {
+        return Value.fromBool(new_proto == target.prototype);
+    }
+    // §10.1.2.1 OrdinarySetPrototypeOf step 8 — cycle detection.
+    var cursor: ?*@import("../object.zig").JSObject = new_proto;
+    while (cursor) |node| {
+        if (node == target) return Value.false_;
+        cursor = node.prototype;
+    }
+    target.prototype = new_proto;
     return Value.true_;
 }
 
