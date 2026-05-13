@@ -51,10 +51,6 @@ pub const cynic_oos_path_contains = [_][]const u8{
     "/property-escapes/special-property-value-Script_Extensions-Unknown",
     "/String/prototype/search/regexp-prototype-search-v",
     "/String/prototype/replace/regexp-prototype-replace-v",
-    // ASI corner cases that depend on label / postfix-update / `--`
-    // edge productions Cynic doesn't yet recognise here. Tracked as
-    // small follow-ups; path-skip to keep the score clean.
-    "/asi/S7.9_A",
 };
 
 /// `features` names we know we don't support. Tests whose
