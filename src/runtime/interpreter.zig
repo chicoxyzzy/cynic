@@ -4606,9 +4606,24 @@ fn runFrames(
                 const key_v = local_chunk.constants[k];
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-                // Names are interned in the constant pool; the
-                // pointer survives realm-lifetime so storing it
-                // as the map key is safe. `put` upserts.
+                // §13.15.2 step 1.f.i — strict-mode assignment to a
+                // truly-unresolvable reference throws ReferenceError
+                // at PutValue. Top-level `var x` / `let x` / `const x`
+                // pre-install their entries at hoist time, so by the
+                // time sta_global runs for a known declaration the
+                // key is present. Anything missing here is a bare
+                // `x = 1` for some `x` that was never declared
+                // anywhere — strict mode forbids the implicit global.
+                if (!realm.globals.contains(key_s.bytes)) {
+                    const ex = try makeReferenceError(realm, key_s.bytes);
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                }
                 try realm.globals.put(realm.allocator, key_s.bytes, acc);
             },
 
