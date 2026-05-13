@@ -532,6 +532,15 @@ pub const Op = enum(u8) {
     /// `({…} = v)`) before any property reads, so `const {} = null`
     /// throws as the spec requires.
     require_object_coercible,
+    /// §7.1.19 ToPropertyKey applied to `acc`. Runs
+    /// ToPrimitive(hint "string") and, for non-Symbol results,
+    /// ToString. Emitted right after the key expression of a
+    /// computed PropertyName so a user-defined `toString` /
+    /// `[@@toPrimitive]` fires BEFORE the property value is
+    /// evaluated (matching §13.2.5.5 step 4.a sequencing —
+    /// PropertyKey resolution happens before the
+    /// AssignmentExpression on the right-hand side).
+    to_property_key,
 
     // ── Termination ──────────────────────────────────────────────────────
     /// Halt with `acc` as the program's value. Top-level only in
@@ -570,6 +579,7 @@ pub const Op = enum(u8) {
             .throw_,
             .throw_if_hole,
             .require_object_coercible,
+            .to_property_key,
             .return_,
             .super_get_computed,
             => 0,
@@ -747,6 +757,7 @@ pub const Op = enum(u8) {
             .throw_ => "Throw",
             .throw_if_hole => "ThrowIfHole",
             .require_object_coercible => "RequireObjectCoercible",
+            .to_property_key => "ToPropertyKey",
             .return_ => "Return",
         };
     }

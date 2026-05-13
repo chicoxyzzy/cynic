@@ -1230,6 +1230,11 @@ pub const Compiler = struct {
                 // intern the source slice and use `sta_property`.
                 if (p.key == .computed) {
                     try self.compileExpression(p.key.computed);
+                    // §13.2.5.5 step 4.a — ToPropertyKey runs
+                    // BEFORE the value expression, so a user-
+                    // defined `toString` / `[@@toPrimitive]` on
+                    // the key sees pre-value-evaluation state.
+                    try self.builder.emitOp(.to_property_key, p.span);
                     const r_key = try self.reserveTemp();
                     defer self.releaseTemp();
                     try self.builder.emitOp(.star, p.span);

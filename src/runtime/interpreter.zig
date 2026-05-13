@@ -5488,6 +5488,28 @@ fn runFrames(
                 }
             },
 
+            .to_property_key => {
+                // §7.1.19 ToPropertyKey. Primitives that are
+                // already a valid PropertyKey (string / symbol)
+                // short-circuit; numbers / bigints / booleans /
+                // null / undefined go through ToPrimitive(string)
+                // then ToString. The output is a string or symbol
+                // value in acc.
+                if (acc.isString() or heap_mod.valueAsSymbol(acc) != null) {
+                    // already a property key
+                } else {
+                    const prim_outcome = try coerceToPropertyKey(allocator, realm, frames, f, ip, acc);
+                    switch (prim_outcome) {
+                        .ok => |v| acc = v,
+                        .handled => {
+                            committed = true;
+                            continue;
+                        },
+                        .uncaught => |ex| return .{ .thrown = ex },
+                    }
+                }
+            },
+
             .return_ => {
                 // Pop the current frame, leaving its accumulator as
                 // the caller's accumulator. If we just popped the
