@@ -275,15 +275,21 @@ fn parseConciseBody(p: *Parser, is_async: bool) ParseError!ast_expr.ArrowBody {
     const saved_gen = p.in_generator;
     const saved_async = p.in_async;
     const saved_in_function = p.in_function;
+    const saved_in_static_block = p.in_static_block;
     p.in_generator = false;
     p.in_async = is_async;
     p.in_function = true;
+    // Arrow concise body has its own `[+Return]` even when the
+    // enclosing context is `[~Return]` (e.g. a class static block).
+    p.in_static_block = false;
     defer {
         p.in_generator = saved_gen;
         p.in_async = saved_async;
         p.in_function = saved_in_function;
+        p.in_static_block = saved_in_static_block;
     }
     if (p.peek().kind == .lbrace) {
+        p.next_block_is_function_body = true;
         const block = try p.parseBlockStatementInner();
         parser_mod.tagDirectivePrologue(block.body);
         return .{ .block = block };
@@ -404,10 +410,23 @@ fn expressionAsBindingTarget(
         .array_literal => |al| {
             var elements: std.ArrayListUnmanaged(?stmt_mod.BindingElement) = .empty;
             var rest: ?*stmt_mod.BindingTarget = null;
-            for (al.elements) |maybe_elt| {
+            for (al.elements, 0..) |maybe_elt, i| {
                 if (maybe_elt) |elt| {
                     switch (elt) {
                         .spread => |sp| {
+                            // §14.3.3 BindingRestElement must be the
+                            // final element. Anything after the spread
+                            // (another element OR an elision) is a
+                            // SyntaxError. RestElement also rejects an
+                            // initializer.
+                            if (i + 1 != al.elements.len) {
+                                try p.report(.assignment_target_invalid, sp.span);
+                                return error.ParseError;
+                            }
+                            if (sp.argument.* == .assignment) {
+                                try p.report(.assignment_target_invalid, sp.span);
+                                return error.ParseError;
+                            }
                             const r = try expressionAsBindingTarget(p, sp.argument.*);
                             const ptr = try p.arena.create(stmt_mod.BindingTarget);
                             ptr.* = r;
@@ -537,10 +556,12 @@ pub fn isSimpleAssignmentTarget(e: Expression) bool {
 /// §13.15.5 DestructuringAssignmentTarget. The LHS of `=` may be an
 /// ArrayLiteral or ObjectLiteral; the parser leaves them as their
 /// expression shape and downstream consumers reinterpret as patterns.
+/// A parenthesised array/object literal is *not* a valid pattern —
+/// §13.2.6 ParenthesizedExpression's AssignmentTargetType forwards to
+/// the inner Expression, which is invalid for raw object/array.
 pub fn isAssignmentPattern(e: Expression) bool {
     return switch (e) {
         .array_literal, .object_literal => true,
-        .parenthesized => |p| isAssignmentPattern(p.expression.*),
         else => false,
     };
 }
@@ -550,6 +571,13 @@ fn parseConditional(p: *Parser) ParseError!Expression {
     const test_expr = try parseShortCircuit(p, lowest_logical_prec);
     if (p.peek().kind != .question) return test_expr;
     _ = try p.bump();
+    // §13.14 — both branches of the `?:` use AssignmentExpression[+In],
+    // so re-enable `in` even when the outer context cleared it (e.g.
+    // for-init heads). The `?` is at precedence below `in`, so the
+    // test-side is the only place the outer `[~In]` is observable.
+    const saved_allow_in = p.allow_in;
+    p.allow_in = true;
+    defer p.allow_in = saved_allow_in;
     const consequent = try parseAssignment(p);
     _ = try p.expect(.colon);
     const alternate = try parseAssignment(p);
@@ -842,7 +870,17 @@ fn parseLeftHandSide(p: *Parser) ParseError!Expression {
             .dot => base = try parseDotMember(p, base, false),
             .lbracket => base = try parseComputedMember(p, base, false),
             .lparen => base = try parseCallTail(p, base, false),
-            .no_substitution_template, .template_head => base = try parseTaggedTemplate(p, base),
+            .no_substitution_template, .template_head => {
+                // §13.3.11 — tagged templates can't appear in the
+                // tail of an OptionalExpression. The OptionalChain
+                // production forbids extending past a `?.` with a
+                // TemplateLiteral.
+                if (saw_optional) {
+                    try p.report(.unexpected_token, p.peek().span);
+                    return error.ParseError;
+                }
+                base = try parseTaggedTemplate(p, base);
+            },
             .optional_chain => {
                 _ = try p.bump();
                 saw_optional = true;
@@ -896,10 +934,13 @@ fn parseNewExpression(p: *Parser) ParseError!Expression {
         if (next.kind == .identifier and std.mem.eql(u8, next.slice(p.source), "target")) {
             _ = try p.bump(); // `.`
             const target_tok = try p.bump(); // `target`
-            // §15.7.1 early error: `new.target` is only allowed
-            // inside a function body (any flavour) or a class
-            // body. Top-level Script / Module use is a SyntaxError.
-            if (!p.in_function) {
+            // §13.3.1 — `new.target` requires some enclosing non-
+            // arrow function-like body (function/method/class field
+            // initializer/static block). Arrow bodies don't introduce
+            // their own [[NewTarget]] — they inherit, so a top-level
+            // arrow without any wrapping function-like context is a
+            // SyntaxError.
+            if (!p.allow_new_target) {
                 try p.report(.unexpected_token, .{ .start = new_tok.span.start, .end = target_tok.span.end });
                 return error.ParseError;
             }
@@ -966,6 +1007,10 @@ const ArgsResult = struct { args: []Expression, end: u32 };
 /// §13.3 Arguments. Caller is positioned at `(`. Trailing comma is allowed.
 fn parseArguments(p: *Parser) ParseError!ArgsResult {
     _ = try p.expect(.lparen);
+    // §13.3.6 Arguments — each AssignmentExpression is `[+In]`.
+    const saved_allow_in = p.allow_in;
+    p.allow_in = true;
+    defer p.allow_in = saved_allow_in;
     var items: std.ArrayListUnmanaged(Expression) = .empty;
     while (p.peek().kind != .rparen and p.peek().kind != .eof) {
         if (p.peek().kind == .ellipsis) {
@@ -1334,6 +1379,16 @@ fn parseImportExpression(p: *Parser) ParseError!Expression {
             std.mem.eql(u8, p.peek().slice(p.source), "meta"))
         {
             const meta_tok = try p.bump();
+            // §13.3.12.1 — `import.meta` is only valid inside a
+            // Module. Script code that references it is a parse-
+            // phase SyntaxError.
+            if (!p.is_module) {
+                try p.report(.unexpected_token, .{
+                    .start = import_tok.span.start,
+                    .end = meta_tok.span.end,
+                });
+                return error.ParseError;
+            }
             return .{ .import_meta = .{
                 .span = .{ .start = import_tok.span.start, .end = meta_tok.span.end },
             } };
@@ -1374,6 +1429,12 @@ fn parseRegexLiteralFromSlash(p: *Parser) ParseError!Expression {
 fn parseArrayLiteral(p: *Parser) ParseError!Expression {
     const lbracket = try p.bump();
     std.debug.assert(lbracket.kind == .lbracket);
+    // §13.2.4 ArrayLiteral elements are AssignmentExpression[+In]; a
+    // surrounding `[~In]` context (e.g. for-init head) does not
+    // propagate inside the brackets.
+    const saved_allow_in = p.allow_in;
+    p.allow_in = true;
+    defer p.allow_in = saved_allow_in;
     var elements: std.ArrayListUnmanaged(?Expression) = .empty;
     while (p.peek().kind != .rbracket and p.peek().kind != .eof) {
         if (p.peek().kind == .comma) {
@@ -1413,6 +1474,10 @@ fn parseObjectLiteral(p: *Parser) ParseError!Expression {
     const stmt_mod = @import("../ast/statement.zig");
     const lbrace = try p.bump();
     std.debug.assert(lbrace.kind == .lbrace);
+    // §13.2.5 ObjectLiteral property values are AssignmentExpression[+In].
+    const saved_allow_in = p.allow_in;
+    p.allow_in = true;
+    defer p.allow_in = saved_allow_in;
     var members: std.ArrayListUnmanaged(ast_expr.ObjectMember) = .empty;
     while (p.peek().kind != .rbrace and p.peek().kind != .eof) {
         if (p.peek().kind == .ellipsis) {
@@ -1494,6 +1559,8 @@ fn parseObjectMember(
         const saved_in_function = p.in_function;
         const saved_super_prop = p.allow_super_property;
         const saved_super_call = p.allow_super_call;
+        const saved_in_static_block = p.in_static_block;
+        const saved_allow_new_target = p.allow_new_target;
         p.in_generator = is_generator;
         p.in_async = is_async;
         p.in_function = true;
@@ -1501,6 +1568,9 @@ fn parseObjectMember(
         // is legal; `super()` is never legal in an object method.
         p.allow_super_property = true;
         p.allow_super_call = false;
+        p.in_static_block = false;
+        p.allow_new_target = true;
+        p.next_block_is_function_body = true;
         const body = blk: {
             defer {
                 p.in_generator = saved_gen;
@@ -1508,6 +1578,8 @@ fn parseObjectMember(
                 p.in_function = saved_in_function;
                 p.allow_super_property = saved_super_prop;
                 p.allow_super_call = saved_super_call;
+                p.in_static_block = saved_in_static_block;
+                p.allow_new_target = saved_allow_new_target;
             }
             break :blk try p.parseBlockStatementInner();
         };
@@ -1606,7 +1678,7 @@ fn parseObjectKey(p: *Parser) ParseError!ast_expr.PropertyKey {
         _ = try p.bump();
         return .{ .string = tok.span };
     }
-    if (tok.kind == .numeric_literal) {
+    if (tok.kind == .numeric_literal or tok.kind == .bigint_literal) {
         _ = try p.bump();
         return .{ .numeric = tok.span };
     }
@@ -1636,7 +1708,7 @@ fn parseObjectProperty(p: *Parser) ParseError!ast_expr.ObjectProperty {
         _ = try p.bump();
         key = .{ .string = key_tok.span };
         key_end = key_tok.span.end;
-    } else if (key_tok.kind == .numeric_literal) {
+    } else if (key_tok.kind == .numeric_literal or key_tok.kind == .bigint_literal) {
         _ = try p.bump();
         key = .{ .numeric = key_tok.span };
         key_end = key_tok.span.end;
@@ -1680,6 +1752,26 @@ fn parseFunctionExpression(p: *Parser) ParseError!Expression {
     return parseFunctionExpressionAt(p, p.peek().span.start, false);
 }
 
+/// §16.2.3.1 — operand parse for `export default <function/class/async
+/// function>`. Returns just the HoistableDeclaration / ClassDeclaration
+/// expression; no left-hand-side extension (call / member / template)
+/// is permitted. Stops at the closing `}` of the body.
+pub fn parseDefaultExportTarget(p: *Parser) ParseError!Expression {
+    const tok = p.peek();
+    if (tok.kind == .kw_function) return parseFunctionExpression(p);
+    if (tok.kind == .kw_class) return parseClassExpression(p);
+    if (tok.kind == .identifier and
+        std.mem.eql(u8, tok.slice(p.source), "async"))
+    {
+        const start = tok.span.start;
+        _ = try p.bump(); // `async`
+        return parseFunctionExpressionAt(p, start, true);
+    }
+    // Shouldn't be reachable — caller checked lookahead.
+    try p.report(.unexpected_token, tok.span);
+    return error.ParseError;
+}
+
 fn parseFunctionExpressionAt(p: *Parser, start: u32, is_async: bool) ParseError!Expression {
     _ = try p.bump(); // `function`
     const is_generator = try p.eat(.star);
@@ -1687,29 +1779,41 @@ fn parseFunctionExpressionAt(p: *Parser, start: u32, is_async: bool) ParseError!
     if (p.peek().kind == .identifier) {
         name = try p.parseBindingIdentifier();
     }
-    const params = try p.parseFunctionParameters();
 
     const saved_gen = p.in_generator;
     const saved_async = p.in_async;
     const saved_in_function = p.in_function;
     const saved_super_prop = p.allow_super_property;
     const saved_super_call = p.allow_super_call;
+    const saved_in_static_block = p.in_static_block;
+    const saved_allow_new_target = p.allow_new_target;
+    // §15.2 — FormalParameters use the inner function's
+    // `[Yield, Await]` flavour, not the outer's. Switch flags before
+    // parsing params so e.g. `function f(x = yield)` inside a `*g()`
+    // generator surfaces the strict reserved-word error.
     p.in_generator = is_generator;
     p.in_async = is_async;
     p.in_function = true;
+    p.allow_new_target = true;
+    const params = try p.parseFunctionParameters();
     // Function expressions carry no HomeObject — `super` of any kind
     // is a SyntaxError inside their body, regardless of the
-    // surrounding context.
+    // surrounding context. Function bodies also reopen `[+Return]`
+    // even when nested inside a class static block.
     p.allow_super_property = false;
     p.allow_super_call = false;
+    p.in_static_block = false;
     defer {
         p.in_generator = saved_gen;
         p.in_async = saved_async;
         p.in_function = saved_in_function;
         p.allow_super_property = saved_super_prop;
         p.allow_super_call = saved_super_call;
+        p.in_static_block = saved_in_static_block;
+        p.allow_new_target = saved_allow_new_target;
     }
 
+    p.next_block_is_function_body = true;
     const body = try p.parseBlockStatementInner();
     parser_mod.tagDirectivePrologue(body.body);
     try parser_mod.enforceStrictDirectiveSimplicity(p, params, body.body, body.span);
@@ -1736,6 +1840,10 @@ fn parseFunctionExpressionAt(p: *Parser, start: u32, is_async: bool) ParseError!
 fn parseParenthesized(p: *Parser) ParseError!Expression {
     const lparen = try p.bump();
     std.debug.assert(lparen.kind == .lparen);
+    // §13.2 ParenthesizedExpression — contents are Expression[+In].
+    const saved_allow_in = p.allow_in;
+    p.allow_in = true;
+    defer p.allow_in = saved_allow_in;
     var items: std.ArrayListUnmanaged(Expression) = .empty;
     while (p.peek().kind != .rparen and p.peek().kind != .eof) {
         if (p.peek().kind == .ellipsis) {

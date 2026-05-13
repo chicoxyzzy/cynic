@@ -99,6 +99,24 @@ pub const Parser = struct {
     /// generators/async, object methods, field initializers, and
     /// static blocks all see this as false. Arrow inherits.
     allow_super_call: bool = false,
+    /// §15.7.13 ClassStaticBlock — the body is parsed with
+    /// `[~Yield, +Await, ~Return]`. `new.target` is permitted
+    /// (HomeObject is the class constructor), but `return` is a
+    /// SyntaxError, as is `yield`. Arrow inherits.
+    in_static_block: bool = false,
+    /// Transient flag set by `parseFunctionBodyBlock` immediately
+    /// before invoking `parseBlockStatementInner`; the latter consumes
+    /// and clears it. Function bodies treat their top-level
+    /// FunctionDeclarations as VarDeclaredNames (not LDN), so the
+    /// block validator runs a narrower LDN collector there. Nested
+    /// blocks (inside the same body) still get the standard rule.
+    next_block_is_function_body: bool = false,
+    /// §13.3.1 NewTarget — `new.target` is grammatically valid only
+    /// when there is *some* enclosing non-arrow function-like body.
+    /// Set true on entering function decl/expr, class methods,
+    /// class field initializers, and class static blocks. Arrow
+    /// bodies inherit (they don't introduce their own [[NewTarget]]).
+    allow_new_target: bool = false,
 
     pub fn init(arena: std.mem.Allocator, source: []const u8, diagnostics: ?*Diagnostics) ParseError!Parser {
         return Parser.initWith(arena, source, diagnostics, false);
@@ -234,6 +252,7 @@ pub const Parser = struct {
         var validator: pattern_validate.Validator = .{
             .arena = self.arena,
             .diagnostics = self.diagnostics,
+            .source = self.source,
         };
         try validator.run(&program);
         // §15.8.1 AllPrivateNamesValid — every `obj.#x` reference must
@@ -245,11 +264,14 @@ pub const Parser = struct {
             .source = self.source,
         };
         try priv_validator.run(&program);
-        // §16.2.1.1 Module — top-level early errors. Script's top-level
-        // rules differ (function declarations are VarDeclaredNames there,
-        // not LexicallyDeclaredNames), so this pass is module-only for
-        // now.
-        if (source_kind == .module) {
+        // §16.1.1 ScriptBody / §16.2.1.1 ModuleBody top-level early
+        // errors. For *scripts*, function declarations are VDN (not
+        // LDN), so a dedicated pass enforces "LDN no duplicates" with
+        // just let/const/class names. Modules treat function decls
+        // as LDN and run their own broader pass.
+        if (source_kind == .script) {
+            try self.validateScriptTopLevelBindings(program.body);
+        } else {
             try self.validateModuleBindings(program.body);
         }
         return program;
@@ -508,7 +530,12 @@ pub const Parser = struct {
         var key_is_plain_ident = false;
         if (key_tok.kind == .lbracket) {
             _ = try self.bump();
+            // §14.3.3 — ComputedPropertyName in a binding pattern uses
+            // AssignmentExpression[+In].
+            const saved_allow_in = self.allow_in;
+            self.allow_in = true;
             const inner = try expr_mod.parseAssignmentEntry(self);
+            self.allow_in = saved_allow_in;
             _ = try self.expect(.rbracket);
             const ptr = try self.arena.create(Expression);
             ptr.* = inner;
@@ -516,7 +543,7 @@ pub const Parser = struct {
         } else if (key_tok.kind == .string_literal) {
             _ = try self.bump();
             key = .{ .string = key_tok.span };
-        } else if (key_tok.kind == .numeric_literal) {
+        } else if (key_tok.kind == .numeric_literal or key_tok.kind == .bigint_literal) {
             _ = try self.bump();
             key = .{ .numeric = key_tok.span };
         } else if (key_tok.kind == .identifier or @intFromEnum(key_tok.kind) >= @intFromEnum(TokenKind.kw_await)) {
@@ -694,7 +721,10 @@ pub const Parser = struct {
     fn parseReturnStatement(self: *Parser) ParseError!Statement {
         const start = self.current.span.start;
         const keyword = try self.bump(); // `return`
-        if (!self.in_function) {
+        // §15.7.13 — `[~Return]` inside a ClassStaticBlockBody, so
+        // `return` is a SyntaxError even though we're nominally
+        // inside a function context.
+        if (!self.in_function or self.in_static_block) {
             try self.report(.unexpected_token, keyword.span);
             return error.ParseError;
         }
@@ -997,6 +1027,38 @@ pub const Parser = struct {
             _ = try self.expect(.rparen);
         }
         const body = try self.parseBlockStatementInner();
+        // §14.15.1 Catch — early errors:
+        //   • BoundNames of CatchParameter must contain no duplicates.
+        //   • BoundNames of CatchParameter ∩ LexicallyDeclaredNames of
+        //     Block must be empty.
+        //   • (Plus ∩ VarDeclaredNames, with an Annex B exception for
+        //     a single-identifier catch param that we don't support.)
+        if (param) |p| {
+            var bound: std.ArrayListUnmanaged(NameSpan) = .empty;
+            defer bound.deinit(self.arena);
+            try self.collectTargetNames(p, &bound);
+            var i: usize = 0;
+            while (i < bound.items.len) : (i += 1) {
+                var j: usize = 0;
+                while (j < i) : (j += 1) {
+                    if (std.mem.eql(u8, bound.items[i].name, bound.items[j].name)) {
+                        try self.report(.duplicate_lexical_binding, bound.items[i].span);
+                        break;
+                    }
+                }
+            }
+            var lex_names: std.ArrayListUnmanaged(NameSpan) = .empty;
+            defer lex_names.deinit(self.arena);
+            for (body.body) |stmt| try self.collectBlockLDN(stmt, &lex_names);
+            for (bound.items) |bn| {
+                for (lex_names.items) |ln| {
+                    if (std.mem.eql(u8, bn.name, ln.name)) {
+                        try self.report(.duplicate_lexical_binding, ln.span);
+                        break;
+                    }
+                }
+            }
+        }
         return .{
             .span = .{ .start = catch_tok.span.start, .end = body.span.end },
             .param = param,
@@ -1008,6 +1070,8 @@ pub const Parser = struct {
     /// not wrapped in a Statement. Used by `try`/`catch`/`finally` where
     /// the AST stores blocks as fields rather than child statements.
     pub fn parseBlockStatementInner(self: *Parser) ParseError!stmt_mod.BlockStmt {
+        const is_function_body = self.next_block_is_function_body;
+        self.next_block_is_function_body = false;
         const lbrace = try self.expect(.lbrace);
         var body: std.ArrayListUnmanaged(Statement) = .empty;
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
@@ -1022,7 +1086,11 @@ pub const Parser = struct {
         }
         const rbrace = try self.expect(.rbrace);
         const slice = try body.toOwnedSlice(self.arena);
-        try self.validateBlockBindings(slice);
+        if (is_function_body) {
+            try self.validateFunctionBodyBindings(slice);
+        } else {
+            try self.validateBlockBindings(slice);
+        }
         return .{
             .span = .{ .start = lbrace.span.start, .end = rbrace.span.end },
             .body = slice,
@@ -1106,30 +1174,53 @@ pub const Parser = struct {
     pub fn parseFunctionDeclarationAt(self: *Parser, start: u32, is_async: bool) ParseError!Statement {
         _ = try self.bump(); // `function`
         const is_generator = try self.eat(.star);
-        const name = try self.parseBindingIdentifier();
-        const params = try self.parseFunctionParameters();
-
+        // §15.2 FunctionDeclaration grammar parameters: FormalParameters
+        // and FunctionBody are both `[~Yield, ~Await]` for plain
+        // functions and `[+Yield, ~Await]` / `[~Yield, +Await]` / etc.
+        // for generators / async / async-generators. Either way they
+        // do **not** inherit the surrounding `[Yield, Await]` — set
+        // the parser flags to the inner function's flavour before
+        // parsing the parameters so default expressions like
+        // `function f(x = yield)` inside an outer generator surface
+        // the correct error.
         const saved_gen = self.in_generator;
         const saved_async = self.in_async;
         const saved_in_function = self.in_function;
         const saved_super_prop = self.allow_super_property;
         const saved_super_call = self.allow_super_call;
+        const saved_in_static_block = self.in_static_block;
+        const saved_allow_new_target = self.allow_new_target;
         self.in_generator = is_generator;
         self.in_async = is_async;
         self.in_function = true;
+        self.allow_new_target = true;
+        // BindingIdentifier uses `[?Yield, ?Await]` (outer flavour),
+        // so name first under saved flags. Restore briefly.
+        self.in_generator = saved_gen;
+        self.in_async = saved_async;
+        const name = try self.parseBindingIdentifier();
+        self.in_generator = is_generator;
+        self.in_async = is_async;
+        const params = try self.parseFunctionParameters();
         // Function declarations carry no HomeObject — `super.x` /
         // `super()` are SyntaxErrors inside them, even when the
-        // enclosing context allowed super.
+        // enclosing context allowed super. Likewise, a function body
+        // has its own `[+Return]` regardless of being nested inside a
+        // static block — clear the flag.
         self.allow_super_property = false;
         self.allow_super_call = false;
+        self.in_static_block = false;
         defer {
             self.in_generator = saved_gen;
             self.in_async = saved_async;
             self.in_function = saved_in_function;
             self.allow_super_property = saved_super_prop;
             self.allow_super_call = saved_super_call;
+            self.in_static_block = saved_in_static_block;
+            self.allow_new_target = saved_allow_new_target;
         }
 
+        self.next_block_is_function_body = true;
         const body = try self.parseBlockStatementInner();
         tagDirectivePrologue(body.body);
         try enforceStrictDirectiveSimplicity(self, params, body.body, body.span);
@@ -1291,12 +1382,15 @@ pub const Parser = struct {
                 .field => |fd| {
                     const key_span = self.classKeySpan(fd.key);
                     // §15.7.1 — FieldDefinition early error: PropName
-                    // "constructor" is forbidden (any IsStatic). Both the
-                    // identifier form `constructor` and the string-literal
-                    // form `"constructor"` are rejected. Numeric and
-                    // computed keys are checked elsewhere.
+                    // "constructor" is forbidden (any IsStatic). PropName
+                    // "prototype" is forbidden on *static* fields (same
+                    // rule as static methods). Both identifier and
+                    // string-literal forms.
                     if (self.classKeyName(fd.key)) |name| {
                         if (std.mem.eql(u8, name, "constructor")) {
+                            try self.report(.invalid_class_element, key_span);
+                        }
+                        if (fd.is_static and std.mem.eql(u8, name, "prototype")) {
                             try self.report(.invalid_class_element, key_span);
                         }
                     }
@@ -1765,12 +1859,15 @@ pub const Parser = struct {
         entry: PrivEntry,
     ) ParseError!void {
         for (privs.items) |existing| {
-            if (existing.is_static != entry.is_static) continue;
             if (!std.mem.eql(u8, existing.name, entry.name)) continue;
-            // Pairing exception: getter + setter on the same is_static.
+            // Pairing exception: getter + setter on the *same* is_static.
+            // A non-static setter and a static getter (or vice versa)
+            // share the PrivateBoundIdentifier name but don't form a
+            // legal accessor pair, so they're a SyntaxError.
             const is_pair =
-                (existing.kind == .getter and entry.kind == .setter) or
-                (existing.kind == .setter and entry.kind == .getter);
+                existing.is_static == entry.is_static and
+                ((existing.kind == .getter and entry.kind == .setter) or
+                    (existing.kind == .setter and entry.kind == .getter));
             if (is_pair) {
                 // Still a violation if a third occurrence appears — i.e.
                 // a get/set already pairs and this is another get or set
@@ -1809,16 +1906,33 @@ pub const Parser = struct {
             if (second.kind == .lbrace) {
                 // §15.7.13 ClassStaticBlock — `static { … }`. HomeObject
                 // is the class constructor itself, so `super.x` is legal
-                // (parent's prototype lookup); `super()` is not.
+                // (parent's prototype lookup); `super()` is not. Body
+                // is parsed with `[~Yield, +Await, ~Return]`.
                 _ = try self.bump(); // `static`
                 const saved_super_prop = self.allow_super_property;
                 const saved_super_call = self.allow_super_call;
+                const saved_in_generator = self.in_generator;
+                const saved_in_async = self.in_async;
+                const saved_in_function = self.in_function;
+                const saved_in_static_block = self.in_static_block;
+                const saved_allow_new_target = self.allow_new_target;
                 self.allow_super_property = true;
                 self.allow_super_call = false;
+                self.in_generator = false;
+                self.in_async = true;
+                self.in_function = true;
+                self.in_static_block = true;
+                self.allow_new_target = true;
+                self.next_block_is_function_body = true;
                 const body_block = blk: {
                     defer {
                         self.allow_super_property = saved_super_prop;
                         self.allow_super_call = saved_super_call;
+                        self.in_generator = saved_in_generator;
+                        self.in_async = saved_in_async;
+                        self.in_function = saved_in_function;
+                        self.in_static_block = saved_in_static_block;
+                        self.allow_new_target = saved_allow_new_target;
                     }
                     break :blk try self.parseBlockStatementInner();
                 };
@@ -1899,11 +2013,18 @@ pub const Parser = struct {
             const saved_in_function = self.in_function;
             const saved_super_prop = self.allow_super_property;
             const saved_super_call = self.allow_super_call;
+            const saved_in_static_block = self.in_static_block;
+            const saved_allow_new_target = self.allow_new_target;
             self.in_generator = is_generator;
             self.in_async = is_async;
             self.in_function = true;
             self.allow_super_property = true;
             self.allow_super_call = this_allow_super_call;
+            // Class methods have their own `[+Return]`, even when
+            // nested inside a static block.
+            self.in_static_block = false;
+            self.allow_new_target = true;
+            self.next_block_is_function_body = true;
             const body = blk: {
                 defer {
                     self.in_generator = saved_gen;
@@ -1911,6 +2032,8 @@ pub const Parser = struct {
                     self.in_function = saved_in_function;
                     self.allow_super_property = saved_super_prop;
                     self.allow_super_call = saved_super_call;
+                    self.in_static_block = saved_in_static_block;
+                    self.allow_new_target = saved_allow_new_target;
                 }
                 break :blk try self.parseBlockStatementInner();
             };
@@ -1941,12 +2064,15 @@ pub const Parser = struct {
         if (try self.eat(.eq)) {
             const saved_super_prop = self.allow_super_property;
             const saved_super_call = self.allow_super_call;
+            const saved_allow_new_target = self.allow_new_target;
             self.allow_super_property = true;
             self.allow_super_call = false;
+            self.allow_new_target = true;
             const v = blk: {
                 defer {
                     self.allow_super_property = saved_super_prop;
                     self.allow_super_call = saved_super_call;
+                    self.allow_new_target = saved_allow_new_target;
                 }
                 break :blk try expr_mod.parseAssignmentEntry(self);
             };
@@ -1972,7 +2098,12 @@ pub const Parser = struct {
         const tok = self.current;
         if (tok.kind == .lbracket) {
             _ = try self.bump();
+            // §15.7 — ComputedPropertyName uses AssignmentExpression[+In]
+            // regardless of the outer context.
+            const saved_allow_in = self.allow_in;
+            self.allow_in = true;
             const inner = try expr_mod.parseAssignmentEntry(self);
+            self.allow_in = saved_allow_in;
             const rbracket = try self.expect(.rbracket);
             const ptr = try self.arena.create(Expression);
             ptr.* = inner;
@@ -1986,7 +2117,7 @@ pub const Parser = struct {
             _ = try self.bump();
             return .{ .key = .{ .string = tok.span }, .end = tok.span.end };
         }
-        if (tok.kind == .numeric_literal) {
+        if (tok.kind == .numeric_literal or tok.kind == .bigint_literal) {
             _ = try self.bump();
             return .{ .key = .{ .numeric = tok.span }, .end = tok.span.end };
         }
@@ -2105,6 +2236,90 @@ pub const Parser = struct {
     /// declared *directly* in the StatementList (not inside nested
     /// blocks). VDN = `var` BoundNames recursively reachable through
     /// non-function statements.
+    /// §16.1.1 ScriptBody — top-level early errors. Function
+    /// declarations are VarDeclaredNames at script top level (not LDN),
+    /// so the standard `collectBlockLDN` over-counts here. This pass
+    /// uses a narrower collector: only `let` / `const` / `class`
+    /// contribute to LDN.
+    fn validateScriptTopLevelBindings(self: *Parser, body: []const Statement) ParseError!void {
+        var lex_names: std.ArrayListUnmanaged(NameSpan) = .empty;
+        defer lex_names.deinit(self.arena);
+        for (body) |stmt| switch (stmt) {
+            .lexical => |lex| {
+                if (lex.kind == .var_) continue;
+                for (lex.declarators) |decl|
+                    try self.collectTargetNames(decl.name, &lex_names);
+            },
+            .class_decl => |cd| try lex_names.append(self.arena, .{
+                .name = self.source[cd.name.span.start..cd.name.span.end],
+                .span = cd.name.span,
+            }),
+            else => {},
+        };
+        var i: usize = 0;
+        while (i < lex_names.items.len) : (i += 1) {
+            var j: usize = 0;
+            while (j < i) : (j += 1) {
+                if (std.mem.eql(u8, lex_names.items[i].name, lex_names.items[j].name)) {
+                    try self.report(.duplicate_lexical_binding, lex_names.items[i].span);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// §15.2.1 / §15.3.1 / §15.5.1 / §15.8.1 — function body top-level
+    /// LDN excludes FunctionDeclaration (those names are
+    /// TopLevelVarDeclaredNames). The same dup-LDN and LDN ∩ VDN rules
+    /// then apply, just with a narrower LDN.
+    fn validateFunctionBodyBindings(self: *Parser, body: []const Statement) ParseError!void {
+        var lex_names: std.ArrayListUnmanaged(NameSpan) = .empty;
+        defer lex_names.deinit(self.arena);
+        var var_names: std.ArrayListUnmanaged(NameSpan) = .empty;
+        defer var_names.deinit(self.arena);
+        for (body) |stmt| switch (stmt) {
+            .lexical => |lex| {
+                if (lex.kind == .var_) continue;
+                for (lex.declarators) |decl|
+                    try self.collectTargetNames(decl.name, &lex_names);
+            },
+            .class_decl => |cd| try lex_names.append(self.arena, .{
+                .name = self.source[cd.name.span.start..cd.name.span.end],
+                .span = cd.name.span,
+            }),
+            // FunctionDeclaration omitted on purpose — at function-body
+            // top level it's a VDN.
+            else => {},
+        };
+        for (body) |stmt| try self.collectVDN(stmt, &var_names);
+        // Also collect bare top-level `function` decls into VDN.
+        for (body) |stmt| switch (stmt) {
+            .function_decl => |fd| try var_names.append(self.arena, .{
+                .name = self.source[fd.name.span.start..fd.name.span.end],
+                .span = fd.name.span,
+            }),
+            else => {},
+        };
+        var i: usize = 0;
+        while (i < lex_names.items.len) : (i += 1) {
+            var j: usize = 0;
+            while (j < i) : (j += 1) {
+                if (std.mem.eql(u8, lex_names.items[i].name, lex_names.items[j].name)) {
+                    try self.report(.duplicate_lexical_binding, lex_names.items[i].span);
+                    break;
+                }
+            }
+        }
+        for (lex_names.items) |ln| {
+            for (var_names.items) |vn| {
+                if (std.mem.eql(u8, ln.name, vn.name)) {
+                    try self.report(.duplicate_lexical_binding, ln.span);
+                    break;
+                }
+            }
+        }
+    }
+
     fn validateBlockBindings(self: *Parser, body: []const Statement) ParseError!void {
         var lex_names: std.ArrayListUnmanaged(NameSpan) = .empty;
         defer lex_names.deinit(self.arena);
@@ -2275,6 +2490,28 @@ pub const Parser = struct {
         for (body) |stmt| try self.collectModuleLDN(stmt, &lex_names);
         for (body) |stmt| try self.collectModuleVDN(stmt, &var_names);
         for (body) |stmt| try self.collectModuleExportedNames(stmt, &exported_names);
+        // §16.2.1.1 — every ExportedBinding (the *local* name on the
+        // LHS of `export { local as exported }`, no `from`) must
+        // resolve to a top-level binding (VDN ∪ LDN).
+        for (body) |stmt| {
+            if (stmt != .export_decl) continue;
+            const ed = stmt.export_decl;
+            if (ed.body != .named) continue;
+            if (ed.body.named.source != null) continue; // re-export `from` skips this rule.
+            for (ed.body.named.specifiers) |spec| {
+                const lname = self.source[spec.local_span.start..spec.local_span.end];
+                var found = false;
+                for (lex_names.items) |ln| if (std.mem.eql(u8, ln.name, lname)) {
+                    found = true;
+                    break;
+                };
+                if (!found) for (var_names.items) |vn| if (std.mem.eql(u8, vn.name, lname)) {
+                    found = true;
+                    break;
+                };
+                if (!found) try self.report(.duplicate_lexical_binding, spec.local_span);
+            }
+        }
 
         // Duplicates within LDN.
         var i: usize = 0;
@@ -2349,7 +2586,7 @@ pub const Parser = struct {
                     // and is handled in collectModuleVDN).
                     try self.collectModuleLDN(inner.*, out);
                 },
-                .default_value => {
+                .default_value => |dv| {
                     // `export default …` introduces a sentinel binding
                     // "*default*" (§16.2.3.7). Two of these in one
                     // module collide and surface as a duplicate.
@@ -2357,6 +2594,21 @@ pub const Parser = struct {
                         .name = "*default*",
                         .span = ed.span,
                     });
+                    // §16.2.3.7 — when the operand is a *named*
+                    // function or class declaration form, the name
+                    // is *also* introduced as a module-local LDN
+                    // binding, so it can collide with other LDNs.
+                    switch (dv) {
+                        .function_expr => |fe| if (fe.name) |n| try out.append(self.arena, .{
+                            .name = self.source[n.span.start..n.span.end],
+                            .span = n.span,
+                        }),
+                        .class_expr => |ce| if (ce.name) |n| try out.append(self.arena, .{
+                            .name = self.source[n.span.start..n.span.end],
+                            .span = n.span,
+                        }),
+                        else => {},
+                    }
                 },
                 // `export { … }` and `export * …` do not introduce new
                 // local bindings; they feed ExportedNames only.
@@ -2586,6 +2838,20 @@ pub const Parser = struct {
                 _ = try self.bump();
                 const local_tok = try self.parseBindingIdentifier();
                 local_span = local_tok.span;
+            } else {
+                // §16.2.2 — without `as`, the imported name doubles
+                // as the local BindingIdentifier and must satisfy the
+                // strict-mode `eval` / `arguments` restriction.
+                const name = self.source[imported_tok.span.start..imported_tok.span.end];
+                if (std.mem.eql(u8, name, "eval") or std.mem.eql(u8, name, "arguments")) {
+                    try self.report(.restricted_identifier_in_strict, imported_tok.span);
+                }
+                if (imported_tok.kind == .string_literal) {
+                    // `import { "foo" } from "..."` — without rename
+                    // it's also a parse error (string ModuleExportName
+                    // requires an `as BindingIdentifier`).
+                    try self.report(.unexpected_token, imported_tok.span);
+                }
             }
             try items.append(self.arena, .{
                 .span = .{ .start = start, .end = local_span.end },
@@ -2732,21 +2998,27 @@ pub const Parser = struct {
         // through the existing expression grammar. The lookahead check
         // only decides whether a trailing semicolon is required.
         const lookahead_kind = self.current.kind;
-        const requires_semi: bool = blk: {
-            if (lookahead_kind == .kw_function or lookahead_kind == .kw_class) {
-                break :blk false;
-            }
-            if (lookahead_kind == .identifier and
-                std.mem.eql(u8, self.current.slice(self.source), "async"))
-            {
-                const second = try self.peek2();
-                if (second.kind == .kw_function and !second.line_terminator_before) {
-                    break :blk false;
-                }
-            }
-            break :blk true;
+        const is_async_function = blk: {
+            if (lookahead_kind != .identifier) break :blk false;
+            if (!std.mem.eql(u8, self.current.slice(self.source), "async")) break :blk false;
+            const second = try self.peek2();
+            break :blk second.kind == .kw_function and !second.line_terminator_before;
         };
-        const e = try expr_mod.parseAssignmentEntry(self);
+        const requires_semi: bool = !(lookahead_kind == .kw_function or
+            lookahead_kind == .kw_class or is_async_function);
+        // §16.2.3.1 — when the lookahead is `function`, `class`, or
+        // `async [no LF] function`, the operand is the corresponding
+        // HoistableDeclaration / ClassDeclaration parsed with
+        // `[+Default]`. Routing the parse through the full expression
+        // grammar would let the `()` in `export default function() {}();`
+        // attach as a CallExpression — but spec-wise the declaration
+        // ends at the closing `}`, so we parse only the
+        // function/class expression and stop there.
+        const e: Expression = if (lookahead_kind == .kw_function or
+            lookahead_kind == .kw_class or is_async_function)
+            try expr_mod.parseDefaultExportTarget(self)
+        else
+            try expr_mod.parseAssignmentEntry(self);
         const stmt_end = if (requires_semi)
             try self.consumeSemicolon(e.span().end)
         else

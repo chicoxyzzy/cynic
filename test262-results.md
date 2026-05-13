@@ -4,9 +4,8 @@
 
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
-| **parser** | 63.52 % | 96.48 % | 29406 / 46296 |
+| **parser** | 65.24 % | 99.09 % | 30202 / 46296 |
 | **runtime** | 70.79 % | 85.00 % | 32775 / 46296 |
-
 
 ## Where the runtime stands, by area
 
@@ -117,7 +116,6 @@ browser-era built-ins …).
 | `language/keywords` | 25 | 0 | 0 | 100 % | 100 % |
 | `language/punctuators` | 11 | 0 | 0 | 100 % | 100 % |
 
-
 ## Legend
 
 **Rows**
@@ -137,10 +135,11 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-13 — cynic `71c3b7a`, test262 `d0c1b455`
+### 2026-05-13 — cynic `36afc4f`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
+| **parser** | 65.24 % | 99.09 % | 30202 / 46296 | +796 | 1.7 s |
 | **runtime** | 70.79 % | 85.00 % | 32775 / 46296 | +1007 | 1m 47s |
 
 ### 2026-05-12 — cynic `6800720`, test262 `d0c1b455`

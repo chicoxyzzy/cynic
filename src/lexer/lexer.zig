@@ -500,14 +500,22 @@ pub const Lexer = struct {
             const c = self.source[self.pos];
             if (c == '\\') {
                 self.pos += 1;
-                if (self.pos < self.source.len and
-                    self.source[self.pos] != '\n' and self.source[self.pos] != '\r')
-                {
+                // §12.9.5 — `\` may not be followed by a
+                // LineTerminator (no LineContinuation in regex
+                // literals). LF, CR, and the 3-byte UTF-8 forms of
+                // <LS> / <PS> are all SyntaxErrors.
+                const followed_by_lt = self.pos >= self.source.len or
+                    self.source[self.pos] == '\n' or
+                    self.source[self.pos] == '\r' or
+                    (self.source[self.pos] == 0xE2 and self.pos + 2 < self.source.len and
+                        self.source[self.pos + 1] == 0x80 and
+                        (self.source[self.pos + 2] == 0xA8 or self.source[self.pos + 2] == 0xA9));
+                if (!followed_by_lt) {
                     self.pos += 1;
                     continue;
                 }
-                // Backslash at EOL — fall through to the LineTerminator
-                // check below to report the unterminated regex.
+                try self.report(.unterminated_regex_literal, .{ .start = slash_start, .end = self.pos });
+                return error.UnterminatedString;
             } else if (c == '[' and !in_class) {
                 in_class = true;
                 self.pos += 1;
@@ -527,6 +535,15 @@ pub const Lexer = struct {
                 }
                 return self.makeToken(.regular_expression_literal, slash_start);
             } else if (c == '\n' or c == '\r') {
+                try self.report(.unterminated_regex_literal, .{ .start = slash_start, .end = self.pos });
+                return error.UnterminatedString;
+            } else if (c == 0xE2 and self.pos + 2 < self.source.len and
+                self.source[self.pos + 1] == 0x80 and
+                (self.source[self.pos + 2] == 0xA8 or self.source[self.pos + 2] == 0xA9))
+            {
+                // §12.9.5 — U+2028 (<LS>) and U+2029 (<PS>) are
+                // LineTerminators; their presence inside a regex
+                // literal body terminates the literal unterminated.
                 try self.report(.unterminated_regex_literal, .{ .start = slash_start, .end = self.pos });
                 return error.UnterminatedString;
             }

@@ -39,6 +39,7 @@ const Code = diag_mod.Code;
 pub const Validator = struct {
     arena: std.mem.Allocator,
     diagnostics: ?*Diagnostics,
+    source: []const u8,
 
     pub fn run(self: *Validator, program: *const Program) !void {
         for (program.body) |*s| try self.visitStmt(s);
@@ -135,6 +136,12 @@ pub const Validator = struct {
                 // Only `=` (plain assignment) is allowed for destructuring
                 // patterns. Compound ops with array/object targets are
                 // already rejected at top level by expression.zig.
+                const target_is_pattern = a.op == .eq and switch (a.target.*) {
+                    .array_literal, .object_literal => true,
+                    .parenthesized => |p| p.expression.* == .array_literal or
+                        p.expression.* == .object_literal,
+                    else => false,
+                };
                 if (a.op == .eq) {
                     switch (a.target.*) {
                         .array_literal => |al| try self.validateArrayPattern(al),
@@ -147,7 +154,12 @@ pub const Validator = struct {
                         else => {},
                     }
                 }
-                try self.visitExpr(a.target);
+                // When the LHS is reinterpreted as a destructuring
+                // pattern, the §13.2.5.1 `__proto__` duplicate rule
+                // is suppressed (the spec's exemption keys on the
+                // grammar position, not source shape). Skip
+                // visitExpr's pattern-only checks for that subtree.
+                if (!target_is_pattern) try self.visitExpr(a.target);
                 try self.visitExpr(a.value);
             },
             .parenthesized => |p| try self.visitExpr(p.expression),
@@ -199,6 +211,43 @@ pub const Validator = struct {
                 }
             },
             .object_literal => |ol| {
+                // §13.2.5.1 — an ObjectLiteral used as a regular
+                // expression (not destructured) may not contain more
+                // than one `__proto__:` property. The pattern path
+                // (`validateObjectPattern`) skips this rule, so we
+                // anchor it on the visitExpr walker, which only fires
+                // for object literals in genuine expression position.
+                var proto_seen = false;
+                for (ol.properties) |m| {
+                    if (m != .property) continue;
+                    const prop = m.property;
+                    // §13.2.5.1 CoverInitializedName — a shorthand
+                    // property with an initializer (`{ a = 1 }`) is
+                    // only legal as the cover form of an
+                    // AssignmentPattern. In a plain expression
+                    // position it's a SyntaxError. We get here only
+                    // when the object literal is *not* a destructuring
+                    // target (the assignment branch skips this walk
+                    // for pattern LHS objects).
+                    if (prop.shorthand and prop.value == .assignment) {
+                        try self.report(.assignment_target_invalid, prop.span);
+                    }
+                    if (prop.shorthand) continue;
+                    const text: []const u8 = switch (prop.key) {
+                        .ident => |sp| self.source[sp.start..sp.end],
+                        .string => |sp| if (sp.end > sp.start + 1)
+                            self.source[sp.start + 1 .. sp.end - 1]
+                        else
+                            "",
+                        else => continue,
+                    };
+                    if (!std.mem.eql(u8, text, "__proto__")) continue;
+                    if (proto_seen) {
+                        try self.report(.duplicate_lexical_binding, prop.span);
+                    } else {
+                        proto_seen = true;
+                    }
+                }
                 for (ol.properties) |m| switch (m) {
                     .property => |p| {
                         switch (p.key) {
@@ -254,8 +303,18 @@ pub const Validator = struct {
             const el = maybe_el.?;
             if (el == .spread) {
                 const sp = el.spread;
-                // Anything after the rest is illegal.
+                // Anything after the rest is illegal — including a
+                // bare trailing comma. The array literal parser
+                // swallows the trailing comma so `[...x,]` parses
+                // with one element; scan the source between the
+                // spread's end and the closing `]` for a `,` to
+                // distinguish `[...x]` (legal rest) from `[...x,]`
+                // (rest with disallowed trailing comma).
                 if (i + 1 < al.elements.len) {
+                    try self.report(.assignment_target_invalid, sp.span);
+                } else if (i + 1 == al.elements.len and
+                    sourceHasComma(self.source, sp.span.end, al.span.end))
+                {
                     try self.report(.assignment_target_invalid, sp.span);
                 }
                 // RestElement target itself can't carry an initializer
@@ -270,6 +329,19 @@ pub const Validator = struct {
             }
             try self.validateAssignmentTarget(&el);
         }
+    }
+
+    /// Scan `[from, to)` of source for a `,`, skipping ASCII
+    /// whitespace and line terminators. Used by the trailing-comma-
+    /// after-rest check in `validateArrayPattern` since the parser
+    /// throws the comma away.
+    fn sourceHasComma(src: []const u8, from: u32, to: u32) bool {
+        var i: usize = from;
+        const end: usize = @min(to, @as(u32, @intCast(src.len)));
+        while (i < end) : (i += 1) {
+            if (src[i] == ',') return true;
+        }
+        return false;
     }
 
     fn validateObjectPattern(self: *Validator, ol: expr_mod_ast.ObjectLit) std.mem.Allocator.Error!void {
@@ -337,6 +409,17 @@ pub const Validator = struct {
     /// nested patterns and disallowed shapes (sequences, comma exprs).
     fn validateAssignmentTarget(self: *Validator, e: *const Expression) std.mem.Allocator.Error!void {
         switch (e.*) {
+            .identifier_reference => |ir| {
+                // §13.15.5.1 — in strict mode, `eval` and `arguments`
+                // are restricted identifiers and cannot appear as a
+                // SimpleAssignmentTarget. Reinterpret-from-cover paths
+                // need the explicit check; direct LHS positions get it
+                // via expression.zig.
+                const name = self.source[ir.span.start..ir.span.end];
+                if (std.mem.eql(u8, name, "eval") or std.mem.eql(u8, name, "arguments")) {
+                    try self.report(.restricted_identifier_in_strict, ir.span);
+                }
+            },
             .array_literal => |al| try self.validateArrayPattern(al),
             .object_literal => |ol| try self.validateObjectPattern(ol),
             .parenthesized => |p| {
@@ -365,12 +448,42 @@ pub const Validator = struct {
                     try self.report(.assignment_target_invalid, e.span());
                 }
             },
-            // Identifier / member / call-chain (yielding LHS) etc. are
-            // handled by the existing simple-target check in
-            // expression.zig at the outer assignment level. Nested
-            // identifiers / members are the common legal case here, so
-            // we don't double-check them.
-            else => {},
+            // Member access (`obj.x`, `obj[x]`, `obj?.x`) and call
+            // results that read as references (`f()[x]`) yield valid
+            // SimpleAssignmentTargets — leave them alone. Likewise
+            // bare identifier_reference falls through to the eval/
+            // arguments branch above. Everything else (literals,
+            // function/class expressions, meta properties, this,
+            // super, etc.) is not a valid destructuring target.
+            .member, .call => {},
+            .new_expr,
+            .null_literal,
+            .boolean_literal,
+            .numeric_literal,
+            .bigint_literal,
+            .string_literal,
+            .template_literal,
+            .regex_literal,
+            .tagged_template,
+            .unary,
+            .binary,
+            .logical,
+            .conditional,
+            .update,
+            .await_,
+            .yield,
+            .spread,
+            .chain,
+            .this_expr,
+            .super_,
+            .import_meta,
+            .import_call,
+            .new_target,
+            .private_identifier,
+            .function_expr,
+            .arrow_function,
+            .class_expr,
+            => try self.report(.assignment_target_invalid, e.span()),
         }
     }
 };
