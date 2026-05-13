@@ -1307,6 +1307,10 @@ pub fn doubleToI64Saturating(d: f64) i64 {
 /// Some Zig versions also pad zero-byte exponents (`1e0`) and
 /// emit the sign differently. Normalise to spec form using
 /// `buf` as scratch.
+pub fn normalizeExponentPub(buf: []u8, raw: []const u8) []const u8 {
+    return normalizeExponent(buf, raw);
+}
+
 fn normalizeExponent(buf: []u8, raw: []const u8) []const u8 {
     const e_idx = std.mem.indexOfScalar(u8, raw, 'e') orelse return raw;
     const exp_start = e_idx + 1;

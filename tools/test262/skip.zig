@@ -76,6 +76,13 @@ pub const unsupported_features = [_][]const u8{
     "await-dictionary",
     // Permanent policy (AGENTS.md, ROADMAP.md) — SES alignment.
     "eval",
+    // Shared memory — out per ROADMAP (single-agent-per-isolate).
+    // Path-skipped under `built-ins/{Atomics,SharedArrayBuffer}/`,
+    // but a long tail of TypedArray / DataView / Reflect fixtures
+    // builds a `new SharedArrayBuffer(...)` view in setup — declare
+    // the feature unsupported so those bail before execution.
+    "SharedArrayBuffer",
+    "Atomics",
     // Annex B browser-legacy.
     "__getter__",
     "__setter__",
