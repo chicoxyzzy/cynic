@@ -264,6 +264,39 @@ pub const Parser = struct {
 
     // ── Statements (§14) ────────────────────────────────────────────────
 
+    /// §14.1 — for contexts that take a `Statement` (not
+    /// `StatementListItem`), reject `let`/`const`/`function`/
+    /// `class`/async-function/generator-function at the start.
+    /// These are Declaration productions per §16 and are not in
+    /// the Statement union. Specifically used by the body slot of
+    /// `if` / `else` / `while` / `do-while` / `for` / `for-in/of`.
+    /// `var` is fine — it's a VariableStatement, which IS a Statement.
+    ///
+    /// Spec §13.6.1, §13.7.x, §13.8 all have a body of `Statement`.
+    /// Annex B.3.4 (FunctionDeclarations in IfStatement Statement
+    /// clauses) is sloppy-mode-only and out of scope for Cynic.
+    fn parseStatementBody(self: *Parser) ParseError!Statement {
+        switch (self.current.kind) {
+            .kw_let, .kw_const, .kw_function, .kw_class => {
+                try self.report(.unexpected_token, self.current.span);
+                return error.ParseError;
+            },
+            .identifier => {
+                // `async function f(){}` — async function declaration
+                // is also a Declaration, not a Statement.
+                if (std.mem.eql(u8, self.current.slice(self.source), "async")) {
+                    const second = try self.peek2();
+                    if (second.kind == .kw_function and !second.line_terminator_before) {
+                        try self.report(.unexpected_token, self.current.span);
+                        return error.ParseError;
+                    }
+                }
+            },
+            else => {},
+        }
+        return self.parseStatement();
+    }
+
     fn parseStatement(self: *Parser) ParseError!Statement {
         const kind = self.current.kind;
         switch (kind) {
@@ -560,12 +593,12 @@ pub const Parser = struct {
         const test_expr = try expr_mod.parseExpression(self);
         _ = try self.expect(.rparen);
         const consequent = try self.arena.create(Statement);
-        consequent.* = try self.parseStatement();
+        consequent.* = try self.parseStatementBody();
         var alternate: ?*Statement = null;
         var end = consequent.span().end;
         if (try self.eat(.kw_else)) {
             const alt = try self.arena.create(Statement);
-            alt.* = try self.parseStatement();
+            alt.* = try self.parseStatementBody();
             alternate = alt;
             end = alt.span().end;
         }
@@ -585,7 +618,7 @@ pub const Parser = struct {
         const test_expr = try expr_mod.parseExpression(self);
         _ = try self.expect(.rparen);
         const body = try self.arena.create(Statement);
-        body.* = try self.parseStatement();
+        body.* = try self.parseStatementBody();
         return .{ .while_ = .{
             .span = .{ .start = start, .end = body.span().end },
             .test_ = test_expr,
@@ -600,7 +633,7 @@ pub const Parser = struct {
         const start = self.current.span.start;
         _ = try self.bump(); // `do`
         const body = try self.arena.create(Statement);
-        body.* = try self.parseStatement();
+        body.* = try self.parseStatementBody();
         _ = try self.expect(.kw_while);
         _ = try self.expect(.lparen);
         const test_expr = try expr_mod.parseExpression(self);
@@ -785,7 +818,7 @@ pub const Parser = struct {
                 try expr_mod.parseExpression(self);
             _ = try self.expect(.rparen);
             const body = try self.arena.create(Statement);
-            body.* = try self.parseStatement();
+            body.* = try self.parseStatementBody();
             return .{ .for_in_of = .{
                 .span = .{ .start = start, .end = body.span().end },
                 .kind = kind,
@@ -816,7 +849,7 @@ pub const Parser = struct {
         }
         _ = try self.expect(.rparen);
         const body = try self.arena.create(Statement);
-        body.* = try self.parseStatement();
+        body.* = try self.parseStatementBody();
         return .{ .for_ = .{
             .span = .{ .start = start, .end = body.span().end },
             .init = init_head,
