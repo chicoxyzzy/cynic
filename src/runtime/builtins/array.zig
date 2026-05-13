@@ -180,7 +180,7 @@ fn arrayConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
 fn arrayPush(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    var len = try clampArrayLength(try toLengthOf(realm, obj));
+    var len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     for (args) |v| {
         if (len >= max_iter_length) return throwRangeError(realm, "Array length exceeds maximum supported");
         var ibuf: [24]u8 = undefined;
@@ -236,7 +236,7 @@ fn arrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const raw_len = try toLengthOf(realm, obj);
     if (raw_len <= 0) return Value.fromInt32(-1);
     const start = (try startIndexFrom(realm, args, raw_len)) orelse return Value.fromInt32(-1);
-    const len = try clampArrayLength(raw_len);
+    const len = try intrinsics.clampArrayLengthR(realm, raw_len);
     var i: i64 = start;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
@@ -285,7 +285,7 @@ fn arrayIncludes(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const raw_len = try toLengthOf(realm, obj);
     if (raw_len <= 0) return Value.false_;
     const start = (try startIndexFrom(realm, args, raw_len)) orelse return Value.false_;
-    const len = try clampArrayLength(raw_len);
+    const len = try intrinsics.clampArrayLengthR(realm, raw_len);
     var i: i64 = start;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
@@ -305,7 +305,7 @@ fn arrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         const s: *JSString = @ptrCast(@alignCast(sep_v.asString()));
         break :blk s.bytes;
     } else ",";
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
     var i: i64 = 0;
@@ -330,7 +330,7 @@ fn arrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 fn arrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = try toObjectThis(realm, this_value);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
     var i: i64 = 0;
@@ -363,7 +363,7 @@ fn arrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) Na
 fn arraySlice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
     const raw_len = try toLengthOf(realm, obj);
-    const len = try clampArrayLength(raw_len);
+    const len = try intrinsics.clampArrayLengthR(realm, raw_len);
     var start: i64 = if (args.len > 0) toInt(args[0]) else 0;
     var end: i64 = if (args.len > 1 and !args[1].isUndefined()) toInt(args[1]) else len;
     if (start < 0) start = @max(len + start, 0);
@@ -425,7 +425,7 @@ fn concatAppend(realm: *Realm, out: *JSObject, value: Value, write_idx: *i64) Na
             try concatWriteOne(realm, out, value, write_idx);
             return;
         };
-        const len = try clampArrayLength(lengthOfArray(arr));
+        const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(arr));
         if (write_idx.* + len > 9007199254740991) {
             return throwTypeError(realm, "concat: result length exceeds 2^53-1");
         }
@@ -616,7 +616,7 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     }
 
     // Array-like fallback (`length` + indexed get).
-    const len = try clampArrayLength(lengthOfArray(src));
+    const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(src));
     var i: i64 = 0;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
@@ -642,7 +642,7 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 
 fn arrayAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     var idx = if (args.len > 0) toInt(args[0]) else 0;
     if (idx < 0) idx += len;
     if (idx < 0 or idx >= len) return Value.undefined_;
@@ -659,7 +659,7 @@ fn arrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     // exception instead of being silently coerced to 0.
     const obj = try toObjectThis(realm, this_value);
     const value = argOr(args, 0, Value.undefined_);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     // §23.1.3.7 step 5-9 — start / end use ToIntegerOrInfinity,
     // which fires through ToPrimitive (valueOf / toString /
     // @@toPrimitive). The `try` propagates a thrown coercion.
@@ -708,7 +708,7 @@ fn arrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nativ
         if (try sparseReverseSearch(realm, obj, start, target)) |found| return numberFromI64(found);
         return Value.fromInt32(-1);
     }
-    const len = try clampArrayLength(raw_len);
+    const len = try intrinsics.clampArrayLengthR(realm, raw_len);
     // Iteration cap can't truncate above `start` — but if the
     // raw length exceeded the cap, `start` might too. Clamp.
     var i: i64 = if (start >= len) len - 1 else start;
@@ -799,7 +799,7 @@ fn lastStartIndexFrom(args: []const Value, len: i64) ?i64 {
 
 fn arrayFindLast(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.findLast callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
     var i: i64 = len - 1;
@@ -820,7 +820,7 @@ fn arrayFindLastIndex(realm: *Realm, this_value: Value, args: []const Value) Nat
     // and inherited indexed accessors on the prototype chain.
     // Step order: ToObject → length → IsCallable.
     const obj = try toObjectThis(realm, this_value);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.findLastIndex callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
     var i: i64 = len - 1;
@@ -886,7 +886,7 @@ fn arrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) Nativ
         return acc;
     }
 
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     var i: i64 = len - 1;
     if (!have_acc) {
         while (i >= 0) : (i -= 1) {
@@ -942,7 +942,7 @@ fn arrayFlat(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 }
 
 fn flattenInto(realm: *Realm, source: *JSObject, depth: i64, target: *JSObject, write_idx: *i64) NativeError!void {
-    const len = try clampArrayLength(lengthOfArray(source));
+    const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(source));
     var i: i64 = 0;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
@@ -987,7 +987,7 @@ fn arrayFlatMap(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // walks the prototype chain (so a fixture that maps over
     // `Array.prototype.flatMap.call(false, cb)` sees inherited
     // accessors from `Boolean.prototype`).
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
 
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
@@ -1002,7 +1002,7 @@ fn arrayFlatMap(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         const mapped = try invokeCallback(realm, callback, this_arg, elem, i, obj);
         if (isArrayLike(mapped)) {
             const inner = heap_mod.valueAsPlainObject(mapped).?;
-            const inner_len = try clampArrayLength(try toLengthOf(realm, inner));
+            const inner_len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, inner));
             var j: i64 = 0;
             while (j < inner_len) : (j += 1) {
                 var jbuf: [24]u8 = undefined;
@@ -1028,7 +1028,7 @@ fn arrayFlatMap(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 
 fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = objectFromThis(this_value) orelse return error.NativeThrew;
-    const len = try clampArrayLength(lengthOfArray(obj));
+    const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
     var start: i64 = if (args.len > 0) toInt(args[0]) else 0;
     if (start < 0) start = @max(len + start, 0);
     start = @min(start, len);
@@ -1107,7 +1107,7 @@ fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
 
 fn arrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = objectFromThis(this_value) orelse return error.NativeThrew;
-    const len = try clampArrayLength(lengthOfArray(obj));
+    const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
     var target: i64 = if (args.len > 0) toInt(args[0]) else 0;
     var start: i64 = if (args.len > 1) toInt(args[1]) else 0;
     var end: i64 = if (args.len > 2 and !args[2].isUndefined()) toInt(args[2]) else len;
@@ -1148,7 +1148,7 @@ fn arrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) Native
 
 fn arraySort(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = objectFromThis(this_value) orelse return error.NativeThrew;
-    const len = try clampArrayLength(lengthOfArray(obj));
+    const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
     if (len <= 1) return this_value;
 
     // Materialise into a Zig slice, sort, write back. With a JS
@@ -1227,7 +1227,7 @@ fn arrayToSorted(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         return intrinsics.throwTypeError(realm, "comparefn must be a function");
     };
     const obj = try toObjectThis(realm, this_value);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
@@ -1300,7 +1300,7 @@ fn arrayToSorted(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 fn arrayToReversed(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = try toObjectThis(realm, this_value);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
@@ -1323,7 +1323,7 @@ fn arrayToReversed(realm: *Realm, this_value: Value, args: []const Value) Native
 /// mutating version but writes into a fresh array.
 fn arrayToSpliced(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     var start: i64 = if (args.len > 0) toInt(args[0]) else 0;
     if (start < 0) start = @max(len + start, 0);
     start = @min(start, len);
@@ -1387,7 +1387,7 @@ fn arrayToSpliced(realm: *Realm, this_value: Value, args: []const Value) NativeE
 /// indices count from the end; out-of-range throws RangeError.
 fn arrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const idx_arg = argOr(args, 0, Value.undefined_);
     var idx: i64 = toInt(idx_arg);
     if (idx < 0) idx += len;
@@ -1441,7 +1441,7 @@ fn computedKeyForSort(v: Value, scratch: *[64]u8) []const u8 {
 fn arrayReverse(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = objectFromThis(this_value) orelse return error.NativeThrew;
-    const len = try clampArrayLength(lengthOfArray(obj));
+    const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
     var i: i64 = 0;
     const half = @divFloor(len, 2);
     while (i < half) : (i += 1) {
@@ -1463,7 +1463,7 @@ fn arrayReverse(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 fn arrayShift(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = objectFromThis(this_value) orelse return error.NativeThrew;
-    const len = try clampArrayLength(lengthOfArray(obj));
+    const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
     if (len == 0) {
         setLength(realm, obj, 0) catch return error.OutOfMemory;
         return Value.undefined_;
@@ -1490,7 +1490,7 @@ fn arrayShift(realm: *Realm, this_value: Value, args: []const Value) NativeError
 
 fn arrayUnshift(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = objectFromThis(this_value) orelse return error.NativeThrew;
-    const len = try clampArrayLength(lengthOfArray(obj));
+    const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
     const argc: i64 = @intCast(args.len);
     // Shift existing elements right by argc.
     var i: i64 = len - 1;
@@ -1552,7 +1552,7 @@ fn arrayForEach(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // `undefined` as the callback; the test expects the length-
     // coercion throw to propagate, not the IsCallable error.
     const obj = try toObjectThis(realm, this_value);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.forEach callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
     var i: i64 = 0;
@@ -1570,7 +1570,7 @@ fn arrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
     // §23.1.3.19 — spec step order is ToObject → LengthOfArrayLike
     // → callback IsCallable check, so a throwing length wins.
     const obj = try toObjectThis(realm, this_value);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.map callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
 
@@ -1594,7 +1594,7 @@ fn arrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
 fn arrayFilter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     // §23.1.3.8 spec step order: ToObject → length → IsCallable.
     const obj = try toObjectThis(realm, this_value);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.filter callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
 
@@ -1624,7 +1624,7 @@ fn arrayFilter(realm: *Realm, this_value: Value, args: []const Value) NativeErro
 fn arrayEvery(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     // §23.1.3.6 spec step order: ToObject → length → IsCallable.
     const obj = try toObjectThis(realm, this_value);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.every callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
     var i: i64 = 0;
@@ -1641,7 +1641,7 @@ fn arrayEvery(realm: *Realm, this_value: Value, args: []const Value) NativeError
 
 fn arraySome(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.some callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
     var i: i64 = 0;
@@ -1658,7 +1658,7 @@ fn arraySome(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 
 fn arrayFind(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.find callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
     var i: i64 = 0;
@@ -1674,7 +1674,7 @@ fn arrayFind(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 
 fn arrayFindIndex(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.findIndex callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
     var i: i64 = 0;
@@ -1690,7 +1690,7 @@ fn arrayFindIndex(realm: *Realm, this_value: Value, args: []const Value) NativeE
 
 fn arrayReduce(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.reduce callback must be a function");
     var acc: Value = Value.undefined_;
     var have_acc = args.len >= 2;

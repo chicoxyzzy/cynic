@@ -904,6 +904,19 @@ pub fn clampArrayLength(len: i64) NativeError!i64 {
     return len;
 }
 
+/// Range-checked clamp that sets `realm.pending_exception` to a
+/// real `RangeError` before unwinding. Prefer this over the bare
+/// `clampArrayLength` so spec fixtures see the right error class.
+pub fn clampArrayLengthR(realm: *Realm, len: i64) NativeError!i64 {
+    if (len < 0) return 0;
+    if (len > max_iter_length) {
+        const ex = newRangeError(realm, "Invalid array length") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
+    return len;
+}
+
 /// Range-checked variant: caller has access to `realm` and wants
 /// the thrown value to carry a real `.message`.
 fn clampArrayLengthOr(realm: *Realm, len: i64) NativeError!i64 {
