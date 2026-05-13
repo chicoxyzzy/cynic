@@ -21,13 +21,19 @@ const throwTypeError = intrinsics.throwTypeError;
 const newURIError = intrinsics.newURIError;
 
 pub fn install(realm: *Realm) !void {
+    // §20.1.1 — none of these globals implement [[Construct]];
+    // `new encodeURI(...)` etc. must throw TypeError.
     const eu = try realm.heap.allocateFunctionNative(globalEncodeURI, 1, "encodeURI");
+    eu.has_construct = false;
     try realm.globals.put(realm.allocator, "encodeURI", heap_mod.taggedFunction(eu));
     const euc = try realm.heap.allocateFunctionNative(globalEncodeURIComponent, 1, "encodeURIComponent");
+    euc.has_construct = false;
     try realm.globals.put(realm.allocator, "encodeURIComponent", heap_mod.taggedFunction(euc));
     const du = try realm.heap.allocateFunctionNative(globalDecodeURI, 1, "decodeURI");
+    du.has_construct = false;
     try realm.globals.put(realm.allocator, "decodeURI", heap_mod.taggedFunction(du));
     const duc = try realm.heap.allocateFunctionNative(globalDecodeURIComponent, 1, "decodeURIComponent");
+    duc.has_construct = false;
     try realm.globals.put(realm.allocator, "decodeURIComponent", heap_mod.taggedFunction(duc));
 }
 
