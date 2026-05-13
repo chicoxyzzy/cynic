@@ -160,8 +160,9 @@ fn iteratorReturnsSelf(realm: *Realm, this_value: Value, args: []const Value) Na
 fn makeArrayLikeIterator(realm: *Realm, src: Value, kind: enum { entries, keys, values }) !Value {
     const it = try realm.heap.allocateObject();
     it.prototype = realm.intrinsics.object_prototype;
-    try it.set(realm.allocator, "__cynic_iter_target__", src);
-    try it.set(realm.allocator, "__cynic_iter_idx__", Value.fromInt32(0));
+    const state = try realm.allocator.create(@import("../object.zig").ArrayLikeIterState);
+    state.* = .{ .target = src };
+    it.array_like_iter = state;
     const native: @import("../function.zig").NativeFn = switch (kind) {
         .entries => arrayLikeIterEntriesNext,
         .keys => arrayLikeIterKeysNext,
@@ -196,9 +197,9 @@ pub fn stringIteratorMethod(realm: *Realm, this_value: Value, args: []const Valu
 
 fn arrayLikeIterStep(realm: *Realm, this_value: Value) ?struct { idx: i32, value: Value, length: i64 } {
     const it = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    const target = it.get("__cynic_iter_target__");
-    const idx_v = it.get("__cynic_iter_idx__");
-    const idx: i32 = if (idx_v.isInt32()) idx_v.asInt32() else 0;
+    const state = it.array_like_iter orelse return null;
+    const target = state.target;
+    const idx: i32 = @intCast(state.idx);
 
     var length: i64 = 0;
     var elem: Value = Value.undefined_;
@@ -235,8 +236,11 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) ?struct { idx: i32, value
     } else {
         return null;
     }
-    if (idx >= length) return null;
-    it.set(realm.allocator, "__cynic_iter_idx__", Value.fromInt32(idx + 1)) catch return null;
+    if (idx >= length) {
+        state.done = true;
+        return null;
+    }
+    state.idx = @intCast(idx + 1);
     return .{ .idx = idx, .value = elem, .length = length };
 }
 

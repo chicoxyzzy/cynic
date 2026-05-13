@@ -19,7 +19,8 @@ const std = @import("std");
 const Value = @import("value.zig").Value;
 const JSString = @import("string.zig").JSString;
 const JSFunction = @import("function.zig").JSFunction;
-const JSObject = @import("object.zig").JSObject;
+const object_mod = @import("object.zig");
+const JSObject = object_mod.JSObject;
 const Environment = @import("environment.zig").Environment;
 const heap_mod = @import("heap.zig");
 const intrinsics_mod = @import("intrinsics.zig");
@@ -831,10 +832,9 @@ pub fn openIterator(
 
     // 2. Array-like fallback. Builds a plain object with a
     // `next` method that walks `iterable[i]` for `i` in
-    // `0..length`. The closure-shaped state lives as
-    // properties on the iterator (`__cynic_iter_target__`,
-    // `__cynic_iter_idx__`); the native `next` reads + writes
-    // them via the receiver.
+    // `0..length`. The cursor + target live on the typed
+    // `array_like_iter` slot (hidden from JS), mirroring the
+    // spec's [[IteratedObject]] + [[NextIndex]] internal slots.
     const has_length = if (heap_mod.valueAsPlainObject(iterable)) |o|
         o.hasOwn("length") or (o.prototype != null and !o.get("length").isUndefined())
     else
@@ -843,8 +843,9 @@ pub fn openIterator(
 
     const iter = realm.heap.allocateObject() catch return error.OutOfMemory;
     iter.prototype = realm.intrinsics.object_prototype;
-    iter.set(realm.allocator, "__cynic_iter_target__", iterable) catch return error.OutOfMemory;
-    iter.set(realm.allocator, "__cynic_iter_idx__", Value.fromInt32(0)) catch return error.OutOfMemory;
+    const state = realm.allocator.create(object_mod.ArrayLikeIterState) catch return error.OutOfMemory;
+    state.* = .{ .target = iterable };
+    iter.array_like_iter = state;
     const next_fn = realm.heap.allocateFunctionNative(arrayLikeIterNext, 0, "next") catch return error.OutOfMemory;
     next_fn.proto = realm.intrinsics.function_prototype;
     iter.set(realm.allocator, "next", heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
@@ -1009,8 +1010,9 @@ pub fn openForInIterator(
 }
 
 /// `next()` for the synthesised array-like iterator. Reads
-/// `this.__cynic_iter_target__[idx]`, increments `idx`, returns
-/// `{value, done}`. Done when `idx >= length`.
+/// `[[IteratedObject]][idx]`, increments `idx`, returns
+/// `{value, done}`. Done when `idx >= length`. Iterator state
+/// lives on the typed `array_like_iter` slot (hidden from JS).
 ///
 /// Strings get per-codepoint walking per §22.1.5.1
 /// `String.prototype[@@iterator]` — `idx` is the byte offset
@@ -1023,19 +1025,20 @@ pub fn openForInIterator(
 fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
     _ = args;
     const iter_obj = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    const target = iter_obj.get("__cynic_iter_target__");
-    const idx_v = iter_obj.get("__cynic_iter_idx__");
-    const idx: i32 = if (idx_v.isInt32()) idx_v.asInt32() else 0;
+    const state = iter_obj.array_like_iter orelse return error.NativeThrew;
+    const target = state.target;
+    const idx: u32 = state.idx;
 
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
     result.prototype = realm.intrinsics.object_prototype;
 
     if (target.isString()) {
         const s: *@import("string.zig").JSString = @ptrCast(@alignCast(target.asString()));
-        const start: usize = @intCast(idx);
+        const start: usize = idx;
         if (start >= s.bytes.len) {
             result.set(realm.allocator, "value", Value.undefined_) catch return error.OutOfMemory;
             result.set(realm.allocator, "done", Value.true_) catch return error.OutOfMemory;
+            state.done = true;
             return heap_mod.taggedObject(result);
         }
         const b0 = s.bytes[start];
@@ -1058,7 +1061,7 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
         const sub = realm.heap.allocateString(s.bytes[start .. start + width]) catch return error.OutOfMemory;
         result.set(realm.allocator, "value", Value.fromString(sub)) catch return error.OutOfMemory;
         result.set(realm.allocator, "done", Value.false_) catch return error.OutOfMemory;
-        iter_obj.set(realm.allocator, "__cynic_iter_idx__", Value.fromInt32(idx + @as(i32, @intCast(width)))) catch return error.OutOfMemory;
+        state.idx = idx + @as(u32, @intCast(width));
         return heap_mod.taggedObject(result);
     }
 
@@ -1069,9 +1072,10 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
         if (len_v.isInt32()) length = len_v.asInt32() else if (len_v.isDouble()) length = @intFromFloat(len_v.asDouble());
     }
 
-    if (idx >= length) {
+    if (@as(i64, idx) >= length) {
         result.set(realm.allocator, "value", Value.undefined_) catch return error.OutOfMemory;
         result.set(realm.allocator, "done", Value.true_) catch return error.OutOfMemory;
+        state.done = true;
         return heap_mod.taggedObject(result);
     }
 
@@ -1083,7 +1087,7 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
     }
     result.set(realm.allocator, "value", elem) catch return error.OutOfMemory;
     result.set(realm.allocator, "done", Value.false_) catch return error.OutOfMemory;
-    iter_obj.set(realm.allocator, "__cynic_iter_idx__", Value.fromInt32(idx + 1)) catch return error.OutOfMemory;
+    state.idx = idx + 1;
     return heap_mod.taggedObject(result);
 }
 

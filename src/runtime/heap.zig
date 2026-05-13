@@ -543,6 +543,7 @@ pub const Heap = struct {
                         self.markValue(entry.value);
                     }
                 }
+                if (o.array_like_iter) |s| self.markValue(s.target);
                 if (o.generator_ref) |gen| self.markGenerator(gen);
                 // §10.4.2 Array exotic — packed indexed elements
                 // are part of the JSObject's own state; mark each

@@ -132,6 +132,24 @@ pub const SetEntry = struct {
     deleted: bool = false,
 };
 
+/// Per-instance state for the synthetic iterator returned by
+/// `openIterator`'s array-like fallback (§7.4.1 step 4) and by
+/// the parallel `fromIterable` path in Map / Set / WeakMap
+/// constructors. The iterator walks `target[0..length]` with
+/// `idx` as the cursor. `done` flips on first out-of-range read.
+/// Kept off the property bag so it isn't enumerable / inspectable
+/// from JS (the spec's [[IteratedObject]] / [[NextIndex]] are
+/// internal slots).
+pub const ArrayLikeIterState = struct {
+    target: Value,
+    idx: u32 = 0,
+    done: bool = false,
+
+    pub fn deinit(self: *ArrayLikeIterState, allocator: std.mem.Allocator) void {
+        allocator.destroy(self);
+    }
+};
+
 /// §26.2.1.1 [[Cells]] storage for FinalizationRegistry.
 /// `cleanup_callback` is the callable supplied at construction;
 /// `cells` holds the live registrations. Cynic's FinalizationRegistry
@@ -236,6 +254,13 @@ pub const JSObject = struct {
     /// `[[SetData]]` (§24.2.1.1) — same shape as map_data but
     /// values-only.
     set_data: ?*SetData = null,
+    /// Array-like iterator state — present on the synthetic
+    /// iterator objects produced by the §7.4.1 fallback path
+    /// (`openIterator`) and the `Map` / `Set` `fromIterable`
+    /// helper. `null` for every other object. Hidden from JS;
+    /// mirrors the spec's [[IteratedObject]] + [[NextIndex]]
+    /// internal slots.
+    array_like_iter: ?*ArrayLikeIterState = null,
     /// `[[DateValue]]` (§21.4.1) — milliseconds since Unix
     /// epoch. NaN means an invalid date. Only set on `new Date()`
     /// instances.
@@ -415,6 +440,7 @@ pub const JSObject = struct {
         self.accessors.deinit(allocator);
         if (self.map_data) |m| m.deinit(allocator);
         if (self.set_data) |s| s.deinit(allocator);
+        if (self.array_like_iter) |s| s.deinit(allocator);
         if (self.finalization_cells) |fc| fc.deinit(allocator);
         if (self.array_buffer) |ab| allocator.free(ab);
         self.promise_waiters.deinit(allocator);
