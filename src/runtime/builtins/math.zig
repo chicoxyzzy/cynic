@@ -104,6 +104,18 @@ fn mathArg(args: []const Value, i: usize) f64 {
     return n.asDouble();
 }
 
+/// Same as `mathArg` but routes the arg through §7.1.4 ToNumber so
+/// objects with `valueOf` / `Symbol.toPrimitive` see the spec hook,
+/// and Symbol / BigInt arguments throw TypeError instead of silently
+/// becoming NaN. Used by methods whose test262 fixtures probe
+/// side-effecting valueOf order or abrupt-from-ToNumber paths.
+fn mathArgRealm(realm: *Realm, args: []const Value, i: usize) NativeError!f64 {
+    const v = argOr(args, i, Value.undefined_);
+    const n = try intrinsics.toNumber(realm, v);
+    if (n.isInt32()) return @floatFromInt(n.asInt32());
+    return n.asDouble();
+}
+
 fn mathDouble(d: f64) Value {
     return Value.fromDouble(d);
 }
@@ -126,9 +138,15 @@ fn mathCeil(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
 fn mathRound(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = realm;
     _ = this_value;
-    // §21.3.2.27 — half-rounds toward +Infinity.
+    // §21.3.2.27 — half-rounds toward +Infinity. Spec-edge:
+    //   - `Math.round(-0)` returns -0 (and `Math.round(x)` for
+    //     x ∈ [-0.5, -0) likewise returns -0, *not* +0). The naïve
+    //     `floor(x + 0.5)` collapses -0.5 → floor(0) = +0 instead.
+    //     Real engines hand-route the [-0.5, 0] interval.
     const x = mathArg(args, 0);
     if (std.math.isNan(x) or std.math.isInf(x)) return mathDouble(x);
+    if (x == 0) return mathDouble(x); // preserves sign of 0
+    if (x < 0 and x >= -0.5) return mathDouble(-0.0);
     return mathDouble(@floor(x + 0.5));
 }
 fn mathTrunc(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -223,46 +241,60 @@ fn mathAtan2(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     return mathDouble(std.math.atan2(mathArg(args, 0), mathArg(args, 1)));
 }
 fn mathMin(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
     _ = this_value;
     if (args.len == 0) return mathDouble(std.math.inf(f64));
-    var best = mathArg(args, 0);
+    // §21.3.2.25 step 2 — ToNumber every arg first (in order), THEN
+    // compute. valueOf side effects must fire for all args even if
+    // an earlier arg is NaN.
+    const coerced = realm.allocator.alloc(f64, args.len) catch return error.OutOfMemory;
+    defer realm.allocator.free(coerced);
+    for (args, 0..) |_, i| coerced[i] = try mathArgRealm(realm, args, i);
+    var best = coerced[0];
     if (std.math.isNan(best)) return mathDouble(best);
     var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        const v = mathArg(args, i);
+    while (i < coerced.len) : (i += 1) {
+        const v = coerced[i];
         if (std.math.isNan(v)) return mathDouble(v);
-        // §21.3.2.25 — `Math.min(-0, +0)` returns -0 even though
-        // IEEE 754 treats them as equal. Spec rule: -0 < +0
-        // for the purposes of Math.min/max.
+        // -0 < +0 per §21.3.2.25 step 6.
         if (v < best or (v == 0 and best == 0 and std.math.signbit(v) and !std.math.signbit(best))) best = v;
     }
     return mathDouble(best);
 }
 fn mathMax(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
     _ = this_value;
     if (args.len == 0) return mathDouble(-std.math.inf(f64));
-    var best = mathArg(args, 0);
+    const coerced = realm.allocator.alloc(f64, args.len) catch return error.OutOfMemory;
+    defer realm.allocator.free(coerced);
+    for (args, 0..) |_, i| coerced[i] = try mathArgRealm(realm, args, i);
+    var best = coerced[0];
     if (std.math.isNan(best)) return mathDouble(best);
     var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        const v = mathArg(args, i);
+    while (i < coerced.len) : (i += 1) {
+        const v = coerced[i];
         if (std.math.isNan(v)) return mathDouble(v);
-        // §21.3.2.24 — `Math.max(-0, +0)` returns +0; +0 > -0.
+        // +0 > -0 per §21.3.2.24 step 6.
         if (v > best or (v == 0 and best == 0 and !std.math.signbit(v) and std.math.signbit(best))) best = v;
     }
     return mathDouble(best);
 }
 fn mathHypot(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
     _ = this_value;
-    var sum: f64 = 0;
-    for (args) |a| {
-        const v = coerceToNumber(a);
-        const d = if (v.isInt32()) @as(f64, @floatFromInt(v.asInt32())) else v.asDouble();
-        sum += d * d;
+    // §21.3.2.18 step 2 — ToNumber every arg before the math.
+    const coerced = realm.allocator.alloc(f64, args.len) catch return error.OutOfMemory;
+    defer realm.allocator.free(coerced);
+    for (args, 0..) |_, i| coerced[i] = try mathArgRealm(realm, args, i);
+    // §21.3.2.18 step 3-5 — Infinity short-circuits to +Infinity
+    // (even when other args are NaN); NaN otherwise propagates.
+    var has_inf = false;
+    var has_nan = false;
+    for (coerced) |d| {
+        if (std.math.isInf(d)) has_inf = true;
+        if (std.math.isNan(d)) has_nan = true;
     }
+    if (has_inf) return mathDouble(std.math.inf(f64));
+    if (has_nan) return mathDouble(std.math.nan(f64));
+    var sum: f64 = 0;
+    for (coerced) |d| sum += d * d;
     return mathDouble(@sqrt(sum));
 }
 
