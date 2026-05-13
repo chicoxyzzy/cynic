@@ -87,6 +87,11 @@ pub const Expression = union(enum) {
     /// invoked via `new` when the enclosing function is being
     /// constructed, or `undefined` otherwise.
     new_target: SpanOnly,
+    /// `#name` as the LHS of `RelationalExpression : PrivateIdentifier
+    /// in ShiftExpression` (§13.10.2). Spec lifts PrivateIdentifier
+    /// here as a one-off cover form; nowhere else is it a primary
+    /// expression. Span covers the `#name`, leading `#` included.
+    private_identifier: SpanOnly,
 
     pub fn span(self: Expression) Span {
         return switch (self) {

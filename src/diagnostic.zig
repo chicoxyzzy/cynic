@@ -91,6 +91,11 @@ pub const Code = enum {
     ///   • duplicate PrivateBoundIdentifiers (other than one paired
     ///     get + set on the same is_static).
     invalid_class_element,
+    /// §15.8.1 AllPrivateNamesValid — a `#name` reference in
+    /// `MemberExpression . PrivateIdentifier` / `CallExpression .
+    /// PrivateIdentifier` whose StringValue is not in scope (no
+    /// enclosing ClassBody declares it as a PrivateBoundIdentifier).
+    undeclared_private_name,
 
     // ── Runtime (later+) ───────────────────────────────────────────────────
     /// `let` or `const` binding read before its initialiser ran —
@@ -125,6 +130,7 @@ pub const Code = enum {
             .assignment_target_invalid,
             .duplicate_lexical_binding,
             .invalid_class_element,
+            .undeclared_private_name,
             => .syntax_error,
             .let_in_tdz => .reference_error,
             .assignment_to_const => .type_error,
@@ -171,6 +177,7 @@ test "Code.errorClass: parser/lexer codes are SyntaxError" {
         .assignment_target_invalid,
         .duplicate_lexical_binding,
         .invalid_class_element,
+        .undeclared_private_name,
     };
     for (parser_codes) |c| {
         try testing.expectEqual(ErrorClass.syntax_error, c.errorClass());

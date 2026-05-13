@@ -942,6 +942,11 @@ fn writeExpression(ctx: *Ctx, e: *const Expression, depth: usize) WriterError!vo
             try writeSpan(ctx, nt.span);
             try ctx.buf.append(ctx.arena, ')');
         },
+        .private_identifier => |pi| {
+            try ctx.buf.print(ctx.arena, "(private-ident \"{s}\" ", .{slice(ctx.source, pi.span)});
+            try writeSpan(ctx, pi.span);
+            try ctx.buf.append(ctx.arena, ')');
+        },
         .class_expr => |ce| {
             try ctx.buf.appendSlice(ctx.arena, "(class-expr ");
             if (ce.name) |n| {

@@ -251,6 +251,16 @@ fn buildArrow(
     }
     // §15.3.1: BoundNames of ArrowParameters must contain no duplicates.
     try parser_mod.enforceUniqueParamBoundNames(p, owned);
+    // §15.3.1: `arguments` and `eval` are forbidden as arrow params
+    // in strict mode. Cover-grammar reinterpret pulls identifier
+    // tokens straight into the param list, so we recheck here.
+    try parser_mod.enforceParamNamesNotEvalArguments(p, owned);
+    // §15.3.1: BoundNames of ArrowParameters ∩ LexicallyDeclaredNames
+    // of ConciseBody must be empty. Only block-bodied arrows can
+    // introduce lexical names; the expression-body form has none.
+    if (body == .block) {
+        try parser_mod.enforceParamLdnDisjoint(p, owned, body.block.body);
+    }
     return .{ .arrow_function = .{
         .span = .{ .start = start, .end = end },
         .params = owned,
@@ -615,7 +625,27 @@ fn checkLogicalMixing(p: *Parser, outer: ast_expr.LogicalOp, child: Expression) 
 /// handled at a higher level (a different production) to enforce the §13.13
 /// "no mixing without parens" rule.
 fn parseBinary(p: *Parser, min_prec: u8) ParseError!Expression {
+    // §13.10.2 — `RelationalExpression : PrivateIdentifier in
+    // ShiftExpression`. This is the only context where a bare
+    // PrivateIdentifier can begin an expression; recognise it before
+    // falling through to the regular unary/primary parse, which would
+    // reject the `#`.
+    if (p.allow_in and p.peek().kind == .private_identifier) {
+        const after = try p.peek2();
+        if (after.kind == .kw_in) {
+            const priv = try p.bump();
+            return parseBinaryPrivateInTail(p, priv.span, min_prec);
+        }
+    }
     var lhs = try parseUnary(p);
+    // §13.6 — `UnaryExpression ** ExponentiationExpression` is rejected
+    // grammatically: the LHS of `**` must be an UpdateExpression (so
+    // `++x ** y` is fine, but `-3 ** 2`, `void x ** y`, `await x ** y`
+    // and friends are not). The wrap-in-parens form is the user's fix.
+    if (p.peek().kind == .star_star and (lhs == .unary or lhs == .await_)) {
+        try p.report(.unexpected_token, p.peek().span);
+        return error.ParseError;
+    }
     while (true) {
         const tok = p.peek();
         const info = binaryPrec(tok.kind, p.allow_in) orelse break;
@@ -633,6 +663,47 @@ fn parseBinary(p: *Parser, min_prec: u8) ParseError!Expression {
             .op = op,
             .lhs = lhs_ptr,
             .rhs = rhs_ptr,
+        } };
+    }
+    return lhs;
+}
+
+/// Continue a `#priv in expr` expression after the `#priv` has been
+/// consumed. Builds the `in` binary with a `private_identifier` LHS and
+/// keeps climbing the regular precedence ladder so chained relational
+/// operators (`#x in obj && cond`, `#x in a in b`, etc.) keep working.
+fn parseBinaryPrivateInTail(p: *Parser, priv_span: Span, min_prec: u8) ParseError!Expression {
+    // `kw_in` has precedence 10. The check above already verified
+    // we're in [+In] context and that `kw_in` is the next token.
+    _ = try p.bump(); // `in`
+    const rhs = try parseBinary(p, 11);
+    const lhs_ptr = try p.arena.create(Expression);
+    lhs_ptr.* = .{ .private_identifier = .{ .span = priv_span } };
+    const rhs_ptr = try p.arena.create(Expression);
+    rhs_ptr.* = rhs;
+    var lhs: Expression = .{ .binary = .{
+        .span = .{ .start = priv_span.start, .end = rhs_ptr.span().end },
+        .op = .in_,
+        .lhs = lhs_ptr,
+        .rhs = rhs_ptr,
+    } };
+    while (true) {
+        const tok = p.peek();
+        const info = binaryPrec(tok.kind, p.allow_in) orelse break;
+        if (info.prec < min_prec) break;
+        _ = try p.bump();
+        const next_min: u8 = if (info.right_assoc) info.prec else info.prec + 1;
+        const next_rhs = try parseBinary(p, next_min);
+        const op = ast_expr.BinaryOp.fromToken(tok.kind).?;
+        const inner_lhs = try p.arena.create(Expression);
+        inner_lhs.* = lhs;
+        const inner_rhs = try p.arena.create(Expression);
+        inner_rhs.* = next_rhs;
+        lhs = .{ .binary = .{
+            .span = .{ .start = inner_lhs.span().start, .end = inner_rhs.span().end },
+            .op = op,
+            .lhs = inner_lhs,
+            .rhs = inner_rhs,
         } };
     }
     return lhs;
@@ -845,6 +916,14 @@ fn parseNewExpression(p: *Parser) ParseError!Expression {
         try parseNewExpression(p)
     else
         try parsePrimary(p);
+    // §13.3 — `new MemberExpression`; ImportCall (`import(...)`) is a
+    // CallExpression, not a MemberExpression, so `new import('')` is
+    // a SyntaxError. Parenthesised `new (import(''))` is allowed because
+    // a parenthesised expression is itself a PrimaryExpression.
+    if (callee == .import_call) {
+        try p.report(.unexpected_token, callee.span());
+        return error.ParseError;
+    }
     while (true) {
         switch (p.peek().kind) {
             .dot => callee = try parseDotMember(p, callee, false),
@@ -1072,16 +1151,43 @@ fn parsePrimary(p: *Parser) ParseError!Expression {
         .lbrace => parseObjectLiteral(p),
         .kw_class => parseClassExpression(p),
         .kw_super => blk: {
-            // §13.3.7 early error: `super` (whether `super.x`,
-            // `super(...)`, or `super[k]`) is only valid inside
-            // a method body. Plain functions and top-level use
-            // are SyntaxErrors. Cynic's `in_method` flag is set
-            // by class-method / object-method body parsing.
-            if (!p.in_method) {
-                try p.report(.unexpected_token, p.peek().span);
+            // §13.3.7 — `super` is grammatically the start of one of
+            // three forms: `SuperCall = super(args)`,
+            // `SuperProperty = super.IdentifierName | super[Expr]`.
+            // Each form has its own scope predicate:
+            //   • `super(...)` only inside the constructor of a
+            //     derived class — `allow_super_call`.
+            //   • `super.x` / `super[x]` inside any HomeObject body —
+            //     `allow_super_property`.
+            // Additionally, `super.#priv` is *never* valid
+            // (PrivateNames live in the receiver's class, not the
+            // parent's), so `super.#x` is a parse-time SyntaxError.
+            const sup = try p.bump();
+            const next = p.peek();
+            if (next.kind == .lparen) {
+                if (!p.allow_super_call) {
+                    try p.report(.unexpected_token, sup.span);
+                    return error.ParseError;
+                }
+            } else if (next.kind == .dot or next.kind == .lbracket) {
+                if (!p.allow_super_property) {
+                    try p.report(.unexpected_token, sup.span);
+                    return error.ParseError;
+                }
+                if (next.kind == .dot) {
+                    const after_dot = try p.peek2();
+                    if (after_dot.kind == .private_identifier) {
+                        try p.report(.unexpected_token, after_dot.span);
+                        return error.ParseError;
+                    }
+                }
+            } else {
+                // Bare `super` (or followed by something else) — not a
+                // legal grammar form. Reject so we don't carry a
+                // dangling super_ expression downstream.
+                try p.report(.unexpected_token, sup.span);
                 return error.ParseError;
             }
-            const sup = try p.bump();
             break :blk .{ .super_ = .{ .span = sup.span } };
         },
         .slash, .slash_eq => parseRegexLiteralFromSlash(p),
@@ -1187,7 +1293,7 @@ fn parseClassExpression(p: *Parser) ParseError!Expression {
         ptr.* = sup;
         superclass = ptr;
     }
-    const body_end = try p.parseClassBody();
+    const body_end = try p.parseClassBody(superclass != null);
     return .{ .class_expr = .{
         .span = .{ .start = start, .end = body_end.end },
         .name = name,
@@ -1379,25 +1485,38 @@ fn parseObjectMember(
     // Method shorthand: `key(params) { body }`.
     if (p.peek().kind == .lparen) {
         const params = try p.parseFunctionParameters();
+        // §15.4.1 / §13.2.5 — getters take zero params; setters take
+        // exactly one non-rest FormalParameter.
+        try parser_mod.enforceAccessorArity(p, method_kind, params, p.peek().span.start);
 
         const saved_gen = p.in_generator;
         const saved_async = p.in_async;
         const saved_in_function = p.in_function;
-        const saved_in_method = p.in_method;
+        const saved_super_prop = p.allow_super_property;
+        const saved_super_call = p.allow_super_call;
         p.in_generator = is_generator;
         p.in_async = is_async;
         p.in_function = true;
-        p.in_method = true;
+        // Object methods carry a HomeObject (§13.2.5.4) so `super.x`
+        // is legal; `super()` is never legal in an object method.
+        p.allow_super_property = true;
+        p.allow_super_call = false;
         const body = blk: {
             defer {
                 p.in_generator = saved_gen;
                 p.in_async = saved_async;
                 p.in_function = saved_in_function;
-                p.in_method = saved_in_method;
+                p.allow_super_property = saved_super_prop;
+                p.allow_super_call = saved_super_call;
             }
             break :blk try p.parseBlockStatementInner();
         };
         parser_mod.tagDirectivePrologue(body.body);
+        // §15.7.1 / §15.8.1 — `use strict` body + non-simple params is
+        // a SyntaxError for ObjectLiteral methods too. Mirrors the
+        // function-decl / class-method enforcement.
+        try parser_mod.enforceStrictDirectiveSimplicity(p, params, body.body, body.span);
+        try parser_mod.enforceParamLdnDisjoint(p, params, body.body);
         try members.append(p.arena, .{ .method = .{
             .span = .{ .start = start, .end = body.span.end },
             .kind = method_kind,
@@ -1573,18 +1692,28 @@ fn parseFunctionExpressionAt(p: *Parser, start: u32, is_async: bool) ParseError!
     const saved_gen = p.in_generator;
     const saved_async = p.in_async;
     const saved_in_function = p.in_function;
+    const saved_super_prop = p.allow_super_property;
+    const saved_super_call = p.allow_super_call;
     p.in_generator = is_generator;
     p.in_async = is_async;
     p.in_function = true;
+    // Function expressions carry no HomeObject — `super` of any kind
+    // is a SyntaxError inside their body, regardless of the
+    // surrounding context.
+    p.allow_super_property = false;
+    p.allow_super_call = false;
     defer {
         p.in_generator = saved_gen;
         p.in_async = saved_async;
         p.in_function = saved_in_function;
+        p.allow_super_property = saved_super_prop;
+        p.allow_super_call = saved_super_call;
     }
 
     const body = try p.parseBlockStatementInner();
     parser_mod.tagDirectivePrologue(body.body);
     try parser_mod.enforceStrictDirectiveSimplicity(p, params, body.body, body.span);
+    try parser_mod.enforceParamLdnDisjoint(p, params, body.body);
     return .{ .function_expr = .{
         .span = .{ .start = start, .end = body.span.end },
         .name = name,

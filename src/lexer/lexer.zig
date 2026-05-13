@@ -640,15 +640,11 @@ pub const Lexer = struct {
         comptime isDigit: fn (u8) bool,
     ) LexError!Token {
         self.pos += 2; // 0x / 0o / 0b
-        const digits_start = self.pos;
-        while (self.pos < self.source.len and (isDigit(self.source[self.pos]) or self.source[self.pos] == '_')) {
-            self.pos += 1;
-        }
-        if (self.pos == digits_start) {
-            try self.report(.invalid_numeric_literal, .{ .start = start, .end = self.pos });
-            return error.InvalidNumericLiteral;
-        }
-        // BigInt suffix (§12.8.3): 0xFFn / 0o7n / 0b1n
+        // §12.8.3 — `0x`/`0o`/`0b` may not be immediately followed by
+        // `_`, and the digit run rejects doubled / trailing separators.
+        try self.scanDigitRun(start, true, isDigit);
+        // BigInt suffix (§12.8.3): 0xFFn / 0o7n / 0b1n. The digit run
+        // already rejects trailing `_`, so `0x1_n` is caught above.
         if (self.pos < self.source.len and self.source[self.pos] == 'n') {
             self.pos += 1;
             try self.checkNumericTrailingIdent(start);
@@ -662,11 +658,16 @@ pub const Lexer = struct {
         // §12.8.3 DecimalLiteral / DecimalIntegerLiteral / DecimalBigIntegerLiteral
         // Integer part:
         if (self.pos < self.source.len and self.source[self.pos] == '0') {
+            // `0` is a DecimalIntegerLiteral on its own; the grammar
+            // never extends it with separators or more digits, so the
+            // trailing-ident check below catches `0_…` and `0n` (BigInt
+            // continues separately).
             self.pos += 1;
+        } else if (self.pos < self.source.len and self.source[self.pos] == '.') {
+            // `.5` — leading-dot DecimalLiteral with no integer part.
+            // Fraction scan handles the rest below; nothing to do here.
         } else {
-            while (self.pos < self.source.len and (isDecimalDigit(self.source[self.pos]) or self.source[self.pos] == '_')) {
-                self.pos += 1;
-            }
+            try self.scanDigitRun(start, true, isDecimalDigit);
         }
         var saw_dot = false;
         var saw_exp = false;
@@ -674,9 +675,9 @@ pub const Lexer = struct {
         if (self.pos < self.source.len and self.source[self.pos] == '.') {
             saw_dot = true;
             self.pos += 1;
-            while (self.pos < self.source.len and (isDecimalDigit(self.source[self.pos]) or self.source[self.pos] == '_')) {
-                self.pos += 1;
-            }
+            // §12.8.3 — `.` may be followed by a (possibly-empty) digit
+            // run; `_` immediately after `.` is disallowed.
+            try self.scanDigitRun(start, false, isDecimalDigit);
         }
         // Exponent:
         if (self.pos < self.source.len and (self.source[self.pos] == 'e' or self.source[self.pos] == 'E')) {
@@ -685,14 +686,10 @@ pub const Lexer = struct {
             if (self.pos < self.source.len and (self.source[self.pos] == '+' or self.source[self.pos] == '-')) {
                 self.pos += 1;
             }
-            const exp_start = self.pos;
-            while (self.pos < self.source.len and isDecimalDigit(self.source[self.pos])) {
-                self.pos += 1;
-            }
-            if (self.pos == exp_start) {
-                try self.report(.invalid_numeric_literal, .{ .start = start, .end = self.pos });
-                return error.InvalidNumericLiteral;
-            }
+            // SignedInteger expands to DecimalDigits which permits
+            // NumericLiteralSeparator. `_` immediately after `e`/`E`/
+            // sign is rejected by the digit run.
+            try self.scanDigitRun(start, true, isDecimalDigit);
         }
         // BigInt suffix is only valid on integer literals (no dot, no exponent).
         if (self.pos < self.source.len and self.source[self.pos] == 'n') {
@@ -707,6 +704,53 @@ pub const Lexer = struct {
         }
         try self.checkNumericTrailingIdent(start);
         return self.makeToken(.numeric_literal, start);
+    }
+
+    /// §12.8.3 NumericLiteralSeparator — consume one digit run, with
+    /// optional `_` between digits. Rejects leading `_`, doubled `__`,
+    /// and trailing `_`. With `require_one == true` the run must
+    /// contain at least one digit.
+    fn scanDigitRun(
+        self: *Lexer,
+        start: u32,
+        require_one: bool,
+        comptime isDigit: fn (u8) bool,
+    ) LexError!void {
+        // `_` may not appear as the first character of a digit run.
+        if (self.pos < self.source.len and self.source[self.pos] == '_') {
+            try self.report(.invalid_numeric_literal, .{ .start = self.pos, .end = self.pos + 1 });
+            return error.InvalidNumericLiteral;
+        }
+        if (require_one and
+            (self.pos >= self.source.len or !isDigit(self.source[self.pos])))
+        {
+            try self.report(.invalid_numeric_literal, .{ .start = start, .end = self.pos });
+            return error.InvalidNumericLiteral;
+        }
+        var prev_sep = false;
+        var any_digit = false;
+        while (self.pos < self.source.len) {
+            const c = self.source[self.pos];
+            if (isDigit(c)) {
+                any_digit = true;
+                prev_sep = false;
+                self.pos += 1;
+            } else if (c == '_') {
+                // Doubled separator (`__`) is rejected, as is `_`
+                // appearing before any digit has been seen.
+                if (prev_sep or !any_digit) {
+                    try self.report(.invalid_numeric_literal, .{ .start = self.pos, .end = self.pos + 1 });
+                    return error.InvalidNumericLiteral;
+                }
+                prev_sep = true;
+                self.pos += 1;
+            } else break;
+        }
+        if (prev_sep) {
+            // Trailing separator — `1_`, `1_n`, `1.0e1_`, etc.
+            try self.report(.invalid_numeric_literal, .{ .start = self.pos - 1, .end = self.pos });
+            return error.InvalidNumericLiteral;
+        }
     }
 
     /// Per §12.8.3, a NumericLiteral cannot be immediately followed by an

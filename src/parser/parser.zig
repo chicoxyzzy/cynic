@@ -45,6 +45,7 @@ const stmt_mod = @import("../ast/statement.zig");
 
 const expr_mod = @import("expression.zig");
 const pattern_validate = @import("pattern_validate.zig");
+const private_names_validate = @import("private_names_validate.zig");
 
 pub const ParseError = error{
     ParseError,
@@ -85,15 +86,19 @@ pub const Parser = struct {
     /// or Module body is a SyntaxError). Saved/restored at the
     /// same boundaries as `in_async` / `in_generator`.
     in_function: bool = false,
-    /// True when parsing inside a method / class body. Drives the
-    /// §13.3.7 `super.x` and `super()` early errors — those are
-    /// only allowed in MethodDefinitions (regular methods see
-    /// `super.x`; constructors of derived classes see `super()`
-    /// too). Top-level / plain-function references to `super` are
-    /// SyntaxErrors. Cynic uses one flag for both forms today; a
-    /// finer split (`allow_super_call` vs `allow_super_property`)
-    /// is later.
-    in_method: bool = false,
+    /// §13.3.7 — `super.x` / `super[x]` is only valid inside a
+    /// HomeObject-bearing body: class methods (any kind, static or
+    /// not), class field initializers, class static blocks, and
+    /// object-literal methods. Plain functions, top-level, and
+    /// arrow-function-with-no-enclosing-method see this as false.
+    /// Arrow functions inherit the enclosing flag.
+    allow_super_property: bool = false,
+    /// §13.3.7 — `super(...)` (SuperCall) is only valid inside the
+    /// constructor body of a *derived* class (`class C extends B`).
+    /// Static methods, non-constructor methods, getters/setters,
+    /// generators/async, object methods, field initializers, and
+    /// static blocks all see this as false. Arrow inherits.
+    allow_super_call: bool = false,
 
     pub fn init(arena: std.mem.Allocator, source: []const u8, diagnostics: ?*Diagnostics) ParseError!Parser {
         return Parser.initWith(arena, source, diagnostics, false);
@@ -231,6 +236,15 @@ pub const Parser = struct {
             .diagnostics = self.diagnostics,
         };
         try validator.run(&program);
+        // §15.8.1 AllPrivateNamesValid — every `obj.#x` reference must
+        // resolve to a PrivateBoundIdentifier declared in some enclosing
+        // ClassBody. Standalone pass so the scope stack stays simple.
+        var priv_validator: private_names_validate.Validator = .{
+            .arena = self.arena,
+            .diagnostics = self.diagnostics,
+            .source = self.source,
+        };
+        try priv_validator.run(&program);
         // §16.2.1.1 Module — top-level early errors. Script's top-level
         // rules differ (function declarations are VarDeclaredNames there,
         // not LexicallyDeclaredNames), so this pass is module-only for
@@ -1098,18 +1112,28 @@ pub const Parser = struct {
         const saved_gen = self.in_generator;
         const saved_async = self.in_async;
         const saved_in_function = self.in_function;
+        const saved_super_prop = self.allow_super_property;
+        const saved_super_call = self.allow_super_call;
         self.in_generator = is_generator;
         self.in_async = is_async;
         self.in_function = true;
+        // Function declarations carry no HomeObject — `super.x` /
+        // `super()` are SyntaxErrors inside them, even when the
+        // enclosing context allowed super.
+        self.allow_super_property = false;
+        self.allow_super_call = false;
         defer {
             self.in_generator = saved_gen;
             self.in_async = saved_async;
             self.in_function = saved_in_function;
+            self.allow_super_property = saved_super_prop;
+            self.allow_super_call = saved_super_call;
         }
 
         const body = try self.parseBlockStatementInner();
         tagDirectivePrologue(body.body);
         try enforceStrictDirectiveSimplicity(self, params, body.body, body.span);
+        try enforceParamLdnDisjoint(self, params, body.body);
         return .{ .function_decl = .{
             .span = .{ .start = start, .end = body.span.end },
             .name = name,
@@ -1131,7 +1155,7 @@ pub const Parser = struct {
         if (try self.eat(.kw_extends)) {
             superclass = try expr_mod.parseLeftHandSideEntry(self);
         }
-        const body_end = try self.parseClassBody();
+        const body_end = try self.parseClassBody(superclass != null);
         return .{ .class_decl = .{
             .span = .{ .start = start, .end = body_end.end },
             .name = name,
@@ -1145,13 +1169,13 @@ pub const Parser = struct {
         end: u32,
     };
 
-    pub fn parseClassBody(self: *Parser) ParseError!ClassBodyResult {
+    pub fn parseClassBody(self: *Parser, has_heritage: bool) ParseError!ClassBodyResult {
         _ = try self.expect(.lbrace);
         var members: std.ArrayListUnmanaged(stmt_mod.ClassMember) = .empty;
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
             // Skip `;` empty class elements (§15.7.1 ClassElement : ;).
             if (try self.eat(.semicolon)) continue;
-            const m = try self.parseClassMember();
+            const m = try self.parseClassMember(has_heritage);
             try members.append(self.arena, m);
         }
         const rbrace = try self.expect(.rbrace);
@@ -1266,6 +1290,16 @@ pub const Parser = struct {
                 },
                 .field => |fd| {
                     const key_span = self.classKeySpan(fd.key);
+                    // §15.7.1 — FieldDefinition early error: PropName
+                    // "constructor" is forbidden (any IsStatic). Both the
+                    // identifier form `constructor` and the string-literal
+                    // form `"constructor"` are rejected. Numeric and
+                    // computed keys are checked elsewhere.
+                    if (self.classKeyName(fd.key)) |name| {
+                        if (std.mem.eql(u8, name, "constructor")) {
+                            try self.report(.invalid_class_element, key_span);
+                        }
+                    }
                     if (fd.key == .private) {
                         const text = self.privateNameText(fd.key.private);
                         if (std.mem.eql(u8, text, "#constructor")) {
@@ -1334,6 +1368,7 @@ pub const Parser = struct {
             .super_,
             .import_meta,
             .new_target,
+            .private_identifier,
             => false,
 
             .identifier_reference => |ir| std.mem.eql(u8, self.source[ir.span.start..ir.span.end], "arguments"),
@@ -1607,6 +1642,7 @@ pub const Parser = struct {
             .super_,
             .import_meta,
             .new_target,
+            .private_identifier,
             => false,
 
             .function_expr, .class_expr => false,
@@ -1763,7 +1799,7 @@ pub const Parser = struct {
         try privs.append(self.arena, entry);
     }
 
-    fn parseClassMember(self: *Parser) ParseError!stmt_mod.ClassMember {
+    fn parseClassMember(self: *Parser, has_heritage: bool) ParseError!stmt_mod.ClassMember {
         const start = self.current.span.start;
         var is_static = false;
         // Detect `static` modifier vs `static` as method name. If `static`
@@ -1771,9 +1807,21 @@ pub const Parser = struct {
         if (self.current.kind == .kw_static) {
             const second = try self.peek2();
             if (second.kind == .lbrace) {
-                // §15.7.13 ClassStaticBlock — `static { … }`.
+                // §15.7.13 ClassStaticBlock — `static { … }`. HomeObject
+                // is the class constructor itself, so `super.x` is legal
+                // (parent's prototype lookup); `super()` is not.
                 _ = try self.bump(); // `static`
-                const body_block = try self.parseBlockStatementInner();
+                const saved_super_prop = self.allow_super_property;
+                const saved_super_call = self.allow_super_call;
+                self.allow_super_property = true;
+                self.allow_super_call = false;
+                const body_block = blk: {
+                    defer {
+                        self.allow_super_property = saved_super_prop;
+                        self.allow_super_call = saved_super_call;
+                    }
+                    break :blk try self.parseBlockStatementInner();
+                };
                 return .{ .static_block = .{
                     .span = .{ .start = start, .end = body_block.span.end },
                     .body = body_block.body,
@@ -1824,26 +1872,51 @@ pub const Parser = struct {
         const key_end = key_with_end.end;
         if (self.current.kind == .lparen) {
             const params = try self.parseFunctionParameters();
+            // §15.4.1 PropertySetParameterList / `get PropertyName ()` —
+            // setters take exactly one FormalParameter and it cannot be
+            // a RestElement; getters take none.
+            try enforceAccessorArity(self, method_kind, params, key_with_end.end);
+
+            // §15.7.1 — `super(...)` (HasDirectSuper) is allowed *only*
+            // in the body of a non-static, non-special method whose
+            // PropName is "constructor", when the enclosing class has
+            // a ClassHeritage (`extends`). Every other class element
+            // (static method, getter/setter, generator/async, regular
+            // method named anything other than "constructor", or any
+            // constructor in a class without heritage) sees
+            // allow_super_call = false. `super.x` / `super[x]` is
+            // legal in every method body via HomeObject.
+            const is_special = method_kind != .method or is_generator or is_async;
+            const is_constructor = !is_static and !is_special and switch (key) {
+                .ident => |sp| std.mem.eql(u8, self.source[sp.start..sp.end], "constructor"),
+                .string => |sp| std.mem.eql(u8, self.source[sp.start + 1 .. sp.end - 1], "constructor"),
+                else => false,
+            };
+            const this_allow_super_call = is_constructor and has_heritage;
 
             const saved_gen = self.in_generator;
             const saved_async = self.in_async;
             const saved_in_function = self.in_function;
-            const saved_in_method = self.in_method;
+            const saved_super_prop = self.allow_super_property;
+            const saved_super_call = self.allow_super_call;
             self.in_generator = is_generator;
             self.in_async = is_async;
             self.in_function = true;
-            self.in_method = true;
+            self.allow_super_property = true;
+            self.allow_super_call = this_allow_super_call;
             const body = blk: {
                 defer {
                     self.in_generator = saved_gen;
                     self.in_async = saved_async;
                     self.in_function = saved_in_function;
-                    self.in_method = saved_in_method;
+                    self.allow_super_property = saved_super_prop;
+                    self.allow_super_call = saved_super_call;
                 }
                 break :blk try self.parseBlockStatementInner();
             };
             tagDirectivePrologue(body.body);
             try enforceStrictDirectiveSimplicity(self, params, body.body, body.span);
+            try enforceParamLdnDisjoint(self, params, body.body);
             return .{ .method = .{
                 .span = .{ .start = start, .end = body.span.end },
                 .is_static = is_static,
@@ -1859,11 +1932,24 @@ pub const Parser = struct {
             try self.report(.unexpected_token, self.current.span);
             return error.ParseError;
         }
-        // Field: optional `= initializer`, then `;` (with ASI).
+        // Field: optional `= initializer`, then `;` (with ASI). §15.7.10
+        // FieldDefinition initializers are evaluated with the instance
+        // as the HomeObject, so `super.x` is legal inside them; `super()`
+        // is never legal.
         var init_expr: ?Expression = null;
         var end = key_end;
         if (try self.eat(.eq)) {
-            const v = try expr_mod.parseAssignmentEntry(self);
+            const saved_super_prop = self.allow_super_property;
+            const saved_super_call = self.allow_super_call;
+            self.allow_super_property = true;
+            self.allow_super_call = false;
+            const v = blk: {
+                defer {
+                    self.allow_super_property = saved_super_prop;
+                    self.allow_super_call = saved_super_call;
+                }
+                break :blk try expr_mod.parseAssignmentEntry(self);
+            };
             init_expr = v;
             end = v.span().end;
         }
@@ -2854,6 +2940,87 @@ pub fn enforceUniqueParamBoundNames(
         .simple => |sp| try p.collectBoundNames(sp.target, &bound_names),
         .rest => |rp| try p.collectBoundNames(rp.target, &bound_names),
     };
+}
+
+/// §15.2.1 / §15.3.1 / §15.5.1 / §15.7.1 / §15.8.1 / §15.9.1 — for
+/// every callable form, BoundNames of FormalParameters and
+/// LexicallyDeclaredNames of the body must be disjoint. The body's
+/// LDN are the top-level `let` / `const` / `class` / `function`
+/// declarations (`collectBlockLDN` already computes these for block-
+/// scope diagnostics, so we reuse it).
+pub fn enforceParamLdnDisjoint(
+    p: *Parser,
+    params: []const stmt_mod.FunctionParam,
+    body: []const Statement,
+) ParseError!void {
+    var param_names: std.ArrayListUnmanaged(Parser.NameSpan) = .empty;
+    defer param_names.deinit(p.arena);
+    for (params) |param| switch (param) {
+        .simple => |sp| try p.collectTargetNames(sp.target, &param_names),
+        .rest => |rp| try p.collectTargetNames(rp.target, &param_names),
+    };
+    if (param_names.items.len == 0) return;
+    var lex_names: std.ArrayListUnmanaged(Parser.NameSpan) = .empty;
+    defer lex_names.deinit(p.arena);
+    for (body) |stmt| try p.collectBlockLDN(stmt, &lex_names);
+    for (param_names.items) |pn| {
+        for (lex_names.items) |ln| {
+            if (std.mem.eql(u8, pn.name, ln.name)) {
+                try p.report(.duplicate_lexical_binding, ln.span);
+                break;
+            }
+        }
+    }
+}
+
+/// §15.3.1 ArrowFormalParameters — `arguments` and `eval` are
+/// forbidden BindingIdentifiers in strict mode. Non-arrow forms route
+/// through `parseBindingIdentifier`, which already flags them; the
+/// cover-grammar reinterpret used for arrows takes
+/// `identifier_reference` nodes directly, so they slip through and
+/// need a dedicated post-build pass.
+/// §15.4.1 / §13.2.5 — accessor arity:
+///   • `get PropertyName()` — zero params.
+///   • `set PropertyName(FormalParameter)` — exactly one parameter,
+///     and it cannot be a RestElement (`...rest`).
+/// Applies to class methods (`parseClassMember`) and object-literal
+/// methods (`parseObjectLiteral`) alike. `report_span` is used for the
+/// diagnostic position; callers pass a span near the param list.
+pub fn enforceAccessorArity(
+    p: *Parser,
+    kind: stmt_mod.MethodKind,
+    params: []const stmt_mod.FunctionParam,
+    report_pos: u32,
+) ParseError!void {
+    const span: Span = .{ .start = report_pos, .end = report_pos };
+    switch (kind) {
+        .getter => if (params.len != 0) try p.report(.invalid_class_element, span),
+        .setter => {
+            if (params.len != 1) {
+                try p.report(.invalid_class_element, span);
+            } else if (params[0] == .rest) {
+                try p.report(.invalid_class_element, span);
+            }
+        },
+        .method => {},
+    }
+}
+
+pub fn enforceParamNamesNotEvalArguments(
+    p: *Parser,
+    params: []const stmt_mod.FunctionParam,
+) ParseError!void {
+    var names: std.ArrayListUnmanaged(Parser.NameSpan) = .empty;
+    defer names.deinit(p.arena);
+    for (params) |param| switch (param) {
+        .simple => |sp| try p.collectTargetNames(sp.target, &names),
+        .rest => |rp| try p.collectTargetNames(rp.target, &names),
+    };
+    for (names.items) |n| {
+        if (std.mem.eql(u8, n.name, "eval") or std.mem.eql(u8, n.name, "arguments")) {
+            try p.report(.restricted_identifier_in_strict, n.span);
+        }
+    }
 }
 
 /// True when `kind` can begin an ObjectLiteral / ClassBody PropertyName.
