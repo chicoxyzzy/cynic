@@ -299,6 +299,16 @@ pub fn wrapGenerator(
     wrapper.prototype = ensureGeneratorPrototype(realm) catch return error.OutOfMemory;
     wrapper.generator_ref = gen;
 
+    // The wrapper is the only handle linking the freshly allocated
+    // `gen` to anything caller-visible. `resumeGenerator` runs the
+    // generator body's prologue eagerly (§10.2.1.4), which can
+    // allocate environments / closures / etc. and trip the GC
+    // before this function returns — pin the wrapper so the mark
+    // walk reaches both it and `gen.generator_ref`.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(wrapper)) catch return error.OutOfMemory;
+
     // §10.2.1.4 — run FunctionDeclarationInstantiation eagerly
     // so param destructuring / defaults / RequireObjectCoercible
     // execute (and possibly throw) at call time. `gen_initial_suspend`
@@ -344,6 +354,12 @@ pub fn wrapAsyncGenerator(
     const wrapper = realm.heap.allocateObject() catch return error.OutOfMemory;
     wrapper.prototype = ensureAsyncGeneratorPrototype(realm) catch return error.OutOfMemory;
     wrapper.generator_ref = gen;
+
+    // Same wrapper-pin rationale as `wrapGenerator`: the eager
+    // prologue can allocate and trip the GC before we return.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(wrapper)) catch return error.OutOfMemory;
 
     // §27.6.3.1 EvaluateAsyncGeneratorBody — param init runs
     // synchronously and any throw propagates to the call site.
