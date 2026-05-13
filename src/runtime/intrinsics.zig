@@ -1278,6 +1278,14 @@ pub fn strictEqualsLite(a: Value, b: Value) bool {
         const sb: *JSString = @ptrCast(@alignCast(b.asString()));
         return std.mem.eql(u8, sa.bytes, sb.bytes);
     }
+    // §6.1.6.2.13 BigInt::equal — compare mathematical values.
+    // Two distinct JSBigInt allocations with the same value pass
+    // strict equality.
+    if (heap_mod.valueAsBigInt(a)) |ba| {
+        if (heap_mod.valueAsBigInt(b)) |bb| {
+            return ba.value == bb.value;
+        }
+    }
     return false;
 }
 

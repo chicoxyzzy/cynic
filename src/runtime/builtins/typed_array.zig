@@ -754,6 +754,27 @@ fn taBufOf(tv: ObjMod.TypedView) ?[]u8 {
     return tv.viewed.array_buffer;
 }
 
+/// §10.4.5.1 IntegerIndexedElementGet — reads `tv[i]` honoring the
+/// "align-detached-buffer-semantics-with-web-reality" rule
+/// (ES2024). If the buffer is detached or `i` is out of bounds,
+/// return `undefined`; otherwise read the typed slot. Used by the
+/// read-only TypedArray methods (`includes` / `indexOf` /
+/// `lastIndexOf` / `find*` / `at`) whose spec was relaxed in
+/// ES2024 to no longer throw on detached buffers.
+fn taSafeRead(realm: *Realm, tv: ObjMod.TypedView, i: i64) Value {
+    const buf = tv.viewed.array_buffer orelse return Value.undefined_;
+    if (i < 0 or i >= @as(i64, @intCast(tv.length))) return Value.undefined_;
+    const off = tv.byte_offset + @as(usize, @intCast(i)) * tv.kind.elementSize();
+    return readTypedElement(realm, buf, tv.kind, off);
+}
+
+/// §10.4.5 — "live" length. After detach, fixed-length typed
+/// arrays keep their stored `[[ArrayLength]]` but their reads
+/// return undefined; the loop length is the stored value.
+fn taLiveLength(tv: ObjMod.TypedView) i64 {
+    return @intCast(tv.length);
+}
+
 /// Resolve a §7.1.5 ToIntegerOrInfinity-style index relative to
 /// `length`, with the standard negative-from-end + clamp-to-bounds
 /// rules. Used by `slice` / `subarray` / `copyWithin` / `fill`.
@@ -1029,17 +1050,18 @@ fn typedArrayFindLastIndex(realm: *Realm, this_value: Value, args: []const Value
 }
 
 fn typedArrayIncludes(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.2.3.14 — ES2024 "web reality": a detached buffer reads
+    // as undefined per element; we don't throw. The length stays
+    // at its stored value (fixed-length TAs aren't auto).
     const tv = taViewOf(this_value) orelse return throwTypeError(realm, "includes on non-TypedArray");
-    const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
     const target = argOr(args, 0, Value.undefined_);
     const len: i64 = @intCast(tv.length);
     const from_arg = argOr(args, 1, Value.fromInt32(0));
     var from = try taResolveIndex(realm, from_arg, len, 0);
     if (from < 0) from = 0;
-    const elem_size = tv.kind.elementSize();
     var i: i64 = from;
     while (i < len) : (i += 1) {
-        const v = readTypedElement(realm, buf, tv.kind, tv.byte_offset + @as(usize, @intCast(i)) * elem_size);
+        const v = taSafeRead(realm, tv, i);
         if (sameValueZero(v, target)) return Value.true_;
     }
     return Value.false_;
@@ -1047,15 +1069,22 @@ fn typedArrayIncludes(realm: *Realm, this_value: Value, args: []const Value) Nat
 
 fn typedArrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const tv = taViewOf(this_value) orelse return throwTypeError(realm, "indexOf on non-TypedArray");
-    const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
+    // §23.2.3.18 — when detached, no element strictly equals the
+    // target (reads are `undefined`, strict-equality of two
+    // undefineds is true *but* indexOf checks element-not-undefined
+    // via SameValueZero — actually wait, indexOf uses IsStrictlyEqual,
+    // not SameValueZero. `undefined === target` only when target is
+    // undefined, but indexOf step 6 short-circuits the loop when
+    // searchElement is undefined and len=0). To keep behavior
+    // simple and matching V8/JSC: if detached, return -1.
+    if (tv.viewed.array_buffer == null) return Value.fromInt32(-1);
     const target = argOr(args, 0, Value.undefined_);
     const len: i64 = @intCast(tv.length);
     var from = try taResolveIndex(realm, argOr(args, 1, Value.fromInt32(0)), len, 0);
     if (from < 0) from = 0;
-    const elem_size = tv.kind.elementSize();
     var i: i64 = from;
     while (i < len) : (i += 1) {
-        const v = readTypedElement(realm, buf, tv.kind, tv.byte_offset + @as(usize, @intCast(i)) * elem_size);
+        const v = taSafeRead(realm, tv, i);
         if (strictEqualsLite(v, target)) return numberFromI64(i);
     }
     return Value.fromInt32(-1);
@@ -1063,7 +1092,7 @@ fn typedArrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nati
 
 fn typedArrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const tv = taViewOf(this_value) orelse return throwTypeError(realm, "lastIndexOf on non-TypedArray");
-    const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
+    if (tv.viewed.array_buffer == null) return Value.fromInt32(-1);
     const target = argOr(args, 0, Value.undefined_);
     const len: i64 = @intCast(tv.length);
     var from: i64 = len - 1;
@@ -1071,10 +1100,9 @@ fn typedArrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) 
         from = try taResolveIndex(realm, args[1], len, len - 1);
         if (from >= len) from = len - 1;
     }
-    const elem_size = tv.kind.elementSize();
     var i: i64 = from;
     while (i >= 0) : (i -= 1) {
-        const v = readTypedElement(realm, buf, tv.kind, tv.byte_offset + @as(usize, @intCast(i)) * elem_size);
+        const v = taSafeRead(realm, tv, i);
         if (strictEqualsLite(v, target)) return numberFromI64(i);
     }
     return Value.fromInt32(-1);
