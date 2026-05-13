@@ -1027,7 +1027,7 @@ fn arrayFlatMap(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 }
 
 fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
+    const obj = try toObjectThis(realm, this_value);
     const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
     var start: i64 = if (args.len > 0) toInt(args[0]) else 0;
     if (start < 0) start = @max(len + start, 0);
@@ -1106,7 +1106,7 @@ fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
 }
 
 fn arrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
+    const obj = try toObjectThis(realm, this_value);
     const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
     var target: i64 = if (args.len > 0) toInt(args[0]) else 0;
     var start: i64 = if (args.len > 1) toInt(args[1]) else 0;
@@ -1147,14 +1147,18 @@ fn arrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) Native
 }
 
 fn arraySort(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
+    // §23.1.3.30 step 1 — comparefn validation (callable or
+    // undefined) runs before ToObject and length, so a non-callable
+    // comparator throws synchronously.
+    const cmp_v = argOr(args, 0, Value.undefined_);
+    const cmp_fn: ?*JSFunction = if (cmp_v.isUndefined())
+        null
+    else if (heap_mod.valueAsFunction(cmp_v)) |f| f
+    else
+        return throwTypeError(realm, "comparefn must be a function or undefined");
+    const obj = try toObjectThis(realm, this_value);
     const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
     if (len <= 1) return this_value;
-
-    // Materialise into a Zig slice, sort, write back. With a JS
-    // comparator we need to invoke it via callJSFunction.
-    const cmp_v = argOr(args, 0, Value.undefined_);
-    const cmp_fn: ?*JSFunction = heap_mod.valueAsFunction(cmp_v);
 
     const buf = realm.allocator.alloc(Value, @intCast(len)) catch return error.OutOfMemory;
     defer realm.allocator.free(buf);
@@ -1440,7 +1444,7 @@ fn computedKeyForSort(v: Value, scratch: *[64]u8) []const u8 {
 
 fn arrayReverse(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
+    const obj = try toObjectThis(realm, this_value);
     const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
     var i: i64 = 0;
     const half = @divFloor(len, 2);
@@ -1462,7 +1466,7 @@ fn arrayReverse(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 
 fn arrayShift(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
+    const obj = try toObjectThis(realm, this_value);
     const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
     if (len == 0) {
         setLength(realm, obj, 0) catch return error.OutOfMemory;
@@ -1489,7 +1493,7 @@ fn arrayShift(realm: *Realm, this_value: Value, args: []const Value) NativeError
 }
 
 fn arrayUnshift(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
+    const obj = try toObjectThis(realm, this_value);
     const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
     const argc: i64 = @intCast(args.len);
     // Shift existing elements right by argc.

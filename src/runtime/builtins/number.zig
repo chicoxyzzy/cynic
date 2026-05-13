@@ -120,18 +120,21 @@ fn numberToExponential(realm: *Realm, this_value: Value, args: []const Value) Na
     const x = primitiveNumberValue(this_value) orelse return throwTypeError(realm, "Number.prototype.toExponential called on non-number");
     const digits_arg = argOr(args, 0, Value.undefined_);
     var digits: i32 = -1;
+    // §21.1.3.2 step 2 — ToIntegerOrInfinity on fractionDigits
+    // ALWAYS runs (its valueOf side effect must fire). The range
+    // guard at step 7 comes AFTER step 4's NaN/Infinity fast-path,
+    // so a NaN receiver returns "NaN" even when fractionDigits is
+    // out of [0, 100].
+    var digits_finite_in_range = true;
     if (!digits_arg.isUndefined()) {
-        // §21.1.3.2 toExponential — ToIntegerOrInfinity routes
-        // through ToNumber, which throws on Symbol / BigInt.
         const dv = try intrinsics.toNumber(realm, digits_arg);
         const raw: f64 = if (dv.isInt32()) @floatFromInt(dv.asInt32()) else dv.asDouble();
-        // §21.1.3.2 step 2 — ToIntegerOrInfinity maps NaN → 0
-        // and truncates finite values. The range guard kicks in
-        // for ±∞ and out-of-bounds finite values, not NaN.
         const dd: f64 = if (std.math.isNan(raw)) 0 else @trunc(raw);
-        if (std.math.isInf(dd) or dd < 0 or dd > 100)
-            return throwRangeError(realm, "toExponential digits out of range [0, 100]");
-        digits = @intFromFloat(dd);
+        if (std.math.isInf(dd) or dd < 0 or dd > 100) {
+            digits_finite_in_range = false;
+        } else {
+            digits = @intFromFloat(dd);
+        }
     }
     if (std.math.isNan(x)) {
         const s = realm.heap.allocateString("NaN") catch return error.OutOfMemory;
@@ -140,6 +143,10 @@ fn numberToExponential(realm: *Realm, this_value: Value, args: []const Value) Na
     if (std.math.isInf(x)) {
         const s = realm.heap.allocateString(if (x > 0) "Infinity" else "-Infinity") catch return error.OutOfMemory;
         return Value.fromString(s);
+    }
+    // §21.1.3.2 step 7 — finite x with out-of-range fractionDigits.
+    if (!digits_finite_in_range) {
+        return throwRangeError(realm, "toExponential digits out of range [0, 100]");
     }
     var buf: [128]u8 = undefined;
     const raw = if (digits < 0)
