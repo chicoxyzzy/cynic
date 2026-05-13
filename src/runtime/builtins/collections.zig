@@ -163,6 +163,13 @@ fn makeArrayLikeIterator(realm: *Realm, src: Value, kind: enum { entries, keys, 
     const state = try realm.allocator.create(@import("../object.zig").ArrayLikeIterState);
     state.* = .{ .target = src };
     it.array_like_iter = state;
+    // Pin `it` for the rest of construction — `allocateFunctionNative`
+    // can trigger GC and `it` is only alive through this local var.
+    // `src` rides along via `state.target` once the GC walker
+    // reaches `it`.
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(heap_mod.taggedObject(it));
     const native: @import("../function.zig").NativeFn = switch (kind) {
         .entries => arrayLikeIterEntriesNext,
         .keys => arrayLikeIterKeysNext,

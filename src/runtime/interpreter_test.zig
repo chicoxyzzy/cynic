@@ -2666,6 +2666,85 @@ test "GC: Promise microtask chain survives gc_threshold=1" {
     , 111);
 }
 
+test "GC: Promise constructor executor survives gc_threshold=1" {
+    // `new Promise(executor)` runs the executor synchronously
+    // with the bound capability state as `this`. The cap record
+    // is reachable only through the bound function's `bound_this`
+    // until the executor stores resolve/reject in it; the
+    // executor's body can allocate (closures, captured envs,
+    // ToString of the input) before that store, so the cap state
+    // must stay marked through every nested allocation.
+    try expectScriptIntUnderGcPressure(
+        \\let r = 0;
+        \\new Promise((resolve, reject) => {
+        \\  for (let i = 0; i < 10; i++) {
+        \\    let o = { a: i };
+        \\    r += o.a;
+        \\  }
+        \\  resolve(r);
+        \\}).then(v => { r = v + 1000; });
+        \\globalThis.__drainMicrotasks();
+        \\r;
+    , 1045);
+}
+
+test "GC: Iterator.prototype.map chain survives gc_threshold=1" {
+    // Each `.map` / `.filter` allocates an IteratorHelperState
+    // and a fresh wrapper. With threshold=1 a sweep fires after
+    // every alloc. The state's `source` / `next_fn` / `payload`
+    // Values must stay rooted through the wrapper construction
+    // (which allocates two natives — `next` and `return` — after
+    // the IteratorHelperState is installed).
+    try expectScriptIntUnderGcPressure(
+        \\function* g() { yield 1; yield 2; yield 3; yield 4; yield 5; }
+        \\let s = 0;
+        \\for (const v of Iterator.from(g()).map(x => x * 10).filter(x => x > 15)) s += v;
+        \\s;
+    , 140);
+}
+
+test "GC: Map iterable construction survives gc_threshold=1" {
+    // `new Map(iterable)` opens an iterator on `iterable` and
+    // walks pairs. Each pair object is allocated then immediately
+    // consumed; the Map instance is reachable only through the
+    // `r_iter` register of the surrounding caller. Each `Map.set`
+    // allocates an entry slot.
+    try expectScriptIntUnderGcPressure(
+        \\const m = new Map([[1,10],[2,20],[3,30],[4,40],[5,50]]);
+        \\let s = 0; for (const [, v] of m) s += v;
+        \\s;
+    , 150);
+}
+
+test "GC: Iterator.from + .toArray survives gc_threshold=1" {
+    // Iterator.from snapshots `next`, allocates a wrapper +
+    // state; .toArray then walks every step, allocating each
+    // result object inside `invokeIterNextFn`. The toArray
+    // accumulator array's `length` is updated last — must
+    // survive GC inside every step.
+    try expectScriptIntUnderGcPressure(
+        \\function* g() { for (let i = 1; i <= 8; i++) yield i; }
+        \\const arr = Iterator.from(g()).toArray();
+        \\let s = 0; for (const v of arr) s += v;
+        \\s;
+    , 36);
+}
+
+test "GC: Promise.all aggregator survives gc_threshold=1" {
+    // Promise.all's aggregator state (kind, remaining, values
+    // array, cap resolve/reject) is the most allocation-heavy
+    // Promise path: one element-closure pair per input, each
+    // with its own state-wrapper JSObject. All of those must
+    // stay rooted until the aggregator settles.
+    try expectScriptIntUnderGcPressure(
+        \\let r = 0;
+        \\Promise.all([Promise.resolve(1), Promise.resolve(2), Promise.resolve(3)])
+        \\  .then(vs => { r = vs[0] + vs[1] + vs[2]; });
+        \\globalThis.__drainMicrotasks();
+        \\r;
+    , 6);
+}
+
 test "GC: property-bag growth survives gc_threshold=1" {
     // Loop writes 20 keys onto a single object, triggering at
     // least one `StringArrayHashMap.grow`. The keys are JSStrings

@@ -125,6 +125,9 @@ fn wrapIterator(realm: *Realm, source: Value) NativeError!Value {
     const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
     state.* = .{ .source = source, .next_fn = heap_mod.taggedFunction(cached_next) };
     wrap.iter_helper = state;
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
     const next_fn = realm.heap.allocateFunctionNative(wrappedNext, 0, "next") catch return error.OutOfMemory;
     next_fn.has_construct = false;
     wrap.setWithFlags(realm.allocator, "next", heap_mod.taggedFunction(next_fn), .{
@@ -382,6 +385,9 @@ fn iteratorFlatMap(realm: *Realm, this_value: Value, args: []const Value) Native
         .payload = cb_v,
     };
     wrap.iter_helper = state;
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
     const next_fn = realm.heap.allocateFunctionNative(flatMapNext, 0, "next") catch return error.OutOfMemory;
     next_fn.has_construct = false;
     wrap.setWithFlags(realm.allocator, "next", heap_mod.taggedFunction(next_fn), .{
@@ -604,6 +610,13 @@ fn buildLazy(realm: *Realm, source: Value, payload: Value, next_fn: @import("../
         .payload = payload,
     };
     wrap.iter_helper = state;
+    // Pin `wrap` for the rest of construction — every subsequent
+    // `allocate*` call below can trigger GC, and `wrap` is only
+    // alive through this local variable. `source` rides along
+    // through `state.source` once the GC walker reaches `wrap`.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
     const fn_obj = realm.heap.allocateFunctionNative(next_fn, 0, "next") catch return error.OutOfMemory;
     fn_obj.has_construct = false;
     wrap.setWithFlags(realm.allocator, "next", heap_mod.taggedFunction(fn_obj), .{
@@ -874,6 +887,13 @@ fn iteratorToArray(realm: *Realm, this_value: Value, args: []const Value) Native
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    // The loop body calls into user JS (`next`, accessor getters)
+    // and allocates an index JSString per step. `out` is only
+    // alive through this local variable — pin it so the GC can't
+    // reclaim it mid-step.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     var idx: i32 = 0;
     var ibuf: [24]u8 = undefined;
     const max_iter: usize = 1 << 24;
@@ -1205,6 +1225,9 @@ fn iteratorConcat(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
     state.* = .{ .count = @intCast(args.len) };
     wrap.iter_helper = state;
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
     var sbuf: [40]u8 = undefined;
     for (args, 0..) |item, i| {
         const owned = realm.heap.allocateString(slotName(&sbuf, "__cynic_iter_input_", i)) catch return error.OutOfMemory;
@@ -1483,6 +1506,9 @@ fn buildZipWrapper(
         .keyed = keys != null,
     };
     wrap.iter_helper = state;
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
 
     // Per-input indexed slots (iter, snapshotted next, active-flag)
     // still ride on the property bag pending a dynamic-array typed
