@@ -1407,6 +1407,17 @@ fn parseObjectMember(
             try p.report(.unexpected_token, p.peek().span);
             return error.ParseError;
         }
+        // §12.7.1 — shorthand reuses the key token as an
+        // IdentifierReference for the value. If the source contained
+        // a `\u` escape and the resolved StringValue is a ReservedWord
+        // (the lexer set `had_escape` for exactly that case), it
+        // can't be used as an Identifier. `{ with }` errors;
+        // `{ with: 1 }` does not (the keyed form keeps it in
+        // IdentifierName position).
+        if (key_tok.had_escape) {
+            try p.report(.escape_in_reserved_word, key_tok.span);
+            return error.ParseError;
+        }
         const ident_span = key.ident;
         var value: Expression = .{ .identifier_reference = .{ .span = ident_span } };
         if (try p.eat(.eq)) {
