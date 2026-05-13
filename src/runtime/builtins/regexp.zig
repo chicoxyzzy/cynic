@@ -201,14 +201,11 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
         realm.heap.allocateString("") catch return error.OutOfMemory
     else
         try stringifyArg(realm, flags_v);
-    // §22.2.4 — the spec's `[[OriginalSource]]` / `[[OriginalFlags]]`
-    // internal slots, surfaced via accessors on `RegExp.prototype`
-    // (installed in `install`). Stored under `__cynic_*` so the
-    // prototype getter shadows the namespace and a user
-    // `Object.getOwnPropertyDescriptor(re, "source")` correctly
-    // sees no own property.
-    inst.set(realm.allocator, "__cynic_re_src__", Value.fromString(pat_s)) catch return error.OutOfMemory;
-    inst.set(realm.allocator, "__cynic_re_flags__", Value.fromString(flag_s)) catch return error.OutOfMemory;
+    // §22.2.4 `[[OriginalSource]]` / `[[OriginalFlags]]` — typed
+    // JSObject slots, not properties. Surfaced to JS only through
+    // the accessors on `RegExp.prototype`.
+    inst.regexp_source = pat_s;
+    inst.regexp_flags = flag_s;
     // §22.2.4 step 13 — `lastIndex` is `{ w:true, e:false, c:false }`.
     // Default `set` lands at all-true, so JSON.stringify({toJSON: /re/})
     // surfaced "lastIndex" as an enumerable own key.
@@ -244,11 +241,8 @@ fn parseFlags(s: []const u8) c_int {
 
 fn ensureBytecode(realm: *Realm, regex_obj: *JSObject) NativeError!?[]u8 {
     if (regex_obj.regex_bytecode) |bc| return bc;
-    const src_v = regex_obj.get("__cynic_re_src__");
-    const flags_v = regex_obj.get("__cynic_re_flags__");
-    if (!src_v.isString()) return null;
-    const src_s: *JSString = @ptrCast(@alignCast(src_v.asString()));
-    const flag_str: []const u8 = if (flags_v.isString()) (@as(*JSString, @ptrCast(@alignCast(flags_v.asString())))).bytes else "";
+    const src_s = regex_obj.regexp_source orelse return null;
+    const flag_str: []const u8 = if (regex_obj.regexp_flags) |f| f.bytes else "";
     const re_flags = parseFlags(flag_str);
 
     var err_buf: [128]u8 = undefined;
@@ -353,11 +347,10 @@ fn buildInputBuf(allocator: std.mem.Allocator, utf8: []const u8) !InputBuf {
 fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const regex_obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "RegExp.prototype.exec called on non-object");
     // §22.2.6.2 step 2 — RequireInternalSlot(R, [[RegExpMatcher]]).
-    // Cynic encodes the slot as the `__cynic_re_src__` property
-    // (set by the RegExp constructor); plain `{}` doesn't have
-    // it. test262 fixtures verify that `RegExp.prototype.exec`
-    // / `.test` reject non-regex receivers with TypeError.
-    if (!regex_obj.hasOwn("__cynic_re_src__")) {
+    // The brand check reads the typed `regexp_source` slot, which
+    // the RegExp constructor sets. Plain `{}` has it null →
+    // TypeError, matching V8 / JSC / SpiderMonkey behavior.
+    if (regex_obj.regexp_source == null) {
         return throwTypeError(realm, "RegExp.prototype.exec called on non-RegExp");
     }
     const input_s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
@@ -492,12 +485,11 @@ fn regexpToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
 // ── RegExp.prototype getters (§22.2.6.{3,4,5,6,7,9,10,11,13,14}) ───
 //
 // Each accessor reads from the instance's `[[OriginalSource]]` /
-// `[[OriginalFlags]]` internal slots (stored as the
-// `__cynic_re_src__` / `__cynic_re_flags__` own data props by
-// the constructor). The receiver must be a RegExp instance —
-// `RegExp.prototype.source` (called with `this` = the prototype
-// itself, which has no internal slots) is special-cased to
-// return the placeholder `(?:)` for `source` and `""` for `flags`.
+// `[[OriginalFlags]]` internal slots (typed `regexp_source` /
+// `regexp_flags` fields on JSObject — never user-visible). The
+// receiver must be a RegExp instance; `RegExp.prototype.source`
+// called with `this` = the prototype itself (no internal slots)
+// is special-cased to return `(?:)` and `""` respectively.
 
 /// `this` is the RegExp.prototype object itself — used by the
 /// spec-mandated `RegExp.prototype.source === "(?:)"` invariant.
@@ -507,16 +499,25 @@ fn isRegExpPrototypeReceiver(realm: *Realm, this_value: Value) bool {
     return false;
 }
 
-fn regexpInternalString(this_value: Value, key: []const u8) ?[]const u8 {
+/// Read `[[OriginalSource]]` from a RegExp receiver. Returns
+/// the underlying string slice when the receiver is a real
+/// RegExp instance (typed slot set by the constructor), null
+/// otherwise (e.g. `RegExp.prototype` itself, or a plain `{}`).
+fn regexpInternalSource(this_value: Value) ?[]const u8 {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    const v = obj.get(key);
-    if (!v.isString()) return null;
-    const s: *JSString = @ptrCast(@alignCast(v.asString()));
+    const s = obj.regexp_source orelse return null;
     return s.bytes;
 }
 
+/// Read `[[OriginalFlags]]`. Same shape as `regexpInternalSource`.
+fn regexpInternalFlagsStr(this_value: Value) ?[]const u8 {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
+    const f = obj.regexp_flags orelse return null;
+    return f.bytes;
+}
+
 fn regexpInternalFlagHas(this_value: Value, ch: u8) ?bool {
-    const flags = regexpInternalString(this_value, "__cynic_re_flags__") orelse return null;
+    const flags = regexpInternalFlagsStr(this_value) orelse return null;
     return std.mem.indexOfScalar(u8, flags, ch) != null;
 }
 
@@ -555,7 +556,7 @@ fn regexpSourceGetter(realm: *Realm, this_value: Value, args: []const Value) Nat
         const s = realm.heap.allocateString("(?:)") catch return error.OutOfMemory;
         return Value.fromString(s);
     }
-    const src = regexpInternalString(this_value, "__cynic_re_src__") orelse return throwTypeError(realm, "RegExp.prototype.source called on non-RegExp");
+    const src = regexpInternalSource(this_value) orelse return throwTypeError(realm, "RegExp.prototype.source called on non-RegExp");
     const escaped = try escapeRegExpPattern(realm, src);
     return Value.fromString(escaped);
 }

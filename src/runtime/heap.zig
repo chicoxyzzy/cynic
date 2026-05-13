@@ -600,6 +600,11 @@ pub const Heap = struct {
                 // `promise_value` slot rather than a property bag,
                 // so the regular property walk above misses it.
                 if (o.promise_state != .none) self.markValue(o.promise_value);
+                // §22.2.4 `[[OriginalSource]]` / `[[OriginalFlags]]`
+                // for RegExp instances. Strings that the regular
+                // property walk wouldn't reach.
+                if (o.regexp_source) |s| s.marked = true;
+                if (o.regexp_flags) |s| s.marked = true;
                 if (o.instance_field_inits) |inits| {
                     for (inits) |fi| {
                         if (fi.init_fn) |fnp| self.markValue(taggedFunction(fnp));

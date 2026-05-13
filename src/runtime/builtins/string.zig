@@ -487,9 +487,9 @@ fn coerceSearchString(realm: *Realm, v: Value, method_name: []const u8) NativeEr
 }
 
 /// §7.2.8 IsRegExp(arg) — Object check, then @@match access, with
-/// fallback to the [[RegExpMatcher]] slot (Cynic's
-/// `__cynic_re_src__` own data prop). Cynic encodes well-known
-/// symbols via their `@@<name>` internal property-key, so a plain
+/// fallback to the [[RegExpMatcher]] slot (Cynic's typed
+/// `regexp_source` field). Cynic encodes well-known symbols via
+/// their `@@<name>` internal property-key, so a plain
 /// `obj.get("@@match")` honours @@-keyed accessor/data descriptors
 /// the same way `obj[Symbol.match]` would.
 fn isRegExp(realm: *Realm, v: Value) NativeError!bool {
@@ -497,7 +497,7 @@ fn isRegExp(realm: *Realm, v: Value) NativeError!bool {
     const obj = heap_mod.valueAsPlainObject(v) orelse return false;
     const matcher = obj.get("@@match");
     if (!matcher.isUndefined()) return matcher.toBooleanPrimitive();
-    return obj.hasOwn("__cynic_re_src__");
+    return obj.regexp_source != null;
 }
 
 fn clampPos(p: i64, len: usize) usize {

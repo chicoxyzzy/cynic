@@ -296,6 +296,15 @@ pub const JSObject = struct {
     /// `promise_state` is fulfilled or rejected; pending Promises
     /// leave it at `undefined_`.
     promise_value: Value = Value.undefined_,
+    /// §22.2.4 `[[OriginalSource]]` — the source string a RegExp
+    /// instance was constructed from (the part between the
+    /// slashes in `/abc/i`). Hidden from JS; user-visible via
+    /// the `RegExp.prototype.source` accessor.
+    regexp_source: ?*@import("string.zig").JSString = null,
+    /// §22.2.4 `[[OriginalFlags]]` — the flag string ("gim", "u",
+    /// etc.) the instance carries. Hidden from JS; user-visible
+    /// via the `RegExp.prototype.flags` accessor.
+    regexp_flags: ?*@import("string.zig").JSString = null,
     /// §10.5 Proxy exotic — `[[ProxyTarget]]` / `[[ProxyHandler]]`
     /// internal slots when this object was constructed via
     /// `new Proxy(target, handler)`. `null` for plain objects.
