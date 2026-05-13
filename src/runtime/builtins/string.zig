@@ -1050,7 +1050,7 @@ pub fn stringReplace(realm: *Realm, this_value: Value, args: []const Value) Nati
     const pat = if (pat_v.isString())
         @as(*JSString, @ptrCast(@alignCast(pat_v.asString())))
     else
-        intrinsics.stringifyArg(realm, pat_v) catch return error.OutOfMemory;
+        try intrinsics.stringifyArg(realm, pat_v);
     if (std.mem.indexOf(u8, s.bytes, pat.bytes)) |pos| {
         const replacement = try resolveReplacer(realm, s, pat, pos, repl_v);
         var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -1073,9 +1073,19 @@ fn regexReplace(
     realm: *Realm,
     s: *JSString,
     regex_obj: *JSObject,
-    repl_v: Value,
+    repl_v_in: Value,
     force_all: bool,
 ) NativeError!Value {
+    // §22.2.6.11 step 7.a — `If functionalReplace is false,
+    // Let replaceValue be ? ToString(replaceValue)`. Run the
+    // coercion synchronously before any regex matching so a
+    // throwing `toString` on the replacement propagates before
+    // we even try to find a match.
+    const functional = heap_mod.valueAsFunction(repl_v_in) != null;
+    const repl_v: Value = if (functional) repl_v_in else blk: {
+        const rs = try intrinsics.stringifyArg(realm, repl_v_in);
+        break :blk Value.fromString(rs);
+    };
     const is_global = flagsHas(realm, regex_obj, 'g');
     const all = is_global or force_all;
     // Reset lastIndex so we always start at 0.
@@ -1155,12 +1165,15 @@ fn resolveRegexReplacer(
             .value, .yielded => |v| v,
             .thrown => return error.NativeThrew,
         };
-        const ret_s = intrinsics.stringifyArg(realm, ret) catch return error.OutOfMemory;
+        const ret_s = try intrinsics.stringifyArg(realm, ret);
         return ret_s.bytes;
     }
     // String replacement — `$&`, `$1`...`$9`, `$$`, `$\``,
-    // `$'` substitutions per §22.1.3.18.1.
-    const repl_s = intrinsics.stringifyArg(realm, repl_v) catch return error.OutOfMemory;
+    // `$'` substitutions per §22.1.3.18.1. (When called from
+    // `regexReplace` after our pre-coercion the value is already
+    // a string, but resolveRegexReplacer is also reachable from
+    // paths that didn't pre-coerce — leave the call here.)
+    const repl_s = try intrinsics.stringifyArg(realm, repl_v);
     return try expandSubstitution(realm, repl_s.bytes, source, match_arr, whole, pos);
 }
 
@@ -1265,10 +1278,10 @@ fn resolveReplacer(
                 return error.NativeThrew;
             },
         };
-        const ret_s = intrinsics.stringifyArg(realm, ret) catch return error.OutOfMemory;
+        const ret_s = try intrinsics.stringifyArg(realm, ret);
         return ret_s.bytes;
     }
-    const repl_s = intrinsics.stringifyArg(realm, repl_v) catch return error.OutOfMemory;
+    const repl_s = try intrinsics.stringifyArg(realm, repl_v);
     return repl_s.bytes;
 }
 
@@ -1286,7 +1299,7 @@ fn stringReplaceAll(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const pat = if (pat_v.isString())
         @as(*JSString, @ptrCast(@alignCast(pat_v.asString())))
     else
-        intrinsics.stringifyArg(realm, pat_v) catch return error.OutOfMemory;
+        try intrinsics.stringifyArg(realm, pat_v);
     if (pat.bytes.len == 0) {
         // Empty pattern — interleave the replacement between every
         // character. The replacer fires once per insertion point;
