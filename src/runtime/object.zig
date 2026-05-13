@@ -150,6 +150,22 @@ pub const ArrayLikeIterState = struct {
     }
 };
 
+/// §27.2.1.5 PromiseCapability internal slots — populated by the
+/// per-cap executor closure (§27.2.1.5.1 GetCapabilitiesExecutor)
+/// and consulted by `newPromiseCapability` once the user
+/// constructor returns. `called` guards the "executor called
+/// twice" TypeError. Hidden from JS; the state JSObject is an
+/// implementation-private vehicle that user code shouldn't reach.
+pub const PromiseCapabilityRecord = struct {
+    resolve: Value = Value.undefined_,
+    reject: Value = Value.undefined_,
+    called: bool = false,
+
+    pub fn deinit(self: *PromiseCapabilityRecord, allocator: std.mem.Allocator) void {
+        allocator.destroy(self);
+    }
+};
+
 /// Per-instance state for the lazy `Iterator.prototype.*` helpers
 /// (`from`, `map`, `filter`, `take`, `drop`, `flatMap`, `zip`).
 /// §27.1.5 — every helper returns a new iterator whose `next`
@@ -305,6 +321,14 @@ pub const JSObject = struct {
     /// Hidden from JS; mirrors §27.1.5's IteratorRecord internal
     /// state.
     iter_helper: ?*IteratorHelperState = null,
+    /// Promise §27.2.1.5 PromiseCapability state — set on the
+    /// transient bound-this object the capability executor closes
+    /// over. Hidden from JS.
+    capability_record: ?*PromiseCapabilityRecord = null,
+    /// `Promise.prototype.finally` callback — set on the per-
+    /// `.finally()` context object the reaction closures capture
+    /// via `is_arrow + captured_this`. Hidden from JS.
+    finally_callback: ?*@import("function.zig").JSFunction = null,
     /// `[[DateValue]]` (§21.4.1) — milliseconds since Unix
     /// epoch. NaN means an invalid date. Only set on `new Date()`
     /// instances.
@@ -486,6 +510,7 @@ pub const JSObject = struct {
         if (self.set_data) |s| s.deinit(allocator);
         if (self.array_like_iter) |s| s.deinit(allocator);
         if (self.iter_helper) |s| s.deinit(allocator);
+        if (self.capability_record) |s| s.deinit(allocator);
         if (self.finalization_cells) |fc| fc.deinit(allocator);
         if (self.array_buffer) |ab| allocator.free(ab);
         self.promise_waiters.deinit(allocator);

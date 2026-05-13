@@ -166,18 +166,15 @@ pub const PromiseCapability = struct {
 /// through `bound_target` so `this_value` here is the state.
 fn capabilityExecutorImpl(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const state = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "capability executor: state not bound");
+    const rec = state.capability_record orelse return throwTypeError(realm, "capability executor: state missing");
     // §27.2.1.5.1 GetCapabilitiesExecutor — second call is a
-    // TypeError. We mark the slots present once the first call
-    // populates them; the sentinel "__cynic_cap_called__" guards
-    // against re-population.
-    if (state.hasOwn("__cynic_cap_called__")) {
+    // TypeError. `called` flips on the first invocation.
+    if (rec.called) {
         return throwTypeError(realm, "capability executor: already called");
     }
-    const resolve_v = if (args.len >= 1) args[0] else Value.undefined_;
-    const reject_v = if (args.len >= 2) args[1] else Value.undefined_;
-    state.set(realm.allocator, "__cynic_cap_resolve__", resolve_v) catch return error.OutOfMemory;
-    state.set(realm.allocator, "__cynic_cap_reject__", reject_v) catch return error.OutOfMemory;
-    state.set(realm.allocator, "__cynic_cap_called__", Value.true_) catch return error.OutOfMemory;
+    rec.resolve = if (args.len >= 1) args[0] else Value.undefined_;
+    rec.reject = if (args.len >= 2) args[1] else Value.undefined_;
+    rec.called = true;
     return Value.undefined_;
 }
 
@@ -190,6 +187,9 @@ pub fn newPromiseCapability(realm: *Realm, ctor: *JSFunction) NativeError!Promis
     // `this_value` without needing closures.
     const state = realm.heap.allocateObject() catch return error.OutOfMemory;
     state.prototype = realm.intrinsics.object_prototype;
+    const rec = realm.allocator.create(@import("../object.zig").PromiseCapabilityRecord) catch return error.OutOfMemory;
+    rec.* = .{};
+    state.capability_record = rec;
 
     const executor_impl = realm.heap.allocateFunctionNative(capabilityExecutorImpl, 2, "") catch return error.OutOfMemory;
     executor_impl.proto = realm.intrinsics.function_prototype;
@@ -214,10 +214,8 @@ pub fn newPromiseCapability(realm: *Realm, ctor: *JSFunction) NativeError!Promis
     };
 
     // §27.2.1.5 step 7-8 — IsCallable(resolve) / IsCallable(reject).
-    const resolve_v = state.get("__cynic_cap_resolve__");
-    const reject_v = state.get("__cynic_cap_reject__");
-    const resolve_fn = heap_mod.valueAsFunction(resolve_v) orelse return throwTypeError(realm, "Promise capability: resolve is not callable");
-    const reject_fn = heap_mod.valueAsFunction(reject_v) orelse return throwTypeError(realm, "Promise capability: reject is not callable");
+    const resolve_fn = heap_mod.valueAsFunction(rec.resolve) orelse return throwTypeError(realm, "Promise capability: resolve is not callable");
+    const reject_fn = heap_mod.valueAsFunction(rec.reject) orelse return throwTypeError(realm, "Promise capability: reject is not callable");
     return PromiseCapability{ .promise = promise_v, .resolve = resolve_fn, .reject = reject_fn };
 }
 
@@ -474,11 +472,12 @@ fn promiseFinally(realm: *Realm, this_value: Value, args: []const Value) NativeE
         return promiseThen(realm, this_value, &passthrough_args);
     }
     // Build the two wrapper closures. They share state via a
-    // small heap-allocated object that carries the user's
-    // onFinally and a sign bit ("rethrow on catch").
+    // small heap-allocated object whose `finally_callback` slot
+    // carries the user's onFinally (hidden from JS — no
+    // `__cynic_finally_cb__` enumerable leak).
     const ctx = realm.heap.allocateObject() catch return error.OutOfMemory;
     ctx.prototype = realm.intrinsics.object_prototype;
-    ctx.set(realm.allocator, "__cynic_finally_cb__", on_finally) catch return error.OutOfMemory;
+    ctx.finally_callback = on_finally_fn;
 
     // Mark the closures `is_arrow = true` so the call path
     // substitutes `captured_this` for whatever the reaction
@@ -506,7 +505,7 @@ fn promiseFinally(realm: *Realm, this_value: Value, args: []const Value) NativeE
 fn finallyThenReaction(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const value = argOr(args, 0, Value.undefined_);
     const ctx = heap_mod.valueAsPlainObject(this_value) orelse return value;
-    const cb = heap_mod.valueAsFunction(ctx.get("__cynic_finally_cb__")) orelse return value;
+    const cb = ctx.finally_callback orelse return value;
     const interp = @import("../interpreter.zig");
     const outcome = interp.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &.{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -530,7 +529,7 @@ fn finallyCatchReaction(realm: *Realm, this_value: Value, args: []const Value) N
         realm.pending_exception = reason;
         return error.NativeThrew;
     };
-    const cb = heap_mod.valueAsFunction(ctx.get("__cynic_finally_cb__")) orelse {
+    const cb = ctx.finally_callback orelse {
         realm.pending_exception = reason;
         return error.NativeThrew;
     };
