@@ -1373,8 +1373,21 @@ pub fn resumeAsyncFunction(
                 return;
             }
             // Normal completion — settle the result Promise.
+            // §27.7.5.1 step 3.d — `await`-style adoption: if `v`
+            // is itself a thenable (Promise), chain so the outer
+            // mirrors the inner's settlement rather than resolving
+            // *with* the inner Promise as a value. Without this,
+            // `async f() { return innerPromise; }` exposes a
+            // Promise<Promise<T>> to consumers.
             if (gen.result_promise) |rp| {
                 if (heap_mod.valueAsPlainObject(rp)) |rp_obj| {
+                    if (heap_mod.valueAsPlainObject(v)) |v_obj| {
+                        if (v_obj.get("__cynic_promise_state__").isString()) {
+                            chainPromiseToInner(realm, v_obj, rp_obj) catch return error.OutOfMemory;
+                            gen.state = .completed;
+                            return;
+                        }
+                    }
                     settlePromiseInternal(realm, rp_obj, .fulfilled, v) catch return error.OutOfMemory;
                 }
             }
