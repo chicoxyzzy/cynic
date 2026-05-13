@@ -146,7 +146,10 @@ pub fn install(realm: *Realm) !void {
         try installNativeGetter(realm, ta_proto, "buffer", typedArrayBuffer);
 
         try installNativeMethodOnProto(realm, ta_proto, "fill", typedArrayFill, 1);
-        try installNativeMethodOnProto(realm, ta_proto, "set", typedArraySet, 2);
+        // §23.2.3.27 — `set` has `length` 1 (the `source` arg;
+        // `offset` defaults to 0). Don't confuse "Cynic's native
+        // implementation reads 2 args" with the spec arity.
+        try installNativeMethodOnProto(realm, ta_proto, "set", typedArraySet, 1);
         try installNativeMethodOnProto(realm, ta_proto, "at", typedArrayAt, 1);
         try installNativeMethodOnProto(realm, ta_proto, "copyWithin", typedArrayCopyWithin, 2);
         try installNativeMethodOnProto(realm, ta_proto, "every", typedArrayEvery, 1);
@@ -690,10 +693,12 @@ fn typedArraySet(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const src = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return error.NativeThrew;
     var offset: usize = 0;
     if (args.len > 1 and !args[1].isUndefined()) {
-        const ov = coerceToNumber(args[1]);
+        // §23.2.3.27 step 5 — ToIntegerOrInfinity → ToNumber.
+        // Symbol / BigInt throw TypeError; `{valueOf: () => throw}`
+        // propagates. Cynic previously used a silent coercion that
+        // swallowed both.
+        const ov = try intrinsics.toNumber(realm, args[1]);
         const od: f64 = if (ov.isInt32()) @floatFromInt(ov.asInt32()) else ov.asDouble();
-        // Spec §23.2.3.26 step 5: offset = ToIntegerOrInfinity(arg);
-        // negative / NaN / non-integer-or-overflow → RangeError.
         if (std.math.isNan(od) or od < 0 or od > @as(f64, @floatFromInt(std.math.maxInt(usize)))) {
             return throwRangeError(realm, "TypedArray.prototype.set: offset out of range");
         }
@@ -752,9 +757,11 @@ fn taBufOf(tv: ObjMod.TypedView) ?[]u8 {
 /// Resolve a §7.1.5 ToIntegerOrInfinity-style index relative to
 /// `length`, with the standard negative-from-end + clamp-to-bounds
 /// rules. Used by `slice` / `subarray` / `copyWithin` / `fill`.
-fn taResolveIndex(arg: Value, length: i64, default_val: i64) i64 {
+/// Routes through `intrinsics.toNumber` so a Symbol / BigInt arg
+/// throws TypeError and `{valueOf: () => throw}` propagates.
+fn taResolveIndex(realm: *Realm, arg: Value, length: i64, default_val: i64) NativeError!i64 {
     if (arg.isUndefined()) return default_val;
-    const v = coerceToNumber(arg);
+    const v = try intrinsics.toNumber(realm, arg);
     const d: f64 = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
     if (std.math.isNan(d)) return 0;
     var i: i64 = if (std.math.isInf(d)) (if (d > 0) length else -length) else doubleToI64Saturating(@trunc(d));
@@ -898,7 +905,7 @@ fn typedArrayAt(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const tv = taViewOf(this_value) orelse return throwTypeError(realm, "at on non-TypedArray");
     const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
     const len: i64 = @intCast(tv.length);
-    const i = taResolveIndex(argOr(args, 0, Value.fromInt32(0)), len, 0);
+    const i = try taResolveIndex(realm, argOr(args, 0, Value.fromInt32(0)), len, 0);
     // `at` returns undefined for out-of-range; resolveIndex clamps,
     // so we re-check using the raw arg to detect "explicitly out of
     // range" vs "negative index in range."
@@ -912,14 +919,13 @@ fn typedArrayAt(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 }
 
 fn typedArrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
     const tv = obj.typed_view orelse return error.NativeThrew;
     const buf = tv.viewed.array_buffer orelse return error.NativeThrew;
     const len: i64 = @intCast(tv.length);
-    const target = taResolveIndex(argOr(args, 0, Value.fromInt32(0)), len, 0);
-    const start = taResolveIndex(argOr(args, 1, Value.fromInt32(0)), len, 0);
-    const end = taResolveIndex(argOr(args, 2, Value.undefined_), len, len);
+    const target = try taResolveIndex(realm, argOr(args, 0, Value.fromInt32(0)), len, 0);
+    const start = try taResolveIndex(realm, argOr(args, 1, Value.fromInt32(0)), len, 0);
+    const end = try taResolveIndex(realm, argOr(args, 2, Value.undefined_), len, len);
     const count = @min(end - start, len - target);
     if (count <= 0) return this_value;
     const elem_size = tv.kind.elementSize();
@@ -1028,7 +1034,7 @@ fn typedArrayIncludes(realm: *Realm, this_value: Value, args: []const Value) Nat
     const target = argOr(args, 0, Value.undefined_);
     const len: i64 = @intCast(tv.length);
     const from_arg = argOr(args, 1, Value.fromInt32(0));
-    var from = taResolveIndex(from_arg, len, 0);
+    var from = try taResolveIndex(realm, from_arg, len, 0);
     if (from < 0) from = 0;
     const elem_size = tv.kind.elementSize();
     var i: i64 = from;
@@ -1044,7 +1050,7 @@ fn typedArrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nati
     const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
     const target = argOr(args, 0, Value.undefined_);
     const len: i64 = @intCast(tv.length);
-    var from = taResolveIndex(argOr(args, 1, Value.fromInt32(0)), len, 0);
+    var from = try taResolveIndex(realm, argOr(args, 1, Value.fromInt32(0)), len, 0);
     if (from < 0) from = 0;
     const elem_size = tv.kind.elementSize();
     var i: i64 = from;
@@ -1062,7 +1068,7 @@ fn typedArrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) 
     const len: i64 = @intCast(tv.length);
     var from: i64 = len - 1;
     if (args.len > 1 and !args[1].isUndefined()) {
-        from = taResolveIndex(args[1], len, len - 1);
+        from = try taResolveIndex(realm, args[1], len, len - 1);
         if (from >= len) from = len - 1;
     }
     const elem_size = tv.kind.elementSize();
@@ -1114,18 +1120,34 @@ fn typedArrayToLocaleString(realm: *Realm, this_value: Value, args: []const Valu
     const elem_size = tv.kind.elementSize();
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
+    const interpreter = @import("../interpreter.zig");
     var i: usize = 0;
     while (i < tv.length) : (i += 1) {
         if (i > 0) out.appendSlice(realm.allocator, ",") catch return error.OutOfMemory;
         const v = readTypedElement(realm, buf, tv.kind, tv.byte_offset + i * elem_size);
-        // §23.2.3.32 step 7 — Invoke(elt, "toLocaleString"). Cynic
-        // doesn't ship Intl (out of scope per AGENTS.md) so the
-        // toLocaleString for Number primitives produces the same
-        // output as `String(n)`. Use `stringifyArg` directly to
-        // skip the boxed-wrapper round-trip; the spec's
-        // `toLocaleString` on a Number wrapper reduces to ToString
-        // when no locale args are passed.
-        const s = stringifyArg(realm, v) catch return error.OutOfMemory;
+        // §23.2.3.34 step 7 — `Invoke(elt, "toLocaleString")`
+        // observes the user-installed
+        // `Number.prototype.toLocaleString` (or BigInt's). Box the
+        // primitive, look up the method through the prototype chain,
+        // then call it with the boxed receiver. Cynic doesn't ship
+        // Intl, so the engine-default `toLocaleString` reduces to
+        // ToString — but user overrides need to fire.
+        const boxed = try intrinsics.toObjectThis(realm, v);
+        const method_v = boxed.get("toLocaleString");
+        var str_v: Value = undefined;
+        if (heap_mod.valueAsFunction(method_v)) |_| {
+            const outcome = interpreter.callValue(realm.allocator, realm, method_v, heap_mod.taggedObject(boxed), &.{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            switch (outcome) {
+                .value, .yielded => |x| str_v = x,
+                .thrown => return error.NativeThrew,
+            }
+        } else {
+            str_v = v;
+        }
+        const s = stringifyArg(realm, str_v) catch return error.OutOfMemory;
         out.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
     }
     const result = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
@@ -1221,8 +1243,8 @@ fn typedArraySlice(realm: *Realm, this_value: Value, args: []const Value) Native
     const self = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "slice on non-TypedArray");
     const tv_pre = self.typed_view orelse return throwTypeError(realm, "slice on non-TypedArray");
     const len: i64 = @intCast(tv_pre.length);
-    const start = taResolveIndex(argOr(args, 0, Value.fromInt32(0)), len, 0);
-    const end = taResolveIndex(argOr(args, 1, Value.undefined_), len, len);
+    const start = try taResolveIndex(realm, argOr(args, 0, Value.fromInt32(0)), len, 0);
+    const end = try taResolveIndex(realm, argOr(args, 1, Value.undefined_), len, len);
     const new_len: usize = if (end > start) @intCast(end - start) else 0;
     const kind = tv_pre.kind;
     // §23.2.3.27 step 13 — TypedArraySpeciesCreate(O, « count »).
@@ -1255,8 +1277,8 @@ fn typedArraySubarray(realm: *Realm, this_value: Value, args: []const Value) Nat
     const self = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "subarray on non-TypedArray");
     const tv = self.typed_view orelse return throwTypeError(realm, "subarray on non-TypedArray");
     const len: i64 = @intCast(tv.length);
-    const begin = taResolveIndex(argOr(args, 0, Value.fromInt32(0)), len, 0);
-    const end = taResolveIndex(argOr(args, 1, Value.undefined_), len, len);
+    const begin = try taResolveIndex(realm, argOr(args, 0, Value.fromInt32(0)), len, 0);
+    const end = try taResolveIndex(realm, argOr(args, 1, Value.undefined_), len, len);
     const new_len: usize = if (end > begin) @intCast(end - begin) else 0;
     const elem_size = tv.kind.elementSize();
     const new_offset = tv.byte_offset + @as(usize, @intCast(begin)) * elem_size;
