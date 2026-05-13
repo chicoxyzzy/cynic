@@ -55,13 +55,6 @@ pub const cynic_oos_path_contains = [_][]const u8{
     // edge productions Cynic doesn't yet recognise here. Tracked as
     // small follow-ups; path-skip to keep the score clean.
     "/asi/S7.9_A",
-    // §15.5.1 / §15.9.1 — `function* (a = yield) {}` and the
-    // async-generator variants. Detecting `Contains YieldExpression`
-    // / `Contains AwaitExpression` in FormalParameters needs a small
-    // post-parse param walker; tracked but not yet shipped.
-    "/param-dflt-yield",
-    "formals-contains-yield-expr",
-    "formals-contains-await-expr",
 };
 
 /// `features` names we know we don't support. Tests whose
