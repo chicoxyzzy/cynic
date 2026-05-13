@@ -226,7 +226,7 @@ fn stringMatchAll(realm: *Realm, this_value: Value, args: []const Value) NativeE
         const re_v = try ensureRegExp(realm, arg);
         break :blk heap_mod.valueAsPlainObject(re_v) orelse return throwTypeError(realm, "matchAll target is not a regex");
     };
-    if (!flagsHas(realm, regex_obj, 'g')) {
+    if (!regexFlagBool(realm, regex_obj, "global")) {
         return throwTypeError(realm, "String.prototype.matchAll requires a global regex");
     }
     // §22.2.9.1 CreateRegExpStringIterator — allocate the
@@ -1037,6 +1037,17 @@ fn flagsHas(realm: *Realm, regex_obj: *JSObject, flag: u8) bool {
     return std.mem.indexOfScalar(u8, f.bytes, flag) != null;
 }
 
+/// §22.2.6.{11,12,13,…} — the @@replace / @@split / @@match
+/// / @@matchAll / @@search methods read individual flag
+/// properties (`Get(rx, "global")` etc.) rather than going
+/// through the `flags` accessor. This honors user-installed
+/// own-property shadows (`Object.defineProperty(rx, "global",
+/// {writable: true}); rx.global = X`).
+fn regexFlagBool(realm: *Realm, regex_obj: *JSObject, name: []const u8) bool {
+    const v = intrinsics.getPropertyChain(realm, regex_obj, name) catch return false;
+    return v.toBooleanPrimitive();
+}
+
 pub fn stringReplace(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const pat_v = argOr(args, 0, Value.undefined_);
@@ -1086,7 +1097,11 @@ fn regexReplace(
         const rs = try intrinsics.stringifyArg(realm, repl_v_in);
         break :blk Value.fromString(rs);
     };
-    const is_global = flagsHas(realm, regex_obj, 'g');
+    // §22.2.6.11 step 8 — `global = ToBoolean(Get(rx, "global"))`.
+    // The Get walks the prototype chain; an own data property
+    // shadows the inherited accessor, letting user code override
+    // the flag with `rx.global = X`.
+    const is_global = regexFlagBool(realm, regex_obj, "global");
     const all = is_global or force_all;
     // Reset lastIndex so we always start at 0.
     regex_obj.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
@@ -1290,7 +1305,9 @@ fn stringReplaceAll(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const pat_v = argOr(args, 0, Value.undefined_);
     const repl_v = argOr(args, 1, Value.undefined_);
     if (isRegexLike(pat_v)) |regex_obj| {
-        // §22.1.3.19 — regex argument MUST have the global flag.
+        // §22.1.3.19 step 4 — `Get(regex, "flags")` must contain
+        // 'g'. The spec routes through the flags accessor (or a
+        // shadowed own property), not the internal slot.
         if (!flagsHas(realm, regex_obj, 'g')) {
             return throwTypeError(realm, "String.prototype.replaceAll requires a global regex");
         }
