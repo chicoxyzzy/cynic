@@ -459,8 +459,6 @@ fn installStubConstructor(
     const proto = try realm.heap.allocateObject();
     proto.prototype = parent_proto;
     try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
-    const name_str = try realm.heap.allocateString(name);
-    try setNonEnumerable(proto, realm.allocator, "name", Value.fromString(name_str));
     fn_obj.prototype = proto;
     try realm.globals.put(realm.allocator, name, heap_mod.taggedFunction(fn_obj));
     return proto;

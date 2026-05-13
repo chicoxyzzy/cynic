@@ -57,6 +57,7 @@ test {
     _ = @import("runtime/interpreter.zig");
     _ = @import("runtime/interpreter_arith.zig");
     _ = @import("runtime/interpreter_test.zig");
+    _ = @import("runtime/surface_audit_test.zig");
     _ = @import("runtime/builtins/iterator.zig");
     _ = @import("runtime/builtins/date.zig");
     _ = @import("runtime/builtins/typed_array.zig");
