@@ -39,16 +39,15 @@ runs the conformance harness.
   / binary / logical / nullish / conditional / sequence /
   assignment + compound assignment + logical-assignment.
 - §14 statement grammar including `try` / `catch` / `finally`,
-  `for` / `for-in` / `for-of` (incl. lhs destructuring),
-  `switch`, labeled statements, lexical declarations with TDZ
-  positioning, `class` declarations, `function` / `function*` /
-  `async function*`, ES6 modules (`import` / `export` / namespace
+  `for` / `for-in` / `for-of` / `for-await-of` (incl. lhs
+  destructuring), `switch`, labeled statements, lexical
+  declarations with TDZ positioning, `class` declarations,
+  `function` / `function*` / `async function*` (with `yield*`
+  delegation), ES6 modules (`import` / `export` / namespace
   imports / re-exports).
 
 **In progress / on the watch.**
 
-- `for await of` — async iteration grammar.
-- `yield*` — generator delegation (parser accepts; compiler errors).
 - Top-level `await` in modules.
 - Tagged template `.raw` access.
 
@@ -84,6 +83,10 @@ code construction (aligns with SES).
 - Iteration: `iter_open` opcode, generator `next` / `return` /
   `throw`, async-generator `next` returning Promises,
   `iter_close` on for-of break + return walking the loop chain.
+  `yield*` delegation for sync and async generators (spec-faithful
+  `IteratorClose` / `AsyncIteratorClose` on abrupt completion).
+  `for-await-of` end-to-end against async iterators (§14.7.5),
+  including the sync-iterable-to-async-iterable wrap.
 - Optional chaining (`?.`) + nullish coalescing (`??`) +
   logical-assignment (`&&=` / `\|\|=` / `??=`) including member
   targets + computed keys.
@@ -104,8 +107,6 @@ code construction (aligns with SES).
 
 **In progress / planned.**
 
-- `yield*` delegation.
-- `for await of` end-to-end.
 - Generator `.return()` running pending `finally` blocks inside
   the body (currently only finally-on-throw fires).
 - Tail-call optimization (PTC).
@@ -197,15 +198,15 @@ Cynic's edge-runtime hosts are single-agent-per-isolate).
   `cynic run` and the test262 harness loader). Not exposed to
   user JS.
 - `import.meta` (returns a fresh empty object — no metadata yet).
-- Dynamic `import()` (returns a `Promise` rejected with
-  `TypeError` — syntax compiles, semantics are stubbed).
+- Dynamic `import()` against the host module loader — fulfilled
+  with the namespace on success, rejected with the loader's
+  `TypeError` on failure (§13.3.10).
 
 **Planned.**
 
 - Real module graph: cyclic imports, namespace objects via
   `import * as ns`, hoisted `import` bindings with TDZ.
 - Top-level `await` in module bodies.
-- Real dynamic `import()` resolution.
 
 ## Regex
 
