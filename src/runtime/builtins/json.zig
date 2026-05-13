@@ -619,13 +619,16 @@ fn formatDoubleForJson(scratch: *[64]u8, d: f64) []const u8 {
 
 fn jsonParse(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    // §25.5.1 JSON.parse(text [, reviver]) step 1 — ToString(text).
-    // Spec is silent on non-string input but real engines coerce.
+    // §25.5.1 JSON.parse(text [, reviver]) step 1 — `text = ?
+    // ToString(text)`. The `try` is load-bearing — a Symbol
+    // arg throws TypeError per §7.1.17, and an object with a
+    // poisoned `toString`/`valueOf` propagates the underlying
+    // throw instead of being swallowed as OOM.
     const v = argOr(args, 0, Value.undefined_);
     const src: *JSString = if (v.isString())
         @ptrCast(@alignCast(v.asString()))
     else
-        stringifyArg(realm, v) catch return error.OutOfMemory;
+        try stringifyArg(realm, v);
 
     var parser = JsonParser{ .input = src.bytes, .pos = 0, .realm = realm };
     parser.skipWs();
