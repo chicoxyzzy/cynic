@@ -167,4 +167,44 @@ pub fn build(b: *std.Build) void {
     const t262_tests = b.addTest(.{ .root_module = t262_mod });
     const run_t262_tests = b.addRunArtifact(t262_tests);
     test_step.dependOn(&run_t262_tests.step);
+
+    // `zig build bench` — Phase 1 micro-bench driver from
+    // docs/benchmarking.md. Spawns a ReleaseFast cynic CLI per
+    // fixture in `bench/micros/`, captures wall time + peak RSS,
+    // prints medians.
+    //
+    // The default `zig build` builds cynic in the user-selected
+    // optimize mode (Debug by default), which is 5-10× slower
+    // and useless for perf signal. `bench` instead builds a
+    // dedicated `cynic-bench` binary in ReleaseFast and writes
+    // it next to the regular install. The harness driver spawns
+    // *that* binary.
+    const cynic_fast_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    cynic_fast_mod.addImport("cynic", lib_mod_fast);
+    cynic_fast_mod.linkLibrary(qjs_regex);
+    cynic_fast_mod.addIncludePath(b.path("vendor/quickjs"));
+    cynic_fast_mod.addImport("c", c_mod);
+    const cynic_fast = b.addExecutable(.{
+        .name = "cynic-bench",
+        .root_module = cynic_fast_mod,
+    });
+    const install_cynic_fast = b.addInstallArtifact(cynic_fast, .{});
+
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("tools/bench.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    const bench_exe = b.addExecutable(.{
+        .name = "bench",
+        .root_module = bench_mod,
+    });
+    const run_bench = b.addRunArtifact(bench_exe);
+    run_bench.step.dependOn(&install_cynic_fast.step);
+    const bench_step = b.step("bench", "Run the micro-bench suite (medians of 5)");
+    bench_step.dependOn(&run_bench.step);
 }

@@ -254,6 +254,57 @@ test corpus is already path-skipped.
 - Disassembler integration on `cynic run --dump-bytecode`.
 - Source-map–style position info in stack traces.
 
+## Performance
+
+Cynic targets edge runtimes — fast cold-start, small RSS,
+predictable latency. The interpreter has never been a perf-first
+target so far (correctness has dominated), but every item below
+is on the menu. Cross-engine measurement infrastructure lives at
+[docs/benchmarking.md](benchmarking.md); per-commit micro-bench
+deltas are produced by the `/perf` slash command and hot-function
+sampling by `/profile`.
+
+**In progress.**
+
+- **Profile-driven hotspot list** — `samply` over a test262
+  runtime sweep, top-N hot functions exported as a per-commit
+  artifact. Drives what gets optimized next. Driver lives at
+  `tools/profile.sh`; slash command at `/profile`.
+- **`/perf` micro-bench harness** — `tools/bench.zig` runs a
+  fixed JS micro-bench suite under `zig-out/bin/cynic run`, prints
+  wall time + max RSS per fixture, diffs against a prior baseline
+  in `bench-results.md`. Phase 1 of [docs/benchmarking.md](benchmarking.md);
+  full JetStream 2 / Octane integration is Phase 2.
+
+**Planned (largest-win-first, after the profile data points at one).**
+
+- **Inline property-shape caches** on hot member access. Every
+  major engine built this *first*: V8 hidden classes, JSC structure
+  IDs, SM shape trees. Today Cynic does an `ArrayHashMap` lookup
+  per `.x` access; ICs collapse that to a one-cmp guard on the hot
+  path. Biggest single win for typical JS workloads (10-100× on
+  hot member access). Architectural; expensive to add but pays for
+  itself many times over.
+- **Real `JSArray` heap kind** with packed indexed storage as the
+  base case, sparse fallback only for true sparse arrays. Some of
+  this exists (`elements: ArrayListUnmanaged(Value)` +
+  `is_array_exotic` flag); a unified heap kind would let the
+  arithmetic / loop opcodes skip the per-access `is_array_exotic`
+  branch and read `elements.items.ptr[i]` directly.
+- **Generational GC** — nursery + tenuring. Most allocations die
+  young; today's full mark-sweep walks the whole heap on every
+  trigger. V8 Orinoco, SM nursery, Hermes YoungGen, JSC Riptide
+  all do this first. Incremental marking is the next step after
+  that, for long-pause amortization.
+- **Inlined `Value` ops in the dispatch loop.** Worth checking the
+  `ReleaseFast` disassembly of `Op.add` / `Op.lda` / property reads
+  — Zig inlines aggressively but the per-opcode handler structure
+  may still leave hot ops behind a function-call boundary. Cheap
+  if the disassembly is bad; no-op if it's already inlined.
+- **Tail-call optimization (PTC)** — already on the runtime
+  watchlist for correctness (§14.6.3). Performance win too — deep
+  recursion stops blowing the call stack.
+
 ## Future work (post-strict-only-runtime)
 
 - **Baseline JIT** — direct opcode-to-native, inline caches for
