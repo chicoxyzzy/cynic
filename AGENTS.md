@@ -90,6 +90,8 @@ These are project rules — they apply to everyone.
 | Touch heap-allocating native code | [docs/handbook/gc.md](docs/handbook/gc.md) (`HandleScope` contract for natives that re-enter JS) |
 | Look up a Zig idiom Cynic uses | [docs/handbook/zig.md](docs/handbook/zig.md) |
 | Score current conformance | `zig build test262 -- --quiet`; history in [test262-results.md](test262-results.md) |
+| Measure perf (micros) | `zig build bench` (or `/perf`); design in [docs/benchmarking.md](docs/benchmarking.md) |
+| Find a hot function | `tools/profile.sh "<filter>"` (or `/profile`); requires `samply` |
 | Find spec text | [tc39.es/ecma262](https://tc39.es/ecma262/) |
 | Inspect test262 fixtures | `vendor/test262/test/<area>` |
 
@@ -212,6 +214,8 @@ the workflow plainly and any agent or human can follow them by hand.
 | `/triage` | Survey current test262 failures, group by pattern, suggest fixes (analysis only) | [.claude/commands/triage.md](.claude/commands/triage.md) |
 | `/score` | Append a fresh score row to `test262-results.md`, report the delta | [.claude/commands/score.md](.claude/commands/score.md) |
 | `/bump-test262` | Bump the test262 submodule to upstream HEAD, rerun, score (do not commit) | [.claude/commands/bump-test262.md](.claude/commands/bump-test262.md) |
+| `/perf` | Run the Phase 1 micro-bench suite; report per-fixture medians + RSS | [.claude/commands/perf.md](.claude/commands/perf.md) |
+| `/profile` | Sample a `--filter`-scoped test262 sweep under `samply`; emit a top-N hot-function list (needs `samply` on PATH) | [.claude/commands/profile.md](.claude/commands/profile.md) |
 
 ## Style & code health
 
