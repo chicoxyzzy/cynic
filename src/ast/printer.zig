@@ -363,6 +363,14 @@ fn writeStatement(ctx: *Ctx, s: *const Statement, depth: usize) WriterError!void
             try writeSpan(ctx, d.span);
             try ctx.buf.append(ctx.arena, ')');
         },
+        .labeled => |lb| {
+            try indent(ctx, depth);
+            try ctx.buf.print(ctx.arena, "(labeled \"{s}\" ", .{slice(ctx.source, lb.label)});
+            try writeSpan(ctx, lb.span);
+            try ctx.buf.append(ctx.arena, '\n');
+            try writeStatement(ctx, lb.body, depth + 1);
+            try ctx.buf.append(ctx.arena, ')');
+        },
         .import_decl => |id| {
             try indent(ctx, depth);
             try ctx.buf.appendSlice(ctx.arena, "(import ");

@@ -20,6 +20,7 @@ pub const Statement = union(enum) {
     try_: TryStmt,
     switch_: SwitchStmt,
     debugger_: SpanOnly,
+    labeled: LabeledStmt,
     function_decl: FunctionDecl,
     class_decl: ClassDecl,
     /// `import …` declaration (§16.2.2). Only valid in modules.
@@ -157,10 +158,19 @@ pub const ThrowStmt = struct {
     argument: expr.Expression,
 };
 
+/// §14.13 LabelledStatement — `IDENTIFIER : Statement`. The `label`
+/// span covers the identifier (without the trailing `:`). Multiple
+/// labels at one site nest as `LabeledStmt { body: LabeledStmt { … } }`.
+pub const LabeledStmt = struct {
+    span: Span,
+    label: Span,
+    body: *Statement,
+};
+
 pub const BreakStmt = struct {
     span: Span,
-    /// `break LabelIdentifier;` — span over the label identifier. Labels
-    /// not yet implemented; always null in this slice.
+    /// `break LabelIdentifier;` — span over the label identifier.
+    /// `null` for the unlabeled form.
     label: ?Span,
 };
 

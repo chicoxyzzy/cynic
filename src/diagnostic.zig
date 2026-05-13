@@ -96,6 +96,19 @@ pub const Code = enum {
     /// PrivateIdentifier` whose StringValue is not in scope (no
     /// enclosing ClassBody declares it as a PrivateBoundIdentifier).
     undeclared_private_name,
+    /// §14.13 / §14.15 — `break LABEL;` / `continue LABEL;` whose
+    /// LABEL is not in the active label set (no enclosing
+    /// LabelledStatement binds it).
+    undefined_label,
+    /// §14.13 — unlabelled `break;` outside an enclosing
+    /// IterationStatement or SwitchStatement.
+    break_outside_loop_or_switch,
+    /// §14.15 — unlabelled `continue;` outside an enclosing
+    /// IterationStatement.
+    continue_outside_loop,
+    /// §14.15.1 — `continue LABEL;` whose LABEL labels a statement
+    /// that is not an IterationStatement.
+    continue_target_not_iteration,
 
     // ── Runtime (later+) ───────────────────────────────────────────────────
     /// `let` or `const` binding read before its initialiser ran —
@@ -131,6 +144,10 @@ pub const Code = enum {
             .duplicate_lexical_binding,
             .invalid_class_element,
             .undeclared_private_name,
+            .undefined_label,
+            .break_outside_loop_or_switch,
+            .continue_outside_loop,
+            .continue_target_not_iteration,
             => .syntax_error,
             .let_in_tdz => .reference_error,
             .assignment_to_const => .type_error,
@@ -178,6 +195,10 @@ test "Code.errorClass: parser/lexer codes are SyntaxError" {
         .duplicate_lexical_binding,
         .invalid_class_element,
         .undeclared_private_name,
+        .undefined_label,
+        .break_outside_loop_or_switch,
+        .continue_outside_loop,
+        .continue_target_not_iteration,
     };
     for (parser_codes) |c| {
         try testing.expectEqual(ErrorClass.syntax_error, c.errorClass());

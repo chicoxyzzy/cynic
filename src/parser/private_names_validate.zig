@@ -123,6 +123,7 @@ pub const Validator = struct {
             .expression => |*es| try self.visitExpr(&es.expression),
             .block => |b| for (b.body) |*c| try self.visitStmt(c),
             .empty, .debugger_, .break_, .continue_ => {},
+            .labeled => |lb| try self.visitStmt(lb.body),
             .lexical => |l| {
                 for (l.declarators) |d| {
                     if (d.init) |ie| try self.visitExpr(&ie);

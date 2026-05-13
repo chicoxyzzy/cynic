@@ -165,6 +165,13 @@ pub const Token = struct {
     /// identifiers with `had_escape = false` — there's no rule to
     /// enforce against them.
     had_escape: bool = false,
+    /// When `had_escape` is true, this is the keyword token kind the
+    /// decoded StringValue resolves to (e.g. `.kw_await` for
+    /// `await`). Lets the parser apply context-sensitive rules:
+    /// `await` is only a ReservedWord in `[+Await]`, so a script-mode
+    /// `class await {}` should accept the name. `.identifier`
+    /// otherwise (never matters when `had_escape == false`).
+    escaped_keyword: TokenKind = .identifier,
 
     pub fn slice(self: Token, source: []const u8) []const u8 {
         return source[self.span.start..self.span.end];

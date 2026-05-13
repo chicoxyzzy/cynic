@@ -46,6 +46,7 @@ const stmt_mod = @import("../ast/statement.zig");
 const expr_mod = @import("expression.zig");
 const pattern_validate = @import("pattern_validate.zig");
 const private_names_validate = @import("private_names_validate.zig");
+const labels_validate = @import("labels_validate.zig");
 
 pub const ParseError = error{
     ParseError,
@@ -264,6 +265,16 @@ pub const Parser = struct {
             .source = self.source,
         };
         try priv_validator.run(&program);
+        // §13.13 / §14.13 / §14.15 LabelledStatement & break/continue
+        // — duplicate labels in scope, undefined break/continue targets,
+        // unlabelled break outside loop/switch, unlabelled continue
+        // outside loop, and `continue LABEL` to a non-iteration label.
+        var label_validator: labels_validate.Validator = .{
+            .arena = self.arena,
+            .diagnostics = self.diagnostics,
+            .source = self.source,
+        };
+        try label_validator.run(&program);
         // §16.1.1 ScriptBody / §16.2.1.1 ModuleBody top-level early
         // errors. For *scripts*, function declarations are VDN (not
         // LDN), so a dedicated pass enforces "LDN no duplicates" with
@@ -378,6 +389,20 @@ pub const Parser = struct {
                 return error.ParseError;
             },
             else => {
+                // §13.13 LabelledStatement — `IDENTIFIER : Statement`.
+                // Detected when the current token is an Identifier
+                // and the next is a literal `:`. `await` counts as
+                // an identifier outside `[+Await]` (so `await:` is a
+                // legal label in script code); `yield` is always
+                // reserved in strict mode and never starts a label.
+                const label_eligible = kind == .identifier or
+                    (kind == .kw_await and !self.in_async);
+                if (label_eligible) {
+                    const second = try self.peek2();
+                    if (second.kind == .colon) {
+                        return self.parseLabeledStatement();
+                    }
+                }
                 // §15.8 AsyncFunctionDeclaration: `async [no LF] function`
                 // at statement start.
                 if (kind == .identifier and std.mem.eql(u8, self.current.slice(self.source), "async")) {
@@ -549,7 +574,11 @@ pub const Parser = struct {
         } else if (key_tok.kind == .identifier or @intFromEnum(key_tok.kind) >= @intFromEnum(TokenKind.kw_await)) {
             _ = try self.bump();
             key = .{ .ident = key_tok.span };
-            key_is_plain_ident = (key_tok.kind == .identifier);
+            // The shorthand `{ a }` / `{ a = 1 }` path needs `a` to
+            // be a *plain* Identifier (not a reserved word).
+            // Contextual `await` outside `[+Await]` qualifies.
+            key_is_plain_ident = (key_tok.kind == .identifier) or
+                (key_tok.kind == .kw_await and !self.in_async);
         } else {
             try self.report(.unexpected_token, key_tok.span);
             return error.ParseError;
@@ -769,10 +798,39 @@ pub const Parser = struct {
         } };
     }
 
+    /// §13.13 LabelledStatement — `LabelIdentifier : Statement`. The
+    /// body is a regular Statement (no FunctionDeclaration in strict;
+    /// `parseStatementBody` already rejects `function`). Label-scope
+    /// and target validity are enforced by the post-parse
+    /// `validateLabels` pass.
+    fn parseLabeledStatement(self: *Parser) ParseError!Statement {
+        const label_tok = try self.bump(); // IDENTIFIER / contextual await
+        // §12.7.1 / §13.13 — LabelIdentifier follows the same
+        // reserved-word rules as BindingIdentifier. `await` is
+        // ReservedWord only in `[+Await]`; an escaped `await` label
+        // in script code is legal.
+        if (label_tok.had_escape) {
+            const ek = label_tok.escaped_keyword;
+            const await_ok = ek == .kw_await and !self.in_async;
+            if (!await_ok) {
+                try self.report(.escape_in_reserved_word, label_tok.span);
+            }
+        }
+        if (label_tok.kind == .kw_await and self.is_module) {
+            try self.report(.escape_in_reserved_word, label_tok.span);
+        }
+        _ = try self.bump(); // `:`
+        const body = try self.arena.create(Statement);
+        body.* = try self.parseStatementBody();
+        return .{ .labeled = .{
+            .span = .{ .start = label_tok.span.start, .end = body.span().end },
+            .label = label_tok.span,
+            .body = body,
+        } };
+    }
+
     /// §14.13 BreakStatement / §14.15 ContinueStatement. Both share a
     /// restricted-production rule: `break [no LF] LabelIdentifier?`.
-    /// Labels are not yet implemented; the optional LabelIdentifier is
-    /// always parsed as null.
     fn parseBreakOrContinueStatement(self: *Parser, is_break: bool) ParseError!Statement {
         const start = self.current.span.start;
         const keyword = try self.bump();
@@ -1236,6 +1294,15 @@ pub const Parser = struct {
         tagDirectivePrologue(body.body);
         try enforceStrictDirectiveSimplicity(self, params, body.body, body.span);
         try enforceParamLdnDisjoint(self, params, body.body);
+        // §15.5.1 / §15.8.1 / §15.9.1 — FormalParameters must not
+        // contain a `YieldExpression` (for generators / async gens)
+        // or `AwaitExpression` (for async / async gens).
+        if (is_generator and self.paramsContainYieldExpression(params)) {
+            try self.report(.unexpected_token, body.span);
+        }
+        if (is_async and self.paramsContainAwaitExpression(params)) {
+            try self.report(.unexpected_token, body.span);
+        }
         return .{ .function_decl = .{
             .span = .{ .start = start, .end = body.span.end },
             .name = name,
@@ -1581,6 +1648,221 @@ pub const Parser = struct {
         };
     }
 
+    /// §15.5.1 GeneratorMethod / §15.9.1 AsyncGeneratorMethod / etc. —
+    /// `It is a Syntax Error if FormalParameters Contains YieldExpression
+    /// is true.` Walks every param's default and nested pattern defaults
+    /// looking for a `.yield` expression node.
+    pub fn paramsContainYieldExpression(self: *Parser, params: []const stmt_mod.FunctionParam) bool {
+        for (params) |param| switch (param) {
+            .simple => |sp| {
+                if (sp.default) |d| if (self.exprContainsYieldExpr(&d)) return true;
+                if (self.bindingTargetContainsYieldExpr(sp.target)) return true;
+            },
+            .rest => |rp| if (self.bindingTargetContainsYieldExpr(rp.target)) return true,
+        };
+        return false;
+    }
+
+    /// §15.8.1 AsyncFunction / §15.3.1 ArrowFunction — `It is a Syntax
+    /// Error if … Contains AwaitExpression is true.` (`AsyncArrowHead`
+    /// for arrows.) Same shape as the YieldExpression walker.
+    pub fn paramsContainAwaitExpression(self: *Parser, params: []const stmt_mod.FunctionParam) bool {
+        for (params) |param| switch (param) {
+            .simple => |sp| {
+                if (sp.default) |d| if (self.exprContainsAwaitExpr(&d)) return true;
+                if (self.bindingTargetContainsAwaitExpr(sp.target)) return true;
+            },
+            .rest => |rp| if (self.bindingTargetContainsAwaitExpr(rp.target)) return true,
+        };
+        return false;
+    }
+
+    fn exprContainsYieldExpr(self: *Parser, e: *const Expression) bool {
+        return switch (e.*) {
+            .yield => true,
+            .function_expr, .class_expr, .arrow_function => false,
+            .parenthesized => |p| self.exprContainsYieldExpr(p.expression),
+            .unary => |u| self.exprContainsYieldExpr(u.operand),
+            .binary => |b| self.exprContainsYieldExpr(b.lhs) or self.exprContainsYieldExpr(b.rhs),
+            .logical => |l| self.exprContainsYieldExpr(l.lhs) or self.exprContainsYieldExpr(l.rhs),
+            .conditional => |c| self.exprContainsYieldExpr(c.test_) or
+                self.exprContainsYieldExpr(c.consequent) or
+                self.exprContainsYieldExpr(c.alternate),
+            .assignment => |a| self.exprContainsYieldExpr(a.target) or self.exprContainsYieldExpr(a.value),
+            .sequence => |sq| blk: {
+                for (sq.expressions) |*x| if (self.exprContainsYieldExpr(x)) break :blk true;
+                break :blk false;
+            },
+            .member => |m| self.exprContainsYieldExpr(m.object) or switch (m.property) {
+                .computed => |c| self.exprContainsYieldExpr(c),
+                else => false,
+            },
+            .call => |c| blk: {
+                if (self.exprContainsYieldExpr(c.callee)) break :blk true;
+                for (c.arguments) |*x| if (self.exprContainsYieldExpr(x)) break :blk true;
+                break :blk false;
+            },
+            .new_expr => |n| blk: {
+                if (self.exprContainsYieldExpr(n.callee)) break :blk true;
+                for (n.arguments) |*x| if (self.exprContainsYieldExpr(x)) break :blk true;
+                break :blk false;
+            },
+            .chain => |c| self.exprContainsYieldExpr(c.expression),
+            .tagged_template => |t| self.exprContainsYieldExpr(t.tag) or self.exprContainsYieldExpr(t.quasi),
+            .template_literal => |tl| blk: {
+                for (tl.expressions) |*x| if (self.exprContainsYieldExpr(x)) break :blk true;
+                break :blk false;
+            },
+            .spread => |sp| self.exprContainsYieldExpr(sp.argument),
+            .update => |u| self.exprContainsYieldExpr(u.operand),
+            .array_literal => |al| blk: {
+                for (al.elements) |maybe_el| if (maybe_el) |el| if (self.exprContainsYieldExpr(&el)) break :blk true;
+                break :blk false;
+            },
+            .object_literal => |ol| blk: {
+                for (ol.properties) |m| switch (m) {
+                    .property => |p| if (self.exprContainsYieldExpr(&p.value)) break :blk true,
+                    .spread => |sp| if (self.exprContainsYieldExpr(sp.argument)) break :blk true,
+                    .method => {},
+                };
+                break :blk false;
+            },
+            .await_ => |a| self.exprContainsYieldExpr(a.argument),
+            .import_call => |ic| self.exprContainsYieldExpr(ic.source),
+            else => false,
+        };
+    }
+
+    fn bindingTargetContainsYieldExpr(self: *Parser, bt: stmt_mod.BindingTarget) bool {
+        return switch (bt) {
+            .identifier => false,
+            .object => |op| blk: {
+                for (op.properties) |prop| {
+                    if (prop.value.default) |d| if (self.exprContainsYieldExpr(&d)) break :blk true;
+                    if (self.bindingTargetContainsYieldExpr(prop.value.target)) break :blk true;
+                }
+                break :blk false;
+            },
+            .array => |ap| blk: {
+                for (ap.elements) |maybe_el| if (maybe_el) |el| {
+                    if (el.default) |d| if (self.exprContainsYieldExpr(&d)) break :blk true;
+                    if (self.bindingTargetContainsYieldExpr(el.target)) break :blk true;
+                };
+                if (ap.rest) |r| if (self.bindingTargetContainsYieldExpr(r.*)) break :blk true;
+                break :blk false;
+            },
+        };
+    }
+
+    fn exprContainsAwaitExpr(self: *Parser, e: *const Expression) bool {
+        return switch (e.*) {
+            .await_ => true,
+            .function_expr, .class_expr, .arrow_function => false,
+            .parenthesized => |p| self.exprContainsAwaitExpr(p.expression),
+            .unary => |u| self.exprContainsAwaitExpr(u.operand),
+            .binary => |b| self.exprContainsAwaitExpr(b.lhs) or self.exprContainsAwaitExpr(b.rhs),
+            .logical => |l| self.exprContainsAwaitExpr(l.lhs) or self.exprContainsAwaitExpr(l.rhs),
+            .conditional => |c| self.exprContainsAwaitExpr(c.test_) or
+                self.exprContainsAwaitExpr(c.consequent) or
+                self.exprContainsAwaitExpr(c.alternate),
+            .assignment => |a| self.exprContainsAwaitExpr(a.target) or self.exprContainsAwaitExpr(a.value),
+            .sequence => |sq| blk: {
+                for (sq.expressions) |*x| if (self.exprContainsAwaitExpr(x)) break :blk true;
+                break :blk false;
+            },
+            .member => |m| self.exprContainsAwaitExpr(m.object) or switch (m.property) {
+                .computed => |c| self.exprContainsAwaitExpr(c),
+                else => false,
+            },
+            .call => |c| blk: {
+                if (self.exprContainsAwaitExpr(c.callee)) break :blk true;
+                for (c.arguments) |*x| if (self.exprContainsAwaitExpr(x)) break :blk true;
+                break :blk false;
+            },
+            .new_expr => |n| blk: {
+                if (self.exprContainsAwaitExpr(n.callee)) break :blk true;
+                for (n.arguments) |*x| if (self.exprContainsAwaitExpr(x)) break :blk true;
+                break :blk false;
+            },
+            .chain => |c| self.exprContainsAwaitExpr(c.expression),
+            .tagged_template => |t| self.exprContainsAwaitExpr(t.tag) or self.exprContainsAwaitExpr(t.quasi),
+            .template_literal => |tl| blk: {
+                for (tl.expressions) |*x| if (self.exprContainsAwaitExpr(x)) break :blk true;
+                break :blk false;
+            },
+            .spread => |sp| self.exprContainsAwaitExpr(sp.argument),
+            .update => |u| self.exprContainsAwaitExpr(u.operand),
+            .array_literal => |al| blk: {
+                for (al.elements) |maybe_el| if (maybe_el) |el| if (self.exprContainsAwaitExpr(&el)) break :blk true;
+                break :blk false;
+            },
+            .object_literal => |ol| blk: {
+                for (ol.properties) |m| switch (m) {
+                    .property => |p| if (self.exprContainsAwaitExpr(&p.value)) break :blk true,
+                    .spread => |sp| if (self.exprContainsAwaitExpr(sp.argument)) break :blk true,
+                    .method => {},
+                };
+                break :blk false;
+            },
+            .yield => |y| if (y.argument) |a| self.exprContainsAwaitExpr(a) else false,
+            .import_call => |ic| self.exprContainsAwaitExpr(ic.source),
+            else => false,
+        };
+    }
+
+    fn bindingTargetContainsAwaitExpr(self: *Parser, bt: stmt_mod.BindingTarget) bool {
+        return switch (bt) {
+            .identifier => false,
+            .object => |op| blk: {
+                for (op.properties) |prop| {
+                    if (prop.value.default) |d| if (self.exprContainsAwaitExpr(&d)) break :blk true;
+                    if (self.bindingTargetContainsAwaitExpr(prop.value.target)) break :blk true;
+                }
+                break :blk false;
+            },
+            .array => |ap| blk: {
+                for (ap.elements) |maybe_el| if (maybe_el) |el| {
+                    if (el.default) |d| if (self.exprContainsAwaitExpr(&d)) break :blk true;
+                    if (self.bindingTargetContainsAwaitExpr(el.target)) break :blk true;
+                };
+                if (ap.rest) |r| if (self.bindingTargetContainsAwaitExpr(r.*)) break :blk true;
+                break :blk false;
+            },
+        };
+    }
+
+    fn bindingTargetContainsAwait(self: *Parser, bt: stmt_mod.BindingTarget) bool {
+        return switch (bt) {
+            .identifier => |id| std.mem.eql(u8, self.source[id.span.start..id.span.end], "await"),
+            .object => |op| blk: {
+                for (op.properties) |prop| {
+                    if (prop.value.default) |d| {
+                        if (self.exprContainsAwait(&d)) break :blk true;
+                    }
+                    if (self.bindingTargetContainsAwait(prop.value.target)) break :blk true;
+                }
+                if (op.rest) |r| {
+                    if (std.mem.eql(u8, self.source[r.span.start..r.span.end], "await")) break :blk true;
+                }
+                break :blk false;
+            },
+            .array => |ap| blk: {
+                for (ap.elements) |maybe_el| {
+                    if (maybe_el) |el| {
+                        if (el.default) |d| {
+                            if (self.exprContainsAwait(&d)) break :blk true;
+                        }
+                        if (self.bindingTargetContainsAwait(el.target)) break :blk true;
+                    }
+                }
+                if (ap.rest) |r| {
+                    if (self.bindingTargetContainsAwait(r.*)) break :blk true;
+                }
+                break :blk false;
+            },
+        };
+    }
+
     fn bindingTargetContainsArguments(self: *Parser, bt: stmt_mod.BindingTarget) bool {
         return switch (bt) {
             .identifier => false,
@@ -1612,6 +1894,7 @@ pub const Parser = struct {
     fn stmtContainsArguments(self: *Parser, s: *const Statement) bool {
         return switch (s.*) {
             .empty, .debugger_, .break_, .continue_ => false,
+            .labeled => |lb| self.stmtContainsArguments(lb.body),
             .expression => |es| self.exprContainsArguments(&es.expression),
             .block => |b| blk: {
                 for (b.body) |*c| {
@@ -1684,6 +1967,7 @@ pub const Parser = struct {
     fn stmtContainsAwait(self: *Parser, s: *const Statement) bool {
         return switch (s.*) {
             .empty, .debugger_, .break_, .continue_, .function_decl, .class_decl, .import_decl, .export_decl => false,
+            .labeled => |lb| self.stmtContainsAwait(lb.body),
             .expression => |es| self.exprContainsAwait(&es.expression),
             .block => |b| blk: {
                 for (b.body) |*c| if (self.stmtContainsAwait(c)) break :blk true;
@@ -1691,6 +1975,7 @@ pub const Parser = struct {
             },
             .lexical => |lx| blk: {
                 for (lx.declarators) |d| {
+                    if (self.bindingTargetContainsAwait(d.name)) break :blk true;
                     if (d.init) |i| if (self.exprContainsAwait(&i)) break :blk true;
                 }
                 break :blk false;
@@ -1752,15 +2037,14 @@ pub const Parser = struct {
 
             .function_expr, .class_expr => false,
 
-            .arrow_function => |af| blk: {
-                switch (af.body) {
-                    .expression => |xe| break :blk self.exprContainsAwait(xe),
-                    .block => |bl| {
-                        for (bl.body) |*s| if (self.stmtContainsAwait(s)) break :blk true;
-                    },
-                }
-                break :blk false;
-            },
+            // §15.7.13 ContainsAwait — an arrow function's body opens
+            // its own `[Await]` scope (inherited from where the arrow
+            // is *lexed*, not where it runs). For the ClassStaticBlock
+            // early error we want the arrow body to be opaque: a
+            // nested `var await;` inside `(() => { … })` does *not*
+            // count against the static block. (V8 / JSC / SpiderMonkey
+            // all behave this way.)
+            .arrow_function => false,
 
             .parenthesized => |p| self.exprContainsAwait(p.expression),
             .unary => |u| self.exprContainsAwait(u.operand),
@@ -1930,6 +2214,16 @@ pub const Parser = struct {
                 self.allow_super_property = true;
                 self.allow_super_call = false;
                 self.in_generator = false;
+                // §15.7.13 — ClassStaticBlockBody parses under
+                // `[~Yield, +Await, ~Return]`. With `[+Await]` set
+                // `await` is a keyword in the immediate body, which
+                // is what `ContainsAwait` morally enforces: bare
+                // `var await;` inside the static block fails at the
+                // BindingIdentifier check; nested non-async function
+                // bodies reset to `[~Await]` so their internal usage
+                // is fine; non-async arrow ConciseBody also resets
+                // to `[~Await]` (parseConciseBody does this), so
+                // `(() => { var {await} = {}; })` continues to parse.
                 self.in_async = true;
                 self.in_function = true;
                 self.in_static_block = true;
@@ -1996,21 +2290,11 @@ pub const Parser = struct {
         const key = key_with_end.key;
         const key_end = key_with_end.end;
         if (self.current.kind == .lparen) {
-            const params = try self.parseFunctionParameters();
-            // §15.4.1 PropertySetParameterList / `get PropertyName ()` —
-            // setters take exactly one FormalParameter and it cannot be
-            // a RestElement; getters take none.
-            try enforceAccessorArity(self, method_kind, params, key_with_end.end);
-
             // §15.7.1 — `super(...)` (HasDirectSuper) is allowed *only*
             // in the body of a non-static, non-special method whose
             // PropName is "constructor", when the enclosing class has
             // a ClassHeritage (`extends`). Every other class element
-            // (static method, getter/setter, generator/async, regular
-            // method named anything other than "constructor", or any
-            // constructor in a class without heritage) sees
-            // allow_super_call = false. `super.x` / `super[x]` is
-            // legal in every method body via HomeObject.
+            // sees allow_super_call = false.
             const is_special = method_kind != .method or is_generator or is_async;
             const is_constructor = !is_static and !is_special and switch (key) {
                 .ident => |sp| std.mem.eql(u8, self.source[sp.start..sp.end], "constructor"),
@@ -2026,8 +2310,17 @@ pub const Parser = struct {
             const saved_super_call = self.allow_super_call;
             const saved_in_static_block = self.in_static_block;
             const saved_allow_new_target = self.allow_new_target;
+            // §13.2.5 — MethodDefinition's FormalParameters and body
+            // use the inner method's `[Yield, Await]` flavour. Switch
+            // before parsing params so `await` / `yield` in default
+            // values are resolved in the method's context, not the
+            // surrounding class body's.
             self.in_generator = is_generator;
             self.in_async = is_async;
+            self.allow_super_property = true;
+            self.allow_super_call = this_allow_super_call;
+            const params = try self.parseFunctionParameters();
+            try enforceAccessorArity(self, method_kind, params, key_with_end.end);
             self.in_function = true;
             self.allow_super_property = true;
             self.allow_super_call = this_allow_super_call;
@@ -2051,6 +2344,16 @@ pub const Parser = struct {
             tagDirectivePrologue(body.body);
             try enforceStrictDirectiveSimplicity(self, params, body.body, body.span);
             try enforceParamLdnDisjoint(self, params, body.body);
+            // §15.7.1 / §15.5.1 / §15.8.1 / §15.9.1 — generator
+            // method FormalParameters must not contain
+            // YieldExpression; async method params must not contain
+            // AwaitExpression.
+            if (is_generator and self.paramsContainYieldExpression(params)) {
+                try self.report(.unexpected_token, body.span);
+            }
+            if (is_async and self.paramsContainAwaitExpression(params)) {
+                try self.report(.unexpected_token, body.span);
+            }
             return .{ .method = .{
                 .span = .{ .start = start, .end = body.span.end },
                 .is_static = is_static,
@@ -3052,7 +3355,15 @@ pub const Parser = struct {
     }
 
     pub fn parseBindingIdentifier(self: *Parser) ParseError!stmt_mod.BindingIdentifier {
-        if (self.current.kind != .identifier) {
+        // §12.7.1 — `await` is contextually an Identifier when *not*
+        // `[+Await]` (i.e. outside async function/generator bodies and
+        // outside Module top-level). Strict mode keeps `yield` as a
+        // FutureReservedWord unconditionally, so we don't accept it
+        // here. The lexer always emits `kw_await` / `kw_yield`; we
+        // dispatch on `kw_await` only when `!in_async`.
+        const tok_kind = self.current.kind;
+        const await_as_ident = tok_kind == .kw_await and !self.in_async;
+        if (tok_kind != .identifier and !await_as_ident) {
             try self.report(.unexpected_token, self.current.span);
             return error.ParseError;
         }
@@ -3062,11 +3373,19 @@ pub const Parser = struct {
             try self.report(.restricted_identifier_in_strict, tok.span);
         }
         // §12.7.1: a BindingIdentifier whose source contains `\u`
-        // escapes and whose StringValue is a ReservedWord is an early
-        // SyntaxError. The lexer set `had_escape = true` on such a
-        // token; enforce it here.
+        // escapes and whose decoded StringValue is a ReservedWord is
+        // an early SyntaxError. "ReservedWord" is context-sensitive
+        // — `await` is reserved only in `[+Await]`, `yield` is a
+        // ReservedWord in strict mode (which Cynic always is). All
+        // other keywords (`if`, `class`, `function`, …) are always
+        // reserved. So we suppress the error specifically for an
+        // escaped `await` when we're outside `[+Await]`.
         if (tok.had_escape) {
-            try self.report(.escape_in_reserved_word, tok.span);
+            const ek = tok.escaped_keyword;
+            const await_ok = ek == .kw_await and !self.in_async;
+            if (!await_ok) {
+                try self.report(.escape_in_reserved_word, tok.span);
+            }
         }
         return .{ .span = tok.span };
     }
@@ -3302,6 +3621,29 @@ pub fn enforceParamNamesNotEvalArguments(
     for (names.items) |n| {
         if (std.mem.eql(u8, n.name, "eval") or std.mem.eql(u8, n.name, "arguments")) {
             try p.report(.restricted_identifier_in_strict, n.span);
+        }
+    }
+}
+
+/// §15.8.1 AsyncFunction / async arrow — `It is a Syntax Error if
+/// BoundNames of FormalParameters contains "await".` Distinct from
+/// the `Contains AwaitExpression` check: this fires for `await` as a
+/// plain BindingIdentifier (cover-call reinterpret pulls
+/// `identifier_reference` straight in, so the BindingIdentifier
+/// strict check on `parseBindingIdentifier` doesn't run).
+pub fn enforceParamNamesNotAwait(
+    p: *Parser,
+    params: []const stmt_mod.FunctionParam,
+) ParseError!void {
+    var names: std.ArrayListUnmanaged(Parser.NameSpan) = .empty;
+    defer names.deinit(p.arena);
+    for (params) |param| switch (param) {
+        .simple => |sp| try p.collectTargetNames(sp.target, &names),
+        .rest => |rp| try p.collectTargetNames(rp.target, &names),
+    };
+    for (names.items) |n| {
+        if (std.mem.eql(u8, n.name, "await")) {
+            try p.report(.unexpected_token, n.span);
         }
     }
 }

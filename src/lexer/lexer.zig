@@ -283,9 +283,10 @@ pub const Lexer = struct {
             var sv_heap: ?[]u8 = null;
             defer if (sv_heap) |h| self.allocator.free(h);
             const sv = try self.identifierStringValue(start, &sv_buf, &sv_heap);
-            const reserved = keywordKind(sv) != null;
+            const kw = keywordKind(sv);
             var tok = self.makeToken(.identifier, start);
-            tok.had_escape = reserved;
+            tok.had_escape = kw != null;
+            if (kw) |k| tok.escaped_keyword = k;
             return tok;
         }
 

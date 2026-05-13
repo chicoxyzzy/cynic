@@ -34,98 +34,31 @@ pub const cynic_oos_path_prefixes = [_][]const u8{
     // no escape hatch.
     "language/eval-code/",
     "built-ins/eval/",
-    // Labelled statements (§13.13) — Cynic's parser doesn't
-    // ship `label: stmt`, `break/continue label`. Path-skip
-    // until the parser lands them.
-    "language/statements/labeled/",
 };
 
-/// Substring filters for fixtures that exercise labelled statements
-/// from outside `language/statements/labeled/`. They live under many
-/// otherwise-unrelated trees (dynamic-import nested forms, the
-/// `statementList` series, `for-of`'s break-label / continue-label
-/// variants, the legacy S12 break/continue/loop suites, etc.) so we
-/// match by path substring rather than enumerate every file. Strictly
-/// a superset filter — anything matching a substring AND containing
-/// label syntax is excluded from the Cynic score. Will retire alongside
-/// `language/statements/labeled/` once §13.13 parsing lands.
+/// Substring filters for fixtures that exercise features Cynic
+/// doesn't ship yet *and* live outside a contiguous path prefix.
+/// Strictly genuinely-out-of-scope items here — vendored libregexp
+/// gaps and a few cross-cutting Unicode-decoding edges that need a
+/// follow-on lexer pass. Per-feature "not yet implemented" gaps are
+/// filed as failures, not skipped.
 pub const cynic_oos_path_contains = [_][]const u8{
-    // Dynamic-import test-fixture series that embed an ImportCall
-    // inside `label: { import(...) }`.
-    "/nested-block-labeled-",
-    "/syntax-nested-block-labeled-",
-    // `language/statementList/` — the `block-with-statment-*` family
-    // and the `*-with-labels` siblings all parse a labelled
-    // statement after a Block.
-    "/statementList/block-with-statment-",
-    "/statementList/block-block-with-labels",
-    "/statementList/fn-block-with-labels",
-    "/statementList/class-block-with-labels",
-    // `language/block-scope/leave/*` — fixtures that bind a label and
-    // assert post-`break LABEL` scoping behaviour.
-    "/leave/verify-context-in-labelled-block",
-    "/leave/x-after-break-to-label",
-    "/leave/nested-block-let-declaration-only-shadows-outer-parameter-value-",
-    "/leave/for-loop-block-let-declaration-only-shadows-outer-parameter-value-2",
-    // `language/module-code/early-undef-{break,continue}.js` — these
-    // exclusively test the "label target must be defined" early error.
-    "/module-code/early-undef-break",
-    "/module-code/early-undef-continue",
-    // Legacy Sputnik suite that exercises labelled break/continue.
-    // The `S12.8_A` series is the break label tests; `S12.7_A` is
-    // the continue label tests; `S12.6.{1,2,3}_A{4,11,12}_*` are
-    // do-while / while / for loop label tests.
-    "/statements/break/S12.8_",
-    "/statements/continue/S12.7_",
-    "/statements/do-while/S12.6.1_A4_",
-    "/statements/while/S12.6.2_A4_",
-    "/statements/for/S12.6.3_A11",
-    "/statements/for/S12.6.3_A12",
-    // `language/statements/{break,continue}/line-terminators.js` —
-    // tests the [no LF here] restriction between `break/continue` and
-    // the label identifier.
-    "/statements/break/line-terminators",
-    "/statements/continue/line-terminators",
-    // `language/statements/continue/{labeled-continue,
-    // nested-let-bound-for-loops-labeled-continue,
-    // simple-and-labeled}` and similar.
-    "/statements/continue/labeled-continue",
-    "/statements/continue/nested-let-bound-for-loops-labeled-continue",
-    "/statements/continue/simple-and-labeled",
-    // `language/statements/for-of/{break,continue}-label*` and the
-    // `{generator,iterator}-close-via-continue` pair that use a label
-    // to test outer-loop break behaviour.
-    "/statements/for-of/break-label",
-    "/statements/for-of/continue-label",
-    "/statements/for-of/generator-close-via-continue",
-    "/statements/for-of/iterator-close-via-continue",
-
-    // Contextual `await` as identifier (§13.1) — Cynic's lexer
-    // tokenises `await` as `kw_await` unconditionally; the spec
-    // treats it as an Identifier in non-Module non-async contexts.
-    // The affected fixtures cluster around `static-init-await-*`,
-    // `await-in-*`, `await-BindingIdentifier-*`, and the
-    // `class-name-ident-await*` series. Path-skip until the lexer
-    // grows context-aware `await` (see roadmap).
-    "static-init-await",
-    "await-in-function",
-    "await-in-generator",
-    "await-in-nested-generator",
-    "await-in-nested-function",
-    "await-in-global",
-    "await-BindingIdentifier",
-    "/reserved-words/await",
-    "/class-name-ident-await",
-    "/new-await-script-code",
-    "identifier-shorthand-static-init-await",
-    "ary-ptrn-elem-id-static-init-await",
-    "obj-ptrn-elem-id-static-init-await",
-    "/2nd-param-await-ident",
-    "/simple-basic-identifierreference-await",
-    "/head-lhs-async",
-    "/private-field-rhs-await-absent",
-    "/await-as-param-nested-arrow-body-position",
-
+    // §15.8 — async-arrow cover form when `async(args)` contains a
+    // *nested* arrow whose own params or body reference `await`.
+    // The cover-call doesn't know it's an async-arrow head until
+    // it sees the trailing `=>`, so the inner expression is parsed
+    // under the surrounding `[~Await]` and `await` lands as a plain
+    // identifier — V8 / JSC handle this with a speculative reparse
+    // under `[+Await]` that Cynic doesn't ship yet.
+    "/await-as-param-nested-arrow-",
+    "/await-as-param-rest-nested-arrow-",
+    "/await-as-param-ident-nested-arrow-",
+    "/early-errors-arrow-await-in-formals-default",
+    // `async X` cover when the identifier on the LHS of `of` is
+    // literally `async`. Cynic's for-await-of head misreads
+    // `for await (async of …)` as an async expression rather than
+    // an IdentifierReference + `of` of-iteration.
+    "/for-await-of/head-lhs-async",
     // `\p{…}` property escapes of *strings* and the
     // RGI-emoji-sequence property set (Unicode 17 / `/v` flag) — the
     // vendored libregexp doesn't validate the strings-property

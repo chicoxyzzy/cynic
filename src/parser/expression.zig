@@ -261,6 +261,25 @@ fn buildArrow(
     if (body == .block) {
         try parser_mod.enforceParamLdnDisjoint(p, owned, body.block.body);
     }
+    // §15.3.1 / §15.8.1 — ArrowParameters must not contain a
+    // YieldExpression (it would only land here when the enclosing
+    // context is a generator) or an AwaitExpression (async arrows).
+    // Async arrows additionally forbid `await` as a *BindingName* —
+    // `async(await) => {}` parses `await` as an IdentifierReference
+    // through the cover-call form, so the BindingIdentifier path's
+    // strict check doesn't run.
+    if (p.paramsContainYieldExpression(owned)) {
+        try p.report(.unexpected_token, .{ .start = start, .end = end });
+    }
+    // §15.3.1 — both sync and async arrows forbid `AwaitExpression`
+    // in their parameter cover form (it can only appear if the
+    // surrounding context was `[+Await]` and the cover happened to
+    // parse `await` as a unary). Async arrows additionally forbid
+    // `await` as a BindingName.
+    if (p.paramsContainAwaitExpression(owned)) {
+        try p.report(.unexpected_token, .{ .start = start, .end = end });
+    }
+    if (is_async) try parser_mod.enforceParamNamesNotAwait(p, owned);
     return .{ .arrow_function = .{
         .span = .{ .start = start, .end = end },
         .params = owned,
@@ -1184,13 +1203,34 @@ fn parsePrimary(p: *Parser) ParseError!Expression {
                 }
             }
             _ = try p.bump();
-            // §12.7.1: an IdentifierReference whose source contains
-            // `\u` escapes and whose StringValue is a ReservedWord is
-            // an early SyntaxError. (Property names are read elsewhere
-            // and are unaffected.)
+            // §12.7.1: an IdentifierReference whose decoded
+            // StringValue is a ReservedWord is an early SyntaxError.
+            // "ReservedWord" is context-sensitive — `await` is
+            // reserved only in `[+Await]`. (Property names are read
+            // elsewhere and are unaffected.)
             if (tok.had_escape) {
-                try p.report(.escape_in_reserved_word, tok.span);
+                const ek = tok.escaped_keyword;
+                const await_ok = ek == .kw_await and !p.in_async;
+                if (!await_ok) {
+                    try p.report(.escape_in_reserved_word, tok.span);
+                }
             }
+            break :blk .{ .identifier_reference = .{ .span = tok.span } };
+        },
+        // §12.7.1 — `await` outside `[+Await]` and `yield` outside
+        // `[+Yield]` are contextual Identifiers. The lexer always
+        // tokenises them as `kw_await` / `kw_yield`; the awaited /
+        // yielded forms are handled in parseUnary above, and primary
+        // routes here surface them as IdentifierReferences. Strict
+        // mode keeps both as reserved BindingIdentifiers (the
+        // BindingIdentifier path enforces that), but plain
+        // IdentifierReference usage is legal.
+        .kw_await => blk: {
+            if (p.in_async) {
+                try p.report(.unexpected_token, tok.span);
+                return error.ParseError;
+            }
+            _ = try p.bump();
             break :blk .{ .identifier_reference = .{ .span = tok.span } };
         },
         .lparen => parseParenthesized(p),
@@ -1332,7 +1372,13 @@ fn parseClassExpression(p: *Parser) ParseError!Expression {
     const start = p.peek().span.start;
     _ = try p.bump(); // `class`
     var name: ?@import("../ast/statement.zig").BindingIdentifier = null;
-    if (p.peek().kind == .identifier) {
+    // The class name is an *optional* BindingIdentifier; detect by
+    // anything that can start one (including contextual `await` /
+    // `yield` outside `[+Await]` / `[+Yield]`).
+    const peek_kind = p.peek().kind;
+    if (peek_kind == .identifier or
+        (peek_kind == .kw_await and !p.in_async))
+    {
         name = try p.parseBindingIdentifier();
     }
     var superclass: ?*Expression = null;
@@ -1556,15 +1602,15 @@ fn parseObjectMember(
     const key_tok = p.peek();
     const key_kind = key_tok.kind;
     const key = try parseObjectKey(p);
-    const key_is_plain_ident = key_kind == .identifier;
+    // For the shorthand `{ a }` / `{ a = default }` paths the key
+    // doubles as a BindingIdentifier / IdentifierReference, so it has
+    // to be a plain Identifier. Contextual `await` outside `[+Await]`
+    // qualifies.
+    const key_is_plain_ident = key_kind == .identifier or
+        (key_kind == .kw_await and !p.in_async);
 
     // Method shorthand: `key(params) { body }`.
     if (p.peek().kind == .lparen) {
-        const params = try p.parseFunctionParameters();
-        // §15.4.1 / §13.2.5 — getters take zero params; setters take
-        // exactly one non-rest FormalParameter.
-        try parser_mod.enforceAccessorArity(p, method_kind, params, p.peek().span.start);
-
         const saved_gen = p.in_generator;
         const saved_async = p.in_async;
         const saved_in_function = p.in_function;
@@ -1572,8 +1618,18 @@ fn parseObjectMember(
         const saved_super_call = p.allow_super_call;
         const saved_in_static_block = p.in_static_block;
         const saved_allow_new_target = p.allow_new_target;
+        // §13.2.5 — MethodDefinition's FormalParameters and body are
+        // parsed under the inner method's `[Yield, Await]` flavour,
+        // not the surrounding scope's. Switch the flags before
+        // reading parameters so `await` / `yield` in default values
+        // resolve correctly when the enclosing context is async / a
+        // generator but the method itself isn't.
         p.in_generator = is_generator;
         p.in_async = is_async;
+        const params = try p.parseFunctionParameters();
+        // §15.4.1 / §13.2.5 — getters take zero params; setters take
+        // exactly one non-rest FormalParameter.
+        try parser_mod.enforceAccessorArity(p, method_kind, params, p.peek().span.start);
         p.in_function = true;
         // Object methods carry a HomeObject (§13.2.5.4) so `super.x`
         // is legal; `super()` is never legal in an object method.
@@ -1600,6 +1656,12 @@ fn parseObjectMember(
         // function-decl / class-method enforcement.
         try parser_mod.enforceStrictDirectiveSimplicity(p, params, body.body, body.span);
         try parser_mod.enforceParamLdnDisjoint(p, params, body.body);
+        if (is_generator and p.paramsContainYieldExpression(params)) {
+            try p.report(.unexpected_token, body.span);
+        }
+        if (is_async and p.paramsContainAwaitExpression(params)) {
+            try p.report(.unexpected_token, body.span);
+        }
         try members.append(p.arena, .{ .method = .{
             .span = .{ .start = start, .end = body.span.end },
             .kind = method_kind,
@@ -1734,8 +1796,11 @@ fn parseObjectProperty(p: *Parser) ParseError!ast_expr.ObjectProperty {
     }
 
     // Shorthand: `{ a }` — only valid when key is an `.ident` whose span
-    // matches an Identifier (not a keyword), and no `:` follows.
-    if (p.peek().kind != .colon and key == .ident and key_tok.kind == .identifier) {
+    // matches an Identifier (not a keyword), and no `:` follows. A
+    // contextual `await` (outside `[+Await]`) also qualifies.
+    const key_is_shorthand_eligible = key_tok.kind == .identifier or
+        (key_tok.kind == .kw_await and !p.in_async);
+    if (p.peek().kind != .colon and key == .ident and key_is_shorthand_eligible) {
         const name_span = key.ident;
         return .{
             .span = .{ .start = start, .end = key_end },
@@ -1787,10 +1852,6 @@ fn parseFunctionExpressionAt(p: *Parser, start: u32, is_async: bool) ParseError!
     _ = try p.bump(); // `function`
     const is_generator = try p.eat(.star);
     var name: ?@import("../ast/statement.zig").BindingIdentifier = null;
-    if (p.peek().kind == .identifier) {
-        name = try p.parseBindingIdentifier();
-    }
-
     const saved_gen = p.in_generator;
     const saved_async = p.in_async;
     const saved_in_function = p.in_function;
@@ -1806,6 +1867,18 @@ fn parseFunctionExpressionAt(p: *Parser, start: u32, is_async: bool) ParseError!
     p.in_async = is_async;
     p.in_function = true;
     p.allow_new_target = true;
+    // §15.2 FunctionExpression — BindingIdentifier and
+    // FormalParameters both use the inner function's flags
+    // (`[~Yield, ~Await]` for plain, `[+Yield, ~Await]` for
+    // generators, etc.). Name is optional; detect after we've
+    // switched flags so `function await() {}` inside an outer
+    // `[+Await]` context (e.g. a class static block) succeeds.
+    const peek_kind = p.peek().kind;
+    if (peek_kind == .identifier or
+        (peek_kind == .kw_await and !p.in_async))
+    {
+        name = try p.parseBindingIdentifier();
+    }
     const params = try p.parseFunctionParameters();
     // Function expressions carry no HomeObject — `super` of any kind
     // is a SyntaxError inside their body, regardless of the
@@ -1829,6 +1902,12 @@ fn parseFunctionExpressionAt(p: *Parser, start: u32, is_async: bool) ParseError!
     parser_mod.tagDirectivePrologue(body.body);
     try parser_mod.enforceStrictDirectiveSimplicity(p, params, body.body, body.span);
     try parser_mod.enforceParamLdnDisjoint(p, params, body.body);
+    if (is_generator and p.paramsContainYieldExpression(params)) {
+        try p.report(.unexpected_token, body.span);
+    }
+    if (is_async and p.paramsContainAwaitExpression(params)) {
+        try p.report(.unexpected_token, body.span);
+    }
     return .{ .function_expr = .{
         .span = .{ .start = start, .end = body.span.end },
         .name = name,

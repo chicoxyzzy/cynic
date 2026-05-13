@@ -2995,6 +2995,7 @@ pub fn compileStatement(self: *Compiler, stmt: *const Statement) CompileError!vo
         .for_in_of => |s| try self.compileForInOf(s),
         .switch_ => |s| try self.compileSwitch(s),
         .debugger_ => {}, // no-op for later — V8 / d8 also no-op without a debugger attached
+        .labeled => |lb| try self.compileLabeled(lb),
         .import_decl => |id| try self.compileImportDecl(id),
         .export_decl => |ed| try self.compileExportDecl(ed),
     }
@@ -5642,6 +5643,17 @@ fn emitFinalliesUntil(
         self.finally_chain = f.parent;
         try self.compileBlock(f.body, span);
     }
+}
+
+/// §14.13 LabelledStatement. For now the compiler treats a label as a
+/// transparent wrapper around its body — labelled break/continue
+/// resolution to a *named outer* loop isn't wired through the
+/// loop-context stack yet (only the innermost loop receives the jump).
+/// Parser conformance is unaffected; runtime tests for cross-loop
+/// labelled break/continue still trip and remain on the path-skip list
+/// pending the proper LoopCtx label threading.
+fn compileLabeled(self: *Compiler, lb: ast.statement.LabeledStmt) CompileError!void {
+    try self.compileStatement(lb.body);
 }
 
 fn compileBreak(self: *Compiler, s: ast.statement.BreakStmt) CompileError!void {
