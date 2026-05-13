@@ -736,7 +736,7 @@ pub fn toObjectThis(realm: *Realm, this_value: Value) NativeError!*JSObject {
 /// `%Object.prototype%`. Walks `realm.globals` because the
 /// Number / Boolean / etc. prototypes aren't pinned on
 /// `Intrinsics` (only the ones the runtime fast-paths reach).
-fn lookupPrimitivePrototype(realm: *Realm, v: Value) ?*JSObject {
+pub fn lookupPrimitivePrototype(realm: *Realm, v: Value) ?*JSObject {
     const ctor_name: []const u8 = blk: {
         if (v.isNumber()) break :blk "Number";
         if (v.isBool()) break :blk "Boolean";

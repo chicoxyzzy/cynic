@@ -5229,14 +5229,24 @@ fn runFrames(
                         } else acc = Value.undefined_;
                     }
                 } else {
-                    const ex = try makeTypeError(realm, "Cannot read properties of non-object");
-                    f.ip = ip;
-                    f.accumulator = acc;
-                    committed = true;
-                    if (!try unwindThrow(allocator, realm, frames, ex)) {
-                        return .{ .thrown = ex };
+                    // §13.3.4 — `boolean[key]` / `number[key]` /
+                    // `bigint[key]` / `symbol[key]` ToObject-box the
+                    // receiver, so property reads find the inherited
+                    // prototype methods. Walk straight to the boxed
+                    // proto chain without materialising a wrapper.
+                    const proto_opt: ?*JSObject = intrinsics_mod.lookupPrimitivePrototype(realm, recv);
+                    if (proto_opt) |proto| {
+                        acc = proto.get(key_slice);
+                    } else {
+                        const ex = try makeTypeError(realm, "Cannot read properties of non-object");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
                     }
-                    continue;
                 }
             },
             .sta_computed => {
