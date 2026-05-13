@@ -220,6 +220,19 @@ fn asyncCallToReinterpret(p: *Parser, lhs: Expression) ?ast_expr.CallExpr {
 
 fn reinterpretCallAsAsyncArrow(p: *Parser, c: ast_expr.CallExpr) ParseError!Expression {
     _ = try p.bump(); // `=>`
+    // §15.3 — arrow param lists cannot have a trailing comma
+    // immediately after `...rest`. The call form swallows it
+    // silently; flag it at the reinterpret site.
+    if (c.trailing_comma_after_spread) {
+        try p.report(.unexpected_token, c.span);
+    }
+    // §15.8 — `async [no LineTerminator here] (` is part of the
+    // async-arrow grammar. If a LineTerminator slipped between
+    // `async` and `(`, this isn't an async-arrow head: the spec
+    // wants `async; (foo) => {};` instead. Surface the error.
+    if (c.lf_before_paren) {
+        try p.report(.unexpected_token, c.span);
+    }
     var params: std.ArrayListUnmanaged(@import("../ast/statement.zig").FunctionParam) = .empty;
     for (c.arguments) |arg| {
         try collectArrowParams(p, arg, &params);
@@ -1016,16 +1029,19 @@ fn parseNewExpression(p: *Parser) ParseError!Expression {
 fn parseCallTail(p: *Parser, callee: Expression, optional: bool) ParseError!Expression {
     const callee_ptr = try p.arena.create(Expression);
     callee_ptr.* = callee;
+    const lf_before_paren = p.peek().line_terminator_before;
     const args_end = try parseArguments(p);
     return .{ .call = .{
         .span = .{ .start = callee_ptr.span().start, .end = args_end.end },
         .callee = callee_ptr,
         .arguments = args_end.args,
         .optional = optional,
+        .trailing_comma_after_spread = args_end.trailing_comma_after_spread,
+        .lf_before_paren = lf_before_paren,
     } };
 }
 
-const ArgsResult = struct { args: []Expression, end: u32 };
+const ArgsResult = struct { args: []Expression, end: u32, trailing_comma_after_spread: bool };
 
 /// §13.3 Arguments. Caller is positioned at `(`. Trailing comma is allowed.
 fn parseArguments(p: *Parser) ParseError!ArgsResult {
@@ -1035,6 +1051,8 @@ fn parseArguments(p: *Parser) ParseError!ArgsResult {
     p.allow_in = true;
     defer p.allow_in = saved_allow_in;
     var items: std.ArrayListUnmanaged(Expression) = .empty;
+    var last_was_spread = false;
+    var trailing_comma_after_spread = false;
     while (p.peek().kind != .rparen and p.peek().kind != .eof) {
         if (p.peek().kind == .ellipsis) {
             const dots = try p.bump();
@@ -1045,17 +1063,26 @@ fn parseArguments(p: *Parser) ParseError!ArgsResult {
                 .span = .{ .start = dots.span.start, .end = arg.span().end },
                 .argument = arg_ptr,
             } });
+            last_was_spread = true;
         } else {
             const arg = try parseAssignment(p);
             try items.append(p.arena, arg);
+            last_was_spread = false;
         }
         if (p.peek().kind != .comma) break;
         _ = try p.bump();
+        // A `,` immediately before `)` after a spread is what the
+        // arrow / async-arrow cover form forbids; record it so the
+        // reinterpret can surface a SyntaxError.
+        if (last_was_spread and p.peek().kind == .rparen) {
+            trailing_comma_after_spread = true;
+        }
     }
     const rparen = try p.expect(.rparen);
     return .{
         .args = try items.toOwnedSlice(p.arena),
         .end = rparen.span.end,
+        .trailing_comma_after_spread = trailing_comma_after_spread,
     };
 }
 
@@ -1618,25 +1645,23 @@ fn parseObjectMember(
         const saved_super_call = p.allow_super_call;
         const saved_in_static_block = p.in_static_block;
         const saved_allow_new_target = p.allow_new_target;
-        // §13.2.5 — MethodDefinition's FormalParameters and body are
-        // parsed under the inner method's `[Yield, Await]` flavour,
-        // not the surrounding scope's. Switch the flags before
-        // reading parameters so `await` / `yield` in default values
-        // resolve correctly when the enclosing context is async / a
-        // generator but the method itself isn't.
+        // §13.2.5 — MethodDefinition's FormalParameters and body
+        // share the inner method's flag set (`[Yield, Await]` and
+        // the HomeObject-derived `super` access). Switch *all*
+        // affected flags before reading parameters so default-value
+        // expressions resolve in the method's scope, not the
+        // surrounding class / object literal's.
         p.in_generator = is_generator;
         p.in_async = is_async;
-        const params = try p.parseFunctionParameters();
-        // §15.4.1 / §13.2.5 — getters take zero params; setters take
-        // exactly one non-rest FormalParameter.
-        try parser_mod.enforceAccessorArity(p, method_kind, params, p.peek().span.start);
         p.in_function = true;
-        // Object methods carry a HomeObject (§13.2.5.4) so `super.x`
-        // is legal; `super()` is never legal in an object method.
         p.allow_super_property = true;
         p.allow_super_call = false;
         p.in_static_block = false;
         p.allow_new_target = true;
+        const params = try p.parseFunctionParameters();
+        // §15.4.1 / §13.2.5 — getters take zero params; setters take
+        // exactly one non-rest FormalParameter.
+        try parser_mod.enforceAccessorArity(p, method_kind, params, p.peek().span.start);
         p.next_block_is_function_body = true;
         const body = blk: {
             defer {
@@ -1935,6 +1960,7 @@ fn parseParenthesized(p: *Parser) ParseError!Expression {
     p.allow_in = true;
     defer p.allow_in = saved_allow_in;
     var items: std.ArrayListUnmanaged(Expression) = .empty;
+    var last_was_spread = false;
     while (p.peek().kind != .rparen and p.peek().kind != .eof) {
         if (p.peek().kind == .ellipsis) {
             const dots = try p.bump();
@@ -1945,12 +1971,23 @@ fn parseParenthesized(p: *Parser) ParseError!Expression {
                 .span = .{ .start = dots.span.start, .end = arg.span().end },
                 .argument = arg_ptr,
             } });
+            last_was_spread = true;
         } else {
             const item = try parseAssignment(p);
             try items.append(p.arena, item);
+            last_was_spread = false;
         }
         if (p.peek().kind != .comma) break;
-        _ = try p.bump();
+        const comma = try p.bump();
+        // §15.3 — a trailing comma after `...rest` is illegal in
+        // ArrowFormalParameters. The CoverParenthesizedExpression
+        // form will only ever be reinterpret-as-arrow when a spread
+        // appears (spread isn't a legal ParenthesizedExpression
+        // element on its own), so rejecting here doesn't risk
+        // killing a legal expression.
+        if (last_was_spread and p.peek().kind == .rparen) {
+            try p.report(.unexpected_token, comma.span);
+        }
     }
     const rparen = try p.expect(.rparen);
     const inner_ptr = try p.arena.create(Expression);

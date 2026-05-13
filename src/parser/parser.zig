@@ -1543,14 +1543,35 @@ pub const Parser = struct {
             .private_identifier,
             => false,
 
-            .identifier_reference => |ir| std.mem.eql(u8, self.source[ir.span.start..ir.span.end], "arguments"),
+            .identifier_reference => |ir| self.identMatches(ir.span, "arguments"),
 
             // Function-scoped — binds its own `arguments`, so the body
             // can't reach the outer one. Param defaults DO get a fresh
             // `arguments` binding too (§10.2.3), so don't recurse there
             // either.
             .function_expr => false,
-            .class_expr => false,
+            // ClassExpression is opaque to its method bodies (each
+            // has its own scope), but ClassHeritage and computed
+            // PropertyNames in the class body ARE part of the
+            // surrounding scope and must be walked.
+            .class_expr => |ce| blk: {
+                if (ce.superclass) |sc| if (self.exprContainsArguments(sc)) break :blk true;
+                for (ce.body) |m| {
+                    const key_expr: ?*const Expression = switch (m) {
+                        .method => |md| switch (md.key) {
+                            .computed => |c| c,
+                            else => null,
+                        },
+                        .field => |fd| switch (fd.key) {
+                            .computed => |c| c,
+                            else => null,
+                        },
+                        .static_block => null,
+                    };
+                    if (key_expr) |k| if (self.exprContainsArguments(k)) break :blk true;
+                }
+                break :blk false;
+            },
 
             .arrow_function => |af| blk: {
                 for (af.params) |*p| {
@@ -1831,9 +1852,61 @@ pub const Parser = struct {
         };
     }
 
+    fn hexNibble(c: u8) u21 {
+        return switch (c) {
+            '0'...'9' => @intCast(c - '0'),
+            'a'...'f' => @intCast(c - 'a' + 10),
+            'A'...'F' => @intCast(c - 'A' + 10),
+            else => 0,
+        };
+    }
+
+    /// Compare an identifier source slice against a target string,
+    /// transparently decoding `\u…` escapes when present. Lets
+    /// ContainsArguments / ContainsAwait checks correctly flag
+    /// escape-disguised names like `await` or `arguments`.
+    fn identMatches(self: *Parser, span: Span, target: []const u8) bool {
+        const src = self.source[span.start..span.end];
+        if (std.mem.indexOfScalar(u8, src, '\\') == null) {
+            return std.mem.eql(u8, src, target);
+        }
+        var i: usize = 0;
+        var t: usize = 0;
+        while (i < src.len) {
+            const c = src[i];
+            if (c == '\\') {
+                i += 2; // skip `\u`
+                var cp: u21 = 0;
+                if (i < src.len and src[i] == '{') {
+                    i += 1;
+                    while (i < src.len and src[i] != '}') : (i += 1) {
+                        cp = (cp << 4) | hexNibble(src[i]);
+                    }
+                    if (i < src.len) i += 1;
+                } else {
+                    var n: usize = 0;
+                    while (n < 4 and i + n < src.len) : (n += 1) {
+                        cp = (cp << 4) | hexNibble(src[i + n]);
+                    }
+                    i += 4;
+                }
+                var buf: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(cp, &buf) catch return false;
+                if (t + len > target.len) return false;
+                if (!std.mem.eql(u8, target[t .. t + len], buf[0..len])) return false;
+                t += len;
+            } else {
+                if (t >= target.len or target[t] != c) return false;
+                i += 1;
+                t += 1;
+            }
+        }
+        return t == target.len;
+    }
+
     fn bindingTargetContainsAwait(self: *Parser, bt: stmt_mod.BindingTarget) bool {
         return switch (bt) {
-            .identifier => |id| std.mem.eql(u8, self.source[id.span.start..id.span.end], "await"),
+            .identifier => |id| self.identMatches(id.span, "await"),
             .object => |op| blk: {
                 for (op.properties) |prop| {
                     if (prop.value.default) |d| {
@@ -2020,7 +2093,7 @@ pub const Parser = struct {
     fn exprContainsAwait(self: *Parser, e: *const Expression) bool {
         return switch (e.*) {
             .await_ => true,
-            .identifier_reference => |ir| std.mem.eql(u8, self.source[ir.span.start..ir.span.end], "await"),
+            .identifier_reference => |ir| self.identMatches(ir.span, "await"),
 
             .null_literal,
             .boolean_literal,
@@ -3106,14 +3179,22 @@ pub const Parser = struct {
         if (self.current.kind != .kw_with) return;
         _ = try self.bump(); // `with`
         _ = try self.expect(.lbrace);
+        // §16.2.1.4 ImportAttributes — `It is a Syntax Error if
+        // WithClauseToAttributes has two entries a and b such that
+        // a.[[Key]] is b.[[Key]].` Keys are compared by StringValue
+        // (identifier `\u…` escapes decode; string-literal contents
+        // decode too). Track decoded keys we've seen.
+        var seen: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer seen.deinit(self.arena);
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
             // AttributeKey — IdentifierName or StringLiteral. The
             // lexer surfaces reserved words as their `kw_*` kinds;
             // `IdentifierName` includes those (§13.1), so we
             // accept either an `identifier` or any `kw_*` token.
             const key_tok = self.current;
+            const is_string = key_tok.kind == .string_literal;
             if (key_tok.kind == .identifier or
-                key_tok.kind == .string_literal or
+                is_string or
                 token_mod.isReservedWord(key_tok.kind))
             {
                 _ = try self.bump();
@@ -3121,6 +3202,17 @@ pub const Parser = struct {
                 try self.report(.unexpected_token, key_tok.span);
                 return error.ParseError;
             }
+            const key_text = if (is_string)
+                try self.decodeAttributeStringKey(key_tok.span)
+            else
+                try self.decodeAttributeIdentKey(key_tok.span);
+            for (seen.items) |existing| {
+                if (std.mem.eql(u8, existing, key_text)) {
+                    try self.report(.duplicate_lexical_binding, key_tok.span);
+                    break;
+                }
+            }
+            try seen.append(self.arena, key_text);
             _ = try self.expect(.colon);
             if (self.current.kind != .string_literal) {
                 try self.report(.unexpected_token, self.current.span);
@@ -3130,6 +3222,158 @@ pub const Parser = struct {
             if (!try self.eat(.comma)) break;
         }
         _ = try self.expect(.rbrace);
+    }
+
+    /// §11.1.4 — true iff `span` covers a StringLiteral whose
+    /// StringValue (after escape decoding) contains an unpaired
+    /// surrogate code unit. Used to enforce the §16.2.2
+    /// ModuleExportName "WellFormedUnicode" rule. Plain source
+    /// text is UTF-8 and never produces surrogates; only the `\u`
+    /// and `\u{…}` escape forms can.
+    fn moduleExportNameHasUnpairedSurrogate(self: *Parser, span: Span) bool {
+        if (span.end < span.start + 2) return false;
+        const inner = self.source[span.start + 1 .. span.end - 1];
+        // Walk the string contents, building code units we'd emit.
+        var prev_high: ?u16 = null;
+        var i: usize = 0;
+        while (i < inner.len) {
+            const c = inner[i];
+            if (c != '\\') {
+                // Plain UTF-8 byte — never produces surrogates.
+                prev_high = null;
+                i += 1;
+                continue;
+            }
+            i += 1;
+            if (i >= inner.len) break;
+            const esc = inner[i];
+            i += 1;
+            if (esc != 'u') {
+                prev_high = null;
+                continue;
+            }
+            var cp: u21 = 0;
+            if (i < inner.len and inner[i] == '{') {
+                i += 1;
+                while (i < inner.len and inner[i] != '}') : (i += 1)
+                    cp = (cp << 4) | Parser.hexNibble(inner[i]);
+                if (i < inner.len) i += 1;
+            } else {
+                var n: usize = 0;
+                while (n < 4 and i + n < inner.len) : (n += 1)
+                    cp = (cp << 4) | Parser.hexNibble(inner[i + n]);
+                i += 4;
+            }
+            // Check if this codepoint is a high surrogate, low
+            // surrogate, or regular code point.
+            if (cp >= 0xD800 and cp <= 0xDBFF) {
+                // High surrogate. Previous high (if any) is unpaired.
+                if (prev_high != null) return true;
+                prev_high = @intCast(cp);
+            } else if (cp >= 0xDC00 and cp <= 0xDFFF) {
+                // Low surrogate. Valid only if preceded by a high.
+                if (prev_high == null) return true;
+                prev_high = null;
+            } else {
+                if (prev_high != null) return true;
+                prev_high = null;
+            }
+        }
+        return prev_high != null;
+    }
+
+    /// Decode a `\u…` identifier-source slice into its StringValue
+    /// (UTF-8 bytes). Used for `ImportAttributes` key comparison.
+    fn decodeAttributeIdentKey(self: *Parser, span: Span) ParseError![]const u8 {
+        const src = self.source[span.start..span.end];
+        if (std.mem.indexOfScalar(u8, src, '\\') == null) return src;
+        var out = try std.ArrayListUnmanaged(u8).initCapacity(self.arena, src.len);
+        var i: usize = 0;
+        while (i < src.len) {
+            if (src[i] == '\\') {
+                i += 2; // skip '\u'
+                var cp: u21 = 0;
+                if (i < src.len and src[i] == '{') {
+                    i += 1;
+                    while (i < src.len and src[i] != '}') : (i += 1)
+                        cp = (cp << 4) | Parser.hexNibble(src[i]);
+                    if (i < src.len) i += 1;
+                } else {
+                    var n: usize = 0;
+                    while (n < 4 and i + n < src.len) : (n += 1)
+                        cp = (cp << 4) | Parser.hexNibble(src[i + n]);
+                    i += 4;
+                }
+                var buf: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(cp, &buf) catch 0;
+                try out.appendSlice(self.arena, buf[0..len]);
+            } else {
+                try out.append(self.arena, src[i]);
+                i += 1;
+            }
+        }
+        return out.toOwnedSlice(self.arena);
+    }
+
+    /// Decode a string-literal source slice (including its quotes)
+    /// into its StringValue. Handles `\u…` and `\xHH`; other escapes
+    /// (`\n`, `\\`, etc.) pass through to their byte equivalents.
+    /// Only used for ImportAttributes key comparison — full string
+    /// decoding lives in the runtime.
+    fn decodeAttributeStringKey(self: *Parser, span: Span) ParseError![]const u8 {
+        if (span.end - span.start < 2) return "";
+        const inner = self.source[span.start + 1 .. span.end - 1];
+        if (std.mem.indexOfScalar(u8, inner, '\\') == null) return inner;
+        var out = try std.ArrayListUnmanaged(u8).initCapacity(self.arena, inner.len);
+        var i: usize = 0;
+        while (i < inner.len) {
+            const c = inner[i];
+            if (c != '\\') {
+                try out.append(self.arena, c);
+                i += 1;
+                continue;
+            }
+            i += 1;
+            if (i >= inner.len) break;
+            const esc = inner[i];
+            i += 1;
+            switch (esc) {
+                'u' => {
+                    var cp: u21 = 0;
+                    if (i < inner.len and inner[i] == '{') {
+                        i += 1;
+                        while (i < inner.len and inner[i] != '}') : (i += 1)
+                            cp = (cp << 4) | Parser.hexNibble(inner[i]);
+                        if (i < inner.len) i += 1;
+                    } else {
+                        var n: usize = 0;
+                        while (n < 4 and i + n < inner.len) : (n += 1)
+                            cp = (cp << 4) | Parser.hexNibble(inner[i + n]);
+                        i += 4;
+                    }
+                    var buf: [4]u8 = undefined;
+                    const len = std.unicode.utf8Encode(cp, &buf) catch 0;
+                    try out.appendSlice(self.arena, buf[0..len]);
+                },
+                'x' => {
+                    if (i + 1 < inner.len) {
+                        const hi = Parser.hexNibble(inner[i]);
+                        const lo = Parser.hexNibble(inner[i + 1]);
+                        const byte: u8 = @intCast(((hi << 4) | lo) & 0xff);
+                        try out.append(self.arena, byte);
+                        i += 2;
+                    }
+                },
+                'n' => try out.append(self.arena, '\n'),
+                'r' => try out.append(self.arena, '\r'),
+                't' => try out.append(self.arena, '\t'),
+                '\\' => try out.append(self.arena, '\\'),
+                '\'' => try out.append(self.arena, '\''),
+                '"' => try out.append(self.arena, '"'),
+                else => try out.append(self.arena, esc),
+            }
+        }
+        return out.toOwnedSlice(self.arena);
     }
 
     fn parseNamespaceImport(self: *Parser) ParseError!stmt_mod.BindingIdentifier {
@@ -3166,6 +3410,12 @@ pub const Parser = struct {
                     // requires an `as BindingIdentifier`).
                     try self.report(.unexpected_token, imported_tok.span);
                 }
+            }
+            // §16.2.2 ModuleExportName WellFormedUnicode check.
+            if (imported_tok.kind == .string_literal and
+                self.moduleExportNameHasUnpairedSurrogate(imported_tok.span))
+            {
+                try self.report(.unexpected_token, imported_tok.span);
             }
             try items.append(self.arena, .{
                 .span = .{ .start = start, .end = local_span.end },
@@ -3232,6 +3482,11 @@ pub const Parser = struct {
             _ = try self.bump();
             const ns_tok = try self.parseModuleExportName();
             namespace_local = ns_tok.span;
+            if (ns_tok.kind == .string_literal and
+                self.moduleExportNameHasUnpairedSurrogate(ns_tok.span))
+            {
+                try self.report(.unexpected_token, ns_tok.span);
+            }
         }
         try self.expectContextualKeyword("from");
         if (self.current.kind != .string_literal) {
@@ -3263,6 +3518,27 @@ pub const Parser = struct {
                 _ = try self.bump();
                 const ex_tok = try self.parseModuleExportName();
                 exported_span = ex_tok.span;
+            }
+            // §16.2.2 — every StringLiteral ModuleExportName must be a
+            // WellFormedUnicode value (no unpaired surrogates).
+            if (local_tok.kind == .string_literal and
+                self.moduleExportNameHasUnpairedSurrogate(local_tok.span))
+            {
+                try self.report(.unexpected_token, local_tok.span);
+            }
+            if (exported_span.start != local_tok.span.start) {
+                // Distinct `as`-renamed slot; check it too. If the
+                // `as` target was an identifier (`exported_span.start
+                // == local_tok.span.start` would be wrong), check
+                // when its token was a string.
+                const src_start = exported_span.start;
+                if (src_start < self.source.len and self.source[src_start] == '"' or
+                    (src_start < self.source.len and self.source[src_start] == '\''))
+                {
+                    if (self.moduleExportNameHasUnpairedSurrogate(exported_span)) {
+                        try self.report(.unexpected_token, exported_span);
+                    }
+                }
             }
             try specs.append(self.arena, .{
                 .span = .{ .start = spec_start, .end = exported_span.end },

@@ -28,6 +28,52 @@ const Code = diag_mod.Code;
 
 const Scope = std.ArrayListUnmanaged([]const u8);
 
+/// Decode `\u…` escapes inside an identifier slice. Returns the
+/// arena-allocated decoded form, or the input slice unchanged when
+/// no escapes are present. Used to compare PrivateBoundIdentifier
+/// names by StringValue: `#℘` and `#℘` are the same private
+/// name even though their source bytes differ.
+fn decodeIdent(arena: std.mem.Allocator, src: []const u8) std.mem.Allocator.Error![]const u8 {
+    if (std.mem.indexOfScalar(u8, src, '\\') == null) return src;
+    var out = try std.ArrayListUnmanaged(u8).initCapacity(arena, src.len);
+    var i: usize = 0;
+    while (i < src.len) {
+        if (src[i] == '\\') {
+            i += 2; // skip '\u'
+            var cp: u21 = 0;
+            if (i < src.len and src[i] == '{') {
+                i += 1;
+                while (i < src.len and src[i] != '}') : (i += 1) {
+                    cp = (cp << 4) | hexNibble(src[i]);
+                }
+                if (i < src.len) i += 1; // consume '}'
+            } else {
+                var n: usize = 0;
+                while (n < 4 and i + n < src.len) : (n += 1) {
+                    cp = (cp << 4) | hexNibble(src[i + n]);
+                }
+                i += 4;
+            }
+            var buf: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(cp, &buf) catch 0;
+            try out.appendSlice(arena, buf[0..len]);
+        } else {
+            try out.append(arena, src[i]);
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice(arena);
+}
+
+fn hexNibble(c: u8) u21 {
+    return switch (c) {
+        '0'...'9' => @intCast(c - '0'),
+        'a'...'f' => @intCast(c - 'a' + 10),
+        'A'...'F' => @intCast(c - 'A' + 10),
+        else => 0,
+    };
+}
+
 pub const Validator = struct {
     arena: std.mem.Allocator,
     diagnostics: ?*Diagnostics,
@@ -72,7 +118,12 @@ pub const Validator = struct {
                 .static_block => null,
             };
             if (key_span) |sp| {
-                try scope.append(self.arena, self.source[sp.start..sp.end]);
+                // §13.1 — PrivateBoundIdentifiers compare by
+                // StringValue. The lexer keeps `\u`-escapes raw, so
+                // we decode here before stashing the name. `#℘` and
+                // `#℘` resolve to the same private name.
+                const raw = self.source[sp.start..sp.end];
+                try scope.append(self.arena, try decodeIdent(self.arena, raw));
             }
         }
         try self.scopes.append(self.arena, scope);
@@ -229,8 +280,9 @@ pub const Validator = struct {
                 try self.visitExpr(m.object);
                 switch (m.property) {
                     .ident => |sp| {
-                        const text = self.source[sp.start..sp.end];
-                        if (text.len > 0 and text[0] == '#') {
+                        const raw = self.source[sp.start..sp.end];
+                        if (raw.len > 0 and raw[0] == '#') {
+                            const text = try decodeIdent(self.arena, raw);
                             if (!self.inScope(text)) {
                                 try self.report(.undeclared_private_name, sp);
                             }
@@ -243,7 +295,8 @@ pub const Validator = struct {
             // PrivateIdentifier with the same scope rule as a member
             // PrivateName reference.
             .private_identifier => |pi| {
-                const text = self.source[pi.span.start..pi.span.end];
+                const raw = self.source[pi.span.start..pi.span.end];
+                const text = try decodeIdent(self.arena, raw);
                 if (!self.inScope(text)) {
                     try self.report(.undeclared_private_name, pi.span);
                 }

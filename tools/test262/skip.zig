@@ -67,13 +67,6 @@ pub const cynic_oos_path_contains = [_][]const u8{
     "/property-escapes/special-property-value-Script_Extensions-Unknown",
     "/String/prototype/search/regexp-prototype-search-v",
     "/String/prototype/replace/regexp-prototype-replace-v",
-    // Private-accessor identifier-escape semantics (§13.1.2). Cynic's
-    // lexer doesn't decode `\u…` inside the IdentifierName that
-    // follows `#`, so the StringValue computations differ. Skip the
-    // generated fixtures until the lexer grows that path.
-    "/class/elements/private-accessor-name/",
-    "regular-definitions-grammar-privatename-identifier-semantics-stringvalue",
-    "wrapped-in-sc-grammar-privatename-identifier-semantics-stringvalue",
     // ASI corner cases that depend on label / postfix-update / `--`
     // edge productions Cynic doesn't yet recognise here. Tracked as
     // small follow-ups; path-skip to keep the score clean.
@@ -85,45 +78,13 @@ pub const cynic_oos_path_contains = [_][]const u8{
     "/param-dflt-yield",
     "formals-contains-yield-expr",
     "formals-contains-await-expr",
-    // §13.3.11 — Arrow / async-arrow rest-parameter cover form
-    // doesn't track the trailing-comma-after-`...`. The cover
-    // reinterpret loses the comma, so we accept e.g. `((...a,) => 0)`.
-    "/rest-params-trailing-comma-early-error",
-    // §15.8 — `async [no LF] => …` rule. The LF check between
-    // `async` and `=>` isn't enforced for the cover-call-async-arrow
-    // form yet.
-    "/early-errors-arrow-formals-lineterminator",
-    // §15.4.1 — `super(...)` / `super.x` inside a method's
-    // *parameter* default-value position. Allowed by the relevant
-    // method (constructor of derived class for super-call; any
-    // method body for super-property). Cynic enables the relevant
-    // flags only for the body; the default-value parse runs before
-    // and sees them as off. Small refactor pending.
-    "/methods-async-super-call-param",
-    "/method-definition/async-super-call-param",
-    "/method-definition/generator-super-prop-param",
-    "/method-definition/name-super-prop-param",
-    // §13.3.11 / §12.8.6 — tagged-template literals relax the
-    // escape-sequence rules: invalid escapes are legal at parse
-    // time and surface as `undefined` cooked values. Our lexer
-    // rejects them up-front; needs a tagged-template-aware path.
+    // §12.8.6 / §13.3.11 — tagged-template literals relax the
+    // escape-sequence rules: invalid escapes are parse-valid and
+    // surface as `undefined` cooked values. Implementing this
+    // correctly requires deferring escape validation to a cook
+    // pass that's aware of tag context (or duplicating the
+    // template lexer). One fixture; deferred.
     "/tagged-template/invalid-escape-sequences",
-    // §15.7.13 — `arguments` referenced via `\u…` escape inside a
-    // class static block. The lexer doesn't decode identifier
-    // escapes for the ContainsArguments check yet.
-    "/static-init-invalid-arguments",
-    // §16.2 ModuleExportName / ImportSpecifier with strings that
-    // contain unpaired surrogates. Spec requires decoding the string
-    // to UTF-16 code units and rejecting unpaired surrogates; the
-    // lexer currently keeps the raw bytes.
-    "/export-expname-unpaired-surrogate",
-    "/export-expname-from-unpaired-surrogate",
-    "/export-expname-from-as-unpaired-surrogate",
-    "/export-expname-import-unpaired-surrogate",
-    // §16.2 ImportAttributes — duplicate-key detection needs to
-    // compare attribute names after `\u`-escape decoding. Cynic's
-    // with-clause parser walks but doesn't yet record/compare keys.
-    "/import-attributes/early-dup-attribute-key-",
 };
 
 /// `features` names we know we don't support. Tests whose

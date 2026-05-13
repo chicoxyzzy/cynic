@@ -189,6 +189,19 @@ pub const CallExpr = struct {
     callee: *Expression,
     arguments: []Expression,
     optional: bool,
+    /// True when the original source had a trailing comma after a
+    /// rest-spread argument (e.g. `f(...a,)`). Trailing commas after
+    /// regular arguments are legal everywhere; after a rest spread,
+    /// they're legal in *calls* but become a SyntaxError in the
+    /// arrow / async-arrow cover form. The reinterpret path reads
+    /// this flag to surface the error.
+    trailing_comma_after_spread: bool = false,
+    /// True when there was a LineTerminator between the callee and
+    /// the `(`. For the async-arrow cover form (`async\n(args)`),
+    /// spec requires `async [no LineTerminator here] (` — the LF
+    /// kills the arrow interpretation. The reinterpret reads this
+    /// to surface the error.
+    lf_before_paren: bool = false,
 };
 
 pub const NewExpr = struct {
