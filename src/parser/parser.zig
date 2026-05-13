@@ -779,25 +779,6 @@ pub const Parser = struct {
         }
     }
 
-    /// §14.6 / §14.7 / §14.13 substatement positions accept the
-    /// `Statement` non-terminal but NOT `Declaration`. The dispatch in
-    /// `parseStatement` recognises `let` / `const` / `class` / `function`
-    /// / `function*` / `async function` / `async function*` greedily, so
-    /// after parsing a substatement (the body of for / if / while / do /
-    /// with / labelled) we explicitly reject those productions here.
-    /// `var` is intentionally allowed — it's a VariableStatement, a
-    /// Statement, not a Declaration.
-    fn rejectDeclarationAsSubstatement(self: *Parser, stmt: Statement) ParseError!void {
-        switch (stmt) {
-            .lexical => |lex| if (lex.kind != .var_) {
-                try self.report(.unexpected_token, lex.span);
-            },
-            .class_decl => |cd| try self.report(.unexpected_token, cd.span),
-            .function_decl => |fd| try self.report(.unexpected_token, fd.span),
-            else => {},
-        }
-    }
-
     /// §14.7.4 / §14.7.5 ForStatement / ForInOfStatement. Distinguishing
     /// the C-style and for-in/of forms requires a small look-ahead trick:
     /// parse the init in `[~In]` mode, then peek the following token —
