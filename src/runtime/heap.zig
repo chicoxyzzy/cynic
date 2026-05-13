@@ -544,6 +544,12 @@ pub const Heap = struct {
                     }
                 }
                 if (o.array_like_iter) |s| self.markValue(s.target);
+                if (o.iter_helper) |s| {
+                    self.markValue(s.source);
+                    self.markValue(s.next_fn);
+                    self.markValue(s.payload);
+                    self.markValue(s.active);
+                }
                 if (o.generator_ref) |gen| self.markGenerator(gen);
                 // §10.4.2 Array exotic — packed indexed elements
                 // are part of the JSObject's own state; mark each

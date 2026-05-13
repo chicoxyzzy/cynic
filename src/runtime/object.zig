@@ -150,6 +150,44 @@ pub const ArrayLikeIterState = struct {
     }
 };
 
+/// Per-instance state for the lazy `Iterator.prototype.*` helpers
+/// (`from`, `map`, `filter`, `take`, `drop`, `flatMap`, `zip`).
+/// §27.1.5 — every helper returns a new iterator whose `next`
+/// pulls from `source` through `next_fn` and processes the value
+/// through `payload`. The shape unifies the V8 / SM / JSC pattern
+/// of "lazy generator-like wrapper".
+///
+/// Field usage per helper:
+///   from    : source, next_fn
+///   map     : source, next_fn, payload, count, done, running
+///   filter  : source, next_fn, payload, count, done, running
+///   take    : source, next_fn, count (remaining), done, running
+///   drop    : source, next_fn, count (remaining-to-drop), done, running, started
+///   flatMap : source, next_fn, payload, active, count, done, running
+///   zip     : source (array of iters), payload (array of next_fns),
+///             active (array of last results), count, done, running,
+///             keyed, mode
+///
+/// Hidden from JS — `Object.getOwnPropertyNames(iter)` no longer
+/// returns spec-internal slot names like `[[Iterated]]` / `[[Done]]`.
+pub const IteratorHelperState = struct {
+    source: Value = Value.undefined_,
+    next_fn: Value = Value.undefined_,
+    payload: Value = Value.undefined_,
+    active: Value = Value.undefined_,
+    count: u32 = 0,
+    idx: u32 = 0,
+    done: bool = false,
+    running: bool = false,
+    started: bool = false,
+    keyed: bool = false,
+    mode: u8 = 0,
+
+    pub fn deinit(self: *IteratorHelperState, allocator: std.mem.Allocator) void {
+        allocator.destroy(self);
+    }
+};
+
 /// §26.2.1.1 [[Cells]] storage for FinalizationRegistry.
 /// `cleanup_callback` is the callable supplied at construction;
 /// `cells` holds the live registrations. Cynic's FinalizationRegistry
@@ -261,6 +299,12 @@ pub const JSObject = struct {
     /// mirrors the spec's [[IteratedObject]] + [[NextIndex]]
     /// internal slots.
     array_like_iter: ?*ArrayLikeIterState = null,
+    /// `Iterator.prototype.*` helper state — present on the
+    /// lazy wrapper objects produced by `Iterator.from`, `.map`,
+    /// `.filter`, `.take`, `.drop`, `.flatMap`, and `Iterator.zip`.
+    /// Hidden from JS; mirrors §27.1.5's IteratorRecord internal
+    /// state.
+    iter_helper: ?*IteratorHelperState = null,
     /// `[[DateValue]]` (§21.4.1) — milliseconds since Unix
     /// epoch. NaN means an invalid date. Only set on `new Date()`
     /// instances.
@@ -441,6 +485,7 @@ pub const JSObject = struct {
         if (self.map_data) |m| m.deinit(allocator);
         if (self.set_data) |s| s.deinit(allocator);
         if (self.array_like_iter) |s| s.deinit(allocator);
+        if (self.iter_helper) |s| s.deinit(allocator);
         if (self.finalization_cells) |fc| fc.deinit(allocator);
         if (self.array_buffer) |ab| allocator.free(ab);
         self.promise_waiters.deinit(allocator);
