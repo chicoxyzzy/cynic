@@ -122,6 +122,80 @@ fn arraySpeciesGetter(realm: *Realm, this_value: Value, args: []const Value) Nat
     return this_value;
 }
 
+/// §23.1.3.34 ArraySpeciesCreate(originalArray, length).
+/// 1. isArray = IsArray(originalArray)
+/// 2. If !isArray, return ! ArrayCreate(length).
+/// 3. C = ? Get(originalArray, "constructor")
+/// 4. If IsConstructor(C):
+///    a. If GetFunctionRealm(C) is different from current realm AND
+///       C === currentRealm.%Array%, set C to undefined.
+/// 5. If C is Object, C = ? Get(C, @@species); if C is null,
+///    set C to undefined.
+/// 6. If C is undefined, return ! ArrayCreate(length).
+/// 7. If !IsConstructor(C), throw TypeError.
+/// 8. Return ? Construct(C, « 𝔽(length) »).
+///
+/// Returns the freshly created array-shaped object.
+pub fn arraySpeciesCreate(realm: *Realm, original: *JSObject, length: i64) NativeError!Value {
+    // Fast path — non-array original, or no user-installed
+    // constructor/species. The vast majority of calls land here.
+    if (!original.is_array_exotic) return defaultArrayCreate(realm, length);
+    const ctor_v = original.get("constructor");
+    if (ctor_v.isUndefined()) return defaultArrayCreate(realm, length);
+    // §22.1.3 step 4.a — cross-realm `Array` gets normalized away
+    // (Cynic is single-realm by default; the cross-realm carve-out
+    // becomes meaningful only once `$262.createRealm` is exercised).
+    var species_v: Value = Value.undefined_;
+    if (heap_mod.valueAsFunction(ctor_v)) |ctor_fn| {
+        species_v = ctor_fn.get("@@species");
+    } else if (heap_mod.valueAsPlainObject(ctor_v)) |ctor_obj| {
+        species_v = ctor_obj.get("@@species");
+    } else if (!ctor_v.isUndefined() and !ctor_v.isNull()) {
+        // C is a primitive (e.g. `a.constructor = 1`) — §22.1.3
+        // step 5 says "if C is not Object", which for a primitive
+        // means we fall through to default ArrayCreate.
+        return defaultArrayCreate(realm, length);
+    } else {
+        return defaultArrayCreate(realm, length);
+    }
+    if (species_v.isUndefined() or species_v.isNull()) return defaultArrayCreate(realm, length);
+    const species_fn = heap_mod.valueAsFunction(species_v) orelse {
+        return throwTypeError(realm, "Array species is not a constructor");
+    };
+    if (!species_fn.has_construct or species_fn.is_arrow) {
+        return throwTypeError(realm, "Array species is not a constructor");
+    }
+    // Fast path: species === %Array% (the spec's default). Skip the
+    // call and allocate directly.
+    if (realm.globals.get("Array")) |array_global| {
+        if (heap_mod.valueAsFunction(array_global)) |array_ctor| {
+            if (array_ctor == species_fn) return defaultArrayCreate(realm, length);
+        }
+    }
+    // Construct(species, [length]) — go through the public path so a
+    // user-defined ctor sees `new.target = species`.
+    const ctor_args = [_]Value{numberFromI64(length)};
+    const result = interpreter.constructValue(realm.allocator, realm, heap_mod.taggedFunction(species_fn), &ctor_args, heap_mod.taggedFunction(species_fn)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    switch (result) {
+        .value, .yielded => |v| return v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    }
+}
+
+fn defaultArrayCreate(realm: *Realm, length: i64) NativeError!Value {
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    out.prototype = realm.intrinsics.array_prototype;
+    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    if (length > 0) setLength(realm, out, length) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(out);
+}
+
 /// §22.1.1 Array(...) — both `new` and plain-call.
 /// • `Array()` → `[]`
 /// • `Array(N)` where N is a Number → array of length N (must
@@ -371,9 +445,11 @@ fn arraySlice(realm: *Realm, this_value: Value, args: []const Value) NativeError
     start = @min(start, len);
     end = @min(end, len);
 
-    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
-    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    // §23.1.3.28 step 7 — `count = max(end - start, 0)`,
+    // ArraySpeciesCreate(O, count).
+    const count = if (end > start) end - start else 0;
+    const out_v = try arraySpeciesCreate(realm, obj, count);
+    const out = heap_mod.valueAsPlainObject(out_v) orelse return throwTypeError(realm, "ArraySpeciesCreate did not return an object");
     var write_idx: i64 = 0;
     var read_idx = start;
     while (read_idx < end) : (read_idx += 1) {
@@ -391,7 +467,7 @@ fn arraySlice(realm: *Realm, this_value: Value, args: []const Value) NativeError
         write_idx += 1;
     }
     setLength(realm, out, write_idx) catch return error.OutOfMemory;
-    return heap_mod.taggedObject(out);
+    return out_v;
 }
 
 /// §23.1.3.2 Array.prototype.concat. The algorithm prepends the
@@ -401,12 +477,12 @@ fn arraySlice(realm: *Realm, this_value: Value, args: []const Value) NativeError
 /// opt out). Non-spreadable elements are appended whole.
 fn arrayConcat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
-    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    // §23.1.3.2 step 4 — ArraySpeciesCreate(O, 0).
+    const out_v = try arraySpeciesCreate(realm, obj, 0);
+    const out = heap_mod.valueAsPlainObject(out_v) orelse return throwTypeError(realm, "ArraySpeciesCreate did not return an object");
     var write_idx: i64 = 0;
 
-    // §23.1.3.2 step 4 prepends O to `items`. O is treated like
+    // §23.1.3.2 step 5 prepends O to `items`. O is treated like
     // any other item — IsConcatSpreadable decides whether it
     // spreads or appends whole (so concat.call(nonArray, ...) puts
     // the non-array in slot 0 rather than splaying its indices).
@@ -415,7 +491,7 @@ fn arrayConcat(realm: *Realm, this_value: Value, args: []const Value) NativeErro
         try concatAppend(realm, out, arg, &write_idx);
     }
     setLength(realm, out, write_idx) catch return error.OutOfMemory;
-    return heap_mod.taggedObject(out);
+    return out_v;
 }
 
 fn concatAppend(realm: *Realm, out: *JSObject, value: Value, write_idx: *i64) NativeError!void {
@@ -932,13 +1008,13 @@ fn arrayFlat(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         if (std.math.isInf(d)) break :blk std.math.maxInt(i32);
         break :blk @intFromFloat(@trunc(d));
     } else 1;
-    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
-    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    // §23.1.3.10 step 4 — ArraySpeciesCreate(O, 0).
+    const out_v = try arraySpeciesCreate(realm, obj, 0);
+    const out = heap_mod.valueAsPlainObject(out_v) orelse return throwTypeError(realm, "ArraySpeciesCreate did not return an object");
     var write_idx: i64 = 0;
     try flattenInto(realm, obj, depth, out, &write_idx);
     setLength(realm, out, write_idx) catch return error.OutOfMemory;
-    return heap_mod.taggedObject(out);
+    return out_v;
 }
 
 fn flattenInto(realm: *Realm, source: *JSObject, depth: i64, target: *JSObject, write_idx: *i64) NativeError!void {
@@ -989,9 +1065,9 @@ fn arrayFlatMap(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // accessors from `Boolean.prototype`).
     const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
 
-    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
-    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    // §23.1.3.11 step 5 — ArraySpeciesCreate(O, 0).
+    const out_v = try arraySpeciesCreate(realm, obj, 0);
+    const out = heap_mod.valueAsPlainObject(out_v) orelse return throwTypeError(realm, "ArraySpeciesCreate did not return an object");
     var write_idx: i64 = 0;
     var i: i64 = 0;
     while (i < len) : (i += 1) {
@@ -1023,7 +1099,7 @@ fn arrayFlatMap(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         }
     }
     setLength(realm, out, write_idx) catch return error.OutOfMemory;
-    return heap_mod.taggedObject(out);
+    return out_v;
 }
 
 fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -1039,10 +1115,9 @@ fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     if (delete_count < 0) delete_count = 0;
     if (delete_count > len - start) delete_count = len - start;
 
-    // Removed array.
-    const removed = realm.heap.allocateObject() catch return error.OutOfMemory;
-    removed.prototype = realm.intrinsics.array_prototype;
-    removed.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    // Removed array — §23.1.3.29 step 9 ArraySpeciesCreate(O, actualDeleteCount).
+    const removed_v = try arraySpeciesCreate(realm, obj, delete_count);
+    const removed = heap_mod.valueAsPlainObject(removed_v) orelse return throwTypeError(realm, "ArraySpeciesCreate did not return an object");
     var i: i64 = 0;
     while (i < delete_count) : (i += 1) {
         var rbuf: [24]u8 = undefined;
@@ -1102,7 +1177,7 @@ fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     }
 
     setLength(realm, obj, new_len) catch return error.OutOfMemory;
-    return heap_mod.taggedObject(removed);
+    return removed_v;
 }
 
 fn arrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -1578,9 +1653,10 @@ fn arrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.map callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
 
-    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
-    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    // §23.1.3.20 step 5 — ArraySpeciesCreate(O, len) so `@@species`
+    // on the receiver's constructor controls the result type.
+    const out_v = try arraySpeciesCreate(realm, obj, len);
+    const out = heap_mod.valueAsPlainObject(out_v) orelse return throwTypeError(realm, "ArraySpeciesCreate did not return an object");
     var i: i64 = 0;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
@@ -1592,7 +1668,7 @@ fn arrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
         out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
     }
     setLength(realm, out, len) catch return error.OutOfMemory;
-    return heap_mod.taggedObject(out);
+    return out_v;
 }
 
 fn arrayFilter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -1602,9 +1678,9 @@ fn arrayFilter(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.filter callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
 
-    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
-    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    // §23.1.3.8 step 5 — ArraySpeciesCreate(O, 0).
+    const out_v = try arraySpeciesCreate(realm, obj, 0);
+    const out = heap_mod.valueAsPlainObject(out_v) orelse return throwTypeError(realm, "ArraySpeciesCreate did not return an object");
     var i: i64 = 0;
     var write_idx: i64 = 0;
     while (i < len) : (i += 1) {
@@ -1622,7 +1698,7 @@ fn arrayFilter(realm: *Realm, this_value: Value, args: []const Value) NativeErro
         }
     }
     setLength(realm, out, write_idx) catch return error.OutOfMemory;
-    return heap_mod.taggedObject(out);
+    return out_v;
 }
 
 fn arrayEvery(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
