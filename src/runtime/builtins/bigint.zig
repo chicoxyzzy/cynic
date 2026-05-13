@@ -57,7 +57,15 @@ fn bigintConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
 }
 
 /// §7.1.13 ToBigInt. Returns the JSBigInt-tagged Value.
-fn toBigIntValue(realm: *Realm, v: Value) !Value {
+fn toBigIntValue(realm: *Realm, v_in: Value) !Value {
+    // §7.1.13 step 1 — ToPrimitive(arg, hint "number") for objects.
+    // Without this, BigInt({ valueOf: () => NaN }) takes the
+    // throwTypeError fall-through instead of the spec-mandated
+    // NumberToBigInt RangeError.
+    const v = if (heap_mod.valueAsPlainObject(v_in) != null)
+        try intrinsics.toPrimitive(realm, v_in, .number)
+    else
+        v_in;
     if (heap_mod.valueAsBigInt(v)) |_| return v;
     if (v.isBool()) {
         const bi = try realm.heap.allocateBigInt(if (v.asBool()) 1 else 0);
@@ -114,7 +122,10 @@ fn bigintToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
     };
     var radix: u8 = 10;
     if (args.len > 0 and !args[0].isUndefined()) {
-        const rv = coerceToNumber(args[0]);
+        // §21.1.3.6 step 3 → ToIntegerOrInfinity → ToNumber.
+        // ToNumber throws TypeError for Symbol / BigInt — must
+        // surface here rather than silently coercing to NaN.
+        const rv = try intrinsics.toNumber(realm, args[0]);
         const rd: f64 = if (rv.isInt32()) @floatFromInt(rv.asInt32()) else rv.asDouble();
         if (std.math.isNan(rd) or std.math.isInf(rd) or rd < 2 or rd > 36)
             return throwRangeError(realm, "toString radix out of range [2, 36]");

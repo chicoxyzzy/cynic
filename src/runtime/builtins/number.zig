@@ -52,8 +52,12 @@ pub fn install(realm: *Realm) !void {
     // object on both bindings. Install once, then alias on
     // Number with the spec-mandated `{ w, !e, c }` flags.
     const pi = try realm.heap.allocateFunctionNative(parseIntNative, 2, "parseInt");
+    // §20.1.1 — built-in function objects don't implement [[Construct]]
+    // unless explicitly specified. `new parseInt(...)` must throw.
+    pi.has_construct = false;
     try realm.globals.put(realm.allocator, "parseInt", heap_mod.taggedFunction(pi));
     const pf = try realm.heap.allocateFunctionNative(parseFloatNative, 1, "parseFloat");
+    pf.has_construct = false;
     try realm.globals.put(realm.allocator, "parseFloat", heap_mod.taggedFunction(pf));
     if (heap_mod.valueAsFunction(realm.globals.get("Number").?)) |num_ctor| {
         try num_ctor.setWithFlags(realm.allocator, "parseInt", heap_mod.taggedFunction(pi), .{
@@ -64,8 +68,10 @@ pub fn install(realm: *Realm) !void {
         });
     }
     const inn = try realm.heap.allocateFunctionNative(globalIsNaN, 1, "isNaN");
+    inn.has_construct = false;
     try realm.globals.put(realm.allocator, "isNaN", heap_mod.taggedFunction(inn));
     const ifn = try realm.heap.allocateFunctionNative(globalIsFinite, 1, "isFinite");
+    ifn.has_construct = false;
     try realm.globals.put(realm.allocator, "isFinite", heap_mod.taggedFunction(ifn));
 }
 
@@ -136,10 +142,14 @@ fn numberToExponential(realm: *Realm, this_value: Value, args: []const Value) Na
         return Value.fromString(s);
     }
     var buf: [128]u8 = undefined;
-    const slice = if (digits < 0)
+    const raw = if (digits < 0)
         std.fmt.bufPrint(&buf, "{e}", .{x}) catch return error.OutOfMemory
     else
         std.fmt.bufPrint(&buf, "{e:.[1]}", .{ x, @as(usize, @intCast(digits)) }) catch return error.OutOfMemory;
+    // §6.1.6.1.13 Number::toString — JS demands `1e+22` for
+    // positive exponents; Zig's `{e}` emits a bare `1e22`. Patch
+    // through the shared normaliser.
+    const slice = intrinsics.normalizeExponentPub(&buf, raw);
     const s = realm.heap.allocateString(slice) catch return error.OutOfMemory;
     return Value.fromString(s);
 }
@@ -186,7 +196,9 @@ fn numberToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const x = primitiveNumberValue(this_value) orelse return throwTypeError(realm, "Number.prototype.toString called on non-number");
     var radix: u8 = 10;
     if (args.len > 0 and !args[0].isUndefined()) {
-        const rv = coerceToNumber(args[0]);
+        // §21.1.3.6 step 3 → ToIntegerOrInfinity → ToNumber.
+        // ToNumber rejects Symbol / BigInt with TypeError.
+        const rv = try intrinsics.toNumber(realm, args[0]);
         const rd: f64 = if (rv.isInt32()) @floatFromInt(rv.asInt32()) else rv.asDouble();
         if (std.math.isNan(rd) or std.math.isInf(rd) or rd < 2 or rd > 36)
             return throwRangeError(realm, "toString radix out of range [2, 36]");
