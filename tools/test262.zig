@@ -1277,7 +1277,21 @@ fn classifyAndRun(
     // skip via the feature filter; the rest get a working shim.
     install262(&realm) catch return .{ .kind = .fail_false_reject };
 
-    if (is_module) {
+    // Install the module loader for both `is_module` tests AND
+    // script tests that use dynamic `import()` (the `dynamic-import`
+    // feature tag). Without a loader the dynamic import opcode
+    // rejects with TypeError, and the `await import(...)` family
+    // of script-mode fixtures would all false-reject.
+    var needs_loader = is_module;
+    if (!needs_loader) {
+        for (fm.features) |feat| {
+            if (std.mem.eql(u8, feat, "dynamic-import")) {
+                needs_loader = true;
+                break;
+            }
+        }
+    }
+    if (needs_loader) {
         loader_state = .{ .corpus = corpus, .io = io, .test_path = rel };
         realm.module_loader = test262ModuleLoader;
     }

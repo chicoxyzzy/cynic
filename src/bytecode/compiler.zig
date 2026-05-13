@@ -395,63 +395,15 @@ pub const Compiler = struct {
         try self.builder.emitOp(.make_object, span);
     }
 
-    /// `import(specifier)` — dynamic import. Lower as
-    /// `Promise.reject(new TypeError("dynamic import is not
-    /// supported in this host"))`. Several test262 cases just
-    /// check that the call returns a Promise; full module
-    /// loading is later.
+    /// `import(specifier)` — §13.3.10 dynamic import.
+    /// Compiles the argument expression into acc, then dispatches
+    /// the `dynamic_import` opcode which builds the Promise. The
+    /// host's `realm.module_loader` does the actual fetch; on
+    /// success the returned Promise fulfils with the namespace,
+    /// on failure it rejects with the loader's TypeError.
     fn compileImportCall(self: *Compiler, ic: ast.expression.ImportCallExpr) CompileError!void {
-        // Evaluate (and discard) the argument for side effects.
         try self.compileExpression(ic.source);
-        // Then emit `Promise.reject(new TypeError("…"))`. Temp
-        // ordering is significant: `call_method` expects the
-        // single arg in `r_callee + 1`, so we build the
-        // TypeError in a scratch range that gets released before
-        // we star the arg.
-        const k_promise = try self.internString("Promise");
-        try self.builder.emitOp(.lda_global, ic.span);
-        try self.builder.emitU16(k_promise);
-        const r_p = try self.reserveTemp();
-        defer self.releaseTemp();
-        try self.builder.emitOp(.star, ic.span);
-        try self.builder.emitU8(r_p);
-        const k_reject = try self.internString("reject");
-        try self.builder.emitOp(.lda_property, ic.span);
-        try self.builder.emitU16(k_reject);
-        const r_rej = try self.reserveTemp();
-        defer self.releaseTemp();
-        try self.builder.emitOp(.star, ic.span);
-        try self.builder.emitU8(r_rej);
-        // Build the TypeError instance in scratch temps, then
-        // release them so the next reserveTemp returns r_rej + 1
-        // (the slot `call_method` needs for the single arg).
-        {
-            const k_te = try self.internString("TypeError");
-            try self.builder.emitOp(.lda_global, ic.span);
-            try self.builder.emitU16(k_te);
-            const r_te = try self.reserveTemp();
-            try self.builder.emitOp(.star, ic.span);
-            try self.builder.emitU8(r_te);
-            const k_msg = try self.builder.addConstant(Value.fromString(self.realm.heap.allocateString("dynamic import is not supported") catch return error.OutOfMemory));
-            try self.builder.emitOp(.lda_constant, ic.span);
-            try self.builder.emitU16(k_msg);
-            const r_msg = try self.reserveTemp();
-            try self.builder.emitOp(.star, ic.span);
-            try self.builder.emitU8(r_msg);
-            try self.builder.emitOp(.new_call, ic.span);
-            try self.builder.emitU8(r_te);
-            try self.builder.emitU8(1);
-            self.releaseTemp(); // r_msg
-            self.releaseTemp(); // r_te
-        }
-        const r_arg = try self.reserveTemp();
-        defer self.releaseTemp();
-        try self.builder.emitOp(.star, ic.span);
-        try self.builder.emitU8(r_arg);
-        try self.builder.emitOp(.call_method, ic.span);
-        try self.builder.emitU8(r_p);
-        try self.builder.emitU8(r_rej);
-        try self.builder.emitU8(1);
+        try self.builder.emitOp(.dynamic_import, ic.span);
     }
 
     /// `/pat/flags` literal — emit as `new RegExp("pat", "flags")`.

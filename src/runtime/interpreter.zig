@@ -4208,6 +4208,41 @@ fn runFrames(
                 acc = result;
             },
 
+            .dynamic_import => {
+                // §13.3.10 dynamic `import(specifier)`. Specifier
+                // is in `acc`. Result becomes a Promise in `acc` —
+                // fulfilled with the namespace on success,
+                // rejected with the TypeError on load failure.
+                // Loader is synchronous in Cynic's setup; observation
+                // still goes through the microtask queue via `.then`
+                // / `await`, so async semantics are preserved at
+                // the observation layer.
+                const promise_mod = @import("builtins/promise.zig");
+                if (!acc.isString()) {
+                    // §13.3.10.1 step 6 calls ToString(specifier),
+                    // but the failure case (Symbol / object with
+                    // throwing toString) becomes a rejected
+                    // Promise per "any abrupt completion → reject"
+                    // (step 9). For now we reject on non-string
+                    // outright; ToString refinement is a follow-up.
+                    const ex = try makeTypeError(realm, "import specifier must be a string");
+                    acc = try promise_mod.allocatePromiseFor(realm, null, .rejected, ex);
+                } else {
+                    const spec_s: *JSString = @ptrCast(@alignCast(acc.asString()));
+                    const result = loadModule(allocator, realm, spec_s.bytes, local_chunk.base_url) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => return error.InvalidOpcode,
+                    };
+                    if (heap_mod.valueAsPlainObject(result) == null) {
+                        // loadModule encoded an exception in the
+                        // return value; wrap in a rejected Promise.
+                        acc = try promise_mod.allocatePromiseFor(realm, null, .rejected, result);
+                    } else {
+                        acc = try promise_mod.allocatePromiseFor(realm, null, .fulfilled, result);
+                    }
+                }
+            },
+
             .module_export => {
                 const k = readU16(code, ip);
                 ip += 2;

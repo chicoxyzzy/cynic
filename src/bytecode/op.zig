@@ -406,6 +406,16 @@ pub const Op = enum(u8) {
     /// unset or `error.ModuleNotFound` / similar from the
     /// loader itself.
     module_load,
+    /// `[op]` — §13.3.10 dynamic `import(specifier)`. Reads the
+    /// specifier from `acc` (ToString'd at the call site), calls
+    /// the module loader synchronously, and writes the resulting
+    /// Promise into `acc`. The Promise is settled before the
+    /// opcode returns (loader is synchronous), but observation
+    /// still goes through the microtask queue — `.then(...)` /
+    /// `await` reactions are queued like any other Promise
+    /// reaction. TypeError on missing loader / failed load
+    /// becomes a rejected Promise; the call itself never throws.
+    dynamic_import,
     /// `[op] [k:u16]` — publish acc as an export named `k` on
     /// the executing module's namespace
     /// (`realm.current_module.exports`). No-op outside module
@@ -582,6 +592,7 @@ pub const Op = enum(u8) {
             .to_property_key,
             .return_,
             .super_get_computed,
+            .dynamic_import,
             => 0,
             .ldar,
             .star,
@@ -737,6 +748,7 @@ pub const Op = enum(u8) {
             .for_in_open => "ForInOpen",
             .pop_env => "PopEnv",
             .module_load => "ModuleLoad",
+            .dynamic_import => "DynamicImport",
             .module_export => "ModuleExport",
             .make_environment => "MakeEnvironment",
             .lda_env => "LdaEnv",
