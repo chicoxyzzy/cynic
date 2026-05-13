@@ -905,26 +905,29 @@ fn nameForTypedKind(kind: ObjMod.TypedKind) []const u8 {
     };
 }
 
-/// Common shape for callback-driven methods: pull tv + buf + the
+/// Common shape for callback-driven methods: pull tv + the
 /// mandatory function callback + optional thisArg.
+///
+/// ES2024 "align-detached-buffer-semantics-with-web-reality" —
+/// callback-driven iterators no longer throw on a detached
+/// buffer; per-element reads go through `taSafeRead`, which
+/// hands back `undefined` for detached / out-of-bounds slots.
 fn taCallbackPreamble(realm: *Realm, this_value: Value, args: []const Value) NativeError!struct {
     tv: ObjMod.TypedView,
-    buf: []u8,
+    buf: ?[]u8,
     callback: *JSFunction,
     this_arg: Value,
     self_obj: *JSObject,
 } {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray method on non-object");
     const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray method on non-TypedArray");
-    const buf = tv.viewed.array_buffer orelse return throwTypeError(realm, "TypedArray detached");
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "callback is not a function");
     const this_arg = argOr(args, 1, Value.undefined_);
-    return .{ .tv = tv, .buf = buf, .callback = callback, .this_arg = this_arg, .self_obj = obj };
+    return .{ .tv = tv, .buf = tv.viewed.array_buffer, .callback = callback, .this_arg = this_arg, .self_obj = obj };
 }
 
 fn typedArrayAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const tv = taViewOf(this_value) orelse return throwTypeError(realm, "at on non-TypedArray");
-    const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
     const len: i64 = @intCast(tv.length);
     const i = try taResolveIndex(realm, argOr(args, 0, Value.fromInt32(0)), len, 0);
     // `at` returns undefined for out-of-range; resolveIndex clamps,
@@ -936,7 +939,9 @@ fn typedArrayAt(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const target_i: i64 = if (raw_i < 0) raw_i + len else raw_i;
     if (target_i < 0 or target_i >= len) return Value.undefined_;
     _ = i;
-    return readTypedElement(realm, buf, tv.kind, tv.byte_offset + @as(usize, @intCast(target_i)) * tv.kind.elementSize());
+    // §23.2.3.1 — `at` reads through the IntegerIndexedElementGet
+    // path; ES2024 detached buffers return undefined, not throw.
+    return taSafeRead(realm, tv, target_i);
 }
 
 fn typedArrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -968,10 +973,9 @@ fn typedArrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) N
 
 fn typedArrayForEach(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
-    const elem_size = ctx.tv.kind.elementSize();
     var i: usize = 0;
     while (i < ctx.tv.length) : (i += 1) {
-        const v = readTypedElement(realm, ctx.buf, ctx.tv.kind, ctx.tv.byte_offset + i * elem_size);
+        const v = taSafeRead(realm, ctx.tv, @intCast(i));
         _ = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
     }
     return Value.undefined_;
@@ -979,10 +983,9 @@ fn typedArrayForEach(realm: *Realm, this_value: Value, args: []const Value) Nati
 
 fn typedArrayEvery(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
-    const elem_size = ctx.tv.kind.elementSize();
     var i: usize = 0;
     while (i < ctx.tv.length) : (i += 1) {
-        const v = readTypedElement(realm, ctx.buf, ctx.tv.kind, ctx.tv.byte_offset + i * elem_size);
+        const v = taSafeRead(realm, ctx.tv, @intCast(i));
         const r = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
         if (!toBoolean(r)) return Value.false_;
     }
@@ -991,10 +994,9 @@ fn typedArrayEvery(realm: *Realm, this_value: Value, args: []const Value) Native
 
 fn typedArraySome(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
-    const elem_size = ctx.tv.kind.elementSize();
     var i: usize = 0;
     while (i < ctx.tv.length) : (i += 1) {
-        const v = readTypedElement(realm, ctx.buf, ctx.tv.kind, ctx.tv.byte_offset + i * elem_size);
+        const v = taSafeRead(realm, ctx.tv, @intCast(i));
         const r = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
         if (toBoolean(r)) return Value.true_;
     }
@@ -1003,10 +1005,9 @@ fn typedArraySome(realm: *Realm, this_value: Value, args: []const Value) NativeE
 
 fn typedArrayFind(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
-    const elem_size = ctx.tv.kind.elementSize();
     var i: usize = 0;
     while (i < ctx.tv.length) : (i += 1) {
-        const v = readTypedElement(realm, ctx.buf, ctx.tv.kind, ctx.tv.byte_offset + i * elem_size);
+        const v = taSafeRead(realm, ctx.tv, @intCast(i));
         const r = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
         if (toBoolean(r)) return v;
     }
@@ -1015,10 +1016,9 @@ fn typedArrayFind(realm: *Realm, this_value: Value, args: []const Value) NativeE
 
 fn typedArrayFindIndex(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
-    const elem_size = ctx.tv.kind.elementSize();
     var i: usize = 0;
     while (i < ctx.tv.length) : (i += 1) {
-        const v = readTypedElement(realm, ctx.buf, ctx.tv.kind, ctx.tv.byte_offset + i * elem_size);
+        const v = taSafeRead(realm, ctx.tv, @intCast(i));
         const r = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
         if (toBoolean(r)) return numberFromI64(@intCast(i));
     }
@@ -1027,10 +1027,9 @@ fn typedArrayFindIndex(realm: *Realm, this_value: Value, args: []const Value) Na
 
 fn typedArrayFindLast(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
-    const elem_size = ctx.tv.kind.elementSize();
     var i: i64 = @as(i64, @intCast(ctx.tv.length)) - 1;
     while (i >= 0) : (i -= 1) {
-        const v = readTypedElement(realm, ctx.buf, ctx.tv.kind, ctx.tv.byte_offset + @as(usize, @intCast(i)) * elem_size);
+        const v = taSafeRead(realm, ctx.tv, i);
         const r = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, i, ctx.self_obj);
         if (toBoolean(r)) return v;
     }
@@ -1039,10 +1038,9 @@ fn typedArrayFindLast(realm: *Realm, this_value: Value, args: []const Value) Nat
 
 fn typedArrayFindLastIndex(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
-    const elem_size = ctx.tv.kind.elementSize();
     var i: i64 = @as(i64, @intCast(ctx.tv.length)) - 1;
     while (i >= 0) : (i -= 1) {
-        const v = readTypedElement(realm, ctx.buf, ctx.tv.kind, ctx.tv.byte_offset + @as(usize, @intCast(i)) * elem_size);
+        const v = taSafeRead(realm, ctx.tv, i);
         const r = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, i, ctx.self_obj);
         if (toBoolean(r)) return numberFromI64(i);
     }
@@ -1397,13 +1395,13 @@ fn taSpeciesCreateSubarray(
 
 fn typedArrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
-    const elem_size = ctx.tv.kind.elementSize();
     // §23.2.3.19 step 6 — TypedArraySpeciesCreate(O, « len »).
     const out = try taSpeciesCreate(realm, ctx.self_obj, ctx.tv.kind, ctx.tv.length);
     const out_buf = out.typed_view.?.viewed.array_buffer.?;
+    const elem_size = ctx.tv.kind.elementSize();
     var i: usize = 0;
     while (i < ctx.tv.length) : (i += 1) {
-        const v = readTypedElement(realm, ctx.buf, ctx.tv.kind, ctx.tv.byte_offset + i * elem_size);
+        const v = taSafeRead(realm, ctx.tv, @intCast(i));
         const mapped = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
         writeTypedElement(out_buf, ctx.tv.kind, i * elem_size, mapped);
     }
@@ -1412,7 +1410,6 @@ fn typedArrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 
 fn typedArrayFilter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
-    const elem_size = ctx.tv.kind.elementSize();
     // Two-pass: first decide which elements are kept (record into
     // a temp byte array), then allocate the result with the exact
     // size and copy. Avoids two reallocations for the common case
@@ -1421,17 +1418,25 @@ fn typedArrayFilter(realm: *Realm, this_value: Value, args: []const Value) Nativ
     defer kept.deinit(realm.allocator);
     var i: usize = 0;
     while (i < ctx.tv.length) : (i += 1) {
-        const v = readTypedElement(realm, ctx.buf, ctx.tv.kind, ctx.tv.byte_offset + i * elem_size);
+        const v = taSafeRead(realm, ctx.tv, @intCast(i));
         const r = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
         if (toBoolean(r)) kept.append(realm.allocator, i) catch return error.OutOfMemory;
     }
     // §23.2.3.10 step 12 — TypedArraySpeciesCreate(O, « kept.length »).
     const out = try taSpeciesCreate(realm, ctx.self_obj, ctx.tv.kind, kept.items.len);
     const out_buf = out.typed_view.?.viewed.array_buffer.?;
+    const elem_size = ctx.tv.kind.elementSize();
+    // If the receiver's buffer is detached we still have to
+    // produce the right shape — re-detached reads were `undefined`,
+    // so `kept` would be empty for primitive-numeric typed arrays
+    // (undefined !== a truthy number). Guard the memcpy anyway.
+    const src_buf_opt = ctx.tv.viewed.array_buffer;
     for (kept.items, 0..) |src_i, dst_i| {
         const src_off = ctx.tv.byte_offset + src_i * elem_size;
         const dst_off = dst_i * elem_size;
-        @memcpy(out_buf[dst_off .. dst_off + elem_size], ctx.buf[src_off .. src_off + elem_size]);
+        if (src_buf_opt) |src_buf| {
+            @memcpy(out_buf[dst_off .. dst_off + elem_size], src_buf[src_off .. src_off + elem_size]);
+        }
     }
     return heap_mod.taggedObject(out);
 }
