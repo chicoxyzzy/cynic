@@ -3416,7 +3416,42 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
     self.current_loop = &ctx;
     defer self.current_loop = saved_loop;
 
+    // §14.7.5.7 / §7.4.6 — wrap the body in an implicit handler
+    // that calls IteratorClose(iter) on abrupt completion (throw).
+    // `break` / `return` already close via compileBreak /
+    // compileReturn; `continue` exits the body normally. The
+    // handler isn't installed for `for-in` (no IteratorClose
+    // contract).
+    const body_start_pc = self.builder.here();
     try self.compileStatement(s.body);
+    const body_end_pc = self.builder.here();
+    if (s.kind != .in_) {
+        // Skip the synthetic handler on normal completion.
+        try self.builder.emitOp(.jmp, s.span);
+        const skip_handler_patch = self.builder.here();
+        try self.builder.emitI16(0);
+        const handler_pc = self.builder.here();
+        // The thrown value is deposited in `acc` (catch_register =
+        // null). Save, close the iterator (preserves acc per the
+        // op's contract), then rethrow.
+        const r_caught = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, s.span);
+        try self.builder.emitU8(r_caught);
+        try self.builder.emitOp(.iter_close, s.span);
+        try self.builder.emitU8(r_iter);
+        try self.builder.emitOp(.ldar, s.span);
+        try self.builder.emitU8(r_caught);
+        try self.builder.emitOp(.throw_, s.span);
+        const after_handler_pc = self.builder.here();
+        try self.builder.patchI16(skip_handler_patch, after_handler_pc);
+        try self.builder.addHandler(.{
+            .start_pc = body_start_pc,
+            .end_pc = body_end_pc,
+            .handler_pc = handler_pc,
+            .catch_register = null,
+        });
+    }
 
     // `continue` jumps to the per-iter env teardown.
     const incr_target = self.builder.here();
