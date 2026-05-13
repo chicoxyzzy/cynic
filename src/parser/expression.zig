@@ -513,7 +513,7 @@ fn expressionAsBindingElement(
 /// optional form is rejected at runtime for assignment) qualify. A
 /// ParenthesizedExpression around a SimpleAssignmentTarget is also valid
 /// (transparent unwrap).
-fn isSimpleAssignmentTarget(e: Expression) bool {
+pub fn isSimpleAssignmentTarget(e: Expression) bool {
     return switch (e) {
         .identifier_reference => true,
         .member => true,
@@ -525,7 +525,7 @@ fn isSimpleAssignmentTarget(e: Expression) bool {
 /// §13.15.5 DestructuringAssignmentTarget. The LHS of `=` may be an
 /// ArrayLiteral or ObjectLiteral; the parser leaves them as their
 /// expression shape and downstream consumers reinterpret as patterns.
-fn isAssignmentPattern(e: Expression) bool {
+pub fn isAssignmentPattern(e: Expression) bool {
     return switch (e) {
         .array_literal, .object_literal => true,
         .parenthesized => |p| isAssignmentPattern(p.expression.*),

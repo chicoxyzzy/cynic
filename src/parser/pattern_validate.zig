@@ -93,6 +93,15 @@ pub const Validator = struct {
                 try self.visitStmt(f.body);
             },
             .for_in_of => |f| {
+                // §13.7.5.1 ForInOfStatement early errors:
+                // • The LeftHandSideExpression must be a valid assignment
+                //   target — IsValidSimpleAssignmentTarget true, or an
+                //   ObjectLiteral / ArrayLiteral that re-parses as an
+                //   AssignmentPattern. `this`, `(this)`, sequence-wrapped
+                //   patterns, ObjectLiteral methods, etc. are all invalid.
+                if (f.left == .expression) {
+                    try self.validateForInOfLhs(&f.left.expression);
+                }
                 try self.visitExpr(&f.right);
                 try self.visitStmt(f.body);
             },
@@ -291,6 +300,35 @@ pub const Validator = struct {
                     try self.validateAssignmentTarget(&p.value);
                 },
             }
+        }
+    }
+
+    /// §13.7.5.1 ForInOfStatement early error: the LeftHandSideExpression
+    /// must be a valid assignment target. The for-in/of head's `left.expression`
+    /// is parsed as a generic Expression (since the head also legitimately
+    /// accepts assignment patterns built from array/object literals). After
+    /// parsing we mirror the §13.15.1 / §13.15.5 rules used at the `=`
+    /// site: simple targets (IdentifierReference, MemberExpression) and
+    /// assignment patterns (ArrayLiteral / ObjectLiteral, recursively
+    /// validated) are accepted; everything else is rejected.
+    fn validateForInOfLhs(self: *Validator, e: *const Expression) std.mem.Allocator.Error!void {
+        switch (e.*) {
+            .identifier_reference, .member => {},
+            .parenthesized => |p| {
+                // `(this)` / `(x = 1)` and similar — the parenthesised
+                // expression itself must be a valid LHS. Object / array
+                // literals inside parens are NOT valid for-in/of LHS per
+                // the §13.7.5.1 grammar: the cover form admits only
+                // `LeftHandSideExpression`, which is a SimpleAssignmentTarget
+                // or pattern at the top level, not under a parenthesis.
+                switch (p.expression.*) {
+                    .identifier_reference, .member => {},
+                    else => try self.report(.assignment_target_invalid, e.span()),
+                }
+            },
+            .array_literal => |al| try self.validateArrayPattern(al),
+            .object_literal => |ol| try self.validateObjectPattern(ol),
+            else => try self.report(.assignment_target_invalid, e.span()),
         }
     }
 

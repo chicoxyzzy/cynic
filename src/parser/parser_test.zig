@@ -677,6 +677,68 @@ test "Parser: arrow (x, ...x) duplicate BoundNames emits SyntaxError" {
     try testing.expectEqual(Code.restricted_identifier_in_strict, diags.items[0].code);
 }
 
+test "Parser: for (var x in {}) let y; rejects Declaration as body" {
+    // §14.7.5: substatement position accepts Statement, not Declaration.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var diags: Diagnostics = .empty;
+    defer diags.deinit(arena.allocator());
+    _ = parseScript(arena.allocator(), "for (var x in {}) let y;", &diags) catch {};
+    try testing.expect(diags.items.len >= 1);
+    try testing.expectEqual(Code.unexpected_token, diags.items[0].code);
+}
+
+test "Parser: for (var x in {}) function f() {} rejects FunctionDeclaration" {
+    // §14.7.5: substatement position accepts Statement, not Declaration.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var diags: Diagnostics = .empty;
+    defer diags.deinit(arena.allocator());
+    _ = parseScript(arena.allocator(), "for (var x in {}) function f() {}", &diags) catch {};
+    try testing.expect(diags.items.len >= 1);
+}
+
+test "Parser: for (this in {}) rejects non-assignment-target LHS" {
+    // §13.7.5.1: LHS of for-in/of must be a valid assignment target.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var diags: Diagnostics = .empty;
+    defer diags.deinit(arena.allocator());
+    _ = parseScript(arena.allocator(), "for (this in {}) {}", &diags) catch {};
+    try testing.expect(diags.items.len >= 1);
+    try testing.expectEqual(Code.assignment_target_invalid, diags.items[0].code);
+}
+
+test "Parser: for (let [x, x] in {}) rejects duplicate BoundNames" {
+    // §14.7.5.1 / §14.3.1: BoundNames of ForDeclaration must be unique.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var diags: Diagnostics = .empty;
+    defer diags.deinit(arena.allocator());
+    _ = parseScript(arena.allocator(), "for (let [x, x] in {}) {}", &diags) catch {};
+    try testing.expect(diags.items.len >= 1);
+}
+
+test "Parser: let [x, x] = [1,2] rejects duplicate BoundNames" {
+    // §14.3.1: BoundNames of LexicalDeclaration must be unique.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var diags: Diagnostics = .empty;
+    defer diags.deinit(arena.allocator());
+    _ = parseScript(arena.allocator(), "let [x, x] = [1,2];", &diags) catch {};
+    try testing.expect(diags.items.len >= 1);
+}
+
+test "Parser: for (let x in {}) { var x; } rejects let/var overlap" {
+    // §14.7.5.1: BoundNames of ForDeclaration ∩ VarDeclaredNames empty.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var diags: Diagnostics = .empty;
+    defer diags.deinit(arena.allocator());
+    _ = parseScript(arena.allocator(), "for (let x in {}) { var x; }", &diags) catch {};
+    try testing.expect(diags.items.len >= 1);
+}
+
 test "Parser: arrow ({y: x}, ...x) duplicate BoundNames emits SyntaxError" {
     // §15.3.1: ObjectBindingPattern element collides with later rest.
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);

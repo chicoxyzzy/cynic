@@ -387,11 +387,28 @@ pub const Parser = struct {
         const slice = try declarators.toOwnedSlice(self.arena);
         const last_end = slice[slice.len - 1].span.end;
         const stmt_end = try self.consumeSemicolon(last_end);
+        // §14.3.1: BoundNames of LexicalDeclaration must contain no
+        // duplicates (let/const only — `var` follows §14.3.2 and may
+        // legally repeat names). Walk each declarator's target and
+        // accumulate via `collectBoundNames`, which reports duplicates.
+        if (kind != .var_) try self.checkDeclaratorBoundNames(slice);
         return .{ .lexical = .{
             .span = .{ .start = keyword.span.start, .end = stmt_end },
             .kind = kind,
             .declarators = slice,
         } };
+    }
+
+    /// Walk every declarator's BindingTarget into a single names
+    /// accumulator and let `collectBoundNames` (via `appendBoundName`)
+    /// emit a duplicate diagnostic at the offending span.
+    fn checkDeclaratorBoundNames(
+        self: *Parser,
+        declarators: []const stmt_mod.VariableDeclarator,
+    ) ParseError!void {
+        var bound_names: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer bound_names.deinit(self.arena);
+        for (declarators) |d| try self.collectBoundNames(d.name, &bound_names);
     }
 
     fn parseVariableDeclarator(self: *Parser, kind: stmt_mod.LexicalDecl.Kind) ParseError!stmt_mod.VariableDeclarator {
@@ -737,6 +754,50 @@ pub const Parser = struct {
         } };
     }
 
+    /// §14.7.4.1 / §14.7.5.1: the body of a for / for-in / for-of must
+    /// not redeclare via `var` any name introduced by a `let` / `const`
+    /// head. Walks the body collecting VarDeclaredNames (`collectVDN`)
+    /// and the head declarator's BoundNames, then reports any overlap.
+    fn checkForDeclVdnOverlap(
+        self: *Parser,
+        head: stmt_mod.LexicalDecl,
+        body: Statement,
+    ) ParseError!void {
+        var head_names: std.ArrayListUnmanaged(NameSpan) = .empty;
+        defer head_names.deinit(self.arena);
+        for (head.declarators) |d| try self.collectTargetNames(d.name, &head_names);
+        var var_names: std.ArrayListUnmanaged(NameSpan) = .empty;
+        defer var_names.deinit(self.arena);
+        try self.collectVDN(body, &var_names);
+        for (head_names.items) |hn| {
+            for (var_names.items) |vn| {
+                if (std.mem.eql(u8, hn.name, vn.name)) {
+                    try self.report(.duplicate_lexical_binding, hn.span);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// §14.6 / §14.7 / §14.13 substatement positions accept the
+    /// `Statement` non-terminal but NOT `Declaration`. The dispatch in
+    /// `parseStatement` recognises `let` / `const` / `class` / `function`
+    /// / `function*` / `async function` / `async function*` greedily, so
+    /// after parsing a substatement (the body of for / if / while / do /
+    /// with / labelled) we explicitly reject those productions here.
+    /// `var` is intentionally allowed — it's a VariableStatement, a
+    /// Statement, not a Declaration.
+    fn rejectDeclarationAsSubstatement(self: *Parser, stmt: Statement) ParseError!void {
+        switch (stmt) {
+            .lexical => |lex| if (lex.kind != .var_) {
+                try self.report(.unexpected_token, lex.span);
+            },
+            .class_decl => |cd| try self.report(.unexpected_token, cd.span),
+            .function_decl => |fd| try self.report(.unexpected_token, fd.span),
+            else => {},
+        }
+    }
+
     /// §14.7.4 / §14.7.5 ForStatement / ForInOfStatement. Distinguishing
     /// the C-style and for-in/of forms requires a small look-ahead trick:
     /// parse the init in `[~In]` mode, then peek the following token —
@@ -819,6 +880,11 @@ pub const Parser = struct {
             _ = try self.expect(.rparen);
             const body = try self.arena.create(Statement);
             body.* = try self.parseStatementBody();
+            // §14.7.5.1: BoundNames of ForDeclaration ∩ VarDeclaredNames
+            // of Statement must be empty. Only applies to let/const heads.
+            if (left == .lexical and left.lexical.kind != .var_) {
+                try self.checkForDeclVdnOverlap(left.lexical, body.*);
+            }
             return .{ .for_in_of = .{
                 .span = .{ .start = start, .end = body.span().end },
                 .kind = kind,
@@ -850,6 +916,14 @@ pub const Parser = struct {
         _ = try self.expect(.rparen);
         const body = try self.arena.create(Statement);
         body.* = try self.parseStatementBody();
+        // §14.7.4.1: BoundNames of LexicalDeclaration ∩ VarDeclaredNames
+        // of Statement must be empty. Only applies to let/const heads.
+        if (init_head) |h| switch (h) {
+            .lexical => |lex| if (lex.kind != .var_) {
+                try self.checkForDeclVdnOverlap(lex, body.*);
+            },
+            .expression => {},
+        };
         return .{ .for_ = .{
             .span = .{ .start = start, .end = body.span().end },
             .init = init_head,
@@ -880,6 +954,11 @@ pub const Parser = struct {
         }
         const slice = try declarators.toOwnedSlice(self.arena);
         const last_end = slice[slice.len - 1].span.end;
+        // §14.7.5.1 / §14.3.1: BoundNames of ForDeclaration must contain no
+        // duplicates for let/const — covers `for (let [x, x] in obj)` and
+        // analogous for-of forms. `var` follows the LegacyVariableStatement
+        // rule and may repeat names.
+        if (kind != .var_) try self.checkDeclaratorBoundNames(slice);
         return .{
             .span = .{ .start = keyword.span.start, .end = last_end },
             .kind = kind,
