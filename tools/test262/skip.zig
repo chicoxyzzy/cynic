@@ -43,22 +43,6 @@ pub const cynic_oos_path_prefixes = [_][]const u8{
 /// follow-on lexer pass. Per-feature "not yet implemented" gaps are
 /// filed as failures, not skipped.
 pub const cynic_oos_path_contains = [_][]const u8{
-    // §15.8 — async-arrow cover form when `async(args)` contains a
-    // *nested* arrow whose own params or body reference `await`.
-    // The cover-call doesn't know it's an async-arrow head until
-    // it sees the trailing `=>`, so the inner expression is parsed
-    // under the surrounding `[~Await]` and `await` lands as a plain
-    // identifier — V8 / JSC handle this with a speculative reparse
-    // under `[+Await]` that Cynic doesn't ship yet.
-    "/await-as-param-nested-arrow-",
-    "/await-as-param-rest-nested-arrow-",
-    "/await-as-param-ident-nested-arrow-",
-    "/early-errors-arrow-await-in-formals-default",
-    // `async X` cover when the identifier on the LHS of `of` is
-    // literally `async`. Cynic's for-await-of head misreads
-    // `for await (async of …)` as an async expression rather than
-    // an IdentifierReference + `of` of-iteration.
-    "/for-await-of/head-lhs-async",
     // `\p{…}` property escapes of *strings* and the
     // RGI-emoji-sequence property set (Unicode 17 / `/v` flag) — the
     // vendored libregexp doesn't validate the strings-property
@@ -78,13 +62,6 @@ pub const cynic_oos_path_contains = [_][]const u8{
     "/param-dflt-yield",
     "formals-contains-yield-expr",
     "formals-contains-await-expr",
-    // §12.8.6 / §13.3.11 — tagged-template literals relax the
-    // escape-sequence rules: invalid escapes are parse-valid and
-    // surface as `undefined` cooked values. Implementing this
-    // correctly requires deferring escape validation to a cook
-    // pass that's aware of tag context (or duplicating the
-    // template lexer). One fixture; deferred.
-    "/tagged-template/invalid-escape-sequences",
 };
 
 /// `features` names we know we don't support. Tests whose

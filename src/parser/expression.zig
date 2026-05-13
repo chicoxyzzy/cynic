@@ -82,7 +82,16 @@ fn parseAssignment(p: *Parser) ParseError!Expression {
     if (p.peek().kind == .identifier and std.mem.eql(u8, p.peek().slice(p.source), "async")) {
         const second = try p.peek2();
         if (!second.line_terminator_before and second.kind == .identifier) {
-            return parseAsyncBareIdentArrow(p);
+            // Cover-grammar ambiguity: `async IDENT` could be the
+            // start of an async-arrow (`async x => …`) or just
+            // `async` used as a regular identifier followed by a
+            // for-of head (`for await (async of [])`). Commit to the
+            // arrow path only if the *third* token is `=>` on the
+            // same line.
+            const third = try p.peek3();
+            if (third.kind == .arrow and !third.line_terminator_before) {
+                return parseAsyncBareIdentArrow(p);
+            }
         }
     }
 
@@ -944,7 +953,7 @@ fn parseLeftHandSide(p: *Parser) ParseError!Expression {
 /// left; immediately following template tokens (no_substitution_template
 /// or template_head) form the quasi.
 fn parseTaggedTemplate(p: *Parser, tag: Expression) ParseError!Expression {
-    const quasi = try parseTemplateLiteral(p);
+    const quasi = try parseTemplateLiteral(p, true);
     const tag_ptr = try p.arena.create(Expression);
     tag_ptr.* = tag;
     const quasi_ptr = try p.arena.create(Expression);
@@ -1261,7 +1270,7 @@ fn parsePrimary(p: *Parser) ParseError!Expression {
             break :blk .{ .identifier_reference = .{ .span = tok.span } };
         },
         .lparen => parseParenthesized(p),
-        .no_substitution_template, .template_head => parseTemplateLiteral(p),
+        .no_substitution_template, .template_head => parseTemplateLiteral(p, false),
         .kw_function => parseFunctionExpression(p),
         .lbracket => parseArrayLiteral(p),
         .lbrace => parseObjectLiteral(p),
@@ -1318,13 +1327,17 @@ fn parsePrimary(p: *Parser) ParseError!Expression {
 /// §13.2.8 TemplateLiteral. The lexer emits four token kinds;
 /// `nextTemplateContinuationAfterBrace` is the parser-driven hook that
 /// re-enters template scanning after a `${…}` substitution closes.
-fn parseTemplateLiteral(p: *Parser) ParseError!Expression {
+fn parseTemplateLiteral(p: *Parser, for_tag: bool) ParseError!Expression {
     const head = try p.bump();
     var quasis: std.ArrayListUnmanaged(ast_expr.TemplateQuasi) = .empty;
     var expressions: std.ArrayListUnmanaged(Expression) = .empty;
+    var saw_invalid_escape = head.had_invalid_template_escape;
 
     if (head.kind == .no_substitution_template) {
         // `…` — the entire body is one quasi, no substitutions.
+        if (saw_invalid_escape and !for_tag) {
+            try p.report(.invalid_escape_sequence, head.span);
+        }
         try quasis.append(p.arena, .{ .span = innerQuasiSpan(head) });
         return .{ .template_literal = .{
             .span = head.span,
@@ -1359,9 +1372,17 @@ fn parseTemplateLiteral(p: *Parser) ParseError!Expression {
         // the lexer.
         p.current = part;
         try quasis.append(p.arena, .{ .span = innerQuasiSpan(part) });
+        if (part.had_invalid_template_escape) saw_invalid_escape = true;
 
         if (part.kind == .template_tail) {
             const last = try p.bump();
+            // §12.8.6 — for a *standalone* template literal (not the
+            // quasi of a tagged template), any invalid escape in the
+            // body is a SyntaxError. Tagged templates relax the
+            // rule: cooked = undefined, raw = source.
+            if (saw_invalid_escape and !for_tag) {
+                try p.report(.invalid_escape_sequence, .{ .start = head.span.start, .end = last.span.end });
+            }
             return .{ .template_literal = .{
                 .span = .{ .start = head.span.start, .end = last.span.end },
                 .quasis = try quasis.toOwnedSlice(p.arena),

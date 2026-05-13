@@ -64,6 +64,10 @@ pub const Parser = struct {
     /// has been called.
     current: Token,
     lookahead: ?Token = null,
+    /// Second-slot lookahead — the token after `lookahead`. Populated
+    /// lazily by `peek3()`; cleared in lock-step with `lookahead`
+    /// inside `bump()`.
+    lookahead2: ?Token = null,
     diagnostics: ?*Diagnostics,
     /// §13.10 [+In] / [-In] grammar parameter. Always `true` in this slice;
     /// `for (let in …)` and friends will flip it off when added.
@@ -150,13 +154,25 @@ pub const Parser = struct {
         return t;
     }
 
+    /// Look two tokens past `current`. Useful for cover-grammar
+    /// dispatch decisions like `async IDENT =>` where the third
+    /// token decides whether to take the async-arrow fast path.
+    pub fn peek3(self: *Parser) ParseError!Token {
+        _ = try self.peek2();
+        if (self.lookahead2) |t| return t;
+        const t = self.lexer.next() catch |err| return mapLexError(err);
+        self.lookahead2 = t;
+        return t;
+    }
+
     /// Advance past `current` and return it. Pulls the next token (possibly
     /// from the lookahead buffer).
     pub fn bump(self: *Parser) ParseError!Token {
         const consumed = self.current;
         if (self.lookahead) |t| {
             self.current = t;
-            self.lookahead = null;
+            self.lookahead = self.lookahead2;
+            self.lookahead2 = null;
         } else {
             self.current = self.lexer.next() catch |err| return mapLexError(err);
         }
@@ -908,6 +924,28 @@ pub const Parser = struct {
         const saved_allow_in = self.allow_in;
         self.allow_in = false;
         defer self.allow_in = saved_allow_in;
+
+        // §14.7.5 — `for ( [lookahead ∉ {let [, async of}] …)`. The
+        // `async of` lookahead is forbidden in plain (non-await)
+        // for-of: `for (async of [])` is a SyntaxError. The
+        // restriction is dropped for `for await (async of …)` (the
+        // for-await rule allows it) and for `for (async of => …)`
+        // (the third token is `=>`, an async-arrow head — a legit
+        // C-style init).
+        if (!is_await and self.current.kind == .identifier and
+            std.mem.eql(u8, self.current.slice(self.source), "async"))
+        {
+            const second = try self.peek2();
+            if (second.kind == .identifier and
+                std.mem.eql(u8, second.slice(self.source), "of"))
+            {
+                const third = try self.peek3();
+                if (third.kind != .arrow) {
+                    try self.report(.unexpected_token, self.current.span);
+                    return error.ParseError;
+                }
+            }
+        }
 
         var init_head: ?stmt_mod.ForHead = null;
         if (self.current.kind == .semicolon) {
@@ -3902,26 +3940,136 @@ pub fn enforceParamNamesNotEvalArguments(
 }
 
 /// §15.8.1 AsyncFunction / async arrow — `It is a Syntax Error if
-/// BoundNames of FormalParameters contains "await".` Distinct from
-/// the `Contains AwaitExpression` check: this fires for `await` as a
-/// plain BindingIdentifier (cover-call reinterpret pulls
-/// `identifier_reference` straight in, so the BindingIdentifier
-/// strict check on `parseBindingIdentifier` doesn't run).
+/// any of FormalParameters' BoundNames is "await", or if the
+/// parameter expressions textually reference `await` as an
+/// identifier.` The cover-call reinterpret parsed the cover under
+/// the surrounding `[Yield, Await]`; spec semantics treat the
+/// reinterpreted ArrowFormalParameters as `[+Await]`, which turns
+/// any `await` identifier inside the params (including in *nested*
+/// arrow parameters — arrows inherit `[Await]`) into a SyntaxError.
+/// Function / class boundaries reset `[Await]`, so this walker
+/// stops at them.
 pub fn enforceParamNamesNotAwait(
     p: *Parser,
     params: []const stmt_mod.FunctionParam,
 ) ParseError!void {
-    var names: std.ArrayListUnmanaged(Parser.NameSpan) = .empty;
-    defer names.deinit(p.arena);
     for (params) |param| switch (param) {
-        .simple => |sp| try p.collectTargetNames(sp.target, &names),
-        .rest => |rp| try p.collectTargetNames(rp.target, &names),
+        .simple => |sp| {
+            if (paramTargetReferencesAwait(p, sp.target)) |span|
+                try p.report(.unexpected_token, span);
+            if (sp.default) |d|
+                if (exprReferencesAwait(p, &d)) |span|
+                    try p.report(.unexpected_token, span);
+        },
+        .rest => |rp| {
+            if (paramTargetReferencesAwait(p, rp.target)) |span|
+                try p.report(.unexpected_token, span);
+        },
     };
-    for (names.items) |n| {
-        if (std.mem.eql(u8, n.name, "await")) {
-            try p.report(.unexpected_token, n.span);
-        }
-    }
+}
+
+fn paramTargetReferencesAwait(p: *Parser, bt: stmt_mod.BindingTarget) ?Span {
+    return switch (bt) {
+        .identifier => |id| if (p.identMatches(id.span, "await")) id.span else null,
+        .object => |op| blk: {
+            for (op.properties) |prop| {
+                if (prop.value.default) |d|
+                    if (exprReferencesAwait(p, &d)) |s| break :blk s;
+                if (paramTargetReferencesAwait(p, prop.value.target)) |s| break :blk s;
+            }
+            if (op.rest) |r| if (p.identMatches(r.span, "await")) break :blk r.span;
+            break :blk null;
+        },
+        .array => |ap| blk: {
+            for (ap.elements) |maybe_el| if (maybe_el) |el| {
+                if (el.default) |d| if (exprReferencesAwait(p, &d)) |s| break :blk s;
+                if (paramTargetReferencesAwait(p, el.target)) |s| break :blk s;
+            };
+            if (ap.rest) |r| if (paramTargetReferencesAwait(p, r.*)) |s| break :blk s;
+            break :blk null;
+        },
+    };
+}
+
+fn exprReferencesAwait(p: *Parser, e: *const Expression) ?Span {
+    return switch (e.*) {
+        .identifier_reference => |ir| if (p.identMatches(ir.span, "await")) ir.span else null,
+        .await_ => |a| a.argument.span(),
+        // Function / class introduce their own [Await] scope — any
+        // internal `await` is theirs, not the outer arrow's.
+        .function_expr, .class_expr => null,
+        .parenthesized => |x| exprReferencesAwait(p, x.expression),
+        .unary => |u| exprReferencesAwait(p, u.operand),
+        .binary => |b| exprReferencesAwait(p, b.lhs) orelse exprReferencesAwait(p, b.rhs),
+        .logical => |l| exprReferencesAwait(p, l.lhs) orelse exprReferencesAwait(p, l.rhs),
+        .conditional => |c| exprReferencesAwait(p, c.test_) orelse
+            exprReferencesAwait(p, c.consequent) orelse
+            exprReferencesAwait(p, c.alternate),
+        .assignment => |a| exprReferencesAwait(p, a.target) orelse exprReferencesAwait(p, a.value),
+        .sequence => |sq| blk: {
+            for (sq.expressions) |*x| if (exprReferencesAwait(p, x)) |s| break :blk s;
+            break :blk null;
+        },
+        .member => |m| exprReferencesAwait(p, m.object) orelse switch (m.property) {
+            .computed => |c| exprReferencesAwait(p, c),
+            else => null,
+        },
+        .call => |c| blk: {
+            if (exprReferencesAwait(p, c.callee)) |s| break :blk s;
+            for (c.arguments) |*x| if (exprReferencesAwait(p, x)) |s| break :blk s;
+            break :blk null;
+        },
+        .new_expr => |n| blk: {
+            if (exprReferencesAwait(p, n.callee)) |s| break :blk s;
+            for (n.arguments) |*x| if (exprReferencesAwait(p, x)) |s| break :blk s;
+            break :blk null;
+        },
+        .chain => |c| exprReferencesAwait(p, c.expression),
+        .tagged_template => |t| exprReferencesAwait(p, t.tag) orelse exprReferencesAwait(p, t.quasi),
+        .template_literal => |tl| blk: {
+            for (tl.expressions) |*x| if (exprReferencesAwait(p, x)) |s| break :blk s;
+            break :blk null;
+        },
+        .spread => |sp| exprReferencesAwait(p, sp.argument),
+        .update => |u| exprReferencesAwait(p, u.operand),
+        .array_literal => |al| blk: {
+            for (al.elements) |maybe_el| if (maybe_el) |el|
+                if (exprReferencesAwait(p, &el)) |s| break :blk s;
+            break :blk null;
+        },
+        .object_literal => |ol| blk: {
+            for (ol.properties) |m| switch (m) {
+                .property => |pr| if (exprReferencesAwait(p, &pr.value)) |s| break :blk s,
+                .spread => |sp| if (exprReferencesAwait(p, sp.argument)) |s| break :blk s,
+                .method => {},
+            };
+            break :blk null;
+        },
+        // §15.3.1 — arrow's own `[Await]` is inherited from where
+        // it's lexed; post-cover-reinterpret that's the outer async-
+        // arrow's `[+Await]`. Walk through arrow params and concise
+        // body looking for `await` identifier references too.
+        .arrow_function => |af| blk: {
+            for (af.params) |pp| switch (pp) {
+                .simple => |sp| {
+                    if (paramTargetReferencesAwait(p, sp.target)) |s| break :blk s;
+                    if (sp.default) |d| if (exprReferencesAwait(p, &d)) |s| break :blk s;
+                },
+                .rest => |rp| if (paramTargetReferencesAwait(p, rp.target)) |s| break :blk s,
+            };
+            switch (af.body) {
+                .expression => |xe| if (exprReferencesAwait(p, xe)) |s| break :blk s,
+                .block => {}, // statement-level walk not needed for
+                // the targeted fixtures; the concise-body parser
+                // already runs under the arrow's own `[Await]` and
+                // surfaces internal usage there.
+            }
+            break :blk null;
+        },
+        .yield => |y| if (y.argument) |a| exprReferencesAwait(p, a) else null,
+        .import_call => |ic| exprReferencesAwait(p, ic.source),
+        else => null,
+    };
 }
 
 /// True when `kind` can begin an ObjectLiteral / ClassBody PropertyName.

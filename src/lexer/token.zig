@@ -172,6 +172,13 @@ pub const Token = struct {
     /// `class await {}` should accept the name. `.identifier`
     /// otherwise (never matters when `had_escape == false`).
     escaped_keyword: TokenKind = .identifier,
+    /// Template-literal-only: true if the scanned body contained an
+    /// invalid EscapeSequence (`\01`, `\xg`, `\u{10FFFFF}`, …).
+    /// Tagged templates relax the rules — their cooked value is
+    /// `undefined`, raw value preserves the source — so the parser
+    /// only errors when the template is consumed standalone (i.e.
+    /// not as a tagged-template argument).
+    had_invalid_template_escape: bool = false,
 
     pub fn slice(self: Token, source: []const u8) []const u8 {
         return source[self.span.start..self.span.end];

@@ -441,25 +441,34 @@ pub const Lexer = struct {
     }
 
     fn scanTemplateBody(self: *Lexer, start: u32, is_continuation: bool) LexError!Token {
+        var had_invalid = false;
         while (self.pos < self.source.len) {
             const c = self.source[self.pos];
             switch (c) {
                 '`' => {
                     self.pos += 1;
                     const kind: TokenKind = if (is_continuation) .template_tail else .no_substitution_template;
-                    return self.makeToken(kind, start);
+                    var tok = self.makeToken(kind, start);
+                    tok.had_invalid_template_escape = had_invalid;
+                    return tok;
                 },
                 '$' => {
                     if (self.pos + 1 < self.source.len and self.source[self.pos + 1] == '{') {
                         self.pos += 2;
                         const kind: TokenKind = if (is_continuation) .template_middle else .template_head;
-                        return self.makeToken(kind, start);
+                        var tok = self.makeToken(kind, start);
+                        tok.had_invalid_template_escape = had_invalid;
+                        return tok;
                     }
                     self.pos += 1;
                 },
                 '\\' => {
                     self.pos += 1;
-                    try self.consumeEscapeSequence();
+                    // §12.8.6 — relaxed template escape consume. The
+                    // lexer accepts the byte run; cook-time
+                    // validation (or the standalone-template check
+                    // in `parseTemplateLiteral`) flags invalid forms.
+                    if (!self.consumeTemplateEscapeSequence()) had_invalid = true;
                 },
                 '\n' => {
                     self.pos += 1;
@@ -475,6 +484,95 @@ pub const Lexer = struct {
         }
         try self.report(.unterminated_template_literal, .{ .start = start, .end = self.pos });
         return error.UnterminatedTemplate;
+    }
+
+    /// §12.8.6 — non-reporting template escape consumer. Advances
+    /// past one EscapeSequence-shaped run of source bytes and
+    /// returns `true` if the escape is well-formed, `false`
+    /// otherwise. Differs from `consumeEscapeSequence` in two ways:
+    /// it never emits a diagnostic, and it never returns
+    /// `error.InvalidEscapeSequence` (callers always need to keep
+    /// scanning the template body). Tagged-template cook-time
+    /// validation surfaces the SyntaxError when the value is read.
+    fn consumeTemplateEscapeSequence(self: *Lexer) bool {
+        if (self.pos >= self.source.len) return true;
+        const esc = self.source[self.pos];
+        self.pos += 1;
+        switch (esc) {
+            // SingleEscapeCharacter + NonEscapeCharacter, plus the
+            // CR / LF LineContinuation forms — always valid.
+            '\'', '"', '\\', 'b', 'f', 'n', 'r', 't', 'v', '\n' => return true,
+            '\r' => {
+                if (self.pos < self.source.len and self.source[self.pos] == '\n') self.pos += 1;
+                return true;
+            },
+            // §12.8.4.1 — `\0` is legal iff not followed by a decimal
+            // digit. `\1` … `\9` are LegacyOctalEscapeSequence /
+            // NonOctalDecimalEscapeSequence — invalid in templates.
+            '0' => {
+                if (self.pos < self.source.len and isDecimalDigit(self.source[self.pos])) {
+                    return false;
+                }
+                return true;
+            },
+            '1'...'9' => return false,
+            // HexEscapeSequence `\xHH`.
+            'x' => {
+                if (self.pos + 2 > self.source.len or
+                    !isHexDigit(self.source[self.pos]) or
+                    !isHexDigit(self.source[self.pos + 1]))
+                {
+                    // Consume whatever non-template-delimiter bytes
+                    // are there so scanning continues.
+                    var n: usize = 0;
+                    while (n < 2 and self.pos < self.source.len and
+                        self.source[self.pos] != '`' and
+                        self.source[self.pos] != '\\' and
+                        self.source[self.pos] != '$') : (n += 1)
+                    {
+                        self.pos += 1;
+                    }
+                    return false;
+                }
+                self.pos += 2;
+                return true;
+            },
+            // UnicodeEscapeSequence `\uHHHH` and `\u{H…}`.
+            'u' => {
+                if (self.pos < self.source.len and self.source[self.pos] == '{') {
+                    const open = self.pos;
+                    self.pos += 1;
+                    var cp: u32 = 0;
+                    var any = false;
+                    var ok = true;
+                    while (self.pos < self.source.len and self.source[self.pos] != '}') : (self.pos += 1) {
+                        if (!isHexDigit(self.source[self.pos])) {
+                            ok = false;
+                            // skip to `}` / `\\` / template
+                            // terminator so scanning continues.
+                            break;
+                        }
+                        cp = (cp << 4) | hexDigitValue(self.source[self.pos]);
+                        any = true;
+                    }
+                    if (self.pos < self.source.len and self.source[self.pos] == '}') self.pos += 1;
+                    _ = open;
+                    if (!ok or !any or cp > 0x10FFFF) return false;
+                    return true;
+                }
+                if (self.pos + 4 > self.source.len) return false;
+                var n: usize = 0;
+                while (n < 4 and self.pos < self.source.len) : (n += 1) {
+                    if (!isHexDigit(self.source[self.pos])) return false;
+                    self.pos += 1;
+                }
+                return true;
+            },
+            // NonEscapeCharacter — any SourceCharacter that isn't a
+            // reserved EscapeCharacter / LineTerminator. Stands for
+            // itself.
+            else => return true,
+        }
     }
 
     /// Re-enter template-literal scanning after the parser has *already*
@@ -1634,13 +1732,16 @@ test "Lexer: unterminated template continuation after substitution" {
     try testing.expectEqual(Code.unterminated_template_literal, diags.items[0].code);
 }
 
-test "Lexer: legacy octal escape `\\17` in template is rejected" {
-    var diags: Diagnostics = .empty;
-    defer diags.deinit(testing.allocator);
+test "Lexer: legacy octal escape `\\17` in template marks invalid-escape but parses" {
+    // §12.8.6 — template-literal escapes are scanned permissively so
+    // tagged templates can still tag invalid forms (cooked value
+    // becomes undefined). The lexer flags `had_invalid_template_escape`
+    // on the token; the parser decides whether to surface a
+    // SyntaxError (standalone template) or accept (tagged template).
     var lex = Lexer.init(testing.allocator, "`a\\17b`");
-    lex.diagnostics = &diags;
-    try testing.expectError(error.InvalidEscapeSequence, lex.next());
-    try testing.expectEqual(Code.invalid_escape_sequence, diags.items[0].code);
+    const tok = try lex.next();
+    try testing.expectEqual(TokenKind.no_substitution_template, tok.kind);
+    try testing.expect(tok.had_invalid_template_escape);
 }
 
 test "Lexer: \\u escape in template" {
