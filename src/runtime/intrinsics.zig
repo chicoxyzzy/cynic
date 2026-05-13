@@ -953,6 +953,33 @@ pub fn throwRangeError(realm: *Realm, msg: []const u8) NativeError {
     return throwNative(realm, ex);
 }
 
+/// Native-side cooperative interrupt + budget poll. Long-running
+/// builtin loops (`Array.prototype.{map, filter, reduce}`,
+/// `String.prototype.{repeat, replace}`, regex matchers, large
+/// JSON parse / stringify) call this every ~1024 iterations so
+/// a host-side watchdog or step-budget host interrupts even
+/// when no JS opcodes are dispatching. V8 / JSC / SpiderMonkey
+/// do the same in their builtin implementations.
+///
+/// Returns `error.NativeThrew` (with `realm.pending_exception`
+/// set) when the interrupt fires or the step budget runs out,
+/// or `error.OutOfMemory` if synthesising the error itself
+/// fails. Cheap on the no-op path — one atomic load + one
+/// integer compare.
+pub fn checkInterruptInNative(realm: *Realm) NativeError!void {
+    if (realm.interrupt.load(.acquire)) {
+        realm.clearInterrupt();
+        const ex = newRangeError(realm, "execution interrupted") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
+    if (realm.step_budget == 0) {
+        const ex = newRangeError(realm, "interpreter step budget exhausted") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
+}
+
 // ── Globals: replacing the stub constructors with real natives ─────────────
 
 fn replaceGlobalNative(realm: *Realm, name: []const u8, native: NativeFn) !void {

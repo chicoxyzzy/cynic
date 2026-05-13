@@ -287,6 +287,12 @@ fn arrayBufferConstructor(realm: *Realm, this_value: Value, args: []const Value)
     if (len_trunc > @as(f64, @floatFromInt(std.math.maxInt(u32))))
         return throwRangeError(realm, "ArrayBuffer length out of range");
     const len: usize = @intFromFloat(len_trunc);
+    // §25.1.3.1 step 7 — `new ArrayBuffer(len)` allocates `len`
+    // bytes. Charge against the heap ceiling so a `new
+    // ArrayBuffer(2 ** 31)` call can't exhaust system memory;
+    // overshoot surfaces as `RangeError` (catchable by user JS).
+    realm.heap.charge(len) catch
+        return throwRangeError(realm, "ArrayBuffer length exceeds heap ceiling");
     const buf = realm.allocator.alloc(u8, len) catch return error.OutOfMemory;
     @memset(buf, 0);
     inst.array_buffer = buf;

@@ -1659,6 +1659,11 @@ fn arrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
     const out = heap_mod.valueAsPlainObject(out_v) orelse return throwTypeError(realm, "ArraySpeciesCreate did not return an object");
     var i: i64 = 0;
     while (i < len) : (i += 1) {
+        // Cooperative interrupt poll every 1024 elements so a
+        // `Array(2**24).map(...)` body can be terminated by a host
+        // watchdog or step-budget exhaustion even though no JS
+        // opcodes dispatch between callback invocations.
+        if ((i & 0x3FF) == 0) try intrinsics.checkInterruptInNative(realm);
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         if (!obj.hasProperty(islice)) continue;
@@ -1684,6 +1689,7 @@ fn arrayFilter(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     var i: i64 = 0;
     var write_idx: i64 = 0;
     while (i < len) : (i += 1) {
+        if ((i & 0x3FF) == 0) try intrinsics.checkInterruptInNative(realm);
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         if (!obj.hasProperty(islice)) continue;
@@ -1793,6 +1799,7 @@ fn arrayReduce(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     }
 
     while (i < len) : (i += 1) {
+        if ((i & 0x3FF) == 0) try intrinsics.checkInterruptInNative(realm);
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         if (!obj.hasProperty(islice)) continue;

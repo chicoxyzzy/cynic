@@ -203,6 +203,20 @@ pub const Heap = struct {
     /// (the unit-test paths that call `collect` directly do this
     /// when they want full control over when GC fires).
     gc_threshold: u32 = 16384,
+    /// Sum of bytes charged across `allocateX` callers. Coarse
+    /// — counts the dominant payload (string bytes, ArrayBuffer
+    /// bytes, register files); approximate for the small headers.
+    /// Drives the hard ceiling check below.
+    bytes_live: usize = 0,
+    /// Hard ceiling on `bytes_live`. When `charge(n)` would push
+    /// it over, the heap forces a GC; if still over, returns
+    /// `error.OutOfMemory`. Mirrors V8's `--max-old-space-size`,
+    /// QuickJS's `JS_SetMemoryLimit`, Hermes's
+    /// `gcConfig.maxHeapSize`. Default `maxInt(usize)` =
+    /// unbounded; sandboxed hosts (test runners, browser tabs,
+    /// isolated workers) set a per-realm cap so a runaway
+    /// `new ArrayBuffer(2 ** 31)` can't exhaust system memory.
+    max_bytes: usize = std.math.maxInt(usize),
     /// When non-zero, every `collect` cycle prints a one-line
     /// stderr report of live counts per heap kind (before sweep,
     /// after sweep). Diagnostic for finding leaks: a kind whose
@@ -214,6 +228,25 @@ pub const Heap = struct {
 
     pub fn init(allocator: std.mem.Allocator) Heap {
         return .{ .allocator = allocator };
+    }
+
+    /// Charge `n` bytes against the heap ceiling. Returns
+    /// `error.OutOfMemory` when the new total would exceed
+    /// `max_bytes`. Cheap to call (one add + one compare); the
+    /// caller is responsible for the actual allocation after this
+    /// returns. Sweep is the right place to undo the charge —
+    /// `mark_sweep_collect` resets `bytes_live` to the post-sweep
+    /// sum before continuing.
+    pub fn charge(self: *Heap, n: usize) error{OutOfMemory}!void {
+        const new_total = self.bytes_live +| n;
+        if (new_total > self.max_bytes) return error.OutOfMemory;
+        self.bytes_live = new_total;
+    }
+
+    /// Decrease the live byte counter. Idempotent w.r.t. the GC
+    /// (any inaccuracy gets corrected on the next sweep).
+    pub fn discharge(self: *Heap, n: usize) void {
+        self.bytes_live = if (n >= self.bytes_live) 0 else self.bytes_live - n;
     }
 
     /// Free every tracked object and the bookkeeping arrays.
@@ -409,6 +442,7 @@ pub const Heap = struct {
     /// it directly — it is freed during a sweep that doesn't see
     /// it marked, or when the heap itself is deinit'd.
     pub fn allocateString(self: *Heap, src: []const u8) !*JSString {
+        try self.charge(src.len + @sizeOf(JSString));
         const s = try JSString.init(self.allocator, src);
         errdefer s.deinit(self.allocator);
         try self.strings.append(self.allocator, s);
@@ -418,6 +452,7 @@ pub const Heap = struct {
 
     /// Allocate a string that is `a ++ b`, owned by the heap.
     pub fn concatStrings(self: *Heap, a: *const JSString, b: *const JSString) !*JSString {
+        try self.charge(a.bytes.len + b.bytes.len + @sizeOf(JSString));
         const s = try JSString.concat(self.allocator, a, b);
         errdefer s.deinit(self.allocator);
         try self.strings.append(self.allocator, s);

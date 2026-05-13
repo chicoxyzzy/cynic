@@ -1947,6 +1947,18 @@ fn runFrames(
             const ex = try makeRangeError(realm, "interpreter step budget exhausted");
             return .{ .thrown = ex };
         }
+        // Cooperative interrupt — host-side watchdog flips
+        // `realm.interrupt` from another thread; the dispatch
+        // loop notices on the next tick and unwinds with
+        // `RangeError("execution interrupted")`. Same shape as
+        // V8's `Isolate::TerminateExecution`, JSC's
+        // `Watchdog::fire`, and `JS_SetInterruptCallback` on
+        // SpiderMonkey / QuickJS.
+        if (realm.interrupt.load(.acquire)) {
+            realm.clearInterrupt();
+            const ex = try makeRangeError(realm, "execution interrupted");
+            return .{ .thrown = ex };
+        }
         realm.step_budget -|= 1;
         var f = &frames.items[frames.items.len - 1];
         const local_chunk = f.chunk;

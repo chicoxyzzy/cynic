@@ -172,11 +172,18 @@ pub const Realm = struct {
     /// Cooperative interpreter step budget. Decremented once per
     /// opcode in `runFrames`; on reaching zero the dispatch loop
     /// raises a synthetic `RangeError("step budget exhausted")`
-    /// and unwinds. Default is `maxInt(u64)` so non-test hosts
-    /// don't trip it. The test262 harness sets a per-test value
-    /// before each run so an infinite-loop fixture can't wedge
-    /// the entire sweep.
+    /// and unwinds. Default is `maxInt(u64)` — hosts that need
+    /// bounded execution (test runners, sandboxed shells, slow-
+    /// script watchers) set a lower value before each run.
     step_budget: u64 = std.math.maxInt(u64),
+    /// Externally-flippable interrupt flag. Any thread (including
+    /// a SIGALRM-style watchdog or a host UI thread) can call
+    /// `requestInterrupt`. The interpreter dispatch loop polls
+    /// this between opcodes and throws an uncatchable
+    /// `RangeError("execution interrupted")` when set, mirroring
+    /// V8's `Isolate::TerminateExecution` and JSC's
+    /// `Watchdog::fire`.
+    interrupt: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     /// Stack of every live `runFrames` call's frame list. Each
     /// entry is the `*ArrayListUnmanaged(CallFrame)` that a
     /// `runFrames` invocation is currently dispatching against;
@@ -276,6 +283,20 @@ pub const Realm = struct {
             self.allocator.destroy(self.heap);
         }
         if (self.class_arena) |*a| a.deinit();
+    }
+
+    /// Request the interpreter unwind on its next dispatch tick.
+    /// Safe to call from any thread; the dispatch-loop poll uses
+    /// acquire-release ordering.
+    pub fn requestInterrupt(self: *Realm) void {
+        self.interrupt.store(true, .release);
+    }
+
+    /// Reset the interrupt flag. Called automatically after the
+    /// dispatch loop throws the synthetic RangeError, but exposed
+    /// so a host can cancel a pending request before it fires.
+    pub fn clearInterrupt(self: *Realm) void {
+        self.interrupt.store(false, .release);
     }
 
     pub fn enqueueMicrotask(self: *Realm, callback: Value, arg: Value) !void {
