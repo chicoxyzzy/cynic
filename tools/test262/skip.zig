@@ -103,9 +103,6 @@ pub const unsupported_features = [_][]const u8{
     "Reflect.parse", // SpiderMonkey-only
     "legacy-regexp", // RegExp.$1 / .input / .leftContext
     "IsHTMLDDA", // [[IsHTMLDDA]] slot for document.all mimicry
-    // Annex B B.3.1 LabelledFunctionDeclaration. The main-spec
-    // §13.13 form is unimplemented but path-skipped above.
-    "labels",
 };
 
 pub fn pathIsSkipped(rel_path: []const u8) bool {
