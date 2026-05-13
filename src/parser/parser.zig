@@ -1115,7 +1115,6 @@ pub const Parser = struct {
 
         for (members) |m| {
             switch (m) {
-                .static_block => continue,
                 .method => |md| {
                     const prop = self.classKeyName(md.key);
                     const key_span = self.classKeySpan(md.key);
@@ -1186,9 +1185,409 @@ pub const Parser = struct {
                             .span = key_span,
                         });
                     }
+                    // §15.7.1 — FieldDefinition : ClassElementName Initializer
+                    //   "It is a Syntax Error if ContainsArguments of
+                    //    Initializer is true."
+                    // Recursive walk stops at function / class boundaries
+                    // (those bind their own `arguments`); arrow functions
+                    // recurse (no `arguments` binding).
+                    if (fd.init) |*init_expr| {
+                        if (self.exprContainsArguments(init_expr)) {
+                            try self.report(.invalid_class_element, fd.span);
+                        }
+                    }
+                },
+                .static_block => |sb| {
+                    // §15.7.11 — ClassStaticBlockBody early errors:
+                    //   "It is a Syntax Error if ContainsArguments of
+                    //    ClassStaticBlockStatementList is true."
+                    //   "It is a Syntax Error if ClassStaticBlockStatementList
+                    //    Contains await is true."
+                    for (sb.body) |*s| {
+                        if (self.stmtContainsArguments(s)) {
+                            try self.report(.invalid_class_element, sb.span);
+                            break;
+                        }
+                    }
+                    for (sb.body) |*s| {
+                        if (self.stmtContainsAwait(s)) {
+                            try self.report(.invalid_class_element, sb.span);
+                            break;
+                        }
+                    }
                 },
             }
         }
+    }
+
+    /// §15.7.1 Static Semantics: ContainsArguments.
+    /// Returns true if `e` (or any nested production) contains an
+    /// IdentifierReference whose StringValue is "arguments". Stops
+    /// recursing at boundaries that bind their own `arguments`:
+    /// non-arrow FunctionExpression, ClassExpression. Arrow functions
+    /// keep recursing — they don't shadow the outer arguments.
+    ///
+    /// Escapes (`arguments`) aren't currently decoded — handful
+    /// of test262 fixtures use them; tracked as a TODO.
+    fn exprContainsArguments(self: *Parser, e: *const Expression) bool {
+        return switch (e.*) {
+            .null_literal,
+            .boolean_literal,
+            .numeric_literal,
+            .bigint_literal,
+            .string_literal,
+            .regex_literal,
+            .this_expr,
+            .super_,
+            .import_meta,
+            .new_target,
+            => false,
+
+            .identifier_reference => |ir| std.mem.eql(u8, self.source[ir.span.start..ir.span.end], "arguments"),
+
+            // Function-scoped — binds its own `arguments`, so the body
+            // can't reach the outer one. Param defaults DO get a fresh
+            // `arguments` binding too (§10.2.3), so don't recurse there
+            // either.
+            .function_expr => false,
+            .class_expr => false,
+
+            .arrow_function => |af| blk: {
+                for (af.params) |*p| {
+                    if (self.paramContainsArguments(p)) break :blk true;
+                }
+                switch (af.body) {
+                    .expression => |xe| break :blk self.exprContainsArguments(xe),
+                    .block => |bl| {
+                        for (bl.body) |*s| {
+                            if (self.stmtContainsArguments(s)) break :blk true;
+                        }
+                    },
+                }
+                break :blk false;
+            },
+
+            .parenthesized => |p| self.exprContainsArguments(p.expression),
+            .unary => |u| self.exprContainsArguments(u.operand),
+            .binary => |b| self.exprContainsArguments(b.lhs) or self.exprContainsArguments(b.rhs),
+            .logical => |l| self.exprContainsArguments(l.lhs) or self.exprContainsArguments(l.rhs),
+            .conditional => |c| self.exprContainsArguments(c.test_) or
+                self.exprContainsArguments(c.consequent) or
+                self.exprContainsArguments(c.alternate),
+            .assignment => |a| self.exprContainsArguments(a.target) or self.exprContainsArguments(a.value),
+            .sequence => |sq| blk: {
+                for (sq.expressions) |*x| {
+                    if (self.exprContainsArguments(x)) break :blk true;
+                }
+                break :blk false;
+            },
+            .member => |m| blk: {
+                if (self.exprContainsArguments(m.object)) break :blk true;
+                switch (m.property) {
+                    .computed => |c| break :blk self.exprContainsArguments(c),
+                    else => break :blk false,
+                }
+            },
+            .call => |c| blk: {
+                if (self.exprContainsArguments(c.callee)) break :blk true;
+                for (c.arguments) |*x| {
+                    if (self.exprContainsArguments(x)) break :blk true;
+                }
+                break :blk false;
+            },
+            .new_expr => |n| blk: {
+                if (self.exprContainsArguments(n.callee)) break :blk true;
+                for (n.arguments) |*x| {
+                    if (self.exprContainsArguments(x)) break :blk true;
+                }
+                break :blk false;
+            },
+            .chain => |c| self.exprContainsArguments(c.expression),
+            .tagged_template => |t| self.exprContainsArguments(t.tag) or self.exprContainsArguments(t.quasi),
+            .template_literal => |tl| blk: {
+                for (tl.expressions) |*x| {
+                    if (self.exprContainsArguments(x)) break :blk true;
+                }
+                break :blk false;
+            },
+            .spread => |sp| self.exprContainsArguments(sp.argument),
+            .update => |u| self.exprContainsArguments(u.operand),
+            .array_literal => |al| blk: {
+                for (al.elements) |maybe_el| {
+                    if (maybe_el) |el| {
+                        if (self.exprContainsArguments(&el)) break :blk true;
+                    }
+                }
+                break :blk false;
+            },
+            .object_literal => |ol| blk: {
+                for (ol.properties) |m| switch (m) {
+                    .property => |p| {
+                        switch (p.key) {
+                            .computed => |c| if (self.exprContainsArguments(c)) break :blk true,
+                            else => {},
+                        }
+                        if (self.exprContainsArguments(&p.value)) break :blk true;
+                    },
+                    .spread => |sp| if (self.exprContainsArguments(sp.argument)) break :blk true,
+                    // method shorthand binds its own `arguments` — skip.
+                    .method => {},
+                };
+                break :blk false;
+            },
+            .yield => |y| if (y.argument) |arg| self.exprContainsArguments(arg) else false,
+            .await_ => |aw| self.exprContainsArguments(aw.argument),
+            .import_call => |ic| self.exprContainsArguments(ic.source),
+        };
+    }
+
+    fn paramContainsArguments(self: *Parser, p: *const stmt_mod.FunctionParam) bool {
+        return switch (p.*) {
+            .simple => |s| if (s.default) |d| self.exprContainsArguments(&d) else false,
+            .rest => |r| self.bindingTargetContainsArguments(r.target),
+        };
+    }
+
+    fn bindingTargetContainsArguments(self: *Parser, bt: stmt_mod.BindingTarget) bool {
+        return switch (bt) {
+            .identifier => false,
+            .object => |op| blk: {
+                for (op.properties) |prop| {
+                    if (prop.value.default) |d| {
+                        if (self.exprContainsArguments(&d)) break :blk true;
+                    }
+                    if (self.bindingTargetContainsArguments(prop.value.target)) break :blk true;
+                }
+                break :blk false;
+            },
+            .array => |ap| blk: {
+                for (ap.elements) |maybe_el| {
+                    if (maybe_el) |el| {
+                        if (el.default) |d| {
+                            if (self.exprContainsArguments(&d)) break :blk true;
+                        }
+                        if (self.bindingTargetContainsArguments(el.target)) break :blk true;
+                    }
+                }
+                break :blk false;
+            },
+        };
+    }
+
+    /// Statement-level ContainsArguments — same boundary semantics,
+    /// recurses into every nested expression and sub-statement.
+    fn stmtContainsArguments(self: *Parser, s: *const Statement) bool {
+        return switch (s.*) {
+            .empty, .debugger_, .break_, .continue_ => false,
+            .expression => |es| self.exprContainsArguments(&es.expression),
+            .block => |b| blk: {
+                for (b.body) |*c| {
+                    if (self.stmtContainsArguments(c)) break :blk true;
+                }
+                break :blk false;
+            },
+            .lexical => |lx| blk: {
+                for (lx.declarators) |d| {
+                    if (self.bindingTargetContainsArguments(d.name)) break :blk true;
+                    if (d.init) |i| {
+                        if (self.exprContainsArguments(&i)) break :blk true;
+                    }
+                }
+                break :blk false;
+            },
+            .if_ => |i| self.exprContainsArguments(&i.test_) or
+                self.stmtContainsArguments(i.consequent) or
+                (if (i.alternate) |a| self.stmtContainsArguments(a) else false),
+            .while_ => |w| self.exprContainsArguments(&w.test_) or self.stmtContainsArguments(w.body),
+            .do_while => |w| self.exprContainsArguments(&w.test_) or self.stmtContainsArguments(w.body),
+            .return_ => |r| if (r.argument) |a| self.exprContainsArguments(&a) else false,
+            .throw_ => |t| self.exprContainsArguments(&t.argument),
+            .for_ => |f| blk: {
+                if (f.init) |fi| switch (fi) {
+                    .expression => |e| if (self.exprContainsArguments(&e)) break :blk true,
+                    .lexical => |lx| {
+                        for (lx.declarators) |d| {
+                            if (d.init) |i| {
+                                if (self.exprContainsArguments(&i)) break :blk true;
+                            }
+                        }
+                    },
+                };
+                if (f.test_) |t| if (self.exprContainsArguments(&t)) break :blk true;
+                if (f.update) |u| if (self.exprContainsArguments(&u)) break :blk true;
+                if (self.stmtContainsArguments(f.body)) break :blk true;
+                break :blk false;
+            },
+            .for_in_of => |f| self.exprContainsArguments(&f.right) or self.stmtContainsArguments(f.body),
+            .try_ => |t| blk: {
+                for (t.block.body) |*c| if (self.stmtContainsArguments(c)) break :blk true;
+                if (t.handler) |h| for (h.body.body) |*c| if (self.stmtContainsArguments(c)) break :blk true;
+                if (t.finalizer) |f| for (f.body) |*c| if (self.stmtContainsArguments(c)) break :blk true;
+                break :blk false;
+            },
+            .switch_ => |sw| blk: {
+                if (self.exprContainsArguments(&sw.discriminant)) break :blk true;
+                for (sw.cases) |cs| {
+                    if (cs.test_) |ct| if (self.exprContainsArguments(&ct)) break :blk true;
+                    for (cs.body) |*c| if (self.stmtContainsArguments(c)) break :blk true;
+                }
+                break :blk false;
+            },
+            // Function / class declarations bind their own `arguments`
+            // (or `arguments` is meaningless inside a class body) — stop.
+            .function_decl, .class_decl => false,
+            // Module-level — class static block can't contain these so they're
+            // effectively dead branches, but recurse defensively.
+            .import_decl, .export_decl => false,
+        };
+    }
+
+    /// §15.7.11 ClassStaticBlockStatementList Contains await is true.
+    /// "Contains" walks every nested production, stopping at function/
+    /// class boundaries (same as ContainsArguments). For static blocks,
+    /// `await` is treated as a contextual keyword: an `AwaitExpr` node
+    /// inside the body counts; an `identifier_reference` named "await"
+    /// also counts (covers the !async parse path).
+    fn stmtContainsAwait(self: *Parser, s: *const Statement) bool {
+        return switch (s.*) {
+            .empty, .debugger_, .break_, .continue_, .function_decl, .class_decl, .import_decl, .export_decl => false,
+            .expression => |es| self.exprContainsAwait(&es.expression),
+            .block => |b| blk: {
+                for (b.body) |*c| if (self.stmtContainsAwait(c)) break :blk true;
+                break :blk false;
+            },
+            .lexical => |lx| blk: {
+                for (lx.declarators) |d| {
+                    if (d.init) |i| if (self.exprContainsAwait(&i)) break :blk true;
+                }
+                break :blk false;
+            },
+            .if_ => |i| self.exprContainsAwait(&i.test_) or
+                self.stmtContainsAwait(i.consequent) or
+                (if (i.alternate) |a| self.stmtContainsAwait(a) else false),
+            .while_ => |w| self.exprContainsAwait(&w.test_) or self.stmtContainsAwait(w.body),
+            .do_while => |w| self.exprContainsAwait(&w.test_) or self.stmtContainsAwait(w.body),
+            .return_ => |r| if (r.argument) |a| self.exprContainsAwait(&a) else false,
+            .throw_ => |t| self.exprContainsAwait(&t.argument),
+            .for_ => |f| blk: {
+                if (f.init) |fi| switch (fi) {
+                    .expression => |e| if (self.exprContainsAwait(&e)) break :blk true,
+                    .lexical => |lx| {
+                        for (lx.declarators) |d| if (d.init) |i| if (self.exprContainsAwait(&i)) break :blk true;
+                    },
+                };
+                if (f.test_) |t| if (self.exprContainsAwait(&t)) break :blk true;
+                if (f.update) |u| if (self.exprContainsAwait(&u)) break :blk true;
+                if (self.stmtContainsAwait(f.body)) break :blk true;
+                break :blk false;
+            },
+            .for_in_of => |f| self.exprContainsAwait(&f.right) or self.stmtContainsAwait(f.body),
+            .try_ => |t| blk: {
+                for (t.block.body) |*c| if (self.stmtContainsAwait(c)) break :blk true;
+                if (t.handler) |h| for (h.body.body) |*c| if (self.stmtContainsAwait(c)) break :blk true;
+                if (t.finalizer) |f| for (f.body) |*c| if (self.stmtContainsAwait(c)) break :blk true;
+                break :blk false;
+            },
+            .switch_ => |sw| blk: {
+                if (self.exprContainsAwait(&sw.discriminant)) break :blk true;
+                for (sw.cases) |cs| {
+                    if (cs.test_) |ct| if (self.exprContainsAwait(&ct)) break :blk true;
+                    for (cs.body) |*c| if (self.stmtContainsAwait(c)) break :blk true;
+                }
+                break :blk false;
+            },
+        };
+    }
+
+    fn exprContainsAwait(self: *Parser, e: *const Expression) bool {
+        return switch (e.*) {
+            .await_ => true,
+            .identifier_reference => |ir| std.mem.eql(u8, self.source[ir.span.start..ir.span.end], "await"),
+
+            .null_literal,
+            .boolean_literal,
+            .numeric_literal,
+            .bigint_literal,
+            .string_literal,
+            .regex_literal,
+            .this_expr,
+            .super_,
+            .import_meta,
+            .new_target,
+            => false,
+
+            .function_expr, .class_expr => false,
+
+            .arrow_function => |af| blk: {
+                switch (af.body) {
+                    .expression => |xe| break :blk self.exprContainsAwait(xe),
+                    .block => |bl| {
+                        for (bl.body) |*s| if (self.stmtContainsAwait(s)) break :blk true;
+                    },
+                }
+                break :blk false;
+            },
+
+            .parenthesized => |p| self.exprContainsAwait(p.expression),
+            .unary => |u| self.exprContainsAwait(u.operand),
+            .binary => |b| self.exprContainsAwait(b.lhs) or self.exprContainsAwait(b.rhs),
+            .logical => |l| self.exprContainsAwait(l.lhs) or self.exprContainsAwait(l.rhs),
+            .conditional => |c| self.exprContainsAwait(c.test_) or
+                self.exprContainsAwait(c.consequent) or
+                self.exprContainsAwait(c.alternate),
+            .assignment => |a| self.exprContainsAwait(a.target) or self.exprContainsAwait(a.value),
+            .sequence => |sq| blk: {
+                for (sq.expressions) |*x| if (self.exprContainsAwait(x)) break :blk true;
+                break :blk false;
+            },
+            .member => |m| blk: {
+                if (self.exprContainsAwait(m.object)) break :blk true;
+                switch (m.property) {
+                    .computed => |c| break :blk self.exprContainsAwait(c),
+                    else => break :blk false,
+                }
+            },
+            .call => |c| blk: {
+                if (self.exprContainsAwait(c.callee)) break :blk true;
+                for (c.arguments) |*x| if (self.exprContainsAwait(x)) break :blk true;
+                break :blk false;
+            },
+            .new_expr => |n| blk: {
+                if (self.exprContainsAwait(n.callee)) break :blk true;
+                for (n.arguments) |*x| if (self.exprContainsAwait(x)) break :blk true;
+                break :blk false;
+            },
+            .chain => |c| self.exprContainsAwait(c.expression),
+            .tagged_template => |t| self.exprContainsAwait(t.tag) or self.exprContainsAwait(t.quasi),
+            .template_literal => |tl| blk: {
+                for (tl.expressions) |*x| if (self.exprContainsAwait(x)) break :blk true;
+                break :blk false;
+            },
+            .spread => |sp| self.exprContainsAwait(sp.argument),
+            .update => |u| self.exprContainsAwait(u.operand),
+            .array_literal => |al| blk: {
+                for (al.elements) |maybe_el| {
+                    if (maybe_el) |el| if (self.exprContainsAwait(&el)) break :blk true;
+                }
+                break :blk false;
+            },
+            .object_literal => |ol| blk: {
+                for (ol.properties) |m| switch (m) {
+                    .property => |p| {
+                        switch (p.key) {
+                            .computed => |c| if (self.exprContainsAwait(c)) break :blk true,
+                            else => {},
+                        }
+                        if (self.exprContainsAwait(&p.value)) break :blk true;
+                    },
+                    .spread => |sp| if (self.exprContainsAwait(sp.argument)) break :blk true,
+                    .method => {},
+                };
+                break :blk false;
+            },
+            .yield => |y| if (y.argument) |arg| self.exprContainsAwait(arg) else false,
+            .import_call => |ic| self.exprContainsAwait(ic.source),
+        };
     }
 
     /// PropName for a MethodDefinition / FieldDefinition key, when
