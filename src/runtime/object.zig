@@ -52,6 +52,16 @@ pub const AccessorKind = enum(u8) {
     setter,
 };
 
+/// §27.2.6 PromiseState — internal slot, never surfaced to JS.
+/// `.none` is Cynic's sentinel for "not a Promise"; the value /
+/// reactions / waiters slots are unread in that state.
+pub const PromiseState = enum(u8) {
+    none,
+    pending,
+    fulfilled,
+    rejected,
+};
+
 /// Accessor pair (§10.1.8 [[Get]] / §10.1.9 [[Set]]). Either
 /// half may be `null` (write-only / read-only).
 pub const Accessor = struct {
@@ -277,6 +287,15 @@ pub const JSObject = struct {
     /// that runs the appropriate handler and settles the
     /// reaction's `result_promise`.
     promise_reactions: std.ArrayListUnmanaged(PromiseReaction) = .empty,
+    /// §27.2.6 `[[PromiseState]]`. `.none` means this object isn't
+    /// a Promise; the runtime brand-checks for `!= .none` rather
+    /// than walking the prototype chain. Hidden from JS — never
+    /// surfaces in `Object.keys` / `in` / property reads.
+    promise_state: PromiseState = .none,
+    /// §27.2.6 `[[PromiseResult]]`. Read only when
+    /// `promise_state` is fulfilled or rejected; pending Promises
+    /// leave it at `undefined_`.
+    promise_value: Value = Value.undefined_,
     /// §10.5 Proxy exotic — `[[ProxyTarget]]` / `[[ProxyHandler]]`
     /// internal slots when this object was constructed via
     /// `new Proxy(target, handler)`. `null` for plain objects.
@@ -624,6 +643,25 @@ pub const JSObject = struct {
     /// pre-allocate-and-fill pattern while keeping the worst-case
     /// dense allocation bounded to ~512 KB.
     const sparse_gap_threshold: usize = 1 << 16;
+
+    /// §27.2 — true iff this object is a Promise instance.
+    /// Checked via the internal `[[PromiseState]]` slot, NOT via
+    /// any user-visible property; a user can't forge a Promise
+    /// just by setting properties on a plain object.
+    pub inline fn isPromise(self: *const JSObject) bool {
+        return self.promise_state != .none;
+    }
+
+    /// Settle the promise's `[[PromiseState]]` / `[[PromiseResult]]`
+    /// pair atomically. Callers that need to chain reactions should
+    /// invoke this AFTER the reactions list has been drained or
+    /// snapshotted; the state flip is what makes subsequent
+    /// `.then` reactions resolve eagerly instead of registering
+    /// for later.
+    pub inline fn settlePromise(self: *JSObject, state: PromiseState, value: Value) void {
+        self.promise_state = state;
+        self.promise_value = value;
+    }
 
     /// Logical array length. Dense → `elements.items.len`;
     /// sparse → `sparse_length`. Callers should prefer this

@@ -595,6 +595,11 @@ pub const Heap = struct {
                     self.markValue(r.result_promise);
                 }
                 for (o.promise_waiters.items) |w| self.markGenerator(w);
+                // §27.2 `[[PromiseResult]]` — the settled value on
+                // a fulfilled / rejected Promise. Held in the typed
+                // `promise_value` slot rather than a property bag,
+                // so the regular property walk above misses it.
+                if (o.promise_state != .none) self.markValue(o.promise_value);
                 if (o.instance_field_inits) |inits| {
                     for (inits) |fi| {
                         if (fi.init_fn) |fnp| self.markValue(taggedFunction(fnp));

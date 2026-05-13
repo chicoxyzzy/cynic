@@ -527,10 +527,7 @@ fn asyncGenNext(realm: *Realm, this_value: Value, args: []const Value) @import("
 /// state. Used by async-gen yield's close-on-reject shim.
 fn isSyncRejectedPromise(v: Value) bool {
     const obj = heap_mod.valueAsPlainObject(v) orelse return false;
-    const state_v = obj.get("__cynic_promise_state__");
-    if (!state_v.isString()) return false;
-    const state: *@import("string.zig").JSString = @ptrCast(@alignCast(state_v.asString()));
-    return std.mem.eql(u8, state.bytes, "rejected");
+    return obj.promise_state == .rejected;
 }
 
 /// §27.6.1 — async generators carry a brand on their wrapper
@@ -614,14 +611,12 @@ const SettledOutcome = union(enum) {
 /// caller can register a reaction.
 fn unwrapSettledPromise(v: Value) SettledOutcome {
     const obj = heap_mod.valueAsPlainObject(v) orelse return .none;
-    const state_v = obj.get("__cynic_promise_state__");
-    if (!state_v.isString()) return .none;
-    const state: *@import("string.zig").JSString = @ptrCast(@alignCast(state_v.asString()));
-    const inner = obj.get("__cynic_promise_value__");
-    if (std.mem.eql(u8, state.bytes, "fulfilled")) return .{ .fulfilled = inner };
-    if (std.mem.eql(u8, state.bytes, "rejected")) return .{ .rejected = inner };
-    if (std.mem.eql(u8, state.bytes, "pending")) return .{ .pending = obj };
-    return .none;
+    return switch (obj.promise_state) {
+        .fulfilled => .{ .fulfilled = obj.promise_value },
+        .rejected => .{ .rejected = obj.promise_value },
+        .pending => .{ .pending = obj },
+        .none => .none,
+    };
 }
 
 fn asyncGenReturn(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
@@ -1162,22 +1157,18 @@ pub fn loadModule(
     }
 }
 
-/// Wrap `value` in a Promise-shape JSObject that mirrors the
-/// `__cynic_promise_state__` / `__cynic_promise_value__`
-/// convention `intrinsics.zig` settled on. Used by the Return
-/// op when the frame's `wrap_return_in_promise` flag is set —
-/// `async function` bodies `return v` into `Promise.resolve(v)`,
-/// uncaught throws into `Promise.reject(...)`. Spec: §27.7
-/// AsyncFunctionStart: an async function always returns a
-/// Promise; the body's normal completion fulfils it, an
-/// abrupt completion rejects it.
+/// Wrap `value` in a Promise — used by the Return op when the
+/// frame's `wrap_return_in_promise` flag is set: `async function`
+/// bodies `return v` into `Promise.resolve(v)`, uncaught throws
+/// into `Promise.reject(...)`. Spec §27.7 AsyncFunctionStart:
+/// an async function always returns a Promise; the body's normal
+/// completion fulfils it, an abrupt completion rejects it. The
+/// state lives in the typed `[[PromiseState]]` slot, not a
+/// property — so the Promise can't be forged from JS.
 pub fn wrapInPromise(realm: *Realm, fulfilled: bool, value: Value) !Value {
     const obj = try realm.heap.allocateObject();
     obj.prototype = realm.intrinsics.promise_prototype;
-    const state_str: []const u8 = if (fulfilled) "fulfilled" else "rejected";
-    const state_v = try realm.heap.allocateString(state_str);
-    try obj.set(realm.allocator, "__cynic_promise_state__", Value.fromString(state_v));
-    try obj.set(realm.allocator, "__cynic_promise_value__", value);
+    obj.settlePromise(if (fulfilled) .fulfilled else .rejected, value);
     return heap_mod.taggedObject(obj);
 }
 
@@ -1268,7 +1259,7 @@ fn runPromiseReaction(
             // result_promise's settlement to the inner Promise's.
             // Plain-value returns settle result_promise fulfilled.
             if (heap_mod.valueAsPlainObject(v)) |inner| {
-                if (inner.get("__cynic_promise_state__").isString()) {
+                if (inner.isPromise()) {
                     try chainPromiseToInner(realm, inner, result_obj);
                     return;
                 }
@@ -1286,17 +1277,16 @@ fn runPromiseReaction(
 /// Implemented by registering a no-handler reaction on `inner`
 /// pointing at `outer`. Spec §27.2.1.3 PromiseResolveThenableJob.
 fn chainPromiseToInner(realm: *Realm, inner: *JSObject, outer: *JSObject) !void {
-    const state = inner.get("__cynic_promise_state__");
-    if (state.isString()) {
-        const s: *JSString = @ptrCast(@alignCast(state.asString()));
-        if (std.mem.eql(u8, s.bytes, "fulfilled")) {
-            try realm.enqueuePromiseReaction(Value.undefined_, inner.get("__cynic_promise_value__"), heap_mod.taggedObject(outer), false);
+    switch (inner.promise_state) {
+        .fulfilled => {
+            try realm.enqueuePromiseReaction(Value.undefined_, inner.promise_value, heap_mod.taggedObject(outer), false);
             return;
-        }
-        if (std.mem.eql(u8, s.bytes, "rejected")) {
-            try realm.enqueuePromiseReaction(Value.undefined_, inner.get("__cynic_promise_value__"), heap_mod.taggedObject(outer), true);
+        },
+        .rejected => {
+            try realm.enqueuePromiseReaction(Value.undefined_, inner.promise_value, heap_mod.taggedObject(outer), true);
             return;
-        }
+        },
+        .pending, .none => {},
     }
     // Pending — register a no-handler reaction so settlement propagates.
     try inner.promise_reactions.append(realm.allocator, .{
@@ -1382,7 +1372,7 @@ pub fn resumeAsyncFunction(
             if (gen.result_promise) |rp| {
                 if (heap_mod.valueAsPlainObject(rp)) |rp_obj| {
                     if (heap_mod.valueAsPlainObject(v)) |v_obj| {
-                        if (v_obj.get("__cynic_promise_state__").isString()) {
+                        if (v_obj.isPromise()) {
                             chainPromiseToInner(realm, v_obj, rp_obj) catch return error.OutOfMemory;
                             gen.state = .completed;
                             return;
@@ -1416,15 +1406,11 @@ pub fn settlePromiseInternal(
     state: enum { fulfilled, rejected },
     value: Value,
 ) !void {
-    const cur_state = inst.get("__cynic_promise_state__");
-    if (cur_state.isString()) {
-        const s: *JSString = @ptrCast(@alignCast(cur_state.asString()));
-        if (!std.mem.eql(u8, s.bytes, "pending")) return; // already settled
-    }
-    const state_str: []const u8 = if (state == .fulfilled) "fulfilled" else "rejected";
-    const state_s = try realm.heap.allocateString(state_str);
-    try inst.set(realm.allocator, "__cynic_promise_state__", Value.fromString(state_s));
-    try inst.set(realm.allocator, "__cynic_promise_value__", value);
+    if (inst.promise_state != .pending) return; // already settled
+    inst.settlePromise(switch (state) {
+        .fulfilled => .fulfilled,
+        .rejected => .rejected,
+    }, value);
 
     // Fire async-await waiters as resume microtasks.
     const waiters = inst.promise_waiters;
@@ -1885,9 +1871,7 @@ pub fn startAsyncCall(
         p.prototype
     else
         realm.intrinsics.object_prototype;
-    const pending_str = realm.heap.allocateString("pending") catch return error.OutOfMemory;
-    promise_obj.set(realm.allocator, "__cynic_promise_state__", Value.fromString(pending_str)) catch return error.OutOfMemory;
-    promise_obj.set(realm.allocator, "__cynic_promise_value__", Value.undefined_) catch return error.OutOfMemory;
+    promise_obj.settlePromise(.pending, Value.undefined_);
     const result_promise = heap_mod.taggedObject(promise_obj);
 
     const wanted: usize = @max(@as(usize, chunk.register_count), args.len);
@@ -3929,13 +3913,11 @@ fn runFrames(
                 const v = acc;
                 drainMicrotasks(allocator, realm) catch return error.OutOfMemory;
                 if (heap_mod.valueAsPlainObject(v)) |obj| {
-                    const state_v = obj.get("__cynic_promise_state__");
-                    if (state_v.isString()) {
-                        const s: *JSString = @ptrCast(@alignCast(state_v.asString()));
-                        if (std.mem.eql(u8, s.bytes, "fulfilled")) {
-                            acc = obj.get("__cynic_promise_value__");
-                        } else if (std.mem.eql(u8, s.bytes, "rejected")) {
-                            const ex = obj.get("__cynic_promise_value__");
+                    if (obj.isPromise()) {
+                        if (obj.promise_state == .fulfilled) {
+                            acc = obj.promise_value;
+                        } else if (obj.promise_state == .rejected) {
+                            const ex = obj.promise_value;
                             f.ip = ip;
                             f.accumulator = acc;
                             committed = true;
@@ -5592,10 +5574,7 @@ fn runFrames(
                 // — the callback chain will handle the unwrap.
                 if (f.wrap_return_in_promise) {
                     const already_promise =
-                        if (heap_mod.valueAsPlainObject(ret)) |po|
-                            po.get("__cynic_promise_state__").isString()
-                        else
-                            false;
+                        if (heap_mod.valueAsPlainObject(ret)) |po| po.isPromise() else false;
                     if (!already_promise) {
                         ret = wrapInPromise(realm, true, ret) catch return error.OutOfMemory;
                     }

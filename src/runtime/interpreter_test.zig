@@ -1922,7 +1922,10 @@ test "later: async function suspends on pending await, resumes on settle" {
         \\const result = f();
         \\externalResolve(41);
         \\globalThis.__drainMicrotasks();
-        \\result.__cynic_promise_value__;
+        \\let captured;
+        \\result.then(v => { captured = v; });
+        \\globalThis.__drainMicrotasks();
+        \\captured;
     , 42);
 }
 
@@ -1937,7 +1940,10 @@ test "later: pending-await rejection throws inside the async body" {
         \\const result = f();
         \\externalReject("boom");
         \\globalThis.__drainMicrotasks();
-        \\result.__cynic_promise_value__;
+        \\let captured;
+        \\result.then(v => { captured = v; });
+        \\globalThis.__drainMicrotasks();
+        \\captured;
     , "caught:boom");
 }
 
@@ -1956,7 +1962,10 @@ test "later: chained pending awaits suspend twice" {
         \\globalThis.__drainMicrotasks();
         \\r2(32);
         \\globalThis.__drainMicrotasks();
-        \\result.__cynic_promise_value__;
+        \\let captured;
+        \\result.then(v => { captured = v; });
+        \\globalThis.__drainMicrotasks();
+        \\captured;
     , 42);
 }
 

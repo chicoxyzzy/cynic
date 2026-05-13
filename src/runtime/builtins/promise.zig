@@ -125,7 +125,12 @@ fn microtaskDrainNative(realm: *Realm, this_value: Value, args: []const Value) N
     return Value.undefined_;
 }
 
-pub const PromiseState = enum { pending, fulfilled, rejected };
+/// Re-export of the typed `[[PromiseState]]` slot defined in
+/// `runtime/object.zig`. The state is stored as an enum field on
+/// `JSObject` (`promise_state`), NOT as a property — so a user
+/// can't forge a Promise by setting `__cynic_promise_state__` on
+/// a plain object.
+pub const PromiseState = @import("../object.zig").PromiseState;
 
 fn allocatePromise(realm: *Realm, state: PromiseState, value: Value) !Value {
     return allocatePromiseFor(realm, null, state, value);
@@ -266,14 +271,11 @@ pub fn allocatePromiseFor(
         else
             realm.intrinsics.object_prototype;
     }
-    const state_str: []const u8 = switch (state) {
-        .pending => "pending",
-        .fulfilled => "fulfilled",
-        .rejected => "rejected",
-    };
-    const state_v = try realm.heap.allocateString(state_str);
-    try obj.set(realm.allocator, "__cynic_promise_state__", Value.fromString(state_v));
-    try obj.set(realm.allocator, "__cynic_promise_value__", value);
+    // §27.2.3.1 — the spec models `[[PromiseState]]` /
+    // `[[PromiseResult]]` as internal slots, NOT properties.
+    // We store them as typed JSObject fields so they don't
+    // surface in `Object.keys` / `in` / property reads.
+    obj.settlePromise(state, value);
     return heap_mod.taggedObject(obj);
 }
 
@@ -295,35 +297,29 @@ fn thisAsPromiseCtor(realm: *Realm, this_value: Value, op_name: []const u8) Nati
     return fn_obj;
 }
 
-fn promiseStateOf(v: Value) ?[]const u8 {
-    const obj = heap_mod.valueAsPlainObject(v) orelse return null;
-    const state_v = obj.get("__cynic_promise_state__");
-    if (!state_v.isString()) return null;
-    const s: *JSString = @ptrCast(@alignCast(state_v.asString()));
-    return s.bytes;
+fn promiseStateOf(v: Value) PromiseState {
+    const obj = heap_mod.valueAsPlainObject(v) orelse return .none;
+    return obj.promise_state;
 }
 
 fn promiseValueOf(v: Value) Value {
     const obj = heap_mod.valueAsPlainObject(v) orelse return Value.undefined_;
-    return obj.get("__cynic_promise_value__");
+    return obj.promise_value;
 }
 
 fn promiseConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Promise constructor requires 'new'");
     // §27.2.3.1 step 1 — `Promise.call(p, fn)` re-initialises an
     // existing Promise via plain-call. Cynic doesn't model
-    // NewTarget directly; an already-initialised receiver gives
-    // it away (its `__cynic_promise_state__` slot is set). Reject
-    // before clobbering the existing state.
-    if (!inst.get("__cynic_promise_state__").isUndefined()) {
+    // NewTarget directly; the typed `[[PromiseState]]` slot
+    // (`!= .none`) tells us this object is already a Promise.
+    if (inst.isPromise()) {
         return throwTypeError(realm, "Promise constructor requires 'new' (receiver already initialized)");
     }
     const executor = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Promise executor must be a function");
 
     // Initial state: pending.
-    const pending = realm.heap.allocateString("pending") catch return error.OutOfMemory;
-    inst.set(realm.allocator, "__cynic_promise_state__", Value.fromString(pending)) catch return error.OutOfMemory;
-    inst.set(realm.allocator, "__cynic_promise_value__", Value.undefined_) catch return error.OutOfMemory;
+    inst.settlePromise(.pending, Value.undefined_);
 
     // Resolve / reject capture the target Promise via a
     // bound-function trick: the actual native (impl) takes its
@@ -363,15 +359,12 @@ fn promiseConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
 }
 
 fn settlePromise(realm: *Realm, inst: *@import("../object.zig").JSObject, state: enum { fulfilled, rejected }, value: Value) !void {
-    const cur_state = inst.get("__cynic_promise_state__");
-    if (cur_state.isString()) {
-        const s: *JSString = @ptrCast(@alignCast(cur_state.asString()));
-        if (!std.mem.eql(u8, s.bytes, "pending")) return; // already settled
-    }
-    const state_str: []const u8 = if (state == .fulfilled) "fulfilled" else "rejected";
-    const state_s = try realm.heap.allocateString(state_str);
-    try inst.set(realm.allocator, "__cynic_promise_state__", Value.fromString(state_s));
-    try inst.set(realm.allocator, "__cynic_promise_value__", value);
+    _ = realm;
+    if (inst.promise_state != .pending) return; // already settled
+    inst.settlePromise(switch (state) {
+        .fulfilled => .fulfilled,
+        .rejected => .rejected,
+    }, value);
 }
 
 /// `resolve(v)` impl. The bound-function trampoline arranges
@@ -418,11 +411,8 @@ fn promiseThen(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     // For already-settled sources we still go through the
     // microtask queue (per spec — handlers always run async).
     const source = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Promise.prototype.then on non-Promise");
-    const state_v = source.get("__cynic_promise_state__");
-    if (!state_v.isString()) return throwTypeError(realm, "Promise.prototype.then on non-Promise");
-    const state_s: *JSString = @ptrCast(@alignCast(state_v.asString()));
-    const state = state_s.bytes;
-    const value = source.get("__cynic_promise_value__");
+    if (!source.isPromise()) return throwTypeError(realm, "Promise.prototype.then on non-Promise");
+    const value = source.promise_value;
 
     const on_fulfilled = argOr(args, 0, Value.undefined_);
     const on_rejected = argOr(args, 1, Value.undefined_);
@@ -431,13 +421,16 @@ fn promiseThen(realm: *Realm, this_value: Value, args: []const Value) NativeErro
 
     const result_promise = allocatePromise(realm, .pending, Value.undefined_) catch return error.OutOfMemory;
 
-    if (std.mem.eql(u8, state, "fulfilled")) {
-        realm.enqueuePromiseReaction(on_fulfilled_fn, value, result_promise, false) catch return error.OutOfMemory;
-        return result_promise;
-    }
-    if (std.mem.eql(u8, state, "rejected")) {
-        realm.enqueuePromiseReaction(on_rejected_fn, value, result_promise, true) catch return error.OutOfMemory;
-        return result_promise;
+    switch (source.promise_state) {
+        .fulfilled => {
+            realm.enqueuePromiseReaction(on_fulfilled_fn, value, result_promise, false) catch return error.OutOfMemory;
+            return result_promise;
+        },
+        .rejected => {
+            realm.enqueuePromiseReaction(on_rejected_fn, value, result_promise, true) catch return error.OutOfMemory;
+            return result_promise;
+        },
+        else => {},
     }
     // Pending — register reaction; settlement will fire it.
     source.promise_reactions.append(realm.allocator, .{
@@ -571,7 +564,7 @@ fn promiseResolve(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // [[Get]]("constructor") chain walk; close enough for the
     // common-case fixtures.
     if (heap_mod.valueAsPlainObject(v)) |maybe| {
-        if (promiseStateOf(v) != null) {
+        if (promiseStateOf(v) != .none) {
             const c_v = maybe.get("constructor");
             if (heap_mod.valueAsFunction(c_v)) |c| {
                 if (c == ctor) return v;
@@ -895,7 +888,7 @@ fn aggregatorRejectFromPending(realm: *Realm, ctor: *JSFunction) Value {
 fn resolveInputAsPromise(realm: *Realm, ctor: *JSFunction, v: Value) NativeError!Value {
     // Already a Cynic-tagged Promise of the right ctor — pass through.
     if (heap_mod.valueAsPlainObject(v)) |obj| {
-        if (promiseStateOf(v) != null) {
+        if (promiseStateOf(v) != .none) {
             const c_v = obj.get("constructor");
             if (heap_mod.valueAsFunction(c_v)) |c| {
                 if (c == ctor) return v;
@@ -1285,17 +1278,19 @@ fn allSettledProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, idx:
     const ctx: *AllSettledCtx = @ptrCast(@alignCast(ctx_ptr));
     const entry = realm.heap.allocateObject() catch return error.OutOfMemory;
     entry.prototype = realm.intrinsics.object_prototype;
-    if (promiseStateOf(resolved)) |state| {
-        if (std.mem.eql(u8, state, "rejected")) {
+    switch (promiseStateOf(resolved)) {
+        .rejected => {
             entry.set(realm.allocator, "status", Value.fromString(ctx.rejected_str)) catch return error.OutOfMemory;
             entry.set(realm.allocator, "reason", promiseValueOf(resolved)) catch return error.OutOfMemory;
-        } else {
+        },
+        .fulfilled, .pending => {
             entry.set(realm.allocator, "status", Value.fromString(ctx.fulfilled_str)) catch return error.OutOfMemory;
             entry.set(realm.allocator, "value", promiseValueOf(resolved)) catch return error.OutOfMemory;
-        }
-    } else {
-        entry.set(realm.allocator, "status", Value.fromString(ctx.fulfilled_str)) catch return error.OutOfMemory;
-        entry.set(realm.allocator, "value", resolved) catch return error.OutOfMemory;
+        },
+        .none => {
+            entry.set(realm.allocator, "status", Value.fromString(ctx.fulfilled_str)) catch return error.OutOfMemory;
+            entry.set(realm.allocator, "value", resolved) catch return error.OutOfMemory;
+        },
     }
     var ibuf: [24]u8 = undefined;
     const islice = std.fmt.bufPrint(&ibuf, "{d}", .{ctx.count}) catch unreachable;
@@ -1423,7 +1418,7 @@ fn promiseTry(realm: *Realm, this_value: Value, args: []const Value) NativeError
     return switch (outcome) {
         .value, .yielded => |v| blk: {
             if (heap_mod.valueAsPlainObject(v)) |maybe| {
-                if (promiseStateOf(v) != null) {
+                if (promiseStateOf(v) != .none) {
                     const c_v = maybe.get("constructor");
                     if (heap_mod.valueAsFunction(c_v)) |c| {
                         if (c == ctor) break :blk v;
