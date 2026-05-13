@@ -144,7 +144,7 @@ Requires Zig **0.17-dev** (master). The Zig project skipped a stable
 - `--quiet` / `--verbose` — progress noise dial.
 - `--no-harness` — skip the `sta.js` + `assert.js` preamble in runtime mode (for measuring the floor).
 - `--threads=<n>` — worker count (`0` = auto, `1` = sequential, `>1` = pool).
-- `--gc-threshold=<n>` — per-fixture allocation-pressure GC threshold (default 4,096; engine default 16,384). Lower values cap a misbehaving fixture's RSS more aggressively but currently surface the four known root gaps tracked in [`docs/handbook/gc.md`](docs/handbook/gc.md). `0` falls through to the engine default.
+- `--gc-threshold=<n>` — per-fixture allocation-pressure GC threshold (default 32,768; engine default 16,384). Lower values cap a misbehaving fixture's RSS more aggressively but currently surface the four known root gaps tracked in [`docs/handbook/gc.md`](docs/handbook/gc.md). `0` falls through to the engine default.
 - `--write-results` — update `test262-results.md` with today's row for the given mode. Re-running the same `(date, mode)` replaces that day's row rather than appending. The default run never touches that file.
 
 The Unicode `ID_Start` / `ID_Continue` tables are committed under

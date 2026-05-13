@@ -127,9 +127,10 @@ rewritten only on full runs without `--filter` and without
 reference path, `>1` = pool. Past ~4 threads diminishing
 returns kick in from libc malloc contention),
 `--gc-threshold=<n>` (per-fixture allocation-pressure GC
-threshold, default 65,536; lower values stress-test the GC
+threshold, default 32,768; lower values stress-test the GC
 trigger but currently surface the known root gaps in
-[docs/handbook/gc.md](docs/handbook/gc.md)),
+[docs/handbook/gc.md](docs/handbook/gc.md). `0` falls through
+to the engine default of 16,384),
 `--gc-stats` (per-realm one-line stderr report after every
 GC cycle — pause time + per-pool live counts; pair with
 `--filter` to keep output sane),
