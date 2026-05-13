@@ -427,6 +427,13 @@ fn serializeJSONObject(
         // When using own keys, skip non-enumerable.
         if (state.property_list == null) {
             if (!obj.flagsFor(key).enumerable) continue;
+            // §25.5.2.5 step 5.a — Symbol-keyed properties never
+            // surface in JSON.stringify output. Cynic encodes
+            // user symbols as `<sym:…>` and well-known ones as
+            // `@@<name>`; both are synthetic, never set by user
+            // JS via a string literal, and the spec drops them.
+            if (std.mem.startsWith(u8, key, "<sym:")) continue;
+            if (std.mem.startsWith(u8, key, "@@")) continue;
         }
         // Probe whether the property serializes to anything.
         var item_buf: std.ArrayListUnmanaged(u8) = .empty;
