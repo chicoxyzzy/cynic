@@ -764,7 +764,14 @@ fn taBufOf(tv: ObjMod.TypedView) ?[]u8 {
 fn taSafeRead(realm: *Realm, tv: ObjMod.TypedView, i: i64) Value {
     const buf = tv.viewed.array_buffer orelse return Value.undefined_;
     if (i < 0 or i >= @as(i64, @intCast(tv.length))) return Value.undefined_;
-    const off = tv.byte_offset + @as(usize, @intCast(i)) * tv.kind.elementSize();
+    const elem_size = tv.kind.elementSize();
+    const off = tv.byte_offset + @as(usize, @intCast(i)) * elem_size;
+    // §10.4.5 IntegerIndexedExoticObject — if the backing store
+    // was shrunk below the stored length (resizable ArrayBuffer),
+    // the element is out-of-bounds and the spec says return
+    // `undefined`. Without this guard, `readTypedElement` reads
+    // past `buf.len` and we segfault.
+    if (off + elem_size > buf.len) return Value.undefined_;
     return readTypedElement(realm, buf, tv.kind, off);
 }
 
