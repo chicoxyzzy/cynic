@@ -655,6 +655,39 @@ test "Parser: let eval = 1 emits restricted_identifier_in_strict" {
     try testing.expectEqual(Code.restricted_identifier_in_strict, diags.items[0].code);
 }
 
+test "Parser: arrow (x, {x}) duplicate BoundNames emits SyntaxError" {
+    // §15.3.1: BoundNames of ArrowParameters must contain no duplicates.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var diags: Diagnostics = .empty;
+    defer diags.deinit(arena.allocator());
+    _ = parseScript(arena.allocator(), "var af = (x, {x}) => 1;", &diags) catch {};
+    try testing.expect(diags.items.len >= 1);
+    try testing.expectEqual(Code.restricted_identifier_in_strict, diags.items[0].code);
+}
+
+test "Parser: arrow (x, ...x) duplicate BoundNames emits SyntaxError" {
+    // §15.3.1: rest parameter target collides with prior simple param.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var diags: Diagnostics = .empty;
+    defer diags.deinit(arena.allocator());
+    _ = parseScript(arena.allocator(), "var af = (x, ...x) => 1;", &diags) catch {};
+    try testing.expect(diags.items.len >= 1);
+    try testing.expectEqual(Code.restricted_identifier_in_strict, diags.items[0].code);
+}
+
+test "Parser: arrow ({y: x}, ...x) duplicate BoundNames emits SyntaxError" {
+    // §15.3.1: ObjectBindingPattern element collides with later rest.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var diags: Diagnostics = .empty;
+    defer diags.deinit(arena.allocator());
+    _ = parseScript(arena.allocator(), "var af = ({y: x}, ...x) => 1;", &diags) catch {};
+    try testing.expect(diags.items.len >= 1);
+    try testing.expectEqual(Code.restricted_identifier_in_strict, diags.items[0].code);
+}
+
 test "Parser: const arguments = 1 emits restricted_identifier_in_strict" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();

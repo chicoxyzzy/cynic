@@ -2777,6 +2777,25 @@ pub fn enforceStrictDirectiveSimplicity(
     try p.report(.unexpected_token, span);
 }
 
+/// §15.3.1 ArrowFunction early error: "It is a Syntax Error if BoundNames
+/// of ArrowParameters contains any duplicate elements." Walks every
+/// parameter's BindingTarget via the existing `collectBoundNames` machinery
+/// (which also reports the duplicate diagnostic). Function declarations /
+/// expressions / methods route through `parseFunctionParameters`, which
+/// runs the same check inline; arrows are built by the
+/// `collectArrowParams` reinterpret path and need an explicit call here.
+pub fn enforceUniqueParamBoundNames(
+    p: *Parser,
+    params: []const stmt_mod.FunctionParam,
+) ParseError!void {
+    var bound_names: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer bound_names.deinit(p.arena);
+    for (params) |param| switch (param) {
+        .simple => |sp| try p.collectBoundNames(sp.target, &bound_names),
+        .rest => |rp| try p.collectBoundNames(rp.target, &bound_names),
+    };
+}
+
 /// True when `kind` can begin an ObjectLiteral / ClassBody PropertyName.
 /// Identifier (and any reserved-word identifier-name), string, numeric,
 /// computed (`[`), and PrivateIdentifier (class only) are valid starts.

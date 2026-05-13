@@ -247,6 +247,8 @@ fn buildArrow(
     if (body == .block) {
         try parser_mod.enforceStrictDirectiveSimplicity(p, owned, body.block.body, body.block.span);
     }
+    // §15.3.1: BoundNames of ArrowParameters must contain no duplicates.
+    try parser_mod.enforceUniqueParamBoundNames(p, owned);
     return .{ .arrow_function = .{
         .span = .{ .start = start, .end = end },
         .params = owned,
