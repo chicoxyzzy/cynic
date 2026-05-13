@@ -343,6 +343,14 @@ pub const JSObject = struct {
     /// `Object.getOwnPropertyDescriptor(arr, "length")` returns a
     /// data descriptor as the spec demands.
     is_array_exotic: bool = false,
+    /// §20.5.1.1 [[ErrorData]] — set when this object is an Error
+    /// (or NativeError) instance produced via `new <X>Error(...)`
+    /// / `<X>Error(...)`. Object.prototype.toString uses this to
+    /// emit `"[object Error]"`; AggregateError init also flips it.
+    /// Plain `<X>Error.prototype` does NOT have this slot, which is
+    /// what `built-ins/NativeErrors/<X>/prototype/not-error-object.js`
+    /// asserts.
+    has_error_data: bool = false,
     elements: std.ArrayListUnmanaged(Value) = .empty,
     /// §10.4.2 Array exotic — dictionary mode (V8-style). When a
     /// single indexed write would extend `elements` by more than

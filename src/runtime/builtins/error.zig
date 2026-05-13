@@ -133,6 +133,7 @@ fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) N
         fresh.prototype = proto;
         break :blk fresh;
     };
+    instance.has_error_data = true;
 
     // §20.5.7.1.1 step 4 — IteratorToList(GetIterator(errors)).
     // Cynic doesn't have a generic GetIterator helper at this
@@ -157,7 +158,7 @@ fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) N
     // ToString and pin as own with `{ w:true, e:false, c:true }`
     // per `CreateNonEnumerableDataPropertyOrThrow`.
     if (args.len > 1 and !args[1].isUndefined()) {
-        const msg_str = stringifyArg(realm, args[1]) catch return error.OutOfMemory;
+        const msg_str = try stringifyArg(realm, args[1]);
         instance.setWithFlags(realm.allocator, "message", Value.fromString(msg_str), .{
             .writable = true, .enumerable = false, .configurable = true,
         }) catch return error.OutOfMemory;
@@ -400,11 +401,19 @@ fn constructErrorInstance(realm: *Realm, this_value: Value, proto: *JSObject, ar
         fresh.prototype = proto;
         break :blk fresh;
     };
+    // §20.5.1.1 step 3 — install [[ErrorData]] slot so
+    // Object.prototype.toString picks the "Error" tag (and so
+    // user-facing IsError-style introspection can distinguish a
+    // real instance from `Error.prototype`).
+    instance.has_error_data = true;
     // §20.5.1.1 step 4 — DefinePropertyOrThrow with descriptor
     // `{[[Value]]: msg, [[Writable]]: true, [[Enumerable]]: false,
     //  [[Configurable]]: true}`.
     if (args.len > 0 and !args[0].isUndefined()) {
-        const msg_str = stringifyArg(realm, args[0]) catch return error.OutOfMemory;
+        // `stringifyArg` can throw TypeError for Symbol arguments
+        // (§7.1.17 ToString step 2); that throw must propagate as
+        // a real JS exception, not be swallowed as OutOfMemory.
+        const msg_str = try stringifyArg(realm, args[0]);
         instance.setWithFlags(realm.allocator, "message", Value.fromString(msg_str), .{
             .writable = true,
             .enumerable = false,
@@ -468,6 +477,7 @@ pub fn newURIError(realm: *Realm, message: []const u8) !Value {
 fn makeError(realm: *Realm, proto: *JSObject, message: []const u8) !Value {
     const instance = try realm.heap.allocateObject();
     instance.prototype = proto;
+    instance.has_error_data = true;
     const msg_str = try realm.heap.allocateString(message);
     try instance.set(realm.allocator, "message", Value.fromString(msg_str));
     return heap_mod.taggedObject(instance);

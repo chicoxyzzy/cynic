@@ -552,8 +552,20 @@ fn descriptorKey(realm: *Realm, v: Value) NativeError![]const u8 {
     // `Object.defineProperty(o, sym, ...)` and `o[sym]` resolve
     // to the same slot.
     if (heap_mod.valueAsSymbol(v)) |sym| return sym.prop_key;
-    // §7.1.19 ToPropertyKey — fall back to ToString for numbers,
-    // booleans, etc.
+    // §7.1.19 ToPropertyKey:
+    //   1. key = ToPrimitive(arg, hint "string")
+    //   2. If key is Symbol, return key
+    //   3. Return ToString(key)
+    // The split matters when a user wrapper's `valueOf` returns
+    // a Symbol — stringifyArg alone would throw "cannot convert
+    // Symbol to string" instead of using the returned Symbol as
+    // the key. Run ToPrimitive first, then dispatch.
+    if (heap_mod.valueAsPlainObject(v) != null) {
+        const prim = try intrinsics.toPrimitive(realm, v, .string);
+        if (heap_mod.valueAsSymbol(prim)) |sym| return sym.prop_key;
+        const s = try stringifyArg(realm, prim);
+        return s.bytes;
+    }
     const s = stringifyArg(realm, v) catch return error.OutOfMemory;
     return s.bytes;
 }
@@ -1662,14 +1674,30 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 // ── Object.prototype methods ────────────────────────────────────────────────
 
 fn objectHasOwnProperty(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    // §7.1.19 ToPropertyKey for the lookup — symbol args coerce
-    // through their stable `prop_key` slug, primitives via ToString.
-    const key = descriptorKey(realm, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
+    // §20.1.3.2 step 1 — `ToPropertyKey(V)` runs BEFORE `ToObject(this)`,
+    // so a coercion throw from the argument propagates even when the
+    // receiver is null/undefined. Use `try` instead of swallowing as
+    // OutOfMemory.
+    const key = try descriptorKey(realm, argOr(args, 0, Value.undefined_));
+    // §20.1.3.2 step 2 — `ToObject(this)` throws on null / undefined.
+    if (this_value.isNull() or this_value.isUndefined()) {
+        return throwTypeError(realm, "Object.prototype.hasOwnProperty called on null or undefined");
+    }
     if (heap_mod.valueAsPlainObject(this_value)) |obj| {
         return Value.fromBool(obj.hasOwn(key));
     }
     if (heap_mod.valueAsFunction(this_value)) |fn_obj| {
         return Value.fromBool(fn_obj.hasOwn(key));
+    }
+    // Primitives (string, number, etc.) ToObject-coerce; the spec
+    // result is "did the boxed wrapper have key as own?". For
+    // string primitives we still consult the indexed view.
+    if (this_value.isString()) {
+        const s: *@import("../string.zig").JSString = @ptrCast(@alignCast(this_value.asString()));
+        // Numeric indices that fall within the string look like own.
+        if (std.mem.eql(u8, key, "length")) return Value.true_;
+        const i = std.fmt.parseInt(usize, key, 10) catch return Value.false_;
+        return Value.fromBool(i < s.bytes.len);
     }
     return Value.false_;
 }
@@ -1757,8 +1785,14 @@ fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value) Na
                 if (bp.isInt32() or bp.isDouble()) break :blk "Number";
             }
             if (obj.boxed_string != null) break :blk "String";
-            // Date / Error / arguments: rely on @@toStringTag
-            // walked in step 5 below. Default falls through.
+            // §20.5.3 / §22.1.3.6 — objects with the [[ErrorData]]
+            // internal slot tag as "Error". The `<X>Error.prototype`
+            // objects intentionally don't have this slot (per
+            // `built-ins/NativeErrors/<X>/prototype/not-error-object.js`)
+            // so the bare prototype falls through to "Object".
+            if (obj.has_error_data) break :blk "Error";
+            // Date / arguments: rely on @@toStringTag walked in
+            // step 5 below. Default falls through.
             break :blk "Object";
         }
         break :blk "Object";
