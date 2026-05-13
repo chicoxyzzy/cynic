@@ -380,6 +380,10 @@ fn reflectApply(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const this_arg = argOr(args, 1, Value.undefined_);
     const args_v = argOr(args, 2, Value.undefined_);
 
+    // §28.1.1 step 4 — `CreateListFromArrayLike(argumentsList)`.
+    // The list source must be an Object; primitives (null,
+    // undefined, false, NaN, …) throw TypeError synchronously,
+    // before any function invocation.
     var apply_args: std.ArrayListUnmanaged(Value) = .empty;
     defer apply_args.deinit(realm.allocator);
     if (heap_mod.valueAsPlainObject(args_v)) |arr| {
@@ -390,6 +394,8 @@ fn reflectApply(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
             apply_args.append(realm.allocator, arr.get(islice)) catch return error.OutOfMemory;
         }
+    } else {
+        return throwTypeError(realm, "Reflect.apply: argumentsList is not an object");
     }
 
     const interpreter = @import("../interpreter.zig");
@@ -413,6 +419,8 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const new_target_v = argOr(args, 2, Value.undefined_);
     const interpreter = @import("../interpreter.zig");
 
+    // §28.1.2 step 3 — `CreateListFromArrayLike(argumentsList)`.
+    // Reject non-object argumentsList per §7.3.18 step 2.
     var ctor_args: std.ArrayListUnmanaged(Value) = .empty;
     defer ctor_args.deinit(realm.allocator);
     if (heap_mod.valueAsPlainObject(args_v)) |arr| {
@@ -423,6 +431,8 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
             ctor_args.append(realm.allocator, arr.get(islice)) catch return error.OutOfMemory;
         }
+    } else {
+        return throwTypeError(realm, "Reflect.construct: argumentsList is not an object");
     }
 
     // §10.5.14 — if `target` is a Proxy with a `construct` trap,
