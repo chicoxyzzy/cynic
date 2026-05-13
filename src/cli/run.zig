@@ -52,13 +52,28 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, paths: []const []const u8) 
         if (last_outcome == .thrown) break;
     }
 
+    // §9.4 — every host must finish the current Job (drain
+    // pending microtasks) before returning to the caller. Without
+    // this, `Promise.resolve(v).then(cb)` at the top of a script
+    // never runs `cb` and the user sees the unresolved Promise as
+    // the script's final value.
+    cynic.runtime.interpreter.drainMicrotasks(allocator, &realm) catch {};
+
     // Flush anything `print` / `console.log` buffered.
     if (realm.output.items.len > 0) {
         try std.Io.File.stdout().writeStreamingAll(io, realm.output.items);
     }
 
     switch (last_outcome) {
-        .value, .yielded => |v| try printValue(io, v),
+        .value, .yielded => |v| {
+            // Suppress trailing `undefined` / unsettled-Promise
+            // prints — they're noise for a `run`-style invocation
+            // (the script chose what to log). Real values (a
+            // computed number, an explicit `42` at the end of the
+            // file) still print so an `eval`-style use stays
+            // useful. Matches `node script.js` semantics.
+            if (!v.isUndefined() and !isPlainObject(v)) try printValue(io, v);
+        },
         .thrown => |v| {
             try std.Io.File.stderr().writeStreamingAll(io, "Uncaught: ");
             try printValueStream(io, std.Io.File.stderr(), v);
@@ -66,6 +81,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, paths: []const []const u8) 
             std.process.exit(1);
         },
     }
+}
+
+fn isPlainObject(v: Value) bool {
+    return cynic.runtime.heap.valueAsPlainObject(v) != null;
 }
 
 fn printValue(io: std.Io, v: Value) !void {
