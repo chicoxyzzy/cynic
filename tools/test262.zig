@@ -1296,43 +1296,38 @@ fn classifyAndRun(
         realm.module_loader = test262ModuleLoader;
     }
 
-    // later §16.1.6 ScriptEvaluation: harness runs as TWO
-    // separate Scripts — sta.js, then assert.js — against the
-    // same realm, then the test source as a third Script. No
-    // concat, no synthetic single buffer; each Script's spans
-    // index its own source.
-    //
-    // Modules skip the harness preload (modules don't share
-    // global env semantics with Scripts, and test262's module
-    // tests carry their own setup via `includes:` which is
-    // already filtered upstream).
-    if (!is_module) {
-        if (harness_pair) |hp| {
-            const r1 = cynic.runtime.evaluateScript(arena, &realm, hp.sta) catch {
-                return .{ .kind = .fail_false_reject };
-            };
-            if (r1 == .thrown) return .{ .kind = .fail_false_reject };
-            const r2 = cynic.runtime.evaluateScript(arena, &realm, hp.assert_js) catch {
-                return .{ .kind = .fail_false_reject };
-            };
-            if (r2 == .thrown) return .{ .kind = .fail_false_reject };
+    // §16.1.6 ScriptEvaluation: harness runs as TWO separate
+    // Scripts — sta.js, then assert.js — against the same realm,
+    // then the test source. The script-vs-module split below is
+    // about how the *test source itself* gets evaluated; the
+    // preload happens for both, because modules and scripts share
+    // a global env and module bodies reference `assert.*` / $DONE
+    // globally.
+    if (harness_pair) |hp| {
+        const r1 = cynic.runtime.evaluateScript(arena, &realm, hp.sta) catch {
+            return .{ .kind = .fail_false_reject };
+        };
+        if (r1 == .thrown) return .{ .kind = .fail_false_reject };
+        const r2 = cynic.runtime.evaluateScript(arena, &realm, hp.assert_js) catch {
+            return .{ .kind = .fail_false_reject };
+        };
+        if (r2 == .thrown) return .{ .kind = .fail_false_reject };
 
-            // Each `includes:` name resolves to a `vendor/test262/harness/<name>`
-            // file, evaluated as another Script in the same realm.
-            // Per spec, includes load AFTER sta + assert and BEFORE
-            // the test source. An include we don't have on disk
-            // turns the test into `has_includes` skip (early-return
-            // signalled by `error.NativeThrew` is treated as a
-            // genuine harness failure, not a missing-file skip).
-            for (fm.includes) |inc_name| {
-                const inc_source = hp.lookupInclude(inc_name) orelse {
-                    return .{ .kind = .skip, .skip_reason = .has_includes };
-                };
-                const r_inc = cynic.runtime.evaluateScript(arena, &realm, inc_source) catch {
-                    return .{ .kind = .fail_false_reject };
-                };
-                if (r_inc == .thrown) return .{ .kind = .fail_false_reject };
-            }
+        // Each `includes:` name resolves to a `vendor/test262/harness/<name>`
+        // file, evaluated as another Script in the same realm.
+        // Per spec, includes load AFTER sta + assert and BEFORE
+        // the test source. An include we don't have on disk
+        // turns the test into `has_includes` skip (early-return
+        // signalled by `error.NativeThrew` is treated as a
+        // genuine harness failure, not a missing-file skip).
+        for (fm.includes) |inc_name| {
+            const inc_source = hp.lookupInclude(inc_name) orelse {
+                return .{ .kind = .skip, .skip_reason = .has_includes };
+            };
+            const r_inc = cynic.runtime.evaluateScript(arena, &realm, inc_source) catch {
+                return .{ .kind = .fail_false_reject };
+            };
+            if (r_inc == .thrown) return .{ .kind = .fail_false_reject };
         }
     }
 
