@@ -1112,6 +1112,17 @@ pub const Parser = struct {
         }
         const rbrace = try self.expect(.rbrace);
         const cases_slice = try cases.toOwnedSlice(self.arena);
+        // §14.12 SwitchStatement — at most one `default:` clause.
+        var default_seen = false;
+        for (cases_slice) |case| {
+            if (case.test_ == null) {
+                if (default_seen) {
+                    try self.report(.duplicate_lexical_binding, case.span);
+                } else {
+                    default_seen = true;
+                }
+            }
+        }
         // §14.12.1 CaseBlock early errors: LDN of the entire switch body
         // must have no duplicates and must not intersect VDN. Validate
         // against the concatenation of every case's StatementList.

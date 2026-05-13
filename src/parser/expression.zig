@@ -571,14 +571,14 @@ fn parseConditional(p: *Parser) ParseError!Expression {
     const test_expr = try parseShortCircuit(p, lowest_logical_prec);
     if (p.peek().kind != .question) return test_expr;
     _ = try p.bump();
-    // §13.14 — both branches of the `?:` use AssignmentExpression[+In],
-    // so re-enable `in` even when the outer context cleared it (e.g.
-    // for-init heads). The `?` is at precedence below `in`, so the
-    // test-side is the only place the outer `[~In]` is observable.
+    // §13.14 — `? AssignmentExpression[+In] : AssignmentExpression[?In]`.
+    // The consequent is unconditionally `[+In]`; the alternate
+    // inherits the outer context (so `for (a ? b : c in d ; …)` is
+    // still a SyntaxError, matching the spec).
     const saved_allow_in = p.allow_in;
     p.allow_in = true;
-    defer p.allow_in = saved_allow_in;
     const consequent = try parseAssignment(p);
+    p.allow_in = saved_allow_in;
     _ = try p.expect(.colon);
     const alternate = try parseAssignment(p);
     const test_ptr = try p.arena.create(Expression);
@@ -657,8 +657,12 @@ fn parseBinary(p: *Parser, min_prec: u8) ParseError!Expression {
     // ShiftExpression`. This is the only context where a bare
     // PrivateIdentifier can begin an expression; recognise it before
     // falling through to the regular unary/primary parse, which would
-    // reject the `#`.
-    if (p.allow_in and p.peek().kind == .private_identifier) {
+    // reject the `#`. The cover-form is only allowed at
+    // RelationalExpression precedence (10) or lower — at higher
+    // precedences (e.g. the RHS of `<<`, or another `in`'s RHS which
+    // is ShiftExpression at prec 11) `#x` is illegal, so chained
+    // forms like `#a in #b in c` correctly surface a SyntaxError.
+    if (min_prec <= 10 and p.allow_in and p.peek().kind == .private_identifier) {
         const after = try p.peek2();
         if (after.kind == .kw_in) {
             const priv = try p.bump();
@@ -1354,11 +1358,18 @@ fn parseImportExpression(p: *Parser) ParseError!Expression {
     const import_tok = try p.bump();
     if (p.peek().kind == .lparen) {
         _ = try p.bump();
+        // §13.3.10 — both ImportCall arguments are
+        // `AssignmentExpression[+In, ?Yield, ?Await]`. Re-enable
+        // `[+In]` so a `for (… import(x, a in b); …)` head doesn't
+        // suppress the operator inside the options expression.
+        const saved_allow_in = p.allow_in;
+        p.allow_in = true;
+        defer p.allow_in = saved_allow_in;
         const arg = try parseAssignment(p);
-        // §13.3.10 ImportCall takes an optional `options` argument
-        // (ES2025 import-attributes). Trailing commas are also
-        // grammar-legal. Parse-and-discard the options — the
-        // runtime loader hook doesn't consume them yet.
+        // ImportCall takes an optional `options` argument (ES2025
+        // import-attributes). Trailing commas are also grammar-legal.
+        // Parse-and-discard the options — the runtime loader hook
+        // doesn't consume them yet.
         if (try p.eat(.comma)) {
             if (p.peek().kind != .rparen) {
                 _ = try parseAssignment(p);
@@ -1915,6 +1926,11 @@ pub fn canStartExpression(kind: TokenKind) bool {
         // these flow through and surface as `unexpected_token` somewhere
         // useful.
         .kw_yield, .kw_await => true,
+        // PrivateIdentifier as the LHS of `in` is the only expression-
+        // initial position where `#name` is legal (§13.10.2). The
+        // dispatcher routes it here so the relational tail picks it up;
+        // any other position downstream surfaces a SyntaxError.
+        .private_identifier => true,
         // `/` and `/=` in expression-start position open a
         // RegularExpressionLiteral (§12.9.5). The parser switches the
         // lexer into `InputElementRegExp` mode by re-scanning.
