@@ -616,6 +616,30 @@
           <p>Yes, that's real ECMAScript. Yes, we are pretending it isn't.</p>
           <div class="quote">SyntaxError: this is a JS file. compose yourself.</div>
         </article>
+
+        <article class="refuse">
+          <div class="stamp">PERMANENT</div>
+          <span class="feature">eval() · new Function("…")</span>
+          <h3>Runtime code construction</h3>
+          <p>Out for good. Aligns with <a href="https://github.com/endojs/endo/tree/main/packages/ses" target="_blank" rel="noopener">SES</a> / Hardened JavaScript, kills the optimization fence, and removes the supply-chain bait. Multi-file scripts use a host hook, not user-reachable.</p>
+          <div class="quote">EvalError: not even once.</div>
+        </article>
+
+        <article class="refuse">
+          <div class="stamp">NOPE</div>
+          <span class="feature">Intl.*</span>
+          <h3>The internationalization API</h3>
+          <p>Locale-aware formatting is a separate runtime project. <code>Date</code>, <code>Number.prototype.toLocaleString</code>, and friends use ISO / C locale and stay that way.</p>
+          <div class="quote">ReferenceError: Intl is not shipped here.</div>
+        </article>
+
+        <article class="refuse">
+          <div class="stamp">DENIED</div>
+          <span class="feature">SharedArrayBuffer · Atomics</span>
+          <h3>Shared-memory primitives</h3>
+          <p>Defeats SES-style isolation. Cynic's edge-runtime hosts are single-agent-per-isolate by design — there's nothing to share memory with.</p>
+          <div class="quote">ReferenceError: no shared agents, no Atomics.</div>
+        </article>
       </div>
     </section>
 
@@ -724,8 +748,35 @@
 
         <div class="compare-row">
           <div>
-            <div class="feature-name"><code>yield*</code> delegation · <code>for await of</code> · top-level <code>await</code></div>
-            <div class="compare-note">parser accepts; runtime / module loader still talking it out</div>
+            <div class="feature-name">Dynamic <code>import()</code></div>
+            <div class="compare-note">host-loader-backed; non-Promise &amp; settled-Promise cases through <code>await</code></div>
+          </div>
+          <div class="check">Works.</div>
+          <div>Returns a real Promise. The loader is up to the host. The body is up to the spec.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name"><code>WeakRef</code> · <code>FinalizationRegistry</code></div>
+            <div class="compare-note">§26.1 / §26.2; strong-ref impl today, real weakness lands with generational GC</div>
+          </div>
+          <div class="check">Works.</div>
+          <div>The API surface ships. The weakness is on the same roadmap as the nursery.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">ES2025 collection &amp; Promise additions</div>
+            <div class="compare-note"><code>Set</code> union / intersection / difference / symmetricDifference / isSubsetOf / isSupersetOf / isDisjointFrom · <code>Promise.try</code> · <code>Promise.withResolvers</code></div>
+          </div>
+          <div class="check">Works.</div>
+          <div>Shipped. Each one cost the runtime score nothing and the spec a little dignity.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name"><code>yield*</code> delegation · <code>for await of</code> · top-level <code>await</code> (pending Promises)</div>
+            <div class="compare-note">simple TLA cases through the module preload work; thenable adoption + suspension across module boundaries still pending</div>
           </div>
           <div class="cross">In progress.</div>
           <div>Don't ship to prod on these. Don't ship anything to prod, frankly.</div>
@@ -734,28 +785,19 @@
         <div class="compare-row">
           <div>
             <div class="feature-name">Real module graph</div>
-            <div class="compare-note">cyclic imports, namespace objects, dynamic <code>import()</code></div>
+            <div class="compare-note">cyclic imports with namespace objects, hoisted <code>import</code> bindings with TDZ, real async module evaluation</div>
           </div>
-          <div class="cross">Not yet.</div>
-          <div>Dynamic <code>import()</code> currently throws on principle (and convenience).</div>
+          <div class="cross">Partly.</div>
+          <div>Single-file modules and the dynamic-import path work; the multi-file graph plumbing is still being wired.</div>
         </div>
 
         <div class="compare-row">
           <div>
-            <div class="feature-name">JIT tiers · generational GC</div>
-            <div class="compare-note">bytecode interp + stop-the-world mark-sweep today</div>
+            <div class="feature-name">JIT tiers · generational GC · inline caches</div>
+            <div class="compare-note">bytecode interp + stop-the-world mark-sweep today; <code>/perf</code> &amp; <code>/profile</code> harness scaffolded</div>
           </div>
           <div class="cross">Future Cynic's problem.</div>
           <div>The plan is real. The plan is also not the code.</div>
-        </div>
-
-        <div class="compare-row">
-          <div>
-            <div class="feature-name">ES2025 odds &amp; ends</div>
-            <div class="compare-note"><code>Set</code> union/intersection, <code>WeakRef</code>, <code>Promise.try</code>, <code>Promise.withResolvers</code></div>
-          </div>
-          <div class="cross">Soon. Probably.</div>
-          <div>Each one takes a swing at the runtime score as it lands.</div>
         </div>
       </div>
     </section>
