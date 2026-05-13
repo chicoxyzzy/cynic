@@ -5057,6 +5057,21 @@ fn runFrames(
                 const r_obj = code[ip];
                 ip += 1;
                 const recv = registers[r_obj];
+                // §13.3.4.1 EvaluatePropertyAccessWithExpressionKey
+                // step 5 — RequireObjectCoercible(baseValue) BEFORE
+                // ToPropertyKey, so `null[obj]` throws TypeError
+                // even when `obj.toString` would throw something
+                // else.
+                if (recv.isNull() or recv.isUndefined()) {
+                    const ex = try makeTypeError(realm, "Cannot read property of null or undefined");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                }
                 // §7.1.19 ToPropertyKey — for object keys (e.g.
                 // `obj[arr]`), run ToPrimitive(string) so user-
                 // defined `toString` / `valueOf` / `[@@toPrimitive]`
