@@ -332,6 +332,17 @@ pub const Op = enum(u8) {
     /// expression `let x = yield e` reads the sent value.
     /// §27.5.3.7 GeneratorYield.
     gen_yield,
+    /// Initial suspension marker emitted between the param
+    /// prologue and the body of every `function*` / `async function*`.
+    /// `wrapGenerator` / `wrapAsyncGenerator` drive the chunk
+    /// synchronously from PC=0 — so the param destructuring,
+    /// defaults, and RequireObjectCoercible run at call time per
+    /// §10.2.1.4 FunctionDeclarationInstantiation — until they hit
+    /// this opcode, which saves frame state into the generator and
+    /// unwinds via `RunResult.yielded`. The wrapper is returned to
+    /// the caller; the first `.next(arg)` resumes from after this
+    /// op, with `acc` overwritten by `arg`.
+    gen_initial_suspend,
     /// Wait on the value in `acc` to settle, then resume with
     /// the resolved value (or throw the rejection). later
     /// implements this by tail-chaining `Promise.resolve(value)
@@ -545,6 +556,7 @@ pub const Op = enum(u8) {
             .init_instance_fields,
             .lda_arguments,
             .gen_yield,
+            .gen_initial_suspend,
             .await_,
             .iter_open,
             .async_iter_open,
@@ -707,6 +719,7 @@ pub const Op = enum(u8) {
             .lda_arguments => "LdaArguments",
             .rest_args_from => "RestArgsFrom",
             .gen_yield => "GenYield",
+            .gen_initial_suspend => "GenInitialSuspend",
             .await_ => "Await",
             .iter_open => "IterOpen",
             .async_iter_open => "AsyncIterOpen",

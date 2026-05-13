@@ -69,6 +69,10 @@ pub fn buildClass(
     heritage_v: ?Value,
 ) ClassError!Value {
     // 1. Heritage check — if `extends X`, X must be a constructor.
+    // `has_heritage` distinguishes `class C {}` (proto inherits
+    // %Object.prototype%) from `class C extends null {}` (proto
+    // inherits null, per §15.7.14 step 6.e.i).
+    const has_heritage = heritage_v != null;
     var parent_ctor: ?*JSFunction = null;
     var parent_proto: ?*JSObject = null;
     if (heritage_v) |hv| {
@@ -78,6 +82,13 @@ pub fn buildClass(
             parent_ctor = null;
             parent_proto = null;
         } else if (heap_mod.valueAsFunction(hv)) |fn_obj| {
+            // §15.7.14 step 7 — superclass must be a constructor.
+            // Arrow functions, generator functions, async functions,
+            // and methods (no [[Construct]]) don't qualify. The
+            // spec phrasing is IsConstructor(superclass).
+            if (!fn_obj.has_construct or fn_obj.is_arrow or fn_obj.is_generator or fn_obj.is_async) {
+                return error.HeritageNotConstructor;
+            }
             parent_ctor = fn_obj;
             // Read parent.prototype — if it's an object, use it
             // as the prototype's [[Prototype]]. If it's null, the
@@ -95,7 +106,11 @@ pub fn buildClass(
 
     // 2. Allocate the prototype object.
     const proto = try realm.heap.allocateObject();
-    proto.prototype = parent_proto orelse realm.intrinsics.object_prototype;
+    // §15.7.14 step 6 — `proto.[[Prototype]]` is:
+    //   • parent.prototype, if `extends X`
+    //   • null, if `extends null`
+    //   • %Object.prototype%, if no heritage clause
+    proto.prototype = if (parent_proto) |pp| pp else if (has_heritage) null else realm.intrinsics.object_prototype;
 
     // Pin `proto` (and shortly `ctor`) across the rest of class
     // construction. Computed-key evaluation re-enters the

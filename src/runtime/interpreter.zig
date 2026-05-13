@@ -105,6 +105,12 @@ pub const CallFrame = struct {
     /// §10.2.1.4 step 14 (instead of falling back to `this`,
     /// which is the base-class behavior).
     is_derived_ctor: bool = false,
+    /// §10.2.1.4 — `[[ThisBindingStatus]]` for derived class
+    /// constructors. `false` on entry; flipped by any `super(...)`
+    /// op. If the constructor body falls off the end (returns
+    /// undefined) with this still false, a ReferenceError is
+    /// thrown per §10.2.1.4 step 5 / §10.2.1.3 step 11.
+    super_called: bool = false,
     /// `[[HomeObject]]` (§10.2.5) of the function executing in
     /// this frame. Set on entry from the callee's
     /// `JSFunction.home_object`. `super_get` / `super_call`
@@ -261,13 +267,13 @@ pub fn run(allocator: std.mem.Allocator, realm: *Realm, chunk: *const Chunk) Run
 /// methods are installed once on the realm's
 /// `generator_prototype`; this wrapper inherits from that proto.
 pub fn wrapGenerator(
-    _: std.mem.Allocator,
+    allocator: std.mem.Allocator,
     realm: *Realm,
     chunk: *const @import("../bytecode/chunk.zig").Chunk,
     captured_env: ?*Environment,
     this_value: Value,
     args: []const Value,
-) RunError!Value {
+) RunError!RunResult {
     // Generator's register file must hold the function body's
     // declared registers AND any extra inbound argument values.
     // Cap at u8 max — over-arity gracefully drops trailing args
@@ -292,7 +298,19 @@ pub fn wrapGenerator(
     const wrapper = realm.heap.allocateObject() catch return error.OutOfMemory;
     wrapper.prototype = ensureGeneratorPrototype(realm) catch return error.OutOfMemory;
     wrapper.generator_ref = gen;
-    return heap_mod.taggedObject(wrapper);
+
+    // §10.2.1.4 — run FunctionDeclarationInstantiation eagerly
+    // so param destructuring / defaults / RequireObjectCoercible
+    // execute (and possibly throw) at call time. `gen_initial_suspend`
+    // sits right after the prologue; resumeGenerator drives the
+    // chunk to that point, then unwinds. The yielded undefined
+    // is discarded; the wrapper is what the caller sees.
+    const initial = try resumeGenerator(allocator, realm, gen, Value.undefined_);
+    switch (initial) {
+        .yielded => return .{ .value = heap_mod.taggedObject(wrapper) },
+        .value => return .{ .value = heap_mod.taggedObject(wrapper) },
+        .thrown => |ex| return .{ .thrown = ex },
+    }
 }
 
 /// §27.6 Allocate a wrapper for `async function*` invocation.
@@ -301,13 +319,13 @@ pub fn wrapGenerator(
 /// the async-suspend path, and uses `%AsyncGeneratorPrototype%`
 /// whose `next`/`return`/`throw` wrap the result in a Promise.
 pub fn wrapAsyncGenerator(
-    _: std.mem.Allocator,
+    allocator: std.mem.Allocator,
     realm: *Realm,
     chunk: *const @import("../bytecode/chunk.zig").Chunk,
     captured_env: ?*Environment,
     this_value: Value,
     args: []const Value,
-) RunError!Value {
+) RunError!RunResult {
     const wanted: usize = @max(@as(usize, chunk.register_count), args.len);
     const reg_count: u8 = @intCast(@min(wanted, std.math.maxInt(u8)));
     const gen = realm.heap.allocateGenerator(
@@ -326,7 +344,17 @@ pub fn wrapAsyncGenerator(
     const wrapper = realm.heap.allocateObject() catch return error.OutOfMemory;
     wrapper.prototype = ensureAsyncGeneratorPrototype(realm) catch return error.OutOfMemory;
     wrapper.generator_ref = gen;
-    return heap_mod.taggedObject(wrapper);
+
+    // §27.6.3.1 EvaluateAsyncGeneratorBody — param init runs
+    // synchronously and any throw propagates to the call site.
+    // Mirror the sync-gen path: drive the chunk to
+    // `gen_initial_suspend`, then hand back the wrapper.
+    const initial = try resumeGenerator(allocator, realm, gen, Value.undefined_);
+    switch (initial) {
+        .yielded => return .{ .value = heap_mod.taggedObject(wrapper) },
+        .value => return .{ .value = heap_mod.taggedObject(wrapper) },
+        .thrown => |ex| return .{ .thrown = ex },
+    }
 }
 
 /// Lazily install `%GeneratorPrototype%` on the realm. Has
@@ -1721,11 +1749,9 @@ pub fn callJSFunction(
     // uses `%AsyncGeneratorPrototype%` so `next`/`return`/`throw`
     // produce Promises.
     if (callee.is_generator) {
-        const wrap = if (callee.is_async)
-            try wrapAsyncGenerator(allocator, realm, callee_chunk, callee.captured_env, this_value, args)
-        else
-            try wrapGenerator(allocator, realm, callee_chunk, callee.captured_env, this_value, args);
-        return .{ .value = wrap };
+        if (callee.is_async)
+            return try wrapAsyncGenerator(allocator, realm, callee_chunk, callee.captured_env, this_value, args);
+        return try wrapGenerator(allocator, realm, callee_chunk, callee.captured_env, this_value, args);
     }
 
     // §27.7 — pure `async function` (no `*`): allocate a fresh
@@ -2478,11 +2504,22 @@ fn runFrames(
                 if (callee_fn.is_generator) {
                     const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
                     const args_start = @as(usize, r_callee) + 1;
-                    const wrap = if (callee_fn.is_async)
+                    const wrap_result = if (callee_fn.is_async)
                         try wrapAsyncGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, Value.undefined_, registers[args_start .. args_start + argc])
                     else
                         try wrapGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, Value.undefined_, registers[args_start .. args_start + argc]);
-                    acc = wrap;
+                    switch (wrap_result) {
+                        .value, .yielded => |v| acc = v,
+                        .thrown => |ex| {
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue;
+                        },
+                    }
                     continue;
                 }
 
@@ -2673,11 +2710,22 @@ fn runFrames(
                 if (callee_fn.is_generator) {
                     const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
                     const args_start = @as(usize, r_callee) + 1;
-                    const wrap = if (callee_fn.is_async)
+                    const wrap_result = if (callee_fn.is_async)
                         try wrapAsyncGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, recv, registers[args_start .. args_start + argc])
                     else
                         try wrapGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, recv, registers[args_start .. args_start + argc]);
-                    acc = wrap;
+                    switch (wrap_result) {
+                        .value, .yielded => |v| acc = v,
+                        .thrown => |ex| {
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue;
+                        },
+                    }
                     continue;
                 }
 
@@ -3773,6 +3821,30 @@ fn runFrames(
                 return .{ .yielded = acc };
             },
 
+            .gen_initial_suspend => {
+                // §10.2.1.4 / §27.5.4.2 / §27.6.3.2 — emitted
+                // between the param prologue and the body of
+                // every `function*` / `async function*`.
+                // `wrapGenerator` / `wrapAsyncGenerator` run the
+                // chunk eagerly so the param destructuring etc.
+                // executes at call time; this op saves the
+                // frame and unwinds. The wrapper drops the
+                // yielded value on the floor — first `.next()`
+                // resumes here with `acc = sent_value`.
+                const gen = f.generator orelse return error.InvalidOpcode;
+                gen.ip = ip;
+                gen.accumulator = Value.undefined_;
+                gen.env = f.env;
+                gen.this_value = f.this_value;
+                gen.home_object = f.home_object;
+                gen.home_function = f.home_function;
+                gen.argc = f.argc;
+                f.ip = ip;
+                f.accumulator = acc;
+                committed = true;
+                return .{ .yielded = Value.undefined_ };
+            },
+
             .await_ => {
                 // §27.5.3.8 Await. Three paths:
                 // • acc isn't a Promise → leave as-is (spec
@@ -4485,6 +4557,11 @@ fn runFrames(
                         continue;
                     },
                 }
+                // §10.2.1.4 — `super(...)` flips `[[ThisBindingStatus]]`
+                // from "uninitialized" to "initialized". A subsequent
+                // `return undefined` is fine; without this flag, falling
+                // off the end throws ReferenceError.
+                f.super_called = true;
             },
 
             // ── Globals ─────────────────────────────────────────────────
@@ -5356,6 +5433,20 @@ fn runFrames(
                         // to `this` for non-Object returns.
                         if (f.is_derived_ctor and !acc.isUndefined()) {
                             const ex = try makeTypeError(realm, "Derived constructor must return an Object or undefined");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue;
+                        }
+                        // §10.2.1.4 step 5 — derived ctor falling
+                        // off the end (or `return;`) requires that
+                        // `super(...)` has run. Otherwise `this` is
+                        // uninitialized and a ReferenceError fires.
+                        if (f.is_derived_ctor and acc.isUndefined() and !f.super_called) {
+                            const ex = try makeReferenceError(realm, "Must call super constructor in derived class before returning from derived constructor");
                             f.ip = ip;
                             f.accumulator = acc;
                             committed = true;

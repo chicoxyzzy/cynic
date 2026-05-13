@@ -797,7 +797,8 @@ pub const Compiler = struct {
                 if (key_slice.len > 0 and key_slice[0] == '#') {
                     return error.UnsupportedExpression; // private field update
                 }
-                k_const = try self.internString(key_slice);
+                const decoded = try self.decodeIdentifierName(key_slice);
+                k_const = try self.internString(decoded);
                 mode = .ident;
             },
             .computed => |key_expr| {
@@ -1487,7 +1488,8 @@ pub const Compiler = struct {
         if (m.object.* == .super_) {
             switch (m.property) {
                 .ident => |span| {
-                    const key_slice = self.source[span.start..span.end];
+                    const raw = self.source[span.start..span.end];
+                    const key_slice = try self.decodeIdentifierName(raw);
                     const k = try self.internString(key_slice);
                     try self.builder.emitOp(.super_get, m.span);
                     try self.builder.emitU16(k);
@@ -2186,7 +2188,11 @@ pub const Compiler = struct {
                     try self.builder.emitOp(.lda_private, c.span);
                     try self.builder.emitU16(k);
                 } else {
-                    const k = try self.internString(key_slice);
+                    // §12.7.1 — `\uXXXX` escapes in IdentifierName
+                    // decode to the source character, so `obj.\u{6F}()`
+                    // is `obj.o()`.
+                    const decoded = try self.decodeIdentifierName(key_slice);
+                    const k = try self.internString(decoded);
                     try self.builder.emitOp(.ldar, c.span);
                     try self.builder.emitU8(r_recv);
                     try self.builder.emitOp(.lda_property, c.span);
@@ -2263,7 +2269,9 @@ pub const Compiler = struct {
                     try self.builder.emitOp(.lda_private, c.span);
                     try self.builder.emitU16(k);
                 } else {
-                    const k = try self.internString(key_slice);
+                    // §12.7.1 — decode `\uXXXX` in IdentifierName.
+                    const decoded = try self.decodeIdentifierName(key_slice);
+                    const k = try self.internString(decoded);
                     try self.builder.emitOp(.ldar, c.span);
                     try self.builder.emitU8(r_recv);
                     try self.builder.emitOp(.lda_property, c.span);
@@ -2371,7 +2379,8 @@ pub const Compiler = struct {
         // Eval super.method via super_get / super_get_computed → r_callee.
         switch (m.property) {
             .ident => |span| {
-                const key_slice = self.source[span.start..span.end];
+                const raw = self.source[span.start..span.end];
+                const key_slice = try self.decodeIdentifierName(raw);
                 const k = try self.internString(key_slice);
                 try self.builder.emitOp(.super_get, m.span);
                 try self.builder.emitU16(k);
@@ -2779,7 +2788,8 @@ pub const Compiler = struct {
                         if (key_slice.len > 0 and key_slice[0] == '#') {
                             return error.UnsupportedExpression;
                         }
-                        const k = try self.internString(key_slice);
+                        const decoded = try self.decodeIdentifierName(key_slice);
+                        const k = try self.internString(decoded);
                         try self.compileExpression(m.object);
                         const r_obj = try self.reserveTemp();
                         defer self.releaseTemp();
@@ -3857,7 +3867,7 @@ fn compileClassTemplate(
             };
             // Computed-key constructor check needs to wait for
             // runtime; the static-name path handles it above.
-            const method_chunk = try compileMethodBody(self, m.params, m.body.body, false, false, m.is_async, m.span);
+            const method_chunk = try compileMethodBody(self, m.params, m.body.body, false, false, m.is_async, m.is_generator, m.span);
             const tmpl = ChunkMod.MethodTemplate{
                 .name = key_name,
                 .chunk = method_chunk,
@@ -4162,6 +4172,7 @@ fn compileMethodBody(
     is_constructor: bool,
     derived: bool,
     is_async: bool,
+    is_generator: bool,
     span: Span,
 ) CompileError!@import("chunk.zig").Chunk {
     _ = is_constructor;
@@ -4217,6 +4228,12 @@ fn compileMethodBody(
         try self.builder.emitOp(.sta_env, span);
         try self.builder.emitU8(0);
         try self.builder.emitU8(slot);
+    }
+
+    // §27.5 / §27.6 — generator methods suspend here so
+    // `wrapGenerator` returns the wrapper after param init.
+    if (is_generator) {
+        try self.builder.emitOp(.gen_initial_suspend, span);
     }
 
     // Body.
@@ -4738,6 +4755,9 @@ fn compileDestructure(self: *Compiler, target: ast.statement.BindingTarget) Comp
                         if (raw.len < 2) break :blk raw;
                         break :blk raw[1 .. raw.len - 1];
                     }
+                    if (prop.key == .ident) {
+                        break :blk try self.decodeIdentifierName(self.source[key_span.start..key_span.end]);
+                    }
                     break :blk self.source[key_span.start..key_span.end];
                 };
                 const k = try self.internString(key_slice);
@@ -4776,6 +4796,9 @@ fn compileDestructure(self: *Compiler, target: ast.statement.BindingTarget) Comp
                             const raw = self.source[key_span.start..key_span.end];
                             if (raw.len < 2) break :blk raw;
                             break :blk raw[1 .. raw.len - 1];
+                        }
+                        if (prop.key == .ident) {
+                            break :blk try self.decodeIdentifierName(self.source[key_span.start..key_span.end]);
                         }
                         break :blk self.source[key_span.start..key_span.end];
                     };
@@ -5935,6 +5958,13 @@ fn compileFunctionTemplateExt(
             try self.builder.emitU8(0);
             try self.builder.emitU8(slot);
         }
+    }
+
+    // §27.5 / §27.6 — param init has run; suspend so the
+    // wrapper can be handed back. Body resumes on first
+    // `.next(arg)`.
+    if (is_generator) {
+        try self.builder.emitOp(.gen_initial_suspend, span);
     }
 
     // Compile body.
