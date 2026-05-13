@@ -1516,7 +1516,11 @@ pub const Compiler = struct {
                     if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
                     const prefix = self.class_stack.items[self.class_stack.items.len - 1].private_prefix;
                     const arena = self.realm.classAllocator();
-                    const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, raw_slice[1..] }) catch return error.OutOfMemory;
+                    // §12.7.1 — `\uXXXX` escapes in IdentifierName
+                    // decode to the source character. `#\u{6F}` and
+                    // `#o` must hash to the same slot.
+                    const decoded = try self.decodeIdentifierName(raw_slice[1..]);
+                    const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, decoded }) catch return error.OutOfMemory;
                     const k = try self.internString(mangled);
                     try self.compileExpression(m.object);
                     if (m.optional) try self.emitOptionalShortCircuit(m.span);
@@ -1626,7 +1630,11 @@ pub const Compiler = struct {
                     if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
                     const prefix = self.class_stack.items[self.class_stack.items.len - 1].private_prefix;
                     const arena = self.realm.classAllocator();
-                    const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, raw_slice[1..] }) catch return error.OutOfMemory;
+                    // §12.7.1 — `\uXXXX` escapes in IdentifierName
+                    // decode to the source character. `#\u{6F}` and
+                    // `#o` must hash to the same slot.
+                    const decoded = try self.decodeIdentifierName(raw_slice[1..]);
+                    const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, decoded }) catch return error.OutOfMemory;
                     private_k = try self.internString(mangled);
                 } else {
                     const key_slice = try self.decodeIdentifierName(raw_slice);
@@ -2186,7 +2194,10 @@ pub const Compiler = struct {
                     if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
                     const prefix = self.class_stack.items[self.class_stack.items.len - 1].private_prefix;
                     const arena = self.realm.classAllocator();
-                    const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, key_slice[1..] }) catch return error.OutOfMemory;
+                    // §12.7.1 — decode escapes so `obj.#\u{6F}()`
+                    // and `obj.#o()` find the same private slot.
+                    const decoded = try self.decodeIdentifierName(key_slice[1..]);
+                    const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, decoded }) catch return error.OutOfMemory;
                     const k = try self.internString(mangled);
                     try self.builder.emitOp(.ldar, c.span);
                     try self.builder.emitU8(r_recv);
@@ -2267,7 +2278,10 @@ pub const Compiler = struct {
                     if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
                     const prefix = self.class_stack.items[self.class_stack.items.len - 1].private_prefix;
                     const arena = self.realm.classAllocator();
-                    const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, key_slice[1..] }) catch return error.OutOfMemory;
+                    // §12.7.1 — decode escapes so `obj.#\u{6F}()`
+                    // and `obj.#o()` find the same private slot.
+                    const decoded = try self.decodeIdentifierName(key_slice[1..]);
+                    const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, decoded }) catch return error.OutOfMemory;
                     const k = try self.internString(mangled);
                     try self.builder.emitOp(.ldar, c.span);
                     try self.builder.emitU8(r_recv);
@@ -3798,8 +3812,11 @@ fn compileClassTemplate(
                 }
                 const raw = methodKeyName(self.source, fd.key) orelse return error.UnsupportedStatement;
                 if (fd.key == .private) {
-                    // `#x` — prefix with the class identity.
-                    break :blk std.fmt.allocPrint(arena, "{s}{s}", .{ private_prefix, raw }) catch return error.OutOfMemory;
+                    // `#x` — prefix with the class identity. Decode
+                    // §12.7.1 escapes so `#\u{6F}` and `#o` share a
+                    // single mangled key.
+                    const decoded_raw = try self.decodeIdentifierName(raw);
+                    break :blk std.fmt.allocPrint(arena, "{s}{s}", .{ private_prefix, decoded_raw }) catch return error.OutOfMemory;
                 }
                 break :blk raw;
             };
@@ -3895,7 +3912,13 @@ fn compileClassTemplate(
                     continue;
                 }
                 break :blk switch (m.key) {
-                    .private => std.fmt.allocPrint(arena, "{s}{s}", .{ private_prefix, raw_key }) catch return error.OutOfMemory,
+                    .private => blk2: {
+                        // §12.7.1 escapes decode for private names
+                        // too — `#\u{6F}()` declares the same slot
+                        // as `#o()`.
+                        const decoded_raw = try self.decodeIdentifierName(raw_key);
+                        break :blk2 std.fmt.allocPrint(arena, "{s}{s}", .{ private_prefix, decoded_raw }) catch return error.OutOfMemory;
+                    },
                     // §12.7.1 — `\u…` escapes in IdentifierName decode
                     // to the source character, so `class C { if(){} }`
                     // installs `if`. String / numeric keys are already
