@@ -68,6 +68,7 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethodOnProto(realm, arr_proto, "findIndex", arrayFindIndex, 1);
         try installNativeMethodOnProto(realm, arr_proto, "reduce", arrayReduce, 1);
         try installNativeMethodOnProto(realm, arr_proto, "toString", arrayJoin, 0);
+        try installNativeMethodOnProto(realm, arr_proto, "toLocaleString", arrayToLocaleString, 0);
         try installNativeMethodOnProto(realm, arr_proto, "reverse", arrayReverse, 0);
         try installNativeMethodOnProto(realm, arr_proto, "shift", arrayShift, 0);
         try installNativeMethodOnProto(realm, arr_proto, "unshift", arrayUnshift, 1);
@@ -135,9 +136,13 @@ fn arrayConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const out = if (heap_mod.valueAsPlainObject(this_value)) |obj| obj else blk: {
         const fresh = realm.heap.allocateObject() catch return error.OutOfMemory;
         fresh.prototype = realm.intrinsics.array_prototype;
-        fresh.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
         break :blk fresh;
     };
+    // `new Array(...)` arrives with `this` already allocated by
+    // OrdinaryCreateFromConstructor — it inherits Array.prototype
+    // but doesn't carry our exotic flag, so flag it here. Plain-call
+    // path needs the same flip; doing it unconditionally is cheap.
+    if (!out.is_array_exotic) out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
 
     if (args.len == 1 and (args[0].isInt32() or args[0].isDouble())) {
         // §22.1.1.2 Array(len) — single Number arg sets length.
@@ -230,7 +235,7 @@ fn arrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // the array's length exceeds our 16M iteration cap.
     const raw_len = try toLengthOf(realm, obj);
     if (raw_len <= 0) return Value.fromInt32(-1);
-    const start = startIndexFrom(args, raw_len) orelse return Value.fromInt32(-1);
+    const start = (try startIndexFrom(realm, args, raw_len)) orelse return Value.fromInt32(-1);
     const len = try clampArrayLength(raw_len);
     var i: i64 = start;
     while (i < len) : (i += 1) {
@@ -248,39 +253,40 @@ fn arrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 /// to iterate from, or `null` when fromIndex is past the end
 /// (caller short-circuits to -1). Negative fromIndex is offset
 /// from the end (`len + fromIndex`), clamped to 0.
-fn startIndexFrom(args: []const Value, len: i64) ?i64 {
+fn startIndexFrom(realm: *Realm, args: []const Value, len: i64) NativeError!?i64 {
     if (args.len < 2) return 0;
-    const v = args[1];
-    // §7.1.5 ToIntegerOrInfinity coercion. We accept Number
-    // primitives directly; for String go through `coerceToNumber`
-    // (which handles "Infinity", "-Infinity", numeric strings,
-    // and the empty/all-whitespace cases per §7.1.4).
-    const nv = if (v.isString()) intrinsics.coerceToNumber(v) else v;
-    const n: f64 = if (nv.isUndefined()) 0 else if (nv.isInt32()) @floatFromInt(nv.asInt32()) else if (nv.isDouble()) nv.asDouble() else if (nv.isBool()) (if (nv.asBool()) @as(f64, 1) else @as(f64, 0)) else if (nv.isNull()) @as(f64, 0) else 0;
-    if (std.math.isNan(n)) return 0;
-    if (n == std.math.inf(f64)) return null;
-    if (n == -std.math.inf(f64)) return 0;
+    // §7.1.5 ToIntegerOrInfinity → ToNumber. Route through
+    // `intrinsics.toNumber` so Symbol / BigInt throw TypeError
+    // and `{valueOf: () => throw}` propagates.
+    const nv = try intrinsics.toNumber(realm, args[1]);
+    const n: f64 = if (nv.isInt32()) @floatFromInt(nv.asInt32()) else nv.asDouble();
+    if (std.math.isNan(n)) return @as(?i64, 0);
+    if (n == std.math.inf(f64)) return @as(?i64, null);
+    if (n == -std.math.inf(f64)) return @as(?i64, 0);
     const trunc_n = @trunc(n);
     if (trunc_n >= 0) {
-        // i64::MAX exceeds f64's exactly-representable integer
-        // range — `len` is already a real array length so any
-        // `trunc_n` ≥ `len` short-circuits below.
         const flen: f64 = @floatFromInt(len);
-        if (trunc_n >= flen) return null;
-        return @intFromFloat(trunc_n);
+        if (trunc_n >= flen) return @as(?i64, null);
+        return @as(?i64, @intFromFloat(trunc_n));
     }
     // Negative — count from the end.
     const flen: f64 = @floatFromInt(len);
     const adjusted = flen + trunc_n;
-    if (adjusted < 0) return 0;
-    return @intFromFloat(adjusted);
+    if (adjusted < 0) return @as(?i64, 0);
+    return @as(?i64, @intFromFloat(adjusted));
 }
 
 fn arrayIncludes(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
     const target = argOr(args, 0, Value.undefined_);
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
-    var i: i64 = 0;
+    // §23.1.3.16 — `length` first, then `fromIndex` (so a
+    // throwing `valueOf` on fromIndex propagates and matches
+    // V8/JSC ordering).
+    const raw_len = try toLengthOf(realm, obj);
+    if (raw_len <= 0) return Value.false_;
+    const start = (try startIndexFrom(realm, args, raw_len)) orelse return Value.false_;
+    const len = try clampArrayLength(raw_len);
+    var i: i64 = start;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
@@ -310,6 +316,44 @@ fn arrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         const v = try getPropertyChain(realm, obj, islice);
         if (v.isUndefined() or v.isNull()) continue; // §23.1.3.18 — undefined / null become empty
         const s = stringifyArg(realm, v) catch return error.OutOfMemory;
+        buf.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
+    }
+    const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
+    return Value.fromString(out);
+}
+
+/// §23.1.3.32 Array.prototype.toLocaleString — like join with ","
+/// but each element is fed through `Invoke(elt, "toLocaleString")`
+/// before string-conversion, so a user-installed
+/// `Number.prototype.toLocaleString` is observed. `undefined` and
+/// `null` slots stringify to empty per step 6.c (matching join).
+fn arrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const obj = try toObjectThis(realm, this_value);
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(realm.allocator);
+    var i: i64 = 0;
+    while (i < len) : (i += 1) {
+        if (i != 0) buf.appendSlice(realm.allocator, ",") catch return error.OutOfMemory;
+        var ibuf: [24]u8 = undefined;
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+        const v = try getPropertyChain(realm, obj, islice);
+        if (v.isUndefined() or v.isNull()) continue;
+        const boxed = try intrinsics.toObjectThis(realm, v);
+        const method_v = boxed.get("toLocaleString");
+        var str_v: Value = v;
+        if (heap_mod.valueAsFunction(method_v)) |_| {
+            const outcome = interpreter.callValue(realm.allocator, realm, method_v, heap_mod.taggedObject(boxed), &.{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            switch (outcome) {
+                .value, .yielded => |x| str_v = x,
+                .thrown => return error.NativeThrew,
+            }
+        }
+        const s = stringifyArg(realm, str_v) catch return error.OutOfMemory;
         buf.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
     }
     const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
@@ -350,55 +394,80 @@ fn arraySlice(realm: *Realm, this_value: Value, args: []const Value) NativeError
     return heap_mod.taggedObject(out);
 }
 
+/// §23.1.3.2 Array.prototype.concat. The algorithm prepends the
+/// receiver to `items`, then for each element decides spread via
+/// IsConcatSpreadable: an explicit `@@isConcatSpreadable` overrides
+/// the default IsArray check (so RegExp can opt in, a subclass can
+/// opt out). Non-spreadable elements are appended whole.
 fn arrayConcat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     var write_idx: i64 = 0;
-    // Copy own array first.
-    {
-        const len = try clampArrayLength(lengthOfArray(obj));
+
+    // §23.1.3.2 step 4 prepends O to `items`. O is treated like
+    // any other item — IsConcatSpreadable decides whether it
+    // spreads or appends whole (so concat.call(nonArray, ...) puts
+    // the non-array in slot 0 rather than splaying its indices).
+    try concatAppend(realm, out, heap_mod.taggedObject(obj), &write_idx);
+    for (args) |arg| {
+        try concatAppend(realm, out, arg, &write_idx);
+    }
+    setLength(realm, out, write_idx) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(out);
+}
+
+fn concatAppend(realm: *Realm, out: *JSObject, value: Value, write_idx: *i64) NativeError!void {
+    const spreadable = try isConcatSpreadable(realm, value);
+    if (spreadable) {
+        const arr = heap_mod.valueAsPlainObject(value) orelse {
+            try concatWriteOne(realm, out, value, write_idx);
+            return;
+        };
+        const len = try clampArrayLength(lengthOfArray(arr));
+        if (write_idx.* + len > 9007199254740991) {
+            return throwTypeError(realm, "concat: result length exceeds 2^53-1");
+        }
         var i: i64 = 0;
         while (i < len) : (i += 1) {
             var rbuf: [24]u8 = undefined;
             const rslice = std.fmt.bufPrint(&rbuf, "{d}", .{i}) catch unreachable;
-            const v = obj.get(rslice);
-            var wbuf: [24]u8 = undefined;
-            const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{write_idx}) catch unreachable;
-            const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-            out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
-            write_idx += 1;
-        }
-    }
-    // Then each argument: spreadable arrays expand, others append.
-    for (args) |arg| {
-        if (heap_mod.valueAsPlainObject(arg)) |arr| {
-            // Treat any object with a numeric `length` as
-            // spreadable — close enough to §23.1.3.2's
-            // IsConcatSpreadable for our later floor.
-            const len = try clampArrayLength(lengthOfArray(arr));
-            var i: i64 = 0;
-            while (i < len) : (i += 1) {
-                var rbuf: [24]u8 = undefined;
-                const rslice = std.fmt.bufPrint(&rbuf, "{d}", .{i}) catch unreachable;
-                const v = arr.get(rslice);
-                var wbuf: [24]u8 = undefined;
-                const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{write_idx}) catch unreachable;
-                const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-                out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
-                write_idx += 1;
+            // HasProperty walks the proto chain; if absent, hole — skip.
+            if (!hasPropertyChain(arr, rslice)) {
+                write_idx.* += 1;
+                continue;
             }
-        } else {
-            var wbuf: [24]u8 = undefined;
-            const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{write_idx}) catch unreachable;
-            const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-            out.set(realm.allocator, owned.bytes, arg) catch return error.OutOfMemory;
-            write_idx += 1;
+            const v = try getPropertyChain(realm, arr, rslice);
+            try concatWriteOne(realm, out, v, write_idx);
         }
+    } else {
+        if (write_idx.* >= 9007199254740991) {
+            return throwTypeError(realm, "concat: result length exceeds 2^53-1");
+        }
+        try concatWriteOne(realm, out, value, write_idx);
     }
-    setLength(realm, out, write_idx) catch return error.OutOfMemory;
-    return heap_mod.taggedObject(out);
+}
+
+fn concatWriteOne(realm: *Realm, out: *JSObject, v: Value, write_idx: *i64) NativeError!void {
+    var wbuf: [24]u8 = undefined;
+    const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{write_idx.*}) catch unreachable;
+    const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
+    out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+    write_idx.* += 1;
+}
+
+/// §23.1.3.2.1 IsConcatSpreadable. `@@isConcatSpreadable` is the
+/// override hook; absent it, IsArray decides.
+fn isConcatSpreadable(realm: *Realm, v: Value) NativeError!bool {
+    const obj = heap_mod.valueAsPlainObject(v) orelse return false;
+    const spreadable_v = try getPropertyChain(realm, obj, "@@isConcatSpreadable");
+    if (!spreadable_v.isUndefined()) return toBoolean(spreadable_v);
+    return obj.is_array_exotic;
+}
+
+fn hasPropertyChain(obj: *JSObject, key: []const u8) bool {
+    return obj.hasProperty(key);
 }
 
 // ── Additional Array methods ────────────────────────────────────────────────
@@ -1150,14 +1219,15 @@ fn arraySort(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 /// Spec step 1 requires the comparator (when provided) to be
 /// callable, throwing TypeError synchronously before any read.
 fn arrayToSorted(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
+    // §23.1.3.34 step 1 — comparator validation before ToObject.
     const cmp_v = argOr(args, 0, Value.undefined_);
     const cmp_fn: ?*JSFunction = blk: {
         if (cmp_v.isUndefined()) break :blk null;
         if (heap_mod.valueAsFunction(cmp_v)) |f| break :blk f;
         return intrinsics.throwTypeError(realm, "comparefn must be a function");
     };
-    const len = try clampArrayLength(lengthOfArray(obj));
+    const obj = try toObjectThis(realm, this_value);
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
@@ -1172,7 +1242,7 @@ fn arrayToSorted(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        buf[@intCast(i)] = obj.get(islice);
+        buf[@intCast(i)] = try getPropertyChain(realm, obj, islice);
     }
 
     // Same insertion-sort body as `sort`; lifted for a fresh
@@ -1195,7 +1265,10 @@ fn arrayToSorted(realm: *Realm, this_value: Value, args: []const Value) NativeEr
                         const d = if (num.isInt32()) @as(f64, @floatFromInt(num.asInt32())) else num.asDouble();
                         break :blk d > 0;
                     },
-                    .thrown => return error.NativeThrew,
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
                 }
             } else blk: {
                 var ab: [64]u8 = undefined;
@@ -1226,8 +1299,8 @@ fn arrayToSorted(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 /// of `reverse`. Allocate, copy back-to-front, return.
 fn arrayToReversed(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
-    const len = try clampArrayLength(lengthOfArray(obj));
+    const obj = try toObjectThis(realm, this_value);
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
@@ -1237,7 +1310,7 @@ fn arrayToReversed(realm: *Realm, this_value: Value, args: []const Value) Native
         var wb: [24]u8 = undefined;
         const rslice = std.fmt.bufPrint(&rb, "{d}", .{len - 1 - i}) catch unreachable;
         const wslice = std.fmt.bufPrint(&wb, "{d}", .{i}) catch unreachable;
-        const v = obj.get(rslice);
+        const v = try getPropertyChain(realm, obj, rslice);
         const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
         out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
     }
@@ -1249,16 +1322,19 @@ fn arrayToReversed(realm: *Realm, this_value: Value, args: []const Value) Native
 /// of `splice`. Shares the start/deleteCount clamping with the
 /// mutating version but writes into a fresh array.
 fn arrayToSpliced(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
-    const len = try clampArrayLength(lengthOfArray(obj));
+    const obj = try toObjectThis(realm, this_value);
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
     var start: i64 = if (args.len > 0) toInt(args[0]) else 0;
     if (start < 0) start = @max(len + start, 0);
     start = @min(start, len);
-    var delete_count: i64 = if (args.len < 2)
-        // §23.1.3.35 step 6 — `toSpliced` with no `deleteCount`
-        // deletes nothing, unlike `splice` which deletes to the
-        // end. Trips up array-by-copy fixtures otherwise.
+    // §23.1.3.35 steps 8–10:
+    //   - start absent → actualDeleteCount = 0
+    //   - start present, deleteCount absent → actualDeleteCount = len - start
+    //   - both present → clamp ToIntegerOrInfinity(deleteCount) to [0, len-start]
+    var delete_count: i64 = if (args.len == 0)
         0
+    else if (args.len < 2)
+        len - start
     else
         toInt(args[1]);
     if (delete_count < 0) delete_count = 0;
@@ -1276,7 +1352,8 @@ fn arrayToSpliced(realm: *Realm, this_value: Value, args: []const Value) NativeE
         var rb: [24]u8 = undefined;
         const rslice = std.fmt.bufPrint(&rb, "{d}", .{i}) catch unreachable;
         const owned = realm.heap.allocateString(rslice) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, obj.get(rslice)) catch return error.OutOfMemory;
+        const v = try getPropertyChain(realm, obj, rslice);
+        out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
     }
     // [start..start+insert_count) — items.
     var k: i64 = 0;
@@ -1298,7 +1375,8 @@ fn arrayToSpliced(realm: *Realm, this_value: Value, args: []const Value) NativeE
         const rslice = std.fmt.bufPrint(&rb, "{d}", .{r}) catch unreachable;
         const wslice = std.fmt.bufPrint(&wb, "{d}", .{w}) catch unreachable;
         const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, obj.get(rslice)) catch return error.OutOfMemory;
+        const v = try getPropertyChain(realm, obj, rslice);
+        out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
     }
     setLength(realm, out, new_len) catch return error.OutOfMemory;
     return heap_mod.taggedObject(out);
@@ -1308,8 +1386,8 @@ fn arrayToSpliced(realm: *Realm, this_value: Value, args: []const Value) NativeE
 /// the array, then overwrite the requested index. Negative
 /// indices count from the end; out-of-range throws RangeError.
 fn arrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = objectFromThis(this_value) orelse return error.NativeThrew;
-    const len = try clampArrayLength(lengthOfArray(obj));
+    const obj = try toObjectThis(realm, this_value);
+    const len = try clampArrayLength(try toLengthOf(realm, obj));
     const idx_arg = argOr(args, 0, Value.undefined_);
     var idx: i64 = toInt(idx_arg);
     if (idx < 0) idx += len;
@@ -1326,7 +1404,7 @@ fn arrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     while (i < len) : (i += 1) {
         var rb: [24]u8 = undefined;
         const rslice = std.fmt.bufPrint(&rb, "{d}", .{i}) catch unreachable;
-        const v = if (i == idx) value else obj.get(rslice);
+        const v = if (i == idx) value else try getPropertyChain(realm, obj, rslice);
         const owned = realm.heap.allocateString(rslice) catch return error.OutOfMemory;
         out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
     }
