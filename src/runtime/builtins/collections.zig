@@ -410,19 +410,42 @@ fn mapConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const data = realm.allocator.create(ObjMod.MapData) catch return error.OutOfMemory;
     data.* = .{};
     inst.map_data = data;
-    // §24.1.1.1 step 9 — if iterable was supplied, populate
-    // pairs. later uses array-like iteration.
+    // §24.1.1.1 step 9 — drive `@@iterator` properly so a throwing
+    // user iterator propagates and entries are pulled in protocol
+    // order. Falls back to the array-like indexed walk via
+    // `openIterator`'s synth path.
     if (args.len > 0 and !args[0].isUndefined() and !args[0].isNull()) {
-        const src = heap_mod.valueAsPlainObject(args[0]) orelse return throwTypeError(realm, "Map iterable must be an object");
-        const len = lengthOfArray(src);
-        var i: i64 = 0;
-        while (i < len) : (i += 1) {
-            var ibuf: [24]u8 = undefined;
-            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-            const pair_v = src.get(islice);
-            const pair = heap_mod.valueAsPlainObject(pair_v) orelse return throwTypeError(realm, "Map entry must be a [key, value] pair");
-            const key = pair.get("0");
-            const val = pair.get("1");
+        const src_v = args[0];
+        const iter_v = interpreter.openIterator(realm.allocator, realm, src_v) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NotIterable => return throwTypeError(realm, "Map constructor: argument is not iterable"),
+            error.Propagated => return error.NativeThrew,
+            else => return error.NativeThrew,
+        };
+        const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse return throwTypeError(realm, "Map iterator did not return an object");
+        const max_iter: usize = 1 << 24;
+        var step: usize = 0;
+        while (step < max_iter) : (step += 1) {
+            const next_v = iter_obj.get("next");
+            const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "Map iterator missing next");
+            const outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            const result_v = switch (outcome) {
+                .value, .yielded => |v| v,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            };
+            const result = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "Map iterator next did not return an object");
+            const done_v = result.get("done");
+            if (done_v.toBooleanPrimitive()) break;
+            const entry_v = result.get("value");
+            const entry = heap_mod.valueAsPlainObject(entry_v) orelse return throwTypeError(realm, "Map entry must be a [key, value] pair");
+            const key = entry.get("0");
+            const val = entry.get("1");
             try mapSetInternal(realm, inst, key, val);
         }
     }
@@ -431,7 +454,12 @@ fn mapConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeE
 
 fn mapDataOf(this_value: Value) ?*@import("../object.zig").MapData {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    return obj.map_data;
+    const d = obj.map_data orelse return null;
+    // §24.1.3 RequireInternalSlot([[MapData]]) — a WeakMap shares
+    // the same Zig slot but is tagged `is_weak`. The check rejects
+    // `Map.prototype.get.call(new WeakMap(), …)` per spec.
+    if (d.is_weak) return null;
+    return d;
 }
 
 /// §24.1.1.{8,12} CanonicalizeKeyedCollectionKey — Map / Set
@@ -897,13 +925,32 @@ fn setConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeE
     data.* = .{};
     inst.set_data = data;
     if (args.len > 0 and !args[0].isUndefined() and !args[0].isNull()) {
-        const src = heap_mod.valueAsPlainObject(args[0]) orelse return throwTypeError(realm, "Set iterable must be an object");
-        const len = lengthOfArray(src);
-        var i: i64 = 0;
-        while (i < len) : (i += 1) {
-            var ibuf: [24]u8 = undefined;
-            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-            try setAddInternal(realm, inst, src.get(islice));
+        const iter_v = interpreter.openIterator(realm.allocator, realm, args[0]) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NotIterable => return throwTypeError(realm, "Set constructor: argument is not iterable"),
+            error.Propagated => return error.NativeThrew,
+            else => return error.NativeThrew,
+        };
+        const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse return throwTypeError(realm, "Set iterator did not return an object");
+        const max_iter: usize = 1 << 24;
+        var step: usize = 0;
+        while (step < max_iter) : (step += 1) {
+            const next_v = iter_obj.get("next");
+            const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "Set iterator missing next");
+            const outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            const result_v = switch (outcome) {
+                .value, .yielded => |v| v,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            };
+            const result = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "Set iterator next did not return an object");
+            if (result.get("done").toBooleanPrimitive()) break;
+            try setAddInternal(realm, inst, result.get("value"));
         }
     }
     return this_value;
