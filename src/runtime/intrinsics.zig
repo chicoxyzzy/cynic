@@ -1031,8 +1031,23 @@ fn stringConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
 }
 
 fn numberConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
-    const primitive: Value = if (args.len == 0) Value.fromInt32(0) else coerceToNumber(args[0]);
+    // §21.1.1.1 step 1 — `Number(value)`. ToNumeric, then if the
+    // result is a BigInt convert to Number via the spec's
+    // 𝔽(ℝ(prim)) (the BigInt's mathematical value as a double).
+    // Bare `coerceToNumber` would have rejected BigInt (NaN), which
+    // breaks the common `Number(10n)` idiom.
+    const primitive: Value = blk: {
+        if (args.len == 0) break :blk Value.fromInt32(0);
+        const arg = args[0];
+        if (heap_mod.valueAsBigInt(arg)) |bi| {
+            break :blk Value.fromDouble(@floatFromInt(bi.value));
+        }
+        const prim = try toPrimitive(realm, arg, .number);
+        if (heap_mod.valueAsBigInt(prim)) |bi| {
+            break :blk Value.fromDouble(@floatFromInt(bi.value));
+        }
+        break :blk try toNumber(realm, prim);
+    };
     if (heap_mod.valueAsPlainObject(this_value)) |inst| {
         inst.boxed_primitive = primitive;
         return this_value;
