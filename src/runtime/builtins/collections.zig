@@ -1039,19 +1039,22 @@ fn validateSetLike(realm: *Realm, op: []const u8, value: Value) NativeError!SetL
     // during intersection / difference / etc. Route through
     // the accessor chain so `get size() { return 2; }` getters
     // fire instead of the bare data-slot lookup returning
-    // undefined → 0.
-    const size_v = intrinsics.getPropertyChain(realm, obj, "size") catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.NativeThrew,
-    };
-    const size_n = intrinsics.coerceToNumber(size_v);
+    // undefined → 0. ToNumber must propagate throws (Symbol etc.)
+    // AND NaN must surface as a TypeError per §24.2.1.2 step 5.
+    const size_v = try intrinsics.getPropertyChain(realm, obj, "size");
+    const size_n = try intrinsics.toNumber(realm, size_v);
     const size_d: f64 = if (size_n.isInt32())
         @floatFromInt(size_n.asInt32())
     else if (size_n.isDouble())
         size_n.asDouble()
     else
         0;
-    const size_usize: usize = if (std.math.isNan(size_d) or size_d < 0)
+    if (std.math.isNan(size_d)) {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Set.prototype.{s}: argument is not set-like (size is NaN)", .{op}) catch op;
+        return throwTypeError(realm, msg);
+    }
+    const size_usize: usize = if (size_d < 0)
         0
     else if (std.math.isInf(size_d))
         std.math.maxInt(usize)
