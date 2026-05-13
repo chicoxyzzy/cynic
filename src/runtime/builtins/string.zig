@@ -423,7 +423,7 @@ fn coerceThisToJSString(realm: *Realm, this_value: Value) NativeError!*JSString 
 
 fn stringCharAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
-    const idx_v = coerceToNumber(argOr(args, 0, Value.fromInt32(0)));
+    const idx_v = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
     // §7.1.5 ToIntegerOrInfinity — NaN → 0; +Inf / -Inf are
     // out-of-range; finite values truncate toward zero.
     const idx: i64 = if (idx_v.isInt32()) idx_v.asInt32() else blk: {
@@ -443,7 +443,7 @@ fn stringCharAt(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 
 fn stringCharCodeAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
-    const idx_v = coerceToNumber(argOr(args, 0, Value.fromInt32(0)));
+    const idx_v = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
     // §7.1.5 ToIntegerOrInfinity — see stringCharAt for the rule.
     const idx: i64 = if (idx_v.isInt32()) idx_v.asInt32() else blk: {
         const d = idx_v.asDouble();
@@ -459,15 +459,14 @@ fn stringCharCodeAt(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
 fn stringIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
-    const needle_v = argOr(args, 0, Value.undefined_);
-    if (!needle_v.isString()) return Value.fromInt32(-1);
-    const needle: *JSString = @ptrCast(@alignCast(needle_v.asString()));
-    const start_v = argOr(args, 1, Value.fromInt32(0));
+    const needle = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
+    const pos_v = argOr(args, 1, Value.undefined_);
     var start: usize = 0;
-    if (start_v.isInt32()) {
-        const i = start_v.asInt32();
-        start = if (i < 0) 0 else @intCast(i);
+    if (!pos_v.isUndefined()) {
+        const n = try intrinsics.toNumber(realm, pos_v);
+        start = clampPos(intrinsics.toInt(n), s.bytes.len);
     }
+    if (needle.bytes.len == 0) return Value.fromInt32(@intCast(start));
     if (start > s.bytes.len) start = s.bytes.len;
     const slice = s.bytes[start..];
     if (std.mem.indexOf(u8, slice, needle.bytes)) |pos| {
@@ -476,35 +475,89 @@ fn stringIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     return Value.fromInt32(-1);
 }
 
+/// §22.1.3.7 / .21 / .23 — `includes` / `startsWith` / `endsWith`
+/// share a preamble: RequireObjectCoercible(this), reject RegExp
+/// search arg per §22.1.3.7 step 4 (IsRegExp), ToString(search).
+fn coerceSearchString(realm: *Realm, v: Value, method_name: []const u8) NativeError!*JSString {
+    if (try isRegExp(realm, v)) {
+        _ = method_name;
+        return throwTypeError(realm, "First argument must not be a regular expression");
+    }
+    return stringifyArg(realm, v);
+}
+
+/// §7.2.8 IsRegExp(arg) — Object check, then @@match access, with
+/// fallback to the [[RegExpMatcher]] slot (Cynic's
+/// `__cynic_re_src__` own data prop). Cynic encodes well-known
+/// symbols via their `@@<name>` internal property-key, so a plain
+/// `obj.get("@@match")` honours @@-keyed accessor/data descriptors
+/// the same way `obj[Symbol.match]` would.
+fn isRegExp(realm: *Realm, v: Value) NativeError!bool {
+    _ = realm;
+    const obj = heap_mod.valueAsPlainObject(v) orelse return false;
+    const matcher = obj.get("@@match");
+    if (!matcher.isUndefined()) return matcher.toBooleanPrimitive();
+    return obj.hasOwn("__cynic_re_src__");
+}
+
+fn clampPos(p: i64, len: usize) usize {
+    if (p < 0) return 0;
+    const lp: usize = @intCast(p);
+    return @min(lp, len);
+}
+
 fn stringIncludes(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
-    const needle_v = argOr(args, 0, Value.undefined_);
-    if (!needle_v.isString()) return Value.false_;
-    const needle: *JSString = @ptrCast(@alignCast(needle_v.asString()));
-    return Value.fromBool(std.mem.indexOf(u8, s.bytes, needle.bytes) != null);
+    const needle = try coerceSearchString(realm, argOr(args, 0, Value.undefined_), "includes");
+    const pos_v = argOr(args, 1, Value.undefined_);
+    var start: usize = 0;
+    if (!pos_v.isUndefined()) {
+        const n = try intrinsics.toNumber(realm, pos_v);
+        start = clampPos(intrinsics.toInt(n), s.bytes.len);
+    }
+    if (start >= s.bytes.len) {
+        return Value.fromBool(needle.bytes.len == 0);
+    }
+    return Value.fromBool(std.mem.indexOf(u8, s.bytes[start..], needle.bytes) != null);
 }
 
 fn stringStartsWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
-    const needle_v = argOr(args, 0, Value.undefined_);
-    if (!needle_v.isString()) return Value.false_;
-    const needle: *JSString = @ptrCast(@alignCast(needle_v.asString()));
-    return Value.fromBool(std.mem.startsWith(u8, s.bytes, needle.bytes));
+    const needle = try coerceSearchString(realm, argOr(args, 0, Value.undefined_), "startsWith");
+    const pos_v = argOr(args, 1, Value.undefined_);
+    var start: usize = 0;
+    if (!pos_v.isUndefined()) {
+        const n = try intrinsics.toNumber(realm, pos_v);
+        start = clampPos(intrinsics.toInt(n), s.bytes.len);
+    }
+    if (start + needle.bytes.len > s.bytes.len) return Value.false_;
+    return Value.fromBool(std.mem.startsWith(u8, s.bytes[start..], needle.bytes));
 }
 
 fn stringEndsWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
-    const needle_v = argOr(args, 0, Value.undefined_);
-    if (!needle_v.isString()) return Value.false_;
-    const needle: *JSString = @ptrCast(@alignCast(needle_v.asString()));
-    return Value.fromBool(std.mem.endsWith(u8, s.bytes, needle.bytes));
+    const needle = try coerceSearchString(realm, argOr(args, 0, Value.undefined_), "endsWith");
+    const end_pos_v = argOr(args, 1, Value.undefined_);
+    var end: usize = s.bytes.len;
+    if (!end_pos_v.isUndefined()) {
+        const n = try intrinsics.toNumber(realm, end_pos_v);
+        end = clampPos(intrinsics.toInt(n), s.bytes.len);
+    }
+    if (needle.bytes.len > end) return Value.false_;
+    const start = end - needle.bytes.len;
+    return Value.fromBool(std.mem.eql(u8, s.bytes[start..end], needle.bytes));
 }
 
 fn stringSlice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const len: i64 = @intCast(s.bytes.len);
-    var start: i64 = if (args.len > 0) toInt(args[0]) else 0;
-    var end: i64 = if (args.len > 1 and !args[1].isUndefined()) toInt(args[1]) else len;
+    const start_num = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
+    var start: i64 = intrinsics.toInt(start_num);
+    var end: i64 = len;
+    if (args.len > 1 and !args[1].isUndefined()) {
+        const end_num = try intrinsics.toNumber(realm, args[1]);
+        end = intrinsics.toInt(end_num);
+    }
     if (start < 0) start = @max(len + start, 0);
     if (end < 0) end = @max(len + end, 0);
     start = @min(start, len);
@@ -517,8 +570,13 @@ fn stringSlice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
 fn stringSubstring(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const len: i64 = @intCast(s.bytes.len);
-    var start: i64 = if (args.len > 0) toInt(args[0]) else 0;
-    var end: i64 = if (args.len > 1 and !args[1].isUndefined()) toInt(args[1]) else len;
+    const start_num = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
+    var start: i64 = intrinsics.toInt(start_num);
+    var end: i64 = len;
+    if (args.len > 1 and !args[1].isUndefined()) {
+        const end_num = try intrinsics.toNumber(realm, args[1]);
+        end = intrinsics.toInt(end_num);
+    }
     start = @max(0, @min(start, len));
     end = @max(0, @min(end, len));
     if (start > end) {
@@ -640,13 +698,29 @@ fn stringConcat(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 
 fn stringRepeat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
-    const n_v = coerceToNumber(argOr(args, 0, Value.fromInt32(0)));
+    // §22.1.3.16 — ToIntegerOrInfinity(count); NaN ⇒ 0 (not throw);
+    // negative or +Infinity ⇒ RangeError.
+    const n_v = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
     const n: i64 = if (n_v.isInt32()) n_v.asInt32() else blk: {
         const d = n_v.asDouble();
-        if (std.math.isNan(d) or d < 0 or std.math.isInf(d)) return error.NativeThrew;
+        if (std.math.isNan(d)) break :blk 0;
+        if (std.math.isInf(d) and d > 0) {
+            const ex = intrinsics.newRangeError(realm, "Invalid count value") catch return error.OutOfMemory;
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        }
+        if (d < 0) {
+            const ex = intrinsics.newRangeError(realm, "Invalid count value") catch return error.OutOfMemory;
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        }
         break :blk @intFromFloat(@trunc(d));
     };
-    if (n < 0) return error.NativeThrew;
+    if (n < 0) {
+        const ex = intrinsics.newRangeError(realm, "Invalid count value") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
     if (n == 0) {
         const empty = realm.heap.allocateString("") catch return error.OutOfMemory;
         return Value.fromString(empty);
@@ -770,23 +844,29 @@ fn stringPadEnd(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 }
 fn stringPad(realm: *Realm, this_value: Value, args: []const Value, start: bool) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
-    const target_v = argOr(args, 0, Value.fromInt32(0));
-    const target_len: i64 = if (target_v.isInt32()) target_v.asInt32() else if (target_v.isDouble()) blk: {
-        const d = target_v.asDouble();
+    // §22.1.3.18 step 4 — ToLength(maxLength). NaN / negative
+    // values clamp to 0.
+    const target_v_raw = argOr(args, 0, Value.fromInt32(0));
+    const target_num = try intrinsics.toNumber(realm, target_v_raw);
+    const target_len: i64 = blk: {
+        if (target_num.isInt32()) break :blk target_num.asInt32();
+        const d = target_num.asDouble();
         if (std.math.isNan(d) or std.math.isInf(d) or d < 0) break :blk 0;
         break :blk @intFromFloat(@trunc(d));
-    } else 0;
+    };
     if (target_len <= @as(i64, @intCast(s.bytes.len))) {
         const out = realm.heap.allocateString(s.bytes) catch return error.OutOfMemory;
         return Value.fromString(out);
     }
+    // §22.1.3.18 step 5 — fillString defaults to single space; any
+    // other primitive is ToString-coerced (matches Number / Boolean
+    // padding tests).
     const fill_v = argOr(args, 1, Value.undefined_);
-    const fill_slice: []const u8 = if (fill_v.isUndefined())
-        " "
-    else if (fill_v.isString()) blk: {
-        const f: *JSString = @ptrCast(@alignCast(fill_v.asString()));
-        break :blk f.bytes;
-    } else " ";
+    const fill_str: *JSString = if (fill_v.isUndefined())
+        try stringifyArg(realm, Value.fromString(realm.heap.allocateString(" ") catch return error.OutOfMemory))
+    else
+        try stringifyArg(realm, fill_v);
+    const fill_slice: []const u8 = fill_str.bytes;
     if (fill_slice.len == 0) {
         const out = realm.heap.allocateString(s.bytes) catch return error.OutOfMemory;
         return Value.fromString(out);
@@ -808,7 +888,8 @@ fn stringPad(realm: *Realm, this_value: Value, args: []const Value, start: bool)
 
 fn stringAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
-    var idx: i64 = if (args.len > 0) toInt(args[0]) else 0;
+    const idx_num = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
+    var idx: i64 = intrinsics.toInt(idx_num);
     if (idx < 0) idx += @as(i64, @intCast(s.bytes.len));
     if (idx < 0 or idx >= @as(i64, @intCast(s.bytes.len))) return Value.undefined_;
     const i: usize = @intCast(idx);
@@ -818,11 +899,26 @@ fn stringAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
 
 fn stringLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
-    const needle_v = argOr(args, 0, Value.undefined_);
-    if (!needle_v.isString()) return Value.fromInt32(-1);
-    const needle: *JSString = @ptrCast(@alignCast(needle_v.asString()));
+    const needle = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
+    // §22.1.3.10 step 4 — `position` is ToNumber, NaN ⇒ +Inf so
+    // the search starts from the end. Anything else is
+    // ToIntegerOrInfinity, then clamped to [0, len].
+    const pos_v = argOr(args, 1, Value.undefined_);
+    var search_end: usize = s.bytes.len;
+    if (!pos_v.isUndefined()) {
+        const n = try intrinsics.toNumber(realm, pos_v);
+        const is_nan = n.isDouble() and std.math.isNan(n.asDouble());
+        if (!is_nan) {
+            const pos_i = intrinsics.toInt(n);
+            search_end = clampPos(pos_i, s.bytes.len);
+        }
+    }
+    if (needle.bytes.len == 0) return Value.fromInt32(@intCast(search_end));
     if (needle.bytes.len > s.bytes.len) return Value.fromInt32(-1);
-    if (std.mem.lastIndexOf(u8, s.bytes, needle.bytes)) |pos| {
+    // Search within `s.bytes[0 .. min(search_end + needle.len, s.len)]`
+    // since matches starting at `search_end` are still valid.
+    const upper = @min(search_end + needle.bytes.len, s.bytes.len);
+    if (std.mem.lastIndexOf(u8, s.bytes[0..upper], needle.bytes)) |pos| {
         return Value.fromInt32(@intCast(pos));
     }
     return Value.fromInt32(-1);
@@ -1297,8 +1393,8 @@ fn stringNormalize(realm: *Realm, this_value: Value, args: []const Value) Native
 /// strings are UTF-8). Out-of-range → undefined.
 fn stringCodePointAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
-    const pos_v = argOr(args, 0, Value.fromInt32(0));
-    const pos = toInt(pos_v);
+    const pos_v = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
+    const pos = intrinsics.toInt(pos_v);
     if (pos < 0 or pos >= s.bytes.len) return Value.undefined_;
     const idx: usize = @intCast(pos);
     const seq_len = std.unicode.utf8ByteSequenceLength(s.bytes[idx]) catch return Value.undefined_;
