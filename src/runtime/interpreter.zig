@@ -3074,8 +3074,47 @@ fn runFrames(
                 ip += 1;
                 const lhs = registers[r];
                 const rhs = acc;
-                // §13.10.2 — RHS must be callable; otherwise TypeError.
-                const rhs_fn = heap_mod.valueAsFunction(rhs) orelse {
+                // §13.10.2 InstanceofOperator step 1 — target must
+                // be an Object (plain object OR function both
+                // qualify; Symbols / primitives throw TypeError).
+                const rhs_obj_opt: ?*JSObject = heap_mod.valueAsPlainObject(rhs);
+                const rhs_fn_opt: ?*JSFunction = heap_mod.valueAsFunction(rhs);
+                if (rhs_obj_opt == null and rhs_fn_opt == null) {
+                    const ex = try makeTypeError(realm, "Right-hand side of instanceof is not an object");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                }
+                // §13.10.2 step 2 — `GetMethod(target, @@hasInstance)`.
+                // Walks the prototype chain. If present and not null /
+                // undefined, invoke it as the handler.
+                const hi_v: Value = if (rhs_obj_opt) |o| o.get("@@hasInstance") else if (rhs_fn_opt) |fn_obj| fn_obj.get("@@hasInstance") else Value.undefined_;
+                if (heap_mod.valueAsFunction(hi_v)) |hi_fn| {
+                    const hi_args = [_]Value{lhs};
+                    const outcome = try callJSFunction(allocator, realm, hi_fn, rhs, &hi_args);
+                    switch (outcome) {
+                        .value, .yielded => |v| {
+                            acc = Value.fromBool(v.toBooleanPrimitive());
+                            continue;
+                        },
+                        .thrown => |ex| {
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue;
+                        },
+                    }
+                }
+                // §13.10.2 step 4 — without an @@hasInstance handler,
+                // target must be callable (i.e. a JSFunction).
+                const rhs_fn = rhs_fn_opt orelse {
                     const ex = try makeTypeError(realm, "Right-hand side of instanceof is not callable");
                     f.ip = ip;
                     f.accumulator = acc;
