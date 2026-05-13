@@ -336,8 +336,25 @@ fn dateConstructor(realm: *Realm, this_value: Value, args: []const Value) Native
     if (args.len == 0) {
         ms = currentTimeMs();
     } else if (args.len == 1) {
-        const v = coerceToNumber(args[0]);
-        ms = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
+        // §21.4.2.1 step 3 — `Date(value)`. If value is a Date
+        // instance, copy its date_ms slot (skip ToPrimitive).
+        // Otherwise, ToPrimitive(value) → if String, parse; else
+        // ToNumber.
+        const arg = args[0];
+        if (heap_mod.valueAsPlainObject(arg)) |o| {
+            if (o.date_ms) |dms| {
+                inst.date_ms = dms;
+                return this_value;
+            }
+        }
+        const prim = try intrinsics.toPrimitive(realm, arg, .default);
+        if (prim.isString()) {
+            const s_obj: *JSString = @ptrCast(@alignCast(prim.asString()));
+            ms = parseIsoDate(s_obj.bytes);
+        } else {
+            const nv = try intrinsics.toNumber(realm, prim);
+            ms = if (nv.isInt32()) @floatFromInt(nv.asInt32()) else nv.asDouble();
+        }
     } else {
         // (year, month, day, hours, minutes, seconds, ms) — UTC
         // construction. later punts on full §21.4.1.13 and uses
