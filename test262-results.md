@@ -137,15 +137,11 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-13 — cynic `f649eb4`, test262 `d0c1b455`
+### 2026-05-13 — cynic `71c3b7a`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
-| **runtime** | 70.79 % | 85.00 % | 32775 / 46296 | +1007 | 1m 48s |
-
-Biggest movers (runtime):
-
-- `built-ins/Object` +3
+| **runtime** | 70.79 % | 85.00 % | 32775 / 46296 | +1007 | 1m 47s |
 
 ### 2026-05-12 — cynic `6800720`, test262 `d0c1b455`
 
