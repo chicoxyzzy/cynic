@@ -179,7 +179,7 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
 /// steps 5-9 are later.
 fn regexpProtoMatchAll(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const re = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "RegExp.prototype[@@matchAll] requires a regex receiver");
-    const s_str = stringifyArg(realm, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
+    const s_str = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
     const iter = realm.heap.allocateObject() catch return error.OutOfMemory;
     iter.prototype = realm.intrinsics.regexp_string_iterator_prototype orelse realm.intrinsics.object_prototype;
     iter.set(realm.allocator, "__cynic_matchall_re__", heap_mod.taggedObject(re)) catch return error.OutOfMemory;
@@ -196,11 +196,11 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     const pat_s = if (pattern_v.isUndefined())
         realm.heap.allocateString("") catch return error.OutOfMemory
     else
-        stringifyArg(realm, pattern_v) catch return error.OutOfMemory;
+        try stringifyArg(realm, pattern_v);
     const flag_s = if (flags_v.isUndefined())
         realm.heap.allocateString("") catch return error.OutOfMemory
     else
-        stringifyArg(realm, flags_v) catch return error.OutOfMemory;
+        try stringifyArg(realm, flags_v);
     // §22.2.4 — the spec's `[[OriginalSource]]` / `[[OriginalFlags]]`
     // internal slots, surfaced via accessors on `RegExp.prototype`
     // (installed in `install`). Stored under `__cynic_*` so the
@@ -360,7 +360,7 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
     if (!regex_obj.hasOwn("__cynic_re_src__")) {
         return throwTypeError(realm, "RegExp.prototype.exec called on non-RegExp");
     }
-    const input_s = stringifyArg(realm, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
+    const input_s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
     const bc = (try ensureBytecode(realm, regex_obj)) orelse return Value.null_;
 
     var input = buildInputBuf(realm.allocator, input_s.bytes) catch return error.OutOfMemory;

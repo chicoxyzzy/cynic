@@ -214,22 +214,22 @@ fn makeURIError(realm: *Realm, msg: []const u8) !Value {
 
 fn globalEncodeURI(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const s = stringifyArg(realm, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
+    const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
     return encodeURIImpl(realm, s.bytes, true);
 }
 fn globalEncodeURIComponent(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const s = stringifyArg(realm, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
+    const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
     return encodeURIImpl(realm, s.bytes, false);
 }
 fn globalDecodeURI(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const s = stringifyArg(realm, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
+    const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
     return decodeURIImpl(realm, s.bytes, true);
 }
 fn globalDecodeURIComponent(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const s = stringifyArg(realm, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
+    const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
     return decodeURIImpl(realm, s.bytes, false);
 }
 

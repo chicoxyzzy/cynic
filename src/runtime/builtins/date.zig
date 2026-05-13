@@ -383,7 +383,7 @@ fn dateNow(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
 fn dateParse(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     if (args.len == 0) return Value.fromDouble(std.math.nan(f64));
-    const s_value = intrinsics.stringifyArg(realm, args[0]) catch return error.OutOfMemory;
+    const s_value = try intrinsics.stringifyArg(realm, args[0]);
     const s = s_value.bytes;
     // §21.4.1.18 simplified ISO format. Real engines also accept
     // RFC 2822-style ("Mon, 01 Jan 2024 00:00:00 GMT"), but the

@@ -1085,7 +1085,7 @@ fn typedArrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
     const sep_v = argOr(args, 0, Value.undefined_);
     const sep_s: []const u8 = if (sep_v.isUndefined()) "," else blk: {
-        const s = stringifyArg(realm, sep_v) catch return error.OutOfMemory;
+        const s = try stringifyArg(realm, sep_v);
         break :blk s.bytes;
     };
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -1095,7 +1095,7 @@ fn typedArrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeE
     while (i < tv.length) : (i += 1) {
         if (i > 0) out.appendSlice(realm.allocator, sep_s) catch return error.OutOfMemory;
         const v = readTypedElement(realm, buf, tv.kind, tv.byte_offset + i * elem_size);
-        const s = stringifyArg(realm, v) catch return error.OutOfMemory;
+        const s = try stringifyArg(realm, v);
         out.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
     }
     const result = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
@@ -1147,7 +1147,7 @@ fn typedArrayToLocaleString(realm: *Realm, this_value: Value, args: []const Valu
         } else {
             str_v = v;
         }
-        const s = stringifyArg(realm, str_v) catch return error.OutOfMemory;
+        const s = try stringifyArg(realm, str_v);
         out.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
     }
     const result = realm.heap.allocateString(out.items) catch return error.OutOfMemory;

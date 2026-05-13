@@ -365,7 +365,7 @@ fn parseIntNative(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // numbers / undefined / null all stringify and are then
     // parsed. `parseInt(true)` ends up with input "true" which
     // doesn't begin with a numeric prefix → NaN.
-    const s = stringifyArg(realm, v) catch return error.OutOfMemory;
+    const s = try stringifyArg(realm, v);
     const radix_v = argOr(args, 1, Value.undefined_);
     // §19.2.5 step 7 — `R = ToInt32(radix)`. step 8 — if R != 0
     // and (R < 2 or R > 36) return NaN. Booleans coerce to 0/1
@@ -488,7 +488,7 @@ fn parseFloatNative(realm: *Realm, this_value: Value, args: []const Value) Nativ
     _ = this_value;
     const v = argOr(args, 0, Value.undefined_);
     // §19.2.4 — ToString first.
-    const s = stringifyArg(realm, v) catch return error.OutOfMemory;
+    const s = try stringifyArg(realm, v);
     // §19.2.4 step 2 — strip leading StrWhiteSpace (Unicode-aware).
     const start = skipStrWhiteSpace(s.bytes);
     const trimmed = s.bytes[start..];

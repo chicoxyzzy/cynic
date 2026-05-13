@@ -689,7 +689,7 @@ fn stringConcat(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     defer buf.deinit(realm.allocator);
     buf.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
     for (args) |a| {
-        const part = stringifyArg(realm, a) catch return error.OutOfMemory;
+        const part = try stringifyArg(realm, a);
         buf.appendSlice(realm.allocator, part.bytes) catch return error.OutOfMemory;
     }
     const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
@@ -786,7 +786,7 @@ pub fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) Native
     const sep_str_v: Value = if (sep_v.isString())
         sep_v
     else
-        Value.fromString(stringifyArg(realm, sep_v) catch return error.OutOfMemory);
+        Value.fromString(try stringifyArg(realm, sep_v));
     const sep: *JSString = @ptrCast(@alignCast(sep_str_v.asString()));
 
     // Empty separator — split into chars. Honour `limit`.
@@ -1389,7 +1389,7 @@ fn stringNormalize(realm: *Realm, this_value: Value, args: []const Value) Native
     const s = try coerceThisToJSString(realm, this_value);
     const form_v = argOr(args, 0, Value.undefined_);
     if (!form_v.isUndefined()) {
-        const form_s = intrinsics.stringifyArg(realm, form_v) catch return error.OutOfMemory;
+        const form_s = try intrinsics.stringifyArg(realm, form_v);
         const f = form_s.bytes;
         if (!std.mem.eql(u8, f, "NFC") and !std.mem.eql(u8, f, "NFD") and
             !std.mem.eql(u8, f, "NFKC") and !std.mem.eql(u8, f, "NFKD"))
@@ -1420,7 +1420,7 @@ fn stringCodePointAt(realm: *Realm, this_value: Value, args: []const Value) Nati
 /// fall back to byte-wise compare. Returns -1/0/+1 per spec.
 fn stringLocaleCompare(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
-    const other_s = intrinsics.stringifyArg(realm, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
+    const other_s = try intrinsics.stringifyArg(realm, argOr(args, 0, Value.undefined_));
     const cmp = std.mem.order(u8, s.bytes, other_s.bytes);
     return Value.fromInt32(switch (cmp) {
         .lt => -1,

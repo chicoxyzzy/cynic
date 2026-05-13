@@ -163,7 +163,7 @@ fn symbolConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     }
     var desc: ?[]const u8 = null;
     if (args.len > 0 and !args[0].isUndefined()) {
-        const desc_str = stringifyArg(realm, args[0]) catch return error.OutOfMemory;
+        const desc_str = try stringifyArg(realm, args[0]);
         desc = desc_str.bytes;
     }
     const sym = realm.heap.allocateSymbol(desc) catch return error.OutOfMemory;
@@ -175,7 +175,7 @@ fn symbolFor(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     // §20.4.2.2 Symbol.for — interns into the realm's global
     // symbol registry. ToString the key first.
     const key_str = if (args.len > 0)
-        stringifyArg(realm, args[0]) catch return error.OutOfMemory
+        try stringifyArg(realm, args[0])
     else
         realm.heap.allocateString("undefined") catch return error.OutOfMemory;
     if (realm.heap.symbol_registry.get(key_str.bytes)) |existing| {

@@ -285,7 +285,7 @@ fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []cons
         const key_str = if (k_v.isString())
             (@as(*JSString, @ptrCast(@alignCast(k_v.asString())))).bytes
         else blk: {
-            const s = stringifyArg(realm, k_v) catch return error.OutOfMemory;
+            const s = try stringifyArg(realm, k_v);
             break :blk s.bytes;
         };
         // §10.5.11 step 9 — duplicate keys → TypeError.
@@ -566,7 +566,7 @@ fn descriptorKey(realm: *Realm, v: Value) NativeError![]const u8 {
         const s = try stringifyArg(realm, prim);
         return s.bytes;
     }
-    const s = stringifyArg(realm, v) catch return error.OutOfMemory;
+    const s = try stringifyArg(realm, v);
     return s.bytes;
 }
 
@@ -1518,7 +1518,7 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
         const key_str = if (k.isString())
             (@as(*JSString, @ptrCast(@alignCast(k.asString())))).bytes
         else blk: {
-            const s = stringifyArg(realm, k) catch return error.OutOfMemory;
+            const s = try stringifyArg(realm, k);
             break :blk s.bytes;
         };
         out.set(realm.allocator, key_str, v) catch return error.OutOfMemory;
@@ -1643,7 +1643,7 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         const key_str = if (key_v.isString())
             (@as(*JSString, @ptrCast(@alignCast(key_v.asString())))).bytes
         else blk: {
-            const s = stringifyArg(realm, key_v) catch return error.OutOfMemory;
+            const s = try stringifyArg(realm, key_v);
             break :blk s.bytes;
         };
         // Look up or create the bucket array.

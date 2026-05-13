@@ -315,7 +315,7 @@ fn arrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         const v = try getPropertyChain(realm, obj, islice);
         if (v.isUndefined() or v.isNull()) continue; // §23.1.3.18 — undefined / null become empty
-        const s = stringifyArg(realm, v) catch return error.OutOfMemory;
+        const s = try stringifyArg(realm, v);
         buf.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
     }
     const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
@@ -353,7 +353,7 @@ fn arrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) Na
                 .thrown => return error.NativeThrew,
             }
         }
-        const s = stringifyArg(realm, str_v) catch return error.OutOfMemory;
+        const s = try stringifyArg(realm, str_v);
         buf.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
     }
     const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
