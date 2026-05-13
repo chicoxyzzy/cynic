@@ -677,6 +677,60 @@ test "Parser: arrow (x, ...x) duplicate BoundNames emits SyntaxError" {
     try testing.expectEqual(Code.restricted_identifier_in_strict, diags.items[0].code);
 }
 
+test "Parser: invalid regex /{2}/ emits invalid_regex_literal" {
+    // §22.2.3.4: an InvalidBracedQuantifier in Atom position fails the
+    // RegExpInitialize syntax (and the §22.2.1 grammar before that).
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var diags: Diagnostics = .empty;
+    defer diags.deinit(arena.allocator());
+    _ = parseScript(arena.allocator(), "/{2}/;", &diags) catch {};
+    try testing.expect(diags.items.len >= 1);
+    try testing.expectEqual(Code.invalid_regex_literal, diags.items[0].code);
+}
+
+test "Parser: regex with invalid flag /abc/qq emits SyntaxError" {
+    // §22.2.3.4 step 6: each RegExpFlag must be in `dgimsuvy`.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var diags: Diagnostics = .empty;
+    defer diags.deinit(arena.allocator());
+    _ = parseScript(arena.allocator(), "/abc/qq;", &diags) catch {};
+    try testing.expect(diags.items.len >= 1);
+    try testing.expectEqual(Code.invalid_regex_literal, diags.items[0].code);
+}
+
+test "Parser: regex with duplicate flag /abc/gg emits SyntaxError" {
+    // §22.2.3.4: RegExpFlag values must be unique.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var diags: Diagnostics = .empty;
+    defer diags.deinit(arena.allocator());
+    _ = parseScript(arena.allocator(), "/abc/gg;", &diags) catch {};
+    try testing.expect(diags.items.len >= 1);
+    try testing.expectEqual(Code.invalid_regex_literal, diags.items[0].code);
+}
+
+test "Parser: regex with conflicting u and v flags emits SyntaxError" {
+    // §22.2.3.4: `u` and `v` are mutually exclusive.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var diags: Diagnostics = .empty;
+    defer diags.deinit(arena.allocator());
+    _ = parseScript(arena.allocator(), "/abc/uv;", &diags) catch {};
+    try testing.expect(diags.items.len >= 1);
+    try testing.expectEqual(Code.invalid_regex_literal, diags.items[0].code);
+}
+
+test "Parser: valid regex /abc/g produces no diagnostic" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var diags: Diagnostics = .empty;
+    defer diags.deinit(arena.allocator());
+    _ = parseScript(arena.allocator(), "/abc/g;", &diags) catch unreachable;
+    try testing.expectEqual(@as(usize, 0), diags.items.len);
+}
+
 test "Parser: for (var x in {}) let y; rejects Declaration as body" {
     // §14.7.5: substatement position accepts Statement, not Declaration.
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);

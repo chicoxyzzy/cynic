@@ -11,6 +11,8 @@ const parser_mod = @import("parser.zig");
 const Parser = parser_mod.Parser;
 const ParseError = parser_mod.ParseError;
 
+const regex_validate = @import("regex_validate.zig");
+
 const ast_expr = @import("../ast/expression.zig");
 const Expression = ast_expr.Expression;
 
@@ -1248,6 +1250,17 @@ fn parseRegexLiteralFromSlash(p: *Parser) ParseError!Expression {
     const re_tok = p.lexer.rescanAsRegex(slash_start) catch |err| return mapLexError(err);
     p.current = re_tok;
     _ = try p.bump();
+    // §22.2.3.4 RegExpInitialize early errors — invalid pattern / flags
+    // are SyntaxErrors at parse phase. Hand the raw token text (including
+    // the slashes and trailing flag chars) to the libregexp-backed
+    // validator. Diagnostics accumulate; the bad span covers the whole
+    // literal so the caller's error report is unambiguous.
+    regex_validate.validateRegexLiteralToken(
+        p.arena,
+        p.source[re_tok.span.start..re_tok.span.end],
+        re_tok.span,
+        p.diagnostics,
+    ) catch |err| return err;
     return .{ .regex_literal = .{ .span = re_tok.span } };
 }
 

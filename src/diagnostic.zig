@@ -43,7 +43,10 @@ pub const Code = enum {
     legacy_octal_in_strict,
     invalid_escape_sequence,
     unexpected_character,
-    regex_literal_unsupported,
+    /// §12.9.5 RegularExpressionLiteral whose pattern or flags fail the
+    /// §22.2.3.4 RegExpInitialize syntax. Invalid regex literals are
+    /// SyntaxErrors at parse phase, not at runtime construction.
+    invalid_regex_literal,
     unterminated_template_literal,
     /// `/regex/` literal not closed before EOF or LineTerminator (§12.9.5).
     unterminated_regex_literal,
@@ -108,7 +111,7 @@ pub const Code = enum {
             .legacy_octal_in_strict,
             .invalid_escape_sequence,
             .unexpected_character,
-            .regex_literal_unsupported,
+            .invalid_regex_literal,
             .unterminated_template_literal,
             .unterminated_regex_literal,
             .invalid_identifier_escape,
@@ -154,7 +157,7 @@ test "Code.errorClass: parser/lexer codes are SyntaxError" {
         .legacy_octal_in_strict,
         .invalid_escape_sequence,
         .unexpected_character,
-        .regex_literal_unsupported,
+        .invalid_regex_literal,
         .unterminated_template_literal,
         .unterminated_regex_literal,
         .invalid_identifier_escape,
