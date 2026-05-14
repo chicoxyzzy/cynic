@@ -5031,11 +5031,13 @@ fn runFrames(
                     }
                 } else if (heap_mod.valueAsFunction(acc)) |fn_obj| {
                     // §10.1.8.1 OrdinaryGet step 4 — accessor
-                    // descriptor wins over data. JSFunction's
-                    // `[[Prototype]]` chain (`static_parent` →
-                    // `proto`) is data-only today, so own-only
-                    // lookup suffices.
-                    if (fn_obj.ownAccessor(key_s.bytes)) |acc_pair| {
+                    // descriptor wins over data. Walk the full
+                    // function `[[Prototype]]` chain (own →
+                    // `static_parent` → `proto`) so the poison-pill
+                    // `caller` / `arguments` accessors installed on
+                    // %Function.prototype% (§10.2.4) fire when user
+                    // code reads `fn.caller` / `fn.arguments`.
+                    if (lookupFunctionAccessor(fn_obj, key_s.bytes)) |acc_pair| {
                         if (acc_pair.getter) |getter| {
                             const recv = acc;
                             const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
@@ -5248,8 +5250,11 @@ fn runFrames(
                     acc = obj.get(key_slice);
                 } else if (heap_mod.valueAsFunction(recv)) |fn_obj| {
                     // §10.1.8.1 OrdinaryGet — accessor descriptor
-                    // wins. Mirror the named-key branch above.
-                    if (fn_obj.ownAccessor(key_slice)) |acc_pair| {
+                    // wins. Walk the function `[[Prototype]]` chain
+                    // so inherited accessors (the %Function.prototype%
+                    // `caller` / `arguments` poison pills, §10.2.4)
+                    // fire.
+                    if (lookupFunctionAccessor(fn_obj, key_slice)) |acc_pair| {
                         if (acc_pair.getter) |getter| {
                             const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
                             switch (outcome) {
@@ -5728,6 +5733,24 @@ pub fn lookupAccessor(obj: *JSObject, key: []const u8) ?@import("object.zig").Ac
     var cursor: ?*JSObject = obj;
     while (cursor) |c| : (cursor = c.prototype) {
         if (c.accessors.get(key)) |a| return a;
+    }
+    return null;
+}
+
+/// §10.1.8 / §10.2 — accessor lookup along a function's full
+/// prototype chain. Walks own accessors → `static_parent` chain
+/// (class-static inheritance, §15.7.14) → `proto` chain (the
+/// function-object `[[Prototype]]`, typically %Function.prototype%
+/// which exposes the poison-pill `caller` / `arguments`
+/// accessors per §10.2.4 AddRestrictedFunctionProperties).
+pub fn lookupFunctionAccessor(fn_obj: *JSFunction, key: []const u8) ?@import("object.zig").Accessor {
+    if (fn_obj.accessors.get(key)) |a| return a;
+    var sp: ?*JSFunction = fn_obj.static_parent;
+    while (sp) |p| : (sp = p.static_parent) {
+        if (p.accessors.get(key)) |a| return a;
+    }
+    if (fn_obj.proto) |proto| {
+        return lookupAccessor(proto, key);
     }
     return null;
 }
