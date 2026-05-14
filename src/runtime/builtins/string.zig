@@ -139,7 +139,41 @@ fn regexpStringIterNext(realm: *Realm, this_value: Value, args: []const Value) N
         it.set(realm.allocator, "__cynic_matchall_done__", Value.fromBool(true)) catch return error.OutOfMemory;
         return iterResult(realm, Value.undefined_, true);
     }
+    // §22.2.9.2 step 1.f.iv — after a zero-width match the iterator
+    // must AdvanceStringIndex on the regex's `lastIndex`, otherwise
+    // the next pull re-matches the same position forever.
+    if (heap_mod.valueAsPlainObject(exec_result)) |match_arr| {
+        const whole_v = match_arr.get("0");
+        if (whole_v.isString()) {
+            const whole: *JSString = @ptrCast(@alignCast(whole_v.asString()));
+            if (whole.bytes.len == 0) {
+                const li_v = re_obj.get("lastIndex");
+                const li_unit: usize = if (li_v.isInt32() and li_v.asInt32() >= 0) @intCast(li_v.asInt32()) else 0;
+                const next_unit = advanceUnitOnString(input.bytes, li_unit);
+                re_obj.set(realm.allocator, "lastIndex", Value.fromInt32(@intCast(next_unit))) catch return error.OutOfMemory;
+            }
+        }
+    }
     return iterResult(realm, exec_result, false);
+}
+
+/// Advance one UTF-16 code unit in the WTF-8 string starting at
+/// code-unit position `from_unit`. Walks the bytes counting units,
+/// then returns `from_unit + units_consumed_by_next_codepoint`. Used
+/// to mirror §22.2.7.1 AdvanceStringIndex without separately tracking
+/// byte cursors at the caller — callers that already do the dual
+/// walk can advance their state directly.
+fn advanceUnitOnString(s: []const u8, from_unit: usize) usize {
+    var unit_pos: usize = 0;
+    var byte_pos: usize = 0;
+    while (byte_pos < s.len and unit_pos < from_unit) {
+        const seq_len = utf8SeqLen(s[byte_pos]);
+        byte_pos += seq_len;
+        unit_pos += if (seq_len == 4) 2 else 1;
+    }
+    if (byte_pos >= s.len) return from_unit + 1;
+    const seq_len = utf8SeqLen(s[byte_pos]);
+    return from_unit + (if (seq_len == 4) @as(usize, 2) else 1);
 }
 
 /// §22.1.2.1 String.fromCharCode(...codeUnits). Each argument is
@@ -1104,7 +1138,13 @@ fn regexReplace(
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
-    var cursor: usize = 0;
+    // Two parallel cursors into the source: `byte_pos` walks the
+    // UTF-8 bytes (for slicing into `s.bytes`); `unit_pos` walks
+    // UTF-16 code units (matching the index space that `exec`'s
+    // `index` and `lastIndex` properties live in). They're updated
+    // in lock-step.
+    var byte_pos: usize = 0;
+    var unit_pos: usize = 0;
     const max_iter: usize = 1 << 20;
     var step: usize = 0;
     while (step < max_iter) : (step += 1) {
@@ -1112,46 +1152,102 @@ fn regexReplace(
         if (exec_result.isNull()) break;
         const match_arr = heap_mod.valueAsPlainObject(exec_result) orelse break;
         const idx_v = match_arr.get("index");
-        const m_idx: usize = if (idx_v.isInt32() and idx_v.asInt32() >= 0) @intCast(idx_v.asInt32()) else cursor;
+        const m_idx_unit: usize = if (idx_v.isInt32() and idx_v.asInt32() >= 0) @intCast(idx_v.asInt32()) else unit_pos;
         const whole_v = match_arr.get("0");
         const whole: *JSString = if (whole_v.isString())
             @ptrCast(@alignCast(whole_v.asString()))
         else
             return error.NativeThrew;
 
-        // Append everything before this match, then the replacement.
-        if (m_idx > cursor) buf.appendSlice(realm.allocator, s.bytes[cursor..m_idx]) catch return error.OutOfMemory;
-        const replacement = try resolveRegexReplacer(realm, s, match_arr, whole, m_idx, repl_v);
-        buf.appendSlice(realm.allocator, replacement) catch return error.OutOfMemory;
-        cursor = m_idx + whole.bytes.len;
+        // Walk forward from `(byte_pos, unit_pos)` to the match
+        // start in code units, accumulating skipped bytes into the
+        // output. Matches are monotonic so this is amortised O(n)
+        // across the whole loop.
+        const append_start = byte_pos;
+        while (unit_pos < m_idx_unit and byte_pos < s.bytes.len) {
+            const seq_len = utf8SeqLen(s.bytes[byte_pos]);
+            if (byte_pos + seq_len > s.bytes.len) break;
+            byte_pos += seq_len;
+            unit_pos += if (seq_len == 4) 2 else 1;
+        }
+        const m_byte = byte_pos;
+        if (m_byte > append_start) buf.appendSlice(realm.allocator, s.bytes[append_start..m_byte]) catch return error.OutOfMemory;
+        try appendRegexReplacement(realm, &buf, s, match_arr, whole, m_byte, m_idx_unit, repl_v);
+        byte_pos = m_byte + whole.bytes.len;
+        unit_pos = m_idx_unit + utf8UnitCount(whole.bytes);
         if (whole.bytes.len == 0) {
-            // Zero-width match — bump cursor by one byte to avoid
-            // infinite loop. (Spec advances by one UTF-16 unit;
-            // we approximate with one UTF-8 byte.)
-            if (cursor < s.bytes.len) {
-                buf.append(realm.allocator, s.bytes[cursor]) catch return error.OutOfMemory;
-                cursor += 1;
+            // §22.2.6.11 step 8.j — `AdvanceStringIndex` after a
+            // zero-width match, otherwise the next `exec` would
+            // re-match the same position. Advancing by a full
+            // UTF-8 sequence collapses the spec's per-code-unit
+            // walk for non-fullUnicode into per-codepoint for
+            // both, which mirrors how V8 / SpiderMonkey behave for
+            // strings whose codepoints survive the surrogate-pair
+            // round-trip. Update the regex's `lastIndex` *and* our
+            // local cursors.
+            if (byte_pos < s.bytes.len) {
+                const seq_len = utf8SeqLen(s.bytes[byte_pos]);
+                if (byte_pos + seq_len <= s.bytes.len) {
+                    byte_pos += seq_len;
+                    unit_pos += if (seq_len == 4) 2 else 1;
+                }
             }
+            regex_obj.set(realm.allocator, "lastIndex", Value.fromInt32(@intCast(unit_pos))) catch return error.OutOfMemory;
         }
         if (!all) break;
     }
-    if (cursor < s.bytes.len) buf.appendSlice(realm.allocator, s.bytes[cursor..]) catch return error.OutOfMemory;
+    if (byte_pos < s.bytes.len) buf.appendSlice(realm.allocator, s.bytes[byte_pos..]) catch return error.OutOfMemory;
     const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
     return Value.fromString(out);
 }
 
-/// §22.1.3.18.1 GetSubstitution — for a regex match, the
-/// callable replacer receives `(match,...captures, offset,
-/// source)`. Cynic's `match_arr` is `[whole, c1, c2,...]`, so
-/// we walk it.
-fn resolveRegexReplacer(
+/// UTF-8 leading-byte → byte-sequence length (1..4). Returns 1 for
+/// bytes that don't start a valid sequence so we always make
+/// progress on malformed input.
+fn utf8SeqLen(b: u8) usize {
+    if (b < 0x80) return 1;
+    if (b < 0xC0) return 1;
+    if (b < 0xE0) return 2;
+    if (b < 0xF0) return 3;
+    return 4;
+}
+
+/// UTF-16 code-unit count for a well-formed UTF-8 slice. A 4-byte
+/// UTF-8 sequence is a supplementary (non-BMP) code point and
+/// occupies two UTF-16 surrogate-pair units; everything else is
+/// one unit.
+fn utf8UnitCount(s: []const u8) usize {
+    var u: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        const seq_len = utf8SeqLen(s[i]);
+        u += if (seq_len == 4) 2 else 1;
+        i += seq_len;
+    }
+    return u;
+}
+
+/// §22.1.3.18.1 GetSubstitution — for a regex match, append the
+/// resolved replacement (callable result *or* `$&`/`$1`/`$$`/`$\``/`$'`
+/// template expansion) directly into `out`. The previous shape returned
+/// a freshly-`dupe`d slice that callers forgot to free; writing into the
+/// caller's buffer removes that bookkeeping (and the leak).
+///
+/// `byte_pos` is the match's byte offset into `source.bytes` (used for
+/// `$\`` / `$'` byte slicing); `unit_pos` is the same position in
+/// UTF-16 code units (the offset passed to a callable replacer, per
+/// spec). They coincide for ASCII inputs and diverge across
+/// supplementary code points.
+fn appendRegexReplacement(
     realm: *Realm,
+    out: *std.ArrayListUnmanaged(u8),
     source: *JSString,
     match_arr: *JSObject,
     whole: *JSString,
-    pos: usize,
+    byte_pos: usize,
+    unit_pos: usize,
     repl_v: Value,
-) NativeError![]const u8 {
+) NativeError!void {
     if (heap_mod.valueAsFunction(repl_v)) |fn_obj| {
         const len_v = match_arr.get("length");
         const arr_len: i32 = if (len_v.isInt32()) len_v.asInt32() else 1;
@@ -1166,7 +1262,7 @@ fn resolveRegexReplacer(
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
             args.append(realm.allocator, match_arr.get(islice)) catch return error.OutOfMemory;
         }
-        args.append(realm.allocator, Value.fromInt32(@intCast(pos))) catch return error.OutOfMemory;
+        args.append(realm.allocator, Value.fromInt32(@intCast(unit_pos))) catch return error.OutOfMemory;
         args.append(realm.allocator, Value.fromString(source)) catch return error.OutOfMemory;
         const outcome = interpreter.callJSFunction(realm.allocator, realm, fn_obj, Value.undefined_, args.items) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -1177,27 +1273,22 @@ fn resolveRegexReplacer(
             .thrown => return error.NativeThrew,
         };
         const ret_s = try intrinsics.stringifyArg(realm, ret);
-        return ret_s.bytes;
+        out.appendSlice(realm.allocator, ret_s.bytes) catch return error.OutOfMemory;
+        return;
     }
-    // String replacement — `$&`, `$1`...`$9`, `$$`, `$\``,
-    // `$'` substitutions per §22.1.3.18.1. (When called from
-    // `regexReplace` after our pre-coercion the value is already
-    // a string, but resolveRegexReplacer is also reachable from
-    // paths that didn't pre-coerce — leave the call here.)
     const repl_s = try intrinsics.stringifyArg(realm, repl_v);
-    return try expandSubstitution(realm, repl_s.bytes, source, match_arr, whole, pos);
+    try expandSubstitutionInto(realm, out, repl_s.bytes, source, match_arr, whole, byte_pos);
 }
 
-fn expandSubstitution(
+fn expandSubstitutionInto(
     realm: *Realm,
+    out: *std.ArrayListUnmanaged(u8),
     template: []const u8,
     source: *JSString,
     match_arr: *JSObject,
     whole: *JSString,
     pos: usize,
-) NativeError![]const u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    defer out.deinit(realm.allocator);
+) NativeError!void {
     var i: usize = 0;
     while (i < template.len) : (i += 1) {
         const c = template[i];
@@ -1225,7 +1316,6 @@ fn expandSubstitution(
                 i += 1;
             },
             '0'...'9' => {
-                // Single or double-digit capture reference.
                 var idx: usize = n - '0';
                 var consumed: usize = 1;
                 if (i + 2 < template.len and template[i + 2] >= '0' and template[i + 2] <= '9') {
@@ -1247,7 +1337,6 @@ fn expandSubstitution(
                         const cs: *JSString = @ptrCast(@alignCast(cap_v.asString()));
                         out.appendSlice(realm.allocator, cs.bytes) catch return error.OutOfMemory;
                     }
-                    // undefined captures contribute nothing.
                 }
                 i += consumed;
             },
@@ -1256,7 +1345,6 @@ fn expandSubstitution(
             },
         }
     }
-    return try realm.allocator.dupe(u8, out.items);
 }
 
 /// §22.1.3.18 — produce the replacement bytes for a single

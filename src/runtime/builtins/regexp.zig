@@ -258,19 +258,32 @@ fn ensureBytecode(realm: *Realm, regex_obj: *JSObject) NativeError!?[]u8 {
     var err_buf: [128]u8 = undefined;
     @memset(&err_buf, 0);
     var bc_len: c_int = 0;
+    // §22.2.1 — when the pattern is parsed without `/u` (and
+    // `/v`, which is paired with `/u` by parseFlags above),
+    // ECMA-262 treats the source as a sequence of UTF-16 code
+    // units. libregexp's parser, in that mode, requires the bytes
+    // to be CESU-8 — a non-BMP code point split into the two
+    // surrogate halves, each encoded as a 3-byte UTF-8 sequence.
+    // Cynic stores JSStrings as well-formed UTF-8 (a non-BMP
+    // code point is a single 4-byte sequence), so transcode here
+    // to keep libregexp happy. Under `/u`/`/v` the buffer is
+    // passed through unchanged; libregexp consumes it as UTF-8.
+    const fullUnicode = (re_flags & LRE_FLAG_UNICODE) != 0 or (re_flags & LRE_FLAG_UNICODE_SETS) != 0;
+    const src_bytes = if (fullUnicode) src_s.bytes else try utf8ToCesu8(realm.allocator, src_s.bytes);
+    defer if (!fullUnicode and src_bytes.ptr != src_s.bytes.ptr) realm.allocator.free(src_bytes);
     // libregexp's parser checks `*buf_ptr != '\0'` after the
     // outer disjunction to detect trailing junk, so the input
     // must be NUL-terminated. Copy into a heap buffer + null.
-    const src_z = realm.allocator.alloc(u8, src_s.bytes.len + 1) catch return error.OutOfMemory;
+    const src_z = realm.allocator.alloc(u8, src_bytes.len + 1) catch return error.OutOfMemory;
     defer realm.allocator.free(src_z);
-    @memcpy(src_z[0..src_s.bytes.len], src_s.bytes);
-    src_z[src_s.bytes.len] = 0;
+    @memcpy(src_z[0..src_bytes.len], src_bytes);
+    src_z[src_bytes.len] = 0;
     const bc_ptr = c.lre_compile(
         &bc_len,
         &err_buf[0],
         @intCast(err_buf.len),
         @ptrCast(src_z.ptr),
-        src_s.bytes.len,
+        src_bytes.len,
         re_flags,
         @ptrCast(realm),
     );
@@ -285,6 +298,56 @@ fn ensureBytecode(realm: *Realm, regex_obj: *JSObject) NativeError!?[]u8 {
     const bc_slice = bc_ptr[0..len_u];
     regex_obj.regex_bytecode = bc_slice;
     return bc_slice;
+}
+
+/// Re-encode a UTF-8 string as CESU-8: every supplementary (non-BMP)
+/// code point — a 4-byte UTF-8 sequence — is split into its UTF-16
+/// surrogate pair, each surrogate emitted as a 3-byte UTF-8 sequence.
+/// BMP code points pass through unchanged. The output is *not* well-
+/// formed UTF-8 (the surrogate ranges D800-DFFF are invalid in UTF-8),
+/// but libregexp's non-Unicode parser specifically requires this form
+/// to count pattern positions in UTF-16 code units.
+fn utf8ToCesu8(allocator: std.mem.Allocator, src: []const u8) std.mem.Allocator.Error![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, src.len);
+    var i: usize = 0;
+    while (i < src.len) {
+        const b = src[i];
+        if (b < 0x80) {
+            out.appendAssumeCapacity(b);
+            i += 1;
+            continue;
+        }
+        const seq_len: usize = if (b < 0xE0) 2 else if (b < 0xF0) 3 else 4;
+        if (i + seq_len > src.len) {
+            try out.appendSlice(allocator, src[i..]);
+            break;
+        }
+        if (seq_len != 4) {
+            try out.appendSlice(allocator, src[i .. i + seq_len]);
+            i += seq_len;
+            continue;
+        }
+        // 4-byte sequence — decode to codepoint, split into a
+        // UTF-16 surrogate pair, emit each as 3-byte UTF-8.
+        const cp = (@as(u32, src[i] & 0x07) << 18) |
+            (@as(u32, src[i + 1] & 0x3F) << 12) |
+            (@as(u32, src[i + 2] & 0x3F) << 6) |
+            (@as(u32, src[i + 3] & 0x3F));
+        const adjusted = cp - 0x10000;
+        const hi: u16 = @intCast(0xD800 + (adjusted >> 10));
+        const lo: u16 = @intCast(0xDC00 + (adjusted & 0x3FF));
+        try out.ensureUnusedCapacity(allocator, 6);
+        out.appendAssumeCapacity(@intCast(0xE0 | (hi >> 12)));
+        out.appendAssumeCapacity(@intCast(0x80 | ((hi >> 6) & 0x3F)));
+        out.appendAssumeCapacity(@intCast(0x80 | (hi & 0x3F)));
+        out.appendAssumeCapacity(@intCast(0xE0 | (lo >> 12)));
+        out.appendAssumeCapacity(@intCast(0x80 | ((lo >> 6) & 0x3F)));
+        out.appendAssumeCapacity(@intCast(0x80 | (lo & 0x3F)));
+        i += 4;
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 // ── UTF-8 ↔ UTF-16 transcoding ──────────────────────────────────────────────

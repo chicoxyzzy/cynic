@@ -129,17 +129,27 @@ fn validateFlags(flags: []const u8, out: *c_int) bool {
 /// the disjunction looking for a trailing NUL). Copy into an
 /// allocator-owned slice and append the NUL.
 fn validatePattern(allocator: std.mem.Allocator, pattern: []const u8, re_flags: c_int) bool {
-    const buf = allocator.alloc(u8, pattern.len + 1) catch return true; // OOM — let runtime handle
-    defer allocator.free(buf);
-    @memcpy(buf[0..pattern.len], pattern);
-    buf[pattern.len] = 0;
-
     // §22.2.1.5 — `/v` is also a Unicode mode. Mirror the
     // RegExp constructor's flag-fixup (`src/runtime/builtins
     // /regexp.zig parseFlags`): pair `/v` with `/u` so libregexp
     // accepts non-BMP code points in the pattern.
     var compile_flags = re_flags;
     if ((compile_flags & LRE_FLAG_UNICODE_SETS) != 0) compile_flags |= LRE_FLAG_UNICODE;
+
+    // Outside Unicode mode libregexp wants the pattern in CESU-8
+    // (supplementary code points split into surrogate pairs, each
+    // encoded as 3-byte UTF-8). Cynic stores well-formed UTF-8, so
+    // transcode here for the validator just like the runtime
+    // bridge does — without this, `/𠮷/` at parse time would
+    // false-reject as `invalid_regex_literal`.
+    const full_unicode = (compile_flags & LRE_FLAG_UNICODE) != 0;
+    const pattern_bytes = if (full_unicode) pattern else utf8ToCesu8(allocator, pattern) catch return true;
+    defer if (!full_unicode and pattern_bytes.ptr != pattern.ptr) allocator.free(pattern_bytes);
+
+    const buf = allocator.alloc(u8, pattern_bytes.len + 1) catch return true; // OOM — let runtime handle
+    defer allocator.free(buf);
+    @memcpy(buf[0..pattern_bytes.len], pattern_bytes);
+    buf[pattern_bytes.len] = 0;
 
     var err_buf: [128]u8 = undefined;
     @memset(&err_buf, 0);
@@ -149,7 +159,7 @@ fn validatePattern(allocator: std.mem.Allocator, pattern: []const u8, re_flags: 
         &err_buf[0],
         @intCast(err_buf.len),
         @ptrCast(buf.ptr),
-        pattern.len,
+        pattern_bytes.len,
         compile_flags,
         null,
     );
@@ -159,6 +169,53 @@ fn validatePattern(allocator: std.mem.Allocator, pattern: []const u8, re_flags: 
     // parser has no interest in the bytecode.
     std.c.free(bc_ptr);
     return true;
+}
+
+/// Re-encode UTF-8 as CESU-8 — supplementary (4-byte) sequences are
+/// split into their UTF-16 surrogate pair, each surrogate emitted as a
+/// 3-byte UTF-8 sequence. See `runtime/builtins/regexp.zig utf8ToCesu8`
+/// for the motivation: libregexp's non-Unicode parser counts pattern
+/// positions in UTF-16 code units and rejects the 4-byte form.
+/// Duplicated here so the parser's syntax check has no runtime dep.
+fn utf8ToCesu8(allocator: std.mem.Allocator, src: []const u8) std.mem.Allocator.Error![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, src.len);
+    var i: usize = 0;
+    while (i < src.len) {
+        const b = src[i];
+        if (b < 0x80) {
+            out.appendAssumeCapacity(b);
+            i += 1;
+            continue;
+        }
+        const seq_len: usize = if (b < 0xE0) 2 else if (b < 0xF0) 3 else 4;
+        if (i + seq_len > src.len) {
+            try out.appendSlice(allocator, src[i..]);
+            break;
+        }
+        if (seq_len != 4) {
+            try out.appendSlice(allocator, src[i .. i + seq_len]);
+            i += seq_len;
+            continue;
+        }
+        const cp = (@as(u32, src[i] & 0x07) << 18) |
+            (@as(u32, src[i + 1] & 0x3F) << 12) |
+            (@as(u32, src[i + 2] & 0x3F) << 6) |
+            (@as(u32, src[i + 3] & 0x3F));
+        const adjusted = cp - 0x10000;
+        const hi: u16 = @intCast(0xD800 + (adjusted >> 10));
+        const lo: u16 = @intCast(0xDC00 + (adjusted & 0x3FF));
+        try out.ensureUnusedCapacity(allocator, 6);
+        out.appendAssumeCapacity(@intCast(0xE0 | (hi >> 12)));
+        out.appendAssumeCapacity(@intCast(0x80 | ((hi >> 6) & 0x3F)));
+        out.appendAssumeCapacity(@intCast(0x80 | (hi & 0x3F)));
+        out.appendAssumeCapacity(@intCast(0xE0 | (lo >> 12)));
+        out.appendAssumeCapacity(@intCast(0x80 | ((lo >> 6) & 0x3F)));
+        out.appendAssumeCapacity(@intCast(0x80 | (lo & 0x3F)));
+        i += 4;
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 /// §22.2.1.5 string-property names. These are Unicode property

@@ -84,6 +84,7 @@ pub const skip_stage_maturity_features = [_][]const u8{
     "explicit-resource-management", // Stage 3 — `using` / `await using`.
     "import-defer", // Stage 3 — `import defer * as ns from "…"`.
     "source-phase-imports", // Stage 3 — `import source x from "…"`.
+    "Temporal", // Stage 3 — large surface area; not in scope yet.
 };
 
 // ── Group 4: Non-standard ───────────────────────────────────────────
@@ -106,21 +107,21 @@ pub const skip_planned_features = [_][]const u8{
     "regexp-modifiers", // ES2024 inline `(?i:…)` / `(?-i:…)`.
 };
 
+pub const skip_planned_paths = [_][]const u8{
+    // Temporal is a large Stage 3 surface (Calendar / TimeZone /
+    // Instant / PlainDate / …). Aside from grammar it adds nothing
+    // the parser needs to model — every fixture parses fine — but
+    // runtime mode attempts ~4500 tests against globals Cynic doesn't
+    // install, drowning the rest of the runtime scoreboard in 0 %
+    // noise. Path-skip wholesale until the implementation phase.
+    "built-ins/Temporal/",
+};
+
 pub const skip_planned_path_contains = [_][]const u8{
     // Unicode `Script_Extensions=Unknown` (alias `scx=Zzzz`) —
     // libregexp's property tables don't include the "Unknown"
     // special value.
     "/property-escapes/special-property-value-Script_Extensions-Unknown",
-    // `String.prototype.{search,replace,match,matchAll}` runtime
-    // tests that mix `/v` with non-BMP patterns. The constructor and
-    // parser now accept the patterns (the libregexp `is_unicode`
-    // gate is paired with `/v` at the bridge — see
-    // `runtime/builtins/regexp.zig parseFlags`), but the runtime
-    // match loop (regexReplace, regexSearch) miscounts last-index
-    // advancement on surrogate-pair matches and leaks substitution
-    // buffers. Tracked under "fix 5" in ROADMAP.
-    "/String/prototype/search/regexp-prototype-search-v",
-    "/String/prototype/replace/regexp-prototype-replace-v",
 };
 
 // ── Lookup ──────────────────────────────────────────────────────────
@@ -136,7 +137,7 @@ pub fn pathIsSkipped(rel_path: []const u8) bool {
 /// scope. Always check `pathIsSkipped` first; this is an extra
 /// filter on top.
 pub fn pathIsCynicOutOfScope(rel_path: []const u8) bool {
-    inline for (.{ skip_annex_b_paths, skip_ses_paths }) |group| {
+    inline for (.{ skip_annex_b_paths, skip_ses_paths, skip_planned_paths }) |group| {
         for (group) |prefix| {
             if (std.mem.startsWith(u8, rel_path, prefix)) return true;
         }
@@ -193,6 +194,12 @@ test "skip: SES out of scope" {
 test "skip: main-spec paths not OOS" {
     try testing.expect(!pathIsCynicOutOfScope("language/expressions/addition/order-of-evaluation.js"));
     try testing.expect(!pathIsCynicOutOfScope("built-ins/String/prototype/substr/length-undef.js"));
+}
+
+test "skip: Temporal out of scope" {
+    try testing.expect(pathIsCynicOutOfScope("built-ins/Temporal/Now/extensible.js"));
+    try testing.expect(pathIsCynicOutOfScope("built-ins/Temporal/PlainDate/prototype/add/branding.js"));
+    try testing.expect(featureIsUnsupported("Temporal"));
 }
 
 test "skip: planned vendor gaps" {
