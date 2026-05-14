@@ -220,7 +220,13 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) ?struct { idx: i32, value
             if (idx >= 0 and @as(usize, @intCast(idx)) < tv.length) {
                 if (tv.viewed.array_buffer) |buf| {
                     const elem_size = tv.kind.elementSize();
-                    elem = readTypedElement(realm, buf, tv.kind, tv.byte_offset + @as(usize, @intCast(idx)) * elem_size);
+                    const off = tv.byte_offset + @as(usize, @intCast(idx)) * elem_size;
+                    // §10.4.5 IsValidIntegerIndex — a view's
+                    // backing resizable AB may shrink under it;
+                    // out-of-bounds reads return `undefined`.
+                    if (off + elem_size <= buf.len) {
+                        elem = readTypedElement(realm, buf, tv.kind, off);
+                    }
                 }
             }
         } else {

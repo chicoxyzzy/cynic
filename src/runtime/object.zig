@@ -341,8 +341,21 @@ pub const JSObject = struct {
     generator_ref: ?*@import("generator.zig").JSGenerator = null,
     /// `[[ArrayBufferData]]` (§25.1.1.1) — raw byte buffer.
     /// Owned by the realm allocator; freed at object deinit.
-    /// Set on `new ArrayBuffer(N)` instances.
+    /// Set on `new ArrayBuffer(N)` instances. `null` either means
+    /// "no ArrayBuffer brand" or "detached"; disambiguated by
+    /// `has_array_buffer_data` below.
     array_buffer: ?[]u8 = null,
+    /// `[[ArrayBufferData]]` brand presence (§25.1.5.x
+    /// RequireInternalSlot). True iff the object was produced by
+    /// the ArrayBuffer constructor (or `.transfer` / `.slice`).
+    /// `array_buffer == null && has_array_buffer_data == true` is
+    /// the detached state. Plain objects keep the default `false`
+    /// so the prototype-method brand checks `TypeError` correctly.
+    has_array_buffer_data: bool = false,
+    /// `[[ArrayBufferMaxByteLength]]` (§25.1.5.x). `null` on
+    /// fixed-length buffers; `Some(n)` on resizable ones — the
+    /// `resizable` getter is `has_array_buffer_data && this != null`.
+    array_buffer_max_byte_length: ?usize = null,
     /// `[[ViewedArrayBuffer]]` + view metadata (§23.2.1).
     /// Set on TypedArray instances. The view borrows bytes
     /// from `viewed.array_buffer` (a separate JSObject).

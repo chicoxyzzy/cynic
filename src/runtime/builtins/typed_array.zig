@@ -62,16 +62,21 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethodOnProto(realm, proto, "slice", arrayBufferSlice, 2);
         // §25.1.5.{3,4} ArrayBuffer.prototype.{transfer, transferToFixedLength}
         // — ES2024. Both detach the source and return a fresh
-        // ArrayBuffer holding the data. Cynic's implementation
-        // matches `transferToFixedLength` for both: we don't
-        // model resizable ArrayBuffers, so there's no
-        // distinction.
+        // ArrayBuffer holding the data. `transfer` preserves the
+        // source's resizable bit (max_byte_length carries over);
+        // `transferToFixedLength` always produces a fixed buffer.
         try installNativeMethodOnProto(realm, proto, "transfer", arrayBufferTransfer, 0);
-        try installNativeMethodOnProto(realm, proto, "transferToFixedLength", arrayBufferTransfer, 0);
+        try installNativeMethodOnProto(realm, proto, "transferToFixedLength", arrayBufferTransferToFixedLength, 0);
         // §25.1.5.2 `get ArrayBuffer.prototype.detached` — ES2024
         // companion of `.transfer`. Reads `[[ArrayBufferData]]
         // === null`.
         try installNativeGetter(realm, proto, "detached", arrayBufferDetached);
+        // §25.1.5 resizable-ArrayBuffer surface (ES2024). Three
+        // accessors + one method, brand-checked off
+        // `[[ArrayBufferMaxByteLength]]`.
+        try installNativeGetter(realm, proto, "maxByteLength", arrayBufferMaxByteLength);
+        try installNativeGetter(realm, proto, "resizable", arrayBufferResizable);
+        try installNativeMethodOnProto(realm, proto, "resize", arrayBufferResize, 1);
         // §25.1.4.3 ArrayBuffer.isView(arg) — returns true iff
         // arg is an Object with a `[[ViewedArrayBuffer]]` slot
         // (TypedArray or DataView instance). Cynic tracks both
@@ -268,35 +273,61 @@ fn typedArrayAbstractCtor(realm: *Realm, this_value: Value, args: []const Value)
 fn arrayBufferConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "ArrayBuffer constructor requires 'new'");
     // §25.1.3.1 step 2 — `Let byteLength be ? ToIndex(length)`.
-    // ToIndex does ToIntegerOrInfinity (which truncates toward
-    // zero — `0.9` → 0, `-0.99999` → -0 → 0, `1.9` → 1) then
-    // requires the result in [0, 2^53-1].
-    const len_v = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
-    const len_raw: f64 = if (len_v.isInt32()) @floatFromInt(len_v.asInt32()) else len_v.asDouble();
-    // ToIntegerOrInfinity: NaN → 0; +/-Inf preserved; else trunc.
-    const len_trunc: f64 = if (std.math.isNan(len_raw)) 0 else if (std.math.isInf(len_raw)) len_raw else @trunc(len_raw);
-    // §7.1.22 ToIndex step 4 — integerIndex < 0 throws RangeError,
-    // BUT -0 is mathematically equal to 0 and passes. ToIntegerOrInfinity
-    // collapses -0.x → -0 which is f64 negative zero — `< 0` returns
-    // false for -0 (== +0). However `< 0` for any negative non-zero
-    // throws.
-    if (std.math.isInf(len_trunc) and len_trunc > 0)
-        return throwRangeError(realm, "ArrayBuffer length out of range");
-    if (len_trunc < 0)
-        return throwRangeError(realm, "ArrayBuffer length out of range");
-    if (len_trunc > @as(f64, @floatFromInt(std.math.maxInt(u32))))
-        return throwRangeError(realm, "ArrayBuffer length out of range");
-    const len: usize = @intFromFloat(len_trunc);
+    const len = try toIndex(realm, argOr(args, 0, Value.fromInt32(0)));
+
+    // §25.1.3.1 step 3 — `Let requestedMaxByteLength be
+    // ? GetArrayBufferMaxByteLengthOption(options)`. Order matters:
+    // observe the `valueOf` / `toString` calls on `maxByteLength`
+    // *after* the length coercion (fixtures assert the log order).
+    const max_byte_length_opt = try getMaxByteLengthOption(realm, argOr(args, 1, Value.undefined_));
+    if (max_byte_length_opt) |max_len| {
+        if (len > max_len) {
+            return throwRangeError(realm, "ArrayBuffer length exceeds maxByteLength");
+        }
+    }
+
     // §25.1.3.1 step 7 — `new ArrayBuffer(len)` allocates `len`
-    // bytes. Charge against the heap ceiling so a `new
-    // ArrayBuffer(2 ** 31)` call can't exhaust system memory;
-    // overshoot surfaces as `RangeError` (catchable by user JS).
-    realm.heap.charge(len) catch
+    // bytes (or `max_len` for resizable buffers so growing in
+    // place doesn't reallocate). Charge against the heap ceiling
+    // so a `new ArrayBuffer(2 ** 31)` call can't exhaust system
+    // memory; overshoot surfaces as `RangeError`.
+    const capacity = max_byte_length_opt orelse len;
+    realm.heap.charge(capacity) catch
         return throwRangeError(realm, "ArrayBuffer length exceeds heap ceiling");
     const buf = realm.allocator.alloc(u8, len) catch return error.OutOfMemory;
     @memset(buf, 0);
     inst.array_buffer = buf;
+    inst.has_array_buffer_data = true;
+    inst.array_buffer_max_byte_length = max_byte_length_opt;
     return this_value;
+}
+
+/// §7.1.22 ToIndex — coerce `v` to an integer index in
+/// `[0, 2^53 - 1]`. `RangeError` on negative / infinite /
+/// out-of-range. Centralised so `new ArrayBuffer(N)`,
+/// `.resize(N)`, and `maxByteLength` share the same edge cases.
+fn toIndex(realm: *Realm, v: Value) NativeError!usize {
+    const n = try intrinsics.toNumber(realm, v);
+    const raw: f64 = if (n.isInt32()) @floatFromInt(n.asInt32()) else n.asDouble();
+    const trunc: f64 = if (std.math.isNan(raw)) 0 else if (std.math.isInf(raw)) raw else @trunc(raw);
+    if (std.math.isInf(trunc) and trunc > 0)
+        return throwRangeError(realm, "value out of range");
+    if (trunc < 0)
+        return throwRangeError(realm, "value out of range");
+    if (trunc > @as(f64, @floatFromInt(std.math.maxInt(u32))))
+        return throwRangeError(realm, "value out of range");
+    return @intFromFloat(trunc);
+}
+
+/// §25.1.3.7 GetArrayBufferMaxByteLengthOption(options).
+/// Returns `null` if `options` is not an Object or its
+/// `maxByteLength` property is `undefined`. Otherwise
+/// `? ToIndex(maxByteLength)`.
+fn getMaxByteLengthOption(realm: *Realm, options: Value) NativeError!?usize {
+    const obj = heap_mod.valueAsPlainObject(options) orelse return null;
+    const mbl = try intrinsics.getPropertyChain(realm, obj, "maxByteLength");
+    if (mbl.isUndefined()) return null;
+    return try toIndex(realm, mbl);
 }
 
 /// §25.1.4.3 ArrayBuffer.isView(arg) — true iff arg is an
@@ -315,10 +346,17 @@ fn arrayBufferIsView(realm: *Realm, this_value: Value, args: []const Value) Nati
 }
 
 fn arrayBufferByteLength(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
     _ = args;
-    const obj = heap_mod.valueAsPlainObject(this_value) orelse return Value.fromInt32(0);
+    // §25.1.5.1 `get ArrayBuffer.prototype.byteLength` step 2 —
+    // RequireInternalSlot(O, [[ArrayBufferData]]) throws TypeError
+    // when `this` is not an ArrayBuffer instance.
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "get ArrayBuffer.prototype.byteLength requires an ArrayBuffer receiver");
+    if (!obj.has_array_buffer_data)
+        return throwTypeError(realm, "get ArrayBuffer.prototype.byteLength requires an ArrayBuffer receiver");
     if (obj.array_buffer) |ab| return Value.fromInt32(@intCast(ab.len));
+    // Detached buffer — §25.1.5.1 step 5 says return 0 (the
+    // [[ArrayBufferByteLength]] field on a detached buffer is 0).
     return Value.fromInt32(0);
 }
 
@@ -329,31 +367,101 @@ fn arrayBufferDetached(realm: *Realm, this_value: Value, args: []const Value) Na
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "get ArrayBuffer.prototype.detached requires an ArrayBuffer receiver");
+    if (!obj.has_array_buffer_data)
+        return throwTypeError(realm, "get ArrayBuffer.prototype.detached requires an ArrayBuffer receiver");
     return Value.fromBool(obj.array_buffer == null);
 }
 
-/// §25.1.5.{3,4} ArrayBuffer.prototype.{transfer, transferToFixedLength}.
-/// Allocate a fresh buffer of the requested `newLength` (default
-/// = source byteLength), copy the source bytes into the prefix,
-/// detach the source, return the fresh buffer.
-fn arrayBufferTransfer(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+/// §25.1.5.x `get ArrayBuffer.prototype.maxByteLength`. ES2024.
+/// Non-resizable buffer → returns current byteLength. Resizable
+/// buffer → returns the stored max. Detached → 0.
+fn arrayBufferMaxByteLength(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "get ArrayBuffer.prototype.maxByteLength requires an ArrayBuffer receiver");
+    if (!obj.has_array_buffer_data)
+        return throwTypeError(realm, "get ArrayBuffer.prototype.maxByteLength requires an ArrayBuffer receiver");
+    if (obj.array_buffer == null) return Value.fromInt32(0);
+    const max = obj.array_buffer_max_byte_length orelse obj.array_buffer.?.len;
+    return numberFromUsize(max);
+}
+
+/// §25.1.5.x `get ArrayBuffer.prototype.resizable`. ES2024.
+fn arrayBufferResizable(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "get ArrayBuffer.prototype.resizable requires an ArrayBuffer receiver");
+    if (!obj.has_array_buffer_data)
+        return throwTypeError(realm, "get ArrayBuffer.prototype.resizable requires an ArrayBuffer receiver");
+    return Value.fromBool(obj.array_buffer_max_byte_length != null);
+}
+
+/// §25.1.5.3 ArrayBuffer.prototype.resize(newLength). ES2024.
+/// Only valid on a resizable (non-detached) ArrayBuffer.
+fn arrayBufferResize(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // Step 2 — RequireInternalSlot(O, [[ArrayBufferMaxByteLength]]).
+    // A fixed buffer doesn't carry the slot at all.
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "ArrayBuffer.prototype.resize requires a resizable ArrayBuffer receiver");
+    if (!obj.has_array_buffer_data or obj.array_buffer_max_byte_length == null)
+        return throwTypeError(realm, "ArrayBuffer.prototype.resize requires a resizable ArrayBuffer receiver");
+    // Step 5 — `Let newByteLength be ? ToIntegerOrInfinity(newLength)`.
+    // The `coerced-new-length-detach.js` fixture asserts that
+    // coercion runs BEFORE the detached check (step 4) — so we
+    // ToNumber here first, then validate.
+    const len_v = try intrinsics.toNumber(realm, argOr(args, 0, Value.undefined_));
+    const raw: f64 = if (len_v.isInt32()) @floatFromInt(len_v.asInt32()) else len_v.asDouble();
+    const trunc: f64 = if (std.math.isNan(raw)) 0 else if (std.math.isInf(raw)) raw else @trunc(raw);
+    // Step 4 — IsDetachedBuffer(O) check happens *after* coercion.
+    if (obj.array_buffer == null)
+        return throwTypeError(realm, "ArrayBuffer.prototype.resize on detached buffer");
+    // Step 6 — newByteLength < 0 or > max → RangeError.
+    const max = obj.array_buffer_max_byte_length.?;
+    const max_f: f64 = @floatFromInt(max);
+    if (trunc < 0 or (std.math.isInf(trunc) and trunc > 0) or trunc > max_f)
+        return throwRangeError(realm, "ArrayBuffer.prototype.resize newLength out of range");
+    const new_len: usize = @intFromFloat(trunc);
+
+    // Step 7 / 8 — HostResizeArrayBuffer. We're the host: realloc
+    // the backing buffer and zero-fill any growth tail.
+    const old = obj.array_buffer.?;
+    if (new_len == old.len) return Value.undefined_;
+    const new_bytes = realm.allocator.realloc(old, new_len) catch return error.OutOfMemory;
+    if (new_len > old.len) @memset(new_bytes[old.len..], 0);
+    obj.array_buffer = new_bytes;
+    return Value.undefined_;
+}
+
+/// §6.1.6 — number return that fits any usize that survives ToIndex.
+fn numberFromUsize(n: usize) Value {
+    if (n <= @as(usize, std.math.maxInt(i32))) return Value.fromInt32(@intCast(n));
+    return Value.fromDouble(@floatFromInt(n));
+}
+
+/// §25.1.5.3 ArrayBuffer.prototype.transfer(newLength).
+/// `preserve_resizability=true` carries the source's resizable
+/// bit (preserving `[[ArrayBufferMaxByteLength]]`);
+/// `transferToFixedLength` always strips it.
+fn arrayBufferTransferImpl(realm: *Realm, this_value: Value, args: []const Value, preserve_resizability: bool) NativeError!Value {
     const src = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "ArrayBuffer.prototype.transfer requires an ArrayBuffer receiver");
+    if (!src.has_array_buffer_data)
+        return throwTypeError(realm, "ArrayBuffer.prototype.transfer requires an ArrayBuffer receiver");
+
+    // newLength defaults to source byteLength (or maxByteLength
+    // when preserving resizability and source is resizable —
+    // matches V8's transfer-preserves-cap semantics).
     const src_buf = src.array_buffer orelse
         return throwTypeError(realm, "Cannot transfer a detached ArrayBuffer");
-
-    // newLength defaults to source byteLength. ToIntegerOrInfinity
-    // applied per §25.1.5.3 step 4.b; negative or non-finite is
-    // a RangeError.
     const new_len: usize = blk: {
         if (args.len == 0 or args[0].isUndefined()) break :blk src_buf.len;
-        const v = try intrinsics.toNumber(realm, args[0]);
-        const d: f64 = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
-        if (std.math.isNan(d) or d < 0 or std.math.isInf(d)) {
-            return @import("../intrinsics.zig").throwRangeError(realm, "ArrayBuffer.prototype.transfer: newLength out of range");
-        }
-        break :blk @intFromFloat(@trunc(d));
+        break :blk try toIndex(realm, args[0]);
     };
+
+    const max_byte_length: ?usize = if (preserve_resizability) src.array_buffer_max_byte_length else null;
+    if (max_byte_length) |m| {
+        if (new_len > m) return throwRangeError(realm, "ArrayBuffer.prototype.transfer: newLength exceeds maxByteLength");
+    }
 
     const new_bytes = realm.allocator.alloc(u8, new_len) catch return error.OutOfMemory;
     // §25.1.3.1 CopyDataBlockBytes — copy min(src, new) bytes,
@@ -365,10 +473,10 @@ fn arrayBufferTransfer(realm: *Realm, this_value: Value, args: []const Value) Na
     // Detach the source — DetachArrayBuffer per §25.1.3.4.
     realm.allocator.free(src_buf);
     src.array_buffer = null;
+    // Detaching clears the max-byte-length slot too; per spec a
+    // detached buffer's `maxByteLength` reads 0.
+    src.array_buffer_max_byte_length = null;
 
-    // Allocate the result buffer object. Mirrors the layout
-    // `arrayBufferConstructor` produces: same prototype, single
-    // `array_buffer` slot.
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     if (heap_mod.valueAsFunction(realm.globals.get("ArrayBuffer") orelse Value.undefined_)) |ab_ctor| {
         out.prototype = ab_ctor.prototype;
@@ -376,7 +484,17 @@ fn arrayBufferTransfer(realm: *Realm, this_value: Value, args: []const Value) Na
         out.prototype = realm.intrinsics.object_prototype;
     }
     out.array_buffer = new_bytes;
+    out.has_array_buffer_data = true;
+    out.array_buffer_max_byte_length = max_byte_length;
     return heap_mod.taggedObject(out);
+}
+
+fn arrayBufferTransfer(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return arrayBufferTransferImpl(realm, this_value, args, true);
+}
+
+fn arrayBufferTransferToFixedLength(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return arrayBufferTransferImpl(realm, this_value, args, false);
 }
 
 fn arrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -413,6 +531,7 @@ fn arrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const new_buf = realm.allocator.alloc(u8, new_len) catch return error.OutOfMemory;
     if (new_len > 0) @memcpy(new_buf, buf[@intCast(start_i)..@intCast(end_i)]);
     out.array_buffer = new_buf;
+    out.has_array_buffer_data = true;
     return heap_mod.taggedObject(out);
 }
 
@@ -463,6 +582,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind) NativeFn {
                 const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
                 @memset(buf_bytes, 0);
                 buf_obj.array_buffer = buf_bytes;
+                buf_obj.has_array_buffer_data = true;
 
                 inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length };
                 return this_value;
@@ -560,6 +680,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind) NativeFn {
                     const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
                     @memset(buf_bytes, 0);
                     buf_obj.array_buffer = buf_bytes;
+                buf_obj.has_array_buffer_data = true;
                     inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length };
                     var idx: usize = 0;
                     while (idx < length) : (idx += 1) {
@@ -582,6 +703,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind) NativeFn {
                         const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
                         @memset(buf_bytes, 0);
                         buf_obj.array_buffer = buf_bytes;
+                buf_obj.has_array_buffer_data = true;
                         inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length };
                         // Copy each element via the same write path.
                         var i: usize = 0;
@@ -788,6 +910,19 @@ fn taLiveLength(tv: ObjMod.TypedView) i64 {
     return @intCast(tv.length);
 }
 
+/// §10.4.5 GetArrayBufferViewByteOffset / MakeTypedArrayWithBufferWitnessRecord —
+/// the in-bounds element count under the current backing buffer.
+/// For fixed-length views this equals `tv.length` (or 0 if detached);
+/// for views over a shrunk resizable buffer it can be less.
+/// Returned as `usize` because callers iterate with it.
+fn taInBoundsLength(tv: ObjMod.TypedView) usize {
+    const buf = tv.viewed.array_buffer orelse return 0;
+    if (tv.byte_offset >= buf.len) return 0;
+    const elem_size = tv.kind.elementSize();
+    const avail_elems = (buf.len - tv.byte_offset) / elem_size;
+    return @min(tv.length, avail_elems);
+}
+
 /// Resolve a §7.1.5 ToIntegerOrInfinity-style index relative to
 /// `length`, with the standard negative-from-end + clamp-to-bounds
 /// rules. Used by `slice` / `subarray` / `copyWithin` / `fill`.
@@ -822,6 +957,7 @@ fn taMakeNew(realm: *Realm, kind: ObjMod.TypedKind, length: usize) NativeError!*
     const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
     @memset(buf_bytes, 0);
     buf_obj.array_buffer = buf_bytes;
+                buf_obj.has_array_buffer_data = true;
     inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length };
     return inst;
 }
@@ -1299,15 +1435,17 @@ fn typedArraySlice(realm: *Realm, this_value: Value, args: []const Value) Native
         const out_tv = out.typed_view orelse return throwTypeError(realm, "Species ctor returned non-TypedArray");
         const out_buf = out_tv.viewed.array_buffer orelse return throwTypeError(realm, "Species ctor returned detached buffer");
         const src_off = tv.byte_offset + @as(usize, @intCast(start)) * elem_size;
-        // Clamp copy to what's actually available in source (the
-        // ctor may have resized the underlying buffer mid-call).
-        const avail = if (src_off + new_len * elem_size <= buf.len)
-            new_len * elem_size
-        else if (src_off < buf.len)
-            buf.len - src_off
-        else
-            0;
-        if (avail > 0) @memcpy(out_buf[0..avail], buf[src_off .. src_off + avail]);
+        // Clamp copy to what's actually available in source AND
+        // destination. ES2024 resizable buffers can leave both
+        // shrunk under the views captured here — copying a full
+        // `new_len * elem_size` would slice past `buf.len` or
+        // `out_buf.len` and panic.
+        const want = new_len * elem_size;
+        const src_avail: usize = if (src_off >= buf.len) 0 else @min(want, buf.len - src_off);
+        const dst_off = out_tv.byte_offset;
+        const dst_avail: usize = if (dst_off >= out_buf.len) 0 else @min(want, out_buf.len - dst_off);
+        const avail = @min(src_avail, dst_avail);
+        if (avail > 0) @memcpy(out_buf[dst_off .. dst_off + avail], buf[src_off .. src_off + avail]);
     }
     return heap_mod.taggedObject(out);
 }
@@ -1783,22 +1921,33 @@ fn taCompareNumeric(a: Value, b: Value) i32 {
     return 0;
 }
 
-fn taSortInPlace(realm: *Realm, tv: ObjMod.TypedView, buf: []u8, comparator: ?*JSFunction) NativeError!void {
+fn taSortInPlace(realm: *Realm, tv: ObjMod.TypedView, buf_in: []u8, comparator: ?*JSFunction) NativeError!void {
     const elem_size = tv.kind.elementSize();
-    // Simple insertion sort — TypedArray sort doesn't need to be
-    // O(n log n) for the corpus, and avoiding the allocator
-    // keeps it simple. M5+ can swap in a quicksort if it matters.
+    // §23.2.3.30 — a user comparator can detach (or resize) the
+    // backing buffer mid-sort. The captured slice would dangle;
+    // re-resolve from `tv.viewed.array_buffer` after every
+    // comparator invocation and short-circuit out if detached.
+    // Bounds-check every direct buf read/write so a shrunk
+    // backing store doesn't slice past the live length.
+    var buf = buf_in;
     var i: usize = 1;
     while (i < tv.length) : (i += 1) {
-        const cur = readTypedElement(realm, buf, tv.kind, tv.byte_offset + i * elem_size);
+        const i_off = tv.byte_offset + i * elem_size;
+        if (i_off + elem_size > buf.len) return;
+        const cur = readTypedElement(realm, buf, tv.kind, i_off);
         var j: i64 = @as(i64, @intCast(i)) - 1;
         while (j >= 0) : (j -= 1) {
-            const prev = readTypedElement(realm, buf, tv.kind, tv.byte_offset + @as(usize, @intCast(j)) * elem_size);
+            const j_off = tv.byte_offset + @as(usize, @intCast(j)) * elem_size;
+            if (j_off + elem_size > buf.len) break;
+            const prev = readTypedElement(realm, buf, tv.kind, j_off);
             const cmp: i32 = blk: {
                 if (comparator) |cf| {
                     const interpreter = @import("../interpreter.zig");
                     const cb_args = [_]Value{ prev, cur };
                     const outcome = interpreter.callJSFunction(realm.allocator, realm, cf, Value.undefined_, &cb_args) catch return error.NativeThrew;
+                    // The comparator may have detached the buffer;
+                    // re-resolve before the next direct access.
+                    buf = tv.viewed.array_buffer orelse return;
                     switch (outcome) {
                         .value, .yielded => |v| {
                             const d: f64 = if (v.isInt32()) @floatFromInt(v.asInt32()) else if (v.isDouble()) v.asDouble() else 0;
@@ -1811,14 +1960,14 @@ fn taSortInPlace(realm: *Realm, tv: ObjMod.TypedView, buf: []u8, comparator: ?*J
                 break :blk taCompareNumeric(prev, cur);
             };
             if (cmp <= 0) break;
-            // shift prev forward into j+1
             const a_off = tv.byte_offset + @as(usize, @intCast(j)) * elem_size;
             const b_off = tv.byte_offset + (@as(usize, @intCast(j)) + 1) * elem_size;
+            if (b_off + elem_size > buf.len or a_off + elem_size > buf.len) break;
             @memcpy(buf[b_off .. b_off + elem_size], buf[a_off .. a_off + elem_size]);
         }
-        // place cur at j+1
         const place: usize = @intCast(j + 1);
-        writeTypedElement(buf, tv.kind, tv.byte_offset + place * elem_size, cur);
+        const place_off = tv.byte_offset + place * elem_size;
+        if (place_off + elem_size <= buf.len) writeTypedElement(buf, tv.kind, place_off, cur);
     }
 }
 
@@ -1916,6 +2065,10 @@ fn toUintMod(d: f64, m: f64) u64 {
 /// `byte_pos` interpreted as `kind`. Does spec-compliant
 /// truncation / clamping (mostly matching ToInt8 / ToUint8 etc).
 pub fn writeTypedElement(buf: []u8, kind: ObjMod.TypedKind, byte_pos: usize, value: Value) void {
+    // §10.4.5.x IntegerIndexedElementSet — out-of-bounds writes
+    // on a shrunk resizable AB silently no-op (mirror the read
+    // bounds check above).
+    if (byte_pos + kind.elementSize() > buf.len) return;
     switch (kind) {
         .int8, .uint8 => {
             const v = coerceToNumber(value);
@@ -1956,6 +2109,11 @@ pub fn writeTypedElement(buf: []u8, kind: ObjMod.TypedKind, byte_pos: usize, val
 }
 
 pub fn readTypedElement(realm: *Realm, buf: []const u8, kind: ObjMod.TypedKind, byte_pos: usize) Value {
+    // §10.4.5 IsValidIntegerIndex — a view over a resizable
+    // ArrayBuffer can be left with `byte_pos + elem_size` past
+    // `buf.len` after a shrink. Spec semantics: read as
+    // `undefined` (caller treats it as a hole).
+    if (byte_pos + kind.elementSize() > buf.len) return Value.undefined_;
     switch (kind) {
         .int8 => return Value.fromInt32(@as(i8, @bitCast(buf[byte_pos]))),
         .uint8 => return Value.fromInt32(buf[byte_pos]),
