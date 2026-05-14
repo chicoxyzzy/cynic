@@ -34,21 +34,34 @@ These are project rules — they apply to everyone.
   the spec ordering.
 - **Strict-only, non-browser-host target.** Cynic targets edge
   runtimes (Workers / Deno / server JS) — not browsers. So:
-  - **Annex B in its entirety** — out. No sloppy mode, no
-    labelled function declarations (B.3.1), no HTML-like
-    comments, no sloppy-mode function-in-block, no legacy octal,
-    no for-in initializer. No `escape` / `unescape`, no String
-    HTML wrappers, no `Date.prototype.{getYear, setYear,
-    toGMTString}`, no `String.prototype.{substr, trimLeft,
-    trimRight}`, no `Object.prototype.__proto__` accessor, no
-    `Object.prototype.__define{Getter,Setter}__` /
-    `__lookup{Getter,Setter}__`, no `RegExp.{$1, input, …}`
-    legacy globals. The whole `annexB/` test262 tree is
-    path-skipped; feature flags for browser-only constructs
-    (`__proto__`, `__getter__`, `__setter__`, `legacy-regexp`,
-    `IsHTMLDDA`) are not in the unsupported-features list
-    because the fixtures using them parse fine — they show as
-    honest runtime-mode failures.
+  - **Annex B in its entirety** — out, with one acknowledged
+    exception (regex grammar §B.1.4 — see below). No sloppy
+    mode, no labelled function declarations (B.3.1), no
+    HTML-like comments, no sloppy-mode function-in-block, no
+    legacy octal, no for-in initializer. No `escape` /
+    `unescape`, no String HTML wrappers, no `Date.prototype.
+    {getYear, setYear, toGMTString}`, no `String.prototype.
+    {substr, trimLeft, trimRight}`, no `Object.prototype.
+    __proto__` accessor, no `Object.prototype.__define
+    {Getter,Setter}__` / `__lookup{Getter,Setter}__`, no
+    `RegExp.{$1, input, …}` legacy globals. The whole `annexB/`
+    test262 tree is path-skipped; feature flags for browser-
+    only constructs (`__proto__`, `__getter__`, `__setter__`,
+    `legacy-regexp`, `IsHTMLDDA`) are not in the unsupported-
+    features list because the fixtures using them parse fine
+    — they show as honest runtime-mode failures.
+
+    **Acknowledged exception — regex Annex B (§B.1.4).** The
+    vendored libregexp (QuickJS-NG) accepts permissive forms
+    like `\1` outside a capturing group (octal `\001`) and the
+    lower-bound-elided quantifier `{,n}` when the pattern is
+    compiled without `/u` or `/v`. Every shipping engine
+    (V8 / JSC / SpiderMonkey) accepts the same forms — Annex B
+    is normative spec and real-world regexes rely on these
+    leaks. Closing it would mean patching vendored libregexp or
+    adding a Cynic-side pattern pre-validator; we deemed the
+    leak narrower than the policy and live with it. See
+    [docs/ROADMAP.md](docs/ROADMAP.md) under "Regex".
   - **`eval` and runtime code construction** — out
     permanently. `eval()` itself, `new Function(string)` /
     `new GeneratorFunction(string)` / `new AsyncFunction(string)`,

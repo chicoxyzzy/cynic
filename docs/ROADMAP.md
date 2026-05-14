@@ -225,21 +225,24 @@ match indices land in spec-correct UTF-16 code units.
 `flags`, `dotAll` accessor; minor edge cases in the
 String.prototype dispatch.
 
-**Known imperfection (Annex B grammar leakage).** §B.1.4
-extends regex grammar with permissive forms that apply only
-when the pattern is compiled *without* the `u` (or `v`) flag —
-e.g. `\1` outside a capturing group treated as octal `\001`,
-and the lower-bound-elided quantifier `{,n}`. With `u` / `v`
-both forms correctly throw `SyntaxError`; without the flag the
-vendored libregexp accepts them, since Annex B is part of the
-normative spec and every other shipping engine does the same.
-Cynic's "Annex B not on the menu" stance is about *language*
-Annex B (sloppy mode, `with`, function-in-block, HTML comments,
-`escape`/`unescape`, the String HTML wrappers) — regex Annex B
-is left as-is. Tightening would mean either patching vendored
-libregexp or adding a Cynic-side pattern pre-validator; both
-cost more than the leak is worth and the `annexB/built-ins/RegExp/`
-test corpus is already path-skipped.
+**Acknowledged exception — Annex B regex grammar (§B.1.4).**
+The vendored libregexp (QuickJS-NG) accepts a handful of
+permissive forms that apply only when the pattern is compiled
+*without* the `u` (or `v`) flag — e.g. `\1` outside a capturing
+group treated as octal `\001`, and the lower-bound-elided
+quantifier `{,n}`. With `u` / `v` both forms correctly throw
+`SyntaxError`; without the flag libregexp accepts them, as
+Annex B is part of the normative spec and every shipping
+engine (V8 / JSC / SpiderMonkey) accepts the same forms.
+
+This is the **only** Annex B carve-out Cynic ships. Everywhere
+else the "no Annex B" stance from AGENTS.md is enforced
+(language extensions, browser-era built-ins, accessor / legacy-
+global aliases). Closing this leak would mean patching vendored
+libregexp or building a Cynic-side pattern pre-validator on
+top of it; both cost more than the leak is worth, real-world
+regex code relies on the leak, and the `annexB/built-ins/
+RegExp/` test corpus is already path-skipped.
 
 ## Tooling
 
