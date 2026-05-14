@@ -138,6 +138,17 @@ pub const skip_planned_paths = [_][]const u8{
     // in 0 % noise. Path-skip wholesale until the implementation
     // phase.
     "built-ins/Temporal/",
+    // ShadowRealm — Stage 2.7 (not yet Stage 3). Cynic doesn't
+    // install the global; honest runtime-fail noise (0 / 64).
+    // Re-evaluate once the proposal advances or SES integration
+    // lands.
+    "built-ins/ShadowRealm/",
+    // `Uint8Array.{fromBase64, fromHex, prototype.{setFromBase64,
+    // setFromHex, toBase64, toHex}}` — Stage 4 (ES2025 ArrayBuffer
+    // ↔ base64/hex). The whole `built-ins/Uint8Array/` tree
+    // tests this single proposal; Cynic's TypedArray surface ships
+    // every other method, so no risk of over-skipping.
+    "built-ins/Uint8Array/",
 };
 
 pub const skip_planned_path_contains = [_][]const u8{
@@ -243,6 +254,16 @@ test "skip: main-spec paths not OOS" {
 test "skip: Temporal out of scope" {
     try testing.expect(pathIsCynicOutOfScope("built-ins/Temporal/Now/extensible.js"));
     try testing.expect(pathIsCynicOutOfScope("built-ins/Temporal/PlainDate/prototype/add/branding.js"));
+}
+
+test "skip: ShadowRealm out of scope" {
+    try testing.expect(pathIsCynicOutOfScope("built-ins/ShadowRealm/constructor.js"));
+    try testing.expect(pathIsCynicOutOfScope("built-ins/ShadowRealm/prototype/evaluate/this.js"));
+}
+
+test "skip: Uint8Array base64/hex (ES2025) out of scope" {
+    try testing.expect(pathIsCynicOutOfScope("built-ins/Uint8Array/fromBase64/null.js"));
+    try testing.expect(pathIsCynicOutOfScope("built-ins/Uint8Array/prototype/toHex/length.js"));
 }
 
 test "skip: planned vendor gaps" {
