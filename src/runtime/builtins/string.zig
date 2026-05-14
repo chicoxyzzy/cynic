@@ -79,6 +79,7 @@ pub fn install(realm: *Realm) !void {
     if (heap_mod.valueAsFunction(realm.globals.get("String").?)) |str_ctor| {
         try intrinsics.installNativeMethod(realm, str_ctor, "fromCharCode", stringFromCharCode, 1);
         try intrinsics.installNativeMethod(realm, str_ctor, "fromCodePoint", stringFromCodePoint, 1);
+        try intrinsics.installNativeMethod(realm, str_ctor, "raw", stringRaw, 1);
     }
 
     // §22.2.9.2 %RegExpStringIteratorPrototype% — shared
@@ -214,6 +215,57 @@ fn stringFromCodePoint(realm: *Realm, this_value: Value, args: []const Value) Na
         const cp: u21 = @intFromFloat(n);
         appendWtf8(realm.allocator, &out, cp) catch return error.OutOfMemory;
     }
+    const s = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
+    return Value.fromString(s);
+}
+
+/// §22.1.2.5 String.raw(template, ...substitutions). Walks the
+/// `template.raw` array-like, interleaving each segment with the
+/// corresponding substitution. Used by tagged template literals
+/// of the form `` String.raw`…` ``. ToObject(template) and
+/// ToObject(template.raw) throw TypeError for null/undefined;
+/// every read goes through the prototype chain so accessor
+/// fixtures observe their getters.
+fn stringRaw(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    // §22.1.2.5 step 1-2 — substitutions list. Cynic forwards the
+    // rest list as `args[1..]`.
+    const template = argOr(args, 0, Value.undefined_);
+    // step 3 — Let cooked be ToObject(template).
+    const cooked = try toObjectThis(realm, template);
+    // step 4 — Let literals be ? ToObject(? Get(cooked, "raw")).
+    const raw_v = try intrinsics.getPropertyChain(realm, cooked, "raw");
+    const raw_obj = try toObjectThis(realm, raw_v);
+    // step 5 — Let literalSegments be ? LengthOfArrayLike(literals).
+    const lit_segs_i64 = try intrinsics.toLengthOf(realm, raw_obj);
+    // step 6 — If literalSegments ≤ 0, return the empty string.
+    if (lit_segs_i64 <= 0) {
+        const empty = realm.heap.allocateString("") catch return error.OutOfMemory;
+        return Value.fromString(empty);
+    }
+    const lit_segs: u64 = @intCast(lit_segs_i64);
+    const num_subs: u64 = if (args.len > 1) @intCast(args.len - 1) else 0;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(realm.allocator);
+
+    // step 7-10 — for each nextIndex: append ToString(Get(literals, nextKey)),
+    // then if not at the last segment, append ToString(substitutions[nextIndex]).
+    var next_index: u64 = 0;
+    while (true) : (next_index += 1) {
+        var ibuf: [24]u8 = undefined;
+        const key = std.fmt.bufPrint(&ibuf, "{d}", .{next_index}) catch unreachable;
+        const seg_v = try intrinsics.getPropertyChain(realm, raw_obj, key);
+        const seg_str = try stringifyArg(realm, seg_v);
+        out.appendSlice(realm.allocator, seg_str.bytes) catch return error.OutOfMemory;
+        if (next_index + 1 == lit_segs) break;
+        if (next_index < num_subs) {
+            const sub_v = args[1 + @as(usize, @intCast(next_index))];
+            const sub_str = try stringifyArg(realm, sub_v);
+            out.appendSlice(realm.allocator, sub_str.bytes) catch return error.OutOfMemory;
+        }
+    }
+
     const s = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
     return Value.fromString(s);
 }
