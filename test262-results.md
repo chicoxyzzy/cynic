@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 73.44 % | 100.00 % | 30478 / 41501 |
-| **runtime** | 80.10 % | 85.55 % | 33244 / 41501 |
+| **runtime** | 80.12 % | 85.56 % | 33249 / 41501 |
 
 
 ## Where the runtime stands, by area
@@ -35,8 +35,8 @@ browser-era built-ins …).
 | `built-ins/String` | 1020 | 198 | 5 | 83 % | 84 % |
 | `built-ins/TypedArray` | 982 | 448 | 8 | 68 % | 69 % |
 | `built-ins/TypedArrayConstructors` | 433 | 287 | 16 | 59 % | 60 % |
-| `language/module-code` | 471 | 123 | 2 | 79 % | 79 % |
-| `language/statements` | 7905 | 681 | 657 | 86 % | 92 % |
+| `language/module-code` | 472 | 122 | 2 | 79 % | 79 % |
+| `language/statements` | 7908 | 678 | 657 | 86 % | 92 % |
 | **_10–99 fails_** | | | | | |
 | `built-ins/ArrayBuffer` | 165 | 31 | 0 | 84 % | 84 % |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 8 | 30 | 0 | 21 % | 21 % |
@@ -61,7 +61,7 @@ browser-era built-ins …).
 | `built-ins/WeakSet` | 73 | 12 | 0 | 86 % | 86 % |
 | `built-ins/global` | 16 | 13 | 0 | 55 % | 55 % |
 | `language/function-code` | 86 | 22 | 109 | 40 % | 80 % |
-| `language/global-code` | 18 | 19 | 5 | 43 % | 49 % |
+| `language/global-code` | 19 | 18 | 5 | 45 % | 51 % |
 | `language/identifiers` | 252 | 16 | 0 | 94 % | 94 % |
 | `language/import` | 7 | 19 | 101 | 6 % | 27 % |
 | `language/line-terminators` | 29 | 12 | 0 | 71 % | 71 % |
@@ -141,15 +141,13 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
 | **parser** | 73.44 % | 100.00 % | 30478 / 41501 | +108 | 2.1 s |
-| **runtime** | 80.10 % | 85.55 % | 33244 / 41501 | +469 | 6m 27s |
+| **runtime** | 80.12 % | 85.56 % | 33249 / 41501 | +474 | 4m 56s |
 
 Biggest movers (runtime):
 
-- `language/expressions` +55
-- `language/module-code` +29
-- `built-ins/TypedArrayConstructors` +25
-- `built-ins/Array` +24
-- `language/statements` +14
+- `language/statements` +3
+- `language/global-code` +1
+- `language/module-code` +1
 
 ### 2026-05-13 — cynic `550a57e`, test262 `d0c1b455`
 

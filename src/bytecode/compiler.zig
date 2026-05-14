@@ -275,6 +275,16 @@ pub const Compiler = struct {
         // top-levels stay scope-local — their visibility model is
         // import / export, not the global object.
         const is_global = target.kind == .script and !self.is_module;
+        // §16.1.7 GlobalDeclarationInstantiation step 5.c — a
+        // lexical (`let` / `const` / `class`) declaration at the
+        // script top level cannot shadow a non-configurable global
+        // property: `undefined`, `NaN`, `Infinity`. `var` /
+        // `function` go through the §16.1.7 step 6.b path which
+        // permits the existing binding.
+        if (is_global and kind != .var_ and isRestrictedGlobalName(name)) {
+            try self.report(.duplicate_lexical_binding, span);
+            return error.DuplicateBinding;
+        }
         const slot: u8 = if (is_global) 0 else try self.newEnvSlot();
         const binding: Binding = .{
             .name = name,
@@ -3624,12 +3634,21 @@ fn compileFunctionDecl(self: *Compiler, fd: ast.statement.FunctionDecl) CompileE
     const name_slice = self.source[fd.name.span.start..fd.name.span.end];
     // Declare the binding FIRST so the function body can resolve
     // its own name (e.g. for recursion). With env-based scoping
-    // the body sees `name` at depth=1, slot=this-slot. later
-    // can extend to full §14.1.3 hoisting (visible above the
-    // declaration); for now declare-on-encounter is sufficient
-    // since the parser already accepts forward references that
-    // typically only resolve at function-call time anyway.
-    const binding = try self.declareBindingFull(name_slice, .var_, fd.name.span);
+    // the body sees `name` at depth=1, slot=this-slot.
+    //
+    // §14.2.5 / §14.12.4 — in strict mode (Cynic is strict-only)
+    // an async / generator / async-generator declaration sitting
+    // inside a Block or SwitchStatement case body is lex-scoped to
+    // that enclosing block, not hoisted to the surrounding function
+    // / script. The non-async / non-generator form has Annex B web-
+    // compat hoisting which Cynic doesn't ship, but plenty of code
+    // (and test262 fixtures) still relies on the legacy `var`-style
+    // visibility — only tighten the three async/gen forms here, the
+    // shape the failing test262 fixtures specifically pin.
+    const inside_block = self.scope.? != self.functionScope();
+    const block_lex = (fd.is_async or fd.is_generator) and inside_block;
+    const binding_kind: BindingKind = if (block_lex) .let_ else .var_;
+    const binding = try self.declareBindingFull(name_slice, binding_kind, fd.name.span);
     const k = try compileFunctionTemplateExt(
         self,
         fd.params,
@@ -4411,10 +4430,33 @@ fn hoistLetConst(self: *Compiler, body: []ast.statement.Statement) CompileError!
 /// be initialised to `undefined` ahead of any reachable read —
 /// `emitVarInits` handles that immediately after `make_environment`.
 fn hoistVarAndFunctions(self: *Compiler, body: []ast.statement.Statement) CompileError!void {
-    for (body) |*s| try self.hoistStatement(s);
+    // The body passed at the top-level call IS the function /
+    // script body — statements at the function-top level get
+    // regular var-style hoisting (including `function` decls).
+    for (body) |*s| try self.hoistStatement(s, false);
 }
 
-fn hoistStatement(self: *Compiler, s: *ast.statement.Statement) CompileError!void {
+/// §9.1.1.4.5 HasRestrictedGlobalProperty — names whose global
+/// binding is created non-configurable by the host (`undefined`,
+/// `NaN`, `Infinity`). A script-mode `let` / `const` / `class`
+/// trying to bind one of these is a §16.1.7 step 5.c SyntaxError.
+fn isRestrictedGlobalName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "undefined") or
+        std.mem.eql(u8, name, "NaN") or
+        std.mem.eql(u8, name, "Infinity");
+}
+
+/// `inside_nested_block` is true when this statement is reached by
+/// recursive descent through a Block / SwitchCase / IfBranch / loop
+/// body / try-block / etc. — i.e. it's NOT a direct child of the
+/// enclosing function / script body. The flag gates strict-mode-
+/// only block scoping for `async` / `generator` / `async generator`
+/// function declarations (§14.2.5 / §14.12.4): those forms have
+/// never participated in Annex B web-compat hoisting, so even when
+/// the surrounding code might rely on legacy `var` visibility for
+/// plain `function`, the three async/gen forms in a nested block
+/// must NOT hoist to the enclosing function/script scope.
+fn hoistStatement(self: *Compiler, s: *ast.statement.Statement, inside_nested_block: bool) CompileError!void {
     switch (s.*) {
         .lexical => |ld| {
             if (ld.kind != .var_) return;
@@ -4423,6 +4465,13 @@ fn hoistStatement(self: *Compiler, s: *ast.statement.Statement) CompileError!voi
             }
         },
         .function_decl => |fd| {
+            if (inside_nested_block and (fd.is_async or fd.is_generator)) {
+                // §14.2.5 / §14.12.4 strict-mode block scope.
+                // Leave it to `compileFunctionDecl` (which lex-
+                // binds via the current Scope) to install the
+                // binding at emission time.
+                return;
+            }
             const name = self.source[fd.name.span.start..fd.name.span.end];
             _ = try self.declareBindingFull(name, .var_, fd.name.span);
         },
@@ -4433,16 +4482,16 @@ fn hoistStatement(self: *Compiler, s: *ast.statement.Statement) CompileError!voi
         // bound name lazily appears in source order and module cycles
         // observe `undefined` for the cross-reference.
         .export_decl => |ed| switch (ed.body) {
-            .declaration => |inner| try self.hoistStatement(inner),
+            .declaration => |inner| try self.hoistStatement(inner, inside_nested_block),
             else => {},
         },
-        .block => |b| try self.hoistVarAndFunctions(b.body),
+        .block => |b| for (b.body) |*inner| try self.hoistStatement(inner, true),
         .if_ => |i| {
-            try self.hoistStatement(i.consequent);
-            if (i.alternate) |alt| try self.hoistStatement(alt);
+            try self.hoistStatement(i.consequent, true);
+            if (i.alternate) |alt| try self.hoistStatement(alt, true);
         },
-        .while_ => |w| try self.hoistStatement(w.body),
-        .do_while => |dw| try self.hoistStatement(dw.body),
+        .while_ => |w| try self.hoistStatement(w.body, true),
+        .do_while => |dw| try self.hoistStatement(dw.body, true),
         .for_ => |f| {
             if (f.init) |head| switch (head) {
                 .lexical => |ld| if (ld.kind == .var_) {
@@ -4450,7 +4499,7 @@ fn hoistStatement(self: *Compiler, s: *ast.statement.Statement) CompileError!voi
                 },
                 .expression => {},
             };
-            try self.hoistStatement(f.body);
+            try self.hoistStatement(f.body, true);
         },
         .for_in_of => |f| {
             switch (f.left) {
@@ -4459,15 +4508,15 @@ fn hoistStatement(self: *Compiler, s: *ast.statement.Statement) CompileError!voi
                 },
                 .expression => {},
             }
-            try self.hoistStatement(f.body);
+            try self.hoistStatement(f.body, true);
         },
         .try_ => |t| {
-            try self.hoistVarAndFunctions(t.block.body);
-            if (t.handler) |h| try self.hoistVarAndFunctions(h.body.body);
-            if (t.finalizer) |fin| try self.hoistVarAndFunctions(fin.body);
+            for (t.block.body) |*inner| try self.hoistStatement(inner, true);
+            if (t.handler) |h| for (h.body.body) |*inner| try self.hoistStatement(inner, true);
+            if (t.finalizer) |fin| for (fin.body) |*inner| try self.hoistStatement(inner, true);
         },
         .switch_ => |sw| {
-            for (sw.cases) |case| try self.hoistVarAndFunctions(case.body);
+            for (sw.cases) |case| for (case.body) |*inner| try self.hoistStatement(inner, true);
         },
         // Nested function / class / arrow bodies have their own
         // function-like scope and are handled by their own
