@@ -1215,6 +1215,13 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
+        // §7.1.1 step 2.b-c — GetMethod(O, @@toPrimitive). Per
+        // §7.3.10, if `exotic` is neither undefined nor null and
+        // is not Callable, throw a TypeError. Silently falling
+        // through to OrdinaryToPrimitive would swallow the abrupt
+        // (e.g. a class field key `[obj]` where `obj.Symbol.
+        // toPrimitive = 42` must throw, not coerce via toString).
+        const exotic_present = !exotic.isUndefined() and !exotic.isNull();
         if (heap_mod.valueAsFunction(exotic)) |fn_obj| {
             const hint_v = realm.heap.allocateString(hint_str) catch return error.OutOfMemory;
             const args = [_]Value{Value.fromString(hint_v)};
@@ -1237,6 +1244,11 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
                     return error.NativeThrew;
                 },
             }
+        } else if (exotic_present) {
+            // §7.3.10 GetMethod — non-undefined / non-null but
+            // not Callable is a TypeError. Don't silently fall
+            // through to OrdinaryToPrimitive.
+            return throwTypeError(realm, "Symbol.toPrimitive must be callable");
         }
         // OrdinaryToPrimitive: `valueOf` then `toString` for
         // number/default hint; reverse for string. `getPropertyChain`
