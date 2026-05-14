@@ -699,15 +699,23 @@ pub fn toObjectThis(realm: *Realm, this_value: Value) NativeError!*JSObject {
         }
         return w;
     }
-    if (heap_mod.valueAsFunction(this_value)) |_| {
-        // Functions are already objects; the cast back via
-        // `valueAsPlainObject` failed because the kind tag is
-        // `function`. For Array.prototype.* purposes treat the
-        // function as if it were a plain object: allocate a
-        // wrapper that proxies length + indexed reads via the
-        // function's property bag. Rare path; keep simple.
+    if (heap_mod.valueAsFunction(this_value)) |fn_obj| {
+        // §7.1.18 ToObject — Functions are already Objects;
+        // ideally we'd return the function itself. Cynic's
+        // JSFunction and JSObject are distinct heap structs, so
+        // Array.prototype.* helpers (typed `*JSObject`) can't
+        // address the function directly. Mirror the function's
+        // own data properties (including the synthesized
+        // `length` / `name` that §10.2.4 installs into
+        // `properties` at function-creation time) into a
+        // wrapper so read-only Array.prototype.X.call(fn, …)
+        // observes `length` and `fn[i]` per spec.
         const w = realm.heap.allocateObject() catch return error.OutOfMemory;
         w.prototype = realm.intrinsics.object_prototype;
+        var it = fn_obj.properties.iterator();
+        while (it.next()) |entry| {
+            w.set(realm.allocator, entry.key_ptr.*, entry.value_ptr.*) catch return error.OutOfMemory;
+        }
         return w;
     }
     // Number / boolean / symbol / bigint — wrap with no own

@@ -790,7 +790,7 @@ fn arrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // `len - 1`. -∞ short-circuits (return -1). Positive values
     // clamp to `len - 1`. Negative values offset from the end;
     // if the result is < 0 the loop never runs and we return -1.
-    const start = lastStartIndexFrom(args, raw_len) orelse return Value.fromInt32(-1);
+    const start = (try lastStartIndexFrom(realm, args, raw_len)) orelse return Value.fromInt32(-1);
     // Sparse fast path — see `sparseReverseSearch`.
     if (obj.is_array_exotic and obj.is_sparse) {
         if (try sparseReverseSearch(realm, obj, start, target)) |found| return numberFromI64(found);
@@ -862,11 +862,16 @@ fn sparseDescendingKeys(realm: *Realm, arr: *JSObject, start: i64) NativeError![
 /// for `lastIndexOf`. Returns the starting index (iteration goes
 /// downward) or `null` when the start is < 0 (caller short-
 /// circuits to -1). When fromIndex is absent, start = len - 1.
-fn lastStartIndexFrom(args: []const Value, len: i64) ?i64 {
+fn lastStartIndexFrom(realm: *Realm, args: []const Value, len: i64) NativeError!?i64 {
     if (args.len < 2) return len - 1;
-    const v = args[1];
-    const nv = if (v.isString()) intrinsics.coerceToNumber(v) else v;
-    const n: f64 = if (nv.isUndefined()) 0 else if (nv.isInt32()) @floatFromInt(nv.asInt32()) else if (nv.isDouble()) nv.asDouble() else if (nv.isBool()) (if (nv.asBool()) @as(f64, 1) else @as(f64, 0)) else if (nv.isNull()) @as(f64, 0) else 0;
+    // §7.1.5 ToIntegerOrInfinity → ToNumber. Route through
+    // `intrinsics.toNumber` so an object fromIndex with a
+    // `valueOf` / `toString` participates in ToPrimitive, and
+    // Symbol / BigInt throw TypeError. The pre-fix fallthrough
+    // silently coerced any object to 0, defeating fixtures like
+    // `[…].lastIndexOf(x, {valueOf: () => 2})`.
+    const nv = try intrinsics.toNumber(realm, args[1]);
+    const n: f64 = if (nv.isInt32()) @floatFromInt(nv.asInt32()) else nv.asDouble();
     if (std.math.isNan(n)) return 0;
     // -∞ short-circuits per spec: "If n is -∞, return -1."
     if (n == -std.math.inf(f64)) return null;
