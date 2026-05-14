@@ -516,7 +516,22 @@ fn resolveComputedKey(
             return error.Propagated;
         },
     };
-    if (heap_mod_.valueAsSymbol(key_v)) |sym| {
+    const intrinsics = @import("intrinsics.zig");
+    // §13.2.5.5 / §7.1.19 ToPropertyKey — first ToPrimitive(hint
+    // "string"), then if the primitive is a Symbol return as-is,
+    // else ToString. If the receiver is already a Symbol the
+    // ToPrimitive identity branch returns it unchanged, so we
+    // fold the early-Symbol check into the general path. A throw
+    // from `@@toPrimitive` / `valueOf` / `toString` propagates
+    // via `realm.pending_exception`.
+    const prim_v = if (heap_mod_.valueAsSymbol(key_v) != null)
+        key_v
+    else
+        intrinsics.toPrimitive(realm, key_v, .string) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.Propagated,
+        };
+    if (heap_mod_.valueAsSymbol(prim_v)) |sym| {
         // Well-known symbols in Cynic carry their `@@`-prefixed
         // name as the description, so the description IS the
         // slot key. For user symbols without a description, fall
@@ -525,12 +540,7 @@ fn resolveComputedKey(
         if (sym.description) |desc| return desc;
         return fallback;
     }
-    const intrinsics = @import("intrinsics.zig");
-    // §13.2.5.5 step 1.c — `ToPropertyKey(propName)` runs
-    // ToPrimitive which can throw. Surface the thrown value back
-    // via `realm.pending_exception` instead of silently coercing
-    // to a fallback string.
-    const s = intrinsics.stringifyArg(realm, key_v) catch |err| switch (err) {
+    const s = intrinsics.stringifyArg(realm, prim_v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.Propagated,
     };
