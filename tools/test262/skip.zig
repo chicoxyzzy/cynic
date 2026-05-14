@@ -67,6 +67,30 @@ pub const skip_ses_paths = [_][]const u8{
     "built-ins/SharedArrayBuffer/",
 };
 
+/// `built-ins/Function/` is a *mixed* bucket — the prototype
+/// methods (`apply`, `call`, `bind`, …) are in scope, but every
+/// test under §15.3.2 / §15.3.5 exercises `Function(string)` /
+/// `new Function(string)` which is a permanent SES carve-out.
+/// Match by basename substring so the prototype-method fixtures
+/// stay attempted.
+pub const skip_ses_substrings = [_][]const u8{
+    "built-ins/Function/15.3.2",
+    "built-ins/Function/S15.3.2",
+    "built-ins/Function/S15.3.5",
+};
+
+/// AND-pair filters — both substrings must appear in the path. Used
+/// when a coarse substring (`/class/elements/`) would over-skip, but
+/// a generated-fixture suffix (`-eval-`, `-eval.js`) narrows it to
+/// exactly the eval-dependent generated set. The §15.7 spec rule
+/// ("eval inside class field initializer contains super → SyntaxError
+/// at PerformEval-time") needs an actual eval — without one, Cynic
+/// throws the wrong error class and these fixtures false-reject.
+/// SES-aligned out of scope alongside the rest of eval.
+pub const skip_ses_substring_pairs = [_][2][]const u8{
+    .{ "/class/elements/", "-eval-" },
+};
+
 pub const skip_ses_features = [_][]const u8{
     // Empty: same reasoning as Annex B — fixtures parse fine but
     // need globals Cynic intentionally doesn't ship.
@@ -144,6 +168,13 @@ pub fn pathIsCynicOutOfScope(rel_path: []const u8) bool {
     for (skip_planned_path_contains) |needle| {
         if (std.mem.indexOf(u8, rel_path, needle) != null) return true;
     }
+    for (skip_ses_substrings) |needle| {
+        if (std.mem.indexOf(u8, rel_path, needle) != null) return true;
+    }
+    for (skip_ses_substring_pairs) |pair| {
+        if (std.mem.indexOf(u8, rel_path, pair[0]) != null and
+            std.mem.indexOf(u8, rel_path, pair[1]) != null) return true;
+    }
     return false;
 }
 
@@ -188,6 +219,20 @@ test "skip: SES out of scope" {
     try testing.expect(pathIsCynicOutOfScope("built-ins/eval/length.js"));
     try testing.expect(pathIsCynicOutOfScope("built-ins/Atomics/load/length.js"));
     try testing.expect(pathIsCynicOutOfScope("built-ins/SharedArrayBuffer/length.js"));
+    // §15.3.2 Function-constructor fixtures (always `Function(string)`).
+    try testing.expect(pathIsCynicOutOfScope("built-ins/Function/S15.3.2.1_A1_T1.js"));
+    try testing.expect(pathIsCynicOutOfScope("built-ins/Function/15.3.2.1-11-9-s.js"));
+    try testing.expect(pathIsCynicOutOfScope("built-ins/Function/S15.3.5_A2_T2.js"));
+    // …prototype methods stay in scope.
+    try testing.expect(!pathIsCynicOutOfScope("built-ins/Function/prototype/apply/length.js"));
+    try testing.expect(!pathIsCynicOutOfScope("built-ins/Function/prototype/call/length.js"));
+    // Class field initializer fixtures whose assertion depends on
+    // eval (cluster narrowed via the `class/elements/ + -eval-` pair).
+    try testing.expect(pathIsCynicOutOfScope("language/expressions/class/elements/derived-cls-direct-eval-err-contains-supercall.js"));
+    try testing.expect(pathIsCynicOutOfScope("language/statements/class/elements/arrow-body-direct-eval-err-contains-arguments.js"));
+    // Non-eval class/elements fixtures stay in scope.
+    try testing.expect(!pathIsCynicOutOfScope("language/expressions/class/elements/evaluation-error/computed-name-toprimitive-returns-nonobject.js"));
+    try testing.expect(!pathIsCynicOutOfScope("language/statements/class/elements/private-class-field-initialization-is-visible-to-proxy.js"));
 }
 
 test "skip: main-spec paths not OOS" {
