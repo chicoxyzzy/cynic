@@ -4,7 +4,7 @@
 
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
-| **parser** | 65.83 % | 100.00 % | 30479 / 46302 |
+| **parser** | 71.80 % | 100.00 % | 33243 / 46302 |
 | **runtime** | 70.79 % | 85.00 % | 32775 / 46296 |
 
 ## Where the runtime stands, by area
@@ -135,11 +135,11 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-14 — cynic `da590e2`, test262 `d0c1b455`
+### 2026-05-14 — cynic `ac40a36`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
-| **parser** | 65.83 % | 100.00 % | 30479 / 46302 | +109 | 1.0 s |
+| **parser** | 71.80 % | 100.00 % | 33243 / 46302 | +2873 | 1.3 s |
 
 ### 2026-05-13 — cynic `550a57e`, test262 `d0c1b455`
 

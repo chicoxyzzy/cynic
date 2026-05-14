@@ -79,56 +79,24 @@ pub const cynic_oos_path_contains = [_][]const u8{
     "/String/prototype/replace/regexp-prototype-replace-v",
 };
 
-/// `features` names we know we don't support. Tests whose
-/// frontmatter declares any of these are skipped.
+/// `features` frontmatter values that name productions / operators
+/// Cynic's *parser* doesn't ship. Skips here mean "the fixture
+/// genuinely fails to parse", not "the fixture references a
+/// runtime feature we haven't built". Runtime-only gaps (no
+/// Temporal global, no ShadowRealm constructor, no SharedArrayBuffer
+/// / Atomics, no `__proto__` accessor / `__getter__` / `__setter__`,
+/// SpiderMonkey-specific globals, etc.) parse fine and surface as
+/// honest runtime-mode failures instead of being hidden here.
 pub const unsupported_features = [_][]const u8{
     // Stage 3 syntax — parser-affecting, not implemented.
     "decorators",
     "import-defer",
     "source-phase-imports",
     "explicit-resource-management",
-    "async-explicit-resource-management",
-    // Withdrawn predecessor of import-attributes — `assert`
-    // clause was dropped from the proposal in favour of `with`.
-    "import-assertions",
     // libregexp (the vendored QuickJS-NG matcher) doesn't ship
     // these regex grammar additions.
     "regexp-duplicate-named-groups", // ES2025
     "regexp-modifiers", // ES2024 inline (?i:…)/(?-i:…)
-    // Deferred per ROADMAP.md — Temporal is a multi-week
-    // project with its own tzdata story; intentionally counts
-    // against spec% to mark the largest known gap.
-    "Temporal",
-    // Stage 3 — needs `evaluate(source)` (collides with no-eval
-    // policy). `importValue` could ship without; not yet.
-    "ShadowRealm",
-    // Stage 3 — module-loader proposals, no runtime impl yet.
-    "json-modules",
-    "json-parse-with-source",
-    // Stage 3 — async iterator helpers / Array.fromAsync /
-    // Math.sumPrecise / Uint8Array base64-hex methods.
-    "async-iterator-helpers",
-    "Array.fromAsync",
-    "Math.sumPrecise",
-    "uint8array-base64",
-    // Stage 2 — Promise.allKeyed.
-    "await-dictionary",
-    // Permanent policy (AGENTS.md, ROADMAP.md) — SES alignment.
-    "eval",
-    // Shared memory — out per ROADMAP (single-agent-per-isolate).
-    // Path-skipped under `built-ins/{Atomics,SharedArrayBuffer}/`,
-    // but a long tail of TypedArray / DataView / Reflect fixtures
-    // builds a `new SharedArrayBuffer(...)` view in setup — declare
-    // the feature unsupported so those bail before execution.
-    "SharedArrayBuffer",
-    "Atomics",
-    // Annex B browser-legacy.
-    "__getter__",
-    "__setter__",
-    "__proto__", // accessor form; the literal {__proto__: x} is main-spec
-    "Reflect.parse", // SpiderMonkey-only
-    "legacy-regexp", // RegExp.$1 / .input / .leftContext
-    "IsHTMLDDA", // [[IsHTMLDDA]] slot for document.all mimicry
 };
 
 pub fn pathIsSkipped(rel_path: []const u8) bool {
@@ -181,8 +149,16 @@ test "skip: cynic out-of-scope paths" {
 
 test "skip: unsupported features" {
     try testing.expect(featureIsUnsupported("decorators"));
-    try testing.expect(featureIsUnsupported("Temporal"));
     try testing.expect(featureIsUnsupported("regexp-modifiers"));
+    try testing.expect(featureIsUnsupported("regexp-duplicate-named-groups"));
+    try testing.expect(featureIsUnsupported("import-defer"));
+    // Runtime-only gaps are no longer hidden in this list — they
+    // parse fine and surface as honest runtime-mode failures.
+    try testing.expect(!featureIsUnsupported("Temporal"));
+    try testing.expect(!featureIsUnsupported("ShadowRealm"));
+    try testing.expect(!featureIsUnsupported("SharedArrayBuffer"));
+    try testing.expect(!featureIsUnsupported("__proto__"));
+    try testing.expect(!featureIsUnsupported("Reflect.parse"));
     try testing.expect(!featureIsUnsupported("regexp-v-flag")); // libregexp ships v-flag (partial: no set-difference)
     try testing.expect(!featureIsUnsupported("regexp-named-groups"));
     try testing.expect(!featureIsUnsupported("class"));
