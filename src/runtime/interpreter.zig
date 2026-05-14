@@ -6437,7 +6437,7 @@ fn coerceToPropertyKey(
 /// reject NaN, Infinity, fractional, and negative inputs (the
 /// spec throws RangeError when ToUint32(value) !== ToNumber(value)).
 /// Returns null on rejection.
-fn arrayLengthCoerce(v: Value) ?u32 {
+pub fn arrayLengthCoerce(v: Value) ?u32 {
     if (v.isInt32()) {
         const i = v.asInt32();
         if (i < 0) return null;
@@ -6467,7 +6467,7 @@ fn arrayLengthCoerce(v: Value) ?u32 {
 /// store: equals `target_len` on full success, or `blocker_idx + 1`
 /// on a stuck non-configurable element. `blocked` tells the
 /// strict-mode setter to throw TypeError.
-const TruncateResult = struct {
+pub const TruncateResult = struct {
     final_length: u32,
     blocked: bool,
 };
@@ -6476,7 +6476,7 @@ const TruncateResult = struct {
 /// descending order, deleting each whose index is `>= target_len`.
 /// On a non-configurable element, stop and return its index + 1
 /// as the floor.
-fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, target_len: u32) TruncateResult {
+pub fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, target_len: u32) TruncateResult {
     // §10.4.2.4 — Array exotic: truncate the packed `elements`
     // vector. Indexed slots are configurable today (Cynic doesn't
     // yet support `Object.defineProperty(arr, "0", {configurable:false})`

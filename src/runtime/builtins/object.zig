@@ -31,6 +31,7 @@ const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
 const setNonEnumerable = intrinsics.setNonEnumerable;
 const argOr = intrinsics.argOr;
 const throwTypeError = intrinsics.throwTypeError;
+const throwRangeError = intrinsics.throwRangeError;
 const stringifyArg = intrinsics.stringifyArg;
 const toBoolean = intrinsics.toBoolean;
 const sameValueZero = intrinsics.sameValueZero;
@@ -786,6 +787,28 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
     const parsed = try parseDescriptor(realm, desc);
 
     if (heap_mod.valueAsPlainObject(target_v)) |target| {
+        // §10.4.2.1 Array exotic [[DefineOwnProperty]] — when the
+        // receiver is an Array and the key is "length", route the
+        // request through §10.4.2.4 ArraySetLength so a non-integer
+        // / negative / out-of-range [[Value]] surfaces as
+        // RangeError instead of being silently coerced. ToUint32
+        // here must equal ToNumber (SameValueZero) — fractional
+        // values, strings like "-42", Symbols, etc. all reject.
+        if (target.is_array_exotic and std.mem.eql(u8, key, "length") and parsed.has_value) {
+            const interpreter = @import("../interpreter.zig");
+            const arith = @import("../interpreter_arith.zig");
+            const new_len = interpreter.arrayLengthCoerce(parsed.value) orelse {
+                return throwRangeError(realm, "Invalid array length");
+            };
+            // SameValueZero(newLen, ToNumber(Value)) — reject
+            // mismatched encodings (e.g. 4294967296 wraps to 0
+            // under ToUint32 but ToNumber returns 4294967296).
+            const num = arith.toNumber(parsed.value);
+            if (@as(f64, @floatFromInt(new_len)) != num) {
+                return throwRangeError(realm, "Invalid array length");
+            }
+        }
+
         // Snapshot the current descriptor (or `null` if absent).
         const had_own = target.hasOwn(key) or target.accessors.contains(key);
         const cur_flags = target.flagsFor(key);
@@ -815,6 +838,14 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
         // Non-configurable redefine guard.
         if (had_own and !isCompatibleRedefine(cur_is_accessor, cur_flags, cur_value, cur_getter, cur_setter, parsed)) {
             return throwTypeError(realm, "Object.defineProperty: cannot redefine non-configurable property");
+        }
+
+        // §10.1.6.3 ValidateAndApplyPropertyDescriptor step 2:
+        // when no current descriptor exists, the object must be
+        // [[Extensible]] — otherwise return false (with Throw=true
+        // this surfaces as a TypeError).
+        if (!had_own and !target.extensible) {
+            return throwTypeError(realm, "Object.defineProperty: object is not extensible");
         }
 
         // Compute the final flags. Missing fields preserve the
