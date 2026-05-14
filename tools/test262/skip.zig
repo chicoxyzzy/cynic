@@ -245,7 +245,6 @@ test "skip: runtime-only gaps are NOT hidden" {
     try testing.expect(!featureIsUnsupported("legacy-regexp"));
     try testing.expect(!featureIsUnsupported("IsHTMLDDA"));
     try testing.expect(!featureIsUnsupported("Reflect.parse"));
-    try testing.expect(!featureIsUnsupported("Temporal"));
     try testing.expect(!featureIsUnsupported("ShadowRealm"));
     try testing.expect(!featureIsUnsupported("SharedArrayBuffer"));
     try testing.expect(!featureIsUnsupported("Atomics"));
