@@ -108,6 +108,9 @@ pub const skip_stage_maturity_features = [_][]const u8{
     "explicit-resource-management", // Stage 3 — `using` / `await using`.
     "import-defer", // Stage 3 — `import defer * as ns from "…"`.
     "source-phase-imports", // Stage 3 — `import source x from "…"`.
+    // Stage 2 `await-dictionary` — `Promise.allKeyed` /
+    // `Promise.allSettledKeyed` (dictionary-shaped aggregators).
+    "await-dictionary",
 };
 
 // ── Group 4: Non-standard ───────────────────────────────────────────
