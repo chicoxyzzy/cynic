@@ -107,3 +107,159 @@ fn proxyRevokeNoop(realm: *Realm, this_value: Value, args: []const Value) Native
     _ = args;
     return Value.undefined_;
 }
+
+const JSObject = @import("../object.zig").JSObject;
+const interpreter = @import("../interpreter.zig");
+
+/// Outcome of a native-side proxy dispatch. `.fallthrough` means
+/// the caller should perform the ordinary internal-method action
+/// against the returned target (either because no trap was
+/// installed, or because the target is itself a proxy and the
+/// caller wants to walk further).
+pub const NativeProxyOutcome = union(enum) {
+    value: Value,
+    fallthrough: *JSObject,
+};
+
+fn raiseRevoked(realm: *Realm, op: []const u8) NativeError {
+    _ = throwTypeError(realm, op) catch {};
+    return error.NativeThrew;
+}
+
+fn callTrap(realm: *Realm, trap_fn: *@import("../function.zig").JSFunction, handler: *JSObject, args: []const Value) NativeError!Value {
+    const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), args) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    switch (outcome) {
+        .value, .yielded => |v| return v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    }
+}
+
+/// §10.5.5 [[Get]] (P, Receiver) — native dispatcher for callers
+/// that aren't bytecode-driven (Reflect.get, host code).
+pub fn nativeProxyGet(realm: *Realm, proxy: *JSObject, key: []const u8, receiver: Value) NativeError!NativeProxyOutcome {
+    if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'get' on a proxy that has been revoked");
+    const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
+    const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
+    const trap_v = handler.get("get");
+    if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
+    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'get' trap is not callable");
+    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+    const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str), receiver };
+    const v = try callTrap(realm, trap_fn, handler, &args);
+    // §10.5.5 invariants: non-configurable non-writable data prop
+    // must match; non-configurable accessor with undefined get
+    // requires trap to return undefined.
+    if (target.property_flags.get(key)) |flags| {
+        if (target.properties.get(key)) |target_v| {
+            if (!flags.configurable and !flags.writable) {
+                if (!intrinsics.sameValue(target_v, v)) {
+                    return throwTypeError(realm, "proxy 'get' trap returned mismatched value for non-writable non-configurable data property");
+                }
+            }
+        }
+    }
+    if (target.accessors.get(key)) |acc| {
+        const flags = target.flagsFor(key);
+        if (!flags.configurable and acc.getter == null) {
+            if (!v.isUndefined()) {
+                return throwTypeError(realm, "proxy 'get' trap returned non-undefined for non-configurable accessor with no getter");
+            }
+        }
+    }
+    return .{ .value = v };
+}
+
+/// §10.5.6 [[Set]] (P, V, Receiver) — native dispatcher. Returns
+/// the boolean result of the trap (ToBoolean of trap return).
+/// Caller is responsible for choosing between strict-throw and
+/// non-strict-return-false; this helper itself never throws on a
+/// merely-falsy return.
+pub fn nativeProxySet(realm: *Realm, proxy: *JSObject, key: []const u8, value: Value, receiver: Value) NativeError!union(enum) { boolean: bool, fallthrough: *JSObject } {
+    if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'set' on a proxy that has been revoked");
+    const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
+    const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
+    const trap_v = handler.get("set");
+    if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
+    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'set' trap is not callable");
+    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+    const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str), value, receiver };
+    const v = try callTrap(realm, trap_fn, handler, &args);
+    const arith = @import("../interpreter_arith.zig");
+    if (!arith.toBoolean(v)) return .{ .boolean = false };
+    // §10.5.6 invariants.
+    if (target.property_flags.get(key)) |flags| {
+        if (target.properties.get(key)) |target_v| {
+            if (!flags.configurable and !flags.writable) {
+                if (!intrinsics.sameValue(target_v, value)) {
+                    return throwTypeError(realm, "proxy 'set' trap reported success for non-writable non-configurable data property");
+                }
+            }
+        }
+    }
+    if (target.accessors.get(key)) |acc| {
+        const flags = target.flagsFor(key);
+        if (!flags.configurable and acc.setter == null) {
+            return throwTypeError(realm, "proxy 'set' trap reported success for non-configurable accessor with no setter");
+        }
+    }
+    return .{ .boolean = true };
+}
+
+/// §10.5.7 [[HasProperty]] (P) — native dispatcher.
+pub fn nativeProxyHas(realm: *Realm, proxy: *JSObject, key: []const u8) NativeError!union(enum) { boolean: bool, fallthrough: *JSObject } {
+    if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'has' on a proxy that has been revoked");
+    const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
+    const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
+    const trap_v = handler.get("has");
+    if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
+    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'has' trap is not callable");
+    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+    const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str) };
+    const v = try callTrap(realm, trap_fn, handler, &args);
+    const arith = @import("../interpreter_arith.zig");
+    const b = arith.toBoolean(v);
+    // §10.5.7 invariant — can't pretend a non-configurable own
+    // property doesn't exist.
+    if (!b) {
+        if (target.property_flags.get(key)) |flags| {
+            if (!flags.configurable and (target.properties.contains(key) or target.accessors.contains(key))) {
+                return throwTypeError(realm, "proxy 'has' trap returned false for non-configurable own property");
+            }
+        }
+        if (!target.extensible and (target.properties.contains(key) or target.accessors.contains(key))) {
+            return throwTypeError(realm, "proxy 'has' trap returned false for own property of non-extensible target");
+        }
+    }
+    return .{ .boolean = b };
+}
+
+/// §10.5.10 [[Delete]] (P) — native dispatcher.
+pub fn nativeProxyDelete(realm: *Realm, proxy: *JSObject, key: []const u8) NativeError!union(enum) { boolean: bool, fallthrough: *JSObject } {
+    if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'deleteProperty' on a proxy that has been revoked");
+    const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
+    const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
+    const trap_v = handler.get("deleteProperty");
+    if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
+    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'deleteProperty' trap is not callable");
+    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+    const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str) };
+    const v = try callTrap(realm, trap_fn, handler, &args);
+    const arith = @import("../interpreter_arith.zig");
+    const b = arith.toBoolean(v);
+    if (b) {
+        // §10.5.10 invariant — can't delete a non-configurable
+        // own property.
+        if (target.property_flags.get(key)) |flags| {
+            if (!flags.configurable and (target.properties.contains(key) or target.accessors.contains(key))) {
+                return throwTypeError(realm, "proxy 'deleteProperty' trap reported success for non-configurable own property");
+            }
+        }
+    }
+    return .{ .boolean = b };
+}

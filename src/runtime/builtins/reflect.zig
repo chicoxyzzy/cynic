@@ -28,6 +28,7 @@ const throwTypeError = intrinsics.throwTypeError;
 const lengthOfArray = intrinsics.lengthOfArray;
 const clampArrayLength = intrinsics.clampArrayLength;
 const objectGetPrototypeOf = intrinsics.objectGetPrototypeOf;
+const proxy_mod = @import("proxy.zig");
 
 // ── §28 Reflect ─────────────────────────────────────────────────────────────
 
@@ -111,10 +112,27 @@ fn reflectHas(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const key_v = argOr(args, 1, Value.undefined_);
     var key_buf: [64]u8 = undefined;
     const key_slice = computedKeyForReflect(key_v, &key_buf);
-    // §28.1.2.6 Reflect.has — target must be an Object. Functions
-    // are objects too. Seed the walk from `fn_obj.proto` for the
-    // callable case; the function's own data-bag covers its
-    // own `length` / `name` / user-installed statics.
+    // §28.1.2.6 Reflect.has — target must be an Object. Proxy
+    // exotic dispatches through `handler.has` per §10.5.7.
+    if (heap_mod.valueAsPlainObject(arg)) |maybe_proxy| {
+        var cur = maybe_proxy;
+        while (cur.proxy_target != null or cur.proxy_revoked) {
+            const r = try proxy_mod.nativeProxyHas(realm, cur, key_slice);
+            switch (r) {
+                .boolean => |b| return Value.fromBool(b),
+                .fallthrough => |t| {
+                    if (t == cur) break;
+                    cur = t;
+                },
+            }
+        }
+        var cursor: ?*JSObject = cur;
+        while (cursor) |c| : (cursor = c.prototype) {
+            if (c.properties.contains(key_slice)) return Value.true_;
+            if (c.accessors.contains(key_slice)) return Value.true_;
+        }
+        return Value.false_;
+    }
     if (heap_mod.valueAsFunction(arg)) |fn_obj| {
         if (fn_obj.properties.contains(key_slice)) return Value.true_;
         if (fn_obj.accessors.contains(key_slice)) return Value.true_;
@@ -175,10 +193,22 @@ fn reflectGet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         return Value.undefined_;
     }
     const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.get target must be an object");
+    // §10.5.5 Proxy [[Get]] dispatch.
+    var proxy_cur = target;
+    while (proxy_cur.proxy_target != null or proxy_cur.proxy_revoked) {
+        const r = try proxy_mod.nativeProxyGet(realm, proxy_cur, key_slice, receiver);
+        switch (r) {
+            .value => |v| return v,
+            .fallthrough => |t| {
+                if (t == proxy_cur) break;
+                proxy_cur = t;
+            },
+        }
+    }
     // Walk the prototype chain looking for the key. Accessors fire
     // with `receiver` as `this`. Function valueless targets fall
     // through; the function check above was the previous shortcut.
-    var cursor: ?*JSObject = target;
+    var cursor: ?*JSObject = proxy_cur;
     while (cursor) |o| : (cursor = o.prototype) {
         if (o.accessors.get(key_slice)) |acc| {
             if (acc.getter) |getter| {
@@ -220,6 +250,23 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         return Value.fromBool(ok);
     }
     const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.set target must be an object");
+    // §10.5.6 Proxy [[Set]] dispatch. Reflect.set returns the
+    // trap's boolean — it never throws on a falsy return, unlike
+    // strict-mode bytecode assignment.
+    {
+        var proxy_cur = target;
+        while (proxy_cur.proxy_target != null or proxy_cur.proxy_revoked) {
+            const receiver_v: Value = if (args.len >= 4) args[3] else heap_mod.taggedObject(proxy_cur);
+            const r = try proxy_mod.nativeProxySet(realm, proxy_cur, key_slice, v, receiver_v);
+            switch (r) {
+                .boolean => |b| return Value.fromBool(b),
+                .fallthrough => |t| {
+                    if (t == proxy_cur) break;
+                    proxy_cur = t;
+                },
+            }
+        }
+    }
     // §10.1.9.1 [[Set]] step 5.a — return false when the own
     // data property exists with `writable: false`. Cynic was
     // using the bypass-set path which silently overwrites.
@@ -268,6 +315,20 @@ fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) 
         return Value.true_;
     }
     const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.deleteProperty target must be an object");
+    // §10.5.10 Proxy [[Delete]] dispatch.
+    {
+        var proxy_cur = target;
+        while (proxy_cur.proxy_target != null or proxy_cur.proxy_revoked) {
+            const r = try proxy_mod.nativeProxyDelete(realm, proxy_cur, key_slice);
+            switch (r) {
+                .boolean => |b| return Value.fromBool(b),
+                .fallthrough => |t| {
+                    if (t == proxy_cur) break;
+                    proxy_cur = t;
+                },
+            }
+        }
+    }
     // §10.1.10.1 — non-configurable own property → return false
     // (no mutation). Includes frozen / sealed objects.
     if (target.flagsFor(key_slice).configurable == false and (target.properties.contains(key_slice) or target.accessors.contains(key_slice))) return Value.false_;

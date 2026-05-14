@@ -5968,13 +5968,19 @@ fn strictSetPropertyAnchored(
     if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
         // §10.5 Proxy [[Set]] — if `recv` is a proxy exotic,
         // dispatch through `handler.set` before falling back to
-        // the target's default setter logic.
+        // the target's default setter logic. Loops so that a
+        // trapless proxy whose target is itself a proxy keeps
+        // dispatching down the chain (§10.5.6 step 7.a recurses
+        // into target.[[Set]]).
         var obj = obj_in;
-        if (obj.proxy_target != null) {
+        while (obj.proxy_target != null or obj.proxy_revoked) {
             const r = try proxySetTrap(allocator, realm, frames, f, ip, obj, key, value, recv);
             switch (r) {
                 .value => return .ok,
-                .fallthrough => |t| obj = t,
+                .fallthrough => |t| {
+                    if (t == obj) break;
+                    obj = t;
+                },
                 .handled => return .handled,
                 .uncaught => |ex| return .{ .uncaught = ex },
             }
@@ -6312,12 +6318,39 @@ fn proxySetTrap(
     switch (outcome) {
         .value, .yielded => |v| {
             if (!arith.toBoolean(v)) {
+                // §10.5.6 step 9 — strict-mode assignment throws on
+                // a falsy trap return (Cynic is strict-only).
                 const ex = try makeTypeError(realm, "'set' on proxy returned falsy");
                 f.ip = ip;
                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                     return .{ .uncaught = ex };
                 }
                 return .handled;
+            }
+            // §10.5.6 steps 10–12 — the trap can't claim success on
+            // a non-configurable / non-writable own data descriptor
+            // unless the new value matches, nor on a non-configurable
+            // accessor whose [[Set]] is undefined.
+            if (target.property_flags.get(key)) |flags| {
+                if (target.properties.get(key)) |target_v| {
+                    if (!flags.configurable and !flags.writable) {
+                        if (!intrinsics_mod.sameValue(target_v, value)) {
+                            const ex = try makeTypeError(realm, "proxy 'set' trap reported success for non-writable non-configurable data property");
+                            f.ip = ip;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                            return .handled;
+                        }
+                    }
+                }
+            }
+            if (target.accessors.get(key)) |acc| {
+                const flags = target.flagsFor(key);
+                if (!flags.configurable and acc.setter == null) {
+                    const ex = try makeTypeError(realm, "proxy 'set' trap reported success for non-configurable accessor with no setter");
+                    f.ip = ip;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                    return .handled;
+                }
             }
             return .{ .value = Value.undefined_ };
         },
