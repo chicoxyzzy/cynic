@@ -784,7 +784,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
     }
     const desc = heap_mod.valueAsPlainObject(desc_v) orelse return throwTypeError(realm, "Object.defineProperty descriptor is not an object");
 
-    const parsed = try parseDescriptor(realm, desc);
+    var parsed = try parseDescriptor(realm, desc);
 
     if (heap_mod.valueAsPlainObject(target_v)) |target| {
         // §10.4.5.3 Integer-Indexed Exotic Object [[DefineOwnProperty]]
@@ -813,24 +813,43 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
         }
         // §10.4.2.1 Array exotic [[DefineOwnProperty]] — when the
         // receiver is an Array and the key is "length", route the
-        // request through §10.4.2.4 ArraySetLength so a non-integer
-        // / negative / out-of-range [[Value]] surfaces as
-        // RangeError instead of being silently coerced. ToUint32
-        // here must equal ToNumber (SameValueZero) — fractional
-        // values, strings like "-42", Symbols, etc. all reject.
+        // request through §10.4.2.4 ArraySetLength. Per spec:
+        // 1. newLen = ? ToUint32(Desc.[[Value]]);
+        // 2. numberLen = ? ToNumber(Desc.[[Value]]);
+        // 3. If newLen != numberLen, throw RangeError.
+        // ToNumber on an Object fires ToPrimitive(value, "number")
+        // which calls `valueOf` / `toString` — those can throw, or
+        // return a value that fails the SameValueZero check.
+        // We then replace parsed.value with the canonical numeric
+        // so the descriptor that lands stores the coerced length.
+        var array_length_new: ?u32 = null;
         if (target.is_array_exotic and std.mem.eql(u8, key, "length") and parsed.has_value) {
-            const interpreter = @import("../interpreter.zig");
             const arith = @import("../interpreter_arith.zig");
-            const new_len = interpreter.arrayLengthCoerce(parsed.value) orelse {
-                return throwRangeError(realm, "Invalid array length");
-            };
-            // SameValueZero(newLen, ToNumber(Value)) — reject
-            // mismatched encodings (e.g. 4294967296 wraps to 0
-            // under ToUint32 but ToNumber returns 4294967296).
-            const num = arith.toNumber(parsed.value);
-            if (@as(f64, @floatFromInt(new_len)) != num) {
+            // §7.1.1 ToPrimitive with hint "number" — calls
+            // valueOf / toString on Object inputs. Symbols throw.
+            const prim = try intrinsics.toPrimitive(realm, parsed.value, .number);
+            if (heap_mod.valueAsSymbol(prim) != null) {
+                return throwTypeError(realm, "Cannot convert a Symbol value to a number");
+            }
+            const num = arith.toNumber(prim);
+            if (std.math.isNan(num) or std.math.isInf(num)) {
                 return throwRangeError(realm, "Invalid array length");
             }
+            // ToUint32: floor toward zero modulo 2^32; the
+            // SameValueZero(ToUint32, ToNumber) check rejects
+            // negative, fractional, and >= 2^32 values per
+            // §10.4.2.4 step 3.d.
+            if (num < 0 or @trunc(num) != num or num > @as(f64, @floatFromInt(std.math.maxInt(u32)))) {
+                return throwRangeError(realm, "Invalid array length");
+            }
+            const new_len: u32 = @intFromFloat(num);
+            array_length_new = new_len;
+            // Replace the raw descriptor value with the coerced
+            // length so the rest of `defineProperty` writes a
+            // clean integer (matters when value is null / "12" /
+            // a valueOf-returning object — the property map
+            // should hold the numeric, not the original).
+            parsed.value = Value.fromInt32(@intCast(new_len));
         }
 
         // Snapshot the current descriptor (or `null` if absent).
@@ -928,6 +947,28 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             _ = target.accessors.swapRemove(key);
             const value: Value = if (parsed.has_value) parsed.value else cur_value;
             target.setWithFlags(realm.allocator, key, value, flags) catch return error.OutOfMemory;
+            // §10.4.2.4 ArraySetLength step 16-17 — when the
+            // receiver is an Array and the key is "length", a
+            // shrink truncates indexed slots ≥ newLen. Walks
+            // descending; a non-configurable element stops the
+            // walk and sets length to that index + 1, returning
+            // false (→ TypeError in strict mode). All indexed
+            // slots are configurable today, so the loop is a
+            // single resize. Done AFTER the property update so
+            // the length property already reads as `newLen`.
+            if (array_length_new) |new_len| {
+                const interpreter = @import("../interpreter.zig");
+                const trunc = interpreter.truncateArrayAtLength(realm.allocator, target, new_len);
+                if (trunc.blocked) {
+                    // Restore length to the floor and throw.
+                    const restore: Value = if (trunc.final_length <= std.math.maxInt(i32))
+                        Value.fromInt32(@intCast(trunc.final_length))
+                    else
+                        Value.fromDouble(@floatFromInt(trunc.final_length));
+                    target.setWithFlags(realm.allocator, key, restore, flags) catch return error.OutOfMemory;
+                    return throwTypeError(realm, "Cannot redefine length: non-configurable element prevents truncation");
+                }
+            }
             return target_v;
         }
 
@@ -1009,7 +1050,23 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
 fn objectDefineProperties(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.defineProperties target is not an object");
-    const props = heap_mod.valueAsPlainObject(argOr(args, 1, Value.undefined_)) orelse return throwTypeError(realm, "Object.defineProperties properties is not an object");
+    // §20.1.2.3.1 step 2 — `props = ? ToObject(Properties)`.
+    // Boolean / Number / String primitives box into wrappers with
+    // no extra enumerable own keys (becomes a no-op iteration).
+    // Function objects flow through unchanged (functions are
+    // Objects per §17). `null` / `undefined` throw.
+    const props_v = argOr(args, 1, Value.undefined_);
+    const props: *@import("../object.zig").JSObject = blk_props: {
+        if (heap_mod.valueAsPlainObject(props_v)) |o| break :blk_props o;
+        if (props_v.isNull() or props_v.isUndefined()) {
+            return throwTypeError(realm, "Object.defineProperties properties is not an object");
+        }
+        // §7.1.18 ToObject for primitives + function objects.
+        // Symbols / BigInts box into wrappers with no own enumerable
+        // keys; same with Function (its own keys like `length` /
+        // `name` are non-enumerable).
+        break :blk_props try intrinsics.toObjectThis(realm, props_v);
+    };
 
     var it = props.properties.iterator();
     while (it.next()) |entry| {
