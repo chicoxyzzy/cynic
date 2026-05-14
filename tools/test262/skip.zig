@@ -43,12 +43,38 @@ pub const cynic_oos_path_prefixes = [_][]const u8{
 /// follow-on lexer pass. Per-feature "not yet implemented" gaps are
 /// filed as failures, not skipped.
 pub const cynic_oos_path_contains = [_][]const u8{
-    // `\p{…}` property escapes of *strings* and the
-    // RGI-emoji-sequence property set (Unicode 17 / `/v` flag) — the
-    // vendored libregexp doesn't validate the strings-property
-    // negation rule. Skip the generated fixtures.
-    "RegExp/property-escapes/generated/strings/",
+    // §22.2.1.5 — `\p{StringProperty}` is legal under `/v` only in
+    // *positive* form. The vendored libregexp (QuickJS-NG) parses
+    // these property escapes fine, and even rejects them under
+    // `/u`-only (the `-negative-u` fixtures all pass), but doesn't
+    // validate the two reject-forms below. Skip only those two
+    // suffix patterns; the bare-positive and `-negative-u` siblings
+    // in the same directory run normally.
+    //
+    //   `[^\p{StringProperty}]/v`  — negated character class.
+    //   `/\P{StringProperty}/v`    — capital-P negation.
+    "/property-escapes/generated/strings/Basic_Emoji-negative-CharacterClass",
+    "/property-escapes/generated/strings/Basic_Emoji-negative-P",
+    "/property-escapes/generated/strings/Emoji_Keycap_Sequence-negative-CharacterClass",
+    "/property-escapes/generated/strings/Emoji_Keycap_Sequence-negative-P",
+    "/property-escapes/generated/strings/RGI_Emoji-negative-CharacterClass",
+    "/property-escapes/generated/strings/RGI_Emoji-negative-P",
+    "/property-escapes/generated/strings/RGI_Emoji_Flag_Sequence-negative-CharacterClass",
+    "/property-escapes/generated/strings/RGI_Emoji_Flag_Sequence-negative-P",
+    "/property-escapes/generated/strings/RGI_Emoji_Modifier_Sequence-negative-CharacterClass",
+    "/property-escapes/generated/strings/RGI_Emoji_Modifier_Sequence-negative-P",
+    "/property-escapes/generated/strings/RGI_Emoji_Tag_Sequence-negative-CharacterClass",
+    "/property-escapes/generated/strings/RGI_Emoji_Tag_Sequence-negative-P",
+    "/property-escapes/generated/strings/RGI_Emoji_ZWJ_Sequence-negative-CharacterClass",
+    "/property-escapes/generated/strings/RGI_Emoji_ZWJ_Sequence-negative-P",
+    // Unicode `Script_Extensions=Unknown` (alias `scx=Zzzz`) —
+    // libregexp's property tables don't include the "Unknown"
+    // special value yet. Single fixture.
     "/property-escapes/special-property-value-Script_Extensions-Unknown",
+    // `String.prototype.{search,replace}` runtime tests that build a
+    // regexp with the `/v` flag and exercise paths Cynic's runtime
+    // glue doesn't take yet (interaction with `RegExp.prototype
+    // [@@search]` / `[@@replace]` under `/v`-mode set notation).
     "/String/prototype/search/regexp-prototype-search-v",
     "/String/prototype/replace/regexp-prototype-replace-v",
 };
