@@ -47,6 +47,7 @@ const strictEqualsLite = intrinsics.strictEqualsLite;
 // ── §25 ArrayBuffer + §23.2 TypedArray ──────────────────────────────
 
 const ObjMod = @import("../object.zig");
+const toBigIntValue = @import("bigint.zig").toBigIntValue;
 
 pub fn install(realm: *Realm) !void {
     // ArrayBuffer constructor.
@@ -814,54 +815,176 @@ fn typedArrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeE
 }
 
 fn typedArraySet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    const tv = obj.typed_view orelse return error.NativeThrew;
-    const buf = tv.viewed.array_buffer orelse return error.NativeThrew;
-    const elem_size = tv.kind.elementSize();
-    const src = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return error.NativeThrew;
-    var offset: usize = 0;
+    // §23.2.3.27 %TypedArray%.prototype.set(source [, offset]).
+    //
+    // Step 1: brand check. .set.call({},…) → TypeError per spec.
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "TypedArray.prototype.set called on non-object");
+    const tv = obj.typed_view orelse
+        return throwTypeError(realm, "TypedArray.prototype.set called on non-TypedArray");
+
+    // Step 5: targetOffset = ToIntegerOrInfinity(offset). Throwing
+    // valueOf propagates via toNumber.
+    var target_offset: f64 = 0.0;
     if (args.len > 1 and !args[1].isUndefined()) {
-        // §23.2.3.27 step 5 — ToIntegerOrInfinity → ToNumber.
-        // Symbol / BigInt throw TypeError; `{valueOf: () => throw}`
-        // propagates. Cynic previously used a silent coercion that
-        // swallowed both.
-        const ov = try intrinsics.toNumber(realm, args[1]);
-        const od: f64 = if (ov.isInt32()) @floatFromInt(ov.asInt32()) else ov.asDouble();
-        if (std.math.isNan(od) or od < 0 or od > @as(f64, @floatFromInt(std.math.maxInt(usize)))) {
-            return throwRangeError(realm, "TypedArray.prototype.set: offset out of range");
-        }
-        offset = @intFromFloat(@trunc(od));
+        target_offset = try taSetToIntegerOrInfinity(realm, args[1]);
     }
-    // §23.2.3.26 SetTypedArrayFromTypedArray — fast path when the
-    // source is itself a typed view: copy via the same byte
-    // representation when kinds match, else read/write through the
-    // numeric conversion.
-    if (src.typed_view) |src_tv| {
-        if (src_tv.viewed.array_buffer) |src_buf| {
-            // §23.2.3.26 step 19 / SetTypedArrayFromTypedArray —
-            // RangeError when the source overflows the destination.
-            if (offset > tv.length or src_tv.length > tv.length - offset) {
-                return throwRangeError(realm, "TypedArray.prototype.set: source overflows destination");
-            }
-            const src_size = src_tv.kind.elementSize();
-            var i: usize = 0;
-            while (i < src_tv.length) : (i += 1) {
-                const v = readTypedElement(realm, src_buf, src_tv.kind, src_tv.byte_offset + i * src_size);
-                writeTypedElement(buf, tv.kind, tv.byte_offset + (offset + i) * elem_size, v);
-            }
-            return Value.undefined_;
+    // Step 6: targetOffset < 0 ⇒ RangeError. NaN already mapped to 0.
+    if (target_offset < 0) {
+        return throwRangeError(realm, "TypedArray.prototype.set: offset out of range");
+    }
+
+    const source_arg = argOr(args, 0, Value.undefined_);
+    const src_obj = heap_mod.valueAsPlainObject(source_arg) orelse {
+        return throwTypeError(realm, "TypedArray.prototype.set: source is not an object");
+    };
+
+    if (src_obj.typed_view != null) {
+        return try taSetFromTypedArray(realm, obj, tv, src_obj, target_offset);
+    }
+    return try taSetFromArrayLike(realm, obj, tv, src_obj, target_offset);
+}
+
+/// §7.1.5 ToIntegerOrInfinity. Routes through ToNumber so a
+/// throwing valueOf propagates instead of being silently coerced.
+fn taSetToIntegerOrInfinity(realm: *Realm, v: Value) NativeError!f64 {
+    const num = try intrinsics.toNumber(realm, v);
+    const d: f64 = if (num.isInt32()) @floatFromInt(num.asInt32()) else num.asDouble();
+    if (std.math.isNan(d)) return 0;
+    if (std.math.isInf(d)) return d;
+    if (d == 0) return 0;
+    return @trunc(d);
+}
+
+/// §23.2.3.27.2 SetTypedArrayFromTypedArray. Snapshots overlapping
+/// same-buffer reads into a temporary so writes don't trample data
+/// we still need to copy. Bulk memcpy when both views are distinct
+/// buffers of identical element kind.
+fn taSetFromTypedArray(
+    realm: *Realm,
+    target: *JSObject,
+    tv: ObjMod.TypedView,
+    src: *JSObject,
+    target_offset: f64,
+) NativeError!Value {
+    _ = target;
+    const src_tv = src.typed_view orelse unreachable;
+    const dst_buf = tv.viewed.array_buffer orelse
+        return throwTypeError(realm, "TypedArray.prototype.set: target buffer is detached");
+    const src_buf = src_tv.viewed.array_buffer orelse
+        return throwTypeError(realm, "TypedArray.prototype.set: source buffer is detached");
+
+    // §23.2.3.27.2 step 6 — disallow Big↔non-Big mixes (the
+    // "ContentType(srcType) != ContentType(targetType)" check).
+    {
+        const src_big = src_tv.kind == .bigint64 or src_tv.kind == .biguint64;
+        const dst_big = tv.kind == .bigint64 or tv.kind == .biguint64;
+        if (src_big != dst_big) {
+            return throwTypeError(realm, "TypedArray.prototype.set: cannot mix BigInt and Number typed arrays");
         }
     }
-    const len_v = src.get("length");
-    const len: usize = if (len_v.isInt32()) @intCast(len_v.asInt32()) else if (len_v.isDouble()) @intFromFloat(len_v.asDouble()) else 0;
-    if (offset > tv.length or len > tv.length - offset) {
+    const target_length: usize = taInBoundsLength(tv);
+    const src_length: usize = taInBoundsLength(src_tv);
+
+    if (target_offset == std.math.inf(f64)) {
+        return throwRangeError(realm, "TypedArray.prototype.set: offset out of range");
+    }
+    const tl_f: f64 = @floatFromInt(target_length);
+    const sl_f: f64 = @floatFromInt(src_length);
+    if (target_offset + sl_f > tl_f) {
         return throwRangeError(realm, "TypedArray.prototype.set: source overflows destination");
     }
+
+    const offset: usize = @intFromFloat(target_offset);
+    const elem_size = tv.kind.elementSize();
+    const src_size = src_tv.kind.elementSize();
+    const dst_base = tv.byte_offset + offset * elem_size;
+    const src_base = src_tv.byte_offset;
+    const same_buffer = src_tv.viewed == tv.viewed;
+
+    if (src_tv.kind == tv.kind and !same_buffer) {
+        const byte_count = src_length * elem_size;
+        if (dst_base + byte_count <= dst_buf.len and src_base + byte_count <= src_buf.len) {
+            @memcpy(dst_buf[dst_base .. dst_base + byte_count], src_buf[src_base .. src_base + byte_count]);
+        }
+        return Value.undefined_;
+    }
+    if (same_buffer) {
+        const byte_count = src_length * src_size;
+        const tmp = realm.allocator.alloc(u8, byte_count) catch return error.OutOfMemory;
+        defer realm.allocator.free(tmp);
+        if (src_base + byte_count <= src_buf.len) {
+            @memcpy(tmp, src_buf[src_base .. src_base + byte_count]);
+        } else {
+            @memset(tmp, 0);
+        }
+        var i: usize = 0;
+        while (i < src_length) : (i += 1) {
+            const v = readTypedElement(realm, tmp, src_tv.kind, i * src_size);
+            writeTypedElement(dst_buf, tv.kind, dst_base + i * elem_size, v);
+        }
+        return Value.undefined_;
+    }
+
     var i: usize = 0;
-    while (i < len) : (i += 1) {
-        var ibuf: [16]u8 = undefined;
-        const s = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        writeTypedElement(buf, tv.kind, tv.byte_offset + (offset + i) * elem_size, src.get(s));
+    while (i < src_length) : (i += 1) {
+        const v = readTypedElement(realm, src_buf, src_tv.kind, src_base + i * src_size);
+        writeTypedElement(dst_buf, tv.kind, dst_base + i * elem_size, v);
+    }
+    return Value.undefined_;
+}
+
+/// §23.2.3.27.1 SetTypedArrayFromArrayLike. ToLength on source.length,
+/// then per-element ToNumber / ToBigInt. Throwing converters
+/// propagate. After each conversion we re-check the target buffer
+/// because a side-effecting valueOf can detach it; writes past a
+/// shrunk buffer silently no-op (§10.4.5 IntegerIndexedElementSet).
+fn taSetFromArrayLike(
+    realm: *Realm,
+    target: *JSObject,
+    tv_in: ObjMod.TypedView,
+    src: *JSObject,
+    target_offset: f64,
+) NativeError!Value {
+    _ = tv_in;
+    const src_len_i64 = try intrinsics.toLengthOf(realm, src);
+    if (src_len_i64 < 0) return Value.undefined_;
+    const src_length: usize = @intCast(src_len_i64);
+
+    const tv = target.typed_view orelse
+        return throwTypeError(realm, "TypedArray.prototype.set: target lost typed-view brand");
+    const target_length: usize = taInBoundsLength(tv);
+    if (tv.viewed.array_buffer == null) {
+        return throwTypeError(realm, "TypedArray.prototype.set: target buffer is detached");
+    }
+
+    if (target_offset == std.math.inf(f64)) {
+        return throwRangeError(realm, "TypedArray.prototype.set: offset out of range");
+    }
+    const tl_f: f64 = @floatFromInt(target_length);
+    const sl_f: f64 = @floatFromInt(src_length);
+    if (target_offset + sl_f > tl_f) {
+        return throwRangeError(realm, "TypedArray.prototype.set: source overflows destination");
+    }
+
+    const offset: usize = @intFromFloat(target_offset);
+    const elem_size = tv.kind.elementSize();
+    const dst_base = tv.byte_offset + offset * elem_size;
+
+    var k: usize = 0;
+    while (k < src_length) : (k += 1) {
+        var ibuf: [24]u8 = undefined;
+        const key = std.fmt.bufPrint(&ibuf, "{d}", .{k}) catch unreachable;
+        const raw = try getPropertyChain(realm, src, key);
+        const converted: Value = switch (tv.kind) {
+            .bigint64, .biguint64 => try toBigIntValue(realm, raw),
+            else => try intrinsics.toNumber(realm, raw),
+        };
+        const cur_tv = target.typed_view orelse return Value.undefined_;
+        const cur_buf = cur_tv.viewed.array_buffer orelse return Value.undefined_;
+        const slot = dst_base + k * elem_size;
+        if (slot + elem_size > cur_buf.len) continue;
+        writeTypedElement(cur_buf, cur_tv.kind, slot, converted);
     }
     return Value.undefined_;
 }

@@ -57,7 +57,7 @@ fn bigintConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
 }
 
 /// §7.1.13 ToBigInt. Returns the JSBigInt-tagged Value.
-fn toBigIntValue(realm: *Realm, v_in: Value) !Value {
+pub fn toBigIntValue(realm: *Realm, v_in: Value) !Value {
     // §7.1.13 step 1 — ToPrimitive(arg, hint "number") for objects.
     // Without this, BigInt({ valueOf: () => NaN }) takes the
     // throwTypeError fall-through instead of the spec-mandated
