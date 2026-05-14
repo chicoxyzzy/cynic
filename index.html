@@ -554,14 +554,6 @@
         </article>
 
         <article class="refuse">
-          <div class="stamp">NOPE</div>
-          <span class="feature">label:</span>
-          <h3>Labelled statements</h3>
-          <p>Intentionally omitted from the parser. <code>break label</code> was a mistake we collectively chose to make.</p>
-          <div class="quote">SyntaxError: labels declined.</div>
-        </article>
-
-        <article class="refuse">
           <div class="stamp">RETIRED</div>
           <span class="feature">0o7  →  07</span>
           <h3>Legacy octal literals</h3>
@@ -618,7 +610,7 @@
         </article>
 
         <article class="refuse">
-          <div class="stamp">PERMANENT</div>
+          <div class="stamp">BANNED</div>
           <span class="feature">eval() · new Function("…")</span>
           <h3>Runtime code construction</h3>
           <p>Out for good. Aligns with <a href="https://github.com/endojs/endo/tree/main/packages/ses" target="_blank" rel="noopener">SES</a> / Hardened JavaScript, kills the optimization fence, and removes the supply-chain bait. Multi-file scripts use a host hook, not user-reachable.</p>
@@ -639,6 +631,14 @@
           <h3>Shared-memory primitives</h3>
           <p>Defeats SES-style isolation. Cynic's edge-runtime hosts are single-agent-per-isolate by design — there's nothing to share memory with.</p>
           <div class="quote">ReferenceError: no shared agents, no Atomics.</div>
+        </article>
+
+        <article class="refuse">
+          <div class="stamp">NOT YET</div>
+          <span class="feature">Temporal.*</span>
+          <h3>The Temporal date API</h3>
+          <p>Stage 4, but a huge surface (Calendar / TimeZone / Instant / PlainDate / …). Its own implementation phase, not a parser opinion. Until then: <code>Date</code>.</p>
+          <div class="quote">ReferenceError: Temporal is not shipped here.</div>
         </article>
       </div>
     </section>
