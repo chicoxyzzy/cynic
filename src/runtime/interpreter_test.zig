@@ -744,18 +744,6 @@ test "later: encodeURI / encodeURIComponent" {
     , "a%20b:a%3Db%26c");
 }
 
-test "later: String.prototype.substr (Annex B alias kept)" {
-    try expectScriptStringWithBuiltins(
-        \\"Hello, World".substr(7, 5);
-    , "World");
-}
-
-test "later: trimLeft / trimRight (Annex B aliases kept)" {
-    try expectScriptStringWithBuiltins(
-        \\"  hi  ".trimLeft() + ":" + "  hi  ".trimRight();
-    , "hi  :  hi");
-}
-
 test "later: Number.prototype.toString(radix)" {
     try expectScriptStringWithBuiltins(
         \\(255).toString(16) + ":" + (10).toString(2);

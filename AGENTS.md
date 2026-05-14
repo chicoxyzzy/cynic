@@ -34,31 +34,21 @@ These are project rules — they apply to everyone.
   the spec ordering.
 - **Strict-only, non-browser-host target.** Cynic targets edge
   runtimes (Workers / Deno / server JS) — not browsers. So:
-  - **Annex B language extensions** — out (no sloppy mode, no
+  - **Annex B in its entirety** — out. No sloppy mode, no
     labelled function declarations (B.3.1), no HTML-like
     comments, no sloppy-mode function-in-block, no legacy octal,
-    no for-in initializer).
-  - **Labelled statements (§13.13)** — main-spec, not Annex B,
-    but not implemented yet. `language/statements/labeled/` is
-    path-skipped in the harness until that lands; once it does
-    the skip comes off and we get ~24 fixtures back plus a tail
-    of `language/statementList/` tests that mix labels with
-    other StatementList productions.
-  - **Annex B browser-era built-ins** — out where they're
-    purely browser legacy: `escape` / `unescape` (broken-by-
-    design for non-ASCII; `encodeURIComponent` is the answer);
-    the 13 `String.prototype` HTML wrappers (`anchor` / `bold`
-    / `blink` / etc. — wrap text in `<font>` tags, useless
-    server-side); `Date.prototype.{getYear, setYear}` (Y2K-
-    quirky year-minus-1900 format).
-  - **Annex B normative aliases** — kept where they're widely
-    used in real-world code or near-free aliases:
-    `String.prototype.{substr, trimLeft, trimRight}`,
-    `Date.prototype.toGMTString`. They're tested via the
-    standard-path test262 fixtures under `built-ins/...`; the
-    parallel `annexB/built-ins/...` tree is path-skipped in
-    full (it's pure duplication for our purposes). See later in
-    [docs/ROADMAP.md](docs/ROADMAP.md).
+    no for-in initializer. No `escape` / `unescape`, no String
+    HTML wrappers, no `Date.prototype.{getYear, setYear,
+    toGMTString}`, no `String.prototype.{substr, trimLeft,
+    trimRight}`, no `Object.prototype.__proto__` accessor, no
+    `Object.prototype.__define{Getter,Setter}__` /
+    `__lookup{Getter,Setter}__`, no `RegExp.{$1, input, …}`
+    legacy globals. The whole `annexB/` test262 tree is
+    path-skipped; feature flags for browser-only constructs
+    (`__proto__`, `__getter__`, `__setter__`, `legacy-regexp`,
+    `IsHTMLDDA`) are not in the unsupported-features list
+    because the fixtures using them parse fine — they show as
+    honest runtime-mode failures.
   - **`eval` and runtime code construction** — out
     permanently. `eval()` itself, `new Function(string)` /
     `new GeneratorFunction(string)` / `new AsyncFunction(string)`,

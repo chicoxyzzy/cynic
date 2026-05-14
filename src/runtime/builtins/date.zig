@@ -87,12 +87,6 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, proto, "setUTCMonth", dateSetMonth, 2);
     try installNativeMethodOnProto(realm, proto, "setUTCFullYear", dateSetFullYear, 3);
 
-    // §B.2.4 — `toGMTString` is a no-cost alias of
-    // `toUTCString`; we ship it. `getYear` (returns
-    // year - 1900) and `setYear` (Y2K-quirky) are
-    // intentionally NOT installed — pre-Y2K legacy that
-    // doesn't make sense on modern non-browser hosts.
-    try installNativeMethodOnProto(realm, proto, "toGMTString", dateToUTCString, 0);
     try installNativeMethodOnProto(realm, proto, "toUTCString", dateToUTCString, 0);
     try installNativeMethodOnProto(realm, proto, "toDateString", dateToDateString, 0);
     try installNativeMethodOnProto(realm, proto, "toTimeString", dateToTimeString, 0);

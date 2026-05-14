@@ -182,11 +182,15 @@ stays feature-gated as `Temporal`, counts in the score
 denominator, and pulls runtime spec% down accordingly. That's
 intentional — it's the largest known coverage gap.
 
-**Out of scope.** Annex B browser-era built-ins (`escape` /
-`unescape`, `String.prototype` HTML wrappers, `Date.{getYear,
-setYear}`); `Intl`; `SharedArrayBuffer` / `Atomics` (path-
-skipped — shared memory defeats SES-style isolation, and
-Cynic's edge-runtime hosts are single-agent-per-isolate).
+**Out of scope.** Annex B in its entirety — language extensions
+*and* every browser-era built-in (`escape` / `unescape`, the
+String HTML wrappers, `Date.prototype.{getYear, setYear,
+toGMTString}`, `String.prototype.{substr, trimLeft, trimRight}`,
+`Object.prototype.__proto__` accessor and the `__define*` /
+`__lookup*` family, `RegExp.{$1, input, …}` legacy globals).
+`Intl`; `SharedArrayBuffer` / `Atomics` (path-skipped — shared
+memory defeats SES-style isolation, and Cynic's edge-runtime
+hosts are single-agent-per-isolate).
 
 ## Modules
 

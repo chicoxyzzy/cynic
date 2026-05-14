@@ -59,10 +59,6 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, sp, "replaceAll", stringReplaceAll, 2);
     try installNativeMethodOnProto(realm, sp, "trimStart", stringTrimStart, 0);
     try installNativeMethodOnProto(realm, sp, "trimEnd", stringTrimEnd, 0);
-    // §B.2.2 — kept Annex B aliases.
-    try installNativeMethodOnProto(realm, sp, "trimLeft", stringTrimStart, 0);
-    try installNativeMethodOnProto(realm, sp, "trimRight", stringTrimEnd, 0);
-    try installNativeMethodOnProto(realm, sp, "substr", stringSubstr, 2);
     try installNativeMethodOnProto(realm, sp, "normalize", stringNormalize, 1);
     try installNativeMethodOnProto(realm, sp, "codePointAt", stringCodePointAt, 1);
     try installNativeMethodOnProto(realm, sp, "localeCompare", stringLocaleCompare, 1);
@@ -1365,35 +1361,6 @@ fn stringTrimEnd(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const s = try coerceThisToJSString(realm, this_value);
     const end = endAfterTrailingWhitespace(s.bytes);
     const out = realm.heap.allocateString(s.bytes[0..end]) catch return error.OutOfMemory;
-    return Value.fromString(out);
-}
-
-// ── Annex B String additions (§B.2.2 / §B.2.3, later) ───────────────────────
-
-fn stringSubstr(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
-    const total: i64 = @intCast(s.bytes.len);
-    var start_d: f64 = 0;
-    if (args.len > 0) {
-        const v = coerceToNumber(args[0]);
-        start_d = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
-    }
-    var len_d: f64 = @floatFromInt(total);
-    if (args.len > 1 and !args[1].isUndefined()) {
-        const v = coerceToNumber(args[1]);
-        len_d = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
-    }
-    if (std.math.isNan(start_d)) start_d = 0;
-    if (std.math.isNan(len_d)) len_d = 0;
-    var start_i: i64 = if (std.math.isInf(start_d)) (if (start_d > 0) total else 0) else @intFromFloat(@trunc(start_d));
-    if (start_i < 0) start_i = @max(total + start_i, 0);
-    if (start_i > total) start_i = total;
-    var len_i: i64 = if (std.math.isInf(len_d)) (if (len_d > 0) total - start_i else 0) else @intFromFloat(@trunc(len_d));
-    if (len_i < 0) len_i = 0;
-    if (start_i + len_i > total) len_i = total - start_i;
-    const a: usize = @intCast(start_i);
-    const b: usize = @intCast(start_i + len_i);
-    const out = realm.heap.allocateString(s.bytes[a..b]) catch return error.OutOfMemory;
     return Value.fromString(out);
 }
 
