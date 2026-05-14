@@ -2116,6 +2116,126 @@ pub fn writeTypedElement(buf: []u8, kind: ObjMod.TypedKind, byte_pos: usize, val
     }
 }
 
+/// §7.1.21 CanonicalNumericIndexString — returns the parsed
+/// f64 for any string S such that ToString(ToNumber(S)) === S
+/// (plus "-0"). Returns null for non-canonical numeric strings
+/// AND non-numeric strings. Used by §10.4.5 Integer-Indexed
+/// Exotic Object hooks ([[GetOwnProperty]] / [[DefineOwnProperty]])
+/// to decide whether a key targets the typed-buffer slot or the
+/// ordinary property bag.
+pub fn canonicalNumericIndex(s: []const u8) ?f64 {
+    if (s.len == 0) return null;
+    if (std.mem.eql(u8, s, "-0")) return -0.0;
+    if (std.mem.eql(u8, s, "Infinity")) return std.math.inf(f64);
+    if (std.mem.eql(u8, s, "-Infinity")) return -std.math.inf(f64);
+    if (std.mem.eql(u8, s, "NaN")) return std.math.nan(f64);
+    var i: usize = 0;
+    if (s[i] == '-') i += 1;
+    if (i >= s.len) return null;
+    if (s[i] == '0') {
+        i += 1;
+    } else if (s[i] >= '1' and s[i] <= '9') {
+        i += 1;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
+    } else {
+        return null;
+    }
+    if (i < s.len and s[i] == '.') {
+        i += 1;
+        if (i >= s.len or s[i] < '0' or s[i] > '9') return null;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
+        if (s[i - 1] == '0') return null;
+    }
+    if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
+        i += 1;
+        if (i < s.len and (s[i] == '+' or s[i] == '-')) i += 1;
+        if (i >= s.len or s[i] < '0' or s[i] > '9') return null;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
+    }
+    if (i != s.len) return null;
+    const n = std.fmt.parseFloat(f64, s) catch return null;
+    var buf: [64]u8 = undefined;
+    const printed = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return null;
+    if (!std.mem.eql(u8, printed, s)) return null;
+    return n;
+}
+
+pub const TypedArrayDefineResult = enum { applied, reject };
+
+/// §10.4.5.3 [[DefineOwnProperty]] for Integer-Indexed Exotic Objects.
+/// Caller has already passed `key` through CanonicalNumericIndexString.
+/// Returns `.applied` if the value (if any) was written to the typed
+/// slot; `.reject` if the spec says return false (out-of-bounds,
+/// non-integer, non-default descriptor flags, detached buffer).
+pub fn typedArrayDefineOwnProperty(
+    realm: *Realm,
+    obj: *JSObject,
+    num: f64,
+    has_value: bool,
+    value: Value,
+    is_accessor: bool,
+    has_configurable: bool,
+    configurable: bool,
+    has_enumerable: bool,
+    enumerable: bool,
+    has_writable: bool,
+    writable: bool,
+) NativeError!TypedArrayDefineResult {
+    const tv = obj.typed_view orelse unreachable;
+    if (std.math.isNan(num)) return .reject;
+    if (std.math.isInf(num)) return .reject;
+    if (@trunc(num) != num) return .reject;
+    if (num == 0.0 and std.math.signbit(num)) return .reject;
+    if (num < 0) return .reject;
+    const idx: usize = @intFromFloat(num);
+    const buf = tv.viewed.array_buffer orelse return .reject;
+    if (idx >= tv.length) return .reject;
+    const elem_size = tv.kind.elementSize();
+    if (tv.byte_offset + (idx + 1) * elem_size > buf.len) return .reject;
+    if (is_accessor) return .reject;
+    if (has_configurable and !configurable) return .reject;
+    if (has_enumerable and !enumerable) return .reject;
+    if (has_writable and !writable) return .reject;
+    if (has_value) {
+        switch (tv.kind) {
+            .bigint64, .biguint64 => {
+                if (heap_mod.valueAsBigInt(value) == null) {
+                    return throwTypeError(realm, "Cannot convert non-BigInt value to BigInt");
+                }
+            },
+            else => {
+                if (heap_mod.valueAsBigInt(value) != null) {
+                    return throwTypeError(realm, "Cannot convert a BigInt value to a number");
+                }
+                if (heap_mod.valueAsSymbol(value) != null) {
+                    return throwTypeError(realm, "Cannot convert a Symbol value to a number");
+                }
+            },
+        }
+        writeTypedElement(buf, tv.kind, tv.byte_offset + idx * elem_size, value);
+    }
+    return .applied;
+}
+
+/// §10.4.5.2 [[GetOwnProperty]] for Integer-Indexed Exotic Objects.
+/// Returns the current slot value (caller wraps it in a fresh
+/// `{writable, enumerable, configurable}: true` descriptor) or
+/// `null` for any key that isn't a valid integer index.
+pub fn typedArrayGetOwnPropertyValue(realm: *Realm, obj: *JSObject, num: f64) ?Value {
+    const tv = obj.typed_view orelse return null;
+    if (std.math.isNan(num)) return null;
+    if (std.math.isInf(num)) return null;
+    if (@trunc(num) != num) return null;
+    if (num == 0.0 and std.math.signbit(num)) return null;
+    if (num < 0) return null;
+    const idx: usize = @intFromFloat(num);
+    const buf = tv.viewed.array_buffer orelse return null;
+    if (idx >= tv.length) return null;
+    const elem_size = tv.kind.elementSize();
+    if (tv.byte_offset + (idx + 1) * elem_size > buf.len) return null;
+    return readTypedElement(realm, buf, tv.kind, tv.byte_offset + idx * elem_size);
+}
+
 pub fn readTypedElement(realm: *Realm, buf: []const u8, kind: ObjMod.TypedKind, byte_pos: usize) Value {
     // §10.4.5 IsValidIntegerIndex — a view over a resizable
     // ArrayBuffer can be left with `byte_pos + elem_size` past

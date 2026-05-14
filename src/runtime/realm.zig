@@ -128,6 +128,12 @@ pub const Realm = struct {
     /// exact constructor / message the spec mandates rather than
     /// the generic "native error".
     pending_exception: ?Value = null,
+    /// Sticky flag set when [[DefineOwnProperty]] rejected a typed-
+    /// array index (per §10.4.5.3 — returns false, not throws).
+    /// Object.defineProperty translates the reject to TypeError;
+    /// Reflect.defineProperty translates it to `false`. The flag
+    /// lets the two callers split the same throw site.
+    define_own_property_rejected: bool = false,
     /// FIFO microtask queue (§9.4 HostEnqueueMicrotask). Drained
     /// at the end of every external entry — `cynic eval`,
     /// `cynic run`, each test262 invocation — and from any

@@ -84,6 +84,14 @@ fn reflectDefineProperty(realm: *Realm, this_value: Value, args: []const Value) 
     const result = intrinsics.objectDefineProperty(realm, this_value, args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NativeThrew => {
+            // §10.4.5.3 TypedArray index rejection — surface as
+            // `false` per Reflect's contract (Object.defineProperty
+            // raises the TypeError; Reflect translates it).
+            if (realm.define_own_property_rejected) {
+                realm.define_own_property_rejected = false;
+                realm.pending_exception = null;
+                return Value.fromBool(false);
+            }
             // Distinguish "key conversion threw" (propagate) from
             // "definition failed validly" (return false). The
             // Object.defineProperty path doesn't surface that
