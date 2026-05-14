@@ -30,6 +30,36 @@ const lengthOfArray = intrinsics.lengthOfArray;
 const clampArrayLength = intrinsics.clampArrayLength;
 const callJSFunction = interpreter.callJSFunction;
 
+/// Accessor-aware `Get(target, key)` for a callable receiver.
+/// `JSFunction.get` only consults the data-property bag and the
+/// reflection slots (`length` / `name` / `prototype`); the spec
+/// `Get` (§7.3.2) walks the proto chain and fires getters. Use
+/// this for §20.2.3.2 step 5 `? Get(Target, "name")` and step 7
+/// `? Get(Target, "length")` so a thrown getter (test262
+/// `instance-name-error` / `instance-length-error`) propagates
+/// rather than getting silently squashed.
+const GetOutcome = union(enum) {
+    value: Value,
+    thrown: Value,
+};
+
+fn getAccessorAwareOnFunction(realm: *Realm, target: *JSFunction, key: []const u8) NativeError!GetOutcome {
+    if (interpreter.lookupFunctionAccessor(target, key)) |acc| {
+        if (acc.getter) |getter| {
+            const outcome = callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(target), &[_]Value{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            switch (outcome) {
+                .value, .yielded => |v| return .{ .value = v },
+                .thrown => |ex| return .{ .thrown = ex },
+            }
+        }
+        return .{ .value = Value.undefined_ };
+    }
+    return .{ .value = target.get(key) };
+}
+
 /// Wire `Function.prototype.{call, apply, bind, toString}` onto
 /// the realm's `%Function.prototype%`.
 pub fn installPrototypeMethods(realm: *Realm) !void {
@@ -279,8 +309,17 @@ fn functionBind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // target.length only if it's an own property. If non-Number
     // or absent, L = 0; otherwise
     // L = max(0, ToInteger(targetLen) - args.length).
+    // §20.2.3.2 step 7-8 — `? Get(Target, "length")`. Spec is
+    // accessor-aware; a thrown getter propagates.
     var bound_length: f64 = 0;
-    if (target.properties.get("length")) |len_v| {
+    {
+        const len_v = switch (try getAccessorAwareOnFunction(realm, target, "length")) {
+            .value => |v| v,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        };
         if (len_v.isInt32()) {
             const li: i64 = @as(i64, len_v.asInt32()) - @as(i64, @intCast(prefix_args.len));
             bound_length = @floatFromInt(@max(@as(i64, 0), li));
@@ -298,13 +337,19 @@ fn functionBind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     }
 
     // §20.2.3.2 step 4-6 — name = "bound " + (target.name if String else "").
-    // Use `JSFunction.get` (data-bag + slot fallback) so a
-    // user-written `target.name = "x"` reads back; a JS function
-    // doesn't typically have a `name` accessor descriptor.
+    // Per spec: `? Get(Target, "name")` — accessor-aware, abrupt
+    // propagates. The previous data-bag-only fallback swallowed
+    // a thrown getter (test262 `instance-name-error`).
     var name_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer name_buf.deinit(realm.allocator);
     name_buf.appendSlice(realm.allocator, "bound ") catch return error.OutOfMemory;
-    const target_name_v = target.get("name");
+    const target_name_v = switch (try getAccessorAwareOnFunction(realm, target, "name")) {
+        .value => |v| v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
     if (target_name_v.isString()) {
         const ts: *JSString = @ptrCast(@alignCast(target_name_v.asString()));
         name_buf.appendSlice(realm.allocator, ts.bytes) catch return error.OutOfMemory;

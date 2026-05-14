@@ -6122,12 +6122,17 @@ fn strictSetPropertyAnchored(
         return .ok;
     }
     if (heap_mod.valueAsFunction(recv)) |fn_obj| {
-        // §10.1.9 [[Set]] for functions — accessor descriptors win
-        // over data slots. Static `set [K](v) {}` on a class lands
-        // in `fn_obj.accessors`; without this branch the assignment
-        // fell through to `setIfWritable` which treats every entry
-        // as a data prop and tripped the read-only guard.
-        if (fn_obj.accessors.get(key)) |acc_pair| {
+        // §10.1.9 [[Set]] for functions — accessor descriptors
+        // win over data slots. Static `set [K](v) {}` on a class
+        // lands in `fn_obj.accessors`; without this branch the
+        // assignment fell through to `setIfWritable` which treats
+        // every entry as a data prop and tripped the read-only
+        // guard. Walk the same chain as `lookupFunctionAccessor`
+        // (own → `static_parent` → `proto`) so the inherited
+        // `%Function.prototype%` `caller` / `arguments` poison-pill
+        // setter (§10.2.4) fires on `fn.caller = x` writes, matching
+        // the `set` side of the spec accessor.
+        if (lookupFunctionAccessor(fn_obj, key)) |acc_pair| {
             if (acc_pair.setter) |setter| {
                 const args = [_]Value{value};
                 const outcome = try callJSFunction(allocator, realm, setter, recv, &args);
