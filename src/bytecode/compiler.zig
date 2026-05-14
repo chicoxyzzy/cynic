@@ -4375,8 +4375,19 @@ fn compileBlock(self: *Compiler, body: []ast.statement.Statement, span: Span) Co
 /// already filled the env with `hole` values.
 fn hoistLetConst(self: *Compiler, body: []ast.statement.Statement) CompileError!void {
     for (body) |*s| {
-        if (s.* != .lexical) continue;
-        const ld = s.lexical;
+        // sec-moduledeclarationinstantiation step 17 -- export <lexical-decl>
+        // participates in the module's LexicallyScopedDeclarations the same way
+        // the unwrapped form does. Recurse one level into
+        // export_decl.body.declaration so `export let` / `export const`
+        // get hoisted into the top-level lex env.
+        const target: *const ast.statement.Statement = if (s.* == .export_decl) blk: {
+            switch (s.export_decl.body) {
+                .declaration => |inner| break :blk inner,
+                else => continue,
+            }
+        } else s;
+        if (target.* != .lexical) continue;
+        const ld = target.lexical;
         if (ld.kind == .var_) continue;
         const kind: BindingKind = if (ld.kind == .let_) .let_ else .const_;
         for (ld.declarators) |d| {
@@ -4414,6 +4425,16 @@ fn hoistStatement(self: *Compiler, s: *ast.statement.Statement) CompileError!voi
         .function_decl => |fd| {
             const name = self.source[fd.name.span.start..fd.name.span.end];
             _ = try self.declareBindingFull(name, .var_, fd.name.span);
+        },
+        // sec-moduledeclarationinstantiation step 17 -- function /
+        // generator / async-function declarations exported via
+        // `export <decl>` get hoisted into the module's lexical env
+        // identically to the plain unwrapped forms. Without this, the
+        // bound name lazily appears in source order and module cycles
+        // observe `undefined` for the cross-reference.
+        .export_decl => |ed| switch (ed.body) {
+            .declaration => |inner| try self.hoistStatement(inner),
+            else => {},
         },
         .block => |b| try self.hoistVarAndFunctions(b.body),
         .if_ => |i| {
@@ -6159,8 +6180,41 @@ pub fn compileModuleAsChunk(
     try c.hoistVarAndFunctions(program.body);
     try c.emitVarInits(start_span);
 
-    for (program.body) |*s| if (s.* == .function_decl) try c.compileStatement(s);
-    for (program.body) |*s| if (s.* != .function_decl) try c.compileStatement(s);
+    // sec-moduledeclarationinstantiation -- ordered phases before body:
+    //   1. FunctionDeclarations + GeneratorDeclarations, including
+    //      `export <fn-decl>` wrappers (step 17). For exported forms
+    //      also publish the module_export here so a self-import cycle
+    //      re-entering during `evaluating` finds the live function on
+    //      the partial namespace. Must precede imports so the partial
+    //      namespace handed to a cycling importer already has these
+    //      bindings published.
+    //   2. ImportDeclarations resolve and bind (steps 9-12). Hoisted
+    //      to the top of the body proper so a top-of-body reference
+    //      to an imported name sees the resolved binding, not the TDZ.
+    //   3. Remaining body statements run in source order.
+    for (program.body) |*s| {
+        switch (s.*) {
+            .function_decl => try c.compileStatement(s),
+            .export_decl => |ed| switch (ed.body) {
+                .declaration => |inner| if (inner.* == .function_decl) {
+                    try c.compileStatement(s);
+                },
+                else => {},
+            },
+            else => {},
+        }
+    }
+    for (program.body) |*s| if (s.* == .import_decl) try c.compileStatement(s);
+    for (program.body) |*s| {
+        switch (s.*) {
+            .import_decl, .function_decl => {},
+            .export_decl => |ed| switch (ed.body) {
+                .declaration => |inner| if (inner.* == .function_decl) {} else try c.compileStatement(s),
+                else => try c.compileStatement(s),
+            },
+            else => try c.compileStatement(s),
+        }
+    }
 
     const end_span: Span = .{
         .start = if (program.body.len > 0) program.body[program.body.len - 1].span().end else 0,
@@ -6256,3 +6310,4 @@ test "compiler: smoke — chunk has the leading MakeEnvironment" {
     try testing.expectEqual(@intFromEnum(@import("op.zig").Op.make_environment), chunk.code[0]);
     try testing.expectEqual(@intFromEnum(@import("op.zig").Op.return_), chunk.code[chunk.code.len - 1]);
 }
+

@@ -1347,10 +1347,31 @@ fn classifyAndRun(
                 return .{ .kind = .fail_false_reject };
             };
             try realm.script_chunks.append(realm.allocator, chunk_ptr);
-            break :blk cynic.runtime.run(arena, &realm, chunk_ptr) catch {
+            // sec-moduledeclarationinstantiation -- register the entry
+            // module under its own URL so a self-import (or a sibling
+            // fixture cycling back via `./entry.js`) finds the
+            // in-progress namespace instead of fetching+compiling a
+            // duplicate ModuleRecord. Mirrors the setup that
+            // `interpreter.loadModule` does for every other module.
+            const ModuleRecord = @import("cynic").runtime.module.ModuleRecord;
+            const entry_ns = realm.heap.allocateObject() catch return error.OutOfMemory;
+            entry_ns.prototype = realm.intrinsics.object_prototype;
+            const entry_mod = ModuleRecord.init(realm.allocator, rel, entry_ns) catch return error.OutOfMemory;
+            entry_mod.state = .evaluating;
+            realm.modules.put(realm.allocator, rel, entry_mod) catch return error.OutOfMemory;
+            const saved_current_mod = realm.current_module;
+            realm.current_module = entry_mod;
+            defer realm.current_module = saved_current_mod;
+            const mod_outcome = cynic.runtime.run(arena, &realm, chunk_ptr) catch {
+                entry_mod.state = .errored;
                 if (expected_negative) |_| return .{ .kind = .pass_negative };
                 return .{ .kind = .fail_false_reject };
             };
+            entry_mod.state = switch (mod_outcome) {
+                .value, .yielded => .evaluated,
+                .thrown => .errored,
+            };
+            break :blk mod_outcome;
         }
         // Plain script — go through evaluateScript so chunk
         // ownership lands on the realm and any function declared
