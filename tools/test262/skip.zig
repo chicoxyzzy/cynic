@@ -84,7 +84,6 @@ pub const skip_stage_maturity_features = [_][]const u8{
     "explicit-resource-management", // Stage 3 — `using` / `await using`.
     "import-defer", // Stage 3 — `import defer * as ns from "…"`.
     "source-phase-imports", // Stage 3 — `import source x from "…"`.
-    "Temporal", // Stage 3 — large surface area; not in scope yet.
 };
 
 // ── Group 4: Non-standard ───────────────────────────────────────────
@@ -108,12 +107,12 @@ pub const skip_planned_features = [_][]const u8{
 };
 
 pub const skip_planned_paths = [_][]const u8{
-    // Temporal is a large Stage 3 surface (Calendar / TimeZone /
-    // Instant / PlainDate / …). Aside from grammar it adds nothing
-    // the parser needs to model — every fixture parses fine — but
-    // runtime mode attempts ~4500 tests against globals Cynic doesn't
-    // install, drowning the rest of the runtime scoreboard in 0 %
-    // noise. Path-skip wholesale until the implementation phase.
+    // Temporal is a large Stage 4 surface (Calendar / TimeZone /
+    // Instant / PlainDate / …). Every fixture parses fine but
+    // runtime mode would attempt ~4500 tests against globals Cynic
+    // doesn't install, drowning the rest of the runtime scoreboard
+    // in 0 % noise. Path-skip wholesale until the implementation
+    // phase.
     "built-ins/Temporal/",
 };
 
@@ -199,7 +198,6 @@ test "skip: main-spec paths not OOS" {
 test "skip: Temporal out of scope" {
     try testing.expect(pathIsCynicOutOfScope("built-ins/Temporal/Now/extensible.js"));
     try testing.expect(pathIsCynicOutOfScope("built-ins/Temporal/PlainDate/prototype/add/branding.js"));
-    try testing.expect(featureIsUnsupported("Temporal"));
 }
 
 test "skip: planned vendor gaps" {
