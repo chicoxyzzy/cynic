@@ -542,7 +542,87 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
     out.set(realm.allocator, "length", Value.fromInt32(@intCast(cap_count))) catch return error.OutOfMemory;
     out.set(realm.allocator, "index", Value.fromInt32(@intCast(whole_start))) catch return error.OutOfMemory;
     out.set(realm.allocator, "input", Value.fromString(input_s)) catch return error.OutOfMemory;
+
+    // §22.2.7.2 RegExpBuiltinExec steps 33-35 — if the pattern
+    // contains any GroupName, `groups` is an OrdinaryObject with
+    // [[Prototype]] = null and a property per named capture set
+    // via CreateDataProperty (so `Object.prototype` setters never
+    // fire). When there are no named captures, `groups` is
+    // `undefined`. Per step 36 the property is always defined on
+    // the result via CreateDataProperty — even the `undefined`
+    // case must be an own own property.
+    const groups_v = try buildGroupsObject(realm, bc, captures, cap_count, cbuf_addr, &input, input_s);
+    out.set(realm.allocator, "groups", groups_v) catch return error.OutOfMemory;
+
     return heap_mod.taggedObject(out);
+}
+
+/// Read libregexp's name table appended after the bytecode body
+/// when `LRE_FLAG_NAMED_GROUPS` is set. Each capture index
+/// (1..capture_count-1) has a NUL-terminated entry — empty for
+/// anonymous captures, the source-level name for named ones.
+/// Returns `undefined` when the pattern contains no named groups.
+fn buildGroupsObject(
+    realm: *Realm,
+    bc: []const u8,
+    captures: []const ?[*]const u8,
+    cap_count: usize,
+    cbuf_addr: usize,
+    input: *const InputBuf,
+    input_s: *JSString,
+) NativeError!Value {
+    const re_flags = c.lre_get_flags(bc.ptr);
+    if ((re_flags & LRE_FLAG_NAMED_GROUPS) == 0) return Value.undefined_;
+    if (cap_count <= 1) return Value.undefined_;
+    // Header is 8 bytes; `bytecode_len` at offset 4 is the bytecode
+    // body size (excludes the header). Names start right after.
+    const RE_HEADER_LEN: usize = 8;
+    const RE_HEADER_BYTECODE_LEN: usize = 4;
+    if (bc.len < RE_HEADER_LEN) return Value.undefined_;
+    const bc_body_len: usize = @as(usize, bc[RE_HEADER_BYTECODE_LEN]) |
+        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 1]) << 8) |
+        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 2]) << 16) |
+        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 3]) << 24);
+    const names_start = RE_HEADER_LEN + bc_body_len;
+    if (names_start > bc.len) return Value.undefined_;
+    const names = bc[names_start..];
+
+    const groups = realm.heap.allocateObject() catch return error.OutOfMemory;
+    // §22.2.7.2 step 33.a — `OrdinaryObjectCreate(null)`. Groups
+    // object has a null prototype so `__proto__` keys land as
+    // ordinary own properties, not as prototype-chain reads.
+    groups.prototype = null;
+
+    var p: usize = 0;
+    var g: usize = 1;
+    while (g < cap_count) : (g += 1) {
+        // Walk to the next NUL.
+        const start = p;
+        while (p < names.len and names[p] != 0) : (p += 1) {}
+        if (p > names.len) break;
+        const name = names[start..p];
+        // Step past the NUL.
+        if (p < names.len) p += 1;
+        if (name.len == 0) continue; // anonymous capture
+        // Per §22.2.7.2 step 33.b.iii — when the capture has no
+        // match, the value is `undefined`; otherwise it's the
+        // captured substring.
+        const start_ptr = captures[2 * g];
+        const end_ptr = captures[2 * g + 1];
+        const cap_v: Value = if (start_ptr == null or end_ptr == null) Value.undefined_ else blk: {
+            const u_start = (@intFromPtr(start_ptr.?) - cbuf_addr) / 2;
+            const u_end = (@intFromPtr(end_ptr.?) - cbuf_addr) / 2;
+            const b_start = input.byte_for_unit[u_start];
+            const b_end = input.byte_for_unit[u_end];
+            const cap_str = realm.heap.allocateString(input_s.bytes[b_start..b_end]) catch return error.OutOfMemory;
+            break :blk Value.fromString(cap_str);
+        };
+        // CreateDataProperty (own, writable / enumerable /
+        // configurable). The default `set` lands at all-true,
+        // which matches.
+        groups.set(realm.allocator, name, cap_v) catch return error.OutOfMemory;
+    }
+    return heap_mod.taggedObject(groups);
 }
 
 fn regexpTest(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

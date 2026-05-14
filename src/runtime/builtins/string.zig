@@ -1339,6 +1339,13 @@ fn appendRegexReplacement(
         }
         args.append(realm.allocator, Value.fromInt32(@intCast(unit_pos))) catch return error.OutOfMemory;
         args.append(realm.allocator, Value.fromString(source)) catch return error.OutOfMemory;
+        // §22.2.6.10 RegExp.prototype[@@replace] step 14.k.iv —
+        // when `namedCaptures` is not undefined, append it as the
+        // last replacer argument.
+        const groups_v = match_arr.get("groups");
+        if (!groups_v.isUndefined()) {
+            args.append(realm.allocator, groups_v) catch return error.OutOfMemory;
+        }
         const outcome = interpreter.callJSFunction(realm.allocator, realm, fn_obj, Value.undefined_, args.items) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
@@ -1414,6 +1421,42 @@ fn expandSubstitutionInto(
                     }
                 }
                 i += consumed;
+            },
+            '<' => {
+                // §22.1.3.18.1 GetSubstitution — `$<groupName>`.
+                // When `namedCaptures` is undefined, `$<` is a
+                // literal pair. Otherwise scan for the closing
+                // `>`; if missing, also literal. If found, look
+                // up the enclosed name on the groups object: a
+                // missing / undefined capture expands to empty,
+                // a string capture expands to its value.
+                const groups_v = match_arr.get("groups");
+                if (groups_v.isUndefined()) {
+                    out.append(realm.allocator, c) catch return error.OutOfMemory;
+                    continue;
+                }
+                // Find the closing '>' starting at i + 2.
+                var j: usize = i + 2;
+                while (j < template.len and template[j] != '>') : (j += 1) {}
+                if (j >= template.len) {
+                    out.append(realm.allocator, c) catch return error.OutOfMemory;
+                    continue;
+                }
+                const name = template[i + 2 .. j];
+                const groups_obj = heap_mod.valueAsPlainObject(groups_v) orelse {
+                    i = j;
+                    continue;
+                };
+                const cap_v = groups_obj.get(name);
+                if (cap_v.isString()) {
+                    const cs: *JSString = @ptrCast(@alignCast(cap_v.asString()));
+                    out.appendSlice(realm.allocator, cs.bytes) catch return error.OutOfMemory;
+                } else if (!cap_v.isUndefined()) {
+                    // Coerce non-string / non-undefined captures.
+                    const cs = try intrinsics.stringifyArg(realm, cap_v);
+                    out.appendSlice(realm.allocator, cs.bytes) catch return error.OutOfMemory;
+                }
+                i = j;
             },
             else => {
                 out.append(realm.allocator, c) catch return error.OutOfMemory;
