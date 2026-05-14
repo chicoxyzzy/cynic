@@ -787,6 +787,30 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
     const parsed = try parseDescriptor(realm, desc);
 
     if (heap_mod.valueAsPlainObject(target_v)) |target| {
+        // §10.4.5.3 Integer-Indexed Exotic Object [[DefineOwnProperty]]
+        if (target.typed_view != null) {
+            const ta = @import("typed_array.zig");
+            if (ta.canonicalNumericIndex(key)) |num| {
+                const res = try ta.typedArrayDefineOwnProperty(
+                    realm,
+                    target,
+                    num,
+                    parsed.has_value,
+                    parsed.value,
+                    parsed.isAccessor(),
+                    parsed.has_configurable,
+                    parsed.configurable,
+                    parsed.has_enumerable,
+                    parsed.enumerable,
+                    parsed.has_writable,
+                    parsed.writable,
+                );
+                switch (res) {
+                    .applied => return target_v,
+                    .reject => { realm.define_own_property_rejected = true; return throwTypeError(realm, "Invalid TypedArray index descriptor"); },
+                }
+            }
+        }
         // §10.4.2.1 Array exotic [[DefineOwnProperty]] — when the
         // receiver is an Array and the key is "length", route the
         // request through §10.4.2.4 ArraySetLength so a non-integer
@@ -1085,6 +1109,22 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
     }
 
     if (heap_mod.valueAsPlainObject(target)) |obj| {
+        // §10.4.5.2 Integer-Indexed Exotic Object [[GetOwnProperty]]
+        if (obj.typed_view != null) {
+            const ta = @import("typed_array.zig");
+            if (ta.canonicalNumericIndex(key)) |num| {
+                if (ta.typedArrayGetOwnPropertyValue(realm, obj, num)) |v| {
+                    const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
+                    desc.prototype = realm.intrinsics.object_prototype;
+                    desc.set(realm.allocator, "value", v) catch return error.OutOfMemory;
+                    desc.set(realm.allocator, "writable", Value.fromBool(true)) catch return error.OutOfMemory;
+                    desc.set(realm.allocator, "enumerable", Value.fromBool(true)) catch return error.OutOfMemory;
+                    desc.set(realm.allocator, "configurable", Value.fromBool(true)) catch return error.OutOfMemory;
+                    return heap_mod.taggedObject(desc);
+                }
+                return Value.undefined_;
+            }
+        }
         // Accessor descriptor first.
         if (obj.accessors.get(key)) |acc| {
             const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
