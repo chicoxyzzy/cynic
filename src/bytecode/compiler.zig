@@ -3407,6 +3407,9 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
         try self.builder.emitU8(r_caught);
         try self.builder.emitOp(.iter_close, s.span);
         try self.builder.emitU8(r_iter);
+        // §7.4.6 step 7 — original throw wins; swallow any inner
+        // throw from `return()` and skip the non-Object check.
+        try self.builder.emitU8(1);
         try self.builder.emitOp(.ldar, s.span);
         try self.builder.emitU8(r_caught);
         try self.builder.emitOp(.throw_, s.span);
@@ -3592,6 +3595,10 @@ fn compileReturn(self: *Compiler, s: ast.statement.ReturnStmt) CompileError!void
         if (c.iter_register) |r_iter| {
             try self.builder.emitOp(.iter_close, s.span);
             try self.builder.emitU8(r_iter);
+            // §7.4.6 — completion type here is `return`, not
+            // `throw`: an inner throw from `return()` propagates;
+            // a non-Object return value throws TypeError.
+            try self.builder.emitU8(0);
         }
     }
     // §14.15 — run every active finally block before returning.
@@ -4748,6 +4755,9 @@ fn compileDestructure(self: *Compiler, target: ast.statement.BindingTarget) Comp
                 // more than two elements), call `.return()`.
                 try self.builder.emitOp(.iter_close, target.span());
                 try self.builder.emitU8(r_iter);
+                // §7.4.6 — normal completion; propagate inner
+                // throws and TypeError on non-Object return.
+                try self.builder.emitU8(0);
             }
         },
         .object => |obj_pat| {
@@ -4945,6 +4955,9 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
                 // §7.4.10 — close iter if still open.
                 try self.builder.emitOp(.iter_close, target.span());
                 try self.builder.emitU8(r_iter);
+                // §7.4.6 — normal completion; propagate inner
+                // throws and TypeError on non-Object return.
+                try self.builder.emitU8(0);
             }
         },
         .object_literal => |ol| {
@@ -5666,6 +5679,9 @@ fn compileBreak(self: *Compiler, s: ast.statement.BreakStmt) CompileError!void {
     if (ctx.iter_register) |r_iter| {
         try self.builder.emitOp(.iter_close, s.span);
         try self.builder.emitU8(r_iter);
+        // §7.4.6 — completion type is `break`; propagate inner
+        // throw, TypeError on non-Object return.
+        try self.builder.emitU8(0);
     }
     // §14.15 — run every finally block opened between this
     // `break` and the loop entry before transferring control.

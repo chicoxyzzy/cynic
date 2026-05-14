@@ -618,7 +618,6 @@ pub const Op = enum(u8) {
             .ge,
             .instanceof_,
             .in_op,
-            .iter_close,
             .super_call_spread,
             .array_spread,
             .object_spread,
@@ -631,7 +630,10 @@ pub const Op = enum(u8) {
             .array_rest_from,
             .object_rest_from,
             .iter_step,
+            .iter_close,
             => 2, // src:u8, dst:u8 (or r_src, start / r_excl, or r_iter, r_done)
+            // iter_close: r_iter:u8 + mode:u8 (0 = normal completion;
+            //                                  1 = throw completion — swallow inner)
             .lda_constant,
             .jmp,
             .jmp_if_false,

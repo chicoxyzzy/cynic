@@ -3297,10 +3297,11 @@ fn runFrames(
 
             .iter_close => {
                 const r = code[ip];
-                ip += 1;
+                const mode = code[ip + 1];
+                ip += 2;
                 const iter_v = registers[r];
                 if (heap_mod.valueAsPlainObject(iter_v)) |iter_obj| {
-                    // §7.4.10 IteratorClose step 1 — only run when
+                    // §7.4.6 IteratorClose step 4 — only run when
                     // `iteratorRecord.[[Done]]` is false. Cynic
                     // tracks this on the iter object itself via
                     // the `__cynic_iter_done__` slot that
@@ -3310,17 +3311,57 @@ fn runFrames(
                     }
                     const ret_v = iter_obj.get("return");
                     if (heap_mod.valueAsFunction(ret_v)) |ret_fn| {
-                        // Spec wants errors here to propagate when the
-                        // outer abrupt completion is `return`/`break`,
-                        // and to be swallowed when it's a `throw`. We
-                        // approximate "best effort" — swallow all
-                        // errors so the surrounding break/return reaches
-                        // its target. later: thread the completion
-                        // through.
+                        // §7.4.6 IteratorClose — completion-type
+                        // dispatch. `mode == 1` ⇒ the surrounding
+                        // completion is `throw`: per step 7, the
+                        // outer throw wins, so swallow any inner
+                        // throw from `return()` and skip the
+                        // non-Object check (step 9 only runs when
+                        // completion is not throw). `mode == 0` ⇒
+                        // `normal` / `return` / `break`: an inner
+                        // throw from `return()` propagates
+                        // (step 8), and a non-Object return value
+                        // throws TypeError (step 9).
                         const saved_acc = acc;
-                        _ = callJSFunction(allocator, realm, ret_fn, iter_v, &.{}) catch {};
-                        if (realm.pending_exception != null) realm.pending_exception = null;
-                        acc = saved_acc;
+                        const outcome = try callJSFunction(allocator, realm, ret_fn, iter_v, &.{});
+                        if (mode == 1) {
+                            // Throw-completion path: discard
+                            // whatever `return()` produced.
+                            if (realm.pending_exception != null) realm.pending_exception = null;
+                            acc = saved_acc;
+                        } else {
+                            switch (outcome) {
+                                .thrown => |ex| {
+                                    // §7.4.6 step 8 — propagate.
+                                    if (realm.pending_exception != null) realm.pending_exception = null;
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    continue;
+                                },
+                                .value, .yielded => |v| {
+                                    // §7.4.6 step 9 — non-Object
+                                    // return value ⇒ TypeError.
+                                    const is_object =
+                                        heap_mod.valueAsPlainObject(v) != null or
+                                        heap_mod.valueAsFunction(v) != null;
+                                    if (!is_object) {
+                                        const ex = try makeTypeError(realm, "Iterator result is not an object");
+                                        f.ip = ip;
+                                        f.accumulator = acc;
+                                        committed = true;
+                                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                            return .{ .thrown = ex };
+                                        }
+                                        continue;
+                                    }
+                                    acc = saved_acc;
+                                },
+                            }
+                        }
                     }
                 }
             },
