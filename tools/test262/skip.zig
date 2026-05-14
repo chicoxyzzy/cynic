@@ -107,36 +107,18 @@ pub const skip_planned_features = [_][]const u8{
 };
 
 pub const skip_planned_path_contains = [_][]const u8{
-    // §22.2.1.5 — `\p{StringProperty}` is legal under `/v` only in
-    // *positive* form. libregexp parses these property escapes
-    // fine and even rejects them under `/u`-only, but doesn't
-    // validate the two reject-forms below.
-    //
-    //   `[^\p{StringProperty}]/v`  — negated character class.
-    //   `/\P{StringProperty}/v`    — capital-P negation.
-    "/property-escapes/generated/strings/Basic_Emoji-negative-CharacterClass",
-    "/property-escapes/generated/strings/Basic_Emoji-negative-P",
-    "/property-escapes/generated/strings/Emoji_Keycap_Sequence-negative-CharacterClass",
-    "/property-escapes/generated/strings/Emoji_Keycap_Sequence-negative-P",
-    "/property-escapes/generated/strings/RGI_Emoji-negative-CharacterClass",
-    "/property-escapes/generated/strings/RGI_Emoji-negative-P",
-    "/property-escapes/generated/strings/RGI_Emoji_Flag_Sequence-negative-CharacterClass",
-    "/property-escapes/generated/strings/RGI_Emoji_Flag_Sequence-negative-P",
-    "/property-escapes/generated/strings/RGI_Emoji_Modifier_Sequence-negative-CharacterClass",
-    "/property-escapes/generated/strings/RGI_Emoji_Modifier_Sequence-negative-P",
-    "/property-escapes/generated/strings/RGI_Emoji_Tag_Sequence-negative-CharacterClass",
-    "/property-escapes/generated/strings/RGI_Emoji_Tag_Sequence-negative-P",
-    "/property-escapes/generated/strings/RGI_Emoji_ZWJ_Sequence-negative-CharacterClass",
-    "/property-escapes/generated/strings/RGI_Emoji_ZWJ_Sequence-negative-P",
     // Unicode `Script_Extensions=Unknown` (alias `scx=Zzzz`) —
     // libregexp's property tables don't include the "Unknown"
     // special value.
     "/property-escapes/special-property-value-Script_Extensions-Unknown",
-    // `String.prototype.{search,replace}` runtime tests that build
-    // a regexp with the `/v` flag and exercise paths Cynic's
-    // runtime glue doesn't take yet (interaction with `RegExp
-    // .prototype[@@search]` / `[@@replace]` under `/v`-mode set
-    // notation).
+    // `String.prototype.{search,replace,match,matchAll}` runtime
+    // tests that mix `/v` with non-BMP patterns. The constructor and
+    // parser now accept the patterns (the libregexp `is_unicode`
+    // gate is paired with `/v` at the bridge — see
+    // `runtime/builtins/regexp.zig parseFlags`), but the runtime
+    // match loop (regexReplace, regexSearch) miscounts last-index
+    // advancement on surrogate-pair matches and leaks substitution
+    // buffers. Tracked under "fix 5" in ROADMAP.
     "/String/prototype/search/regexp-prototype-search-v",
     "/String/prototype/replace/regexp-prototype-replace-v",
 };
@@ -215,18 +197,24 @@ test "skip: main-spec paths not OOS" {
 
 test "skip: planned vendor gaps" {
     try testing.expect(pathIsCynicOutOfScope(
-        "built-ins/RegExp/property-escapes/generated/strings/RGI_Emoji-negative-P.js",
-    ));
-    try testing.expect(pathIsCynicOutOfScope(
         "built-ins/RegExp/property-escapes/special-property-value-Script_Extensions-Unknown.js",
     ));
-    // The positive form and `-negative-u` siblings stay in scope —
-    // libregexp handles them.
+    // The string-property positive form and `-negative-*` siblings
+    // stay in scope — libregexp handles `\p{…}` for property-of-
+    // strings, and Cynic's parse-time validator (§22.2.1.5) rejects
+    // the spec-illegal `\P{StringProperty}` and `[^\p{StringProperty}]`
+    // forms under `/v`.
     try testing.expect(!pathIsCynicOutOfScope(
         "built-ins/RegExp/property-escapes/generated/strings/RGI_Emoji.js",
     ));
     try testing.expect(!pathIsCynicOutOfScope(
         "built-ins/RegExp/property-escapes/generated/strings/RGI_Emoji-negative-u.js",
+    ));
+    try testing.expect(!pathIsCynicOutOfScope(
+        "built-ins/RegExp/property-escapes/generated/strings/RGI_Emoji-negative-P.js",
+    ));
+    try testing.expect(!pathIsCynicOutOfScope(
+        "built-ins/RegExp/property-escapes/generated/strings/RGI_Emoji-negative-CharacterClass.js",
     ));
 }
 

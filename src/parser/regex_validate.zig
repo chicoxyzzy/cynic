@@ -85,6 +85,17 @@ pub fn validateRegexLiteralToken(
         try report(allocator, diagnostics, .invalid_regex_literal, span);
         return;
     }
+    // §22.2.1.5 — under the `/v` (UnicodeSetsMode) flag, a Unicode
+    // property escape that names a *property of strings* (e.g.
+    // `\p{RGI_Emoji}`) is only legal in positive form outside a
+    // negated character class. The vendored libregexp parses both
+    // `[^\p{StringProperty}]/v` and `\P{StringProperty}/v` without
+    // complaint; we enforce the spec rule here, ahead of the
+    // matcher.
+    if ((re_flags & LRE_FLAG_UNICODE_SETS) != 0 and patternHasForbiddenStringPropertyNegation(pattern)) {
+        try report(allocator, diagnostics, .invalid_regex_literal, span);
+        return;
+    }
 }
 
 /// §22.2.3.4 step 6: each flag must be drawn from `dgimsuvy`, must
@@ -123,6 +134,13 @@ fn validatePattern(allocator: std.mem.Allocator, pattern: []const u8, re_flags: 
     @memcpy(buf[0..pattern.len], pattern);
     buf[pattern.len] = 0;
 
+    // §22.2.1.5 — `/v` is also a Unicode mode. Mirror the
+    // RegExp constructor's flag-fixup (`src/runtime/builtins
+    // /regexp.zig parseFlags`): pair `/v` with `/u` so libregexp
+    // accepts non-BMP code points in the pattern.
+    var compile_flags = re_flags;
+    if ((compile_flags & LRE_FLAG_UNICODE_SETS) != 0) compile_flags |= LRE_FLAG_UNICODE;
+
     var err_buf: [128]u8 = undefined;
     @memset(&err_buf, 0);
     var bc_len: c_int = 0;
@@ -132,7 +150,7 @@ fn validatePattern(allocator: std.mem.Allocator, pattern: []const u8, re_flags: 
         @intCast(err_buf.len),
         @ptrCast(buf.ptr),
         pattern.len,
-        re_flags,
+        compile_flags,
         null,
     );
     if (bc_ptr == null) return false;
@@ -141,6 +159,103 @@ fn validatePattern(allocator: std.mem.Allocator, pattern: []const u8, re_flags: 
     // parser has no interest in the bytecode.
     std.c.free(bc_ptr);
     return true;
+}
+
+/// §22.2.1.5 string-property names. These are Unicode property
+/// names whose values are *sequences* of code points (not single
+/// code points). Under the `/v` flag they may only appear as
+/// positive `\p{Name}` outside a negated character class; any of:
+///
+///   • `\P{Name}` (capital-P negation) anywhere in the pattern,
+///   • `\p{Name}` inside a negated character class `[^…]`,
+///
+/// is a SyntaxError. Spec text identifies them as the entries that
+/// `BinaryPropertyOfStrings` recognises. Kept inline (rather than
+/// derived from the Unicode generator) because the list is small
+/// and stable per Unicode revision.
+const string_property_names = [_][]const u8{
+    "Basic_Emoji",
+    "Emoji_Keycap_Sequence",
+    "RGI_Emoji",
+    "RGI_Emoji_Flag_Sequence",
+    "RGI_Emoji_Modifier_Sequence",
+    "RGI_Emoji_Tag_Sequence",
+    "RGI_Emoji_ZWJ_Sequence",
+};
+
+/// Scan a pattern for the two `/v`-mode reject cases above. The
+/// caller has already verified that `/v` is in effect. Returns true
+/// when the pattern contains a forbidden form.
+///
+/// The scan ignores property names it doesn't recognise — those are
+/// either regular properties (which `\P{…}` / negated-class are
+/// legal for) or invalid names that libregexp will reject on its
+/// own. We only intervene for the specific spec-string-property
+/// list.
+fn patternHasForbiddenStringPropertyNegation(pattern: []const u8) bool {
+    // Track per-level negation as a small stack. `/v` set notation
+    // permits arbitrary nesting (`[[^A]&&B]`); to know whether a
+    // `\p{StringProperty}` sits inside *any* enclosing negated
+    // class, we keep a flag per nested `[`.
+    var negated_stack: [32]bool = undefined;
+    var depth: usize = 0;
+    var in_any_negated: usize = 0; // count of negated levels currently open
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        const ch = pattern[i];
+        if (ch == '\\') {
+            if (i + 1 >= pattern.len) break;
+            const next = pattern[i + 1];
+            if (next == 'p' or next == 'P') {
+                if (i + 2 >= pattern.len or pattern[i + 2] != '{') {
+                    i += 1;
+                    continue;
+                }
+                const name_start = i + 3;
+                const name_end = std.mem.indexOfScalarPos(u8, pattern, name_start, '}') orelse break;
+                const body = pattern[name_start..name_end];
+                // Property *value* forms (`\p{Name=Value}`) never
+                // designate a property-of-strings — strip them.
+                const has_eq = std.mem.indexOfScalar(u8, body, '=') != null;
+                if (!has_eq and isStringPropertyName(body)) {
+                    const is_neg_property = next == 'P';
+                    if (is_neg_property) return true;
+                    if (in_any_negated > 0) return true;
+                }
+                i = name_end; // loop's `i+=1` advances past the `}`
+                continue;
+            }
+            i += 1; // consume the escaped byte
+            continue;
+        }
+        if (ch == '[') {
+            const is_neg = i + 1 < pattern.len and pattern[i + 1] == '^';
+            if (depth < negated_stack.len) {
+                negated_stack[depth] = is_neg;
+            }
+            depth += 1;
+            if (is_neg) {
+                in_any_negated += 1;
+                i += 1; // consume the `^`
+            }
+            continue;
+        }
+        if (ch == ']' and depth > 0) {
+            depth -= 1;
+            if (depth < negated_stack.len and negated_stack[depth]) {
+                if (in_any_negated > 0) in_any_negated -= 1;
+            }
+            continue;
+        }
+    }
+    return false;
+}
+
+fn isStringPropertyName(name: []const u8) bool {
+    for (string_property_names) |sp| {
+        if (std.mem.eql(u8, name, sp)) return true;
+    }
+    return false;
 }
 
 fn report(

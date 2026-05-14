@@ -236,6 +236,16 @@ fn parseFlags(s: []const u8) c_int {
         'v' => f |= LRE_FLAG_UNICODE_SETS,
         else => {},
     };
+    // §22.2.1.5 — `/v` (UnicodeSetsMode) is a Unicode mode: the
+    // pattern is interpreted as a sequence of Unicode code points,
+    // and matching is surrogate-pair-aware. libregexp gates both
+    // of those behaviours on its internal `is_unicode` flag (driven
+    // by `LRE_FLAG_UNICODE`), so pair `/v` with `/u` when handing
+    // flags to lre_compile / lre_exec — otherwise `new RegExp('𠮷',
+    // 'v')` rejects the non-BMP code point at parse time, and even
+    // when the pattern is purely BMP the matcher walks the UTF-16
+    // input as if non-Unicode, surfacing surrogate halves.
+    if ((f & LRE_FLAG_UNICODE_SETS) != 0) f |= LRE_FLAG_UNICODE;
     return f;
 }
 
