@@ -104,15 +104,20 @@ pub fn install(realm: *Realm) !void {
     // paths already consult `re.get("exec")` dynamically and walk
     // `re.flags` / `re.lastIndex` via `get`, so user-overridden
     // subclass behaviour mostly works through the back door.
-    try installNativeMethodOnProto(realm, proto, "@@match", regexpProtoMatch, 1);
-    try installNativeMethodOnProto(realm, proto, "@@replace", regexpProtoReplace, 2);
-    try installNativeMethodOnProto(realm, proto, "@@search", regexpProtoSearch, 1);
-    try installNativeMethodOnProto(realm, proto, "@@split", regexpProtoSplit, 2);
+    // §17 — the spec mandates that well-known-symbol-keyed methods
+    // have a `name` property of `"[Symbol.X]"`, not the internal
+    // canonical `"@@X"` key Cynic uses for dispatch. Install via a
+    // helper that registers the function under the `"@@X"` key but
+    // sets its `name` property to the bracketed form.
+    try installSymbolMethod(realm, proto, "@@match", "[Symbol.match]", regexpProtoMatch, 1);
+    try installSymbolMethod(realm, proto, "@@replace", "[Symbol.replace]", regexpProtoReplace, 2);
+    try installSymbolMethod(realm, proto, "@@search", "[Symbol.search]", regexpProtoSearch, 1);
+    try installSymbolMethod(realm, proto, "@@split", "[Symbol.split]", regexpProtoSplit, 2);
     // §22.2.6.5 RegExp.prototype[@@matchAll] — minimal wiring so
     // `re[Symbol.matchAll](s)` returns a RegExpStringIterator.
     // Spec-faithful flag-cloning + species lookup is later; this
     // path lets test262 reach %RegExpStringIteratorPrototype%.
-    try installNativeMethodOnProto(realm, proto, "@@matchAll", regexpProtoMatchAll, 1);
+    try installSymbolMethod(realm, proto, "@@matchAll", "[Symbol.matchAll]", regexpProtoMatchAll, 1);
 
     // §22.2.6.{3, 4, 5, 6, 7, 9, 10, 11, 13, 14} — accessors on
     // RegExp.prototype that surface the instance's
@@ -132,6 +137,29 @@ pub fn install(realm: *Realm) !void {
     try installNativeGetter(realm, proto, "sticky", regexpStickyGetter);
 
     try installNativeMethod(realm, fn_obj, "escape", regexpEscape, 1);
+}
+
+/// Install a method whose property key is Cynic's `"@@<name>"`
+/// canonical form for a well-known Symbol, but whose `name`
+/// property reports the spec-mandated `"[Symbol.<name>]"`.
+/// §17 — built-in function `name` must match the spec table.
+fn installSymbolMethod(
+    realm: *Realm,
+    proto: *JSObject,
+    key: []const u8,
+    display_name: []const u8,
+    native: @import("../function.zig").NativeFn,
+    params: u8,
+) !void {
+    // Allocate the function with the spec-mandated display name so
+    // `f.name` and the `name` own-property point at the same JSString.
+    const fn_obj = try realm.heap.allocateFunctionNative(native, params, display_name);
+    fn_obj.has_construct = false;
+    try proto.setWithFlags(realm.allocator, key, heap_mod.taggedFunction(fn_obj), .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    });
 }
 
 /// §22.2.6.7 RegExp.prototype [ @@match ] ( string ). The

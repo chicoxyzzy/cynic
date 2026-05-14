@@ -1041,19 +1041,27 @@ fn isRegexLike(value: Value) ?*JSObject {
     return null;
 }
 
-/// Run `regex.exec(input)` and return the result Value. Caller
-/// inspects for null vs match-array.
+/// §22.2.7.1 RegExpExec ( R, S ) — `Get(R, "exec")` (accessor-aware
+/// chain walk so user shadows like `Object.defineProperty(rx, "exec",
+/// {get: ...})` fire); if callable, `Call(exec, R, «S»)` and require
+/// the result to be either Object or Null (per spec, throw TypeError
+/// otherwise). Caller inspects for null vs match-array.
 fn regexExecCall(realm: *Realm, regex_obj: *JSObject, input: *JSString) NativeError!Value {
-    const exec_fn = heap_mod.valueAsFunction(regex_obj.get("exec")) orelse return throwTypeError(realm, "regex has no exec method");
+    const exec_v = try intrinsics.getPropertyChain(realm, regex_obj, "exec");
+    const exec_fn = heap_mod.valueAsFunction(exec_v) orelse return throwTypeError(realm, "regex has no exec method");
     const args_call = [_]Value{Value.fromString(input)};
     const out = interpreter.callJSFunction(realm.allocator, realm, exec_fn, heap_mod.taggedObject(regex_obj), &args_call) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
-    return switch (out) {
-        .value, .yielded => |v| v,
+    const v: Value = switch (out) {
+        .value, .yielded => |x| x,
         .thrown => return error.NativeThrew,
     };
+    if (!v.isNull() and heap_mod.valueAsPlainObject(v) == null) {
+        return throwTypeError(realm, "RegExpExec: exec must return Object or null");
+    }
+    return v;
 }
 
 fn flagsHas(realm: *Realm, regex_obj: *JSObject, flag: u8) bool {
@@ -1110,13 +1118,22 @@ pub fn stringReplace(realm: *Realm, this_value: Value, args: []const Value) Nati
 /// replaceAll}`. Iterates `regex.exec(input)`, splicing the
 /// replacement at each match position. `force_all` mirrors
 /// `replaceAll` (which requires a global regex anyway).
-fn regexReplace(
+pub fn regexReplace(
     realm: *Realm,
     s: *JSString,
     regex_obj: *JSObject,
     repl_v_in: Value,
     force_all: bool,
 ) NativeError!Value {
+    // §22.2.6.11 step 7 — `flags = ? ToString(? Get(rx, "flags"))`.
+    // Read the *flags string* via the accessor-aware property
+    // chain so a user-installed `flags` getter (or a shadowed
+    // own-data `flags`) fires before any other inspection. This
+    // is the spec source of `global` / `fullUnicode`; reading
+    // `Get(rx, "global")` directly diverges from ES2024 §22.2.6.11.
+    const flags_v = try intrinsics.getPropertyChain(realm, regex_obj, "flags");
+    const flags_s = try intrinsics.stringifyArg(realm, flags_v);
+    const is_global = std.mem.indexOfScalar(u8, flags_s.bytes, 'g') != null;
     // §22.2.6.11 step 7.a — `If functionalReplace is false,
     // Let replaceValue be ? ToString(replaceValue)`. Run the
     // coercion synchronously before any regex matching so a
@@ -1127,14 +1144,14 @@ fn regexReplace(
         const rs = try intrinsics.stringifyArg(realm, repl_v_in);
         break :blk Value.fromString(rs);
     };
-    // §22.2.6.11 step 8 — `global = ToBoolean(Get(rx, "global"))`.
-    // The Get walks the prototype chain; an own data property
-    // shadows the inherited accessor, letting user code override
-    // the flag with `rx.global = X`.
-    const is_global = regexFlagBool(realm, regex_obj, "global");
     const all = is_global or force_all;
-    // Reset lastIndex so we always start at 0.
-    regex_obj.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
+    // §22.2.6.11 step 9 — `If global is true, Set(rx, "lastIndex",
+    // +0𝔽, true)`. The reset is gated on `global` so a non-global
+    // sticky (`/.../y`) regex with a user-supplied `lastIndex`
+    // starts its single match from that position rather than 0.
+    if (all) {
+        regex_obj.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
+    }
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
@@ -1151,13 +1168,19 @@ fn regexReplace(
         const exec_result = try regexExecCall(realm, regex_obj, s);
         if (exec_result.isNull()) break;
         const match_arr = heap_mod.valueAsPlainObject(exec_result) orelse break;
-        const idx_v = match_arr.get("index");
-        const m_idx_unit: usize = if (idx_v.isInt32() and idx_v.asInt32() >= 0) @intCast(idx_v.asInt32()) else unit_pos;
-        const whole_v = match_arr.get("0");
-        const whole: *JSString = if (whole_v.isString())
-            @ptrCast(@alignCast(whole_v.asString()))
-        else
-            return error.NativeThrew;
+        // §22.2.6.11 step 13.c — read "0" first, ToString-coerce.
+        // The spec ordering is: matchStr = ? ToString(? Get(result,
+        // "0")) before any other field read. Use the accessor-aware
+        // chain walk so a user-installed `get 0` getter fires.
+        const whole_v = try intrinsics.getPropertyChain(realm, match_arr, "0");
+        const whole: *JSString = try intrinsics.stringifyArg(realm, whole_v);
+        // §22.2.6.11 step 13.d — `position = ? ToIntegerOrInfinity(?
+        // Get(result, "index"))`, clamped to [0, lengthS] (step 13.e).
+        const idx_v = try intrinsics.getPropertyChain(realm, match_arr, "index");
+        const idx_num_v = try intrinsics.toNumber(realm, idx_v);
+        const idx_d: f64 = if (idx_num_v.isInt32()) @floatFromInt(idx_num_v.asInt32()) else if (idx_num_v.isDouble()) idx_num_v.asDouble() else 0.0;
+        const idx_clamped: f64 = if (std.math.isNan(idx_d)) 0.0 else if (idx_d < 0.0) 0.0 else if (idx_d > @as(f64, @floatFromInt(std.math.maxInt(i32)))) @as(f64, @floatFromInt(std.math.maxInt(i32))) else @trunc(idx_d);
+        const m_idx_unit: usize = @intFromFloat(idx_clamped);
 
         // Walk forward from `(byte_pos, unit_pos)` to the match
         // start in code units, accumulating skipped bytes into the
