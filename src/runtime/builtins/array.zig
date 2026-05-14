@@ -603,6 +603,18 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     out.prototype = realm.intrinsics.array_prototype;
 
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    // §23.1.2.1 — every branch below re-enters JS (string fast
+    // path, @@iterator next(), array-like indexed get, optional
+    // mapfn callback) and each re-entry can trigger a GC sweep
+    // that would otherwise collect `out` (held only on the Zig
+    // stack) and the source/iterator if it's ephemeral. Pin them
+    // through a HandleScope until we return.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+    if (heap_mod.valueAsPlainObject(items) != null) {
+        scope.push(items) catch return error.OutOfMemory;
+    }
     // String fast path — iterate characters.
     if (items.isString()) {
         const s: *JSString = @ptrCast(@alignCast(items.asString()));

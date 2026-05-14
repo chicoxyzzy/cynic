@@ -5737,17 +5737,24 @@ pub fn lookupAccessor(obj: *JSObject, key: []const u8) ?@import("object.zig").Ac
     return null;
 }
 
-/// §10.1.8 / §10.2 — accessor lookup along a function's full
-/// prototype chain. Walks own accessors → `static_parent` chain
-/// (class-static inheritance, §15.7.14) → `proto` chain (the
-/// function-object `[[Prototype]]`, typically %Function.prototype%
-/// which exposes the poison-pill `caller` / `arguments`
-/// accessors per §10.2.4 AddRestrictedFunctionProperties).
+/// §10.1.8.1 OrdinaryGet — locate an accessor descriptor for `key`
+/// starting at `fn_obj`, walking the function's full prototype chain
+/// (own → `static_parent` → `proto`). An own *data* property on the
+/// receiver shadows any inherited accessor (step 1 returns that own
+/// descriptor, step 2 short-circuits the parent walk), so this
+/// returns `null` once we've confirmed the key is owned by the
+/// receiver as plain data — the caller will then fall through to the
+/// regular data-lookup path.
 pub fn lookupFunctionAccessor(fn_obj: *JSFunction, key: []const u8) ?@import("object.zig").Accessor {
     if (fn_obj.accessors.get(key)) |a| return a;
+    // Own data (or the dedicated `prototype` slot) shadows any
+    // inherited accessor — `hasOwn` covers all three storage spots
+    // (`properties`, `accessors`, the typed `prototype` field).
+    if (fn_obj.hasOwn(key)) return null;
     var sp: ?*JSFunction = fn_obj.static_parent;
     while (sp) |p| : (sp = p.static_parent) {
         if (p.accessors.get(key)) |a| return a;
+        if (p.hasOwn(key)) return null;
     }
     if (fn_obj.proto) |proto| {
         return lookupAccessor(proto, key);

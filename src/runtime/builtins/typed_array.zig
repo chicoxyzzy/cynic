@@ -1577,15 +1577,23 @@ fn typedArrayFilter(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const out = try taSpeciesCreate(realm, ctx.self_obj, ctx.tv.kind, kept.items.len);
     const out_buf = out.typed_view.?.viewed.array_buffer.?;
     const elem_size = ctx.tv.kind.elementSize();
-    // If the receiver's buffer is detached we still have to
-    // produce the right shape — re-detached reads were `undefined`,
-    // so `kept` would be empty for primitive-numeric typed arrays
-    // (undefined !== a truthy number). Guard the memcpy anyway.
+    // Length-tracking destinations whose backing buffer has been
+    // resized below kept.len*elem_size after taSpeciesCreate
+    // returned (e.g. species ctor handed us a TA over a shrunk
+    // resizable buffer) — clamp so the memcpy stays in-bounds.
+    // Per §23.2.4.1 the species result is also required to have
+    // length ≥ count, but the check is `[[ArrayLength]]`, not
+    // `byteLength`, and a length-tracking view of a resized-down
+    // buffer reports the construction-time length while exposing
+    // a smaller backing slice.
     const src_buf_opt = ctx.tv.viewed.array_buffer;
+    const dst_cap = out_buf.len;
     for (kept.items, 0..) |src_i, dst_i| {
         const src_off = ctx.tv.byte_offset + src_i * elem_size;
         const dst_off = dst_i * elem_size;
+        if (dst_off + elem_size > dst_cap) break;
         if (src_buf_opt) |src_buf| {
+            if (src_off + elem_size > src_buf.len) break;
             @memcpy(out_buf[dst_off .. dst_off + elem_size], src_buf[src_off .. src_off + elem_size]);
         }
     }
