@@ -1249,63 +1249,128 @@ fn arraySort(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     else
         return throwTypeError(realm, "comparefn must be a function or undefined");
     const obj = try toObjectThis(realm, this_value);
-    const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
-    if (len <= 1) return this_value;
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
+    if (len <= 1) return heap_mod.taggedObject(obj);
 
-    const buf = realm.allocator.alloc(Value, @intCast(len)) catch return error.OutOfMemory;
-    defer realm.allocator.free(buf);
+    // §23.1.3.30.1 SortIndexedProperties — gather only present
+    // entries (HasProperty true), partition out undefineds, sort
+    // the remaining values, write items back at 0..items.len,
+    // then a run of undefineds, then Delete the trailing slots
+    // so holes that existed in the receiver propagate to the end.
+    var items: std.ArrayList(Value) = .empty;
+    defer items.deinit(realm.allocator);
+    var undef_count: i64 = 0;
+    var hole_count: i64 = 0;
     var i: i64 = 0;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        buf[@intCast(i)] = obj.get(islice);
+        if (!obj.hasProperty(islice)) {
+            hole_count += 1;
+            continue;
+        }
+        const v = try getPropertyChain(realm, obj, islice);
+        if (v.isUndefined()) {
+            undef_count += 1;
+        } else {
+            items.append(realm.allocator, v) catch return error.OutOfMemory;
+        }
     }
 
-    // Insertion sort — stable and adequate for our later floor
-    // (test262 fixtures rarely exceed a few hundred elements). The
-    // comparator may throw; we surface that via NativeThrew.
+    try sortBufferStable(realm, items.items, cmp_fn);
+
+    // Write sorted items back at 0..items.len.
+    var w: usize = 0;
+    while (w < items.items.len) : (w += 1) {
+        var wbuf: [24]u8 = undefined;
+        const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{w}) catch unreachable;
+        const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
+        obj.set(realm.allocator, owned.bytes, items.items[w]) catch return error.OutOfMemory;
+    }
+    // Then `undef_count` undefineds (so `[undef, 1].sort()` puts
+    // `1` first and the undefined back at index 1).
+    var u: i64 = 0;
+    while (u < undef_count) : (u += 1) {
+        var wbuf: [24]u8 = undefined;
+        const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{@as(i64, @intCast(items.items.len)) + u}) catch unreachable;
+        const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
+        obj.set(realm.allocator, owned.bytes, Value.undefined_) catch return error.OutOfMemory;
+    }
+    // Holes: delete the remaining trailing indices, preserving
+    // them as absent rather than padding with undefined.
+    var d: i64 = 0;
+    const written: i64 = @as(i64, @intCast(items.items.len)) + undef_count;
+    while (d < hole_count) : (d += 1) {
+        var dbuf: [24]u8 = undefined;
+        const dslice = std.fmt.bufPrint(&dbuf, "{d}", .{written + d}) catch unreachable;
+        _ = obj.deleteOwn(dslice);
+    }
+    return heap_mod.taggedObject(obj);
+}
+
+/// In-place stable sort of `buf`. Uses simple insertion sort —
+/// adequate for the test262 fixture sizes (most under a few
+/// hundred) and keeps stability per §23.1.3.30 (Array.prototype.
+/// sort is required to be stable as of ES2019).
+fn sortBufferStable(realm: *Realm, buf: []Value, cmp_fn: ?*JSFunction) NativeError!void {
     var n: usize = 1;
     while (n < buf.len) : (n += 1) {
         const key = buf[n];
         var j: isize = @as(isize, @intCast(n)) - 1;
         while (j >= 0) : (j -= 1) {
-            const should_swap = if (cmp_fn) |c| blk: {
-
-                const cb_args = [_]Value{ buf[@intCast(j)], key };
-                const outcome = interpreter.callJSFunction(realm.allocator, realm, c, Value.undefined_, &cb_args) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => return error.NativeThrew,
-                };
-                switch (outcome) {
-                    .value, .yielded => |v| {
-                        const num = coerceToNumber(v);
-                        const d = if (num.isInt32()) @as(f64, @floatFromInt(num.asInt32())) else num.asDouble();
-                        break :blk d > 0;
-                    },
-                    .thrown => return error.NativeThrew,
-                }
-            } else blk: {
-                // Default comparator: ToString on both, lexical order.
-                var ab: [64]u8 = undefined;
-                var bb: [64]u8 = undefined;
-                const a_s = computedKeyForSort(buf[@intCast(j)], &ab);
-                const b_s = computedKeyForSort(key, &bb);
-                break :blk std.mem.order(u8, a_s, b_s) == .gt;
-            };
-            if (!should_swap) break;
+            const cmp = try sortCompare(realm, buf[@intCast(j)], key, cmp_fn);
+            // Stable: only shift left when strictly greater.
+            if (cmp <= 0) break;
             buf[@intCast(j + 1)] = buf[@intCast(j)];
         }
         buf[@intCast(j + 1)] = key;
     }
+}
 
-    // Write back.
-    var w: i64 = 0;
-    while (w < len) : (w += 1) {
-        var wbuf: [24]u8 = undefined;
-        const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{w}) catch unreachable;
-        obj.set(realm.allocator, wslice, buf[@intCast(w)]) catch return error.OutOfMemory;
+/// §23.1.3.30.2 CompareArrayElements. Returns -1, 0, or +1
+/// (the sign of the comparator's result, NaN treated as +0).
+/// With a user comparator, ToNumber is applied to the result.
+/// Without one, both operands go through ToString (hint
+/// "string"), then are compared lexically. Undefineds never
+/// reach here — `arraySort` partitions them out before sorting.
+fn sortCompare(realm: *Realm, x: Value, y: Value, cmp_fn: ?*JSFunction) NativeError!i32 {
+    if (cmp_fn) |c| {
+        const cb_args = [_]Value{ x, y };
+        const outcome = interpreter.callJSFunction(realm.allocator, realm, c, Value.undefined_, &cb_args) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        switch (outcome) {
+            .value, .yielded => |v| {
+                // §23.1.3.30.2 step 6 — ToNumber on the return; a
+                // throwing ToNumber propagates.
+                const num = try intrinsics.toNumber(realm, v);
+                const d: f64 = if (num.isInt32())
+                    @floatFromInt(num.asInt32())
+                else if (num.isDouble())
+                    num.asDouble()
+                else
+                    0;
+                if (std.math.isNan(d)) return 0;
+                if (d < 0) return -1;
+                if (d > 0) return 1;
+                return 0;
+            },
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        }
     }
-    return this_value;
+    // Default: ToString both sides via §7.1.17 (consulting
+    // `toString` / `valueOf` per the spec hint chain).
+    const xs = try intrinsics.stringifyArg(realm, x);
+    const ys = try intrinsics.stringifyArg(realm, y);
+    return switch (std.mem.order(u8, xs.bytes, ys.bytes)) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
 }
 
 /// §23.1.3.34 Array.prototype.toSorted — non-mutating sibling
@@ -1332,60 +1397,42 @@ fn arrayToSorted(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         return heap_mod.taggedObject(out);
     }
 
-    const buf = realm.allocator.alloc(Value, @intCast(len)) catch return error.OutOfMemory;
-    defer realm.allocator.free(buf);
+    // §23.1.3.34 — read every index via [[Get]], partition out
+    // undefineds, sort, and write the result. Holes (HasProperty
+    // false) read as undefined per the spec ([[Get]] returns
+    // undefined for absent) which then sorts to the end alongside
+    // explicit undefineds — toSorted does NOT preserve holes, it
+    // produces a dense array of the same length.
+    var items: std.ArrayList(Value) = .empty;
+    defer items.deinit(realm.allocator);
+    var undef_count: i64 = 0;
     var i: i64 = 0;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        buf[@intCast(i)] = try getPropertyChain(realm, obj, islice);
-    }
-
-    // Same insertion-sort body as `sort`; lifted for a fresh
-    // buffer rather than the receiver. See `arraySort` for the
-    // rationale on the algorithm choice.
-    var n: usize = 1;
-    while (n < buf.len) : (n += 1) {
-        const key = buf[n];
-        var j: isize = @as(isize, @intCast(n)) - 1;
-        while (j >= 0) : (j -= 1) {
-            const should_swap = if (cmp_fn) |c| blk: {
-                const cb_args = [_]Value{ buf[@intCast(j)], key };
-                const outcome = interpreter.callJSFunction(realm.allocator, realm, c, Value.undefined_, &cb_args) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => return error.NativeThrew,
-                };
-                switch (outcome) {
-                    .value, .yielded => |v| {
-                        const num = coerceToNumber(v);
-                        const d = if (num.isInt32()) @as(f64, @floatFromInt(num.asInt32())) else num.asDouble();
-                        break :blk d > 0;
-                    },
-                    .thrown => |ex| {
-                        realm.pending_exception = ex;
-                        return error.NativeThrew;
-                    },
-                }
-            } else blk: {
-                var ab: [64]u8 = undefined;
-                var bb: [64]u8 = undefined;
-                const a_s = computedKeyForSort(buf[@intCast(j)], &ab);
-                const b_s = computedKeyForSort(key, &bb);
-                break :blk std.mem.order(u8, a_s, b_s) == .gt;
-            };
-            if (!should_swap) break;
-            buf[@intCast(j + 1)] = buf[@intCast(j)];
+        const v = try getPropertyChain(realm, obj, islice);
+        if (v.isUndefined()) {
+            undef_count += 1;
+        } else {
+            items.append(realm.allocator, v) catch return error.OutOfMemory;
         }
-        buf[@intCast(j + 1)] = key;
     }
 
-    // Write sorted values into the fresh array.
-    var w: i64 = 0;
-    while (w < len) : (w += 1) {
+    try sortBufferStable(realm, items.items, cmp_fn);
+
+    var w: usize = 0;
+    while (w < items.items.len) : (w += 1) {
         var wbuf: [24]u8 = undefined;
         const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{w}) catch unreachable;
         const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, buf[@intCast(w)]) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.bytes, items.items[w]) catch return error.OutOfMemory;
+    }
+    var u: i64 = 0;
+    while (u < undef_count) : (u += 1) {
+        var wbuf: [24]u8 = undefined;
+        const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{@as(i64, @intCast(items.items.len)) + u}) catch unreachable;
+        const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.bytes, Value.undefined_) catch return error.OutOfMemory;
     }
     setLength(realm, out, len) catch return error.OutOfMemory;
     return heap_mod.taggedObject(out);
