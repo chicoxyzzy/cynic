@@ -4442,19 +4442,31 @@ fn runFrames(
                         continue;
                     }
                 }
-                const next_v = intrinsics_mod.getPropertyChain(realm, iter_obj, "next") catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => {
-                        const ex = consumePendingException(realm) orelse try makeTypeError(realm, "iterator.next read failed");
-                        f.ip = ip;
-                        f.accumulator = acc;
-                        committed = true;
-                        if (!try unwindThrow(allocator, realm, frames, ex)) {
-                            return .{ .thrown = ex };
-                        }
-                        continue;
-                    },
+                // §7.4.5 GetIteratorDirect — the spec captures
+                // \`[[NextMethod]]\` once at iterator open. \`iter_step\`
+                // can be called many times for one destructuring
+                // pattern (\`[a, b, c] = src\` → three iter_steps).
+                // Cache the resolved \`next\` on a hidden slot after
+                // the first read so subsequent steps don't re-fire
+                // a \`get next()\` accessor.
+                const next_v = if (iter_obj.properties.get("__cynic_iter_next__")) |cached| cached else nv: {
+                    const v = intrinsics_mod.getPropertyChain(realm, iter_obj, "next") catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => {
+                            const ex = consumePendingException(realm) orelse try makeTypeError(realm, "iterator.next read failed");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            break :nv Value.undefined_;
+                        },
+                    };
+                    iter_obj.set(allocator, "__cynic_iter_next__", v) catch return error.OutOfMemory;
+                    break :nv v;
                 };
+                if (committed) continue;
                 const next_fn = heap_mod.valueAsFunction(next_v) orelse {
                     const ex = try makeTypeError(realm, "iterator.next is not callable");
                     f.ip = ip;
