@@ -260,6 +260,11 @@ const StepOutcome = union(enum) {
     /// resizable buffer has gone out-of-bounds; `next()` throws
     /// TypeError per the ES2024 ValidateTypedArray re-check.
     typed_array_oob,
+    /// §23.1.5.2.1 step 6.d.iii — \`Get(O, Pk)\` (or the prior
+    /// \`Get(O, \"length\")\`) ran a user getter that threw. The
+    /// exception is already deposited in \`realm.pending_exception\`;
+    /// the per-kind next() wrappers surface it via \`error.NativeThrew\`.
+    propagated,
 };
 
 fn arrayLikeIterStep(realm: *Realm, this_value: Value) StepOutcome {
@@ -309,12 +314,24 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) StepOutcome {
                 }
             }
         } else {
-            const len_v = obj.get("length");
+            // §23.1.5.2.1 step 6 — \`length = LengthOfArrayLike(O)\`,
+            // which routes through \`[[Get]]\` and therefore accessors.
+            const len_v = intrinsics.getPropertyChain(realm, obj, "length") catch {
+                state.done = true;
+                return .propagated;
+            };
             if (len_v.isInt32()) length = len_v.asInt32() else if (len_v.isDouble()) length = @intFromFloat(len_v.asDouble());
             if (idx < length) {
                 var ibuf: [16]u8 = undefined;
                 const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
-                elem = obj.get(islice);
+                // §23.1.5.2.1 step 6.d.iii — \`Get(O, Pk)\` walks
+                // accessors. A throw from the getter propagates
+                // through the surrounding for-of as a user-visible
+                // exception.
+                elem = intrinsics.getPropertyChain(realm, obj, islice) catch {
+                    state.done = true;
+                    return .propagated;
+                };
             }
         }
     } else if (target.isString()) {
@@ -341,6 +358,7 @@ fn arrayLikeIterValuesNext(realm: *Realm, this_value: Value, args: []const Value
     switch (arrayLikeIterStep(realm, this_value)) {
         .step => |s| return iterResult(realm, s.value, false) catch return error.OutOfMemory,
         .typed_array_oob => return throwTypeError(realm, "TypedArray iterator: backing buffer is out-of-bounds"),
+        .propagated => return error.NativeThrew,
         .done => return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory,
     }
 }
@@ -349,6 +367,7 @@ fn arrayLikeIterKeysNext(realm: *Realm, this_value: Value, args: []const Value) 
     switch (arrayLikeIterStep(realm, this_value)) {
         .step => |s| return iterResult(realm, Value.fromInt32(s.idx), false) catch return error.OutOfMemory,
         .typed_array_oob => return throwTypeError(realm, "TypedArray iterator: backing buffer is out-of-bounds"),
+        .propagated => return error.NativeThrew,
         .done => return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory,
     }
 }
@@ -365,6 +384,7 @@ fn arrayLikeIterEntriesNext(realm: *Realm, this_value: Value, args: []const Valu
             return iterResult(realm, heap_mod.taggedObject(arr), false) catch return error.OutOfMemory;
         },
         .typed_array_oob => return throwTypeError(realm, "TypedArray iterator: backing buffer is out-of-bounds"),
+        .propagated => return error.NativeThrew,
         .done => return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory,
     }
 }
