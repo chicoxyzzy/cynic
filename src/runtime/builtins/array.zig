@@ -2121,14 +2121,20 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
     }
 
     // step 4 — array-like fallback. ToObject + ToLength.
+    // §7.1.18 ToObject autoboxes every primitive except null /
+    // undefined; route through `toObjectThis` so Symbol / Number /
+    // Boolean / BigInt items pick up the inherited prototype walk
+    // (a `Symbol.prototype.length` / `[0]` augmentation observably
+    // wraps via the Symbol wrapper). Null / undefined remain a
+    // TypeError rejection.
+    if (items.isNull() or items.isUndefined()) {
+        return rejectWithTypeError(realm, cap, "Array.fromAsync: cannot convert null or undefined to object");
+    }
     const items_obj = blk: {
         if (heap_mod.valueAsPlainObject(items)) |o| break :blk o;
-        if (items.isString()) {
-            break :blk intrinsics.toObjectThis(realm, items) catch {
-                return rejectPendingException(realm, cap);
-            };
-        }
-        return rejectWithTypeError(realm, cap, "Array.fromAsync: cannot convert null or undefined to object");
+        break :blk intrinsics.toObjectThis(realm, items) catch {
+            return rejectPendingException(realm, cap);
+        };
     };
     state.set(realm.allocator, k_fa_items, heap_mod.taggedObject(items_obj)) catch return error.OutOfMemory;
 
