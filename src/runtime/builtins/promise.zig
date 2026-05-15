@@ -1566,11 +1566,29 @@ fn promiseAny(realm: *Realm, this_value: Value, args: []const Value) NativeError
 /// same-constructor Promise we forward it unchanged so chained
 /// `.then` preserves identity.
 fn promiseTry(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §27.2.4.7 Promise.try ( callbackfn, ...args ) — ES2025
+    //   1. Let C be the this value.
+    //   2. Let promiseCapability be ? NewPromiseCapability(C).
+    //   3. Let status be Completion(Call(callbackfn, undefined, args)).
+    //   4. If status is an abrupt completion, then
+    //      a. Perform ? Call(promiseCapability.[[Reject]],
+    //         undefined, « status.[[Value]] »).
+    //   5. Else, Perform ? Call(promiseCapability.[[Resolve]],
+    //      undefined, « status.[[Value]] »).
+    //   6. Return promiseCapability.[[Promise]].
+    //
+    // Routing through the capability — rather than allocating a
+    // built-in Promise directly — lets `Promise.try.call(Sub, fn)`
+    // hand back an instance of `Sub` whose executor saw the real
+    // resolve/reject pair, and lets a constructor that throws
+    // synchronously propagate that abrupt out (ctx-ctor-throws).
     const ctor = try thisAsPromiseCtor(realm, this_value, "try");
+    const cap = try newPromiseCapability(realm, ctor);
     const callback = argOr(args, 0, Value.undefined_);
     const callback_fn = heap_mod.valueAsFunction(callback) orelse {
         const ex = intrinsics.newTypeError(realm, "Promise.try requires a function") catch return error.OutOfMemory;
-        return allocatePromiseFor(realm, ctor, .rejected, ex) catch return error.OutOfMemory;
+        _ = try capabilityReject(realm, cap, ex);
+        return cap.promise;
     };
     const rest_args: []const Value = if (args.len > 1) args[1..] else &[_]Value{};
     const interp = @import("../interpreter.zig");
@@ -1578,20 +1596,15 @@ fn promiseTry(realm: *Realm, this_value: Value, args: []const Value) NativeError
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
-    return switch (outcome) {
-        .value, .yielded => |v| blk: {
-            if (heap_mod.valueAsPlainObject(v)) |maybe| {
-                if (promiseStateOf(v) != .none) {
-                    const c_v = maybe.get("constructor");
-                    if (heap_mod.valueAsFunction(c_v)) |c| {
-                        if (c == ctor) break :blk v;
-                    }
-                }
-            }
-            break :blk allocatePromiseFor(realm, ctor, .fulfilled, v) catch return error.OutOfMemory;
+    switch (outcome) {
+        .value, .yielded => |v| {
+            _ = try capabilityResolve(realm, cap, v);
         },
-        .thrown => |ex| allocatePromiseFor(realm, ctor, .rejected, ex) catch return error.OutOfMemory,
-    };
+        .thrown => |ex| {
+            _ = try capabilityReject(realm, cap, ex);
+        },
+    }
+    return cap.promise;
 }
 
 /// §27.2.4.6 Promise.withResolvers ( ) — ES2025.
