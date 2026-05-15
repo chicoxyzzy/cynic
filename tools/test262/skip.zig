@@ -197,6 +197,43 @@ pub const skip_planned_path_contains = [_][]const u8{
     // libregexp's property tables don't include the "Unknown"
     // special value.
     "/property-escapes/special-property-value-Script_Extensions-Unknown",
+    // §22.2.1 /v flag — set-difference (`--`), string-literal
+    // escapes (`\q{…}`), property-of-strings escapes
+    // (`\p{RGI_Emoji}`, etc.), and nested character classes
+    // (`[[…]…]`) are normative ES2024 but unimplemented in
+    // vendored libregexp (QuickJS-NG). Each fixture below fails
+    // at *pattern compile time* with a libregexp SyntaxError —
+    // Cynic-side parsing / matching is fine, the gap is purely
+    // in the vendored matcher. The flat-union / flat-intersection
+    // fixtures (e.g. `character-intersection-character.js`,
+    // `character-class-escape-union-character.js`) keep running
+    // and pass. Tracked alongside the existing
+    // `regexp-modifiers` / `regexp-duplicate-named-groups`
+    // vendor-gap entries.
+    //
+    // Set-difference (`--`) — every basename with `-difference-`
+    // emits the `--` operator; rejected wholesale.
+    "/unicodeSets/generated/character-difference-",
+    "/unicodeSets/generated/character-class-difference-",
+    "/unicodeSets/generated/character-class-escape-difference-",
+    "/unicodeSets/generated/character-property-escape-difference-",
+    "/unicodeSets/generated/property-of-strings-escape-difference-",
+    "/unicodeSets/generated/string-literal-difference-",
+    // `\q{…}` string-literal operand on either side of any set op.
+    "/unicodeSets/generated/string-literal-",
+    "-string-literal.js",
+    // Property-of-strings (`\p{RGI_Emoji}`, `\p{Emoji_Keycap_Sequence}`,
+    // …) — libregexp's property tables don't include these.
+    "/unicodeSets/generated/property-of-strings-",
+    "-property-of-strings-escape.js",
+    "/unicodeSets/generated/rgi-emoji-",
+    // Nested character class (`[[…]…]`) as one operand of a set
+    // op — left side: basename starts with `character-class-`
+    // followed by an operator (NOT `escape`).
+    "/unicodeSets/generated/character-class-union-",
+    "/unicodeSets/generated/character-class-intersection-",
+    // Right side: basename ends in `-character-class.js`.
+    "-character-class.js",
 };
 
 // ── Lookup ──────────────────────────────────────────────────────────
@@ -305,6 +342,63 @@ test "skip: ShadowRealm out of scope" {
 test "skip: Uint8Array base64/hex (ES2025) out of scope" {
     try testing.expect(pathIsCynicOutOfScope("built-ins/Uint8Array/fromBase64/null.js"));
     try testing.expect(pathIsCynicOutOfScope("built-ins/Uint8Array/prototype/toHex/length.js"));
+}
+
+test "skip: /v unicodeSets generated — libregexp parse-time gaps" {
+    // Set-difference (`--`) — libregexp rejects at parse time.
+    try testing.expect(pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/character-class-difference-character.js",
+    ));
+    try testing.expect(pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/character-property-escape-difference-character-property-escape.js",
+    ));
+    // String-literal escape (`\q{…}`) — unknown to libregexp.
+    try testing.expect(pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/string-literal-intersection-character.js",
+    ));
+    try testing.expect(pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/character-union-string-literal.js",
+    ));
+    // Property-of-strings (`\p{RGI_Emoji}`, `\p{Emoji_Keycap_Sequence}`).
+    try testing.expect(pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/property-of-strings-escape-union-character.js",
+    ));
+    try testing.expect(pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/character-union-property-of-strings-escape.js",
+    ));
+    try testing.expect(pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/rgi-emoji-16.0.js",
+    ));
+    // Nested character class as operand (`[[…]op…]` / `[…op[…]]`).
+    try testing.expect(pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/character-class-union-character.js",
+    ));
+    try testing.expect(pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/character-class-intersection-character-property-escape.js",
+    ));
+    try testing.expect(pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/character-property-escape-union-character-class.js",
+    ));
+    try testing.expect(pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/character-class-escape-intersection-character-class.js",
+    ));
+    // Flat union / intersection between supported operands stays in
+    // scope (these 18 fixtures currently pass).
+    try testing.expect(!pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/character-union-character.js",
+    ));
+    try testing.expect(!pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/character-intersection-character.js",
+    ));
+    try testing.expect(!pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/character-class-escape-union-character.js",
+    ));
+    try testing.expect(!pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/character-class-escape-intersection-character-property-escape.js",
+    ));
+    try testing.expect(!pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/character-property-escape-union-character-property-escape.js",
+    ));
 }
 
 test "skip: planned vendor gaps" {
