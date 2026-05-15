@@ -228,6 +228,12 @@ Iteration loop for a triage-and-fix session:
     # this refreshes the cache for the next session).
     zig build test262 -- --quiet --mode=runtime --write-results
 
+    # Between agent batches, when you only want to refresh the
+    # cache (no score row): drop --write-results. Same full sweep
+    # but no edit to `test262-results.md`. Refreshes the cache
+    # for the next agent in ~100 s.
+    zig build test262 -- --quiet --mode=runtime
+
 The `--only-failing` cache won't surface a regression that flips
 a previously-passing fixture to fail outside the touched bucket
 — a session-end full sweep is the safety net. Don't use
