@@ -167,11 +167,14 @@ pub const PromiseCapability = struct {
 fn capabilityExecutorImpl(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const state = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "capability executor: state not bound");
     const rec = state.capability_record orelse return throwTypeError(realm, "capability executor: state missing");
-    // §27.2.1.5.1 GetCapabilitiesExecutor — second call is a
-    // TypeError. `called` flips on the first invocation.
-    if (rec.called) {
-        return throwTypeError(realm, "capability executor: already called");
-    }
+    // §27.2.1.5.1 GetCapabilitiesExecutor Functions —
+    //   3. If F.[[Capability]].[[Resolve]] is not undefined → TypeError.
+    //   4. If F.[[Capability]].[[Reject]]  is not undefined → TypeError.
+    //   5/6. Else set them (even to undefined / non-callable —
+    //   the callable check belongs to NewPromiseCapability step
+    //   7-8, the executor itself doesn't filter).
+    if (!rec.resolve.isUndefined()) return throwTypeError(realm, "capability executor: resolve already set");
+    if (!rec.reject.isUndefined()) return throwTypeError(realm, "capability executor: reject already set");
     rec.resolve = if (args.len >= 1) args[0] else Value.undefined_;
     rec.reject = if (args.len >= 2) args[1] else Value.undefined_;
     rec.called = true;
@@ -724,7 +727,12 @@ fn iteratorOpen(realm: *Realm, source_v: Value) NativeError!?IteratorRecord {
     const interp = @import("../interpreter.zig");
     const obj = heap_mod.valueAsPlainObject(source_v) orelse return null;
     const iter_method_v = try getPropertyChain(realm, obj, "@@iterator");
-    const iter_method = heap_mod.valueAsFunction(iter_method_v) orelse return null;
+    // §7.3.10 GetMethod — null / undefined both mean "no method"
+    // and the caller falls back. A *present, non-callable*
+    // @@iterator (e.g. a number) must throw TypeError per
+    // GetIterator step 4 (Call on a non-callable).
+    if (iter_method_v.isUndefined() or iter_method_v.isNull()) return null;
+    const iter_method = heap_mod.valueAsFunction(iter_method_v) orelse return throwTypeError(realm, "iterable's @@iterator is not callable");
     const iter_outcome = interp.callJSFunction(realm.allocator, realm, iter_method, source_v, &.{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
@@ -831,16 +839,13 @@ fn collectIterable(realm: *Realm, source_v: Value) NativeError!std.ArrayList(Val
         return list;
     }
 
-    // Array-like fallback.
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
-    var i: i64 = 0;
-    while (i < len) : (i += 1) {
-        var ibuf: [24]u8 = undefined;
-        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        const v = try getPropertyChain(realm, obj, islice);
-        try list.append(realm.allocator, v);
-    }
-    return list;
+    // §7.4.2 GetIterator — when there's no callable @@iterator
+    // method, the spec calls `Call(undefined, …)` which throws
+    // TypeError. The Promise aggregators surface this as a
+    // rejection (IfAbruptRejectPromise). No silent fallback to
+    // an array-like length walk.
+    _ = obj;
+    return throwTypeError(realm, "iterable is not iterable");
 }
 
 /// §27.2.4.1.2 / §27.2.4.4.1 / etc. — Promise aggregator main
