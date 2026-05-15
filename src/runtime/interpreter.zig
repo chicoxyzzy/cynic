@@ -570,7 +570,7 @@ fn asyncGenBrandCheck(realm: *Realm, this_value: Value, msg: []const u8) ?Value 
 /// If `raw` is already-settled, unwrap synchronously. If pending,
 /// register a reaction so the outer promise settles when `raw`
 /// does, with the value transformed into an iterator result.
-fn wrapAsyncGenResult(realm: *Realm, raw: Value, done: bool) @import("function.zig").NativeError!Value {
+pub fn wrapAsyncGenResult(realm: *Realm, raw: Value, done: bool) @import("function.zig").NativeError!Value {
     const settled = unwrapSettledPromise(raw);
     switch (settled) {
         .fulfilled => |v| {
@@ -786,11 +786,15 @@ pub fn openAsyncIterator(
             }
         }
     }
-    // §27.1.4.3 step 1.b — fall back to sync `@@iterator`.
-    // CreateAsyncFromSyncIterator wrapping is approximated: we
-    // hand back the sync iter and the `await` in the consumer
-    // (for-await-of / yield* lowering) resolves the sync result.
-    return openIterator(realm.allocator, realm, iterable);
+    // §27.1.4.3 step 1.b — fall back to sync `@@iterator`,
+    // then wrap with §27.6.1.1 CreateAsyncFromSyncIterator so
+    // each `.next()` / `.return()` / `.throw()` returns a fresh
+    // Promise per §27.6.1.{2,3,4}.
+    const sync_iter = try openIterator(realm.allocator, realm, iterable);
+    const afsi = @import("builtins/async_iterator.zig");
+    return afsi.createAsyncFromSyncIterator(realm, sync_iter) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+    };
 }
 
 pub fn openIterator(

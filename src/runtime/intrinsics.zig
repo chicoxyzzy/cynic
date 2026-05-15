@@ -84,6 +84,11 @@ pub const Intrinsics = struct {
     /// §27.1.3 %AsyncIteratorPrototype% — ancestor of every
     /// async iterator. Houses `@@asyncIterator` (returns this).
     async_iterator_prototype: ?*JSObject = null,
+    /// §27.6.1 %AsyncFromSyncIteratorPrototype% — hidden
+    /// intrinsic adapting a sync iterator to the async-iter
+    /// protocol. Lazily installed on first wrap (see
+    /// `builtins/async_iterator.zig`).
+    async_from_sync_iterator_prototype: ?*JSObject = null,
 
     /// `%PromisePrototype%` — installed by `installPromise` so
     /// instances of the realm's `Promise` constructor share one
