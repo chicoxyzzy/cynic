@@ -86,8 +86,12 @@ pub fn install(realm: *Realm) !void {
     // so we install directly into its `accessors` map; spec flags
     // are `{ enumerable: false, configurable: true }` (no writable
     // on accessors).
-    const species_getter = try realm.heap.allocateFunctionNative(promiseSpeciesGetter, 0, "[Symbol.species]");
+    // §27.2.4.6 — the getter's `name` property is
+    // `"get [Symbol.species]"`; the `get ` prefix is required by
+    // §10.2.10 SetFunctionName for accessor functions.
+    const species_getter = try realm.heap.allocateFunctionNative(promiseSpeciesGetter, 0, "get [Symbol.species]");
     species_getter.proto = realm.intrinsics.function_prototype;
+    species_getter.has_construct = false;
     const sp_entry = try fn_obj.accessors.getOrPut(realm.allocator, "@@species");
     sp_entry.value_ptr.* = .{ .getter = species_getter };
     try fn_obj.property_flags.put(realm.allocator, "@@species", .{
@@ -194,10 +198,15 @@ pub fn newPromiseCapability(realm: *Realm, ctor: *JSFunction) NativeError!Promis
     rec.* = .{};
     state.capability_record = rec;
 
+    // §27.2.1.5.1 GetCapabilitiesExecutor Functions — anonymous,
+    // length 2, non-constructor. Observable when a subclass /
+    // poisoned constructor inspects the executor it received.
     const executor_impl = realm.heap.allocateFunctionNative(capabilityExecutorImpl, 2, "") catch return error.OutOfMemory;
     executor_impl.proto = realm.intrinsics.function_prototype;
+    executor_impl.has_construct = false;
     const executor = realm.heap.allocateFunctionNative(boundResolveTrampoline, 2, "") catch return error.OutOfMemory;
     executor.proto = realm.intrinsics.function_prototype;
+    executor.has_construct = false;
     executor.bound_target = executor_impl;
     executor.bound_this = heap_mod.taggedObject(state);
 
@@ -328,17 +337,25 @@ fn promiseConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
     // function whose `bound_this` IS the target Promise. When
     // user code calls `resolve(v)`, the bind machinery unwraps
     // and calls the impl with `this_value = target_promise`.
-    const resolve_impl = realm.heap.allocateFunctionNative(promiseResolveImpl, 1, "resolve") catch return error.OutOfMemory;
+    // §27.2.1.3 Promise Resolve/Reject Functions — these are
+    // anonymous (`name: ""`) and not constructors (`hasOwn-
+    // Property(resolveFn, "prototype") === false`,
+    // `new resolveFn()` throws).
+    const resolve_impl = realm.heap.allocateFunctionNative(promiseResolveImpl, 1, "") catch return error.OutOfMemory;
     resolve_impl.proto = realm.intrinsics.function_prototype;
-    const resolve_fn = realm.heap.allocateFunctionNative(boundResolveTrampoline, 1, "resolve") catch return error.OutOfMemory;
+    resolve_impl.has_construct = false;
+    const resolve_fn = realm.heap.allocateFunctionNative(boundResolveTrampoline, 1, "") catch return error.OutOfMemory;
     resolve_fn.proto = realm.intrinsics.function_prototype;
+    resolve_fn.has_construct = false;
     resolve_fn.bound_target = resolve_impl;
     resolve_fn.bound_this = this_value;
 
-    const reject_impl = realm.heap.allocateFunctionNative(promiseRejectImpl, 1, "reject") catch return error.OutOfMemory;
+    const reject_impl = realm.heap.allocateFunctionNative(promiseRejectImpl, 1, "") catch return error.OutOfMemory;
     reject_impl.proto = realm.intrinsics.function_prototype;
-    const reject_fn = realm.heap.allocateFunctionNative(boundResolveTrampoline, 1, "reject") catch return error.OutOfMemory;
+    reject_impl.has_construct = false;
+    const reject_fn = realm.heap.allocateFunctionNative(boundResolveTrampoline, 1, "") catch return error.OutOfMemory;
     reject_fn.proto = realm.intrinsics.function_prototype;
+    reject_fn.has_construct = false;
     reject_fn.bound_target = reject_impl;
     reject_fn.bound_this = this_value;
 
@@ -1040,17 +1057,22 @@ fn resolveInputAsPromise(realm: *Realm, ctor: *JSFunction, v: Value) NativeError
             // resolve/reject closures into the thenable's `.then`.
             const target_v = allocatePromiseFor(realm, ctor, .pending, Value.undefined_) catch return error.OutOfMemory;
 
+            // §27.2.1.3 Resolve/Reject Functions — anonymous, non-ctor.
             const resolve_impl = realm.heap.allocateFunctionNative(promiseResolveImpl, 1, "") catch return error.OutOfMemory;
             resolve_impl.proto = realm.intrinsics.function_prototype;
+            resolve_impl.has_construct = false;
             const resolve_fn = realm.heap.allocateFunctionNative(boundResolveTrampoline, 1, "") catch return error.OutOfMemory;
             resolve_fn.proto = realm.intrinsics.function_prototype;
+            resolve_fn.has_construct = false;
             resolve_fn.bound_target = resolve_impl;
             resolve_fn.bound_this = target_v;
 
             const reject_impl = realm.heap.allocateFunctionNative(promiseRejectImpl, 1, "") catch return error.OutOfMemory;
             reject_impl.proto = realm.intrinsics.function_prototype;
+            reject_impl.has_construct = false;
             const reject_fn = realm.heap.allocateFunctionNative(boundResolveTrampoline, 1, "") catch return error.OutOfMemory;
             reject_fn.proto = realm.intrinsics.function_prototype;
+            reject_fn.has_construct = false;
             reject_fn.bound_target = reject_impl;
             reject_fn.bound_this = target_v;
 
@@ -1121,17 +1143,23 @@ fn allocElementClosures(realm: *Realm, state: *JSObject, idx: u32) NativeError!s
     wrapper.set(realm.allocator, k_elem_index, Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
     wrapper.set(realm.allocator, k_elem_called, Value.false_) catch return error.OutOfMemory;
 
+    // §27.2.4.1.{Resolve,Reject} Element Functions — anonymous,
+    // length 1, non-constructor.
     const resolve_impl = realm.heap.allocateFunctionNative(aggResolveElement, 1, "") catch return error.OutOfMemory;
     resolve_impl.proto = realm.intrinsics.function_prototype;
+    resolve_impl.has_construct = false;
     const resolve_fn = realm.heap.allocateFunctionNative(boundResolveTrampoline, 1, "") catch return error.OutOfMemory;
     resolve_fn.proto = realm.intrinsics.function_prototype;
+    resolve_fn.has_construct = false;
     resolve_fn.bound_target = resolve_impl;
     resolve_fn.bound_this = heap_mod.taggedObject(wrapper);
 
     const reject_impl = realm.heap.allocateFunctionNative(aggRejectElement, 1, "") catch return error.OutOfMemory;
     reject_impl.proto = realm.intrinsics.function_prototype;
+    reject_impl.has_construct = false;
     const reject_fn = realm.heap.allocateFunctionNative(boundResolveTrampoline, 1, "") catch return error.OutOfMemory;
     reject_fn.proto = realm.intrinsics.function_prototype;
+    reject_fn.has_construct = false;
     reject_fn.bound_target = reject_impl;
     reject_fn.bound_this = heap_mod.taggedObject(wrapper);
 
@@ -1578,19 +1606,24 @@ fn promiseWithResolvers(realm: *Realm, this_value: Value, args: []const Value) N
     const promise_v = allocatePromiseFor(realm, ctor, .pending, Value.undefined_) catch return error.OutOfMemory;
 
     // Per §27.2.1.5 NewPromiseCapability, the Resolve and Reject
-    // functions have name = "". The 1-arg `length` matches spec
-    // (they take a single (resolution) / (reason) parameter).
+    // functions have name = "" and are not constructors. The
+    // 1-arg `length` matches spec (single (resolution) / (reason)
+    // parameter).
     const resolve_impl = realm.heap.allocateFunctionNative(promiseResolveImpl, 1, "") catch return error.OutOfMemory;
     resolve_impl.proto = realm.intrinsics.function_prototype;
+    resolve_impl.has_construct = false;
     const resolve_fn = realm.heap.allocateFunctionNative(boundResolveTrampoline, 1, "") catch return error.OutOfMemory;
     resolve_fn.proto = realm.intrinsics.function_prototype;
+    resolve_fn.has_construct = false;
     resolve_fn.bound_target = resolve_impl;
     resolve_fn.bound_this = promise_v;
 
     const reject_impl = realm.heap.allocateFunctionNative(promiseRejectImpl, 1, "") catch return error.OutOfMemory;
     reject_impl.proto = realm.intrinsics.function_prototype;
+    reject_impl.has_construct = false;
     const reject_fn = realm.heap.allocateFunctionNative(boundResolveTrampoline, 1, "") catch return error.OutOfMemory;
     reject_fn.proto = realm.intrinsics.function_prototype;
+    reject_fn.has_construct = false;
     reject_fn.bound_target = reject_impl;
     reject_fn.bound_this = promise_v;
 
