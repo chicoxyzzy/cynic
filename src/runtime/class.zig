@@ -206,15 +206,22 @@ pub fn buildClass(
         // §13.2.5 ComputedPropertyName — if the method's key
         // was `[expr]`, evaluate the key chunk to get the
         // runtime key. Otherwise use the static `m.name`.
-        const runtime_name = try resolveComputedKey(realm, optChunkPtr(&m.key_chunk), m.name, captured_env, proto);
+        const resolved = try resolveComputedKey(realm, optChunkPtr(&m.key_chunk), m.name, captured_env, proto);
+        const runtime_name = resolved.name;
         // §15.7 — private method `.name` is the bare `#method`,
         // not the class-identity-prefixed mangled key. Strip
         // the `P<uid>#` prefix used for the slot lookup. The
         // accessor `get / set` prefix is added below per kind.
-        const display_name = if (std.mem.startsWith(u8, runtime_name, template.private_prefix))
+        // §10.2.5 SetFunctionName — Symbol keys carry a "[desc]"
+        // / "" display name distinct from their property slot;
+        // resolved.display_name folds that in.
+        const base_display = if (std.mem.startsWith(u8, runtime_name, template.private_prefix))
             runtime_name[template.private_prefix.len - 1 ..]
         else
-            runtime_name;
+            resolved.display_name;
+        // §10.2.5 SetFunctionName step 3.a — accessor functions
+        // carry a `"get " | "set "` prefix in their `name`.
+        const display_name = try maybePrefixAccessor(realm, m.kind, base_display, proto);
         const fn_obj = try realm.heap.allocateFunction(
             &m.chunk,
             m.param_count,
@@ -305,9 +312,10 @@ pub fn buildClass(
     if (template.instance_fields.len > 0) {
         var inits = try realm.classAllocator().alloc(ObjMod.FieldInit, template.instance_fields.len);
         for (template.instance_fields, 0..) |*ft, i| {
-            const runtime_name = try resolveComputedKey(realm, optChunkPtr(&ft.key_chunk), ft.name, captured_env, proto);
+            const resolved = try resolveComputedKey(realm, optChunkPtr(&ft.key_chunk), ft.name, captured_env, proto);
+            const runtime_name = resolved.name;
             const init_fn: ?*JSFunction = if (ft.init_chunk) |*c|
-                try realm.heap.allocateFunction(c, 0, runtime_name, false, captured_env)
+                try realm.heap.allocateFunction(c, 0, resolved.display_name, false, captured_env)
             else
                 null;
             if (init_fn) |fp| {
@@ -338,12 +346,17 @@ pub fn buildClass(
     // test262 fixtures using `super` in static methods are a
     // small fraction of the class-test cluster.
     for (template.static_methods) |*m| {
-        const runtime_name = try resolveComputedKey(realm, optChunkPtr(&m.key_chunk), m.name, captured_env, proto);
+        const resolved = try resolveComputedKey(realm, optChunkPtr(&m.key_chunk), m.name, captured_env, proto);
+        const runtime_name = resolved.name;
         // §15.7 — bare `#method` for private static .name.
-        const display_name = if (std.mem.startsWith(u8, runtime_name, template.private_prefix))
+        // §10.2.5 — Symbol-keyed static method names follow the
+        // same "[desc]" / "" shape via resolved.display_name.
+        const base_display = if (std.mem.startsWith(u8, runtime_name, template.private_prefix))
             runtime_name[template.private_prefix.len - 1 ..]
         else
-            runtime_name;
+            resolved.display_name;
+        // §10.2.5 SetFunctionName step 3.a — accessor prefix.
+        const display_name = try maybePrefixAccessor(realm, m.kind, base_display, proto);
         const fn_obj = try realm.heap.allocateFunction(
             &m.chunk,
             m.param_count,
@@ -425,10 +438,11 @@ pub fn buildClass(
     const interpreter = @import("interpreter.zig");
     const ctor_value = heap_mod.taggedFunction(ctor);
     for (template.static_fields) |*ft| {
-        const runtime_name = try resolveComputedKey(realm, optChunkPtr(&ft.key_chunk), ft.name, captured_env, proto);
+        const resolved = try resolveComputedKey(realm, optChunkPtr(&ft.key_chunk), ft.name, captured_env, proto);
+        const runtime_name = resolved.name;
         var v: Value = Value.undefined_;
         if (ft.init_chunk) |*c| {
-            const init_fn = try realm.heap.allocateFunction(c, 0, runtime_name, false, captured_env);
+            const init_fn = try realm.heap.allocateFunction(c, 0, resolved.display_name, false, captured_env);
             init_fn.home_object = proto;
             init_fn.proto = realm.intrinsics.function_prototype;
             const outcome = interpreter.callJSFunction(realm.allocator, realm, init_fn, ctor_value, &.{}) catch |err| switch (err) {
@@ -497,14 +511,50 @@ fn optChunkPtr(opt: *const ?ChunkMod.Chunk) ?*const ChunkMod.Chunk {
     return null;
 }
 
+/// §10.2.5 SetFunctionName step 3.a — for a getter, return
+/// `"get " ++ base`; for a setter, `"set " ++ base`; otherwise
+/// return `base` unchanged. The composed string is anchored on
+/// `anchor.key_anchors` so the GC keeps it alive while the
+/// class is reachable. Falls back to `base` on OOM.
+fn maybePrefixAccessor(
+    realm: *Realm,
+    kind: ChunkMod.MethodKind,
+    base: []const u8,
+    anchor: *JSObject,
+) !([]const u8) {
+    const prefix: []const u8 = switch (kind) {
+        .method => return base,
+        .getter => "get ",
+        .setter => "set ",
+    };
+    const buf = realm.allocator.alloc(u8, prefix.len + base.len) catch return base;
+    defer realm.allocator.free(buf);
+    @memcpy(buf[0..prefix.len], prefix);
+    @memcpy(buf[prefix.len..], base);
+    const owned = realm.heap.allocateString(buf) catch return base;
+    anchor.key_anchors.append(realm.allocator, owned) catch {};
+    return owned.bytes;
+}
+
+const ResolvedKey = struct {
+    /// Property-bag slot (`@@iterator`, `<sym:N>`, or a string key).
+    name: []const u8,
+    /// §10.2.5 SetFunctionName-friendly display string. For a
+    /// computed key that resolves to a Symbol with description
+    /// `desc`, this is `"[" + desc + "]"`; for a Symbol with
+    /// no description, it's the empty string. For a non-Symbol
+    /// key it matches `name`.
+    display_name: []const u8,
+};
+
 fn resolveComputedKey(
     realm: *Realm,
     key_chunk: ?*const ChunkMod.Chunk,
     fallback: []const u8,
     captured_env: ?*@import("environment.zig").Environment,
     anchor: *JSObject,
-) !([]const u8) {
-    const chunk_ptr = key_chunk orelse return fallback;
+) !ResolvedKey {
+    const chunk_ptr = key_chunk orelse return .{ .name = fallback, .display_name = fallback };
     const interpreter = @import("interpreter.zig");
     const heap_mod_ = @import("heap.zig");
     // `allocateFunction` stores the chunk pointer; it must
@@ -559,7 +609,30 @@ fn resolveComputedKey(
         // `inst[sym]` reads. Falling back to `description` would
         // collapse `Symbol("x")` and the property `"x"` into one
         // slot and make `hasOwn(inst, sym)` miss.
-        return sym.prop_key;
+        //
+        // §10.2.5 SetFunctionName step 2 — for a Symbol key,
+        // the function `.name` is `"[" + description + "]"`,
+        // or `""` when description is undefined. Materialise
+        // that here so methods keyed by `[sym]` carry the
+        // spec-correct display name even though their slot is
+        // the `prop_key` slug.
+        const display: []const u8 = blk: {
+            if (sym.description) |desc| {
+                const buf = realm.allocator.alloc(u8, desc.len + 2) catch break :blk "";
+                buf[0] = '[';
+                @memcpy(buf[1 .. 1 + desc.len], desc);
+                buf[1 + desc.len] = ']';
+                // Anchor the heap-side display name so the
+                // class GC root keeps it alive for the lifetime
+                // of the class prototype.
+                const owned = realm.heap.allocateString(buf) catch break :blk "";
+                realm.allocator.free(buf);
+                anchor.key_anchors.append(realm.allocator, owned) catch {};
+                break :blk owned.bytes;
+            }
+            break :blk "";
+        };
+        return .{ .name = sym.prop_key, .display_name = display };
     }
     const s = intrinsics.stringifyArg(realm, prim_v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -570,6 +643,6 @@ fn resolveComputedKey(
     // as the class prototype is reachable. Without anchoring,
     // a later GC cycle sweeps the JSString and the property
     // bag's borrowed `[]const u8` key slice dangles.
-    anchor.key_anchors.append(realm.allocator, s) catch return fallback;
-    return s.bytes;
+    anchor.key_anchors.append(realm.allocator, s) catch return .{ .name = fallback, .display_name = fallback };
+    return .{ .name = s.bytes, .display_name = s.bytes };
 }
