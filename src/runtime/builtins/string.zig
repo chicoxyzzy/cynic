@@ -114,7 +114,7 @@ fn stringSymbolIterator(realm: *Realm, this_value: Value, args: []const Value) N
     // (RequireObjectCoercible); `coerceThisToJSString` handles
     // the wrapper-unbox and the null/undefined → TypeError.
     const s = try coerceThisToJSString(realm, this_value);
-    return interpreter.openIterator(realm.allocator, realm, Value.fromString(s)) catch |err| switch (err) {
+    return interpreter.openIteratorAllowArrayLike(realm.allocator, realm, Value.fromString(s)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return throwTypeError(realm, "could not open string iterator"),
     };

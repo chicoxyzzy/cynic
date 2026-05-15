@@ -1158,7 +1158,7 @@ fn getIteratorFlattenable(realm: *Realm, v: Value, reject_strings: bool) NativeE
             // installed on `String.prototype`; route through
             // `openIterator` (which array-like-iterates strings)
             // for the same shape.
-            const it = interpreter.openIterator(realm.allocator, realm, v) catch |err| switch (err) {
+            const it = interpreter.openIteratorAllowArrayLike(realm.allocator, realm, v) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return throwTypeError(realm, "could not open string iterator"),
             };

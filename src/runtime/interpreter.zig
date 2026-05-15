@@ -798,14 +798,77 @@ pub fn openAsyncIterator(
 }
 
 pub fn openIterator(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    iterable: Value,
+) IterError!Value {
+    return openIteratorOpts(allocator, realm, iterable, .{});
+}
+
+/// Open an iterator with an array-like fallback enabled — used
+/// only by callers that legitimately want it (String iterator
+/// impl, internal for-in snapshot wrapping). Per §7.4.2, the
+/// for-of / array-destructuring / spread paths must reject
+/// non-iterable array-likes; those callers use `openIterator`.
+pub fn openIteratorAllowArrayLike(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    iterable: Value,
+) IterError!Value {
+    return openIteratorOpts(allocator, realm, iterable, .{ .allow_array_like = true });
+}
+
+pub const OpenIterOpts = struct {
+    /// When true, fall through to a synth array-like iterator if
+    /// the iterable has no `@@iterator` but does have `.length`.
+    /// Non-spec for `for-of` / destructuring / spread; spec-correct
+    /// for String's own `@@iterator` and for internal snapshots
+    /// where the caller built the array themselves.
+    allow_array_like: bool = false,
+};
+
+pub fn openIteratorOpts(
     _: std.mem.Allocator,
     realm: *Realm,
     iterable: Value,
+    opts: OpenIterOpts,
 ) IterError!Value {
     // 1. If iterable carries `@@iterator`, invoke it with the
     // iterable as `this`. The well-known-symbol key is
     // represented by the literal string `"@@iterator"` until
     // Symbol becomes a Value-tag primitive.
+    //
+    // §7.4.2 GetIterator implicitly ToObject's the receiver
+    // (via §7.3.11 GetMethod → §7.3.3 GetV); a primitive String
+    // therefore consults `String.prototype[@@iterator]`. We
+    // mirror that by routing primitive strings through the
+    // shared String prototype lookup instead of always falling
+    // through to the array-like fallback.
+    if (iterable.isString()) {
+        if (realm.intrinsics.string_prototype) |sp| {
+            const iter_fn_v = intrinsics_mod.getPropertyChain(realm, sp, "@@iterator") catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.Propagated,
+            };
+            if (!iter_fn_v.isUndefined() and !iter_fn_v.isNull()) {
+                const iter_fn = heap_mod.valueAsFunction(iter_fn_v) orelse return error.NotIterable;
+                const result = callJSFunction(realm.allocator, realm, iter_fn, iterable, &.{}) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.InvalidOpcode,
+                };
+                switch (result) {
+                    .value, .yielded => |v| {
+                        if (heap_mod.valueAsPlainObject(v) == null) return error.NotIterable;
+                        return v;
+                    },
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.Propagated;
+                    },
+                }
+            }
+        }
+    }
     if (heap_mod.valueAsPlainObject(iterable)) |obj| {
         // §7.4.2 GetIterator — accessor-aware so a `get
         // [Symbol.iterator]() { throw … }` style fixture
@@ -833,6 +896,10 @@ pub fn openIterator(
             }
         }
     }
+
+    // §7.4.2 step 8 — `if method is undefined, throw a TypeError`.
+    // The array-like fallback below is non-spec; gated on opts.
+    if (!opts.allow_array_like) return error.NotIterable;
 
     // 2. Array-like fallback. Builds a plain object with a
     // `next` method that walks `iterable[i]` for `i` in
@@ -1055,7 +1122,7 @@ pub fn openForInIterator(
     // synthesised array-like iterator from `openIterator`'s
     // fallback branch. The array always has `.length`, so
     // NotIterable is impossible here.
-    return openIterator(realm.allocator, realm, heap_mod.taggedObject(arr)) catch |err| switch (err) {
+    return openIteratorAllowArrayLike(realm.allocator, realm, heap_mod.taggedObject(arr)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidOpcode,
     };
