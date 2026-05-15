@@ -38,9 +38,9 @@ const toBoolean = intrinsics.toBoolean;
 const stringifyArg = intrinsics.stringifyArg;
 const sameValueZero = intrinsics.sameValueZero;
 const invokeCallback = intrinsics.invokeCallback;
-const arrayLikeEntriesMethod = intrinsics.arrayLikeEntriesMethod;
-const arrayLikeKeysMethod = intrinsics.arrayLikeKeysMethod;
-const arrayLikeValuesMethod = intrinsics.arrayLikeValuesMethod;
+const arrayLikeEntriesMethod = intrinsics.typedArrayEntriesMethod;
+const arrayLikeKeysMethod = intrinsics.typedArrayKeysMethod;
+const arrayLikeValuesMethod = intrinsics.typedArrayValuesMethod;
 const doubleToI64Saturating = intrinsics.doubleToI64Saturating;
 const strictEqualsLite = intrinsics.strictEqualsLite;
 

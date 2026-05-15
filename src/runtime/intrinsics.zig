@@ -1540,6 +1540,9 @@ pub const writeTypedElement = @import("builtins/typed_array.zig").writeTypedElem
 pub const arrayLikeValuesMethod = @import("builtins/collections.zig").arrayLikeValuesMethod;
 pub const arrayLikeKeysMethod = @import("builtins/collections.zig").arrayLikeKeysMethod;
 pub const arrayLikeEntriesMethod = @import("builtins/collections.zig").arrayLikeEntriesMethod;
+pub const typedArrayValuesMethod = @import("builtins/collections.zig").typedArrayValuesMethod;
+pub const typedArrayKeysMethod = @import("builtins/collections.zig").typedArrayKeysMethod;
+pub const typedArrayEntriesMethod = @import("builtins/collections.zig").typedArrayEntriesMethod;
 
 // Object methods live in `builtins/object.zig` — re-export those
 // referenced by other builtins so the `intrinsics.objectXxx`

@@ -214,17 +214,35 @@ fn validateTypedArrayIfPresent(realm: *Realm, this_value: Value) NativeError!voi
     }
 }
 
+/// Array.prototype.{values, keys, entries} — no ValidateTypedArray
+/// here even when the receiver is a TA. Per §23.1.3, the iterator
+/// is created successfully; OOB-on-resizable-buffer surfaces at
+/// `.next()` calls (live length re-resolution in `arrayLikeIterStep`).
 pub fn arrayLikeValuesMethod(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    try validateTypedArrayIfPresent(realm, this_value);
     return makeArrayLikeIterator(realm, this_value, .values) catch return error.OutOfMemory;
 }
 pub fn arrayLikeKeysMethod(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    try validateTypedArrayIfPresent(realm, this_value);
     return makeArrayLikeIterator(realm, this_value, .keys) catch return error.OutOfMemory;
 }
 pub fn arrayLikeEntriesMethod(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    return makeArrayLikeIterator(realm, this_value, .entries) catch return error.OutOfMemory;
+}
+/// TypedArray.prototype.{values, keys, entries} — §23.2.3.30 et al
+/// run ValidateTypedArray *before* the iterator is constructed.
+pub fn typedArrayValuesMethod(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    try validateTypedArrayIfPresent(realm, this_value);
+    return makeArrayLikeIterator(realm, this_value, .values) catch return error.OutOfMemory;
+}
+pub fn typedArrayKeysMethod(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    try validateTypedArrayIfPresent(realm, this_value);
+    return makeArrayLikeIterator(realm, this_value, .keys) catch return error.OutOfMemory;
+}
+pub fn typedArrayEntriesMethod(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     try validateTypedArrayIfPresent(realm, this_value);
     return makeArrayLikeIterator(realm, this_value, .entries) catch return error.OutOfMemory;
@@ -235,9 +253,19 @@ pub fn stringIteratorMethod(realm: *Realm, this_value: Value, args: []const Valu
     return makeArrayLikeIterator(realm, this_value, .values) catch return error.OutOfMemory;
 }
 
-fn arrayLikeIterStep(realm: *Realm, this_value: Value) ?struct { idx: i32, value: Value, length: i64 } {
-    const it = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    const state = it.array_like_iter orelse return null;
+const StepOutcome = union(enum) {
+    step: struct { idx: i32, value: Value, length: i64 },
+    done,
+    /// §23.1.5.1 — Array iterator over a TA whose underlying
+    /// resizable buffer has gone out-of-bounds; `next()` throws
+    /// TypeError per the ES2024 ValidateTypedArray re-check.
+    typed_array_oob,
+};
+
+fn arrayLikeIterStep(realm: *Realm, this_value: Value) StepOutcome {
+    const it = heap_mod.valueAsPlainObject(this_value) orelse return .done;
+    const state = it.array_like_iter orelse return .done;
+    if (state.done) return .done;
     const target = state.target;
     const idx: i32 = @intCast(state.idx);
 
@@ -253,23 +281,31 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) ?struct { idx: i32, value
             // every step. A length-tracking view's backing buffer
             // may have been grown or shrunk between iterations;
             // a fixed-length view's buffer may have shrunk so the
-            // view is now OOB (live length collapses to 0 per
-            // IsTypedArrayOutOfBounds + IsValidIntegerIndex).
-            if (tv.viewed.array_buffer) |buf| {
-                const elem_size = tv.kind.elementSize();
-                const live_len: usize = if (tv.length_tracking) blk: {
-                    if (tv.byte_offset > buf.len) break :blk 0;
-                    break :blk (buf.len - tv.byte_offset) / elem_size;
-                } else blk: {
-                    if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
-                    break :blk tv.length;
-                };
-                length = @intCast(live_len);
-                if (idx >= 0 and @as(usize, @intCast(idx)) < live_len) {
-                    const off = tv.byte_offset + @as(usize, @intCast(idx)) * elem_size;
-                    if (off + elem_size <= buf.len) {
-                        elem = readTypedElement(realm, buf, tv.kind, off);
-                    }
+            // view is now OOB — throw TypeError per §23.1.5.1
+            // step 3.e.iii (the Array iterator's per-step
+            // ValidateTypedArray re-check, ES2024).
+            const buf = tv.viewed.array_buffer orelse {
+                state.done = true;
+                return .typed_array_oob;
+            };
+            const elem_size = tv.kind.elementSize();
+            const is_oob = if (tv.length_tracking)
+                tv.byte_offset > buf.len
+            else
+                tv.byte_offset + tv.length * elem_size > buf.len;
+            if (is_oob) {
+                state.done = true;
+                return .typed_array_oob;
+            }
+            const live_len: usize = if (tv.length_tracking)
+                (buf.len - tv.byte_offset) / elem_size
+            else
+                tv.length;
+            length = @intCast(live_len);
+            if (idx >= 0 and @as(usize, @intCast(idx)) < live_len) {
+                const off = tv.byte_offset + @as(usize, @intCast(idx)) * elem_size;
+                if (off + elem_size <= buf.len) {
+                    elem = readTypedElement(realm, buf, tv.kind, off);
                 }
             }
         } else {
@@ -286,46 +322,51 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) ?struct { idx: i32, value
         length = @intCast(@min(s.bytes.len, std.math.maxInt(i32)));
         const start: usize = @intCast(idx);
         if (start < s.bytes.len) {
-            const sub = realm.heap.allocateString(s.bytes[start .. start + 1]) catch return null;
+            const sub = realm.heap.allocateString(s.bytes[start .. start + 1]) catch return .done;
             elem = Value.fromString(sub);
         }
     } else {
-        return null;
+        return .done;
     }
     if (idx >= length) {
         state.done = true;
-        return null;
+        return .done;
     }
     state.idx = @intCast(idx + 1);
-    return .{ .idx = idx, .value = elem, .length = length };
+    return .{ .step = .{ .idx = idx, .value = elem, .length = length } };
 }
 
 fn arrayLikeIterValuesNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    if (arrayLikeIterStep(realm, this_value)) |step| {
-        return iterResult(realm, step.value, false) catch return error.OutOfMemory;
+    switch (arrayLikeIterStep(realm, this_value)) {
+        .step => |s| return iterResult(realm, s.value, false) catch return error.OutOfMemory,
+        .typed_array_oob => return throwTypeError(realm, "TypedArray iterator: backing buffer is out-of-bounds"),
+        .done => return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory,
     }
-    return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory;
 }
 fn arrayLikeIterKeysNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    if (arrayLikeIterStep(realm, this_value)) |step| {
-        return iterResult(realm, Value.fromInt32(step.idx), false) catch return error.OutOfMemory;
+    switch (arrayLikeIterStep(realm, this_value)) {
+        .step => |s| return iterResult(realm, Value.fromInt32(s.idx), false) catch return error.OutOfMemory,
+        .typed_array_oob => return throwTypeError(realm, "TypedArray iterator: backing buffer is out-of-bounds"),
+        .done => return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory,
     }
-    return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory;
 }
 fn arrayLikeIterEntriesNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    if (arrayLikeIterStep(realm, this_value)) |step| {
-        const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
-        arr.prototype = realm.intrinsics.array_prototype;
-        arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
-        arr.set(realm.allocator, "0", Value.fromInt32(step.idx)) catch return error.OutOfMemory;
-        arr.set(realm.allocator, "1", step.value) catch return error.OutOfMemory;
-        arr.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
-        return iterResult(realm, heap_mod.taggedObject(arr), false) catch return error.OutOfMemory;
+    switch (arrayLikeIterStep(realm, this_value)) {
+        .step => |s| {
+            const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
+            arr.prototype = realm.intrinsics.array_prototype;
+            arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+            arr.set(realm.allocator, "0", Value.fromInt32(s.idx)) catch return error.OutOfMemory;
+            arr.set(realm.allocator, "1", s.value) catch return error.OutOfMemory;
+            arr.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
+            return iterResult(realm, heap_mod.taggedObject(arr), false) catch return error.OutOfMemory;
+        },
+        .typed_array_oob => return throwTypeError(realm, "TypedArray iterator: backing buffer is out-of-bounds"),
+        .done => return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory,
     }
-    return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory;
 }
 
 fn iterResult(realm: *Realm, value: Value, done: bool) !Value {
