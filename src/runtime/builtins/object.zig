@@ -678,8 +678,10 @@ fn isCompatibleRedefine(
                 // 6.a. !current.[[Writable]] → desc must not toggle writable to true
                 if (!cur_flags.writable) {
                     if (new_desc.has_writable and new_desc.writable) return false;
-                    // 6.b. desc must not change value (sameValue).
-                    if (new_desc.has_value and !sameValueZero(cur_value, new_desc.value)) return false;
+                    // 6.b. desc must not change value (SameValue —
+                    // §7.2.10 distinguishes +0 from -0 and NaN from NaN,
+                    // unlike SameValueZero).
+                    if (new_desc.has_value and !intrinsics.sameValue(cur_value, new_desc.value)) return false;
                 }
             }
             // 7. Else (both accessor):
@@ -782,7 +784,24 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             return objectDefineProperty(realm, Value.undefined_, &inner_args);
         }
     }
-    const desc = heap_mod.valueAsPlainObject(desc_v) orelse return throwTypeError(realm, "Object.defineProperty descriptor is not an object");
+    // §6.2.5.5 ToPropertyDescriptor step 1 — Obj must be an Object.
+    // Functions are Objects, so route them through a JSObject
+    // wrapper that mirrors the function's own data properties and
+    // inherits from `%Function.prototype%` (so descriptor field
+    // lookups walk the function's [[Prototype]] chain per spec).
+    const desc: *@import("../object.zig").JSObject = blk_desc: {
+        if (heap_mod.valueAsPlainObject(desc_v)) |o| break :blk_desc o;
+        if (heap_mod.valueAsFunction(desc_v)) |fn_obj| {
+            const w = realm.heap.allocateObject() catch return error.OutOfMemory;
+            w.prototype = fn_obj.proto;
+            var fit = fn_obj.properties.iterator();
+            while (fit.next()) |entry| {
+                w.set(realm.allocator, entry.key_ptr.*, entry.value_ptr.*) catch return error.OutOfMemory;
+            }
+            break :blk_desc w;
+        }
+        return throwTypeError(realm, "Object.defineProperty descriptor is not an object");
+    };
 
     var parsed = try parseDescriptor(realm, desc);
 
@@ -1401,12 +1420,26 @@ fn objectCreate(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 
 fn objectAssign(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.assign target must be an object");
+    // §20.1.2.1 step 1 — `target = ? ToObject(target)`. Primitives
+    // (numbers, strings, booleans) box into wrappers; undefined /
+    // null throw. The wrapper itself is what gets returned.
+    const target_v = argOr(args, 0, Value.undefined_);
+    const target = try intrinsics.toObjectThis(realm, target_v);
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const src_v = args[i];
+        // Step 5.a — `if nextSource is undefined or null, skip`. All
+        // other primitives (and Functions) ToObject and contribute
+        // their enumerable own keys.
         if (src_v.isUndefined() or src_v.isNull()) continue;
-        const src = heap_mod.valueAsPlainObject(src_v) orelse continue;
+        const src = heap_mod.valueAsPlainObject(src_v) orelse blk_src: {
+            // String wrappers expose indexed character own properties
+            // (e.g. `"1a2c3"` → "0":"1","1":"a",…). Functions /
+            // Number / Boolean ToObject into wrappers with no
+            // enumerable own keys, which is the spec-correct no-op.
+            const o = intrinsics.toObjectThis(realm, src_v) catch continue;
+            break :blk_src o;
+        };
         // §20.1.2.1 step 5 — `OwnPropertyKeys(from)` includes the
         // Array exotic's packed indexed slots; `ownPropertyKeysOrdered`
         // surfaces them ahead of string keys.
