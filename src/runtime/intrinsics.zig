@@ -827,7 +827,10 @@ pub fn getPropertyChain(realm: *Realm, obj: *JSObject, key: []const u8) NativeEr
                     const live_len: usize = if (tv.length_tracking) blk: {
                         if (tv.byte_offset > buf.len) break :blk 0;
                         break :blk (buf.len - tv.byte_offset) / elem_size;
-                    } else tv.length;
+                    } else blk: {
+                        if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
+                        break :blk tv.length;
+                    };
                     if (idx_u < live_len) {
                         const byte_pos = tv.byte_offset + idx_u * elem_size;
                         if (byte_pos + elem_size <= buf.len) {

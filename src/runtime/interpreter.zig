@@ -5455,7 +5455,10 @@ fn runFrames(
                                 const live_len: usize = if (tv.length_tracking) blk: {
                                     if (tv.byte_offset > buf.len) break :blk 0;
                                     break :blk (buf.len - tv.byte_offset) / elem_size;
-                                } else tv.length;
+                                } else blk: {
+                                    if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
+                                    break :blk tv.length;
+                                };
                                 if (idx < live_len) {
                                     const byte_pos = tv.byte_offset + idx * elem_size;
                                     if (byte_pos + elem_size <= buf.len) {
@@ -5637,7 +5640,10 @@ fn runFrames(
                                 const live_len: usize = if (tv.length_tracking) blk: {
                                     if (tv.byte_offset > buf.len) break :blk 0;
                                     break :blk (buf.len - tv.byte_offset) / elem_size;
-                                } else tv.length;
+                                } else blk: {
+                                    if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
+                                    break :blk tv.length;
+                                };
                                 if (idx < live_len) {
                                     const byte_pos = tv.byte_offset + idx * elem_size;
                                     if (byte_pos + elem_size <= buf.len) {

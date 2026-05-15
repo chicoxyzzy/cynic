@@ -665,7 +665,10 @@ pub const JSObject = struct {
                     const live_len: usize = if (tv.length_tracking) blk: {
                         if (tv.byte_offset > buf.len) break :blk 0;
                         break :blk (buf.len - tv.byte_offset) / elem_size;
-                    } else tv.length;
+                    } else blk: {
+                        if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
+                        break :blk tv.length;
+                    };
                     if (idx_u < live_len) {
                         const byte_pos = tv.byte_offset + idx_u * elem_size;
                         if (byte_pos + elem_size <= buf.len) {
@@ -777,12 +780,18 @@ pub const JSObject = struct {
                 const buf = tv.viewed.array_buffer orelse return false;
                 // §10.4.5.16 IsValidIntegerIndex — for a length-
                 // tracking view, the live length is recomputed from
-                // the current buffer size; otherwise use `tv.length`.
+                // the current buffer size; for a fixed-length view
+                // the snapshot, gated on IsTypedArrayOutOfBounds
+                // (the view may be entirely OOB after a resizable-
+                // buffer shrink).
                 const elem_size = tv.kind.elementSize();
                 const live_len: usize = if (tv.length_tracking) blk: {
                     if (tv.byte_offset > buf.len) break :blk 0;
                     break :blk (buf.len - tv.byte_offset) / elem_size;
-                } else tv.length;
+                } else blk: {
+                    if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
+                    break :blk tv.length;
+                };
                 if (idx_u >= live_len) return false;
                 if (tv.byte_offset + (idx_u + 1) * elem_size > buf.len) return false;
                 return true;

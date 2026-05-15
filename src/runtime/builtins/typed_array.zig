@@ -2805,12 +2805,18 @@ pub fn typedArrayDefineOwnProperty(
     const idx: usize = @intFromFloat(num);
     const buf = tv.viewed.array_buffer orelse return .reject;
     // §10.4.5.16 IsValidIntegerIndex — live length for length-
-    // tracking views; otherwise the stored `[[ArrayLength]]`.
+    // tracking views; for fixed-length views the snapshot, but
+    // gated on IsTypedArrayOutOfBounds (a shrunk resizable buffer
+    // can leave a fixed-length view entirely OOB, in which case
+    // every index is invalid).
     const elem_size = tv.kind.elementSize();
     const live_len: usize = if (tv.length_tracking) blk: {
         if (tv.byte_offset > buf.len) break :blk 0;
         break :blk (buf.len - tv.byte_offset) / elem_size;
-    } else tv.length;
+    } else blk: {
+        if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
+        break :blk tv.length;
+    };
     if (idx >= live_len) return .reject;
     if (tv.byte_offset + (idx + 1) * elem_size > buf.len) return .reject;
     if (is_accessor) return .reject;
@@ -2852,12 +2858,17 @@ pub fn typedArrayGetOwnPropertyValue(realm: *Realm, obj: *JSObject, num: f64) ?V
     const idx: usize = @intFromFloat(num);
     const buf = tv.viewed.array_buffer orelse return null;
     // §10.4.5.2 + §10.4.5.16 — live length for length-tracking
-    // views; otherwise the stored `[[ArrayLength]]`.
+    // views; for fixed-length views the snapshot, but gated on
+    // IsTypedArrayOutOfBounds (a shrunk resizable buffer can
+    // leave a fixed-length view entirely OOB).
     const elem_size = tv.kind.elementSize();
     const live_len: usize = if (tv.length_tracking) blk: {
         if (tv.byte_offset > buf.len) break :blk 0;
         break :blk (buf.len - tv.byte_offset) / elem_size;
-    } else tv.length;
+    } else blk: {
+        if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
+        break :blk tv.length;
+    };
     if (idx >= live_len) return null;
     if (tv.byte_offset + (idx + 1) * elem_size > buf.len) return null;
     return readTypedElement(realm, buf, tv.kind, tv.byte_offset + idx * elem_size);
