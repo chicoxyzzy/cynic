@@ -198,6 +198,13 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethodOnProto(realm, ta_proto, "with", typedArrayWith, 2);
     }
 
+    // §23.2.2 static methods on %TypedArray% itself. Concrete
+    // constructors (Int8Array etc.) inherit these through the
+    // `static_parent` link — `Int8Array.from === %TypedArray%.from`
+    // and `Int8Array.hasOwnProperty("from")` is false.
+    try intrinsics.installNativeMethod(realm, ta_ctor, "from", typedArrayFrom, 1);
+    try intrinsics.installNativeMethod(realm, ta_ctor, "of", typedArrayOf, 0);
+
     // %TypedArray% itself isn't a global — `var TypedArray =
     // Object.getPrototypeOf(Int8Array)` fishes it out via the
     // proto chain instead. Pin it on intrinsics for our own use.
@@ -746,6 +753,223 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
             return throwTypeError(realm, "TypedArray: unsupported constructor argument");
         }
     }.ctor;
+}
+
+/// §23.2.4.2 TypedArrayCreate(constructor, argumentList) — calls
+/// `Construct(constructor, argumentList)`, then performs
+/// `ValidateTypedArray(newTypedArray)` (must have `[[TypedArrayName]]`
+/// and a non-detached buffer). For the single-`len` argumentList
+/// variant used by `%TypedArray%.from` / `.of`, additionally checks
+/// `newTypedArray.[[ArrayLength]] >= len`.
+fn typedArrayCreate(
+    realm: *Realm,
+    ctor_v: Value,
+    args: []const Value,
+    expected_len: ?usize,
+) NativeError!*JSObject {
+    const interp = @import("../interpreter.zig");
+    const outcome = interp.constructValue(realm.allocator, realm, ctor_v, args, ctor_v) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const result_v: Value = switch (outcome) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+    const result = heap_mod.valueAsPlainObject(result_v) orelse
+        return throwTypeError(realm, "TypedArrayCreate: constructor did not return an object");
+    const tv = result.typed_view orelse
+        return throwTypeError(realm, "TypedArrayCreate: constructor did not return a TypedArray");
+    _ = tv.viewed.array_buffer orelse
+        return throwTypeError(realm, "TypedArrayCreate: returned TypedArray has a detached buffer");
+    if (expected_len) |min_len| {
+        if (tv.length < min_len) {
+            return throwTypeError(realm, "TypedArrayCreate: returned TypedArray is too small");
+        }
+    }
+    return result;
+}
+
+/// IntegerIndexedElementSet — coerce `v` to the target's element
+/// type (ToNumber or ToBigInt) and write at index `idx`.
+fn typedArrayWriteIndex(realm: *Realm, target: *JSObject, idx: usize, v: Value) NativeError!void {
+    const bigint_mod = @import("bigint.zig");
+    const tv = target.typed_view orelse return throwTypeError(realm, "TypedArray write on non-TypedArray");
+    const elem_size = tv.kind.elementSize();
+    const coerced = switch (tv.kind) {
+        .bigint64, .biguint64 => bigint_mod.toBigIntValue(realm, v) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        },
+        else => try intrinsics.toNumber(realm, v),
+    };
+    const buf = tv.viewed.array_buffer orelse return throwTypeError(realm, "TypedArray write on detached buffer");
+    const byte_pos = tv.byte_offset + idx * elem_size;
+    if (byte_pos + elem_size > buf.len) return;
+    writeTypedElement(buf, tv.kind, byte_pos, coerced);
+}
+
+/// §23.2.2.1 %TypedArray%.from ( source [ , mapfn [ , thisArg ] ] ).
+fn typedArrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.2.2.1 step 1-2 — IsConstructor(this).
+    const ctor_fn = heap_mod.valueAsFunction(this_value) orelse
+        return throwTypeError(realm, "%TypedArray%.from requires a constructor 'this'");
+    if (!ctor_fn.has_construct or ctor_fn.is_arrow)
+        return throwTypeError(realm, "%TypedArray%.from requires a constructor 'this'");
+
+    const source = argOr(args, 0, Value.undefined_);
+    const mapfn_v = argOr(args, 1, Value.undefined_);
+    const this_arg = argOr(args, 2, Value.undefined_);
+    // §23.2.2.1 step 3 — IsCallable(mapfn). Run BEFORE touching
+    // `source[@@iterator]` (mapfn-is-not-callable fixture asserts
+    // `getIterator === 0`).
+    const mapfn: ?*JSFunction = blk: {
+        if (mapfn_v.isUndefined()) break :blk null;
+        const f = heap_mod.valueAsFunction(mapfn_v) orelse
+            return throwTypeError(realm, "%TypedArray%.from: mapfn is not callable");
+        break :blk f;
+    };
+
+    const interp = @import("../interpreter.zig");
+
+    if (source.isUndefined() or source.isNull())
+        return throwTypeError(realm, "%TypedArray%.from: source is null or undefined");
+
+    const src_obj = heap_mod.valueAsPlainObject(source);
+    if (src_obj) |src| {
+        // §23.2.2.1 step 5 — GetMethod(source, @@iterator).
+        const iter_method_v = try getPropertyChain(realm, src, "@@iterator");
+        if (heap_mod.valueAsFunction(iter_method_v)) |iter_method| {
+            // §23.2.2.1 step 6 — IterableToList path.
+            const iter_outcome = interp.callJSFunction(realm.allocator, realm, iter_method, source, &.{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            const iter = switch (iter_outcome) {
+                .value, .yielded => |v| v,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            };
+            const iter_obj = heap_mod.valueAsPlainObject(iter) orelse
+                return throwTypeError(realm, "%TypedArray%.from: @@iterator did not return an iterator object");
+            const next_v = try getPropertyChain(realm, iter_obj, "next");
+            const next_fn = heap_mod.valueAsFunction(next_v) orelse
+                return throwTypeError(realm, "%TypedArray%.from: iterator missing callable 'next'");
+
+            var collected: std.ArrayListUnmanaged(Value) = .empty;
+            defer collected.deinit(realm.allocator);
+            const scope = realm.heap.openScope() catch return error.OutOfMemory;
+            defer scope.close();
+            scope.push(iter) catch return error.OutOfMemory;
+            const max_iter: usize = 1 << 24;
+            var step: usize = 0;
+            while (step < max_iter) : (step += 1) {
+                const result_outcome = interp.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                const result = switch (result_outcome) {
+                    .value, .yielded => |v| v,
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                };
+                const result_o = heap_mod.valueAsPlainObject(result) orelse
+                    return throwTypeError(realm, "%TypedArray%.from: iterator next() did not return an object");
+                if (toBoolean(try getPropertyChain(realm, result_o, "done"))) break;
+                const item = try getPropertyChain(realm, result_o, "value");
+                scope.push(item) catch return error.OutOfMemory;
+                collected.append(realm.allocator, item) catch return error.OutOfMemory;
+            }
+            const len = collected.items.len;
+            const create_args = [_]Value{numberFromUsize(len)};
+            const target = try typedArrayCreate(realm, this_value, &create_args, len);
+            scope.push(heap_mod.taggedObject(target)) catch return error.OutOfMemory;
+            var k: usize = 0;
+            while (k < len) : (k += 1) {
+                const raw_v = collected.items[k];
+                const final_v: Value = blk: {
+                    if (mapfn) |mf| {
+                        const cb_args = [_]Value{ raw_v, numberFromI64(@intCast(k)) };
+                        const cb_out = interp.callJSFunction(realm.allocator, realm, mf, this_arg, &cb_args) catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            else => return error.NativeThrew,
+                        };
+                        switch (cb_out) {
+                            .value, .yielded => |v| break :blk v,
+                            .thrown => |ex| {
+                                realm.pending_exception = ex;
+                                return error.NativeThrew;
+                            },
+                        }
+                    } else break :blk raw_v;
+                };
+                try typedArrayWriteIndex(realm, target, k, final_v);
+            }
+            return heap_mod.taggedObject(target);
+        }
+    }
+
+    // §23.2.2.1 step 7 — array-like fallback.
+    const src = src_obj orelse return throwTypeError(realm, "%TypedArray%.from: source is not iterable or array-like");
+    const len_i = try intrinsics.toLengthOf(realm, src);
+    const len: usize = @intCast(len_i);
+    const create_args = [_]Value{numberFromUsize(len)};
+    const target = try typedArrayCreate(realm, this_value, &create_args, len);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(target)) catch return error.OutOfMemory;
+    scope.push(source) catch return error.OutOfMemory;
+    var k: usize = 0;
+    while (k < len) : (k += 1) {
+        var ibuf: [24]u8 = undefined;
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{k}) catch unreachable;
+        const raw_v = try getPropertyChain(realm, src, islice);
+        const final_v: Value = blk: {
+            if (mapfn) |mf| {
+                const cb_args = [_]Value{ raw_v, numberFromI64(@intCast(k)) };
+                const cb_out = interp.callJSFunction(realm.allocator, realm, mf, this_arg, &cb_args) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (cb_out) {
+                    .value, .yielded => |v| break :blk v,
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                }
+            } else break :blk raw_v;
+        };
+        try typedArrayWriteIndex(realm, target, k, final_v);
+    }
+    return heap_mod.taggedObject(target);
+}
+
+/// §23.2.2.2 %TypedArray%.of ( ...items ).
+fn typedArrayOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const ctor_fn = heap_mod.valueAsFunction(this_value) orelse
+        return throwTypeError(realm, "%TypedArray%.of requires a constructor 'this'");
+    if (!ctor_fn.has_construct or ctor_fn.is_arrow)
+        return throwTypeError(realm, "%TypedArray%.of requires a constructor 'this'");
+
+    const len = args.len;
+    const create_args = [_]Value{numberFromUsize(len)};
+    const target = try typedArrayCreate(realm, this_value, &create_args, len);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(target)) catch return error.OutOfMemory;
+    var k: usize = 0;
+    while (k < len) : (k += 1) {
+        try typedArrayWriteIndex(realm, target, k, args[k]);
+    }
+    return heap_mod.taggedObject(target);
 }
 
 fn typedArrayLength(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
