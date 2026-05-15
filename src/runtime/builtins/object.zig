@@ -51,10 +51,13 @@ const getPropertyChain = intrinsics.getPropertyChain;
 /// return value if we return undefined).
 pub fn objectConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const arg = argOr(args, 0, Value.undefined_);
-    // §20.1.1.1 step 2 — `Object(value)` with a non-nullish
-    // value-that-is-an-object returns the value unchanged. This
-    // is the identity case for both `new` and plain-call.
-    if (arg.isObject() or heap_mod.valueAsFunction(arg) != null) {
+    // §20.1.1.1 step 3a — `Object(value)` returns the value
+    // unchanged only when Type(value) is Object (§6.1.7).
+    // `Value.isObject` is the *heap-tag* predicate which also
+    // covers Symbol and BigInt (both are heap-allocated
+    // primitives, §6.1.5 / §6.1.6.2). Use `isJSObject` so those
+    // primitives fall through to the ToObject wrapper path.
+    if (heap_mod.isJSObject(arg)) {
         return arg;
     }
     // §20.1.1.1 step 3 — non-null/non-undefined primitive →

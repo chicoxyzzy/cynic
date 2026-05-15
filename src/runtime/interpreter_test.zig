@@ -738,6 +738,15 @@ test "later: BigInt unsigned right-shift throws TypeError" {
     try expectScriptThrows("1n >>> 1n;");
 }
 
+// §20.1.1.1 Object(value) — Symbol/BigInt are primitives (§6.1.5 /
+// §6.1.6.2), not Type(Object), so Object() must wrap them rather
+// than passing them through.
+test "later: Object(BigInt) / Object(Symbol) box the primitive" {
+    try expectScriptStringWithBuiltins(
+        \\typeof Object(0n) + ":" + typeof Object(Symbol("s"));
+    , "object:object");
+}
+
 test "later: BigInt bitwise on negative + AND with -1n is identity" {
     try expectScriptStringWithBuiltins(
         \\(-2n & -3n).toString() + ":" + (-1n & 5n).toString() + ":" + (5n | -1n).toString();

@@ -740,7 +740,9 @@ pub fn toObjectThis(realm: *Realm, this_value: Value) NativeError!*JSObject {
     // `Number.prototype.toString` / `.valueOf` (and the matching
     // Boolean / BigInt methods) can recover the underlying value
     // for `new Object(42).toString()` style coercion.
-    if (this_value.isInt32() or this_value.isDouble() or this_value.isBool()) {
+    if (this_value.isInt32() or this_value.isDouble() or this_value.isBool() or
+        heap_mod.isSymbol(this_value) or heap_mod.isBigInt(this_value))
+    {
         w.boxed_primitive = this_value;
     }
     return w;
