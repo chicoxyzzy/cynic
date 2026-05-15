@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 73.50 % | 100.00 % | 30405 / 41369 |
-| **runtime** | 80.75 % | 86.41 % | 33404 / 41369 |
+| **runtime** | 80.66 % | 86.56 % | 33342 / 41339 |
 
 
 ## Where the runtime stands, by area
@@ -25,7 +25,7 @@ browser-era built-ins …).
 |---|---:|---:|---:|---:|---:|
 | **_100–999 fails_** | | | | | |
 | `built-ins/Array` | 2535 | 510 | 36 | 82 % | 83 % |
-| `built-ins/DataView` | 446 | 115 | 0 | 80 % | 80 % |
+| `built-ins/DataView` | 446 | 104 | 11 | 80 % | 81 % |
 | `built-ins/Function` | 238 | 133 | 84 | 52 % | 64 % |
 | `built-ins/Object` | 2977 | 423 | 11 | 87 % | 88 % |
 | `built-ins/Promise` | 506 | 131 | 40 | 75 % | 79 % |
@@ -33,17 +33,15 @@ browser-era built-ins …).
 | `built-ins/String` | 1044 | 174 | 5 | 85 % | 86 % |
 | `built-ins/TypedArray` | 1016 | 414 | 8 | 71 % | 71 % |
 | `built-ins/TypedArrayConstructors` | 433 | 287 | 16 | 59 % | 60 % |
-| `language/expressions` | 9045 | 994 | 917 | 83 % | 90 % |
-| `language/module-code` | 472 | 122 | 2 | 79 % | 79 % |
-| `language/statements` | 7915 | 653 | 675 | 86 % | 92 % |
+| `language/expressions` | 8998 | 981 | 977 | 82 % | 90 % |
+| `language/module-code` | 460 | 122 | 14 | 77 % | 79 % |
+| `language/statements` | 7915 | 650 | 675 | 86 % | 92 % |
 | **_10–99 fails_** | | | | | |
-| `built-ins/ArrayBuffer` | 165 | 31 | 0 | 84 % | 84 % |
+| `built-ins/ArrayBuffer` | 165 | 27 | 4 | 84 % | 86 % |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 8 | 30 | 0 | 21 % | 21 % |
-| `built-ins/AsyncGeneratorFunction` | 7 | 16 | 0 | 30 % | 30 % |
 | `built-ins/AsyncGeneratorPrototype` | 22 | 26 | 0 | 46 % | 46 % |
 | `built-ins/BigInt` | 51 | 26 | 0 | 66 % | 66 % |
 | `built-ins/Date` | 526 | 68 | 0 | 89 % | 89 % |
-| `built-ins/GeneratorFunction` | 7 | 16 | 0 | 30 % | 30 % |
 | `built-ins/GeneratorPrototype` | 32 | 29 | 0 | 52 % | 52 % |
 | `built-ins/Iterator` | 440 | 64 | 6 | 86 % | 87 % |
 | `built-ins/JSON` | 113 | 52 | 0 | 68 % | 68 % |
@@ -60,7 +58,6 @@ browser-era built-ins …).
 | `language/function-code` | 86 | 22 | 109 | 40 % | 80 % |
 | `language/global-code` | 19 | 18 | 5 | 45 % | 51 % |
 | `language/identifiers` | 252 | 16 | 0 | 94 % | 94 % |
-| `language/import` | 7 | 19 | 101 | 6 % | 27 % |
 | `language/line-terminators` | 29 | 12 | 0 | 71 % | 71 % |
 | `language/literals` | 409 | 28 | 97 | 77 % | 94 % |
 | `language/statementList` | 40 | 40 | 0 | 50 % | 50 % |
@@ -69,10 +66,12 @@ browser-era built-ins …).
 | **_1–9 fails_** | | | | | |
 | `built-ins/AggregateError` | 19 | 6 | 0 | 76 % | 76 % |
 | `built-ins/ArrayIteratorPrototype` | 10 | 9 | 8 | 37 % | 53 % |
-| `built-ins/AsyncFunction` | 11 | 7 | 0 | 61 % | 61 % |
+| `built-ins/AsyncFunction` | 11 | 4 | 0 | 73 % | 73 % |
+| `built-ins/AsyncGeneratorFunction` | 7 | 4 | 0 | 64 % | 64 % |
 | `built-ins/Boolean` | 47 | 4 | 0 | 92 % | 92 % |
 | `built-ins/Error` | 50 | 8 | 0 | 86 % | 86 % |
 | `built-ins/FinalizationRegistry` | 44 | 3 | 0 | 94 % | 94 % |
+| `built-ins/GeneratorFunction` | 7 | 4 | 0 | 64 % | 64 % |
 | `built-ins/RegExpStringIteratorPrototype` | 9 | 8 | 0 | 53 % | 53 % |
 | `built-ins/StringIteratorPrototype` | 2 | 5 | 0 | 29 % | 29 % |
 | `built-ins/Symbol` | 82 | 8 | 8 | 84 % | 91 % |
@@ -109,6 +108,7 @@ browser-era built-ins …).
 | ~~`language/directive-prologue`~~ | ~~0~~ | ~~0~~ | ~~62~~ | ~~0 %~~ | ~~0 %~~ |
 | `language/export` | 3 | 0 | 0 | 100 % | 100 % |
 | `language/future-reserved-words` | 48 | 0 | 7 | 87 % | 100 % |
+| `language/import` | 4 | 0 | 123 | 3 % | 100 % |
 | `language/keywords` | 25 | 0 | 0 | 100 % | 100 % |
 | `language/punctuators` | 11 | 0 | 0 | 100 % | 100 % |
 | `language/reserved-words` | 27 | 0 | 0 | 100 % | 100 % |
@@ -138,7 +138,13 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
 | **parser** | 73.50 % | 100.00 % | 30405 / 41369 | -73 | 0.9 s |
-| **runtime** | 80.75 % | 86.41 % | 33404 / 41369 | +155 | 1m 36s |
+| **runtime** | 80.66 % | 86.56 % | 33342 / 41339 | +93 | 1m 34s |
+
+Biggest movers (runtime):
+
+- `language/expressions` -47
+- `language/module-code` -12
+- `language/import` -3
 
 ### 2026-05-14 — cynic `aca1903`, test262 `d0c1b455`
 

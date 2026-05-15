@@ -77,6 +77,25 @@ pub const skip_ses_substrings = [_][]const u8{
     "built-ins/Function/15.3.2",
     "built-ins/Function/S15.3.2",
     "built-ins/Function/S15.3.5",
+    // §27.3.2 GeneratorFunction(string) / §27.4.2 AsyncGenerator
+    // Function(string) / §27.7.2 AsyncFunction(string) — same
+    // permanent SES carve-out as `new Function(string)`. The
+    // `instance-*`, `invoked-as-*`, `is-a-constructor`, and
+    // `has-instance` fixtures all instantiate via the string-
+    // source constructor and false-reject without it. Prototype
+    // / metadata / descriptor fixtures (`length`, `name`,
+    // `prototype-prototype.js`, etc.) stay attempted.
+    "/GeneratorFunction/instance-",
+    "/GeneratorFunction/invoked-as-",
+    "/GeneratorFunction/is-a-constructor",
+    "/GeneratorFunction/has-instance",
+    "/AsyncGeneratorFunction/instance-",
+    "/AsyncGeneratorFunction/invoked-as-",
+    "/AsyncGeneratorFunction/is-a-constructor",
+    "/AsyncGeneratorFunction/has-instance",
+    "/AsyncFunction/AsyncFunction-construct.",
+    "/AsyncFunction/instance-construct-throws.",
+    "/AsyncFunction/is-a-constructor.",
 };
 
 /// AND-pair filters — both substrings must appear in the path. Used
@@ -139,6 +158,17 @@ pub const skip_planned_features = [_][]const u8{
     // Reasonable lift but unlocks ~35 fixtures; revisit when the
     // analysis pieces land for a JIT tier.
     "tail-call-optimization",
+    // ES2025 import-attributes (`import x from "./y.json" with {
+    // type: "json" }`) + the JSON-module integration. Stage 4 /
+    // shipped in spec; Cynic's module loader hasn't grown the
+    // attribute syntax + the JSON / text resolution back-ends yet.
+    "import-attributes",
+    "json-modules",
+    // Stage 3 `import-bytes` — `import data from "./x.png" with {
+    // type: "bytes" }` returns a (frozen) Uint8Array. Needs the
+    // immutable-arraybuffer (Stage 2.7) substrate too.
+    "import-bytes",
+    "immutable-arraybuffer",
 };
 
 pub const skip_planned_paths = [_][]const u8{
