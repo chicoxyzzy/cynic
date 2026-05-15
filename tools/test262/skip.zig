@@ -112,6 +112,16 @@ pub const skip_ses_substrings = [_][]const u8{
     "/AsyncFunction/instance-construct-throws.",
     "/AsyncFunction/is-a-constructor.",
 
+    // Completion-value tests across `language/statements/{switch,
+    // try, if, for-in, for-of, for, while, do-while, generators,
+    // labeled, variable, let, const, function, empty, async-
+    // function, class}/cptn-*.js`. Every fixture uses
+    // `assert.sameValue(eval('…'), <expected>)` to observe the
+    // statement's completion value — un-runnable without `eval`,
+    // same permanent SES carve-out. 73 fixtures at skip time, all
+    // confirmed eval-based.
+    "/cptn-",
+
     // Fixtures whose basename contains `resizable-buffer` (either as
     // the exact basename `resizable-buffer.js` or in dash-suffixed
     // forms — `resizable-buffer-grow-mid-iteration.js`,
@@ -283,6 +293,22 @@ pub const skip_planned_path_contains = [_][]const u8{
     "/unicodeSets/generated/character-class-intersection-",
     // Right side: basename ends in `-character-class.js`.
     "-character-class.js",
+
+    // Multi-realm fixtures. Cynic ships a single-realm `Realm.
+    // evaluateScript` host hook (used by the test262 harness loader
+    // for module-graph evaluation) but doesn't expose
+    // `$262.createRealm()` to user JS. Fixtures that need a cross-
+    // realm setup all bottom out on that hook: the
+    // `proto-from-ctor-realm*.js` family (cross-realm
+    // GetPrototypeFromConstructor), the `cross-realm.js` siblings
+    // around RegExp prototype getters, and the
+    // `multiple-evaluations-of-class-realm-function-ctor.js`
+    // private-brand fixtures. ~43 fixtures combined at skip time,
+    // all confirmed reliant on `$262.createRealm` / `new Realm(`.
+    // When multi-realm lands as a real feature, lift these.
+    "/proto-from-ctor-realm",
+    "/cross-realm.",
+    "-realm-function-ctor.",
 };
 
 // ── Lookup ──────────────────────────────────────────────────────────
