@@ -384,6 +384,18 @@ pub fn buildClass(
         // method walks `ctor.proto` to reach the parent class.
         fn_obj.home_function = ctor;
         const is_priv_static = std.mem.startsWith(u8, runtime_name, template.private_prefix);
+        // §15.7.14 step 18 — Class constructors carry a non-
+        // configurable, non-writable `prototype` slot (§10.2.4
+        // SetFunctionLength → §10.2.5 OrdinaryFunctionCreate).
+        // PropertyDefinitionEvaluation for a static method named
+        // `"prototype"` runs DefinePropertyOrThrow, which §10.1.6.3
+        // ValidateAndApplyPropertyDescriptor rejects on a
+        // non-configurable existing slot. Surface the spec's
+        // TypeError before mutating the constructor.
+        if (!is_priv_static and std.mem.eql(u8, runtime_name, "prototype")) {
+            realm.pending_exception = try @import("intrinsics.zig").newTypeError(realm, "Cannot redefine non-configurable property 'prototype'");
+            return error.Propagated;
+        }
         // §15.7.10 / §10.2.2 — same descriptor flags as instance
         // methods: `{ writable: true, enumerable: false,
         // configurable: true }` for data; `{ writable: false,
@@ -468,6 +480,14 @@ pub fn buildClass(
             // property bag.
             try ctor.private_properties.put(realm.allocator, runtime_name, v);
         } else {
+            // §15.7.14 step 18 — guard against `static prototype = …`
+            // for the same reason as static methods: the class's
+            // own non-configurable `prototype` slot rejects a
+            // DefineOwnProperty.
+            if (std.mem.eql(u8, runtime_name, "prototype")) {
+                realm.pending_exception = try @import("intrinsics.zig").newTypeError(realm, "Cannot redefine non-configurable property 'prototype'");
+                return error.Propagated;
+            }
             try ctor.set(realm.allocator, runtime_name, v);
         }
     }
