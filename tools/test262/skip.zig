@@ -122,28 +122,6 @@ pub const skip_ses_substrings = [_][]const u8{
     // confirmed eval-based.
     "/cptn-",
 
-    // Fixtures whose basename contains `resizable-buffer` (either as
-    // the exact basename `resizable-buffer.js` or in dash-suffixed
-    // forms — `resizable-buffer-grow-mid-iteration.js`,
-    // `speciesctor-resizable-buffer-shrink.js`,
-    // `typedarray-backed-by-resizable-buffer-…`, etc.) load
-    // `harness/resizableArrayBufferUtils.js`, which manufactures
-    // subclass constructors via `new Function('return class … extends
-    // …')`. Cynic's strict-only target permanently bans `new
-    // Function(string)` (AGENTS.md), so the harness's `try/catch`
-    // leaves the subclass slots `undefined`; `ctors.concat(MyUint8Array,
-    // MyFloat32Array)` then injects `undefined` entries into the
-    // iteration array and every `for (let ctor of ctors)` fixture
-    // trips on them before reaching real engine behaviour. Verified
-    // empty pass set across all 12 basename variants at skip time
-    // (0 / ~230 total fails). The sibling `resizable-array-buffer`
-    // pattern (note the extra `array-`) used by the getter buckets
-    // does NOT load the same harness and stays attempted (17/3 at
-    // skip time, picking up the length-tracking engine work).
-    "/resizable-buffer.js",
-    "/resizable-buffer-",
-    "-resizable-buffer-",
-    "-resizable-buffer.js",
 };
 
 /// AND-pair filters — both substrings must appear in the path. Used
