@@ -4,8 +4,8 @@
 
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
-| **parser** | 73.50 % | 100.00 % | 30405 / 41369 |
-| **runtime** | 80.66 % | 86.56 % | 33342 / 41339 |
+| **parser** | 73.32 % | 100.00 % | 30311 / 41339 |
+| **runtime** | 81.44 % | 87.40 % | 33667 / 41339 |
 
 
 ## Where the runtime stands, by area
@@ -24,18 +24,17 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_100–999 fails_** | | | | | |
-| `built-ins/Array` | 2535 | 510 | 36 | 82 % | 83 % |
+| `built-ins/Array` | 2567 | 478 | 36 | 83 % | 84 % |
 | `built-ins/DataView` | 446 | 104 | 11 | 80 % | 81 % |
-| `built-ins/Function` | 238 | 133 | 84 | 52 % | 64 % |
-| `built-ins/Object` | 2977 | 423 | 11 | 87 % | 88 % |
-| `built-ins/Promise` | 506 | 131 | 40 | 75 % | 79 % |
+| `built-ins/Function` | 260 | 111 | 84 | 57 % | 70 % |
+| `built-ins/Object` | 3070 | 330 | 11 | 90 % | 90 % |
 | `built-ins/RegExp` | 1343 | 374 | 161 | 72 % | 78 % |
 | `built-ins/String` | 1044 | 174 | 5 | 85 % | 86 % |
 | `built-ins/TypedArray` | 1016 | 414 | 8 | 71 % | 71 % |
 | `built-ins/TypedArrayConstructors` | 433 | 287 | 16 | 59 % | 60 % |
-| `language/expressions` | 8998 | 981 | 977 | 82 % | 90 % |
+| `language/expressions` | 9055 | 924 | 977 | 83 % | 91 % |
 | `language/module-code` | 460 | 122 | 14 | 77 % | 79 % |
-| `language/statements` | 7915 | 650 | 675 | 86 % | 92 % |
+| `language/statements` | 7956 | 609 | 675 | 86 % | 93 % |
 | **_10–99 fails_** | | | | | |
 | `built-ins/ArrayBuffer` | 165 | 27 | 4 | 84 % | 86 % |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 8 | 30 | 0 | 21 % | 21 % |
@@ -44,14 +43,15 @@ browser-era built-ins …).
 | `built-ins/Date` | 526 | 68 | 0 | 89 % | 89 % |
 | `built-ins/GeneratorPrototype` | 32 | 29 | 0 | 52 % | 52 % |
 | `built-ins/Iterator` | 440 | 64 | 6 | 86 % | 87 % |
-| `built-ins/JSON` | 113 | 52 | 0 | 68 % | 68 % |
-| `built-ins/Map` | 177 | 26 | 1 | 87 % | 87 % |
+| `built-ins/JSON` | 114 | 51 | 0 | 69 % | 69 % |
+| `built-ins/Map` | 178 | 25 | 1 | 87 % | 88 % |
 | `built-ins/Math` | 311 | 16 | 0 | 95 % | 95 % |
 | `built-ins/NativeErrors` | 82 | 12 | 0 | 87 % | 87 % |
 | `built-ins/Number` | 318 | 22 | 0 | 94 % | 94 % |
-| `built-ins/Proxy` | 213 | 86 | 12 | 68 % | 71 % |
+| `built-ins/Promise` | 581 | 56 | 40 | 86 % | 91 % |
+| `built-ins/Proxy` | 214 | 85 | 12 | 69 % | 72 % |
 | `built-ins/Reflect` | 120 | 33 | 0 | 78 % | 78 % |
-| `built-ins/Set` | 346 | 36 | 1 | 90 % | 91 % |
+| `built-ins/Set` | 347 | 35 | 1 | 91 % | 91 % |
 | `built-ins/WeakMap` | 123 | 18 | 0 | 87 % | 87 % |
 | `built-ins/WeakSet` | 73 | 12 | 0 | 86 % | 86 % |
 | `built-ins/global` | 16 | 13 | 0 | 55 % | 55 % |
@@ -61,7 +61,6 @@ browser-era built-ins …).
 | `language/line-terminators` | 29 | 12 | 0 | 71 % | 71 % |
 | `language/literals` | 409 | 28 | 97 | 77 % | 94 % |
 | `language/statementList` | 40 | 40 | 0 | 50 % | 50 % |
-| `language/types` | 94 | 10 | 9 | 83 % | 90 % |
 | `language/white-space` | 51 | 16 | 0 | 76 % | 76 % |
 | **_1–9 fails_** | | | | | |
 | `built-ins/AggregateError` | 19 | 6 | 0 | 76 % | 76 % |
@@ -92,6 +91,7 @@ browser-era built-ins …).
 | `language/identifier-resolution` | 8 | 1 | 5 | 57 % | 89 % |
 | `language/rest-parameters` | 10 | 1 | 0 | 91 % | 91 % |
 | `language/source-text` | 0 | 1 | 0 | 0 % | 0 % |
+| `language/types` | 95 | 9 | 9 | 84 % | 91 % |
 | **_0 fails (passing or wholly OOS)_** | | | | | |
 | ~~`built-ins/AbstractModuleSource`~~ | ~~0~~ | ~~0~~ | ~~8~~ | ~~0 %~~ | ~~0 %~~ |
 | ~~`built-ins/AsyncDisposableStack`~~ | ~~0~~ | ~~0~~ | ~~104~~ | ~~0 %~~ | ~~0 %~~ |
@@ -133,18 +133,20 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-15 — cynic `08fb0f4`, test262 `d0c1b455`
+### 2026-05-15 — cynic `2b05c51`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
-| **parser** | 73.50 % | 100.00 % | 30405 / 41369 | -73 | 0.9 s |
-| **runtime** | 80.66 % | 86.56 % | 33342 / 41339 | +93 | 1m 34s |
+| **parser** | 73.32 % | 100.00 % | 30311 / 41339 | -167 | 1.3 s |
+| **runtime** | 81.44 % | 87.40 % | 33667 / 41339 | +418 | 4m 21s |
 
 Biggest movers (runtime):
 
-- `language/expressions` -47
-- `language/module-code` -12
-- `language/import` -3
+- `built-ins/Object` +92
+- `built-ins/Promise` +75
+- `language/expressions` +16
+- `built-ins/Array` +1
+- `built-ins/Map` +1
 
 ### 2026-05-14 — cynic `aca1903`, test262 `d0c1b455`
 
