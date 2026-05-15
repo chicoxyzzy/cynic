@@ -994,6 +994,11 @@ pub fn throwRangeError(realm: *Realm, msg: []const u8) NativeError {
     return throwNative(realm, ex);
 }
 
+pub fn throwSyntaxError(realm: *Realm, msg: []const u8) NativeError {
+    const ex = newSyntaxError(realm, msg) catch return error.OutOfMemory;
+    return throwNative(realm, ex);
+}
+
 /// Native-side cooperative interrupt + budget poll. Long-running
 /// builtin loops (`Array.prototype.{map, filter, reduce}`,
 /// `String.prototype.{repeat, replace}`, regex matchers, large
