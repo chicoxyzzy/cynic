@@ -2001,7 +2001,6 @@ const promise_mod = @import("promise.zig");
 /// `Array.fromAsync(asyncItems, mapfn?, thisArg?)`. Returns a Promise.
 /// §23.1.2.1.1 (Stage 4 proposal — Igalia / TC39).
 fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value;
     // §23.1.2.1.1 step 1 — IfAbruptRejectPromise pattern. Allocate
     // the result capability up front so any synchronous abrupt
     // becomes a rejection rather than a throw.
@@ -2018,6 +2017,18 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
             return rejectWithTypeError(realm, cap, "Array.fromAsync: mapfn is not a function");
         }
     }
+
+    // §23.1.2.1.1 step 3.e / 3.k.iv — when `this` is a constructor
+    // (the receiver of `Array.fromAsync.call(C, …)`), the spec
+    // allocates the result via `Construct(C)` (iterator path) or
+    // `Construct(C, « 𝔽(len) »)` (array-like path). We don't yet
+    // know which path applies, so defer the array-like construction
+    // until step 4; the iterator path uses `Construct(C)` below.
+    const this_ctor: ?*JSFunction = blk: {
+        const f = heap_mod.valueAsFunction(this_value) orelse break :blk null;
+        if (!f.has_construct or f.is_arrow) break :blk null;
+        break :blk f;
+    };
 
     // Allocate the result array + driver state.
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
@@ -2063,6 +2074,13 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
 
     // Iterator path?
     if (heap_mod.valueAsFunction(iter_method_v)) |async_iter_fn| {
+        // §23.1.2.1.1 step 3.e — `IsConstructor(C)` → `Construct(C)`.
+        if (this_ctor) |c| {
+            const ctor_v = constructForFromAsync(realm, c, &.{}) catch {
+                return rejectPendingException(realm, cap);
+            };
+            state.set(realm.allocator, k_fa_array, ctor_v) catch return error.OutOfMemory;
+        }
         const iter_outcome = interpreter.callJSFunction(realm.allocator, realm, async_iter_fn, items, &.{}) catch {
             return rejectPendingException(realm, cap);
         };
@@ -2089,6 +2107,12 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
     }
 
     if (heap_mod.valueAsFunction(sync_iter_method_v)) |sync_iter_fn| {
+        if (this_ctor) |c| {
+            const ctor_v = constructForFromAsync(realm, c, &.{}) catch {
+                return rejectPendingException(realm, cap);
+            };
+            state.set(realm.allocator, k_fa_array, ctor_v) catch return error.OutOfMemory;
+        }
         // step 3.h — sync `@@iterator` fallback. Per spec, wrap in
         // %AsyncFromSyncIteratorPrototype%. Cynic shortcut: drive the
         // sync iterator directly and `awaitAndThen` no-ops on non-
@@ -2147,10 +2171,42 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
     state.set(realm.allocator, k_fa_length, numberFromI64(len)) catch return error.OutOfMemory;
     state.set(realm.allocator, k_fa_mode, Value.fromInt32(0)) catch return error.OutOfMemory;
 
+    // §23.1.2.1.1 step 3.k.iv — `IsConstructor(C)` → `Construct(C, « 𝔽(len) »)`.
+    if (this_ctor) |c| {
+        const ctor_args = [_]Value{numberFromI64(len)};
+        const ctor_v = constructForFromAsync(realm, c, &ctor_args) catch {
+            return rejectPendingException(realm, cap);
+        };
+        state.set(realm.allocator, k_fa_array, ctor_v) catch return error.OutOfMemory;
+    }
+
     fromAsyncArrayLikeStep(realm, state) catch {
         return rejectPendingException(realm, cap);
     };
     return cap.promise;
+}
+
+/// §7.3.14 Construct(F, args) — invoke the constructor with
+/// `newTarget = F`. Errors bubble through `realm.pending_exception`
+/// so the caller can route them into the result capability.
+fn constructForFromAsync(realm: *Realm, ctor: *JSFunction, ctor_args: []const Value) NativeError!Value {
+    const outcome = interpreter.constructValue(
+        realm.allocator,
+        realm,
+        heap_mod.taggedFunction(ctor),
+        ctor_args,
+        heap_mod.taggedFunction(ctor),
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    return switch (outcome) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
 }
 
 // ── Capability helpers ──────────────────────────────────────────────────────
