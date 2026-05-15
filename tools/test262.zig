@@ -28,6 +28,12 @@
 //! --top-slow=<n>          Print the N slowest fixtures (≥50ms) after the final tally.
 //! --top-rss=<n>           Print the N memory-heaviest fixtures (≥8MB RSS delta) after the
 //!                         final tally. Pair with `--threads=1` for clean readings.
+//! --leak-check            Route the per-fixture bytes allocator through
+//!                         `std.heap.DebugAllocator`; report unfreed allocations with
+//!                         stack traces at exit. Forces `--threads=1`. Pair with `--filter`.
+//! --max-rss=<mb>          Abort the run with exit code 2 if process RSS crosses
+//!                         <mb> MiB after a fixture; print the offending path.
+//!                         Forces `--threads=1`.
 
 const std = @import("std");
 const cynic = @import("cynic");
@@ -405,6 +411,28 @@ const Options = struct {
     /// Only fixtures over `heavy_threshold_mb` (8 MiB) are
     /// recorded to keep noise out.
     top_rss: u32 = 0,
+    /// When true, the per-fixture `bytes_allocator` (used for
+    /// large heap-owned byte payloads — `JSString.bytes`,
+    /// ArrayBuffer slabs) is routed through `std.heap.DebugAllocator`
+    /// instead of the default `gpa`. The DebugAllocator detects
+    /// every unfreed allocation at process exit and prints a
+    /// stack trace per leak — turning "RSS climbed by 200 MiB"
+    /// into "this exact call site leaked N bytes." Forces
+    /// `--threads=1` because DebugAllocator is not thread-safe.
+    /// Pair with `--filter` — running the full corpus under
+    /// leak-check is 10-20× slower than ReleaseFast.
+    leak_check: bool = false,
+    /// Process-RSS budget in MiB. When >0 and the post-fixture
+    /// RSS exceeds the budget, the harness prints the offending
+    /// fixture path + RSS reading and aborts the run with a
+    /// non-zero exit code. Complements `--leak-check`:
+    /// `--leak-check` reports unfreed allocations at exit;
+    /// `--max-rss` traps the run at the fixture where growth
+    /// crossed the budget, so a sweep that's about to hang the
+    /// laptop fails fast with a pointer instead. Single-thread
+    /// only (process RSS is racy with multiple workers); the
+    /// flag parser pins `--threads=1`.
+    max_rss_mb: u32 = 0,
 };
 
 /// Path of the pass-cache, written at the repo root after every
@@ -729,6 +757,28 @@ pub fn main(init: std.process.Init) !void {
         var per_file_arena: std.heap.ArenaAllocator = .init(gpa);
         defer per_file_arena.deinit();
 
+        // `--leak-check` swaps the per-fixture bytes allocator
+        // for a `DebugAllocator`. Every unfreed allocation prints
+        // a stack trace at the deinit below, so a leaked
+        // `JSString.bytes` or ArrayBuffer slab points at its exact
+        // call site. Single-thread-only (DebugAllocator is not
+        // thread-safe — the flag parser already forces threads=1).
+        var leak_check_alloc: std.heap.DebugAllocator(.{}) = .init;
+        defer if (opts.leak_check) {
+            const status = leak_check_alloc.deinit();
+            if (status == .leak) {
+                std.Io.File.stderr().writeStreamingAll(io,
+                    "test262 --leak-check: DebugAllocator reported leaks (see trace above)\n",
+                ) catch {};
+            } else {
+                std.Io.File.stderr().writeStreamingAll(io,
+                    "test262 --leak-check: clean — no leaked allocations\n",
+                ) catch {};
+            }
+        };
+        const bytes_allocator: std.mem.Allocator =
+            if (opts.leak_check) leak_check_alloc.allocator() else gpa;
+
         for (paths.items) |rel| {
             stats.total += 1;
 
@@ -755,7 +805,7 @@ pub fn main(init: std.process.Init) !void {
             const harness_pair: ?harness_mod.HarnessSources = harness_sources;
             const fx_start = if (opts.top_slow > 0) std.Io.Clock.now(.awake, io) else undefined;
             const fx_rss_pre: u64 = if (opts.top_rss > 0) (currentRssMb() orelse 0) else 0;
-            const outcome = try classifyAndRun(arena, gpa, io, corpus, rel, opts.mode, harness_pair, opts.gc_threshold, opts.gc_stats);
+            const outcome = try classifyAndRun(arena, bytes_allocator, io, corpus, rel, opts.mode, harness_pair, opts.gc_threshold, opts.gc_stats);
             if (opts.top_slow > 0) {
                 const ms_i = fx_start.untilNow(io, .awake).toMilliseconds();
                 const ms_u: u64 = if (ms_i > 0) @intCast(ms_i) else 0;
@@ -768,6 +818,18 @@ pub fn main(init: std.process.Init) !void {
                 const delta: u64 = if (rss_post > fx_rss_pre) rss_post - fx_rss_pre else 0;
                 if (delta >= heavy_threshold_mb) {
                     try heavy.append(gpa, .{ .path = try gpa.dupe(u8, rel), .mb = delta });
+                }
+            }
+            if (opts.max_rss_mb > 0) {
+                const rss_now: u64 = currentRssMb() orelse 0;
+                if (rss_now >= opts.max_rss_mb) {
+                    var line: [512]u8 = undefined;
+                    const msg = try std.fmt.bufPrint(&line,
+                        "\ntest262 --max-rss tripped at fixture: {s}\n  RSS now: {d} MiB, budget: {d} MiB\n",
+                        .{ rel, rss_now, opts.max_rss_mb },
+                    );
+                    try std.Io.File.stderr().writeStreamingAll(io, msg);
+                    std.process.exit(2);
                 }
             }
             try recordOutcome(gpa, &stats, &buckets, &failures, &pass_paths, rel, outcome, is_full_run);
@@ -2506,6 +2568,17 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.top_slow = std.fmt.parseInt(u32, arg["--top-slow=".len..], 10) catch 0;
         } else if (std.mem.startsWith(u8, arg, "--top-rss=")) {
             opts.top_rss = std.fmt.parseInt(u32, arg["--top-rss=".len..], 10) catch 0;
+        } else if (std.mem.eql(u8, arg, "--leak-check")) {
+            opts.leak_check = true;
+            // DebugAllocator is single-threaded; force-pin workers
+            // before the dispatcher reads `opts.threads`.
+            opts.threads = 1;
+        } else if (std.mem.startsWith(u8, arg, "--max-rss=")) {
+            opts.max_rss_mb = std.fmt.parseInt(u32, arg["--max-rss=".len..], 10) catch 0;
+            // Process RSS is a single-process watermark; multiple
+            // workers make the "which fixture tripped it" pointer
+            // useless. Pin to one worker.
+            if (opts.max_rss_mb > 0) opts.threads = 1;
         }
     }
     return opts;

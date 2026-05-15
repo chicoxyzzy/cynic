@@ -139,7 +139,24 @@ GC cycle — pause time + per-pool live counts; pair with
 `--filter` to keep output sane),
 `--top-slow=<n>` (after the tally, print the N slowest
 fixtures over 50ms — V8 / JSC both surface this; long-tail
-outliers usually dominate sweep wall-time). The harness
+outliers usually dominate sweep wall-time),
+`--top-rss=<n>` (after the tally, print the N memory-heaviest
+fixtures with per-fixture RSS deltas over 8 MiB — use this to
+spot allocation pathologies and creeping leaks; pair with
+`--filter` for a sharper signal),
+`--leak-check` (route the per-fixture bytes allocator through
+`std.heap.DebugAllocator` so every unfreed allocation prints a
+stack trace at exit — turns "RSS climbed by 200 MiB" into "this
+exact call site leaked N bytes." Forces `--threads=1` because
+DebugAllocator isn't thread-safe; pair with `--filter`, the
+full corpus under leak-check is 10-20× slower than ReleaseFast),
+`--max-rss=<mb>` (abort the run with exit code 2 the moment
+process RSS crosses the budget after a fixture — prints the
+offending path. Use this to bound a sweep that's at risk of
+hanging the laptop and get a fixture pointer to bisect from.
+Forces `--threads=1`. Complement to `--leak-check`: max-rss
+traps *when* growth crossed the budget, leak-check tells you
+*what* was unfreed). The harness
 scores against the **Cynic-targeted scope**: paths under
 `harness/`, `staging/`, `intl402/`, Annex B language extensions,
 and the browser-era built-ins Cynic doesn't ship are dropped from
@@ -163,6 +180,22 @@ chews ~50k fixtures). Pass `-Doptimize=Debug` or
 `-Dtest262-debug=true` if you need stack traces on a panic
 inside the engine — that rebuilds both the harness and the
 `cynic` library it links at Debug.
+
+**Leak-check before every full sweep.** Past leaks (e.g. JSString
+bytes pinned in the per-fixture arena before `7a6a0d8`) ballooned
+full sweeps to multi-GB RSS and locked the laptop. The byte-trigger
+GC in `Heap` (`bytes_since_gc` + 16 MB threshold, paired with a
+split `bytes_allocator`) bounds per-fixture RSS today — but a new
+allocation path can bypass it. Before kicking off a full
+`zig build test262`, run a filtered sweep under
+`/usr/bin/time -l` and confirm peak RSS is in the healthy band:
+
+    /usr/bin/time -l timeout 300 zig build test262 -- --quiet \
+      --mode=runtime --filter=language/expressions
+
+Healthy: ≤ ~100 MB peak, ≤ ~10 s. If RSS climbs noticeably above
+that, STOP and bisect the regressing commit with the same harness
+before starting the full sweep.
 
 CI runs `zig build` and `zig build test` as gating jobs, plus
 `zig build test262 -- --quiet` as an advisory job
