@@ -1324,9 +1324,17 @@ fn taIsOutOfBounds(tv: ObjMod.TypedView) bool {
 /// value and does not throw.
 fn taCurrentLength(tv: ObjMod.TypedView) usize {
     const buf = tv.viewed.array_buffer orelse return 0;
-    if (!tv.length_tracking) return tv.length;
-    if (tv.byte_offset > buf.len) return 0;
     const elem_size = tv.kind.elementSize();
+    if (!tv.length_tracking) {
+        // §10.4.5 IsTypedArrayOutOfBounds — a fixed-length view
+        // over a resizable buffer that's been shrunk past its
+        // window reports a current length of 0; per-element
+        // reads at any index then collapse to `undefined`
+        // (ES2024 align-detached-buffer-semantics).
+        if (tv.byte_offset + tv.length * elem_size > buf.len) return 0;
+        return tv.length;
+    }
+    if (tv.byte_offset > buf.len) return 0;
     return (buf.len - tv.byte_offset) / elem_size;
 }
 
