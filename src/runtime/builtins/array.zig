@@ -1724,7 +1724,15 @@ pub fn invokeCallback(
     };
     switch (outcome) {
         .value, .yielded => |v| return v,
-        .thrown => return error.NativeThrew,
+        // §6.2.4.4 — the user-supplied callback threw. Pin the
+        // thrown value in `realm.pending_exception` so the
+        // unwind machinery resurfaces *its* error class /
+        // message instead of the generic "native error" filler
+        // (test262 inspects `e instanceof Test262Error`, etc.).
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
     }
 }
 
