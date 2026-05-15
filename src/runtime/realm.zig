@@ -40,16 +40,18 @@ const Intrinsics = intrinsics_mod.Intrinsics;
 /// the settlement unchanged. A Promise-returning handler
 /// chains.
 pub const Microtask = struct {
-    kind: enum { callback, async_resume, promise_reaction } = .callback,
+    kind: enum { callback, async_resume, promise_reaction, thenable_job } = .callback,
     callback: Value = Value.undefined_,
     arg: Value = Value.undefined_,
     async_gen: ?*@import("generator.zig").JSGenerator = null,
     async_throws: bool = false,
     /// For `.promise_reaction` — the handler for the settled
     /// state (`Value.undefined_` if absent → propagate).
+    /// For `.thenable_job` — the `then` callable to invoke.
     reaction_handler: Value = Value.undefined_,
     /// For `.promise_reaction` — the Promise to settle with
     /// the handler's outcome.
+    /// For `.thenable_job` — the outer Promise to settle.
     reaction_result: Value = Value.undefined_,
     /// For `.promise_reaction` — true when the source Promise
     /// settled rejected (drives propagation in the no-handler
@@ -364,6 +366,25 @@ pub const Realm = struct {
             .reaction_handler = handler,
             .reaction_result = result,
             .reaction_was_rejected = was_rejected,
+        });
+    }
+
+    /// §27.2.1.3 PromiseResolveThenableJob — schedule a job that
+    /// invokes `then.call(thenable, resolveFn, rejectFn)` where
+    /// resolveFn/rejectFn settle `outer_promise`. Used both by
+    /// `Promise.prototype.then` reactions returning a thenable
+    /// and by `Promise Resolve Functions` (§27.2.1.3.2).
+    pub fn enqueueThenableJob(
+        self: *Realm,
+        outer_promise: Value,
+        thenable: Value,
+        then_fn: Value,
+    ) !void {
+        try self.microtask_queue.append(self.allocator, .{
+            .kind = .thenable_job,
+            .arg = thenable,
+            .reaction_handler = then_fn,
+            .reaction_result = outer_promise,
         });
     }
 

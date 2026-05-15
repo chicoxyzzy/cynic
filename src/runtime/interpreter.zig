@@ -1222,7 +1222,69 @@ pub fn drainMicrotasks(allocator: std.mem.Allocator, realm: *Realm) RunError!voi
             .promise_reaction => {
                 try runPromiseReaction(allocator, realm, task.reaction_handler, task.arg, task.reaction_result, task.reaction_was_rejected);
             },
+            .thenable_job => {
+                try runThenableJob(allocator, realm, task.reaction_result, task.arg, task.reaction_handler);
+            },
         }
+    }
+}
+
+/// §27.2.1.3 PromiseResolveThenableJob — call
+/// `thenAction.call(thenable, resolveFn, rejectFn)` where
+/// resolveFn/rejectFn settle `outer_promise`. An abrupt
+/// completion from the then invocation rejects `outer_promise`
+/// with the thrown value (unless `outer_promise` is already
+/// settled — the bound trampoline guards that).
+fn runThenableJob(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    outer_promise: Value,
+    thenable: Value,
+    then_fn_v: Value,
+) RunError!void {
+    const outer_obj = heap_mod.valueAsPlainObject(outer_promise) orelse return;
+    const then_fn = heap_mod.valueAsFunction(then_fn_v) orelse {
+        try settlePromiseInternal(realm, outer_obj, .fulfilled, thenable);
+        return;
+    };
+    // Pin outer + thenable across the call.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(outer_promise) catch return error.OutOfMemory;
+    scope.push(thenable) catch return error.OutOfMemory;
+    scope.push(then_fn_v) catch return error.OutOfMemory;
+
+    // Build bound-trampoline resolve/reject pair targeting outer_promise.
+    const promise_mod = @import("builtins/promise.zig");
+    const resolve_impl = realm.heap.allocateFunctionNative(promise_mod.promiseResolveImplExported, 1, "") catch return error.OutOfMemory;
+    resolve_impl.proto = realm.intrinsics.function_prototype;
+    const resolve_fn = realm.heap.allocateFunctionNative(promise_mod.boundResolveTrampolineExported, 1, "") catch return error.OutOfMemory;
+    resolve_fn.proto = realm.intrinsics.function_prototype;
+    resolve_fn.bound_target = resolve_impl;
+    resolve_fn.bound_this = outer_promise;
+
+    const reject_impl = realm.heap.allocateFunctionNative(promise_mod.promiseRejectImplExported, 1, "") catch return error.OutOfMemory;
+    reject_impl.proto = realm.intrinsics.function_prototype;
+    const reject_fn = realm.heap.allocateFunctionNative(promise_mod.boundResolveTrampolineExported, 1, "") catch return error.OutOfMemory;
+    reject_fn.proto = realm.intrinsics.function_prototype;
+    reject_fn.bound_target = reject_impl;
+    reject_fn.bound_this = outer_promise;
+
+    const args = [_]Value{ heap_mod.taggedFunction(resolve_fn), heap_mod.taggedFunction(reject_fn) };
+    const outcome = callJSFunction(allocator, realm, then_fn, thenable, &args) catch |err| switch (err) {
+        else => return err,
+    };
+    switch (outcome) {
+        .value, .yielded => {},
+        .thrown => |ex| {
+            // §27.2.1.3 step 6 — call rejectFn(reason). The
+            // trampolines guard against double-settlement, so if
+            // user code already resolved/rejected this is a
+            // no-op.
+            if (outer_obj.promise_state == .pending) {
+                try settlePromiseInternal(realm, outer_obj, .rejected, ex);
+            }
+        },
     }
 }
 
@@ -1274,22 +1336,55 @@ fn runPromiseReaction(
     };
     switch (outcome) {
         .value, .yielded => |v| {
-            // Promise resolution (§27.2.1.3-ish): if the handler
-            // returned a thenable (= a Cynic Promise), chain
-            // result_promise's settlement to the inner Promise's.
-            // Plain-value returns settle result_promise fulfilled.
-            if (heap_mod.valueAsPlainObject(v)) |inner| {
-                if (inner.isPromise()) {
-                    try chainPromiseToInner(realm, inner, result_obj);
-                    return;
-                }
-            }
-            try settlePromiseInternal(realm, result_obj, .fulfilled, v);
+            // §27.2.1.3.2 Promise Resolve Functions — route the
+            // handler's return value through the full thenable-
+            // resolution flow so a non-Promise thenable also
+            // gets unwrapped (real Promise → chain; thenable →
+            // PromiseResolveThenableJob; non-Object → fulfill).
+            try resolvePromiseWithValue(realm, result_obj, v);
         },
         .thrown => |ex| {
             try settlePromiseInternal(realm, result_obj, .rejected, ex);
         },
     }
+}
+
+/// §27.2.1.3.2 Promise Resolve Functions, run with the
+/// receiver-promise pinned. Used by `runPromiseReaction` and
+/// other internal settlement paths where the value is *not*
+/// flowing through the user-callable resolve trampoline.
+pub fn resolvePromiseWithValue(realm: *Realm, target: *JSObject, v: Value) !void {
+    if (target.promise_state != .pending) return;
+    if (heap_mod.valueAsPlainObject(v)) |v_obj| {
+        if (v_obj == target) {
+            const intrinsics = @import("intrinsics.zig");
+            const ex = intrinsics.newTypeError(realm, "Chaining cycle detected for promise") catch return error.OutOfMemory;
+            try settlePromiseInternal(realm, target, .rejected, ex);
+            return;
+        }
+        if (v_obj.isPromise()) {
+            try chainPromiseToInner(realm, v_obj, target);
+            return;
+        }
+        const intrinsics = @import("intrinsics.zig");
+        const then_v = intrinsics.getPropertyChain(realm, v_obj, "then") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                const ex = realm.pending_exception orelse Value.undefined_;
+                realm.pending_exception = null;
+                try settlePromiseInternal(realm, target, .rejected, ex);
+                return;
+            },
+        };
+        if (target.promise_state != .pending) return;
+        if (heap_mod.valueAsFunction(then_v) == null) {
+            try settlePromiseInternal(realm, target, .fulfilled, v);
+            return;
+        }
+        try realm.enqueueThenableJob(heap_mod.taggedObject(target), v, then_v);
+        return;
+    }
+    try settlePromiseInternal(realm, target, .fulfilled, v);
 }
 
 /// Chain `outer`'s settlement to `inner`'s — when `inner`
@@ -5945,6 +6040,14 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
         if (!fn_obj.hasOwn(key)) return .{ .ok = true };
         const flags = fn_obj.flagsForOwn(key);
         if (!flags.configurable) return .{ .throw_typeerror = "Cannot delete non-configurable property" };
+        // Accessor descriptors live in a separate map (e.g. the
+        // static `Promise[@@species]` getter). Remove the accessor
+        // entry alongside its flags.
+        if (fn_obj.accessors.contains(key)) {
+            _ = fn_obj.accessors.swapRemove(key);
+            _ = fn_obj.property_flags.swapRemove(key);
+            return .{ .ok = true };
+        }
         // Removing `name` clears the dedicated slot; removing
         // `length` drops the param-count fallback path entirely
         // (subsequent `hasOwn("length")` returns false). Removing
@@ -6109,6 +6212,12 @@ fn strictSetPropertyAnchored(
         // `properties` stores `[]const u8` slices, not pointers,
         // so a heap-allocated key gets swept without the anchor.
         const had_entry = obj.properties.contains(key);
+        const had_indexed = blk_idx: {
+            if (obj.is_array_exotic) {
+                if (canonicalIntegerIndexInterp(key)) |idx| break :blk_idx obj.hasOwnIndexedSlot(idx);
+            }
+            break :blk_idx false;
+        };
         if (had_entry) {
             const flags = obj.flagsFor(key);
             if (!flags.writable) {
@@ -6116,10 +6225,21 @@ fn strictSetPropertyAnchored(
                 return throwInSetter(realm, frames, f, ip, value, ex);
             }
             obj.properties.put(allocator, key, value) catch return error.OutOfMemory;
-        } else if (key_string) |ks| {
-            obj.setComputedOwned(allocator, ks, value) catch return error.OutOfMemory;
         } else {
-            obj.set(allocator, key, value) catch return error.OutOfMemory;
+            // §10.1.9.2 OrdinarySetWithOwnDescriptor — when no own
+            // descriptor exists for the key, the spec ultimately
+            // calls [[DefineOwnProperty]], which fails (and so
+            // strict-mode [[Set]] throws — §10.1.9.1 step 4) when
+            // the receiver is non-extensible.
+            if (!had_indexed and !obj.extensible) {
+                const ex = try makeTypeError(realm, "Cannot add property, object is not extensible");
+                return throwInSetter(realm, frames, f, ip, value, ex);
+            }
+            if (key_string) |ks| {
+                obj.setComputedOwned(allocator, ks, value) catch return error.OutOfMemory;
+            } else {
+                obj.set(allocator, key, value) catch return error.OutOfMemory;
+            }
         }
         return .ok;
     }

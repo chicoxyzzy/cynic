@@ -370,12 +370,78 @@ fn settlePromise(realm: *Realm, inst: *@import("../object.zig").JSObject, state:
 /// `bound_this` at promise-constructor time). When user code
 /// calls `resolve(42)`, the bind unwrap dispatches into here
 /// with the target Promise as `this_value`.
+pub const promiseResolveImplExported = promiseResolveImpl;
+pub const promiseRejectImplExported = promiseRejectImpl;
+pub const boundResolveTrampolineExported = boundResolveTrampoline;
+
 fn promiseResolveImpl(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const target = heap_mod.valueAsPlainObject(this_value) orelse return Value.undefined_;
     const v = argOr(args, 0, Value.undefined_);
     const interp = @import("../interpreter.zig");
+    // §27.2.1.3.2 Promise Resolve Functions — already-settled guard
+    // first (the trampoline ensures one-shot, but we may be reached
+    // from the thenable-job rejection path too).
+    if (target.promise_state != .pending) return Value.undefined_;
+
+    // Step 4 — resolution === target → TypeError.
+    if (heap_mod.valueAsPlainObject(v)) |v_obj| {
+        if (v_obj == target) {
+            const ex = intrinsics.newTypeError(realm, "Chaining cycle detected for promise") catch return error.OutOfMemory;
+            interp.settlePromiseInternal(realm, target, .rejected, ex) catch return error.OutOfMemory;
+            return Value.undefined_;
+        }
+        // Step 5 — if resolution is not an Object, fulfill (handled
+        // by the non-Object fall-through below).
+        // Step 7 — Get(resolution, "then"). For a Cynic Promise we
+        // already know `.then` is the built-in; chain inline.
+        if (v_obj.isPromise()) {
+            chainPromiseToInner(realm, v_obj, target) catch return error.OutOfMemory;
+            return Value.undefined_;
+        }
+        const then_v = intrinsics.getPropertyChain(realm, v_obj, "then") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => blk: {
+                // §27.2.1.3.2 step 8 — abrupt Get(then) rejects.
+                const ex = realm.pending_exception orelse Value.undefined_;
+                realm.pending_exception = null;
+                interp.settlePromiseInternal(realm, target, .rejected, ex) catch return error.OutOfMemory;
+                break :blk Value.undefined_;
+            },
+        };
+        if (target.promise_state != .pending) return Value.undefined_;
+        // Step 10 — IsCallable(then) is false → fulfill with v.
+        if (heap_mod.valueAsFunction(then_v) == null) {
+            interp.settlePromiseInternal(realm, target, .fulfilled, v) catch return error.OutOfMemory;
+            return Value.undefined_;
+        }
+        // Step 11 — enqueue PromiseResolveThenableJob.
+        realm.enqueueThenableJob(this_value, v, then_v) catch return error.OutOfMemory;
+        return Value.undefined_;
+    }
+    // Step 5 — non-Object resolution: fulfill.
     interp.settlePromiseInternal(realm, target, .fulfilled, v) catch return error.OutOfMemory;
     return Value.undefined_;
+}
+
+/// §27.2.1.3 PromiseResolveThenableJob helper — chain a real
+/// Cynic Promise's settlement onto `outer`. Used by both
+/// `promiseResolveImpl` (when resolution is itself a Promise)
+/// and the aggregator forwarding path.
+fn chainPromiseToInner(realm: *Realm, inner: *@import("../object.zig").JSObject, outer: *@import("../object.zig").JSObject) !void {
+    const interp = @import("../interpreter.zig");
+    switch (inner.promise_state) {
+        .fulfilled => try realm.enqueuePromiseReaction(Value.undefined_, inner.promise_value, heap_mod.taggedObject(outer), false),
+        .rejected => try realm.enqueuePromiseReaction(Value.undefined_, inner.promise_value, heap_mod.taggedObject(outer), true),
+        .pending => try inner.promise_reactions.append(realm.allocator, .{
+            .on_fulfilled = Value.undefined_,
+            .on_rejected = Value.undefined_,
+            .result_promise = heap_mod.taggedObject(outer),
+        }),
+        .none => {
+            // Treated as plain object — defensive; shouldn't happen.
+            interp.settlePromiseInternal(realm, outer, .fulfilled, heap_mod.taggedObject(inner)) catch return error.OutOfMemory;
+        },
+    }
 }
 
 fn promiseRejectImpl(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -573,9 +639,18 @@ fn promiseResolve(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // For the built-in Promise constructor, the fast path
     // produces an internally-tagged result; for user constructors
     // we go through NewPromiseCapability so the executor's
-    // resolve receives `v`.
+    // resolve receives `v`. A thenable / Promise resolution must
+    // still walk §27.2.1.3.2 — synthesize a pending Promise and
+    // route through the spec resolve function.
     const builtin_promise = heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_);
     if (builtin_promise != null and ctor == builtin_promise.?) {
+        if (heap_mod.valueAsPlainObject(v)) |_| {
+            const pending = allocatePromiseFor(realm, ctor, .pending, Value.undefined_) catch return error.OutOfMemory;
+            const target = heap_mod.valueAsPlainObject(pending).?;
+            const resolve_args = [_]Value{v};
+            _ = try promiseResolveImpl(realm, heap_mod.taggedObject(target), &resolve_args);
+            return pending;
+        }
         return allocatePromiseFor(realm, ctor, .fulfilled, v) catch return error.OutOfMemory;
     }
     const cap = try newPromiseCapability(realm, ctor);
