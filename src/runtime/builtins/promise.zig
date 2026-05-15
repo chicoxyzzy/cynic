@@ -465,44 +465,73 @@ fn boundResolveTrampoline(realm: *Realm, this_value: Value, args: []const Value)
 }
 
 fn promiseThen(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    // §27.2.5.4 PerformPromiseThen — register a reaction that
-    // fires when the source Promise settles. The returned
-    // Promise is settled by the reaction's outcome:
-    // • handler returns plain v → result fulfilled with v.
-    // • handler returns Promise → result mirrors that Promise.
-    // • handler throws → result rejected.
-    // • handler absent → propagate state/value.
-    // For already-settled sources we still go through the
-    // microtask queue (per spec — handlers always run async).
+    // §27.2.5.4 Promise.prototype.then —
+    //   1. Let promise be the this value.
+    //   2. If IsPromise(promise) is false, throw a TypeError.
+    //   3. Let C be ? SpeciesConstructor(promise, %Promise%).
+    //   4. Let resultCapability be ? NewPromiseCapability(C).
+    //   5. Return PerformPromiseThen(promise, onFulfilled, onRejected, resultCapability).
     const source = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Promise.prototype.then on non-Promise");
     if (!source.isPromise()) return throwTypeError(realm, "Promise.prototype.then on non-Promise");
-    const value = source.promise_value;
+
+    // SpeciesConstructor — read `constructor` from the source.
+    // A null/undefined/non-object constructor throws TypeError
+    // (§7.3.22 step 3). Then read @@species; null/undefined
+    // falls back to %Promise%. A non-constructor S throws.
+    const builtin_promise = heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_) orelse return throwTypeError(realm, "Promise.prototype.then: %Promise% missing");
+    var c_fn: *JSFunction = builtin_promise;
+    const ctor_v = getPropertyChain(realm, source, "constructor") catch return error.NativeThrew;
+    if (!ctor_v.isUndefined()) {
+        if (heap_mod.valueAsFunction(ctor_v)) |c_obj| {
+            const species_v = ctorGetMember(realm, c_obj, "@@species") catch return error.NativeThrew;
+            if (!species_v.isUndefined() and !species_v.isNull()) {
+                const s_fn = heap_mod.valueAsFunction(species_v) orelse return throwTypeError(realm, "Promise.prototype.then: species is not a constructor");
+                if (!s_fn.has_construct or s_fn.is_arrow) return throwTypeError(realm, "Promise.prototype.then: species is not a constructor");
+                c_fn = s_fn;
+            } else {
+                c_fn = c_obj;
+            }
+        } else {
+            return throwTypeError(realm, "Promise.prototype.then: constructor is not an object");
+        }
+    }
 
     const on_fulfilled = argOr(args, 0, Value.undefined_);
     const on_rejected = argOr(args, 1, Value.undefined_);
     const on_fulfilled_fn: Value = if (heap_mod.valueAsFunction(on_fulfilled) != null) on_fulfilled else Value.undefined_;
     const on_rejected_fn: Value = if (heap_mod.valueAsFunction(on_rejected) != null) on_rejected else Value.undefined_;
 
-    const result_promise = allocatePromise(realm, .pending, Value.undefined_) catch return error.OutOfMemory;
-
-    switch (source.promise_state) {
-        .fulfilled => {
-            realm.enqueuePromiseReaction(on_fulfilled_fn, value, result_promise, false) catch return error.OutOfMemory;
-            return result_promise;
-        },
-        .rejected => {
-            realm.enqueuePromiseReaction(on_rejected_fn, value, result_promise, true) catch return error.OutOfMemory;
-            return result_promise;
-        },
-        else => {},
+    // Fast path — built-in %Promise%, no subclass: allocate the
+    // result promise directly without going through user code.
+    if (c_fn == builtin_promise) {
+        const value = source.promise_value;
+        const result_promise = allocatePromise(realm, .pending, Value.undefined_) catch return error.OutOfMemory;
+        switch (source.promise_state) {
+            .fulfilled => realm.enqueuePromiseReaction(on_fulfilled_fn, value, result_promise, false) catch return error.OutOfMemory,
+            .rejected => realm.enqueuePromiseReaction(on_rejected_fn, value, result_promise, true) catch return error.OutOfMemory,
+            else => source.promise_reactions.append(realm.allocator, .{
+                .on_fulfilled = on_fulfilled_fn,
+                .on_rejected = on_rejected_fn,
+                .result_promise = result_promise,
+            }) catch return error.OutOfMemory,
+        }
+        return result_promise;
     }
-    // Pending — register reaction; settlement will fire it.
-    source.promise_reactions.append(realm.allocator, .{
-        .on_fulfilled = on_fulfilled_fn,
-        .on_rejected = on_rejected_fn,
-        .result_promise = result_promise,
-    }) catch return error.OutOfMemory;
-    return result_promise;
+
+    // Subclass path — NewPromiseCapability(C). The capability's
+    // resolve/reject become the settlement edges.
+    const cap = try newPromiseCapability(realm, c_fn);
+    const value = source.promise_value;
+    switch (source.promise_state) {
+        .fulfilled => realm.enqueuePromiseReaction(on_fulfilled_fn, value, cap.promise, false) catch return error.OutOfMemory,
+        .rejected => realm.enqueuePromiseReaction(on_rejected_fn, value, cap.promise, true) catch return error.OutOfMemory,
+        else => source.promise_reactions.append(realm.allocator, .{
+            .on_fulfilled = on_fulfilled_fn,
+            .on_rejected = on_rejected_fn,
+            .result_promise = cap.promise,
+        }) catch return error.OutOfMemory,
+    }
+    return cap.promise;
 }
 
 fn promiseCatch(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
