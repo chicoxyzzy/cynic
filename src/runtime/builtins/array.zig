@@ -491,15 +491,27 @@ pub fn deletePropertyOrThrow(realm: *Realm, obj: *JSObject, key: []const u8) Nat
 fn arrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
     const target = argOr(args, 0, Value.undefined_);
-    // §23.1.3.16 step 1-7 — handle fromIndex BEFORE clamping
-    // length so a fromIndex of +∞ short-circuits to -1 even when
-    // the array's length exceeds our 16M iteration cap.
-    const raw_len = try toLengthOf(realm, obj);
+    // §23.1.3.16 step 1-7 — clamp `len` at 2^53 - 1 per §7.1.20
+    // ToLength. Don't apply Cynic's 16M iteration cap here; a
+    // huge `length` with a `fromIndex` near MAX_SAFE_INTEGER is
+    // bounded by the (small) iteration window — the runtime cap
+    // applies only to the *effective* loop count below.
+    var raw_len = try toLengthOf(realm, obj);
     if (raw_len <= 0) return Value.fromInt32(-1);
+    const safe_max: i64 = (1 << 53) - 1;
+    if (raw_len > safe_max) raw_len = safe_max;
     const start = (try startIndexFrom(realm, args, raw_len)) orelse return Value.fromInt32(-1);
-    const len = try intrinsics.clampArrayLengthR(realm, raw_len);
+    // Apply the iteration cap to the *window* (start..len), not
+    // to `len` itself. Fixtures like `length-near-integer-limit`
+    // sit at len=2^53-1 with fromIndex=len-3; the loop touches
+    // 3 indices and we shouldn't refuse it.
+    if (raw_len - start > max_iter_length) {
+        const ex = intrinsics.newRangeError(realm, "Array length window exceeds maximum supported") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
     var i: i64 = start;
-    while (i < len) : (i += 1) {
+    while (i < raw_len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         if (!obj.hasProperty(islice)) continue;
@@ -990,8 +1002,10 @@ fn toIntPropagating(realm: *Realm, v: Value) NativeError!i64 {
 fn arrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
     const target = argOr(args, 0, Value.undefined_);
-    const raw_len = try toLengthOf(realm, obj);
+    var raw_len = try toLengthOf(realm, obj);
     if (raw_len <= 0) return Value.fromInt32(-1);
+    const safe_max: i64 = (1 << 53) - 1;
+    if (raw_len > safe_max) raw_len = safe_max;
     // §23.1.3.20 steps 4-7 — fromIndex handling. Default to
     // `len - 1`. -∞ short-circuits (return -1). Positive values
     // clamp to `len - 1`. Negative values offset from the end;
@@ -1002,10 +1016,16 @@ fn arrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nativ
         if (try sparseReverseSearch(realm, obj, start, target)) |found| return numberFromI64(found);
         return Value.fromInt32(-1);
     }
-    const len = try intrinsics.clampArrayLengthR(realm, raw_len);
-    // Iteration cap can't truncate above `start` — but if the
-    // raw length exceeded the cap, `start` might too. Clamp.
-    var i: i64 = if (start >= len) len - 1 else start;
+    // Bound the linear loop on the [0, start] window. With a
+    // `len` near MAX_SAFE_INTEGER and `start` near it too, the
+    // window may still exceed the runtime cap — refuse it
+    // explicitly rather than spinning.
+    if (start + 1 > max_iter_length) {
+        const ex = intrinsics.newRangeError(realm, "Array length window exceeds maximum supported") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
+    var i: i64 = start;
     while (i >= 0) : (i -= 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
