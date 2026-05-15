@@ -747,8 +747,15 @@ pub const JSObject = struct {
                 if (num < 0) return false;
                 const idx_u: usize = @intFromFloat(num);
                 const buf = tv.viewed.array_buffer orelse return false;
-                if (idx_u >= tv.length) return false;
+                // §10.4.5.16 IsValidIntegerIndex — for a length-
+                // tracking view, the live length is recomputed from
+                // the current buffer size; otherwise use `tv.length`.
                 const elem_size = tv.kind.elementSize();
+                const live_len: usize = if (tv.length_tracking) blk: {
+                    if (tv.byte_offset > buf.len) break :blk 0;
+                    break :blk (buf.len - tv.byte_offset) / elem_size;
+                } else tv.length;
+                if (idx_u >= live_len) return false;
                 if (tv.byte_offset + (idx_u + 1) * elem_size > buf.len) return false;
                 return true;
             }
@@ -1106,13 +1113,20 @@ pub const TypedView = struct {
     /// `viewed.array_buffer`. Borrowed pointer.
     viewed: *JSObject,
     byte_offset: usize,
-    /// Number of *elements* in the view (not bytes).
+    /// Number of *elements* in the view (not bytes). Snapshot
+    /// taken at construction time for fixed-length views;
+    /// ignored when `length_tracking` is true (the live length
+    /// is computed against the backing buffer).
     length: usize,
     /// §23.2 [[TypedArrayName]] — the string name returned by
     /// `%TypedArray%.prototype[@@toStringTag]`. Stored as a
     /// static string slice so Uint8Array vs Uint8ClampedArray
     /// (which share `kind = .uint8`) can be told apart.
     name: []const u8 = "",
+    /// §10.4.5 [[ArrayLength]] = auto — set when the TypedArray
+    /// was constructed without an explicit `length` argument over
+    /// a resizable ArrayBuffer. The length floats with the buffer.
+    length_tracking: bool = false,
 };
 
 /// `[[DataView]]` (§25.3.1) — a view over an ArrayBuffer
@@ -1124,7 +1138,14 @@ pub const DataView = struct {
     /// Source ArrayBuffer.
     viewed: *JSObject,
     byte_offset: usize,
+    /// Snapshot taken at construction. Ignored when
+    /// `length_tracking` is true; live byte length is then
+    /// computed against the backing buffer.
     byte_length: usize,
+    /// §25.3.1 [[ByteLength]] = auto — set when the DataView was
+    /// constructed without an explicit `byteLength` argument
+    /// over a resizable ArrayBuffer.
+    length_tracking: bool = false,
 };
 
 /// One user-level `.then` reaction queued on a pending

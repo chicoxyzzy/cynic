@@ -607,14 +607,24 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
 
                     const remaining = ab.len - byte_offset;
                     var length: usize = remaining / elem_size;
-                    if (args.len > 2 and !args[2].isUndefined()) {
+                    // §23.2.5.1.4 — length argument omitted (or
+                    // undefined) over a resizable buffer creates a
+                    // length-tracking view (§10.4.5 [[ArrayLength]] =
+                    // auto). Over a fixed-length buffer it's just the
+                    // remaining size; the flag stays false.
+                    const length_omitted = !(args.len > 2 and !args[2].isUndefined());
+                    const is_resizable = src.array_buffer_max_byte_length != null;
+                    var length_tracking = false;
+                    if (length_omitted) {
+                        if (is_resizable) length_tracking = true;
+                    } else {
                         const lv = try intrinsics.toNumber(realm, args[2]);
                         const ld: f64 = if (lv.isInt32()) @floatFromInt(lv.asInt32()) else lv.asDouble();
                         if (std.math.isNan(ld) or ld < 0) return throwRangeError(realm, "length out of range");
                         length = @intFromFloat(ld);
                         if (length * elem_size > remaining) return throwRangeError(realm, "view exceeds buffer");
                     }
-                    inst.typed_view = .{ .kind = kind, .viewed = src, .byte_offset = byte_offset, .length = length, .name = ta_name };
+                    inst.typed_view = .{ .kind = kind, .viewed = src, .byte_offset = byte_offset, .length = length, .name = ta_name, .length_tracking = length_tracking };
                     return this_value;
                 }
 
@@ -739,28 +749,31 @@ fn typedArrayLength(realm: *Realm, this_value: Value, args: []const Value) Nativ
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray accessor on non-object");
     const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray.prototype.length called on a non-TypedArray");
-    // §23.2.3.18 step 6 — IsDetachedBuffer → return 0. The stored
-    // length is preserved on the view (post-detach behaviour is
-    // observable only through this getter and `byteLength`).
+    // §23.2.3.18 — IsDetachedBuffer or IsTypedArrayOutOfBounds
+    // → return 0. For a length-tracking view, the current length
+    // is recomputed against the live buffer.
     if (tv.viewed.array_buffer == null) return Value.fromInt32(0);
-    return Value.fromInt32(@intCast(tv.length));
+    if (taIsOutOfBounds(tv)) return Value.fromInt32(0);
+    return Value.fromInt32(@intCast(taCurrentLength(tv)));
 }
 
 fn typedArrayByteLength(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray accessor on non-object");
     const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray.prototype.byteLength called on a non-TypedArray");
-    // §23.2.3.2 step 5 — IsDetachedBuffer → return 0.
+    // §23.2.3.2 — IsDetachedBuffer or IsTypedArrayOutOfBounds → 0.
     if (tv.viewed.array_buffer == null) return Value.fromInt32(0);
-    return Value.fromInt32(@intCast(tv.length * tv.kind.elementSize()));
+    if (taIsOutOfBounds(tv)) return Value.fromInt32(0);
+    return Value.fromInt32(@intCast(taCurrentLength(tv) * tv.kind.elementSize()));
 }
 
 fn typedArrayByteOffset(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray accessor on non-object");
     const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray.prototype.byteOffset called on a non-TypedArray");
-    // §23.2.3.3 step 5 — IsDetachedBuffer → return 0.
+    // §23.2.3.3 — IsDetachedBuffer or IsTypedArrayOutOfBounds → 0.
     if (tv.viewed.array_buffer == null) return Value.fromInt32(0);
+    if (taIsOutOfBounds(tv)) return Value.fromInt32(0);
     return Value.fromInt32(@intCast(tv.byte_offset));
 }
 
@@ -1067,9 +1080,25 @@ fn taValidatedView(realm: *Realm, this_value: Value, comptime label: []const u8)
 /// throwing. See `taSafeRead` for that path.
 fn taIsOutOfBounds(tv: ObjMod.TypedView) bool {
     const buf = tv.viewed.array_buffer orelse return true;
+    // §10.4.5 IsTypedArrayOutOfBounds — for a length-tracking
+    // view the only OOB condition is `byte_offset > buf.len`;
+    // any remaining bytes (even zero) keep the view in-bounds.
+    if (tv.length_tracking) return tv.byte_offset > buf.len;
     const elem_size = tv.kind.elementSize();
     const end = tv.byte_offset + tv.length * elem_size;
     return end > buf.len;
+}
+
+/// §10.4.5 [[ArrayLength]] for a possibly-length-tracking view.
+/// Returns the live element count. Caller must have verified
+/// `!taIsOutOfBounds(tv)` already; this routine only computes a
+/// value and does not throw.
+fn taCurrentLength(tv: ObjMod.TypedView) usize {
+    const buf = tv.viewed.array_buffer orelse return 0;
+    if (!tv.length_tracking) return tv.length;
+    if (tv.byte_offset > buf.len) return 0;
+    const elem_size = tv.kind.elementSize();
+    return (buf.len - tv.byte_offset) / elem_size;
 }
 
 
@@ -1086,7 +1115,8 @@ fn taBufOf(tv: ObjMod.TypedView) ?[]u8 {
 /// ES2024 to no longer throw on detached buffers.
 fn taSafeRead(realm: *Realm, tv: ObjMod.TypedView, i: i64) Value {
     const buf = tv.viewed.array_buffer orelse return Value.undefined_;
-    if (i < 0 or i >= @as(i64, @intCast(tv.length))) return Value.undefined_;
+    const cur_len = taCurrentLength(tv);
+    if (i < 0 or i >= @as(i64, @intCast(cur_len))) return Value.undefined_;
     const elem_size = tv.kind.elementSize();
     const off = tv.byte_offset + @as(usize, @intCast(i)) * elem_size;
     // §10.4.5 IntegerIndexedExoticObject — if the backing store
@@ -1098,10 +1128,11 @@ fn taSafeRead(realm: *Realm, tv: ObjMod.TypedView, i: i64) Value {
     return readTypedElement(realm, buf, tv.kind, off);
 }
 
-/// §10.4.5 — "live" length. After detach, fixed-length typed
-/// arrays keep their stored `[[ArrayLength]]` but their reads
-/// return undefined; the loop length is the stored value.
+/// §10.4.5 — "live" length used by iterators. For fixed-length
+/// views this is the stored `[[ArrayLength]]`; for length-
+/// tracking views it's the current count under the buffer.
 fn taLiveLength(tv: ObjMod.TypedView) i64 {
+    if (tv.length_tracking) return @intCast(taCurrentLength(tv));
     return @intCast(tv.length);
 }
 
@@ -1115,6 +1146,11 @@ fn taInBoundsLength(tv: ObjMod.TypedView) usize {
     if (tv.byte_offset >= buf.len) return 0;
     const elem_size = tv.kind.elementSize();
     const avail_elems = (buf.len - tv.byte_offset) / elem_size;
+    // §10.4.5 — length-tracking views always report the live
+    // available element count; fixed-length views are clamped to
+    // their stored `tv.length` (shrinks below it stay safe, even
+    // though IsTypedArrayOutOfBounds usually catches that case).
+    if (tv.length_tracking) return avail_elems;
     return @min(tv.length, avail_elems);
 }
 
@@ -1855,14 +1891,21 @@ fn dataViewConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
 
     const length_arg = argOr(args, 2, Value.undefined_);
     var byte_length: usize = undefined;
+    // §25.3.2.1 — `byteLength` omitted over a resizable buffer
+    // creates a length-tracking DataView; the live byte length
+    // is `bufLen - byte_offset` (re-resolved on every access),
+    // and going out of bounds throws TypeError on the accessor.
+    var length_tracking = false;
+    const is_resizable_dv = buf_obj.array_buffer_max_byte_length != null;
     if (length_arg.isUndefined()) {
         byte_length = buf1.len - byte_offset;
+        if (is_resizable_dv) length_tracking = true;
     } else {
         byte_length = try dvToIndex(realm, length_arg);
         const buf2 = buf_obj.array_buffer orelse return throwTypeError(realm, "DataView: ArrayBuffer detached during construction");
         if (byte_offset > buf2.len or byte_length > buf2.len - byte_offset) return throwRangeError(realm, "DataView: byteLength exceeds buffer");
     }
-    inst.data_view = .{ .viewed = buf_obj, .byte_offset = byte_offset, .byte_length = byte_length };
+    inst.data_view = .{ .viewed = buf_obj, .byte_offset = byte_offset, .byte_length = byte_length, .length_tracking = length_tracking };
     return this_value;
 }
 
@@ -1934,16 +1977,29 @@ fn dvOf(this_value: Value) ?ObjMod.DataView {
 fn dataViewByteLength(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const dv = dvOf(this_value) orelse return throwTypeError(realm, "DataView accessor on non-DataView");
-    // §25.3.4.1 step 6 — throw if buffer is detached.
-    if (dv.viewed.array_buffer == null) return throwTypeError(realm, "DataView: buffer is detached");
+    // §25.3.4.1 — detached or OOB → TypeError. For a length-
+    // tracking DataView the live byte length is recomputed from
+    // the current buffer; the view is OOB only when its
+    // `byte_offset` is past the end of the buffer.
+    const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: buffer is detached");
+    if (dv.length_tracking) {
+        if (dv.byte_offset > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
+        return Value.fromInt32(@intCast(buf.len - dv.byte_offset));
+    }
+    if (dv.byte_offset + dv.byte_length > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
     return Value.fromInt32(@intCast(dv.byte_length));
 }
 
 fn dataViewByteOffset(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const dv = dvOf(this_value) orelse return throwTypeError(realm, "DataView accessor on non-DataView");
-    // §25.3.4.2 step 6 — throw if buffer is detached.
-    if (dv.viewed.array_buffer == null) return throwTypeError(realm, "DataView: buffer is detached");
+    // §25.3.4.2 — detached or OOB → TypeError.
+    const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: buffer is detached");
+    if (dv.length_tracking) {
+        if (dv.byte_offset > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
+    } else if (dv.byte_offset + dv.byte_length > buf.len) {
+        return throwTypeError(realm, "DataView: out-of-bounds");
+    }
     return Value.fromInt32(@intCast(dv.byte_offset));
 }
 
@@ -1972,8 +2028,15 @@ fn dvGetPrologue(realm: *Realm, this_value: Value, args: []const Value, elem_siz
     const off = try dvToIndex(realm, argOr(args, 0, Value.undefined_));
     // step 8 — RequireInternalSlot already done; step 9 — IsDetachedBuffer.
     const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: buffer is detached");
+    // §25.3.1.1 GetViewByteLength — live byte length for length-
+    // tracking views; the stored snapshot for fixed-length ones.
+    // If the view is itself OOB, throw TypeError per spec.
+    const view_byte_len: usize = if (dv.length_tracking) blk: {
+        if (dv.byte_offset > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
+        break :blk buf.len - dv.byte_offset;
+    } else dv.byte_length;
     // step 12-13 — bounds (overflow-safe).
-    if (elem_size > dv.byte_length or off > dv.byte_length - elem_size) {
+    if (elem_size > view_byte_len or off > view_byte_len - elem_size) {
         return throwRangeError(realm, "DataView: byte offset out of bounds");
     }
     return .{ .dv = dv, .buf = buf, .abs_offset = dv.byte_offset + off };
@@ -1990,7 +2053,11 @@ fn dvSetNumPrologue(realm: *Realm, this_value: Value, args: []const Value, elem_
     const off = try dvToIndex(realm, argOr(args, 0, Value.undefined_));
     const num_v = try dvToNumber(realm, argOr(args, 1, Value.undefined_));
     const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: buffer is detached");
-    if (elem_size > dv.byte_length or off > dv.byte_length - elem_size) {
+    const view_byte_len: usize = if (dv.length_tracking) blk: {
+        if (dv.byte_offset > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
+        break :blk buf.len - dv.byte_offset;
+    } else dv.byte_length;
+    if (elem_size > view_byte_len or off > view_byte_len - elem_size) {
         return throwRangeError(realm, "DataView: byte offset out of bounds");
     }
     const d: f64 = if (num_v.isInt32()) @floatFromInt(num_v.asInt32()) else num_v.asDouble();
@@ -2130,7 +2197,11 @@ fn dataViewSetBigInt64(realm: *Realm, this_value: Value, args: []const Value) Na
     const off = try dvToIndex(realm, argOr(args, 0, Value.undefined_));
     const i = try dvToBigInt64(realm, argOr(args, 1, Value.undefined_));
     const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: buffer is detached");
-    if (8 > dv.byte_length or off > dv.byte_length - 8) return throwRangeError(realm, "DataView: byte offset out of bounds");
+    const vbl: usize = if (dv.length_tracking) blk: {
+        if (dv.byte_offset > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
+        break :blk buf.len - dv.byte_offset;
+    } else dv.byte_length;
+    if (8 > vbl or off > vbl - 8) return throwRangeError(realm, "DataView: byte offset out of bounds");
     dvWriteEndian(i64, buf, dv.byte_offset + off, i, dvLittleEndian(args, 2));
     return Value.undefined_;
 }
@@ -2139,7 +2210,11 @@ fn dataViewSetBigUint64(realm: *Realm, this_value: Value, args: []const Value) N
     const off = try dvToIndex(realm, argOr(args, 0, Value.undefined_));
     const i = try dvToBigInt64(realm, argOr(args, 1, Value.undefined_));
     const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: buffer is detached");
-    if (8 > dv.byte_length or off > dv.byte_length - 8) return throwRangeError(realm, "DataView: byte offset out of bounds");
+    const vbl: usize = if (dv.length_tracking) blk: {
+        if (dv.byte_offset > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
+        break :blk buf.len - dv.byte_offset;
+    } else dv.byte_length;
+    if (8 > vbl or off > vbl - 8) return throwRangeError(realm, "DataView: byte offset out of bounds");
     const u: u64 = @bitCast(i);
     dvWriteEndian(u64, buf, dv.byte_offset + off, u, dvLittleEndian(args, 2));
     return Value.undefined_;
@@ -2421,8 +2496,14 @@ pub fn typedArrayDefineOwnProperty(
     if (num < 0) return .reject;
     const idx: usize = @intFromFloat(num);
     const buf = tv.viewed.array_buffer orelse return .reject;
-    if (idx >= tv.length) return .reject;
+    // §10.4.5.16 IsValidIntegerIndex — live length for length-
+    // tracking views; otherwise the stored `[[ArrayLength]]`.
     const elem_size = tv.kind.elementSize();
+    const live_len: usize = if (tv.length_tracking) blk: {
+        if (tv.byte_offset > buf.len) break :blk 0;
+        break :blk (buf.len - tv.byte_offset) / elem_size;
+    } else tv.length;
+    if (idx >= live_len) return .reject;
     if (tv.byte_offset + (idx + 1) * elem_size > buf.len) return .reject;
     if (is_accessor) return .reject;
     if (has_configurable and !configurable) return .reject;
@@ -2462,8 +2543,14 @@ pub fn typedArrayGetOwnPropertyValue(realm: *Realm, obj: *JSObject, num: f64) ?V
     if (num < 0) return null;
     const idx: usize = @intFromFloat(num);
     const buf = tv.viewed.array_buffer orelse return null;
-    if (idx >= tv.length) return null;
+    // §10.4.5.2 + §10.4.5.16 — live length for length-tracking
+    // views; otherwise the stored `[[ArrayLength]]`.
     const elem_size = tv.kind.elementSize();
+    const live_len: usize = if (tv.length_tracking) blk: {
+        if (tv.byte_offset > buf.len) break :blk 0;
+        break :blk (buf.len - tv.byte_offset) / elem_size;
+    } else tv.length;
+    if (idx >= live_len) return null;
     if (tv.byte_offset + (idx + 1) * elem_size > buf.len) return null;
     return readTypedElement(realm, buf, tv.kind, tv.byte_offset + idx * elem_size);
 }
