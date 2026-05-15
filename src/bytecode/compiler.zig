@@ -1216,25 +1216,16 @@ pub const Compiler = struct {
                     try self.builder.emitU8(r_key);
                     continue;
                 }
-                const key_slice = switch (p.key) {
-                    .ident => |span| try self.decodeIdentifierName(self.source[span.start..span.end]),
-                    .string => |span| inner: {
-                        // Strip surrounding quotes — string-literal keys
-                        // include the quote bytes in their span. later
-                        // will decode escape sequences here too.
-                        const raw = self.source[span.start..span.end];
-                        if (raw.len < 2) return error.UnsupportedExpression;
-                        break :inner raw[1 .. raw.len - 1];
-                    },
-                    // §13.2.5.5 PropertyDefinitionEvaluation —
-                    // `{0: x}` evaluates the literal and ToPropertyKey-
-                    // coerces. For integer literals the canonical
-                    // string form equals the source text; floats /
-                    // exponents canonicalize differently but are
-                    // rare in test262 fixtures.
-                    .numeric => |span| self.source[span.start..span.end],
-                    else => return error.UnsupportedExpression, // private
-                };
+                // §13.2.5.5 PropertyDefinitionEvaluation —
+                // `{0: x}` / `{"a\tb": x}` evaluates the literal
+                // and ToPropertyKey-coerces; ESCAPES in string
+                // keys are decoded, and numeric keys take their
+                // §6.1.6.1.13 Number::toString canonical form
+                // (e.g. `0x10` → `"16"`, `1e3` → `"1000"`).
+                const key_slice = if (p.key == .private)
+                    return error.UnsupportedExpression
+                else
+                    try self.decodePropertyKeyName(p.key);
                 // §B.3.1 — `{ __proto__: v }` (with a non-computed
                 // `__proto__` key, no shorthand): if `v` is Object
                 // or Null, set [[Prototype]]; otherwise no-op. Do
@@ -1318,16 +1309,10 @@ pub const Compiler = struct {
                     }
                     continue;
                 }
-                const key_slice = switch (m.key) {
-                    .ident => |span| try self.decodeIdentifierName(self.source[span.start..span.end]),
-                    .string => |span| inner: {
-                        const raw = self.source[span.start..span.end];
-                        if (raw.len < 2) return error.UnsupportedExpression;
-                        break :inner raw[1 .. raw.len - 1];
-                    },
-                    .numeric => |span| self.source[span.start..span.end],
-                    else => return error.UnsupportedExpression,
-                };
+                const key_slice = if (m.key == .private)
+                    return error.UnsupportedExpression
+                else
+                    try self.decodePropertyKeyName(m.key);
                 const k = try self.internString(key_slice);
                 // §15.5.6.4 — accessor `.name` is the property
                 // key prefixed with `get ` / `set `; the bare
@@ -1410,6 +1395,65 @@ pub const Compiler = struct {
     /// `key_slice` unchanged when there are no escapes.
     /// Allocations come from the realm's class arena (lifetime
     /// matches compiled chunks).
+    /// Decode a string-literal property-key span (`"…"` or `'…'`).
+    /// Strips the surrounding quotes and runs §12.8.4 escape decoding
+    /// so `"a\tb"` produces the key `"a\tb"` (tab char), not the
+    /// six-byte source slice. Returned slice lives in the realm's
+    /// class arena when escapes are present; otherwise it points
+    /// back into `self.source`.
+    fn decodeStringKey(self: *Compiler, key_span_slice: []const u8) CompileError![]const u8 {
+        if (key_span_slice.len < 2) return error.UnsupportedExpression;
+        const inner = key_span_slice[1 .. key_span_slice.len - 1];
+        if (std.mem.indexOfScalar(u8, inner, '\\') == null) return inner;
+        const arena = self.realm.classAllocator();
+        return decodeStringContent(arena, inner) catch return error.UnsupportedExpression;
+    }
+
+    /// §6.1.6.1.13 Number::toString applied to a NumericLiteral's
+    /// source spelling. `class C { get 0x10() {} }` exposes the
+    /// property under the canonical decimal form `"16"`, not the
+    /// raw `"0x10"` source span. Mirrors the formatting in
+    /// `intrinsics.stringifyArg`'s double / int32 path.
+    fn canonicalNumericKey(self: *Compiler, src_slice: []const u8) CompileError![]const u8 {
+        const arena = self.realm.classAllocator();
+        // BigInt literal — strip trailing `n` and format as decimal.
+        if (src_slice.len > 0 and src_slice[src_slice.len - 1] == 'n') {
+            const bi = parseBigIntLiteral(src_slice[0 .. src_slice.len - 1]) catch return error.UnsupportedExpression;
+            return std.fmt.allocPrint(arena, "{d}", .{bi}) catch return error.OutOfMemory;
+        }
+        const d = parseNumericLiteral(src_slice) catch return error.UnsupportedExpression;
+        if (std.math.isNan(d)) return "NaN";
+        if (std.math.isInf(d)) return if (d > 0) "Infinity" else "-Infinity";
+        if (d == 0) return "0";
+        // Integer fast-path — avoid the `1.0` formatting Zig
+        // would otherwise give us for `1` typed as f64.
+        if (asExactSmi(d)) |smi| {
+            return std.fmt.allocPrint(arena, "{d}", .{smi}) catch return error.OutOfMemory;
+        }
+        const a = @abs(d);
+        if (a != 0 and (a < 1e-6 or a >= 1e21)) {
+            var buf: [64]u8 = undefined;
+            const raw = std.fmt.bufPrint(&buf, "{e}", .{d}) catch return error.UnsupportedExpression;
+            const normalized = @import("../runtime/intrinsics.zig").normalizeExponentPub(&buf, raw);
+            return arena.dupe(u8, normalized) catch return error.OutOfMemory;
+        }
+        return std.fmt.allocPrint(arena, "{d}", .{d}) catch return error.OutOfMemory;
+    }
+
+    /// Resolve a PropertyKey to its runtime string form. Handles
+    /// identifiers (with `\uXXXX` decoding), string literals
+    /// (quote-strip + §12.8.4 escape decode), and numeric literals
+    /// (§6.1.6.1.13 Number::toString canonicalization, so
+    /// `class C { get 0x10() {} }` lives at `"16"`).
+    fn decodePropertyKeyName(self: *Compiler, key: ast.expression.PropertyKey) CompileError![]const u8 {
+        return switch (key) {
+            .ident => |span| try self.decodeIdentifierName(self.source[span.start..span.end]),
+            .string => |span| try self.decodeStringKey(self.source[span.start..span.end]),
+            .numeric => |span| try self.canonicalNumericKey(self.source[span.start..span.end]),
+            else => error.UnsupportedExpression,
+        };
+    }
+
     fn decodeIdentifierName(self: *Compiler, key_slice: []const u8) CompileError![]const u8 {
         if (std.mem.indexOfScalar(u8, key_slice, '\\') == null) return key_slice;
         const arena = self.realm.classAllocator();
@@ -3789,15 +3833,19 @@ fn compileClassTemplate(
                     fkey_chunk = try compileFieldInitChunk(self, fd.key.computed, fd.span);
                     break :blk "__cynic_computed__";
                 }
-                const raw = methodKeyName(self.source, fd.key) orelse return error.UnsupportedStatement;
                 if (fd.key == .private) {
                     // `#x` — prefix with the class identity. Decode
                     // §12.7.1 escapes so `#\u{6F}` and `#o` share a
                     // single mangled key.
+                    const raw = methodKeyName(self.source, fd.key) orelse return error.UnsupportedStatement;
                     const decoded_raw = try self.decodeIdentifierName(raw);
                     break :blk std.fmt.allocPrint(arena, "{s}{s}", .{ private_prefix, decoded_raw }) catch return error.OutOfMemory;
                 }
-                break :blk raw;
+                // Identifier / string-literal / numeric-literal
+                // class field name — decode escapes / canonicalize
+                // per §6.1.6.1.13 so `class C { 0x10 = 1 }` lives
+                // at `"16"`, `class C { "a\tb" = 1 }` at `"a<TAB>b"`.
+                break :blk try self.decodePropertyKeyName(fd.key);
             };
             const init_chunk: ?ChunkMod.Chunk = if (fd.init) |*init_expr|
                 try compileFieldInitChunk(self, init_expr, fd.span)
@@ -3900,11 +3948,11 @@ fn compileClassTemplate(
                     },
                     // §12.7.1 — `\u…` escapes in IdentifierName decode
                     // to the source character, so `class C { if(){} }`
-                    // installs `if`. String / numeric keys are already
-                    // the PropertyKey value once their literal frame
-                    // is stripped.
-                    .ident => try self.decodeIdentifierName(raw_key),
-                    else => raw_key,
+                    // installs `if`. §12.8.4 escapes in string-literal
+                    // keys decode here too, and numeric literals route
+                    // through §6.1.6.1.13 Number::toString — so
+                    // `class C { get 0x10() {} }` installs `"16"`.
+                    else => try self.decodePropertyKeyName(m.key),
                 };
             };
             // Computed-key constructor check needs to wait for
@@ -5218,16 +5266,7 @@ fn assignToMember(self: *Compiler, m: ast.expression.MemberExpr, span: Span) Com
 /// `.property` element. Mirrors the rules in compileObjectLiteral
 /// (ident decode + string-literal trim).
 fn assignmentPatternKey(self: *Compiler, key: ast.expression.PropertyKey) CompileError![]const u8 {
-    return switch (key) {
-        .ident => |span| try self.decodeIdentifierName(self.source[span.start..span.end]),
-        .string => |span| inner: {
-            const raw = self.source[span.start..span.end];
-            if (raw.len < 2) return error.UnsupportedExpression;
-            break :inner raw[1 .. raw.len - 1];
-        },
-        .numeric => |span| self.source[span.start..span.end],
-        else => return error.UnsupportedExpression,
-    };
+    return self.decodePropertyKeyName(key);
 }
 
 /// `acc = (acc === undefined) ? <default-expr> : acc`.
