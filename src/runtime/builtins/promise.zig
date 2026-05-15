@@ -775,7 +775,15 @@ fn iteratorOpen(realm: *Realm, source_v: Value) NativeError!?IteratorRecord {
     // and the caller falls back. A *present, non-callable*
     // @@iterator (e.g. a number) must throw TypeError per
     // GetIterator step 4 (Call on a non-callable).
-    if (iter_method_v.isUndefined() or iter_method_v.isNull()) return null;
+    // §7.4.2 GetIterator (sync) — null / undefined for the
+    // method means "no iterator". For Promise aggregators
+    // (`Promise.{all,allSettled,any,race}`), the spec calls
+    // GetIterator with no explicit method, so the receiver
+    // must have a callable `@@iterator`; null/undefined is
+    // a TypeError per the iterator-call step.
+    if (iter_method_v.isUndefined() or iter_method_v.isNull()) {
+        return throwTypeError(realm, "iterable's @@iterator is null or undefined");
+    }
     const iter_method = heap_mod.valueAsFunction(iter_method_v) orelse return throwTypeError(realm, "iterable's @@iterator is not callable");
     const iter_outcome = interp.callJSFunction(realm.allocator, realm, iter_method, source_v, &.{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
