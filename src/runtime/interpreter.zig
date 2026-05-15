@@ -1099,30 +1099,44 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
 /// suspension point; `await` inside a module body still uses
 /// the synchronous unwrap from later. Errored modules
 /// re-throw on subsequent loads.
+/// §16.2.1.5 load outcome — pair a Value with a flag telling the
+/// caller whether it's the module namespace (`threw = false`) or
+/// an exception (`threw = true`). Without the flag, TypeError
+/// objects (e.g. "module not found") would tunnel through the
+/// `valueAsPlainObject != null` check and be misclassified as
+/// successful namespaces — fixtures under
+/// `language/expressions/dynamic-import/catch/*` rely on the
+/// rejected-Promise path firing for missing-file and errored-
+/// module specifiers.
+pub const LoadModuleOutcome = struct {
+    value: Value,
+    threw: bool,
+};
+
 pub fn loadModule(
     allocator: std.mem.Allocator,
     realm: *Realm,
     specifier: []const u8,
     base_url: ?[]const u8,
-) RunError!Value {
+) RunError!LoadModuleOutcome {
     const ModuleRecord = @import("module.zig").ModuleRecord;
     const loader = realm.module_loader orelse {
         const ex = try makeTypeError(realm, "no module loader installed");
-        return ex; // caller checks; we encode the type-error in acc and rely on the call site to throw
+        return .{ .value = ex, .threw = true };
     };
 
     const result = loader(realm, specifier, base_url) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.ModuleNotFound => return makeTypeError(realm, "module not found"),
-        error.ModuleLoadError => return makeTypeError(realm, "module load failed"),
+        error.ModuleNotFound => return .{ .value = try makeTypeError(realm, "module not found"), .threw = true },
+        error.ModuleLoadError => return .{ .value = try makeTypeError(realm, "module load failed"), .threw = true },
     };
 
     // Cache lookup.
     if (realm.modules.get(result.url)) |mr| {
         switch (mr.state) {
-            .uninstantiated, .evaluated => return heap_mod.taggedObject(mr.exports),
-            .evaluating => return heap_mod.taggedObject(mr.exports), // cycle: partial ns
-            .errored => return mr.error_value,
+            .uninstantiated, .evaluated => return .{ .value = heap_mod.taggedObject(mr.exports), .threw = false },
+            .evaluating => return .{ .value = heap_mod.taggedObject(mr.exports), .threw = false }, // cycle: partial ns
+            .errored => return .{ .value = mr.error_value, .threw = true },
         }
     }
 
@@ -1143,14 +1157,14 @@ pub fn loadModule(
         mr.state = .errored;
         const ex = makeTypeError(realm, "module parse error") catch return error.OutOfMemory;
         mr.error_value = ex;
-        return ex;
+        return .{ .value = ex, .threw = true };
     };
 
     mr.chunk = compiler_mod.compileModuleAsChunk(realm.allocator, realm, &program, result.source, null, result.url) catch {
         mr.state = .errored;
         const ex = makeTypeError(realm, "module compile error") catch return error.OutOfMemory;
         mr.error_value = ex;
-        return ex;
+        return .{ .value = ex, .threw = true };
     };
     // (chunk constants pinned inside `compileModuleAsChunk`)
 
@@ -1167,12 +1181,12 @@ pub fn loadModule(
     switch (outcome) {
         .value, .yielded => {
             mr.state = .evaluated;
-            return heap_mod.taggedObject(mr.exports);
+            return .{ .value = heap_mod.taggedObject(mr.exports), .threw = false };
         },
         .thrown => |ex| {
             mr.state = .errored;
             mr.error_value = ex;
-            return ex;
+            return .{ .value = ex, .threw = true };
         },
     }
 }
@@ -4326,24 +4340,20 @@ fn runFrames(
                 const spec_v = local_chunk.constants[k];
                 if (!spec_v.isString()) return error.InvalidOpcode;
                 const spec_s: *JSString = @ptrCast(@alignCast(spec_v.asString()));
-                const result = loadModule(allocator, realm, spec_s.bytes, local_chunk.base_url) catch |err| switch (err) {
+                const outcome = loadModule(allocator, realm, spec_s.bytes, local_chunk.base_url) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.InvalidOpcode,
                 };
-                // loadModule returns either the namespace
-                // (success / cycle) or an exception value. For
-                // the later scaffold, we treat any non-
-                // object Value as a thrown exception.
-                if (heap_mod.valueAsPlainObject(result) == null) {
+                if (outcome.threw) {
                     f.ip = ip;
                     f.accumulator = acc;
                     committed = true;
-                    if (!try unwindThrow(allocator, realm, frames, result)) {
-                        return .{ .thrown = result };
+                    if (!try unwindThrow(allocator, realm, frames, outcome.value)) {
+                        return .{ .thrown = outcome.value };
                     }
                     continue;
                 }
-                acc = result;
+                acc = outcome.value;
             },
 
             .dynamic_import => {
@@ -4367,16 +4377,14 @@ fn runFrames(
                     acc = try promise_mod.allocatePromiseFor(realm, null, .rejected, ex);
                 } else {
                     const spec_s: *JSString = @ptrCast(@alignCast(acc.asString()));
-                    const result = loadModule(allocator, realm, spec_s.bytes, local_chunk.base_url) catch |err| switch (err) {
+                    const outcome = loadModule(allocator, realm, spec_s.bytes, local_chunk.base_url) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => return error.InvalidOpcode,
                     };
-                    if (heap_mod.valueAsPlainObject(result) == null) {
-                        // loadModule encoded an exception in the
-                        // return value; wrap in a rejected Promise.
-                        acc = try promise_mod.allocatePromiseFor(realm, null, .rejected, result);
+                    if (outcome.threw) {
+                        acc = try promise_mod.allocatePromiseFor(realm, null, .rejected, outcome.value);
                     } else {
-                        acc = try promise_mod.allocatePromiseFor(realm, null, .fulfilled, result);
+                        acc = try promise_mod.allocatePromiseFor(realm, null, .fulfilled, outcome.value);
                     }
                 }
             },
