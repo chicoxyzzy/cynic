@@ -339,16 +339,21 @@ sampling by `/profile`.
   alloc ~1.6 GiB combined; surfaced by `--top-alloc`). The byte
   trigger keeps RSS bounded (~255 MB peak across 35 GC cycles)
   but the wall-time cost is real.
-  Two shapes:
-  - **`add_inplace` opcode** — compiler detects the `x = x + y`
-    register-rewrite pattern when `x`'s binding isn't captured by
-    any closure; emits an opcode that grows `JSString.bytes` with
-    amortized doubling. Half-day; narrow scope.
+
+  **Cost re-estimate (after sketching):** a "compiler-only
+  `add_inplace`" that only checks closure capture is unsound —
+  intra-function aliasing (`let y = x; x = x + 'a';`) would let
+  `y` observe the mutation. Correctness needs either real alias
+  analysis (~2–3 days, brittle) or ConsString (the right answer):
+
   - **ConsString / ropes** — V8 / JSC style. `JSString` gets a
     `kind` discriminator (`flat` vs `cons (left, right, len)`);
     `concat()` is O(1); first observable use flattens to a single
-    buffer. Cleanest answer but ~412 `.bytes` access sites to
-    audit + plumb a `flatten()` accessor through. Multi-day.
+    buffer. The ~412 `.bytes` access sites get a `flatten()`
+    accessor (mostly mechanical, audit-heavy). Multi-day, no
+    correctness risk because cons-strings are invisible at the
+    JS level. Right answer when the perf cost becomes the
+    bottleneck.
 ## Proper Tail Calls (PTC) — research
 
 ES2015 §10.2.4 + §15.6.1 + §15.10.1 — function calls *in tail
