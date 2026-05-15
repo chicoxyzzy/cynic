@@ -1652,6 +1652,37 @@ test "later: Function.prototype.bind chained" {
     , 10);
 }
 
+test "later: bound function [[Construct]] threads new.target to target (§10.4.1.2)" {
+    // Mirrors built-ins/Function/prototype/bind/instance-construct-newtarget-self-new.js:
+    // `new C()` where C = B.bind() and B = A.bind() — per step 5
+    // of §10.4.1.2 [[Construct]], `SameValue(F, newTarget)`
+    // collapses newTarget to the (fully-unwrapped) target. Inside
+    // A, `new.target` must be A, not undefined.
+    try expectScriptStringWithBuiltins(
+        \\var nt;
+        \\function A() { nt = new.target; }
+        \\var B = A.bind();
+        \\var C = B.bind();
+        \\new C();
+        \\(nt === A) ? "ok" : "no";
+    , "ok");
+}
+
+test "later: Reflect.construct(BoundFn, args, NT) threads explicit newTarget (§10.5.14)" {
+    // Mirrors built-ins/Function/prototype/bind/instance-construct-newtarget-boundtarget.js:
+    // `Reflect.construct(C, [], A)` with C = B.bind(), B = A.bind()
+    // — newTarget is the explicit A, propagates through the bound
+    // chain unchanged, and is observable inside A.
+    try expectScriptStringWithBuiltins(
+        \\var nt;
+        \\function A() { nt = new.target; }
+        \\var B = A.bind();
+        \\var C = B.bind();
+        \\Reflect.construct(C, [], A);
+        \\(nt === A) ? "ok" : "no";
+    , "ok");
+}
+
 test "later: for-in walks own properties" {
     try expectScriptStringWithBuiltins(
         \\const o = { a: 1, b: 2, c: 3 };

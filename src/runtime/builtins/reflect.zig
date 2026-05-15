@@ -608,13 +608,34 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
         return throwTypeError(realm, "Reflect.construct newTarget must be a constructor");
     if (!new_target.has_construct or new_target.is_arrow) return throwTypeError(realm, "Reflect.construct newTarget is not a constructor");
 
+    // §10.4.1.2 [[Construct]] step 5 — walk the *target*'s bound
+    // chain (each layer is an F-frame in the spec recursion) and
+    // collapse newTarget via `SameValue(F, newTarget)` at each
+    // layer. So `Reflect.construct(C, [], C)` with C=B.bind(),
+    // B=A.bind() collapses NT: C→B→A. An NT outside the chain
+    // (e.g. `Reflect.construct(C, [], differentBoundFn)`) is
+    // untouched — so accessors on the supplied NT still fire in
+    // GetPrototypeFromConstructor (matches WeakRef's
+    // prototype-from-newtarget-custom.js).
+    var effective_new_target = new_target;
+    {
+        var cursor_f: *@import("../function.zig").JSFunction = target;
+        while (cursor_f.bound_target) |inner| : (cursor_f = inner) {
+            if (cursor_f == effective_new_target) effective_new_target = inner;
+        }
+    }
+    // Unwrap `target` so the intrinsic-default prototype
+    // resolves against the underlying constructor, not the bound
+    // wrapper (which has no `prototype` slot).
+    var effective_target = target;
+    while (effective_target.bound_target) |inner| : (effective_target = inner) {}
     // §10.1.13 OrdinaryCreateFromConstructor → §10.1.14
     // GetPrototypeFromConstructor — Get(newTarget, "prototype")
     // through the accessor path so a user-installed getter on a
     // bound NewTarget fires (per the WeakRef /
     // FinalizationRegistry / ArrayBuffer
     // `prototype-from-newtarget-*.js` fixtures).
-    const proto_lookup = interpreter.getPrototypeFromConstructor(realm.allocator, realm, new_target, target.prototype) catch |err| switch (err) {
+    const proto_lookup = interpreter.getPrototypeFromConstructor(realm.allocator, realm, effective_new_target, effective_target.prototype) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -629,7 +650,13 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     instance.prototype = resolved_proto;
     const this_arg = heap_mod.taggedObject(instance);
 
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, target, this_arg, ctor_args.items) catch |err| switch (err) {
+    // §10.5.14 [[Construct]] — invoke the target with the supplied
+    // newTarget so `new.target` inside the body reads as that
+    // constructor. `callJSFunctionAsSuper` handles the bound-target
+    // unwrap and threads new_target into the final-target frame
+    // (see the bound-construct fixtures under
+    // built-ins/Function/prototype/bind/instance-construct-*).
+    const outcome = interpreter.callJSFunctionAsSuper(realm.allocator, realm, target, this_arg, ctor_args.items, heap_mod.taggedFunction(effective_new_target)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };

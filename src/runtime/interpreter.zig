@@ -1935,14 +1935,29 @@ pub fn callJSFunctionAsSuper(
     args: []const Value,
     new_target: Value,
 ) RunError!RunResult {
-    // Native / generator / async / bound paths don't observe
-    // new.target via a frame slot — they receive `this` and
-    // args directly. Fall back to the regular call there; the
-    // new_target threading only matters for plain JS-function
-    // bodies (the only ones with a CallFrame).
-    if (callee.bound_target != null or callee.native_callback != null or
-        callee.is_generator or callee.is_async)
-    {
+    // §10.4.1.2 [[Construct]] on a bound function — walk the
+    // bound chain and apply step 5 at each layer:
+    //   `If SameValue(F, newTarget) is true, set newTarget to
+    //    F.[[BoundTargetFunction]]`.
+    // So a `new C()` where C is bound starts with newTarget = C,
+    // collapses to target B, then on B collapses to A, etc.
+    // An explicit `Reflect.construct(C, args, NT)` where NT is
+    // *not* in the chain keeps NT unchanged through the unwrap.
+    if (callee.bound_target != null) {
+        var effective_nt = new_target;
+        var cursor: *JSFunction = callee;
+        while (cursor.bound_target) |inner| : (cursor = inner) {
+            if (heap_mod.valueAsFunction(effective_nt)) |nt_fn| {
+                if (nt_fn == cursor) effective_nt = heap_mod.taggedFunction(inner);
+            }
+        }
+        const unwrapped = try unwrapBoundCall(allocator, callee, this_value, args, true);
+        defer if (unwrapped.owns_args) allocator.free(unwrapped.args);
+        return callJSFunctionAsSuper(allocator, realm, unwrapped.target, this_value, unwrapped.args, effective_nt);
+    }
+    // Native / generator / async paths don't observe new.target
+    // via a frame slot — they receive `this` and args directly.
+    if (callee.native_callback != null or callee.is_generator or callee.is_async) {
         return callJSFunction(allocator, realm, callee, this_value, args);
     }
     const callee_chunk = callee.chunk orelse return error.InvalidOpcode;
@@ -3077,7 +3092,16 @@ fn runFrames(
                     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
                     inst.prototype = resolved_proto;
                     const this_v = heap_mod.taggedObject(inst);
-                    const result = try callJSFunction(allocator, realm, resolved_callee, this_v, unwrapped.args);
+                    // §10.4.1.2 [[Construct]] step 5 — for a
+                    // `new C()` where C is bound, the original
+                    // newTarget *is* C, so the spec's
+                    // `SameValue(F, newTarget)` collapses it to
+                    // target. After fully unwrapping the bind
+                    // chain, the new_target seen inside the
+                    // target body is the unwrapped target itself
+                    // — so `new.target` reads as `A` for
+                    // `new A.bind().bind()()`.
+                    const result = try callJSFunctionAsSuper(allocator, realm, resolved_callee, this_v, unwrapped.args, heap_mod.taggedFunction(resolved_callee));
                     switch (result) {
                         .value, .yielded => |v| {
                             // ConstructResult per §13.3.5.1.1.
