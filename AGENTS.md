@@ -95,6 +95,8 @@ These are project rules — they apply to everyone.
 | Score current conformance | `zig build test262 -- --quiet`; history in [test262-results.md](test262-results.md) |
 | Measure perf (micros) | `zig build bench` (or `/perf`); design in [docs/benchmarking.md](docs/benchmarking.md) |
 | Find a hot function | `tools/profile.sh "<filter>"` (or `/profile`); requires `samply` |
+| See engine memory shape | `zig build test262 -- --filter=<x> --mem-summary --top-alloc=10` (engine-side counters) |
+| Profile allocations with call stacks (macOS) | `xcrun xctrace record --template Allocations --launch -- <path-to-test262-binary> --filter=<x>` |
 | Find spec text | [tc39.es/ecma262](https://tc39.es/ecma262/) |
 | Inspect test262 fixtures | `vendor/test262/test/<area>` |
 
@@ -156,7 +158,18 @@ offending path. Use this to bound a sweep that's at risk of
 hanging the laptop and get a fixture pointer to bisect from.
 Forces `--threads=1`. Complement to `--leak-check`: max-rss
 traps *when* growth crossed the budget, leak-check tells you
-*what* was unfreed). The harness
+*what* was unfreed),
+`--mem-summary` (end-of-sweep one-pager: cumulative bytes
+allocated, max per-fixture charged peak, total GC cycles +
+pause time, avg bytes per fixture. Reads engine-side
+`Heap.bytes_alloc_total` etc. — different signal from RSS
+which includes binary/libc/allocator slack. Forces
+`--threads=1`),
+`--top-alloc=<n>` (top-N fixtures by cumulative bytes
+allocated ≥ 64 KiB. Catches allocate-and-discard thrash that
+`--top-rss` misses — e.g. a fixture with 1 GiB cumulative
+alloc but 10 MiB peak live (all freed by GC) is invisible in
+RSS but obvious here. Forces `--threads=1`). The harness
 scores against the **Cynic-targeted scope**: paths under
 `harness/`, `staging/`, `intl402/`, Annex B language extensions,
 and the browser-era built-ins Cynic doesn't ship are dropped from
