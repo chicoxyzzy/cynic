@@ -90,14 +90,37 @@ pub fn buildClass(
                 return error.HeritageNotConstructor;
             }
             parent_ctor = fn_obj;
-            // Read parent.prototype — if it's an object, use it
-            // as the prototype's [[Prototype]]. If it's null, the
-            // instance proto chain ends at null. Anything else
-            // (e.g. `Foo.prototype = 42`) is rejected by the
-            // spec; we approximate by treating it as null.
-            const parent_proto_v = fn_obj.get("prototype");
+            // §15.7.14 step 7.e — \`Get(superclass, \"prototype\")\`
+            // walks accessors. The parent may have an
+            // \`Object.defineProperty(\..., 'prototype', { get(){} })\`
+            // shape that observes a single read on every extends.
+            // Use the accessor-aware path. A non-null, non-Object
+            // result is a TypeError per step 7.h.
+            const interp = @import("interpreter.zig");
+            const parent_proto_v = if (fn_obj.ownAccessor("prototype")) |acc_pair| blk_acc: {
+                if (acc_pair.getter) |getter| {
+                    const recv = heap_mod.taggedFunction(fn_obj);
+                    const outcome = interp.callJSFunction(realm.allocator, realm, getter, recv, &.{}) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => return error.Propagated,
+                    };
+                    switch (outcome) {
+                        .value, .yielded => |v| break :blk_acc v,
+                        .thrown => |ex| {
+                            realm.pending_exception = ex;
+                            return error.Propagated;
+                        },
+                    }
+                }
+                break :blk_acc Value.undefined_;
+            } else if (fn_obj.prototype) |p| heap_mod.taggedObject(p) else Value.undefined_;
             if (heap_mod.valueAsPlainObject(parent_proto_v)) |po| {
                 parent_proto = po;
+            } else if (!parent_proto_v.isNull() and !parent_proto_v.isUndefined()) {
+                // §15.7.14 step 7.h — \`prototype\` of the parent is
+                // present but not Object or null → TypeError.
+                realm.pending_exception = @import("intrinsics.zig").newTypeError(realm, "Class extends value's 'prototype' is not an object or null") catch return error.OutOfMemory;
+                return error.Propagated;
             }
         } else {
             return error.HeritageNotConstructor;
