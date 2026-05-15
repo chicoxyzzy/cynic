@@ -122,6 +122,31 @@ fn arraySpeciesGetter(realm: *Realm, this_value: Value, args: []const Value) Nat
     return this_value;
 }
 
+/// §10.1.8 [[Get]] applied to a function object — invokes an
+/// own accessor's getter if present, otherwise walks the function's
+/// data-property + proto chain. Used by ArraySpeciesCreate to read
+/// `@@species` off a constructor function where the species slot
+/// is a get-only accessor (e.g. the built-in `Array[@@species]`).
+fn getFunctionMember(realm: *Realm, fn_obj: *JSFunction, key: []const u8) NativeError!Value {
+    if (fn_obj.accessors.get(key)) |acc| {
+        if (acc.getter) |getter| {
+            const outcome = interpreter.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(fn_obj), &[_]Value{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            switch (outcome) {
+                .value, .yielded => |v| return v,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            }
+        }
+        return Value.undefined_;
+    }
+    return fn_obj.get(key);
+}
+
 /// §23.1.3.34 ArraySpeciesCreate(originalArray, length).
 /// 1. isArray = IsArray(originalArray)
 /// 2. If !isArray, return ! ArrayCreate(length).
@@ -137,28 +162,31 @@ fn arraySpeciesGetter(realm: *Realm, this_value: Value, args: []const Value) Nat
 ///
 /// Returns the freshly created array-shaped object.
 pub fn arraySpeciesCreate(realm: *Realm, original: *JSObject, length: i64) NativeError!Value {
-    // Fast path — non-array original, or no user-installed
-    // constructor/species. The vast majority of calls land here.
+    // Fast path — non-array original. Step 2: if isArray is false,
+    // return ArrayCreate(length).
     if (!original.is_array_exotic) return defaultArrayCreate(realm, length);
-    const ctor_v = original.get("constructor");
-    if (ctor_v.isUndefined()) return defaultArrayCreate(realm, length);
-    // §22.1.3 step 4.a — cross-realm `Array` gets normalized away
-    // (Cynic is single-realm by default; the cross-realm carve-out
-    // becomes meaningful only once `$262.createRealm` is exercised).
-    var species_v: Value = Value.undefined_;
+    // Step 3 — Get(originalArray, "constructor"). Use the full
+    // accessor-aware path so a poisoned getter propagates per spec.
+    const ctor_v = try intrinsics.getPropertyChain(realm, original, "constructor");
+    // Step 4 — if IsConstructor(C) true and cross-realm %Array%, set
+    // to undefined. Cynic is single-realm by default, so the
+    // cross-realm carve-out is currently a no-op.
+    // Step 5 — if C is an Object, set C to ? Get(C, @@species); if
+    // null, set C to undefined.
+    var c_v: Value = ctor_v;
     if (heap_mod.valueAsFunction(ctor_v)) |ctor_fn| {
-        species_v = ctor_fn.get("@@species");
+        c_v = try getFunctionMember(realm, ctor_fn, "@@species");
+        if (c_v.isNull()) c_v = Value.undefined_;
     } else if (heap_mod.valueAsPlainObject(ctor_v)) |ctor_obj| {
-        species_v = ctor_obj.get("@@species");
-    } else if (!ctor_v.isUndefined() and !ctor_v.isNull()) {
-        // C is a primitive (e.g. `a.constructor = 1`) — §22.1.3
-        // step 5 says "if C is not Object", which for a primitive
-        // means we fall through to default ArrayCreate.
-        return defaultArrayCreate(realm, length);
-    } else {
-        return defaultArrayCreate(realm, length);
+        c_v = try intrinsics.getPropertyChain(realm, ctor_obj, "@@species");
+        if (c_v.isNull()) c_v = Value.undefined_;
     }
-    if (species_v.isUndefined() or species_v.isNull()) return defaultArrayCreate(realm, length);
+    // Step 6 — if C is undefined, return ArrayCreate(length).
+    if (c_v.isUndefined()) return defaultArrayCreate(realm, length);
+    // Step 7 — if IsConstructor(C) is false, throw a TypeError. A
+    // primitive constructor (e.g. `a.constructor = null` or `= 1`)
+    // lands here; so does an object/function without [[Construct]].
+    const species_v = c_v;
     const species_fn = heap_mod.valueAsFunction(species_v) orelse {
         return throwTypeError(realm, "Array species is not a constructor");
     };
@@ -771,13 +799,14 @@ fn arrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 /// propagated. Symbols → TypeError; objects → ToPrimitive
 /// chain (valueOf / toString / @@toPrimitive) which may throw.
 fn toIntPropagating(realm: *Realm, v: Value) NativeError!i64 {
-    // Symbols never coerce to number — §7.1.4 step 5 throws TypeError.
-    if (heap_mod.valueAsSymbol(v) != null) return throwTypeError(realm, "Cannot convert a Symbol value to a number");
-    const n = intrinsics.coerceToNumber(v);
+    // §7.1.4 ToNumber — invokes toPrimitive for object receivers
+    // (so a throwing `valueOf` / `toString` propagates), and rejects
+    // Symbol / BigInt with TypeError per the abstract op.
+    const n = try intrinsics.toNumber(realm, v);
     const d: f64 = if (n.isInt32()) @floatFromInt(n.asInt32()) else if (n.isDouble()) n.asDouble() else 0;
     if (std.math.isNan(d)) return 0;
-    if (d == std.math.inf(f64)) return std.math.maxInt(i32);
-    if (d == -std.math.inf(f64)) return std.math.minInt(i32);
+    if (d == std.math.inf(f64)) return std.math.maxInt(i64);
+    if (d == -std.math.inf(f64)) return std.math.minInt(i64);
     return @intFromFloat(@trunc(d));
 }
 
@@ -1198,11 +1227,17 @@ fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
 }
 
 fn arrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.1.3.4 step 1-3 — ToObject, then LengthOfArrayLike via the
+    // accessor-aware path so a throwing `length` getter propagates.
     const obj = try toObjectThis(realm, this_value);
-    const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
-    var target: i64 = if (args.len > 0) toInt(args[0]) else 0;
-    var start: i64 = if (args.len > 1) toInt(args[1]) else 0;
-    var end: i64 = if (args.len > 2 and !args[2].isUndefined()) toInt(args[2]) else len;
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
+    // §23.1.3.4 steps 4-8 — ToIntegerOrInfinity on target / start /
+    // end. Each can be an object with a throwing `valueOf` /
+    // `toString` (or a Symbol → TypeError); use the propagating
+    // helper so abrupt completions surface as JS exceptions.
+    var target: i64 = if (args.len > 0) try toIntPropagating(realm, args[0]) else 0;
+    var start: i64 = if (args.len > 1) try toIntPropagating(realm, args[1]) else 0;
+    var end: i64 = if (args.len > 2 and !args[2].isUndefined()) try toIntPropagating(realm, args[2]) else len;
     if (target < 0) target = @max(len + target, 0);
     if (start < 0) start = @max(len + start, 0);
     if (end < 0) end = @max(len + end, 0);
@@ -1212,30 +1247,36 @@ fn arrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) Native
     const count: i64 = @min(end - start, len - target);
     if (count <= 0) return this_value;
 
-    // Direction matters when ranges overlap.
+    // §23.1.3.4 steps 14-18 — HasProperty / Get / Set / Delete on
+    // each visited index. Direction matters when ranges overlap.
+    // Use the accessor-aware `getPropertyChain` so a poisoned
+    // getter on a copied source slot propagates, and fall back to
+    // `Delete` when the source slot is a hole.
     if (start < target and target < start + count) {
-        // Copy backwards.
         var k: i64 = count - 1;
         while (k >= 0) : (k -= 1) {
-            var sb: [24]u8 = undefined;
-            var db: [24]u8 = undefined;
-            const sslice = std.fmt.bufPrint(&sb, "{d}", .{start + k}) catch unreachable;
-            const dslice = std.fmt.bufPrint(&db, "{d}", .{target + k}) catch unreachable;
-            const v = obj.get(sslice);
-            obj.set(realm.allocator, dslice, v) catch return error.OutOfMemory;
+            try copyWithinStep(realm, obj, start + k, target + k);
         }
     } else {
         var k: i64 = 0;
         while (k < count) : (k += 1) {
-            var sb: [24]u8 = undefined;
-            var db: [24]u8 = undefined;
-            const sslice = std.fmt.bufPrint(&sb, "{d}", .{start + k}) catch unreachable;
-            const dslice = std.fmt.bufPrint(&db, "{d}", .{target + k}) catch unreachable;
-            const v = obj.get(sslice);
-            obj.set(realm.allocator, dslice, v) catch return error.OutOfMemory;
+            try copyWithinStep(realm, obj, start + k, target + k);
         }
     }
     return this_value;
+}
+
+fn copyWithinStep(realm: *Realm, obj: *JSObject, src: i64, dst: i64) NativeError!void {
+    var sb: [24]u8 = undefined;
+    var db: [24]u8 = undefined;
+    const sslice = std.fmt.bufPrint(&sb, "{d}", .{src}) catch unreachable;
+    const dslice = std.fmt.bufPrint(&db, "{d}", .{dst}) catch unreachable;
+    if (obj.hasProperty(sslice)) {
+        const v = try getPropertyChain(realm, obj, sslice);
+        obj.set(realm.allocator, dslice, v) catch return error.OutOfMemory;
+    } else {
+        _ = obj.deleteOwn(dslice);
+    }
 }
 
 fn arraySort(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
