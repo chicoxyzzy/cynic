@@ -337,10 +337,30 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) StepOutcome {
     } else if (target.isString()) {
         const s: *@import("../string.zig").JSString = @ptrCast(@alignCast(target.asString()));
         length = @intCast(@min(s.bytes.len, std.math.maxInt(i32)));
+        // §22.1.5.2.1 StringIterator.next — advance by encoded
+        // codepoint length, not by byte. Cynic stores strings as
+        // WTF-8; a leading byte of \`0xxxxxxx\` is 1 byte,
+        // \`110xxxxx\` 2, \`1110xxxx\` 3, \`11110xxx\` 4.
+        // Yielding a multi-byte slice keeps astral codepoints
+        // intact (4-byte WTF-8 sequences). Invalid leading byte
+        // falls back to a single-byte step so we don't loop.
         const start: usize = @intCast(idx);
         if (start < s.bytes.len) {
-            const sub = realm.heap.allocateString(s.bytes[start .. start + 1]) catch return .done;
+            const lead = s.bytes[start];
+            const cp_len: usize = if (lead & 0x80 == 0) 1 else if (lead & 0xE0 == 0xC0) 2 else if (lead & 0xF0 == 0xE0) 3 else if (lead & 0xF8 == 0xF0) 4 else 1;
+            const end = @min(start + cp_len, s.bytes.len);
+            const sub = realm.heap.allocateString(s.bytes[start..end]) catch return .done;
             elem = Value.fromString(sub);
+            // Bump state.idx by codepoint length now; the
+            // tail of arrayLikeIterStep would otherwise bump by 1
+            // and yield the trailing bytes of the same codepoint
+            // on the next step.
+            state.idx = @intCast(end);
+            if (idx >= length) {
+                state.done = true;
+                return .done;
+            }
+            return .{ .step = .{ .idx = idx, .value = elem, .length = length } };
         }
     } else {
         return .done;
