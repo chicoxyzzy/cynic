@@ -529,7 +529,10 @@ fn concatAppend(realm: *Realm, out: *JSObject, value: Value, write_idx: *i64) Na
             try concatWriteOne(realm, out, value, write_idx);
             return;
         };
-        const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(arr));
+        // §23.1.3.2 step 8.d.iii — ? LengthOfArrayLike(E). Must
+        // propagate ToLength throws (e.g. poisoned `length.toString`
+        // on an opted-in non-array spreadable).
+        const len = try intrinsics.clampArrayLengthR(realm, try intrinsics.toLengthOf(realm, arr));
         if (write_idx.* + len > 9007199254740991) {
             return throwTypeError(realm, "concat: result length exceeds 2^53-1");
         }
