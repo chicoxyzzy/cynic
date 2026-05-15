@@ -5472,16 +5472,57 @@ fn runFrames(
                 var key_buf: [64]u8 = undefined;
                 const key_slice = computedKeyToString(key_v, &key_buf);
                 // TypedArray numeric-index write — bypass the
-                // ordinary [[Set]] machinery; §23.2.4.6
-                // SetTypedArrayFromArrayLike writes straight to
-                // the backing buffer.
+                // ordinary [[Set]] machinery; §10.4.5.5
+                // [[Set]] / IntegerIndexedElementSet writes
+                // straight to the backing buffer after the
+                // mandatory type conversion of `value`.
                 if (heap_mod.valueAsPlainObject(recv)) |obj| {
                     if (obj.typed_view) |tv| {
                         if (std.fmt.parseInt(usize, key_slice, 10)) |idx| {
+                            // §10.4.5.13 IntegerIndexedElementSet step 1-2 —
+                            // type coercion runs BEFORE the bounds /
+                            // detached check. A BigInt typed array
+                            // calls ToBigInt(value); every other kind
+                            // calls ToNumber(value). Either coercion
+                            // can throw (Symbol → TypeError; undefined
+                            // → TypeError for BigInt; user valueOf), so
+                            // it must surface before the silent drop on
+                            // an out-of-bounds index.
+                            const coerce_outcome: union(enum) { value: Value, thrown: Value } = if (tv.kind.isBigInt()) blk: {
+                                const r = @import("builtins/bigint.zig").toBigIntValue(realm, acc) catch |err| switch (err) {
+                                    error.OutOfMemory => return error.OutOfMemory,
+                                    else => {
+                                        const ex = consumePendingException(realm) orelse try makeTypeError(realm, "TypedArray element type-coercion failed");
+                                        break :blk .{ .thrown = ex };
+                                    },
+                                };
+                                break :blk .{ .value = r };
+                            } else blk: {
+                                const r = intrinsics_mod.toNumber(realm, acc) catch |err| switch (err) {
+                                    error.OutOfMemory => return error.OutOfMemory,
+                                    error.NativeThrew => {
+                                        const ex = consumePendingException(realm) orelse try makeTypeError(realm, "TypedArray element type-coercion failed");
+                                        break :blk .{ .thrown = ex };
+                                    },
+                                };
+                                break :blk .{ .value = r };
+                            };
+                            const coerced: Value = switch (coerce_outcome) {
+                                .value => |v| v,
+                                .thrown => |ex| {
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    continue;
+                                },
+                            };
                             if (idx < tv.length) {
                                 if (tv.viewed.array_buffer) |buf| {
                                     const elem_size = tv.kind.elementSize();
-                                    intrinsics_mod.writeTypedElement(buf, tv.kind, tv.byte_offset + idx * elem_size, acc);
+                                    intrinsics_mod.writeTypedElement(buf, tv.kind, tv.byte_offset + idx * elem_size, coerced);
                                 }
                             }
                             continue;
