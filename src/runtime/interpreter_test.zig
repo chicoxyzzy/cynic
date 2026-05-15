@@ -3782,6 +3782,23 @@ test "later: assigning to a private method throws TypeError" {
     , "type");
 }
 
+test "later: abrupt static-field initializer halts class definition" {
+    // §15.7.14 step 34 / DefineField — a thrown initializer
+    // aborts ClassDefinitionEvaluation, so later static fields
+    // must not run.
+    try expectScriptStringWithBuiltins(
+        \\let ran_b = false;
+        \\let kind = "none";
+        \\try {
+        \\  class C {
+        \\    static a = (() => { throw new TypeError("boom"); })();
+        \\    static b = (ran_b = true);
+        \\  }
+        \\} catch (e) { kind = (e instanceof TypeError && !ran_b) ? "ok" : "leak"; }
+        \\kind;
+    , "ok");
+}
+
 test "later: assigning to a static private method throws TypeError" {
     try expectScriptStringWithBuiltins(
         \\class C { static #m() {} static assign() { this.#m = 0; } }

@@ -437,7 +437,15 @@ pub fn buildClass(
             };
             switch (outcome) {
                 .value, .yielded => |val| v = val,
-                .thrown => v = Value.undefined_,
+                .thrown => |ex| {
+                    // §15.7.14 step 34 / §10.2.1.3 — an abrupt
+                    // completion during a static field initializer
+                    // aborts ClassDefinitionEvaluation and propagates.
+                    // Subsequent static fields and blocks must NOT
+                    // run.
+                    realm.pending_exception = ex;
+                    return error.Propagated;
+                },
             }
         }
         if (std.mem.startsWith(u8, runtime_name, template.private_prefix)) {
@@ -459,7 +467,16 @@ pub fn buildClass(
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.OutOfMemory,
         };
-        _ = outcome; // discarded — static blocks return undefined
+        switch (outcome) {
+            .value, .yielded => {},
+            .thrown => |ex| {
+                // §15.7.13 ClassStaticBlock — abrupt completion
+                // aborts ClassDefinitionEvaluation; later blocks
+                // must not run.
+                realm.pending_exception = ex;
+                return error.Propagated;
+            },
+        }
     }
 
     return heap_mod.taggedFunction(ctor);
