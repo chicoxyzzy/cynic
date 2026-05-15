@@ -205,6 +205,21 @@ pub fn install(realm: *Realm) !void {
     try intrinsics.installNativeMethod(realm, ta_ctor, "from", typedArrayFrom, 1);
     try intrinsics.installNativeMethod(realm, ta_ctor, "of", typedArrayOf, 0);
 
+    // §23.2.2.4 get %TypedArray% [ @@species ] returns this.
+    // Inherited by every concrete constructor through
+    // `static_parent`, so `Uint8Array[@@species] === Uint8Array`
+    // unless the user overrides it; subclasses pick up the
+    // inherited getter and resolve to the subclass.
+    {
+        const species_getter = try realm.heap.allocateFunctionNative(typedArraySpeciesGetter, 0, "[Symbol.species]");
+        species_getter.proto = realm.intrinsics.function_prototype;
+        const entry = try ta_ctor.accessors.getOrPut(realm.allocator, "@@species");
+        entry.value_ptr.* = .{ .getter = species_getter };
+        try ta_ctor.property_flags.put(realm.allocator, "@@species", .{
+            .writable = false, .enumerable = false, .configurable = true,
+        });
+    }
+
     // %TypedArray% itself isn't a global — `var TypedArray =
     // Object.getPrototypeOf(Int8Array)` fishes it out via the
     // proto chain instead. Pin it on intrinsics for our own use.
@@ -1468,6 +1483,50 @@ fn taMakeNew(realm: *Realm, kind: ObjMod.TypedKind, length: usize) NativeError!*
 /// `@@species` to return a stub constructor — this matters for
 /// `slice` / `filter` / `map` whose spec text invokes
 /// SpeciesCreate so user subclasses interpose.
+/// §23.2.2.4 — `get %TypedArray% [@@species]`.  The getter is
+/// installed on `%TypedArray%` and inherited by every concrete
+/// constructor through `static_parent`, so `Uint8Array[@@species]`
+/// resolves to `Uint8Array` and `MyU8[@@species]` (subclass of
+/// `Uint8Array`) resolves to `MyU8` — exactly what TypedArrayCreate
+/// needs when allocating the destination view of a `map` / `filter`
+/// / `slice` / `subarray`.
+fn typedArraySpeciesGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = args;
+    return this_value;
+}
+
+/// §10.1.8 [[Get]] applied to a function object — invokes an own
+/// accessor's getter if present, otherwise walks the function's
+/// proto chain (via `static_parent` → `proto`) looking for an
+/// inherited accessor before falling through to the data-property
+/// lookup.  Used to read `@@species` off a subclass constructor
+/// where the slot is a getter on `%TypedArray%`.
+fn taGetFunctionMember(realm: *Realm, fn_obj: *JSFunction, key: []const u8) NativeError!Value {
+    var cur: ?*JSFunction = fn_obj;
+    while (cur) |f| {
+        if (f.accessors.get(key)) |acc| {
+            if (acc.getter) |getter| {
+                const interp = @import("../interpreter.zig");
+                const outcome = interp.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(fn_obj), &[_]Value{}) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (outcome) {
+                    .value, .yielded => |v| return v,
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                }
+            }
+            return Value.undefined_;
+        }
+        cur = f.static_parent;
+    }
+    return fn_obj.get(key);
+}
+
 fn taSpeciesCreate(realm: *Realm, exemplar: *JSObject, kind: ObjMod.TypedKind, length: usize) NativeError!*JSObject {
     // §7.3.22 SpeciesConstructor step 1 — Get(exemplar, "constructor").
     const ctor_prop = intrinsics.getPropertyChain(realm, exemplar, "constructor") catch |err| switch (err) {
@@ -1481,7 +1540,7 @@ fn taSpeciesCreate(realm: *Realm, exemplar: *JSObject, kind: ObjMod.TypedKind, l
         const ctor_obj_or_fn = heap_mod.valueAsPlainObject(ctor_prop) orelse blk: {
             if (heap_mod.valueAsFunction(ctor_prop)) |fn_obj| {
                 // Use the function's accessor lookup chain.
-                species_v = fn_obj.get("@@species");
+                species_v = try taGetFunctionMember(realm, fn_obj, "@@species");
                 break :blk @as(?*JSObject, null);
             }
             return throwTypeError(realm, "exemplar.constructor is not an object");
@@ -2039,7 +2098,7 @@ fn taSpeciesCreateSubarray(
     if (!ctor_prop.isUndefined()) {
         const ctor_obj_or_fn = heap_mod.valueAsPlainObject(ctor_prop) orelse blk: {
             if (heap_mod.valueAsFunction(ctor_prop)) |fn_obj| {
-                species_v = fn_obj.get("@@species");
+                species_v = try taGetFunctionMember(realm, fn_obj, "@@species");
                 break :blk @as(?*JSObject, null);
             }
             return throwTypeError(realm, "exemplar.constructor is not an object");
