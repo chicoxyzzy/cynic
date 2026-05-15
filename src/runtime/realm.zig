@@ -212,6 +212,24 @@ pub const Realm = struct {
         };
     }
 
+    /// Variant of `init` that backs heap-side byte payloads
+    /// (`JSString.bytes`, ArrayBuffer slabs) with a separate
+    /// allocator from the realm's struct allocator. Used by the
+    /// test262 harness so per-fixture peaks return to the OS
+    /// between fixtures — see `Heap.initWithBytesAllocator`.
+    pub fn initWithBytesAllocator(
+        allocator: std.mem.Allocator,
+        bytes_allocator: std.mem.Allocator,
+    ) Realm {
+        const heap_ptr = allocator.create(Heap) catch unreachable;
+        heap_ptr.* = Heap.initWithBytesAllocator(allocator, bytes_allocator);
+        return .{
+            .allocator = allocator,
+            .heap = heap_ptr,
+            .owns_heap = true,
+        };
+    }
+
     /// Create a child Realm that shares `parent`'s heap. Used by
     /// `$262.createRealm()` (test262 harness) and by future
     /// ShadowRealm support — both need a fresh set of intrinsics

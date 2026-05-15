@@ -36,19 +36,31 @@ pub const JSString = struct {
     pinned: bool = false,
 
     /// Allocate a new `JSString` whose contents are a copy of `src`.
-    /// The returned pointer and its `bytes` are both owned by
-    /// `allocator`; pair with `deinit`.
-    pub fn init(allocator: std.mem.Allocator, src: []const u8) !*JSString {
-        const owned = try allocator.dupe(u8, src);
-        errdefer allocator.free(owned);
-        const s = try allocator.create(JSString);
+    /// `struct_allocator` owns the `*JSString` header; `bytes_allocator`
+    /// owns the `.bytes` slice. Splitting the two lets the host place
+    /// the (often large) `.bytes` in a real page-returning allocator
+    /// even when the header itself lives in a per-fixture arena —
+    /// `arena.free()` is a no-op and would otherwise pin GC-freed
+    /// string payloads to the arena's resident pages.
+    pub fn init(
+        struct_allocator: std.mem.Allocator,
+        bytes_allocator: std.mem.Allocator,
+        src: []const u8,
+    ) !*JSString {
+        const owned = try bytes_allocator.dupe(u8, src);
+        errdefer bytes_allocator.free(owned);
+        const s = try struct_allocator.create(JSString);
         s.* = .{ .bytes = owned };
         return s;
     }
 
-    pub fn deinit(self: *JSString, allocator: std.mem.Allocator) void {
-        allocator.free(self.bytes);
-        allocator.destroy(self);
+    pub fn deinit(
+        self: *JSString,
+        struct_allocator: std.mem.Allocator,
+        bytes_allocator: std.mem.Allocator,
+    ) void {
+        bytes_allocator.free(self.bytes);
+        struct_allocator.destroy(self);
     }
 
     pub fn length(self: *const JSString) usize {
@@ -68,13 +80,18 @@ pub const JSString = struct {
     /// §13.5.3 / §22.1.3.1 — string concatenation. Allocates a new
     /// `JSString`; the inputs are unmodified. Caller owns the
     /// result and must `deinit` it.
-    pub fn concat(allocator: std.mem.Allocator, a: *const JSString, b: *const JSString) !*JSString {
+    pub fn concat(
+        struct_allocator: std.mem.Allocator,
+        bytes_allocator: std.mem.Allocator,
+        a: *const JSString,
+        b: *const JSString,
+    ) !*JSString {
         const total = a.bytes.len + b.bytes.len;
-        const owned = try allocator.alloc(u8, total);
-        errdefer allocator.free(owned);
+        const owned = try bytes_allocator.alloc(u8, total);
+        errdefer bytes_allocator.free(owned);
         @memcpy(owned[0..a.bytes.len], a.bytes);
         @memcpy(owned[a.bytes.len..], b.bytes);
-        const s = try allocator.create(JSString);
+        const s = try struct_allocator.create(JSString);
         s.* = .{ .bytes = owned };
         return s;
     }
@@ -88,8 +105,8 @@ const testing = std.testing;
 
 test "JSString: init copies the source bytes (no aliasing)" {
     var src_buf = [_]u8{ 'h', 'e', 'l', 'l', 'o' };
-    const s = try JSString.init(testing.allocator, &src_buf);
-    defer s.deinit(testing.allocator);
+    const s = try JSString.init(testing.allocator, testing.allocator, &src_buf);
+    defer s.deinit(testing.allocator, testing.allocator);
 
     // Mutating the source buffer must not affect the JSString.
     src_buf[0] = 'X';
@@ -97,53 +114,53 @@ test "JSString: init copies the source bytes (no aliasing)" {
 }
 
 test "JSString: length matches input slice length" {
-    const s = try JSString.init(testing.allocator, "abc");
-    defer s.deinit(testing.allocator);
+    const s = try JSString.init(testing.allocator, testing.allocator, "abc");
+    defer s.deinit(testing.allocator, testing.allocator);
     try testing.expectEqual(@as(usize, 3), s.length());
 }
 
 test "JSString: empty string round-trips" {
-    const s = try JSString.init(testing.allocator, "");
-    defer s.deinit(testing.allocator);
+    const s = try JSString.init(testing.allocator, testing.allocator, "");
+    defer s.deinit(testing.allocator, testing.allocator);
     try testing.expectEqual(@as(usize, 0), s.length());
     try testing.expect(s.isEmpty());
 }
 
 test "JSString: equals is byte-wise" {
-    const a = try JSString.init(testing.allocator, "foo");
-    defer a.deinit(testing.allocator);
-    const b = try JSString.init(testing.allocator, "foo");
-    defer b.deinit(testing.allocator);
-    const c = try JSString.init(testing.allocator, "bar");
-    defer c.deinit(testing.allocator);
+    const a = try JSString.init(testing.allocator, testing.allocator, "foo");
+    defer a.deinit(testing.allocator, testing.allocator);
+    const b = try JSString.init(testing.allocator, testing.allocator, "foo");
+    defer b.deinit(testing.allocator, testing.allocator);
+    const c = try JSString.init(testing.allocator, testing.allocator, "bar");
+    defer c.deinit(testing.allocator, testing.allocator);
 
     try testing.expect(a.equals(b));
     try testing.expect(!a.equals(c));
 }
 
 test "JSString: concat preserves order and total length" {
-    const a = try JSString.init(testing.allocator, "Hello, ");
-    defer a.deinit(testing.allocator);
-    const b = try JSString.init(testing.allocator, "world!");
-    defer b.deinit(testing.allocator);
+    const a = try JSString.init(testing.allocator, testing.allocator, "Hello, ");
+    defer a.deinit(testing.allocator, testing.allocator);
+    const b = try JSString.init(testing.allocator, testing.allocator, "world!");
+    defer b.deinit(testing.allocator, testing.allocator);
 
-    const ab = try JSString.concat(testing.allocator, a, b);
-    defer ab.deinit(testing.allocator);
+    const ab = try JSString.concat(testing.allocator, testing.allocator, a, b);
+    defer ab.deinit(testing.allocator, testing.allocator);
 
     try testing.expectEqualStrings("Hello, world!", ab.bytes);
     try testing.expectEqual(a.length() + b.length(), ab.length());
 }
 
 test "JSString: concat with empty operands is a no-op-ish copy" {
-    const empty = try JSString.init(testing.allocator, "");
-    defer empty.deinit(testing.allocator);
-    const x = try JSString.init(testing.allocator, "abc");
-    defer x.deinit(testing.allocator);
+    const empty = try JSString.init(testing.allocator, testing.allocator, "");
+    defer empty.deinit(testing.allocator, testing.allocator);
+    const x = try JSString.init(testing.allocator, testing.allocator, "abc");
+    defer x.deinit(testing.allocator, testing.allocator);
 
-    const left = try JSString.concat(testing.allocator, empty, x);
-    defer left.deinit(testing.allocator);
-    const right = try JSString.concat(testing.allocator, x, empty);
-    defer right.deinit(testing.allocator);
+    const left = try JSString.concat(testing.allocator, testing.allocator, empty, x);
+    defer left.deinit(testing.allocator, testing.allocator);
+    const right = try JSString.concat(testing.allocator, testing.allocator, x, empty);
+    defer right.deinit(testing.allocator, testing.allocator);
 
     try testing.expectEqualStrings("abc", left.bytes);
     try testing.expectEqualStrings("abc", right.bytes);

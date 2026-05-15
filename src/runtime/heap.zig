@@ -148,6 +148,15 @@ pub fn isJSObject(v: Value) bool {
 
 pub const Heap = struct {
     allocator: std.mem.Allocator,
+    /// Allocator backing large heap-owned payloads (JSString.bytes,
+    /// ArrayBuffer slabs) that the mark-sweep collector will free
+    /// during `sweep`. Defaults to `allocator`, but hosts running
+    /// many disjoint workloads on top of an `ArenaAllocator` (the
+    /// test262 harness, in particular) override it to a real
+    /// page-returning allocator — `arena.free()` is a no-op, so
+    /// without the split, freed string bytes stay resident inside
+    /// the arena's pages and per-fixture peak RSS never shrinks.
+    bytes_allocator: std.mem.Allocator,
     /// Every live `JSString` allocated through this heap. Sweep
     /// walks this list; allocate appends.
     strings: std.ArrayListUnmanaged(*JSString) = .empty,
@@ -196,6 +205,12 @@ pub const Heap = struct {
     /// finishes. Stop-the-world mark-sweep means we never run
     /// mid-opcode — pointers from native callbacks stay stable.
     allocs_since_gc: u32 = 0,
+    /// Bytes charged since the last `collect`. A workload that
+    /// allocates a small number of huge payloads (`String += big`,
+    /// `new ArrayBuffer(MB)`, …) never trips the count-based
+    /// threshold, so dead intermediates pile up between collects.
+    /// Bytes-based trigger keeps GC firing on data volume too.
+    bytes_since_gc: usize = 0,
     /// Allocation count that triggers a collection. Tunable; the
     /// default is sized so an empty allocating loop runs GC every
     /// few hundred ms at typical `JSObject`/`Environment` sizes.
@@ -203,6 +218,15 @@ pub const Heap = struct {
     /// (the unit-test paths that call `collect` directly do this
     /// when they want full control over when GC fires).
     gc_threshold: u32 = 16384,
+    /// Byte counterpart to `gc_threshold` — collect when the
+    /// charged payload since the last sweep crosses this. 16 MiB
+    /// is loose enough to leave small workloads count-gated while
+    /// catching the property-escapes / huge-string-concat pattern
+    /// (each `result += chunk` charges N bytes; without this,
+    /// 80 += operations on a multi-MB result accumulate hundreds
+    /// of MB of dead intermediates before the count-based trigger
+    /// fires).
+    gc_byte_threshold: usize = 16 * 1024 * 1024,
     /// Sum of bytes charged across `allocateX` callers. Coarse
     /// — counts the dominant payload (string bytes, ArrayBuffer
     /// bytes, register files); approximate for the small headers.
@@ -227,7 +251,17 @@ pub const Heap = struct {
     gc_stats: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) Heap {
-        return .{ .allocator = allocator };
+        return .{ .allocator = allocator, .bytes_allocator = allocator };
+    }
+
+    /// Same as `init` but with a distinct allocator for large heap-
+    /// owned byte payloads (`JSString.bytes`, ArrayBuffer slabs).
+    /// See `bytes_allocator` for the motivation.
+    pub fn initWithBytesAllocator(
+        allocator: std.mem.Allocator,
+        bytes_allocator: std.mem.Allocator,
+    ) Heap {
+        return .{ .allocator = allocator, .bytes_allocator = bytes_allocator };
     }
 
     /// Charge `n` bytes against the heap ceiling. Returns
@@ -241,6 +275,7 @@ pub const Heap = struct {
         const new_total = self.bytes_live +| n;
         if (new_total > self.max_bytes) return error.OutOfMemory;
         self.bytes_live = new_total;
+        self.bytes_since_gc +|= n;
     }
 
     /// Decrease the live byte counter. Idempotent w.r.t. the GC
@@ -252,7 +287,7 @@ pub const Heap = struct {
     /// Free every tracked object and the bookkeeping arrays.
     /// Idempotent — safe to call on a partially-initialized heap.
     pub fn deinit(self: *Heap) void {
-        for (self.strings.items) |s| s.deinit(self.allocator);
+        for (self.strings.items) |s| s.deinit(self.allocator, self.bytes_allocator);
         self.strings.deinit(self.allocator);
         for (self.functions.items) |f| f.deinit(self.allocator);
         self.functions.deinit(self.allocator);
@@ -443,8 +478,8 @@ pub const Heap = struct {
     /// it marked, or when the heap itself is deinit'd.
     pub fn allocateString(self: *Heap, src: []const u8) !*JSString {
         try self.charge(src.len + @sizeOf(JSString));
-        const s = try JSString.init(self.allocator, src);
-        errdefer s.deinit(self.allocator);
+        const s = try JSString.init(self.allocator, self.bytes_allocator, src);
+        errdefer s.deinit(self.allocator, self.bytes_allocator);
         try self.strings.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
@@ -453,8 +488,8 @@ pub const Heap = struct {
     /// Allocate a string that is `a ++ b`, owned by the heap.
     pub fn concatStrings(self: *Heap, a: *const JSString, b: *const JSString) !*JSString {
         try self.charge(a.bytes.len + b.bytes.len + @sizeOf(JSString));
-        const s = try JSString.concat(self.allocator, a, b);
-        errdefer s.deinit(self.allocator);
+        const s = try JSString.concat(self.allocator, self.bytes_allocator, a, b);
+        errdefer s.deinit(self.allocator, self.bytes_allocator);
         try self.strings.append(self.allocator, s);
         return s;
     }
@@ -741,7 +776,7 @@ pub const Heap = struct {
                     s.marked = false;
                 } else {
                     _ = self.strings.swapRemove(i);
-                    s.deinit(self.allocator);
+                    s.deinit(self.allocator, self.bytes_allocator);
                 }
             }
         }
@@ -828,10 +863,11 @@ pub const Heap = struct {
                 }
             }
         }
-        // Reset the allocation pressure counter so the next
+        // Reset the allocation pressure counters so the next
         // collect doesn't fire until fresh allocations cross
-        // the threshold again.
+        // a threshold again.
         self.allocs_since_gc = 0;
+        self.bytes_since_gc = 0;
 
         // Per-cycle diagnostic report — flagged on by the
         // `--gc-stats` test262 harness option (or by hand for

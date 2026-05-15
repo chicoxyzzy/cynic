@@ -744,13 +744,18 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             }
 
-            _ = per_file_arena.reset(.retain_capacity);
+            // §`Heap`: GC frees JSStrings via `allocator.free`, which
+            // on an arena is a no-op — bytes hold their pages until the
+            // arena itself releases. `retain_capacity` would let every
+            // fixture's peak accumulate on the worker; `free_all`
+            // returns pages between fixtures and keeps RSS bounded.
+            _ = per_file_arena.reset(.free_all);
             const arena = per_file_arena.allocator();
 
             const harness_pair: ?harness_mod.HarnessSources = harness_sources;
             const fx_start = if (opts.top_slow > 0) std.Io.Clock.now(.awake, io) else undefined;
             const fx_rss_pre: u64 = if (opts.top_rss > 0) (currentRssMb() orelse 0) else 0;
-            const outcome = try classifyAndRun(arena, io, corpus, rel, opts.mode, harness_pair, opts.gc_threshold, opts.gc_stats);
+            const outcome = try classifyAndRun(arena, gpa, io, corpus, rel, opts.mode, harness_pair, opts.gc_threshold, opts.gc_stats);
             if (opts.top_slow > 0) {
                 const ms_i = fx_start.untilNow(io, .awake).toMilliseconds();
                 const ms_u: u64 = if (ms_i > 0) @intCast(ms_i) else 0;
@@ -1080,12 +1085,12 @@ fn workerLoop(
             continue;
         }
 
-        _ = arena_state.reset(.retain_capacity);
+        _ = arena_state.reset(.free_all);
         const arena = arena_state.allocator();
 
         const fx_start = if (ctx.opts.top_slow > 0) std.Io.Clock.now(.awake, ctx.io) else undefined;
         const fx_rss_pre: u64 = if (ctx.opts.top_rss > 0) (currentRssMb() orelse 0) else 0;
-        const outcome = classifyAndRun(arena, ctx.io, ctx.corpus, rel, ctx.opts.mode, ctx.harness_sources, ctx.opts.gc_threshold, ctx.opts.gc_stats) catch |err| {
+        const outcome = classifyAndRun(arena, ctx.gpa, ctx.io, ctx.corpus, rel, ctx.opts.mode, ctx.harness_sources, ctx.opts.gc_threshold, ctx.opts.gc_stats) catch |err| {
             if (err == error.OutOfMemory) return err;
             try recordOutcome(ctx.gpa, stats, buckets, failures, pass_paths, rel, .{ .kind = .fail_false_reject }, ctx.is_full_run);
             continue;
@@ -1137,6 +1142,11 @@ fn mergeBuckets(dst: *BucketMap, src: *const BucketMap) !void {
 
 fn classifyAndRun(
     arena: std.mem.Allocator,
+    /// Page-returning allocator for large heap-owned byte payloads
+    /// (`JSString.bytes`, ArrayBuffer slabs). The per-fixture arena
+    /// retains capacity, so GC-freed string bytes would otherwise
+    /// pin every fixture's peak inside the worker. Pass `gpa` here.
+    bytes_allocator: std.mem.Allocator,
     io: std.Io,
     corpus: std.Io.Dir,
     rel: []const u8,
@@ -1238,7 +1248,7 @@ fn classifyAndRun(
         return .{ .kind = .fail_false_reject };
     }
 
-    var realm = cynic.runtime.Realm.init(arena);
+    var realm = cynic.runtime.Realm.initWithBytesAllocator(arena, bytes_allocator);
     defer realm.deinit();
     realm.installBuiltins() catch return .{ .kind = .fail_false_reject };
     // Cap each test at a generous opcode budget so an

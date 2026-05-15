@@ -1949,7 +1949,9 @@ fn runFrames(
         // world means we never run mid-opcode, so pointers
         // natives hold across a sub-call stay stable; the
         // check at dispatch top is the natural safe point.
-        if (realm.heap.allocs_since_gc >= realm.heap.gc_threshold) {
+        if (realm.heap.allocs_since_gc >= realm.heap.gc_threshold or
+            realm.heap.bytes_since_gc >= realm.heap.gc_byte_threshold)
+        {
             realm.collectGarbage();
         }
         // Cooperative step budget — saturating decrement, then
