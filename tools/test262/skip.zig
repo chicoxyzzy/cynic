@@ -131,6 +131,14 @@ pub const skip_non_standard_features = [_][]const u8{};
 pub const skip_planned_features = [_][]const u8{
     "regexp-duplicate-named-groups", // ES2025 — libregexp gap.
     "regexp-modifiers", // ES2024 inline `(?i:…)` / `(?-i:…)`.
+    // ES2015 Proper Tail Calls. In the spec since 2015 but only
+    // JavaScriptCore actually ships it — V8 implemented and then
+    // removed (debugging / perf), SpiderMonkey / Hermes / QuickJS /
+    // XS never did. Implementing PTC needs a `tail_call` opcode + a
+    // pass to detect tail position (gated by try/finally / with).
+    // Reasonable lift but unlocks ~35 fixtures; revisit when the
+    // analysis pieces land for a JIT tier.
+    "tail-call-optimization",
 };
 
 pub const skip_planned_paths = [_][]const u8{

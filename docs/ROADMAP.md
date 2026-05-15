@@ -309,9 +309,66 @@ sampling by `/profile`.
   — Zig inlines aggressively but the per-opcode handler structure
   may still leave hot ops behind a function-call boundary. Cheap
   if the disassembly is bad; no-op if it's already inlined.
-- **Tail-call optimization (PTC)** — already on the runtime
-  watchlist for correctness (§14.6.3). Performance win too — deep
-  recursion stops blowing the call stack.
+## Proper Tail Calls (PTC) — research
+
+ES2015 §10.2.4 + §15.6.1 + §15.10.1 — function calls *in tail
+position* (`return f(x)`, the last expression of an arrow body,
+`return cond ? f() : g()`, etc.) MUST reuse the caller's stack
+frame, not push a fresh one. Spec wording is mandatory; in practice
+only **JavaScriptCore** ships it. Reflected in the test262 corpus
+by ~35 fixtures gated on the `tail-call-optimization` feature flag,
+all currently skipped in `tools/test262/skip.zig`.
+
+### Cross-engine status (2026)
+
+| Engine | PTC | Notes |
+|---|---|---|
+| JavaScriptCore | ✅ | Shipped 2016, still in. Bun inherits. |
+| V8 | ❌ | Implemented briefly behind a flag (2016), removed. Cited reasons: lost stack frames break dev-tools / `Error.stack`, hot-path cost on every call site, and the [STC counter-proposal](https://github.com/tc39/proposal-ptc-syntax) wanting explicit `return continue f()` syntax. |
+| SpiderMonkey | ❌ | [Tracking bug](https://bugzilla.mozilla.org/show_bug.cgi?id=1188320) open since 2015. |
+| Hermes / QuickJS / XS / Boa | ❌ | None. |
+
+### What it takes to ship in Cynic
+
+1. **Static tail-position detection** during bytecode compilation.
+   Per §15.10.1, a `CallExpression` is in tail position iff:
+   - It's the `Expression` of a `ReturnStatement`, or
+   - The last expression of an `ArrowFunction` ConciseBody, or
+   - The consequent / alternate of a tail-position conditional, or
+   - Inside a tail-position `,` / `&&` / `||` / `??` right-hand side,
+   *and* not inside a `try` block whose `finally` runs after the
+   call, *not* inside a `with` (Cynic doesn't ship `with` — easier),
+   *not* inside a `for-of` / `for-in` that owes the iterator a
+   `return()` call on early exit (§7.4.6 IteratorClose).
+2. **A `tail_call` bytecode op.** Instead of pushing a new
+   `CallFrame`, the handler overwrites the *current* frame's
+   registers, locals, and chunk pointer in-place with the callee's,
+   then re-enters the dispatch loop. The discipline matches the
+   JSC pattern (`emit_op_tail_call`); the implementation lifts
+   cleanly into Cynic's existing frame-stack-as-`ArrayList` model.
+3. **Cleanup of pending `iter_close` ops at tail-call sites** —
+   PTC must run them *before* the frame is reused, otherwise the
+   open iterators stay open across the call (and the spec says
+   the loop is supposed to close on early exit).
+4. **`Error.stack` impact**: a tail-called function disappears
+   from the chain Cynic threads through `unwindThrow`. Stack
+   traces become harder to read. The decision to ship PTC is
+   partly a decision to give that up; mirroring JSC's tradeoff
+   is the most defensible position.
+
+### Why deferred
+
+- ~35 fixtures of test262 score, small relative to other clusters.
+- The static-analysis machinery (tail-position detection, escape
+  analysis through `try`/`finally`) is *the same machinery* a
+  baseline JIT will want. Building it twice is wasteful.
+- No production demand: edge-runtime workloads don't write
+  deeply-recursive JS by accident, and the SES / Hardened-
+  JavaScript layer above Cynic doesn't require PTC.
+
+Revisit alongside the baseline-JIT scaffolding (Future work
+section), at which point the analysis cost amortises across
+PTC + inline-cache shape guards + dead-store elimination.
 
 ## Future work (post-strict-only-runtime)
 
