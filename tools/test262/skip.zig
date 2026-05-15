@@ -79,6 +79,19 @@ pub const skip_ses_paths = [_][]const u8{
 /// `built-ins/TypedArrayConstructors/{ctors,ctors-bigint,internals}`.
 pub const skip_ses_path_suffixes = [_][]const u8{
     "-sab.js",
+    // `prototype/<method>/resizable-buffer.js` fixtures all load
+    // `harness/resizableArrayBufferUtils.js`, which manufactures
+    // subclass constructors via `new Function('return class … extends …')`.
+    // Cynic's strict-only target permanently bans `new Function(string)`
+    // (AGENTS.md), so the harness's `try/catch` leaves the subclass slots
+    // `undefined`; `ctors.concat(MyUint8Array, MyFloat32Array)` then
+    // injects `undefined` entries into the iteration array and every
+    // `for (let ctor of ctors)` fixture crashes before reaching real
+    // engine behaviour. Verified empty pass set (0/156) at skip time;
+    // the sibling `resizable-array-buffer.js` basename in the getter
+    // buckets does NOT load the same harness and stays attempted
+    // (17 pass / 3 fail at skip time).
+    "resizable-buffer.js",
 };
 
 /// `built-ins/Function/` is a *mixed* bucket — the prototype
@@ -91,6 +104,7 @@ pub const skip_ses_substrings = [_][]const u8{
     "built-ins/Function/15.3.2",
     "built-ins/Function/S15.3.2",
     "built-ins/Function/S15.3.5",
+
     // §27.3.2 GeneratorFunction(string) / §27.4.2 AsyncGenerator
     // Function(string) / §27.7.2 AsyncFunction(string) — same
     // permanent SES carve-out as `new Function(string)`. The
@@ -122,6 +136,17 @@ pub const skip_ses_substrings = [_][]const u8{
 /// SES-aligned out of scope alongside the rest of eval.
 pub const skip_ses_substring_pairs = [_][2][]const u8{
     .{ "/class/elements/", "-eval-" },
+    // `built-ins/Promise/<staticMethod>/ctx-non-ctor.js` —
+    // each fixture asserts `Promise.<m>.call(eval)` throws
+    // TypeError because `eval` is not a constructor. Without
+    // SES's `eval` global the receiver is a ReferenceError,
+    // not a TypeError — the test misclassifies the cause.
+    // Covers `resolve`, `reject`, `all`, `allSettled`, `any`,
+    // `race`, `try`, `withResolvers`. The constructor-arg
+    // path is exercised by the other `ctx-*` siblings (e.g.
+    // `ctx-ctor.js`, `ctx-ctor-throws.js`) which stay
+    // attempted.
+    .{ "built-ins/Promise/", "ctx-non-ctor.js" },
 };
 
 pub const skip_ses_features = [_][]const u8{
@@ -351,6 +376,16 @@ test "skip: SES out of scope" {
     // Non-eval class/elements fixtures stay in scope.
     try testing.expect(!pathIsCynicOutOfScope("language/expressions/class/elements/evaluation-error/computed-name-toprimitive-returns-nonobject.js"));
     try testing.expect(!pathIsCynicOutOfScope("language/statements/class/elements/private-class-field-initialization-is-visible-to-proxy.js"));
+    // `Promise.<m>.call(eval)` ctx-non-ctor cluster — all SES.
+    try testing.expect(pathIsCynicOutOfScope("built-ins/Promise/resolve/ctx-non-ctor.js"));
+    try testing.expect(pathIsCynicOutOfScope("built-ins/Promise/all/ctx-non-ctor.js"));
+    try testing.expect(pathIsCynicOutOfScope("built-ins/Promise/any/ctx-non-ctor.js"));
+    try testing.expect(pathIsCynicOutOfScope("built-ins/Promise/race/ctx-non-ctor.js"));
+    try testing.expect(pathIsCynicOutOfScope("built-ins/Promise/try/ctx-non-ctor.js"));
+    try testing.expect(pathIsCynicOutOfScope("built-ins/Promise/withResolvers/ctx-non-ctor.js"));
+    // Constructor-arg `ctx-*` siblings stay attempted.
+    try testing.expect(!pathIsCynicOutOfScope("built-ins/Promise/try/ctx-ctor.js"));
+    try testing.expect(!pathIsCynicOutOfScope("built-ins/Promise/try/ctx-ctor-throws.js"));
 }
 
 test "skip: main-spec paths not OOS" {
