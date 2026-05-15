@@ -3883,6 +3883,35 @@ test "later: assigning to a private method throws TypeError" {
     , "type");
 }
 
+// ── §15.7.1 ClassDefinitionEvaluation — inner C binding ────────────────────
+
+test "later: methods see the inner immutable C even after outer C is reassigned" {
+    try expectScriptStringWithBuiltins(
+        \\class C { method() { return C; } }
+        \\let cls = C;
+        \\C = null;
+        \\let result = cls.prototype.method();
+        \\result === cls ? "inner" : "leaked";
+    , "inner");
+}
+
+test "later: class with heritage — methods still see the inner C" {
+    try expectScriptStringWithBuiltins(
+        \\class P {}
+        \\class C extends P { method() { return C; } }
+        \\let cls = C;
+        \\C = null;
+        \\cls.prototype.method() === cls ? "inner" : "leaked";
+    , "inner");
+}
+
+test "later: class expression's named inner binding visible to methods" {
+    try expectScriptStringWithBuiltins(
+        \\let cls = class C { method() { return C; } };
+        \\cls.prototype.method() === cls ? "inner" : "leaked";
+    , "inner");
+}
+
 test "later: abrupt static-field initializer halts class definition" {
     // §15.7.14 step 34 / DefineField — a thrown initializer
     // aborts ClassDefinitionEvaluation, so later static fields

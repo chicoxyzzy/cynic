@@ -3796,31 +3796,133 @@ fn compileFunctionDecl(self: *Compiler, fd: ast.statement.FunctionDecl) CompileE
 fn compileClassDecl(self: *Compiler, cd: ast.statement.ClassDecl) CompileError!void {
     const name_slice = self.source[cd.name.span.start..cd.name.span.end];
     const binding = try self.declareBindingFull(name_slice, .let_, cd.name.span);
-    const k = try compileClassTemplate(
-        self,
-        name_slice,
-        if (cd.superclass) |s| &s else null,
-        cd.body,
-        cd.span,
-    );
-    if (cd.superclass) |s| try self.compileExpression(&s);
-    try self.builder.emitOp(.make_class, cd.span);
-    try self.builder.emitU16(k);
+    try self.emitClassBuild(name_slice, if (cd.superclass) |s| &s else null, cd.body, cd.span);
     try self.emitStoreBinding(binding, cd.span);
 }
 
 fn compileClassExpr(self: *Compiler, ce: ast.expression.ClassExpr) CompileError!void {
     const name_slice: ?[]const u8 = if (ce.name) |n| self.source[n.span.start..n.span.end] else null;
-    const k = try compileClassTemplate(
-        self,
-        name_slice,
-        ce.superclass,
-        ce.body,
-        ce.span,
-    );
-    if (ce.superclass) |s| try self.compileExpression(s);
-    try self.builder.emitOp(.make_class, ce.span);
+    try self.emitClassBuild(name_slice, ce.superclass, ce.body, ce.span);
+}
+
+/// §15.7.1 ClassDefinitionEvaluation steps 8 / 27 — establish an
+/// inner declarative environment around the class body so methods
+/// close over a single, *immutable* `C` binding that's distinct
+/// from any outer mutable `C`. Without this scaffolding, a method
+/// like `class C { m() { return C; } }` resolves `C` to whatever
+/// the outer binding happens to hold at call time — and the
+/// outer is mutable, so `C = null; instance.m()` would surface
+/// `null` instead of the original class.
+///
+/// Runtime layout (named-class case):
+///
+///     make_environment 1          // push class-env with 1 slot
+///     [heritage] (if any)         // acc = parent ctor
+///     make_class k                // methods capture class-env
+///     sta_env 0 0                 // class fn → inner C slot
+///     pop_env                     // back to enclosing env
+///
+/// Anonymous class expression: no inner binding to create, so we
+/// skip the env push/pop entirely.
+fn emitClassBuild(
+    self: *Compiler,
+    name_slice: ?[]const u8,
+    superclass: ?*const Expression,
+    body: []ast.statement.ClassMember,
+    span: Span,
+) CompileError!void {
+    const has_inner_name = name_slice != null;
+    if (!has_inner_name) {
+        // Anonymous `class { … }` expression. No `C` to see
+        // from inside — `Function.prototype.toString` gives
+        // the empty name. Skip the inner-env scaffolding.
+        const k = try compileClassTemplate(self, name_slice, superclass, body, span);
+        if (superclass) |s| try self.compileExpression(s);
+        try self.builder.emitOp(.make_class, span);
+        try self.builder.emitU16(k);
+        return;
+    }
+    const name = name_slice.?;
+
+    // Push the inner class scope. `has_own_env=true` so this
+    // scope owns its own slot pool; methods bound inside it
+    // get `env_depth = enclosing+1` and resolve `C` to the
+    // single slot here. Save & reset the function-level
+    // env_slot_count so the slot allocator counts WITHIN the
+    // class env, then restore the outer counter on exit.
+    var class_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = true };
+    defer class_scope.deinit(self.allocator);
+    const saved_scope = self.scope;
+    self.scope = &class_scope;
+    defer self.scope = saved_scope;
+    const saved_env_depth = self.env_depth;
+    defer self.env_depth = saved_env_depth;
+    const saved_slot_count = self.env_slot_count;
+    self.env_slot_count = 0;
+    defer self.env_slot_count = saved_slot_count;
+
+    // §15.7.1 step 8 — `classScopeEnvRec.CreateImmutableBinding
+    // (className, true)`. We model the immutable-ness via the
+    // `const_` BindingKind so the compiler rejects `C = …`
+    // *from inside the class body* at compile time.
+    self.env_depth = saved_env_depth + 1;
+    const inner_slot = try self.declareBinding(name, .const_, span);
+
+    try self.builder.emitOp(.make_environment, span);
+    try self.builder.emitU8(1);
+
+    // Wrap the class-build (heritage eval, make_class with its
+    // field-initializer + computed-key user-code re-entries)
+    // in a synthetic handler that pops the inner env on throw
+    // before rethrowing. Without this, a throwing static-field
+    // initializer (or a throwing computed-key) would propagate
+    // out of the make_class call with `f.env` still pointing
+    // at the inner class env — leaking that env into the
+    // enclosing handler's scope. The handler is emitted with
+    // `is_finally=true` so it doesn't trip the `genReturn`
+    // return-completion path (it's just bookkeeping).
+    const build_start_pc = self.builder.here();
+    // Compile every method / field template inside the inner
+    // scope so they pick `C` up via Scope.resolve.
+    const k = try compileClassTemplate(self, name_slice, superclass, body, span);
+    if (superclass) |s| try self.compileExpression(s);
+    try self.builder.emitOp(.make_class, span);
     try self.builder.emitU16(k);
+    const build_end_pc = self.builder.here();
+    // Store the freshly-minted class function into the inner
+    // `C` slot BEFORE popping the env — depth 0, slot
+    // `inner_slot` (which is always 0 here, but kept symbolic
+    // for clarity).
+    try self.builder.emitOp(.sta_env, span);
+    try self.builder.emitU8(0);
+    try self.builder.emitU8(inner_slot);
+    // Pop the class env. Methods captured the env at
+    // `make_class` time; the JSEnvironment is kept alive
+    // through that capture, so the pop only unlinks the
+    // current frame.
+    try self.builder.emitOp(.pop_env, span);
+    // Jump past the synthetic-throw cleanup handler on the
+    // normal-completion path.
+    try self.builder.emitOp(.jmp, span);
+    const skip_cleanup_patch = self.builder.here();
+    try self.builder.emitI16(0);
+
+    const cleanup_pc = self.builder.here();
+    // The thrown value is deposited in `acc` (catch_register =
+    // null). Pop the leaked inner env first, then rethrow.
+    try self.builder.emitOp(.pop_env, span);
+    try self.builder.emitOp(.throw_, span);
+    try self.builder.addHandler(.{
+        .start_pc = build_start_pc,
+        .end_pc = build_end_pc,
+        .handler_pc = cleanup_pc,
+        .catch_register = null,
+        // Marked `is_finally` so a generator's return-completion
+        // (§27.5.1.3) doesn't get steered AWAY from this cleanup
+        // — the env-pop must always run on the way out.
+        .is_finally = true,
+    });
+    try self.builder.patchI16(skip_cleanup_patch, self.builder.here());
 }
 
 /// Compile a class body — constructor + methods + static methods +
