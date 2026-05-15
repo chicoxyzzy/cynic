@@ -9,11 +9,24 @@ and [`src/runtime/interpreter.zig`](../../src/runtime/interpreter.zig).
 
 Each `Heap.allocateX` (object, function, environment, generator,
 string, symbol, BigInt) increments a per-heap counter
-(`allocs_since_gc`). At the top of the interpreter's dispatch loop —
-the only safe point Cynic has — the loop checks that counter against
-`gc_threshold` (default 16,384). When it crosses, `Realm.collectGarbage`
-walks every root, marks reachable objects, and sweeps the rest.
-`heap.collect` resets the counter at the end.
+(`allocs_since_gc`). String bytes and ArrayBuffer slabs additionally
+`charge(n)` the byte counterpart (`bytes_since_gc`). At the top of
+the interpreter's dispatch loop — the only safe point Cynic has —
+the loop checks **either** the allocation count against `gc_threshold`
+(default 16,384) **or** the charged bytes against `gc_byte_threshold`
+(default 16 MiB). When either crosses, `Realm.collectGarbage` walks
+every root, marks reachable objects, and sweeps the rest. `heap.collect`
+resets both counters at the end.
+
+The byte trigger keeps allocate-and-discard string concat patterns
+(`result += chunk` loops) under control even though they don't tick
+the count trigger fast enough — one big allocation that dies a moment
+later still moves `bytes_since_gc`.
+
+Always-on counters track sweep-level activity: `bytes_alloc_total`,
+`bytes_live_peak`, `gc_cycles_total`, and `gc_time_ns_total` are
+surfaced by the test262 harness flags `--mem-summary` /
+`--top-alloc=<N>` / `--gc-stats`.
 
 A loop like
 
@@ -106,20 +119,57 @@ native missing a `HandleScope`.
 ## Tunables
 
 ```zig
-realm.heap.gc_threshold = 16384;  // allocations between collections
+realm.heap.gc_threshold = 16384;            // allocations between collections
+realm.heap.gc_byte_threshold = 16 * 1024 * 1024;  // bytes charged between collections
+realm.heap.max_bytes = std.math.maxInt(usize);    // hard ceiling; OOM beyond this
 ```
 
-`std.math.maxInt(u32)` effectively disables the trigger; a few unit
-tests in `heap.zig` set it that way when they want to call `collect`
-explicitly with a tailored root set. Real hosts (the CLI, the test262
-harness) leave it at the default.
+`std.math.maxInt(u32)` on `gc_threshold` effectively disables the count
+trigger; a few unit tests in `heap.zig` set it that way when they want
+to call `collect` explicitly with a tailored root set. Real hosts (the
+CLI, the test262 harness) leave it at the defaults.
 
-The 16,384 default is the smallest power of two where the per-iteration
-bookkeeping is invisible in the test262 wall-time (vs `gc_threshold = 1`
-which doubles the runtime). It collects often enough that an empty
-allocating loop's RSS stays under 20 MB and rare enough that scripts
-which churn through a few thousand short-lived objects don't pay for
-GC at all.
+The 16,384 count default is the smallest power of two where the
+per-iteration bookkeeping is invisible in the test262 wall-time (vs
+`gc_threshold = 1` which doubles the runtime). It collects often enough
+that an empty allocating loop's RSS stays under 20 MB and rare enough
+that scripts churning through a few thousand short-lived objects don't
+pay for GC at all.
+
+The 16 MiB byte trigger catches a different shape: string concat /
+ArrayBuffer / TypedArray fill patterns that move a small number of
+huge payloads. One `result += big_chunk` step might charge 4 MiB on its
+own; without the byte trigger, 80 such steps accumulate ~320 MiB of
+dead intermediates before the count threshold fires. With it, GC kicks
+in promptly. The combined effect: per-fixture RSS in the runtime sweep
+stays bounded even for the heaviest fixtures.
+
+## Sweep-level memory profiling
+
+Four always-on counters track activity:
+
+| Field | What |
+|---|---|
+| `bytes_alloc_total` | cumulative bytes charged (never reset by GC) |
+| `bytes_live_peak` | high-water mark of `bytes_live` |
+| `gc_cycles_total` | total `collect()` cycles |
+| `gc_time_ns_total` | accumulated GC pause time |
+
+Bumped from `charge()` and `collect()`; surfaced by the test262
+harness via `--mem-summary` (end-of-sweep one-pager), `--top-alloc=<N>`
+(top-N fixtures by cumulative bytes), and `--gc-stats` (per-cycle
+counts plus `live=KB peak=KB alloc_total=KB`). `--top-alloc` is the
+complement to `--top-rss`: RSS shows peak live; alloc shows total
+churn — a fixture with 1 GiB cumulative alloc but 10 MiB peak (all
+freed by GC) is invisible to RSS but obvious here.
+
+For deeper call-stack allocation profiling on macOS, the harness binary
+runs cleanly under Instruments:
+
+```sh
+xcrun xctrace record --template Allocations --launch \
+  -- ./.zig-cache/o/<hash>/test262 --quiet --filter=<x>
+```
 
 ## Re-entrant dispatch and nested frame stacks
 

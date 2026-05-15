@@ -1,6 +1,8 @@
 # Zig idioms in Cynic
 
-Pinned to Zig 0.16. Things that surface during contribution.
+Pinned to Zig 0.17-dev (master) — the Zig project skipped a stable
+0.16, so CI tracks `master` via `mlugg/setup-zig`. Things that
+surface during contribution.
 
 ## Allocators
 

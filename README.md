@@ -103,17 +103,17 @@ the `HandleScope` contract for natives).
 
 ### Known gaps
 
-`yield*` (parser accepts; runtime errors), `for await of`
-end-to-end, top-level `await` in modules, the real module graph
-(cyclic imports, namespace objects, dynamic `import()`), generator
-`.return()` running pending `finally` blocks, tail-call
-optimization, `WeakRef` / `FinalizationRegistry`,
-`Function.prototype.toString` returning real source,
-`String.prototype.normalize` (currently passthrough), `Date`
-timezones beyond UTC, `Proxy` `apply` / `construct` trap dispatch,
-destructuring assignment targets (declarations work; the standalone
-`[a, b] = arr` form does not yet). Each takes a swing at the runtime
-score as it lands.
+The big shaped items: top-level `await` in modules; the multi-file
+module graph beyond single-file evaluation (cyclic imports, namespace
+exotic, live mutable bindings — dynamic `import()` itself works);
+async-generator yield-star resume-arg forwarding + `AsyncIteratorClose`
+with `await`; `Array.fromAsync`; resizable-ArrayBuffer length-tracking
+view semantics across the TypedArray prototype; tail-call optimization
+(PTC); generational GC; the timezone story behind `Date` (UTC-only
+today); `String.prototype.normalize` (passthrough — needs UCD tables);
+`Set.prototype.{union, intersection, difference, …}` (ES2025). Each
+takes a swing at the runtime score as it lands; the scoreboard in
+[`test262-results.md`](test262-results.md) is the source of truth.
 
 ## Build
 
@@ -138,14 +138,16 @@ Requires Zig **0.17-dev** (master). The Zig project skipped a stable
 
 `zig build test262` accepts forwarded flags after `--`:
 
-- `--filter=<glob>` — run only matching paths.
+- `--filter=<substring>` — run only matching paths.
 - `--list-failures=<n>` — print the first `n` failing paths after the tally.
 - `--mode={parser,runtime}` — parser-only (default) or full parse → compile → execute.
 - `--quiet` / `--verbose` — progress noise dial.
 - `--no-harness` — skip the `sta.js` + `assert.js` preamble in runtime mode (for measuring the floor).
 - `--threads=<n>` — worker count (`0` = auto, `1` = sequential, `>1` = pool).
-- `--gc-threshold=<n>` — per-fixture allocation-pressure GC threshold (default 32,768; engine default 16,384). Lower values cap a misbehaving fixture's RSS more aggressively but currently surface the four known root gaps tracked in [`docs/handbook/gc.md`](docs/handbook/gc.md). `0` falls through to the engine default.
+- `--only-failing` — skip-as-pass any path in `.test262-pass-cache.txt`. After a full sweep populates the cache, the next iteration runs only the ~7 k failing/skipped fixtures — ≤ 30 s vs ≤ 100 s. Don't use for score rows; use it for per-fix verification.
+- `--gc-threshold=<n>` — per-fixture allocation-pressure GC threshold (default 32,768; engine default 16,384). `0` falls through to the engine default. The engine also has a 16 MiB byte trigger so allocate-and-discard patterns GC promptly regardless of count.
 - `--write-results` — update `test262-results.md` with today's row for the given mode. Re-running the same `(date, mode)` replaces that day's row rather than appending. The default run never touches that file.
+- **Memory / leak instrumentation:** `--gc-stats` (per-cycle pool counts + bytes), `--mem-summary` (end-of-sweep totals: cumulative bytes, max charged peak, GC cycles), `--top-rss=<n>` (top-N fixtures by process RSS delta ≥ 8 MiB), `--top-alloc=<n>` (top-N by cumulative bytes allocated ≥ 64 KiB — catches GC-cleaned thrash that RSS hides), `--leak-check` (route per-fixture bytes allocator through `std.heap.DebugAllocator`; stack trace per unfreed allocation), `--max-rss=<mb>` (abort with the offending path when RSS crosses budget).
 
 The Unicode `ID_Start` / `ID_Continue` tables are committed under
 `src/unicode/ident_tables.zig` (currently Unicode 17.0). ECMA-262 §3

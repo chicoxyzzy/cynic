@@ -100,12 +100,20 @@ for natives — are in [docs/handbook/gc.md](handbook/gc.md).
 
 `Heap` tracks `JSString`, `JSFunction`, `JSObject`, `Environment`,
 `JSGenerator`, `JSSymbol`, and `JSBigInt` on separate lists. Each
-`allocateX` increments `allocs_since_gc`; the dispatch loop checks
-the counter against `gc_threshold` (default 16,384) between opcodes
-and runs `Realm.collectGarbage` when it crosses. Roots include the
+`allocateX` increments `allocs_since_gc`; large heap-owned payloads
+(string bytes, ArrayBuffer slabs) additionally `charge(n)` the byte
+counterpart `bytes_since_gc`. The dispatch loop checks **either**
+counter — count against `gc_threshold` (default 16,384) or charged
+bytes against `gc_byte_threshold` (default 16 MiB) — between opcodes
+and runs `Realm.collectGarbage` when one crosses. Roots include the
 realm's globals, intrinsics, microtask queue, modules, top-level
 chunks, the active frames' registers + accumulator + this + env +
 home_object, and any open handle scopes.
+
+The heap also exposes always-on counters (`bytes_alloc_total`,
+`bytes_live_peak`, `gc_cycles_total`, `gc_time_ns_total`) that the
+test262 harness surfaces via `--mem-summary`, `--top-alloc=<N>`, and
+the existing `--gc-stats` line.
 
 Reference counting (QuickJS) was rejected: it leaks cycles and bloats
 the runtime API. Generational moving GC (Lieberman / Hewitt 1983,

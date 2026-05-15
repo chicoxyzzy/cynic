@@ -133,9 +133,12 @@ reference path, `>1` = pool. Past ~4 threads diminishing
 returns kick in from libc malloc contention),
 `--gc-threshold=<n>` (per-fixture allocation-pressure GC
 threshold, default 32,768; lower values stress-test the GC
-trigger but currently surface the known root gaps in
-[docs/handbook/gc.md](docs/handbook/gc.md). `0` falls through
-to the engine default of 16,384),
+trigger. The historical root gaps documented in
+[docs/handbook/gc.md](docs/handbook/gc.md) have been closed
+(frame stacks, promise reactions, key anchors); a residual at
+`gc_threshold=1` would be a new native missing a `HandleScope`.
+`0` falls through to the engine default of 16,384, paired with
+a 16 MiB byte trigger),
 `--gc-stats` (per-realm one-line stderr report after every
 GC cycle — pause time + per-pool live counts; pair with
 `--filter` to keep output sane),
