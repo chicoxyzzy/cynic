@@ -459,6 +459,13 @@ fn reflectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) 
     if (!proto_v.isNull() and heap_mod.valueAsPlainObject(proto_v) == null and heap_mod.valueAsFunction(proto_v) == null) {
         return intrinsics.throwTypeError(realm, "prototype must be an Object or null");
     }
+    // §10.5.2 Proxy [[SetPrototypeOf]] — dispatch through the
+    // handler trap if target is a proxy. Reflect returns the boolean.
+    if (target.proxy_target != null or target.proxy_revoked) {
+        const obj_mod = @import("object.zig");
+        const ok = try obj_mod.proxySetPrototypeOfBool(realm, target, proto_v);
+        return Value.fromBool(ok);
+    }
     const new_proto: ?*@import("../object.zig").JSObject = blk: {
         if (proto_v.isNull()) break :blk null;
         if (heap_mod.valueAsPlainObject(proto_v)) |p| break :blk p;
@@ -483,11 +490,16 @@ fn reflectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) 
 }
 
 fn reflectIsExtensible(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value;
     // §28.1.10 step 1 — target must be Object (incl. Function);
     // non-object (Symbol, primitives, null, undefined) → TypeError.
     const target_v = argOr(args, 0, Value.undefined_);
     if (heap_mod.valueAsPlainObject(target_v)) |target| {
+        // §10.5.3 Proxy [[IsExtensible]] — dispatch via the shared
+        // Object.isExtensible path (handles trap + invariant).
+        if (target.proxy_target != null or target.proxy_revoked) {
+            const obj_mod = @import("object.zig");
+            return obj_mod.objectIsExtensible(realm, this_value, args);
+        }
         return Value.fromBool(target.extensible);
     }
     if (heap_mod.valueAsFunction(target_v)) |_| {
