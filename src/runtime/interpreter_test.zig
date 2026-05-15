@@ -738,6 +738,21 @@ test "later: BigInt unsigned right-shift throws TypeError" {
     try expectScriptThrows("1n >>> 1n;");
 }
 
+// §7.2.14 IsLooselyEqual: BigInt vs String / Number / Boolean.
+test "later: BigInt loose-equals String" {
+    try expectScriptStringWithBuiltins(
+        \\(0n == "") + ":" + (0n == "0") + ":" + (1n == "1") +
+        \\":" + (-1n == "-1") + ":" + (1n == "foo") + ":" + (1n == "1.5");
+    , "true:true:true:true:false:false");
+}
+
+test "later: BigInt loose-equals Number / Boolean" {
+    try expectScriptStringWithBuiltins(
+        \\(1n == 1) + ":" + (1n == 1.0) + ":" + (1n == 1.5) +
+        \\":" + (1n == true) + ":" + (0n == false) + ":" + (1n == NaN);
+    , "true:true:false:true:true:false");
+}
+
 // §20.1.1.1 Object(value) — Symbol/BigInt are primitives (§6.1.5 /
 // §6.1.6.2), not Type(Object), so Object() must wrap them rather
 // than passing them through.

@@ -619,9 +619,70 @@ pub fn looseEq(a: Value, b: Value) bool {
     if (a.isString() and (b.isInt32() or b.isDouble())) {
         return strictEq(Value.fromDouble(toNumber(a)), b);
     }
+    // §7.2.14 IsLooselyEqual steps 12-13: BigInt vs String —
+    // convert the String via StringToBigInt; mismatch on parse
+    // failure is `false`, not coerced. BigInt vs Number — compare
+    // mathematical values (§6.1.6.1.13 / §6.1.6.2.13 are exact).
+    if (heap_mod.valueAsBigInt(a)) |abi| {
+        if (b.isString()) {
+            const s: *JSString = @ptrCast(@alignCast(b.asString()));
+            return stringEqualsBigInt(s.bytes, abi.value);
+        }
+        if (b.isInt32()) return abi.value == @as(i128, b.asInt32());
+        if (b.isDouble()) return bigintEqualsDouble(abi.value, b.asDouble());
+        if (b.isBool()) return abi.value == @as(i128, if (b.asBool()) 1 else 0);
+    }
+    if (heap_mod.valueAsBigInt(b)) |bbi| {
+        if (a.isString()) {
+            const s: *JSString = @ptrCast(@alignCast(a.asString()));
+            return stringEqualsBigInt(s.bytes, bbi.value);
+        }
+        if (a.isInt32()) return bbi.value == @as(i128, a.asInt32());
+        if (a.isDouble()) return bigintEqualsDouble(bbi.value, a.asDouble());
+        if (a.isBool()) return bbi.value == @as(i128, if (a.asBool()) 1 else 0);
+    }
     if (a.isBool()) return looseEq(Value.fromInt32(if (a.asBool()) 1 else 0), b);
     if (b.isBool()) return looseEq(a, Value.fromInt32(if (b.asBool()) 1 else 0));
     return false;
+}
+
+/// §7.1.14 StringToBigInt + §7.2.14 BigInt/Number comparison
+/// fast-path. Returns true iff `s` parses as a finite integer
+/// (per the BigInt-literal grammar: optional sign + decimal /
+/// hex / oct / bin) whose mathematical value equals `bi`.
+fn stringEqualsBigInt(s: []const u8, bi: i128) bool {
+    const trimmed = std.mem.trim(u8, s, " \t\r\n");
+    if (trimmed.len == 0) return bi == 0;
+    var i: usize = 0;
+    var negative = false;
+    if (trimmed[i] == '+') {
+        i += 1;
+    } else if (trimmed[i] == '-') {
+        negative = true;
+        i += 1;
+    }
+    if (i >= trimmed.len) return false;
+    var value: i128 = 0;
+    while (i < trimmed.len) : (i += 1) {
+        const c = trimmed[i];
+        if (c < '0' or c > '9') return false;
+        const digit: i128 = c - '0';
+        value = std.math.mul(i128, value, 10) catch return false;
+        value = std.math.add(i128, value, digit) catch return false;
+    }
+    if (negative) value = -value;
+    return value == bi;
+}
+
+/// §6.1.6.2.13 BigInt::equal cross-type with Number: equal iff
+/// y is finite, y has no fractional part, and x = ℝ(y).
+fn bigintEqualsDouble(bi: i128, d: f64) bool {
+    if (std.math.isNan(d) or std.math.isInf(d)) return false;
+    if (d != @trunc(d)) return false;
+    // Range guard — i128 fits any safe-integer double exactly.
+    if (d > 1.7e38 or d < -1.7e38) return false;
+    const as_int: i128 = @intFromFloat(d);
+    return as_int == bi;
 }
 
 pub fn relational(comptime op: RelOp, lhs: Value, rhs: Value) Value {
