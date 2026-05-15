@@ -964,9 +964,18 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 }
 
 fn arrayAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.1.3.1 Array.prototype.at:
+    //   1. O = ToObject(this)
+    //   2. len = ? LengthOfArrayLike(O)
+    //   3. relativeIndex = ? ToIntegerOrInfinity(index)
+    //   4-5. k = relativeIndex >= 0 ? relativeIndex : len + relativeIndex
+    //   6. If k < 0 or k >= len, return undefined
+    //   7. Return ? Get(O, ToString(k))
     const obj = try toObjectThis(realm, this_value);
     const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
-    var idx = if (args.len > 0) toInt(args[0]) else 0;
+    // Route through `toIntPropagating` so an object-with-valueOf
+    // index fires its hook and a Symbol throws.
+    var idx: i64 = if (args.len > 0) try toIntPropagating(realm, args[0]) else 0;
     if (idx < 0) idx += len;
     if (idx < 0 or idx >= len) return Value.undefined_;
     var ibuf: [24]u8 = undefined;
@@ -1138,16 +1147,30 @@ fn lastStartIndexFrom(realm: *Realm, args: []const Value, len: i64) NativeError!
 
 fn arrayFindLast(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
+    var len = try toLengthOf(realm, obj);
+    const safe_max: i64 = (1 << 53) - 1;
+    if (len > safe_max) len = safe_max;
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.findLast callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
+    // findLast walks descending; predicate-returns-true short-
+    // circuits. Don't refuse a 2^53-1 length when the search is
+    // likely to terminate early — but cap raw iteration count
+    // anyway to bound the worst case.
     var i: i64 = len - 1;
+    const iter_limit = max_iter_length;
+    var seen: i64 = 0;
     while (i >= 0) : (i -= 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         const elem = try getPropertyChain(realm, obj, islice);
         const v = try invokeCallback(realm, callback, this_arg, elem, i, obj);
         if (toBoolean(v)) return elem;
+        seen += 1;
+        if (seen >= iter_limit) {
+            const ex = intrinsics.newRangeError(realm, "Array length window exceeds maximum supported") catch return error.OutOfMemory;
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        }
     }
     return Value.undefined_;
 }
@@ -1159,16 +1182,26 @@ fn arrayFindLastIndex(realm: *Realm, this_value: Value, args: []const Value) Nat
     // and inherited indexed accessors on the prototype chain.
     // Step order: ToObject → length → IsCallable.
     const obj = try toObjectThis(realm, this_value);
-    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
+    var len = try toLengthOf(realm, obj);
+    const safe_max: i64 = (1 << 53) - 1;
+    if (len > safe_max) len = safe_max;
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.findLastIndex callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
     var i: i64 = len - 1;
+    const iter_limit = max_iter_length;
+    var seen: i64 = 0;
     while (i >= 0) : (i -= 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         const elem = try getPropertyChain(realm, obj, islice);
         const v = try invokeCallback(realm, callback, this_arg, elem, i, obj);
         if (toBoolean(v)) return numberFromI64(i);
+        seen += 1;
+        if (seen >= iter_limit) {
+            const ex = intrinsics.newRangeError(realm, "Array length window exceeds maximum supported") catch return error.OutOfMemory;
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        }
     }
     return Value.fromInt32(-1);
 }
