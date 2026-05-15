@@ -1989,6 +1989,26 @@ test "later: async function returns a Promise" {
     , "function");
 }
 
+test "later: async arrow returns a Promise (§15.8)" {
+    // §15.8 Async Arrow Function Definitions — invoking an async
+    // arrow must wrap the body via AsyncFunctionStart so the call
+    // returns the implicit Promise, not the body's completion
+    // value. Mirrors the async-function-expression behaviour above.
+    try expectScriptStringWithBuiltins(
+        \\const f = async () => 42;
+        \\typeof f().then;
+    , "function");
+}
+
+test "later: async arrow concise body resolves with body value" {
+    try expectScriptIntWithBuiltins(
+        \\let result = -1;
+        \\(async () => 7)().then(v => { result = v; });
+        \\globalThis.__drainMicrotasks();
+        \\result;
+    , 7);
+}
+
 test "later: async/await round-trip with then" {
     try expectScriptIntWithBuiltins(
         \\async function f() {

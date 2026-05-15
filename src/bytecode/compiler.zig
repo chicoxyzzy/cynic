@@ -1890,7 +1890,21 @@ pub const Compiler = struct {
             .block => |b| .{ .block = b.body },
             .expression => |e| .{ .expression = e },
         };
-        const k = try compileFunctionTemplate(self, af.params, body, null, true, af.span);
+        // §15.8 AsyncArrowFunction — must thread `is_async` into the
+        // template so the resulting JSFunction's call dispatch goes
+        // through AsyncFunctionStart and returns a Promise. The
+        // shorthand `compileFunctionTemplate` hardcodes `is_async=false`
+        // and silently downgrades `async () => x` to a sync arrow.
+        const k = try compileFunctionTemplateExt(
+            self,
+            af.params,
+            body,
+            null,
+            true,
+            false,
+            af.is_async,
+            af.span,
+        );
         try self.builder.emitOp(.make_function, af.span);
         try self.builder.emitU16(k);
     }
