@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 84.15 % | 90.52 % | 34476 / 40969 | 34476 / 38088 |
+| **runtime** | 84.89 % | 91.31 % | 34779 / 40969 | 34779 / 38088 |
 
 
 ## Where the runtime stands, by area
@@ -24,16 +24,16 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_100–999 fails_** | | | | | |
-| `built-ins/Array` | 2765 | 275 | 36 | 90 % | 91 % |
+| `built-ins/Array` | 2850 | 190 | 36 | 93 % | 94 % |
 | `built-ins/Function` | 265 | 103 | 84 | 59 % | 72 % |
-| `built-ins/Object` | 3083 | 247 | 80 | 90 % | 93 % |
+| `built-ins/Object` | 3088 | 242 | 80 | 91 % | 93 % |
 | `built-ins/RegExp` | 1349 | 261 | 161 | 76 % | 84 % |
 | `built-ins/String` | 1045 | 172 | 5 | 86 % | 86 % |
-| `built-ins/TypedArray` | 1272 | 151 | 8 | 89 % | 89 % |
+| `built-ins/TypedArray` | 1273 | 150 | 8 | 89 % | 89 % |
 | `built-ins/TypedArrayConstructors` | 534 | 126 | 16 | 79 % | 81 % |
-| `language/expressions` | 9175 | 794 | 979 | 84 % | 92 % |
+| `language/expressions` | 9266 | 703 | 979 | 85 % | 93 % |
 | `language/module-code` | 462 | 120 | 14 | 78 % | 79 % |
-| `language/statements` | 7978 | 510 | 672 | 87 % | 94 % |
+| `language/statements` | 8092 | 396 | 672 | 88 % | 95 % |
 | **_10–99 fails_** | | | | | |
 | `built-ins/ArrayBuffer` | 165 | 26 | 4 | 85 % | 86 % |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 11 | 27 | 0 | 29 % | 29 % |
@@ -41,7 +41,7 @@ browser-era built-ins …).
 | `built-ins/BigInt` | 50 | 26 | 0 | 66 % | 66 % |
 | `built-ins/Date` | 526 | 65 | 0 | 89 % | 89 % |
 | `built-ins/GeneratorPrototype` | 32 | 29 | 0 | 52 % | 52 % |
-| `built-ins/Iterator` | 442 | 61 | 6 | 87 % | 88 % |
+| `built-ins/Iterator` | 443 | 60 | 6 | 87 % | 88 % |
 | `built-ins/JSON` | 115 | 50 | 0 | 70 % | 70 % |
 | `built-ins/Map` | 179 | 23 | 1 | 88 % | 89 % |
 | `built-ins/Math` | 311 | 16 | 0 | 95 % | 95 % |
@@ -86,7 +86,7 @@ browser-era built-ins …).
 | `language/asi` | 100 | 2 | 0 | 98 % | 98 % |
 | `language/block-scope` | 140 | 5 | 0 | 97 % | 97 % |
 | `language/comments` | 22 | 7 | 23 | 42 % | 76 % |
-| `language/computed-property-names` | 39 | 9 | 0 | 81 % | 81 % |
+| `language/computed-property-names` | 45 | 3 | 0 | 94 % | 94 % |
 | `language/destructuring` | 16 | 2 | 1 | 84 % | 89 % |
 | `language/rest-parameters` | 10 | 1 | 0 | 91 % | 91 % |
 | `language/source-text` | 0 | 1 | 0 | 0 % | 0 % |
@@ -139,11 +139,15 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 | -167 |  |
-| **runtime** | 84.15 % | 90.52 % | 34476 / 40969 | 34476 / 38088 | +1227 | 1m 48s |
+| **runtime** | 84.89 % | 91.31 % | 34779 / 40969 | 34779 / 38088 | +1530 | 1m 39s |
 
 Biggest movers (runtime):
 
-- `language/expressions` -1
+- `language/statements` +114
+- `language/expressions` +91
+- `built-ins/Array` +85
+- `language/computed-property-names` +6
+- `built-ins/Object` +5
 
 ### 2026-05-14 — cynic `aca1903`, test262 `d0c1b455`
 
