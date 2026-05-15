@@ -997,7 +997,9 @@ fn arrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        obj.set(realm.allocator, owned.bytes, value) catch return error.OutOfMemory;
+        // §23.1.3.7 step 11.b — Set(O, Pk, value, true). Honor
+        // accessor setters / writable / extensible.
+        try setOrThrow(realm, obj, owned.bytes, value);
     }
     return heap_mod.taggedObject(obj);
 }
@@ -1592,9 +1594,12 @@ fn copyWithinStep(realm: *Realm, obj: *JSObject, src: i64, dst: i64) NativeError
     const dslice = std.fmt.bufPrint(&db, "{d}", .{dst}) catch unreachable;
     if (obj.hasProperty(sslice)) {
         const v = try getPropertyChain(realm, obj, sslice);
-        obj.set(realm.allocator, dslice, v) catch return error.OutOfMemory;
+        // §23.1.3.4 step 15.b.iv — Set(O, toKey, fromVal, true).
+        // Honor setter / writable / extensible.
+        const owned = realm.heap.allocateString(dslice) catch return error.OutOfMemory;
+        try setOrThrow(realm, obj, owned.bytes, v);
     } else {
-        _ = obj.deleteOwn(dslice);
+        try deletePropertyOrThrow(realm, obj, dslice);
     }
 }
 
@@ -1956,16 +1961,26 @@ fn arrayReverse(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         const j = len - 1 - i;
         const jslice = std.fmt.bufPrint(&jbuf, "{d}", .{j}) catch unreachable;
-        // Route reads through `getPropertyChain` so TypedArray
-        // numeric-index Get fires (else `obj.get` misses the
-        // backing buffer; `Array.prototype.reverse.call(ta)` then
-        // sees undefined at every index).
-        const a = try getPropertyChain(realm, obj, islice);
-        const b = try getPropertyChain(realm, obj, jslice);
+        // §23.1.3.26 step 5 — HasProperty(O, lower) / HasProperty(O,
+        // upper) distinguish holes. The four cases (both present,
+        // only lower, only upper, neither) decide between Set and
+        // DeletePropertyOrThrow at each side.
+        const lower_exists = obj.hasProperty(islice);
+        const upper_exists = obj.hasProperty(jslice);
+        const lower_v = if (lower_exists) try getPropertyChain(realm, obj, islice) else Value.undefined_;
+        const upper_v = if (upper_exists) try getPropertyChain(realm, obj, jslice) else Value.undefined_;
         const owned_i = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         const owned_j = realm.heap.allocateString(jslice) catch return error.OutOfMemory;
-        obj.set(realm.allocator, owned_i.bytes, b) catch return error.OutOfMemory;
-        obj.set(realm.allocator, owned_j.bytes, a) catch return error.OutOfMemory;
+        if (lower_exists and upper_exists) {
+            try setOrThrow(realm, obj, owned_i.bytes, upper_v);
+            try setOrThrow(realm, obj, owned_j.bytes, lower_v);
+        } else if (upper_exists) {
+            try setOrThrow(realm, obj, owned_i.bytes, upper_v);
+            try deletePropertyOrThrow(realm, obj, owned_j.bytes);
+        } else if (lower_exists) {
+            try deletePropertyOrThrow(realm, obj, owned_i.bytes);
+            try setOrThrow(realm, obj, owned_j.bytes, lower_v);
+        }
     }
     return this_value;
 }
