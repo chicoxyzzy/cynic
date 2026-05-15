@@ -556,11 +556,14 @@ fn promiseThen(realm: *Realm, this_value: Value, args: []const Value) NativeErro
 
 fn promiseCatch(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     // §27.2.5.1 Promise.prototype.catch — `return Invoke(this,
-    // "then", « undefined, onRejected »)`. Goes through the
-    // user-visible `then` so subclasses / thenable receivers
-    // dispatch correctly.
+    // "then", « undefined, onRejected »)`. §7.3.18 Invoke calls
+    // §7.3.2 GetV (which performs ToObject on the receiver for
+    // the property lookup), then calls `func` with the ORIGINAL
+    // `this_value`. So primitives are object-coercible — null /
+    // undefined throw TypeError, everything else gets wrapped
+    // just for the lookup.
     const cb = argOr(args, 0, Value.undefined_);
-    const this_obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Promise.prototype.catch called on non-object");
+    const this_obj = try intrinsics.toObjectThis(realm, this_value);
     const then_v = getPropertyChain(realm, this_obj, "then") catch return error.NativeThrew;
     const then_fn = heap_mod.valueAsFunction(then_v) orelse return throwTypeError(realm, "Promise.prototype.catch: this.then is not callable");
     const interp = @import("../interpreter.zig");

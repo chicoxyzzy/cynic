@@ -334,6 +334,14 @@ pub const JSFunction = struct {
     pub fn setIfWritable(self: *JSFunction, allocator: std.mem.Allocator, key: []const u8, v: Value) !bool {
         const flags = self.flagsForOwn(key);
         if (self.properties.contains(key) and !flags.writable) return false;
+        // §10.2.4 — built-in constructors have a non-writable
+        // `prototype` slot. The slot's "own" status comes from
+        // `hasOwn` (which consults `self.prototype != null`), not
+        // from `properties.contains`, so the writability gate has
+        // to honor the synthesized descriptor too.
+        if (std.mem.eql(u8, key, "prototype") and self.prototype != null and !flags.writable) {
+            return false;
+        }
         // Same special-cases as `set`.
         if (std.mem.eql(u8, key, "prototype")) {
             const heap_mod = @import("heap.zig");
