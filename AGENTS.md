@@ -187,15 +187,21 @@ full sweeps to multi-GB RSS and locked the laptop. The byte-trigger
 GC in `Heap` (`bytes_since_gc` + 16 MB threshold, paired with a
 split `bytes_allocator`) bounds per-fixture RSS today — but a new
 allocation path can bypass it. Before kicking off a full
-`zig build test262`, run a filtered sweep under
-`/usr/bin/time -l` and confirm peak RSS is in the healthy band:
+`zig build test262`, run a filtered sweep with `--top-rss` and
+confirm the top per-fixture deltas are in the healthy band:
 
-    /usr/bin/time -l timeout 300 zig build test262 -- --quiet \
-      --mode=runtime --filter=language/expressions
+    zig build test262 -- --quiet --mode=runtime \
+      --filter=language/expressions --top-rss=10
 
-Healthy: ≤ ~100 MB peak, ≤ ~10 s. If RSS climbs noticeably above
-that, STOP and bisect the regressing commit with the same harness
-before starting the full sweep.
+Healthy: top per-fixture deltas ≤ ~20 MiB on
+`language/expressions`, ≤ ~50 MiB on `built-ins/TypedArray`. If
+the deltas climb noticeably above that, STOP and bisect the
+regressing commit with the same filter before starting the full
+sweep. Do NOT use `/usr/bin/time -l` for this — it measures
+`zig build`'s RSS (the compile-and-fork wrapper, which holds
+~1 GB during link), not the harness, and is wildly misleading.
+For a stricter guard pair the filter with `--max-rss=<mb>` or
+`--leak-check` (DebugAllocator); see flag table above.
 
 CI runs `zig build` and `zig build test` as gating jobs, plus
 `zig build test262 -- --quiet` as an advisory job

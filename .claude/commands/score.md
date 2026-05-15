@@ -6,15 +6,19 @@ Score current test262 conformance and update the score history.
 Today the meaningful signal is the **runtime** row (parser has been
 at 100 % attempted for a while); we still capture both.
 
-1. Leak-check first. Confirm peak RSS is in the healthy band on a
-   filtered sweep before kicking off a full one:
+1. Leak-check first. Confirm the heaviest per-fixture RSS deltas
+   are in the healthy band on a filtered sweep before kicking off
+   a full one:
 
-       /usr/bin/time -l timeout 300 zig build test262 -- --quiet \
-         --mode=runtime --filter=language/expressions
+       zig build test262 -- --quiet --mode=runtime \
+         --filter=language/expressions --top-rss=10
 
-   Healthy: ≤ 100 MB peak, ≤ 10 s. If RSS climbs noticeably above
-   that, STOP — bisect recent commits with the same harness; do
-   not start the full sweep.
+   Healthy: top deltas ≤ ~20 MiB on `language/expressions`, ≤ ~50 MiB
+   on `built-ins/TypedArray`. If deltas climb noticeably above that,
+   STOP — bisect recent commits with the same `--top-rss` filter; do
+   not start the full sweep. Do NOT use `/usr/bin/time -l` —
+   it measures `zig build`'s RSS (~1 GB during link), not the
+   harness.
 
 2. Parser sweep — `zig build test262 -- --quiet --write-results`
    (parser is the default mode).

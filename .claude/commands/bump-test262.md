@@ -14,9 +14,9 @@ Bump the test262 corpus to upstream HEAD and produce fresh score rows.
 3. Show the new SHA and the number of intervening commits
    (`git -C vendor/test262 rev-list <old>..<new> --count`).
 
-4. Leak-check first — a filtered runtime sweep with
-   `/usr/bin/time -l` (see `.claude/commands/score.md` step 1).
-   If peak RSS is unhealthy, STOP and report; do not proceed.
+4. Leak-check first — a filtered runtime sweep with `--top-rss`
+   (see `.claude/commands/score.md` step 1). If per-fixture RSS
+   deltas are unhealthy, STOP and report; do not proceed.
 
 5. Run both modes with `--write-results`:
    - `timeout 1800 zig build test262 -- --quiet --write-results`

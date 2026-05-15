@@ -88,15 +88,17 @@ jobs:
     name: test262 RSS smoke (advisory)
     runs-on: ubuntu-latest
     needs: build-and-test
-    # Advisory leak guard: a filtered runtime sweep under
-    # `/usr/bin/time -v` posts peak RSS to the job log. The
-    # threshold mirrors `AGENTS.md` — healthy is ≤ ~150 MiB for
-    # `language/expressions` on the GitHub runner. A jump here
+    # Advisory leak guard: a filtered runtime sweep reports the
+    # heaviest per-fixture RSS deltas via `--top-rss`. Healthy
+    # deltas on `language/expressions` are ≤ ~20 MiB; a jump
     # almost always means a new allocation path stopped freeing.
+    # We deliberately do NOT wrap in `/usr/bin/time -v` — that
+    # reports the parent `zig build` RSS (≈1 GB during link),
+    # not the harness, and would always look "leaking."
     #
     # `continue-on-error` because we don't want a flaky runner
-    # to paint PRs red; this is for human review of the printed
-    # RSS line.
+    # to paint PRs red; this is for human review of the top-rss
+    # block in the log.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -108,14 +110,9 @@ jobs:
         with:
           version: master
 
-      - name: Filtered sweep with peak RSS
+      - name: Filtered sweep with top-rss
         timeout-minutes: 5
         continue-on-error: true
         run: |
-          /usr/bin/time -v zig build test262 -- --quiet \
-            --mode=runtime --threads=4 \
-            --filter=language/expressions \
-            --top-rss=10 2>&1 | tee rss.log
-          echo "---"
-          echo "Peak RSS line for reviewer:"
-          grep -E "Maximum resident set size" rss.log || true
+          zig build test262 -- --quiet --mode=runtime --threads=4 \
+            --filter=language/expressions --top-rss=10
