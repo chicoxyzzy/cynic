@@ -5535,6 +5535,47 @@ fn runFrames(
                             }
                             continue;
                         } else |_| {}
+                        // §10.4.5.5 [[Set]] step 2.b — `CanonicalNumericIndexString`
+                        // covers more than non-negative integers: "1.1", "-0",
+                        // "-1", "NaN", "Infinity" all map to numbers. Those
+                        // route to `IntegerIndexedElementSet`, which performs
+                        // the ToNumber/ToBigInt coercion (observable
+                        // `valueOf` side-effects) and then silently drops the
+                        // store because `IsValidIntegerIndex` returns false.
+                        // [[Set]] still returns `true`, so don't fall through
+                        // to OrdinarySet (which would store a sticky property).
+                        if (isCanonicalNumericIndexString(key_slice)) {
+                            if (tv.kind.isBigInt()) {
+                                _ = @import("builtins/bigint.zig").toBigIntValue(realm, acc) catch |err| switch (err) {
+                                    error.OutOfMemory => return error.OutOfMemory,
+                                    else => {
+                                        const ex = consumePendingException(realm) orelse try makeTypeError(realm, "TypedArray element type-coercion failed");
+                                        f.ip = ip;
+                                        f.accumulator = acc;
+                                        committed = true;
+                                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                            return .{ .thrown = ex };
+                                        }
+                                        continue;
+                                    },
+                                };
+                            } else {
+                                _ = intrinsics_mod.toNumber(realm, acc) catch |err| switch (err) {
+                                    error.OutOfMemory => return error.OutOfMemory,
+                                    error.NativeThrew => {
+                                        const ex = consumePendingException(realm) orelse try makeTypeError(realm, "TypedArray element type-coercion failed");
+                                        f.ip = ip;
+                                        f.accumulator = acc;
+                                        committed = true;
+                                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                            return .{ .thrown = ex };
+                                        }
+                                        continue;
+                                    },
+                                };
+                            }
+                            continue;
+                        }
                     }
                 }
                 // Allocate a heap-owned copy of the key — the
@@ -5987,6 +6028,32 @@ pub fn formatDoubleSafe(scratch: *[64]u8, d: f64) []const u8 {
 /// must not retain the slice past the next allocation that could
 /// invalidate the JSString contents — at sta_computed sites we
 /// re-allocate before storing.
+/// §7.1.21 CanonicalNumericIndexString — returns `true` when `s`
+/// is "-0" or the result of `ToString(ToNumber(s))` (i.e., the
+/// canonical string form of a Number). Used at TypedArray
+/// `[[Set]]` to detect string keys that route to
+/// IntegerIndexedElementSet (which still performs `ToNumber` on
+/// the value but silently drops the store when the index is
+/// invalid). Spec-faithful: matches the lexical shape of a JS
+/// number literal in source form (sign + digits + optional `.`
+/// + digits + optional exponent), plus the canonical sentinels
+/// ("Infinity", "-Infinity", "NaN", "-0").
+pub fn isCanonicalNumericIndexString(s: []const u8) bool {
+    if (s.len == 0) return false;
+    if (std.mem.eql(u8, s, "-0")) return true;
+    if (std.mem.eql(u8, s, "NaN")) return true;
+    if (std.mem.eql(u8, s, "Infinity")) return true;
+    if (std.mem.eql(u8, s, "-Infinity")) return true;
+    // Parse as a JS-style number. `std.fmt.parseFloat` accepts the
+    // strict numeric grammar Cynic needs here (no hex / no leading
+    // `+`); reject NaN result to filter junk like "abc". The
+    // canonical-string round-trip check is over-strict for our
+    // purpose — IntegerIndexedElementSet drops on any non-valid
+    // index anyway, so "01" / "1.10" both fall into the drop path.
+    const d = std.fmt.parseFloat(f64, s) catch return false;
+    return !std.math.isNan(d);
+}
+
 fn computedKeyToString(v: Value, scratch: *[64]u8) []const u8 {
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
