@@ -73,6 +73,19 @@ const cynic_assert_js: []const u8 =
     \\
 ;
 
+/// Cynic-shipped stub for `harness/resizableArrayBufferUtils.js`. The
+/// upstream helper builds TypedArray subclass constructors via
+/// `new Function('return class My' + type + ' extends ' + type + ' {}')()`.
+/// Cynic permanently bans `new Function(string)` (AGENTS.md: SES-aligned
+/// "eval / runtime code construction — out permanently"), so the
+/// upstream `try/catch` leaves `MyUint8Array` / `MyFloat32Array` /
+/// `MyBigInt64Array` `undefined` and every fixture iterating `ctors`
+/// trips on the undefined entries before reaching real engine
+/// behaviour. The stub aliases the `My*` slots to the real built-in
+/// constructors — losing the user-subclass-semantics signal but
+/// recovering ~166 fixtures of genuine resizable-buffer signal.
+const resizable_array_buffer_utils_stub: []const u8 = @embedFile("stubs/resizableArrayBufferUtils.js");
+
 /// Preloaded harness sources. `sta` and `assert_js` are
 /// always evaluated (in that order) before the test source;
 /// `includes` is a name→source map covering every `.js` file
@@ -168,6 +181,18 @@ fn populateIncludes(
         // `read*` operation invalidates it.
         const owned_name = try allocator.dupe(u8, entry.name);
         errdefer allocator.free(owned_name);
+
+        // Cynic-shipped substitute: the upstream
+        // `resizableArrayBufferUtils.js` calls `new Function(string)`
+        // which Cynic permanently bans. Inject our stub instead so
+        // the ~166 fixtures that `include:` this helper become
+        // runnable. See `stubs/resizableArrayBufferUtils.js`.
+        if (std.mem.eql(u8, entry.name, "resizableArrayBufferUtils.js")) {
+            const owned_source = try allocator.dupe(u8, resizable_array_buffer_utils_stub);
+            errdefer allocator.free(owned_source);
+            try out.put(allocator, owned_name, owned_source);
+            continue;
+        }
 
         const source = harness_dir.readFileAlloc(io, owned_name, allocator, .limited(256 * 1024)) catch {
             allocator.free(owned_name);
