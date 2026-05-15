@@ -1112,6 +1112,16 @@ fn typedArraySet(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         return throwRangeError(realm, "TypedArray.prototype.set: offset out of range");
     }
 
+    // §23.2.3.27 step 8 — `ValidateTypedArray(target, SEQ-CST)`
+    // happens BEFORE the source argument is touched. When the
+    // target view is out-of-bounds over a resizable buffer (or
+    // detached), a TypeError must propagate without ever calling
+    // any source getters; V8 / JSC observably evaluate the
+    // bounds witness here, not in the per-element loop.
+    if (taIsOutOfBounds(tv)) {
+        return throwTypeError(realm, "TypedArray.prototype.set: target is out-of-bounds");
+    }
+
     const source_arg = argOr(args, 0, Value.undefined_);
     const src_obj = heap_mod.valueAsPlainObject(source_arg) orelse {
         return throwTypeError(realm, "TypedArray.prototype.set: source is not an object");
@@ -1152,6 +1162,14 @@ fn taSetFromTypedArray(
     const src_buf = src_tv.viewed.array_buffer orelse
         return throwTypeError(realm, "TypedArray.prototype.set: source buffer is detached");
 
+    // §23.2.3.27.2 step 4 — `ValidateTypedArray(source, SEQ-CST)`
+    // throws TypeError when the source view is out-of-bounds
+    // (resizable buffer shrunk below its window).  Target was
+    // already validated at method entry.
+    if (taIsOutOfBounds(src_tv)) {
+        return throwTypeError(realm, "TypedArray.prototype.set: source is out-of-bounds");
+    }
+
     // §23.2.3.27.2 step 6 — disallow Big↔non-Big mixes (the
     // "ContentType(srcType) != ContentType(targetType)" check).
     {
@@ -1161,8 +1179,10 @@ fn taSetFromTypedArray(
             return throwTypeError(realm, "TypedArray.prototype.set: cannot mix BigInt and Number typed arrays");
         }
     }
-    const target_length: usize = taInBoundsLength(tv);
-    const src_length: usize = taInBoundsLength(src_tv);
+    // §23.2.3.27.2 — use the live `[[ArrayLength]]` so a length-
+    // tracking view's count reflects the current buffer size.
+    const target_length: usize = taCurrentLength(tv);
+    const src_length: usize = taCurrentLength(src_tv);
 
     if (target_offset == std.math.inf(f64)) {
         return throwRangeError(realm, "TypedArray.prototype.set: offset out of range");
@@ -1231,7 +1251,12 @@ fn taSetFromArrayLike(
 
     const tv = target.typed_view orelse
         return throwTypeError(realm, "TypedArray.prototype.set: target lost typed-view brand");
-    const target_length: usize = taInBoundsLength(tv);
+    // §23.2.3.27.1 — use live `[[ArrayLength]]` so a length-
+    // tracking target's capacity reflects the current buffer
+    // size, and so a fixed-length target that's been shrunk OOB
+    // reports 0 (the entry validation also throws TypeError on
+    // OOB, but the per-element math still has to be correct).
+    const target_length: usize = taCurrentLength(tv);
     if (tv.viewed.array_buffer == null) {
         return throwTypeError(realm, "TypedArray.prototype.set: target buffer is detached");
     }
