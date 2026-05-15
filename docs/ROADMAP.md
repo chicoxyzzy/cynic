@@ -95,10 +95,16 @@ code construction (aligns with SES).
 - Microtask queue + `await` suspension via generator-shaped frame
   saves; promise reaction queue with then / catch / finally.
 - Stop-the-world mark-sweep heap, fired on allocation pressure
-  (`gc_threshold` allocations between cycles, default 16,384).
-  Roots: globals, intrinsics, microtask queue, modules, top-level
-  chunks, active call frames, open handle scopes. The heap stays
-  bounded under any allocating loop / recursion / promise chain.
+  — both a count trigger (`gc_threshold` allocations between
+  cycles, default 16,384) and a byte trigger (`gc_byte_threshold`,
+  default 16 MiB) so allocate-and-discard string concat patterns
+  GC promptly. Roots: globals, intrinsics, microtask queue,
+  modules, top-level chunks, active call frames, open handle
+  scopes. The heap stays bounded under any allocating loop /
+  recursion / promise chain. Always-on counters surface
+  `bytes_alloc_total` / `bytes_live_peak` / `gc_cycles_total`
+  / `gc_time_ns_total` for engine-side memory profiling via the
+  harness `--mem-summary` / `--top-alloc` / `--gc-stats` flags.
   Operational details + `HandleScope` contract for natives:
   [docs/handbook/gc.md](handbook/gc.md).
 - Per-test interpreter step budget — the test262 harness caps
@@ -171,8 +177,10 @@ code construction (aligns with SES).
   symmetricDifference, isSubsetOf, isSupersetOf, isDisjointFrom}`
   (ES2025) — not yet wired.
 - `WeakRef` / `FinalizationRegistry` — not yet.
-- `Function.prototype.toString` returning real source — currently
-  approximate.
+- `Function.prototype.toString` — returns the original source slice
+  for declared functions; callable Proxy returns the spec sentinel
+  `function () { [native code] }`. Remaining edge: CR vs LF
+  normalization (test262 `line-terminator-normalisation-CR.js`).
 
 **Deferred.** `Temporal` (ES2025) is not implemented yet —
 ~4500 test262 fixtures depend on it. It's a complete date/time
@@ -253,8 +261,21 @@ RegExp/` test corpus is already path-skipped.
   loads `harness/sta.js` + `assert.js` automatically; per-file
   outcome on `--verbose`; failure list on `--list-failures=N`;
   results history in [test262-results.md](../test262-results.md).
-- Score history written by `--write-results`.
-- CI: `zig build` + `zig build test` gating; test262 advisory.
+- Score history written by `--write-results`. Fast iteration via
+  `--only-failing` (skip-as-pass any path in
+  `.test262-pass-cache.txt`, ~5× faster than a full sweep).
+- Memory / leak instrumentation: `--gc-stats` (per-cycle pool
+  counts + bytes), `--mem-summary` (end-of-sweep totals),
+  `--top-rss=N` (heaviest fixtures by process RSS delta),
+  `--top-alloc=N` (heaviest by cumulative bytes allocated —
+  catches GC-cleaned thrash that RSS hides),
+  `--leak-check` (route the per-fixture bytes allocator through
+  `std.heap.DebugAllocator`; stack trace per unfreed allocation
+  at exit), `--max-rss=<mb>` (abort with the offending fixture
+  path when RSS crosses budget).
+- CI: `zig build` + `zig build test` gating; test262 advisory
+  + a `test262-rss-smoke` advisory job that prints per-fixture
+  RSS deltas via `--top-rss`.
 
 **Planned.**
 
