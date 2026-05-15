@@ -184,16 +184,36 @@ fn makeArrayLikeIterator(realm: *Realm, src: Value, kind: enum { entries, keys, 
     return heap_mod.taggedObject(it);
 }
 
+/// §10.4.5 ValidateTypedArray check shared by the
+/// TypedArray.prototype { keys, values, entries } variants of
+/// the array-like iterator factory. For non-TypedArray receivers
+/// (regular Array.prototype.values, etc.) this is a no-op.
+fn validateTypedArrayIfPresent(realm: *Realm, this_value: Value) NativeError!void {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse return;
+    const tv = obj.typed_view orelse return;
+    // Detached buffers — ES2024 web-reality alignment: iterator
+    // methods read `undefined` per element rather than throw.
+    const buf = tv.viewed.array_buffer orelse return;
+    const elem_size = tv.kind.elementSize();
+    // Resizable AB shrunk under the view → OOB, TypeError.
+    if (tv.byte_offset + tv.length * elem_size > buf.len) {
+        return throwTypeError(realm, "TypedArray iterator on out-of-bounds TypedArray");
+    }
+}
+
 pub fn arrayLikeValuesMethod(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
+    try validateTypedArrayIfPresent(realm, this_value);
     return makeArrayLikeIterator(realm, this_value, .values) catch return error.OutOfMemory;
 }
 pub fn arrayLikeKeysMethod(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
+    try validateTypedArrayIfPresent(realm, this_value);
     return makeArrayLikeIterator(realm, this_value, .keys) catch return error.OutOfMemory;
 }
 pub fn arrayLikeEntriesMethod(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
+    try validateTypedArrayIfPresent(realm, this_value);
     return makeArrayLikeIterator(realm, this_value, .entries) catch return error.OutOfMemory;
 }
 

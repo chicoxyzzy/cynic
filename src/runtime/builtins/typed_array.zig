@@ -770,8 +770,7 @@ fn typedArrayBuffer(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
 
 fn typedArrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray.prototype.fill called on non-TypedArray");
-    const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray.prototype.fill called on non-TypedArray");
+    const tv = try taValidatedView(realm, this_value, "fill");
     const buf = tv.viewed.array_buffer orelse return throwTypeError(realm, "Cannot perform 'fill' on a detached buffer");
     const elem_size = tv.kind.elementSize();
     const len_i: i64 = @intCast(tv.length);
@@ -1018,6 +1017,38 @@ fn taViewOf(this_value: Value) ?ObjMod.TypedView {
     return obj.typed_view;
 }
 
+/// §10.4.5 ValidateTypedArray — combines the "is a TypedArray?"
+/// brand check with the resizable-buffer out-of-bounds check.
+/// Returns the view on success, throws TypeError otherwise.
+/// `label` names the calling method for the diagnostic.
+fn taValidatedView(realm: *Realm, this_value: Value, comptime label: []const u8) NativeError!ObjMod.TypedView {
+    const tv = taViewOf(this_value) orelse return throwTypeError(realm, label ++ " called on non-TypedArray");
+    if (taIsOutOfBounds(tv)) return throwTypeError(realm, label ++ " on out-of-bounds TypedArray");
+    return tv;
+}
+
+/// §10.4.5 IsTypedArrayOutOfBounds — true when the view's
+/// `[byte_offset, byte_offset + length*elemSize)` window spills
+/// past the backing buffer's current length. Resizable
+/// ArrayBuffers can be shrunk so that a fixed-length view that
+/// was once in-bounds becomes out-of-bounds; the spec then
+/// requires the TA method to throw TypeError via
+/// ValidateTypedArray.
+///
+/// NOTE: a *detached* buffer reports `array_buffer == null` —
+/// we treat that as NOT out-of-bounds here so the ES2024
+/// "align-detached-buffer-semantics-with-web-reality" callers
+/// (iterator methods + read-only finds) keep their no-throw
+/// path. The methods that still throw on detach call this
+/// helper AND check `tv.viewed.array_buffer` explicitly.
+fn taIsOutOfBounds(tv: ObjMod.TypedView) bool {
+    const buf = tv.viewed.array_buffer orelse return false;
+    const elem_size = tv.kind.elementSize();
+    const end = tv.byte_offset + tv.length * elem_size;
+    return end > buf.len;
+}
+
+
 fn taBufOf(tv: ObjMod.TypedView) ?[]u8 {
     return tv.viewed.array_buffer;
 }
@@ -1210,13 +1241,18 @@ fn taCallbackPreamble(realm: *Realm, this_value: Value, args: []const Value) Nat
 } {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray method on non-object");
     const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray method on non-TypedArray");
+    // §10.4.5 ValidateTypedArray — a resizable backing buffer
+    // may have been shrunk under us, leaving the view's window
+    // off the end of the buffer. The spec requires this check
+    // before any element read.
+    if (taIsOutOfBounds(tv)) return throwTypeError(realm, "TypedArray method called on out-of-bounds TypedArray");
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "callback is not a function");
     const this_arg = argOr(args, 1, Value.undefined_);
     return .{ .tv = tv, .buf = tv.viewed.array_buffer, .callback = callback, .this_arg = this_arg, .self_obj = obj };
 }
 
 fn typedArrayAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const tv = taViewOf(this_value) orelse return throwTypeError(realm, "at on non-TypedArray");
+    const tv = try taValidatedView(realm, this_value, "at");
     const len: i64 = @intCast(tv.length);
     const i = try taResolveIndex(realm, argOr(args, 0, Value.fromInt32(0)), len, 0);
     // `at` returns undefined for out-of-range; resolveIndex clamps,
@@ -1234,8 +1270,7 @@ fn typedArrayAt(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 }
 
 fn typedArrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    const tv = obj.typed_view orelse return error.NativeThrew;
+    const tv = try taValidatedView(realm, this_value, "copyWithin");
     const buf = tv.viewed.array_buffer orelse return error.NativeThrew;
     const len: i64 = @intCast(tv.length);
     const target = try taResolveIndex(realm, argOr(args, 0, Value.fromInt32(0)), len, 0);
@@ -1340,7 +1375,7 @@ fn typedArrayIncludes(realm: *Realm, this_value: Value, args: []const Value) Nat
     // §23.2.3.14 — ES2024 "web reality": a detached buffer reads
     // as undefined per element; we don't throw. The length stays
     // at its stored value (fixed-length TAs aren't auto).
-    const tv = taViewOf(this_value) orelse return throwTypeError(realm, "includes on non-TypedArray");
+    const tv = try taValidatedView(realm, this_value, "includes");
     const target = argOr(args, 0, Value.undefined_);
     const len: i64 = @intCast(tv.length);
     const from_arg = argOr(args, 1, Value.fromInt32(0));
@@ -1355,7 +1390,7 @@ fn typedArrayIncludes(realm: *Realm, this_value: Value, args: []const Value) Nat
 }
 
 fn typedArrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const tv = taViewOf(this_value) orelse return throwTypeError(realm, "indexOf on non-TypedArray");
+    const tv = try taValidatedView(realm, this_value, "indexOf");
     // §23.2.3.18 — when detached, no element strictly equals the
     // target (reads are `undefined`, strict-equality of two
     // undefineds is true *but* indexOf checks element-not-undefined
@@ -1378,7 +1413,7 @@ fn typedArrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nati
 }
 
 fn typedArrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const tv = taViewOf(this_value) orelse return throwTypeError(realm, "lastIndexOf on non-TypedArray");
+    const tv = try taValidatedView(realm, this_value, "lastIndexOf");
     if (tv.viewed.array_buffer == null) return Value.fromInt32(-1);
     const target = argOr(args, 0, Value.undefined_);
     const len: i64 = @intCast(tv.length);
@@ -1396,7 +1431,7 @@ fn typedArrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) 
 }
 
 fn typedArrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const tv = taViewOf(this_value) orelse return throwTypeError(realm, "join on non-TypedArray");
+    const tv = try taValidatedView(realm, this_value, "join");
     const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
     const sep_v = argOr(args, 0, Value.undefined_);
     const sep_s: []const u8 = if (sep_v.isUndefined()) "," else blk: {
@@ -1430,7 +1465,7 @@ fn typedArrayToString(realm: *Realm, this_value: Value, args: []const Value) Nat
 /// Cynic doesn't ship Intl (out of scope per AGENTS.md).
 fn typedArrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    const tv = taViewOf(this_value) orelse return throwTypeError(realm, "toLocaleString on non-TypedArray");
+    const tv = try taValidatedView(realm, this_value, "toLocaleString");
     const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
     const elem_size = tv.kind.elementSize();
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -1470,8 +1505,8 @@ fn typedArrayToLocaleString(realm: *Realm, this_value: Value, args: []const Valu
 }
 
 fn typedArrayReduce(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "reduce on non-TypedArray");
-    const tv = obj.typed_view orelse return throwTypeError(realm, "reduce on non-TypedArray");
+    const tv = try taValidatedView(realm, this_value, "reduce");
+    const obj = heap_mod.valueAsPlainObject(this_value).?;
     const buf = tv.viewed.array_buffer orelse return throwTypeError(realm, "TypedArray detached");
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "callback is not a function");
     const elem_size = tv.kind.elementSize();
@@ -1496,8 +1531,8 @@ fn typedArrayReduce(realm: *Realm, this_value: Value, args: []const Value) Nativ
 }
 
 fn typedArrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "reduceRight on non-TypedArray");
-    const tv = obj.typed_view orelse return throwTypeError(realm, "reduceRight on non-TypedArray");
+    const tv = try taValidatedView(realm, this_value, "reduceRight");
+    const obj = heap_mod.valueAsPlainObject(this_value).?;
     const buf = tv.viewed.array_buffer orelse return throwTypeError(realm, "TypedArray detached");
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "callback is not a function");
     const elem_size = tv.kind.elementSize();
@@ -1526,10 +1561,8 @@ fn typedArrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) 
 }
 
 fn typedArrayReverse(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
     _ = args;
-    const obj = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    const tv = obj.typed_view orelse return error.NativeThrew;
+    const tv = try taValidatedView(realm, this_value, "reverse");
     const buf = tv.viewed.array_buffer orelse return error.NativeThrew;
     const elem_size = tv.kind.elementSize();
     var lo: usize = 0;
@@ -1555,8 +1588,8 @@ fn typedArrayReverse(realm: *Realm, this_value: Value, args: []const Value) Nati
 // ── TypedArray prototype: methods that allocate a new TA ─────────────────────
 
 fn typedArraySlice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const self = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "slice on non-TypedArray");
-    const tv_pre = self.typed_view orelse return throwTypeError(realm, "slice on non-TypedArray");
+    const tv_pre = try taValidatedView(realm, this_value, "slice");
+    const self = heap_mod.valueAsPlainObject(this_value).?;
     const len: i64 = @intCast(tv_pre.length);
     const start = try taResolveIndex(realm, argOr(args, 0, Value.fromInt32(0)), len, 0);
     const end = try taResolveIndex(realm, argOr(args, 1, Value.undefined_), len, len);
@@ -1591,6 +1624,12 @@ fn typedArraySlice(realm: *Realm, this_value: Value, args: []const Value) Native
 }
 
 fn typedArraySubarray(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.2.3.30 step 2 — ValidateTypedArray. NOTE: subarray
+    // is one of the few methods that historically did NOT
+    // throw on OOB (it just produces a new OOB view). The
+    // ES2024 RAB integration ratified the OOB throw for
+    // *most* methods but subarray's behavior is to compute
+    // against the current bounds — keep the brand check only.
     const self = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "subarray on non-TypedArray");
     const tv = self.typed_view orelse return throwTypeError(realm, "subarray on non-TypedArray");
     const len: i64 = @intCast(tv.length);
@@ -2121,7 +2160,7 @@ fn taSortInPlace(realm: *Realm, tv: ObjMod.TypedView, buf_in: []u8, comparator: 
 }
 
 fn typedArraySort(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const tv = taViewOf(this_value) orelse return throwTypeError(realm, "sort on non-TypedArray");
+    const tv = try taValidatedView(realm, this_value, "sort");
     const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
     const cmp_v = argOr(args, 0, Value.undefined_);
     const cmp_fn: ?*JSFunction = if (cmp_v.isUndefined()) null else heap_mod.valueAsFunction(cmp_v) orelse return throwTypeError(realm, "sort comparator must be a function");
@@ -2130,7 +2169,7 @@ fn typedArraySort(realm: *Realm, this_value: Value, args: []const Value) NativeE
 }
 
 fn typedArrayToSorted(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const tv = taViewOf(this_value) orelse return throwTypeError(realm, "toSorted on non-TypedArray");
+    const tv = try taValidatedView(realm, this_value, "toSorted");
     const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
     const cmp_v = argOr(args, 0, Value.undefined_);
     const cmp_fn: ?*JSFunction = if (cmp_v.isUndefined()) null else heap_mod.valueAsFunction(cmp_v) orelse return throwTypeError(realm, "toSorted comparator must be a function");
@@ -2144,7 +2183,7 @@ fn typedArrayToSorted(realm: *Realm, this_value: Value, args: []const Value) Nat
 
 fn typedArrayToReversed(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    const tv = taViewOf(this_value) orelse return throwTypeError(realm, "toReversed on non-TypedArray");
+    const tv = try taValidatedView(realm, this_value, "toReversed");
     const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
     const out = try taMakeNew(realm, tv.kind, tv.length);
     const out_buf = out.typed_view.?.viewed.array_buffer.?;
@@ -2159,7 +2198,7 @@ fn typedArrayToReversed(realm: *Realm, this_value: Value, args: []const Value) N
 }
 
 fn typedArrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const tv = taViewOf(this_value) orelse return throwTypeError(realm, "with on non-TypedArray");
+    const tv = try taValidatedView(realm, this_value, "with");
     const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
     const len: i64 = @intCast(tv.length);
     const idx_arg = argOr(args, 0, Value.fromInt32(0));
