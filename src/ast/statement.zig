@@ -293,6 +293,13 @@ pub const ClassMember = union(enum) {
 
 pub const MethodDef = struct {
     span: Span,
+    /// §20.2.3.5 — start offset of the *function source text* for
+    /// `Function.prototype.toString`. Differs from `span.start`
+    /// when the method has a `static` modifier: `span` starts at
+    /// `static`, but the spec's source-text slice starts at the
+    /// `async` / `*` / `get` / `set` / key that follows. Equal to
+    /// `span.start` for non-static methods.
+    source_start: u32,
     is_static: bool,
     kind: MethodKind,
     key: expr.PropertyKey,
