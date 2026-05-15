@@ -1946,6 +1946,12 @@ const Row = struct {
     test262_sha: []const u8,
     total: u32,
     pass: u32,
+    /// `pass + fail`. Stored alongside `total` so the table can
+    /// surface raw counts for both `spec%` (pass/total) and
+    /// `attempted%` (pass/attempted). For rows imported from
+    /// pre-attempted-column history, derived from `attempted_pct`
+    /// (rounded; matches the original integer division to within 1).
+    attempted: u32,
     spec_pct: f64,
     attempted_pct: f64,
     /// Wall-clock duration of the run that produced this row, in
@@ -1955,6 +1961,18 @@ const Row = struct {
     /// comparable to a full sweep.
     elapsed_ms: ?u64 = null,
 };
+
+/// Derive `attempted` from `pass` and `attempted_pct` for rows
+/// imported from history files that didn't carry the column.
+/// `attempted_pct = 100 * pass / attempted` → solve for attempted.
+/// Falls back to `pass` (≡ 100% attempted ≡ 0 fail) when the
+/// percent is zero or rounding would underflow.
+fn deriveAttempted(pass: u32, attempted_pct: f64) u32 {
+    if (attempted_pct <= 0.0 or pass == 0) return pass;
+    const a = @as(f64, @floatFromInt(pass)) * 100.0 / attempted_pct;
+    const rounded: u32 = @intFromFloat(@round(a));
+    return if (rounded < pass) pass else rounded;
+}
 
 /// Update test262-results.md with today's row for the run that
 /// just finished.
@@ -2072,6 +2090,7 @@ fn makeRow(
         .test262_sha = test262_sha,
         .total = stats.total,
         .pass = stats.pass(),
+        .attempted = attempted,
         .spec_pct = spec_pct,
         .attempted_pct = att_pct,
         .elapsed_ms = elapsed_ms,
@@ -2143,6 +2162,7 @@ fn parseLinearRows(
             .test262_sha = t262_sha,
             .total = total,
             .pass = pass,
+            .attempted = deriveAttempted(pass, att_pct),
             .spec_pct = spec_pct,
             .attempted_pct = att_pct,
         });
@@ -2235,6 +2255,7 @@ fn parsePerDayRows(
             .test262_sha = t262_sha,
             .total = total,
             .pass = pass,
+            .attempted = deriveAttempted(pass, att_pct),
             .spec_pct = spec_pct,
             .attempted_pct = att_pct,
             .elapsed_ms = elapsed_ms,
@@ -2302,8 +2323,8 @@ fn writeFileBody(
         \\
         \\## Current scores
         \\
-        \\|         | spec% | attempted% | pass / total |
-        \\|---|---|---|---|
+        \\|         | spec% | attempted% | pass / total | pass / attempted |
+        \\|---|---|---|---|---|
         \\
     );
     inline for (.{ Mode.parser, Mode.runtime }) |m| {
@@ -2336,7 +2357,8 @@ fn writeFileBody(
         \\
         \\- **spec%** — `pass / total`. Coverage of the corpus. Skipped tests are in `total` but never in `pass`, so this rises only when we ship features that unblock previously-skipped tests. Same definition in the rolled-up rows and in the by-area scoreboard.
         \\- **attempted%** — `pass / (pass + fail)`. Of the tests we actually ran, the fraction that passed. Skips drop out. Measures the quality of what's shipped, independent of coverage. Same definition in the rolled-up rows and in the by-area scoreboard; skip-only buckets render as `0 %`.
-        \\- **pass / total** — raw counts. `total` is the Cynic-targeted corpus (see below); `fail` is `attempted - pass`; `skip` is `total - attempted`.
+        \\- **pass / total** — raw counts for `spec%`. `total` is the Cynic-targeted corpus (see below); `skip` is `total - attempted`.
+        \\- **pass / attempted** — raw counts for `attempted%`. `attempted = pass + fail`; `fail` is `attempted - pass`. Side-by-side with `pass / total` so a row's two percentages have visible numerators and denominators.
         \\- **Δ pass** (history) — change in `pass` versus the row immediately above (chronologically previous run of the same `mode`).
         \\- **elapsed** (history) — wall-clock time of the run that produced the row. Recorded only for full sweeps (no `--filter`, no `--only-failing`); partial runs leave it blank to keep the regression signal clean. Sub-minute as `12.3 s`, minute+ as `2m 40s`.
         \\
@@ -2369,8 +2391,8 @@ fn writeFileBody(
         }
         try out.appendSlice(gpa, "\n\n");
         try out.appendSlice(gpa,
-            \\|         | spec% | attempted% | pass / total | Δ pass | elapsed |
-            \\|---|---|---|---|---:|---:|
+            \\|         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
+            \\|---|---|---|---|---|---:|---:|
             \\
         );
 
@@ -2402,9 +2424,9 @@ fn writeMiniRow(
     out: *std.ArrayListUnmanaged(u8),
     r: Row,
 ) !void {
-    var buf: [256]u8 = undefined;
-    const line = try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} |\n", .{
-        @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total,
+    var buf: [320]u8 = undefined;
+    const line = try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {d} / {d} |\n", .{
+        @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, r.pass, r.attempted,
     });
     try out.appendSlice(gpa, line);
 }
@@ -2431,7 +2453,7 @@ fn writeHistoryRow(
     r: Row,
     prev_pass: ?u32,
 ) !void {
-    var buf: [320]u8 = undefined;
+    var buf: [384]u8 = undefined;
     var elapsed_buf: [32]u8 = undefined;
     const elapsed_cell = try formatElapsedCell(&elapsed_buf, r.elapsed_ms);
     if (prev_pass) |p| {
@@ -2439,17 +2461,17 @@ fn writeHistoryRow(
         const sign: u8 = if (delta > 0) '+' else if (delta < 0) '-' else 0;
         const mag: u64 = @abs(delta);
         const line = if (sign == 0)
-            try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | ±0 | {s} |\n", .{
-                @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, elapsed_cell,
+            try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {d} / {d} | ±0 | {s} |\n", .{
+                @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, r.pass, r.attempted, elapsed_cell,
             })
         else
-            try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {c}{d} | {s} |\n", .{
-                @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, sign, mag, elapsed_cell,
+            try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {d} / {d} | {c}{d} | {s} |\n", .{
+                @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, r.pass, r.attempted, sign, mag, elapsed_cell,
             });
         try out.appendSlice(gpa, line);
     } else {
-        const line = try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | n/a | {s} |\n", .{
-            @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, elapsed_cell,
+        const line = try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {d} / {d} | n/a | {s} |\n", .{
+            @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, r.pass, r.attempted, elapsed_cell,
         });
         try out.appendSlice(gpa, line);
     }

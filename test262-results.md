@@ -2,10 +2,10 @@
 
 ## Current scores
 
-|         | spec% | attempted% | pass / total |
-|---|---|---|---|
-| **parser** | 73.32 % | 100.00 % | 30311 / 41339 |
-| **runtime** | 82.59 % | 88.66 % | 33974 / 41138 |
+|         | spec% | attempted% | pass / total | pass / attempted |
+|---|---|---|---|---|
+| **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
+| **runtime** | 82.58 % | 88.66 % | 33973 / 41138 | 33973 / 38319 |
 
 
 ## Where the runtime stands, by area
@@ -32,7 +32,7 @@ browser-era built-ins …).
 | `built-ins/TypedArray` | 1130 | 293 | 8 | 79 % | 79 % |
 | `built-ins/TypedArrayConstructors` | 474 | 196 | 16 | 69 % | 71 % |
 | `language/expressions` | 9141 | 833 | 977 | 83 % | 92 % |
-| `language/module-code` | 461 | 121 | 14 | 77 % | 79 % |
+| `language/module-code` | 460 | 122 | 14 | 77 % | 79 % |
 | `language/statements` | 7969 | 592 | 675 | 86 % | 93 % |
 | **_10–99 fails_** | | | | | |
 | `built-ins/ArrayBuffer` | 165 | 27 | 4 | 84 % | 86 % |
@@ -125,7 +125,8 @@ browser-era built-ins …).
 
 - **spec%** — `pass / total`. Coverage of the corpus. Skipped tests are in `total` but never in `pass`, so this rises only when we ship features that unblock previously-skipped tests. Same definition in the rolled-up rows and in the by-area scoreboard.
 - **attempted%** — `pass / (pass + fail)`. Of the tests we actually ran, the fraction that passed. Skips drop out. Measures the quality of what's shipped, independent of coverage. Same definition in the rolled-up rows and in the by-area scoreboard; skip-only buckets render as `0 %`.
-- **pass / total** — raw counts. `total` is the Cynic-targeted corpus (see below); `fail` is `attempted - pass`; `skip` is `total - attempted`.
+- **pass / total** — raw counts for `spec%`. `total` is the Cynic-targeted corpus (see below); `skip` is `total - attempted`.
+- **pass / attempted** — raw counts for `attempted%`. `attempted = pass + fail`; `fail` is `attempted - pass`. Side-by-side with `pass / total` so a row's two percentages have visible numerators and denominators.
 - **Δ pass** (history) — change in `pass` versus the row immediately above (chronologically previous run of the same `mode`).
 - **elapsed** (history) — wall-clock time of the run that produced the row. Recorded only for full sweeps (no `--filter`, no `--only-failing`); partial runs leave it blank to keep the regression signal clean. Sub-minute as `12.3 s`, minute+ as `2m 40s`.
 
@@ -135,63 +136,61 @@ browser-era built-ins …).
 
 ### 2026-05-15 — cynic `2b05c51`, test262 `d0c1b455`
 
-|         | spec% | attempted% | pass / total | Δ pass | elapsed |
-|---|---|---|---|---:|---:|
-| **parser** | 73.32 % | 100.00 % | 30311 / 41339 | -167 | 1.3 s |
-| **runtime** | 82.59 % | 88.66 % | 33974 / 41138 | +725 | 1m 36s |
+|         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
+|---|---|---|---|---|---:|---:|
+| **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 | -167 | 1.3 s |
+| **runtime** | 82.58 % | 88.66 % | 33973 / 41138 | 33973 / 38319 | +724 | 1m 45s |
 
 Biggest movers (runtime):
 
-- `built-ins/TypedArrayConstructors` +18
-- `language/expressions` +15
-- `language/statements` +14
+- `language/module-code` -1
 
 ### 2026-05-14 — cynic `aca1903`, test262 `d0c1b455`
 
-|         | spec% | attempted% | pass / total | Δ pass | elapsed |
-|---|---|---|---|---:|---:|
-| **parser** | 73.44 % | 100.00 % | 30478 / 41501 | +108 | 2.1 s |
-| **runtime** | 80.12 % | 85.56 % | 33249 / 41501 | +474 | 4m 56s |
+|         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
+|---|---|---|---|---|---:|---:|
+| **parser** | 73.44 % | 100.00 % | 30478 / 41501 | 30478 / 30478 | +108 | 2.1 s |
+| **runtime** | 80.12 % | 85.56 % | 33249 / 41501 | 33249 / 38860 | +474 | 4m 56s |
 
 ### 2026-05-13 — cynic `550a57e`, test262 `d0c1b455`
 
-|         | spec% | attempted% | pass / total | Δ pass | elapsed |
-|---|---|---|---|---:|---:|
-| **parser** | 65.76 % | 100.00 % | 30370 / 46183 | +964 | 1.3 s |
-| **runtime** | 70.79 % | 85.00 % | 32775 / 46296 | +1007 | 1m 47s |
+|         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
+|---|---|---|---|---|---:|---:|
+| **parser** | 65.76 % | 100.00 % | 30370 / 46183 | 30370 / 30370 | +964 | 1.3 s |
+| **runtime** | 70.79 % | 85.00 % | 32775 / 46296 | 32775 / 38559 | +1007 | 1m 47s |
 
 ### 2026-05-12 — cynic `6800720`, test262 `d0c1b455`
 
-|         | spec% | attempted% | pass / total | Δ pass | elapsed |
-|---|---|---|---|---:|---:|
-| **parser** | 63.52 % | 96.48 % | 29406 / 46296 | +148 | 1.2 s |
-| **runtime** | 68.62 % | 82.38 % | 31768 / 46296 | +1877 | 2m 12s |
+|         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
+|---|---|---|---|---|---:|---:|
+| **parser** | 63.52 % | 96.48 % | 29406 / 46296 | 29406 / 30479 | +148 | 1.2 s |
+| **runtime** | 68.62 % | 82.38 % | 31768 / 46296 | 31768 / 38563 | +1877 | 2m 12s |
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
-|         | spec% | attempted% | pass / total | Δ pass | elapsed |
-|---|---|---|---|---:|---:|
-| **parser** | 63.16 % | 96.48 % | 29258 / 46320 | ±0 |  |
-| **runtime** | 64.53 % | 78.37 % | 29891 / 46320 | +4713 |  |
+|         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
+|---|---|---|---|---|---:|---:|
+| **parser** | 63.16 % | 96.48 % | 29258 / 46320 | 29258 / 30325 | ±0 |  |
+| **runtime** | 64.53 % | 78.37 % | 29891 / 46320 | 29891 / 38141 | +4713 |  |
 
 ### 2026-05-10 — cynic `c5c12a0`, test262 `d0c1b455`
 
-|         | spec% | attempted% | pass / total | Δ pass | elapsed |
-|---|---|---|---|---:|---:|
-| **parser** | 63.16 % | 96.48 % | 29258 / 46320 | +464 |  |
-| **runtime** | 54.36 % | 66.01 % | 25178 / 46320 | +1265 |  |
+|         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
+|---|---|---|---|---|---:|---:|
+| **parser** | 63.16 % | 96.48 % | 29258 / 46320 | 29258 / 30325 | +464 |  |
+| **runtime** | 54.36 % | 66.01 % | 25178 / 46320 | 25178 / 38143 | +1265 |  |
 
 ### 2026-05-09 — cynic `fcc5543`, test262 `d0c1b455`
 
-|         | spec% | attempted% | pass / total | Δ pass | elapsed |
-|---|---|---|---|---:|---:|
-| **parser** | 62.11 % | 94.89 % | 28794 / 46357 | +252 |  |
-| **runtime** | 51.58 % | 62.65 % | 23913 / 46357 | +6048 |  |
+|         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
+|---|---|---|---|---|---:|---:|
+| **parser** | 62.11 % | 94.89 % | 28794 / 46357 | 28794 / 30345 | +252 |  |
+| **runtime** | 51.58 % | 62.65 % | 23913 / 46357 | 23913 / 38169 | +6048 |  |
 
 ### 2026-05-08 — cynic `unknown`, test262 `d0c1b455`
 
-|         | spec% | attempted% | pass / total | Δ pass | elapsed |
-|---|---|---|---|---:|---:|
-| **parser** | 54.76 % | 95.61 % | 28542 / 52125 | n/a |  |
-| **runtime** | 34.60 % | 46.64 % | 17865 / 51639 | n/a |  |
+|         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
+|---|---|---|---|---|---:|---:|
+| **parser** | 54.76 % | 95.61 % | 28542 / 52125 | 28542 / 29853 | n/a |  |
+| **runtime** | 34.60 % | 46.64 % | 17865 / 51639 | 17865 / 38304 | n/a |  |
 
