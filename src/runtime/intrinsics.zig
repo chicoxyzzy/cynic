@@ -814,6 +814,30 @@ pub fn getPropertyChain(realm: *Realm, obj: *JSObject, key: []const u8) NativeEr
                 if (o.tryGetIndexedOwn(idx)) |v| return v;
             }
         }
+        // §10.4.5 Integer-Indexed Exotic [[Get]] — for a typed-array
+        // numeric index, read from the backing buffer directly
+        // (live length on length-tracking views over a resizable
+        // buffer). Lookup terminates at the TA — no proto-chain
+        // fallthrough for the numeric form. Out-of-bounds reads
+        // return undefined per ES2024 IntegerIndexedElementGet.
+        if (o.typed_view) |tv| {
+            if (std.fmt.parseInt(usize, key, 10)) |idx_u| {
+                if (tv.viewed.array_buffer) |buf| {
+                    const elem_size = tv.kind.elementSize();
+                    const live_len: usize = if (tv.length_tracking) blk: {
+                        if (tv.byte_offset > buf.len) break :blk 0;
+                        break :blk (buf.len - tv.byte_offset) / elem_size;
+                    } else tv.length;
+                    if (idx_u < live_len) {
+                        const byte_pos = tv.byte_offset + idx_u * elem_size;
+                        if (byte_pos + elem_size <= buf.len) {
+                            return readTypedElement(realm, buf, tv.kind, byte_pos);
+                        }
+                    }
+                }
+                return Value.undefined_;
+            } else |_| {}
+        }
         if (o.properties.get(key)) |v| return v;
         cur = o.prototype;
     }
