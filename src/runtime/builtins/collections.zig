@@ -191,9 +191,12 @@ fn makeArrayLikeIterator(realm: *Realm, src: Value, kind: enum { entries, keys, 
 fn validateTypedArrayIfPresent(realm: *Realm, this_value: Value) NativeError!void {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return;
     const tv = obj.typed_view orelse return;
-    // Detached buffers — ES2024 web-reality alignment: iterator
-    // methods read `undefined` per element rather than throw.
-    const buf = tv.viewed.array_buffer orelse return;
+    // §23.2.4.4 ValidateTypedArray (called by entries / keys /
+    // values) — throws TypeError when the buffer is detached
+    // (IsTypedArrayOutOfBounds is `true` per ES2024 §25.1.3.x
+    // for a detached buffer).
+    const buf = tv.viewed.array_buffer orelse
+        return throwTypeError(realm, "TypedArray iterator on detached buffer");
     const elem_size = tv.kind.elementSize();
     // Resizable AB shrunk under the view → OOB, TypeError.
     if (tv.byte_offset + tv.length * elem_size > buf.len) {

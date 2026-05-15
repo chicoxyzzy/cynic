@@ -727,6 +727,10 @@ fn typedArrayLength(realm: *Realm, this_value: Value, args: []const Value) Nativ
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray accessor on non-object");
     const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray.prototype.length called on a non-TypedArray");
+    // §23.2.3.18 step 6 — IsDetachedBuffer → return 0. The stored
+    // length is preserved on the view (post-detach behaviour is
+    // observable only through this getter and `byteLength`).
+    if (tv.viewed.array_buffer == null) return Value.fromInt32(0);
     return Value.fromInt32(@intCast(tv.length));
 }
 
@@ -734,6 +738,8 @@ fn typedArrayByteLength(realm: *Realm, this_value: Value, args: []const Value) N
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray accessor on non-object");
     const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray.prototype.byteLength called on a non-TypedArray");
+    // §23.2.3.2 step 5 — IsDetachedBuffer → return 0.
+    if (tv.viewed.array_buffer == null) return Value.fromInt32(0);
     return Value.fromInt32(@intCast(tv.length * tv.kind.elementSize()));
 }
 
@@ -741,6 +747,8 @@ fn typedArrayByteOffset(realm: *Realm, this_value: Value, args: []const Value) N
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray accessor on non-object");
     const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray.prototype.byteOffset called on a non-TypedArray");
+    // §23.2.3.3 step 5 — IsDetachedBuffer → return 0.
+    if (tv.viewed.array_buffer == null) return Value.fromInt32(0);
     return Value.fromInt32(@intCast(tv.byte_offset));
 }
 
@@ -1035,14 +1043,18 @@ fn taValidatedView(realm: *Realm, this_value: Value, comptime label: []const u8)
 /// requires the TA method to throw TypeError via
 /// ValidateTypedArray.
 ///
-/// NOTE: a *detached* buffer reports `array_buffer == null` —
-/// we treat that as NOT out-of-bounds here so the ES2024
-/// "align-detached-buffer-semantics-with-web-reality" callers
-/// (iterator methods + read-only finds) keep their no-throw
-/// path. The methods that still throw on detach call this
-/// helper AND check `tv.viewed.array_buffer` explicitly.
+/// Per ES2024 §25.1.3.x IsTypedArrayOutOfBounds, a detached
+/// buffer is reported as out-of-bounds (a detached buffer has
+/// effective byte length 0). ValidateTypedArray therefore
+/// throws TypeError at method entry on detach.
+///
+/// The ES2024 "align-detached-buffer-semantics-with-web-reality"
+/// fixtures detach the buffer DURING the call (after Validate
+/// returned) — per-element reads then fall through `taSafeRead`,
+/// which returns undefined; the method completes without
+/// throwing. See `taSafeRead` for that path.
 fn taIsOutOfBounds(tv: ObjMod.TypedView) bool {
-    const buf = tv.viewed.array_buffer orelse return false;
+    const buf = tv.viewed.array_buffer orelse return true;
     const elem_size = tv.kind.elementSize();
     const end = tv.byte_offset + tv.length * elem_size;
     return end > buf.len;
@@ -1404,6 +1416,10 @@ fn typedArrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nati
     const len: i64 = @intCast(tv.length);
     var from = try taResolveIndex(realm, argOr(args, 1, Value.fromInt32(0)), len, 0);
     if (from < 0) from = 0;
+    // §23.2.3.14 step 8 — HasProperty(O, k) is `false` once the
+    // buffer is detached (mid-call via `fromIndex.valueOf`); the
+    // spec's loop returns -1 in that case.
+    if (tv.viewed.array_buffer == null) return Value.fromInt32(-1);
     var i: i64 = from;
     while (i < len) : (i += 1) {
         const v = taSafeRead(realm, tv, i);
@@ -1422,6 +1438,10 @@ fn typedArrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) 
         from = try taResolveIndex(realm, args[1], len, len - 1);
         if (from >= len) from = len - 1;
     }
+    // §23.2.3.17 step 8 — `kPresent` is `false` after detach (the
+    // `fromIndex.valueOf` may have triggered it), so the loop
+    // returns -1 without inspecting elements.
+    if (tv.viewed.array_buffer == null) return Value.fromInt32(-1);
     var i: i64 = from;
     while (i >= 0) : (i -= 1) {
         const v = taSafeRead(realm, tv, i);
@@ -1431,8 +1451,13 @@ fn typedArrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) 
 }
 
 fn typedArrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.2.3.15 step 2 — ValidateTypedArray throws on pre-call
+    // detach. ES2024 "align-detached-buffer-semantics-with-web-
+    // reality": if `separator.toString` detaches mid-call, the
+    // per-element reads return `undefined` (via `taSafeRead`),
+    // each stringifies to the empty string per step 7.c, and
+    // the join completes producing only the separators.
     const tv = try taValidatedView(realm, this_value, "join");
-    const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
     const sep_v = argOr(args, 0, Value.undefined_);
     const sep_s: []const u8 = if (sep_v.isUndefined()) "," else blk: {
         const s = try stringifyArg(realm, sep_v);
@@ -1440,11 +1465,13 @@ fn typedArrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeE
     };
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
-    const elem_size = tv.kind.elementSize();
     var i: usize = 0;
     while (i < tv.length) : (i += 1) {
         if (i > 0) out.appendSlice(realm.allocator, sep_s) catch return error.OutOfMemory;
-        const v = readTypedElement(realm, buf, tv.kind, tv.byte_offset + i * elem_size);
+        const v = taSafeRead(realm, tv, @intCast(i));
+        // §23.2.3.15 step 7.c — `If element is undefined or null,
+        // let next be the empty String`. Skip stringification.
+        if (v.isUndefined() or v.isNull()) continue;
         const s = try stringifyArg(realm, v);
         out.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
     }
@@ -1684,7 +1711,14 @@ fn taSpeciesCreateSubarray(
     }
 
     if (species_v.isUndefined() or species_v.isNull()) {
-        // Default — build inline, reusing the shared buffer.
+        // §23.2.4.2 TypedArrayCreate inlined for the default species:
+        // build a view directly on the shared buffer. §23.2.5.1.4
+        // step 11 — `If IsDetachedBuffer(buffer) is true, throw a
+        // TypeError`. The user's `valueOf` on `begin` / `end` (run
+        // earlier in `subarray`) may have detached the buffer
+        // between the brand check and here; the spec defers the
+        // throw to this inner TA construction.
+        if (buffer.array_buffer == null) return throwTypeError(realm, "TypedArray: ArrayBuffer is detached");
         const ctor = heap_mod.valueAsFunction(realm.globals.get(nameForTypedKind(kind)) orelse Value.undefined_) orelse return throwTypeError(realm, "TypedArray constructor not found");
         const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
         inst.prototype = ctor.prototype;
@@ -1786,19 +1820,25 @@ fn dataViewConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "DataView constructor requires 'new'");
     const buf_arg = argOr(args, 0, Value.undefined_);
     const buf_obj = heap_mod.valueAsPlainObject(buf_arg) orelse return throwTypeError(realm, "DataView: first argument must be an ArrayBuffer");
-    // The first argument has to *be* an ArrayBuffer object, not
-    // some random object — but checking `array_buffer != null`
-    // also covers the detached case, which §25.3.2.1 step 6 says
-    // throws TypeError ("If IsDetachedBuffer(buffer) is true").
-    if (buf_obj.array_buffer == null) return throwTypeError(realm, "DataView: ArrayBuffer is detached");
+    // §25.3.2.1 step 2 — RequireInternalSlot(buffer, [[ArrayBufferData]]):
+    // brand check on the constructor argument. Use
+    // `has_array_buffer_data` so a *detached* ArrayBuffer still
+    // satisfies the brand here; the dedicated detached-buffer
+    // throw lives further down per step 7 — after ToIndex has had
+    // a chance to fire any user-observable `valueOf` on
+    // `byteOffset`.
+    if (!buf_obj.has_array_buffer_data) return throwTypeError(realm, "DataView: first argument must be an ArrayBuffer");
 
-    // §7.1.17 ToIndex — runs BEFORE the buffer-length read, since
-    // the user's `valueOf` could detach the buffer mid-call.
+    // §25.3.2.1 step 3 — ToIndex(byteOffset). Runs BEFORE the
+    // detached check (step 7) so a `valueOf` side-effect on
+    // `byteOffset` is still observable when the buffer was
+    // detached before the call.
     const byte_offset = try dvToIndex(realm, argOr(args, 1, Value.undefined_));
 
-    // Re-check detachment / fetch buf after each user-observable
-    // step (ToIndex can call into JS via `valueOf`).
-    const buf1 = buf_obj.array_buffer orelse return throwTypeError(realm, "DataView: ArrayBuffer detached during construction");
+    // §25.3.2.1 step 7 — IsDetachedBuffer. The detach can happen
+    // before the call or inside `byteOffset`'s `valueOf`; either
+    // way `array_buffer == null` once we reach this point.
+    const buf1 = buf_obj.array_buffer orelse return throwTypeError(realm, "DataView: ArrayBuffer is detached");
     if (byte_offset > buf1.len) return throwRangeError(realm, "DataView: byteOffset exceeds buffer");
 
     const length_arg = argOr(args, 2, Value.undefined_);
