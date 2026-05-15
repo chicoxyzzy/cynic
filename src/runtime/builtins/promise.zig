@@ -42,9 +42,7 @@ const installNativeMethod = intrinsics.installNativeMethod;
 const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
 const argOr = intrinsics.argOr;
 const throwTypeError = intrinsics.throwTypeError;
-const clampArrayLength = intrinsics.clampArrayLength;
 const setLength = intrinsics.setLength;
-const toLengthOf = intrinsics.toLengthOf;
 const getPropertyChain = intrinsics.getPropertyChain;
 
 // ── §27 Promise — install constructors, prototype, statics ────────────────
@@ -772,7 +770,16 @@ const IteratorRecord = struct {
 /// `error.NativeThrew` with `realm.pending_exception` set.
 fn iteratorOpen(realm: *Realm, source_v: Value) NativeError!?IteratorRecord {
     const interp = @import("../interpreter.zig");
-    const obj = heap_mod.valueAsPlainObject(source_v) orelse return null;
+    // §7.4.2 GetIterator: ToObject the source first so primitive
+    // wrappers (`""`, `42`, …) get their prototype's `@@iterator`
+    // (e.g. `String.prototype[@@iterator]`). null / undefined
+    // remain a TypeError via `toObjectThis`.
+    const obj = if (heap_mod.valueAsPlainObject(source_v)) |o|
+        o
+    else if (source_v.isNull() or source_v.isUndefined())
+        return throwTypeError(realm, "Cannot convert null or undefined to object")
+    else
+        try intrinsics.toObjectThis(realm, source_v);
     const iter_method_v = try getPropertyChain(realm, obj, "@@iterator");
     // §7.3.10 GetMethod — null / undefined both mean "no method"
     // and the caller falls back. A *present, non-callable*
@@ -947,7 +954,10 @@ fn iterateAggregator(
     process: *const fn (ctx: *anyopaque, realm: *Realm, ctor: *JSFunction, idx: usize, resolved: Value) NativeError!IterStepAction,
 ) NativeError!void {
     const interp = @import("../interpreter.zig");
-    const obj = heap_mod.valueAsPlainObject(source_v) orelse return throwTypeError(realm, "Promise aggregator requires an iterable");
+    // §7.4.2 GetIterator is delegated to `iteratorOpen` below;
+    // it ToObject-coerces primitive sources (so `Promise.any("")`
+    // sees `String.prototype[@@iterator]`) and throws TypeError
+    // for null / undefined.
 
     // §27.2.4.1.1 GetPromiseResolve — `Get(promiseConstructor, "resolve")`
     // runs ONCE before the loop. Fixtures count the resolve
@@ -960,65 +970,43 @@ fn iterateAggregator(
     };
     const resolve_fn = heap_mod.valueAsFunction(resolve_v) orelse return throwTypeError(realm, "Promise aggregator: resolve is not a function");
 
-    if (try iteratorOpen(realm, source_v)) |rec_in| {
-        var rec = rec_in;
-        const max_iter: usize = 1 << 24;
-        var idx: usize = 0;
-        while (idx < max_iter) : (idx += 1) {
-            const next_v = iteratorStep(realm, &rec) catch |err| {
-                // Step itself flagged abrupt; close is not our job
-                // here (rec.done is true).
-                return err;
-            } orelse return;
+    // `iteratorOpen` always returns a record or throws — no
+    // array-like fallback (spec §7.4.2 only allows GetIterator).
+    const rec_in = (try iteratorOpen(realm, source_v)) orelse unreachable;
+    var rec = rec_in;
+    const max_iter: usize = 1 << 24;
+    var idx: usize = 0;
+    while (idx < max_iter) : (idx += 1) {
+        const next_v = iteratorStep(realm, &rec) catch |err| {
+            // Step itself flagged abrupt; close is not our job
+            // here (rec.done is true).
+            return err;
+        } orelse return;
 
-            const r_outcome = interp.callJSFunction(realm.allocator, realm, resolve_fn, heap_mod.taggedFunction(ctor), &.{next_v}) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => {
-                    iteratorClose(realm, &rec);
-                    return error.NativeThrew;
-                },
-            };
-            const resolved = switch (r_outcome) {
-                .value, .yielded => |v| v,
-                .thrown => |ex| {
-                    iteratorClose(realm, &rec);
-                    realm.pending_exception = ex;
-                    return error.NativeThrew;
-                },
-            };
-
-            const action = process(ctx, realm, ctor, idx, resolved) catch |err| {
-                iteratorClose(realm, &rec);
-                return err;
-            };
-            if (action == .short_circuit) {
-                iteratorClose(realm, &rec);
-                return;
-            }
-        }
-        return;
-    }
-
-    // Array-like fallback.
-    const len = try clampArrayLength(try toLengthOf(realm, obj));
-    var i: i64 = 0;
-    while (i < len) : (i += 1) {
-        var ibuf: [24]u8 = undefined;
-        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        const v = try getPropertyChain(realm, obj, islice);
-        const r_outcome = interp.callJSFunction(realm.allocator, realm, resolve_fn, heap_mod.taggedFunction(ctor), &.{v}) catch |err| switch (err) {
+        const r_outcome = interp.callJSFunction(realm.allocator, realm, resolve_fn, heap_mod.taggedFunction(ctor), &.{next_v}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return error.NativeThrew,
+            else => {
+                iteratorClose(realm, &rec);
+                return error.NativeThrew;
+            },
         };
         const resolved = switch (r_outcome) {
-            .value, .yielded => |rv| rv,
+            .value, .yielded => |v| v,
             .thrown => |ex| {
+                iteratorClose(realm, &rec);
                 realm.pending_exception = ex;
                 return error.NativeThrew;
             },
         };
-        const action = try process(ctx, realm, ctor, @intCast(i), resolved);
-        if (action == .short_circuit) return;
+
+        const action = process(ctx, realm, ctor, idx, resolved) catch |err| {
+            iteratorClose(realm, &rec);
+            return err;
+        };
+        if (action == .short_circuit) {
+            iteratorClose(realm, &rec);
+            return;
+        }
     }
 }
 
