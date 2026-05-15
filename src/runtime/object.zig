@@ -649,6 +649,34 @@ pub const JSObject = struct {
                 return self.setIndexed(allocator, idx, v);
             }
         }
+        // §10.4.5 Integer-Indexed Exotic [[Set]] — TypedArray
+        // numeric-index write goes straight to the backing buffer
+        // (live length on length-tracking views over a resizable
+        // ArrayBuffer). NOTE: this internal `set` bypasses
+        // ToNumber/ToBigInt coercion — Array.prototype.fill /
+        // copyWithin etc. pass an already-numeric value, and
+        // the call sites that need user coercion route through
+        // the interpreter's sta_property bytecode instead. Drop
+        // out-of-bounds writes silently per spec.
+        if (self.typed_view) |tv| {
+            if (std.fmt.parseInt(usize, key, 10)) |idx_u| {
+                if (tv.viewed.array_buffer) |buf| {
+                    const elem_size = tv.kind.elementSize();
+                    const live_len: usize = if (tv.length_tracking) blk: {
+                        if (tv.byte_offset > buf.len) break :blk 0;
+                        break :blk (buf.len - tv.byte_offset) / elem_size;
+                    } else tv.length;
+                    if (idx_u < live_len) {
+                        const byte_pos = tv.byte_offset + idx_u * elem_size;
+                        if (byte_pos + elem_size <= buf.len) {
+                            const intrinsics_mod = @import("intrinsics.zig");
+                            intrinsics_mod.writeTypedElement(buf, tv.kind, byte_pos, v);
+                        }
+                    }
+                }
+                return;
+            } else |_| {}
+        }
         try self.properties.put(allocator, key, v);
     }
 
