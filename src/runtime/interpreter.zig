@@ -3981,7 +3981,15 @@ fn runFrames(
                                 },
                             }
                         } else {
-                            acc = Value.undefined_;
+                            // §10.1.8.1 PrivateFieldGet step 6.b —
+                            // accessor without [[Get]] throws TypeError.
+                            const ex = try makeTypeError(realm, "Cannot read from private accessor with no getter");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
                         }
                         continue;
                     }
@@ -4010,8 +4018,8 @@ fn runFrames(
                 };
                 // §15.7 — private accessor descriptors win over
                 // data slots on read. A read of a write-only
-                // accessor (`set #x` without `get #x`) returns
-                // `undefined` per §10.1.8.1 step 4.b.
+                // accessor (`set #x` without `get #x`) throws
+                // TypeError per §10.1.8.1 PrivateFieldGet step 6.b.
                 if (recv.private_accessors.get(key_s.bytes)) |pa| {
                     if (pa.getter) |getter| {
                         const outcome = try callJSFunction(allocator, realm, getter, heap_mod.taggedObject(recv), &.{});
@@ -4028,7 +4036,14 @@ fn runFrames(
                             },
                         }
                     } else {
-                        acc = Value.undefined_;
+                        const ex = try makeTypeError(realm, "Cannot read from private accessor with no getter");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
                     }
                 } else if (recv.private_properties.get(key_s.bytes)) |v| {
                     acc = v;

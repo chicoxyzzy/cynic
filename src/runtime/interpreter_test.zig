@@ -3761,11 +3761,25 @@ test "later: private setter dispatches as accessor" {
     , 70);
 }
 
-test "later: read of write-only private accessor returns undefined" {
+test "later: read of write-only private accessor throws TypeError" {
+    // §10.1.8.1 PrivateFieldGet step 6.b — accessor without [[Get]]
+    // throws TypeError.
     try expectScriptStringWithBuiltins(
         \\class C { set #x(v) {} readX() { return this.#x; } }
-        \\String(new C().readX());
-    , "undefined");
+        \\let kind = "none";
+        \\try { new C().readX(); } catch (e) { kind = e instanceof TypeError ? "type" : "other"; }
+        \\kind;
+    , "type");
+}
+
+test "later: read of static write-only private accessor throws TypeError" {
+    // §10.1.8.1 PrivateFieldGet step 6.b — static accessor path.
+    try expectScriptStringWithBuiltins(
+        \\class C { static set #x(v) {} static readX() { return this.#x; } }
+        \\let kind = "none";
+        \\try { C.readX(); } catch (e) { kind = e instanceof TypeError ? "type" : "other"; }
+        \\kind;
+    , "type");
 }
 
 test "later: static private field reads back via this.#x" {
