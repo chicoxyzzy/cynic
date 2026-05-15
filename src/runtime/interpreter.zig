@@ -5443,14 +5443,25 @@ fn runFrames(
                     }
                     // §23.2.4 IntegerIndex — typed-array
                     // numeric index access reads from the
-                    // backing buffer.
+                    // backing buffer. For length-tracking views
+                    // over a resizable ArrayBuffer the live length
+                    // is recomputed against the (possibly grown
+                    // or shrunk) buffer; a fixed-length view past
+                    // the current buffer end reports undefined.
                     if (obj.typed_view) |tv| {
                         if (std.fmt.parseInt(usize, key_slice, 10)) |idx| {
-                            if (idx < tv.length) {
-                                if (tv.viewed.array_buffer) |buf| {
-                                    const elem_size = tv.kind.elementSize();
-                                    acc = intrinsics_mod.readTypedElement(realm, buf, tv.kind, tv.byte_offset + idx * elem_size);
-                                    continue;
+                            if (tv.viewed.array_buffer) |buf| {
+                                const elem_size = tv.kind.elementSize();
+                                const live_len: usize = if (tv.length_tracking) blk: {
+                                    if (tv.byte_offset > buf.len) break :blk 0;
+                                    break :blk (buf.len - tv.byte_offset) / elem_size;
+                                } else tv.length;
+                                if (idx < live_len) {
+                                    const byte_pos = tv.byte_offset + idx * elem_size;
+                                    if (byte_pos + elem_size <= buf.len) {
+                                        acc = intrinsics_mod.readTypedElement(realm, buf, tv.kind, byte_pos);
+                                        continue;
+                                    }
                                 }
                             }
                             acc = Value.undefined_;
@@ -5615,10 +5626,23 @@ fn runFrames(
                                     continue;
                                 },
                             };
-                            if (idx < tv.length) {
-                                if (tv.viewed.array_buffer) |buf| {
-                                    const elem_size = tv.kind.elementSize();
-                                    intrinsics_mod.writeTypedElement(buf, tv.kind, tv.byte_offset + idx * elem_size, coerced);
+                            // §10.4.5.16 IsValidIntegerIndex —
+                            // length-tracking views over a
+                            // resizable buffer use the live length;
+                            // out-of-bounds writes are silently
+                            // dropped per spec (after the mandatory
+                            // ToNumber/ToBigInt above).
+                            if (tv.viewed.array_buffer) |buf| {
+                                const elem_size = tv.kind.elementSize();
+                                const live_len: usize = if (tv.length_tracking) blk: {
+                                    if (tv.byte_offset > buf.len) break :blk 0;
+                                    break :blk (buf.len - tv.byte_offset) / elem_size;
+                                } else tv.length;
+                                if (idx < live_len) {
+                                    const byte_pos = tv.byte_offset + idx * elem_size;
+                                    if (byte_pos + elem_size <= buf.len) {
+                                        intrinsics_mod.writeTypedElement(buf, tv.kind, byte_pos, coerced);
+                                    }
                                 }
                             }
                             continue;
