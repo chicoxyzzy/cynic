@@ -3695,6 +3695,39 @@ fn runFrames(
                 ip += 1;
                 const obj_v = acc;
                 // §13.10.1 — RHS must be an object; otherwise TypeError.
+                // §10.1.7 HasProperty / §7.3.12 — applies to any
+                // Object, including callable Functions. Function
+                // receivers walk through the JSFunction's own
+                // properties + the function's prototype chain (which
+                // typically resolves to Function.prototype).
+                if (heap_mod.valueAsFunction(obj_v)) |fn_in| {
+                    // §7.1.19 ToPropertyKey on the LHS.
+                    const key_v = switch (try coerceToPropertyKey(allocator, realm, frames, f, ip, registers[r])) {
+                        .ok => |v| v,
+                        .handled => {
+                            committed = true;
+                            continue;
+                        },
+                        .uncaught => |ex| return .{ .thrown = ex },
+                    };
+                    var key_buf: [64]u8 = undefined;
+                    const key_slice = computedKeyToString(key_v, &key_buf);
+                    // Function own properties: \`prototype\` lives in
+                    // a dedicated slot (synthesised via \`hasOwn\`);
+                    // the rest are in \`properties\` / \`accessors\`.
+                    var found = fn_in.hasOwn(key_slice);
+                    if (!found) {
+                        var cursor: ?*JSObject = fn_in.proto;
+                        while (cursor) |c| : (cursor = c.prototype) {
+                            if (c.properties.contains(key_slice) or c.accessors.contains(key_slice)) {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    acc = Value.fromBool(found);
+                    continue;
+                }
                 const obj_in = heap_mod.valueAsPlainObject(obj_v) orelse {
                     const ex = try makeTypeError(realm, "Cannot use 'in' operator to search non-object");
                     f.ip = ip;

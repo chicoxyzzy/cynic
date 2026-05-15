@@ -229,6 +229,16 @@ pub fn buildClass(
             false,
             captured_env,
         );
+        // §15.5.6.4 / §10.2.10 — getter/setter functions are
+        // allocated via OrdinaryFunctionCreate with FunctionKind
+        // = method, which produces a function WITHOUT a
+        // \`prototype\` own slot (\`MakeMethod\` only sets
+        // [[HomeObject]]). Drop the auto-allocated prototype that
+        // allocateFunction installs for non-arrow functions, so
+        // \`'prototype' in classProto.x.get\` is false per spec.
+        if (m.kind != .method) {
+            fn_obj.prototype = null;
+        }
         if (m.spec_length != m.param_count) {
             try fn_obj.properties.put(realm.allocator, "length", @import("value.zig").Value.fromInt32(m.spec_length));
         }
@@ -364,6 +374,11 @@ pub fn buildClass(
             false,
             captured_env,
         );
+        // §15.5.6.4 — static getter/setter functions also lack a
+        // \`prototype\` own slot (same shape as instance accessors).
+        if (m.kind != .method) {
+            fn_obj.prototype = null;
+        }
         if (m.spec_length != m.param_count) {
             try fn_obj.properties.put(realm.allocator, "length", @import("value.zig").Value.fromInt32(m.spec_length));
         }
