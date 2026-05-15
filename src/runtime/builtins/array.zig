@@ -570,14 +570,21 @@ fn arrayIncludes(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 }
 
 fn arrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.1.3.15 Array.prototype.join (separator):
+    //   1. O = ToObject(this); 2. len = ? LengthOfArrayLike(O)
+    //   3. If separator is undefined, sep = ","; else sep = ? ToString(separator)
     const obj = try toObjectThis(realm, this_value);
     const sep_v = argOr(args, 0, Value.undefined_);
     const sep_slice: []const u8 = if (sep_v.isUndefined())
         ","
-    else if (sep_v.isString()) blk: {
-        const s: *JSString = @ptrCast(@alignCast(sep_v.asString()));
+    else blk: {
+        // Route through stringifyArg so booleans, numbers, null,
+        // and objects with toString hooks all coerce per §7.1.17
+        // ToString (an inherited `Symbol.toPrimitive` / `toString`
+        // setter on the receiver participates and can throw).
+        const s = try stringifyArg(realm, sep_v);
         break :blk s.bytes;
-    } else ",";
+    };
     const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
@@ -1927,10 +1934,19 @@ fn arrayToSpliced(realm: *Realm, this_value: Value, args: []const Value) NativeE
 /// the array, then overwrite the requested index. Negative
 /// indices count from the end; out-of-range throws RangeError.
 fn arrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.1.3.33 Array.prototype.with(index, value):
+    //   1-3. ToObject + ToLength
+    //   4. relativeIndex = ? ToIntegerOrInfinity(index)
+    //   5-6. actualIndex = relativeIndex >= 0 ? relativeIndex : len + relativeIndex
+    //   7. If actualIndex >= len or actualIndex < 0, throw RangeError
+    //   8-9. A = ArrayCreate(len); copy elements
+    //   10. Return A
     const obj = try toObjectThis(realm, this_value);
     const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const idx_arg = argOr(args, 0, Value.undefined_);
-    var idx: i64 = toInt(idx_arg);
+    // Route through `toIntPropagating` so a throwing valueOf
+    // propagates and Symbol throws TypeError.
+    var idx: i64 = try toIntPropagating(realm, idx_arg);
     if (idx < 0) idx += len;
     if (idx < 0 or idx >= len) {
         const ex = intrinsics.newRangeError(realm, "invalid index") catch return error.OutOfMemory;
