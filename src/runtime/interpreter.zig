@@ -3851,32 +3851,44 @@ fn runFrames(
                 };
                 var key_buf: [64]u8 = undefined;
                 const key_slice = computedKeyToString(key_v, &key_buf);
-                // §10.5.7 Proxy [[HasProperty]] dispatch.
-                var obj = obj_in;
-                if (obj.proxy_target != null or obj.proxy_revoked) {
-                    const r2 = try proxyHasTrap(allocator, realm, frames, f, ip, obj, key_slice);
-                    switch (r2) {
-                        .value => |v| {
-                            acc = v;
-                            continue;
-                        },
-                        .fallthrough => |t| obj = t,
-                        .handled => {
-                            committed = true;
-                            continue;
-                        },
-                        .uncaught => |ex| return .{ .thrown = ex },
-                    }
-                }
-                // Walk own + prototype chain.
-                var cursor: ?*JSObject = obj;
+                // §10.5.7 Proxy [[HasProperty]] dispatch, then
+                // §10.1.7.1 OrdinaryHasProperty prototype walk. When
+                // a proxy appears at *any* point in the chain (the
+                // receiver itself or an inherited prototype), we
+                // dispatch through its handler and recurse if the
+                // trap is absent.
+                var cursor: ?*JSObject = obj_in;
                 var found = false;
-                while (cursor) |c| : (cursor = c.prototype) {
+                var handled_via_proxy = false;
+                walk: while (cursor) |c| {
+                    if (c.proxy_target != null or c.proxy_revoked) {
+                        const r2 = try proxyHasTrap(allocator, realm, frames, f, ip, c, key_slice);
+                        switch (r2) {
+                            .value => |v| {
+                                acc = v;
+                                handled_via_proxy = true;
+                                break :walk;
+                            },
+                            .fallthrough => |t| {
+                                if (t == c) break :walk;
+                                cursor = t;
+                                continue :walk;
+                            },
+                            .handled => {
+                                committed = true;
+                                handled_via_proxy = true;
+                                break :walk;
+                            },
+                            .uncaught => |ex| return .{ .thrown = ex },
+                        }
+                    }
                     if (c.properties.contains(key_slice) or c.accessors.contains(key_slice)) {
                         found = true;
-                        break;
+                        break :walk;
                     }
+                    cursor = c.prototype;
                 }
+                if (handled_via_proxy) continue;
                 acc = Value.fromBool(found);
             },
 
