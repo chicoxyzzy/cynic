@@ -1966,17 +1966,28 @@ fn typedArraySubarray(realm: *Realm, this_value: Value, args: []const Value) Nat
     // views it's the stored length.
     const len: i64 = @intCast(taCurrentLength(tv));
     const begin = try taResolveIndex(realm, argOr(args, 0, Value.fromInt32(0)), len, 0);
-    const end = try taResolveIndex(realm, argOr(args, 1, Value.undefined_), len, len);
-    const new_len: usize = if (end > begin) @intCast(end - begin) else 0;
     const elem_size = tv.kind.elementSize();
     const new_offset = tv.byte_offset + @as(usize, @intCast(begin)) * elem_size;
 
-    // §23.2.3.30 step 14 — `TypedArraySpeciesCreate(O, «
-    // buffer, byteOffset, newLength »)`. Three-arg shape, unlike
-    // `slice`/`map`/`filter` (one arg = length); use a dedicated
-    // helper instead of `taSpeciesCreate`. Default case (no
-    // override) builds a view directly on the shared buffer.
-    const out_obj = try taSpeciesCreateSubarray(realm, self, tv.kind, tv.viewed, new_offset, new_len);
+    // §23.2.3.31 step 15 — when `end` is undefined AND the source
+    // view is length-tracking, the new subarray inherits the
+    // length-tracking property (no fixed length is supplied to
+    // TypedArrayCreate). Otherwise a concrete `newLength` is
+    // computed from `(end - begin)`, clamped to ≥ 0.
+    const end_arg = argOr(args, 1, Value.undefined_);
+    const inherit_length_tracking = tv.length_tracking and end_arg.isUndefined();
+    const new_len: usize = if (inherit_length_tracking)
+        0
+    else blk: {
+        const end_i = try taResolveIndex(realm, end_arg, len, len);
+        break :blk if (end_i > begin) @as(usize, @intCast(end_i - begin)) else 0;
+    };
+
+    // §23.2.3.31 step 17 — `TypedArraySpeciesCreate(O, «buffer,
+    // byteOffset, newLength»)`; or, when the new view inherits
+    // length-tracking from O (step 15), the two-arg shape
+    // «buffer, byteOffset».
+    const out_obj = try taSpeciesCreateSubarray(realm, self, tv.kind, tv.viewed, new_offset, new_len, inherit_length_tracking);
     return heap_mod.taggedObject(out_obj);
 }
 
@@ -1993,6 +2004,7 @@ fn taSpeciesCreateSubarray(
     buffer: *JSObject,
     byte_offset: usize,
     length: usize,
+    length_tracking: bool,
 ) NativeError!*JSObject {
     const ctor_prop = intrinsics.getPropertyChain(realm, exemplar, "constructor") catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -2024,6 +2036,15 @@ fn taSpeciesCreateSubarray(
         // between the brand check and here; the spec defers the
         // throw to this inner TA construction.
         if (buffer.array_buffer == null) return throwTypeError(realm, "TypedArray: ArrayBuffer is detached");
+        // §23.2.5.1.4 — the inlined TypedArrayCreate refuses a
+        // byteOffset past the live buffer length, and (for fixed-
+        // length views) refuses `byteOffset + length*elemSize` past
+        // it.  Subarray inherits that throw via
+        // TypedArraySpeciesCreate.
+        const buf_bytes = buffer.array_buffer.?;
+        const elem_size = kind.elementSize();
+        if (byte_offset > buf_bytes.len) return throwRangeError(realm, "subarray: byteOffset exceeds buffer");
+        if (!length_tracking and byte_offset + length * elem_size > buf_bytes.len) return throwRangeError(realm, "subarray: view exceeds buffer");
         const ctor = heap_mod.valueAsFunction(realm.globals.get(nameForTypedKind(kind)) orelse Value.undefined_) orelse return throwTypeError(realm, "TypedArray constructor not found");
         const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
         inst.prototype = ctor.prototype;
@@ -2033,20 +2054,31 @@ fn taSpeciesCreateSubarray(
             .byte_offset = byte_offset,
             .length = length,
             .name = nameForTypedKind(kind),
+            .length_tracking = length_tracking,
         };
         return inst;
     }
     const species_fn = heap_mod.valueAsFunction(species_v) orelse return throwTypeError(realm, "TypedArray @@species is not a constructor");
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
-    const ctor_args = [_]Value{
+    // §23.2.3.31 steps 15-16 — argument list shape depends on
+    // length-tracking inheritance.  When O.[[ArrayLength]] is auto
+    // and end is undefined the species ctor receives «buffer,
+    // beginByteOffset»; otherwise it receives the three-arg
+    // form «buffer, beginByteOffset, newLength».
+    const ctor_args_three = [_]Value{
         heap_mod.taggedObject(buffer),
         Value.fromInt32(@as(i32, @intCast(@min(byte_offset, std.math.maxInt(i32))))),
         Value.fromInt32(@as(i32, @intCast(@min(length, std.math.maxInt(i32))))),
     };
+    const ctor_args_two = [_]Value{
+        heap_mod.taggedObject(buffer),
+        Value.fromInt32(@as(i32, @intCast(@min(byte_offset, std.math.maxInt(i32))))),
+    };
+    const ctor_args: []const Value = if (length_tracking) ctor_args_two[0..] else ctor_args_three[0..];
     const interpreter = @import("../interpreter.zig");
     const callee_v = heap_mod.taggedFunction(species_fn);
-    const outcome = interpreter.constructValue(realm.allocator, realm, callee_v, &ctor_args, callee_v) catch |err| switch (err) {
+    const outcome = interpreter.constructValue(realm.allocator, realm, callee_v, ctor_args, callee_v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
