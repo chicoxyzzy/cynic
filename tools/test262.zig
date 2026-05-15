@@ -34,6 +34,11 @@
 //! --max-rss=<mb>          Abort the run with exit code 2 if process RSS crosses
 //!                         <mb> MiB after a fixture; print the offending path.
 //!                         Forces `--threads=1`.
+//! --mem-summary           End-of-sweep one-pager: cumulative bytes allocated,
+//!                         max charged peak, GC cycles + pause. Forces `--threads=1`.
+//! --top-alloc=<n>         Print the N fixtures with the highest cumulative
+//!                         bytes allocated (≥64KB). Forces `--threads=1`.
+//!                         Different signal from `--top-rss` (peak RSS).
 
 const std = @import("std");
 const cynic = @import("cynic");
@@ -433,6 +438,16 @@ const Options = struct {
     /// only (process RSS is racy with multiple workers); the
     /// flag parser pins `--threads=1`.
     max_rss_mb: u32 = 0,
+    /// When true, print an end-of-sweep memory summary: cumulative
+    /// bytes allocated, max charged peak, total GC cycles + pause.
+    /// Different signal from `--top-rss` (per-fixture RSS peak)
+    /// and `--top-alloc` (top-N cumulative). Forces `--threads=1`.
+    mem_summary: bool = false,
+    /// When >0, print the top-N fixtures by cumulative bytes
+    /// allocated via `heap.bytes_alloc_total`. Captures allocate-
+    /// and-discard workloads that `--top-rss` misses. Forces
+    /// `--threads=1`.
+    top_alloc: u32 = 0,
 };
 
 /// Path of the pass-cache, written at the repo root after every
@@ -685,6 +700,12 @@ pub fn main(init: std.process.Init) !void {
         for (heavy.items) |e| gpa.free(e.path);
         heavy.deinit(gpa);
     }
+    var alloc_list: std.ArrayListUnmanaged(AllocEntry) = .empty;
+    defer {
+        for (alloc_list.items) |e| gpa.free(e.path);
+        alloc_list.deinit(gpa);
+    }
+    var mem_agg: MemAggregate = .{};
 
     // `--only-failing` shortcut: any test path present in the
     // cache is counted as a pass without being classified or
@@ -805,7 +826,18 @@ pub fn main(init: std.process.Init) !void {
             const harness_pair: ?harness_mod.HarnessSources = harness_sources;
             const fx_start = if (opts.top_slow > 0) std.Io.Clock.now(.awake, io) else undefined;
             const fx_rss_pre: u64 = if (opts.top_rss > 0) (currentRssMb() orelse 0) else 0;
-            const outcome = try classifyAndRun(arena, bytes_allocator, io, corpus, rel, opts.mode, harness_pair, opts.gc_threshold, opts.gc_stats);
+            const need_mem = opts.mem_summary or opts.top_alloc > 0;
+            var fx_mem: FixtureMem = .{};
+            const outcome = try classifyAndRun(arena, bytes_allocator, io, corpus, rel, opts.mode, harness_pair, opts.gc_threshold, opts.gc_stats, if (need_mem) &fx_mem else null);
+            if (need_mem) {
+                mem_agg.add(fx_mem);
+                if (opts.top_alloc > 0) {
+                    const kb = fx_mem.bytes_alloc_total / 1024;
+                    if (kb >= alloc_threshold_kb) {
+                        try alloc_list.append(gpa, .{ .path = try gpa.dupe(u8, rel), .kb = kb });
+                    }
+                }
+            }
             if (opts.top_slow > 0) {
                 const ms_i = fx_start.untilNow(io, .awake).toMilliseconds();
                 const ms_u: u64 = if (ms_i > 0) @intCast(ms_i) else 0;
@@ -932,6 +964,12 @@ pub fn main(init: std.process.Init) !void {
     if (opts.top_rss > 0 and heavy.items.len > 0) {
         try printTopHeavy(io, heavy.items, opts.top_rss);
     }
+    if (opts.top_alloc > 0 and alloc_list.items.len > 0) {
+        try printTopAlloc(io, alloc_list.items, opts.top_alloc);
+    }
+    if (opts.mem_summary) {
+        try printMemSummary(io, &mem_agg, &stats);
+    }
     if (opts.write_results) {
         const now_ts = std.Io.Clock.now(.real, io);
         // Elapsed is only carried into the row when we ran the
@@ -983,6 +1021,55 @@ const HeavyEntry = struct {
 /// workers most fixtures churn allocations under 8 MiB; the
 /// interesting tail is what actually pushed RSS up.
 const heavy_threshold_mb: u64 = 8;
+
+/// `--top-alloc=N` capture. Pairs the per-fixture cumulative
+/// `heap.bytes_alloc_total` (in KiB) with the test path. Different
+/// signal from `HeavyEntry` (process-RSS peak delta) — this is
+/// total bytes charged inside the engine, catching GC-cleaned
+/// allocate-and-discard thrash that RSS hides.
+const AllocEntry = struct {
+    path: []const u8,
+    kb: u64,
+};
+
+/// Threshold to keep the alloc report focused on interesting
+/// fixtures. 64 KiB ≈ a single string-concat result; below that
+/// is allocator noise.
+const alloc_threshold_kb: u64 = 64;
+
+/// Per-fixture summary of heap counters that the sequential path
+/// captures before tearing down the realm. Fed into the harness-
+/// level `MemAggregate` for `--mem-summary` and the top-N report
+/// for `--top-alloc`.
+const FixtureMem = struct {
+    bytes_alloc_total: u64 = 0,
+    bytes_live_peak: u64 = 0,
+    gc_cycles: u32 = 0,
+    gc_time_ns: u64 = 0,
+};
+
+/// Sweep-level aggregate. Accumulated across every fixture (each
+/// fixture has its own realm; we sum per-fixture `FixtureMem`).
+/// Surfaces in the `--mem-summary` end-of-sweep one-pager.
+const MemAggregate = struct {
+    bytes_alloc_total: u64 = 0,
+    /// Max of per-fixture `bytes_live_peak`. Tells you the
+    /// engine-charged ceiling reached during the sweep.
+    max_fixture_live_peak: u64 = 0,
+    gc_cycles_total: u32 = 0,
+    gc_time_ns_total: u64 = 0,
+    fixtures_with_alloc: u32 = 0,
+
+    fn add(self: *MemAggregate, m: FixtureMem) void {
+        self.bytes_alloc_total +|= m.bytes_alloc_total;
+        if (m.bytes_live_peak > self.max_fixture_live_peak) {
+            self.max_fixture_live_peak = m.bytes_live_peak;
+        }
+        self.gc_cycles_total +|= m.gc_cycles;
+        self.gc_time_ns_total +|= m.gc_time_ns;
+        if (m.bytes_alloc_total > 0) self.fixtures_with_alloc +|= 1;
+    }
+};
 
 const RunResult = struct {
     kind: Outcome,
@@ -1152,7 +1239,9 @@ fn workerLoop(
 
         const fx_start = if (ctx.opts.top_slow > 0) std.Io.Clock.now(.awake, ctx.io) else undefined;
         const fx_rss_pre: u64 = if (ctx.opts.top_rss > 0) (currentRssMb() orelse 0) else 0;
-        const outcome = classifyAndRun(arena, ctx.gpa, ctx.io, ctx.corpus, rel, ctx.opts.mode, ctx.harness_sources, ctx.opts.gc_threshold, ctx.opts.gc_stats) catch |err| {
+        // Workers don't participate in `--mem-summary` / `--top-alloc`
+        // (single-thread only — those flags pin `--threads=1` upstream).
+        const outcome = classifyAndRun(arena, ctx.gpa, ctx.io, ctx.corpus, rel, ctx.opts.mode, ctx.harness_sources, ctx.opts.gc_threshold, ctx.opts.gc_stats, null) catch |err| {
             if (err == error.OutOfMemory) return err;
             try recordOutcome(ctx.gpa, stats, buckets, failures, pass_paths, rel, .{ .kind = .fail_false_reject }, ctx.is_full_run);
             continue;
@@ -1216,6 +1305,10 @@ fn classifyAndRun(
     harness_pair: ?harness_mod.HarnessSources,
     gc_threshold: u32,
     gc_stats: bool,
+    /// Optional out-param. When non-null, the runtime path writes
+    /// the fixture's heap counters here via a `defer` so every
+    /// return point is covered. Parser path leaves it at zero.
+    mem_out: ?*FixtureMem,
 ) !RunResult {
     // Hard exclusions — `harness/`, `staging/`, `intl402/`.
     // Cynic-out-of-scope paths (Annex B / browser-era) are
@@ -1312,6 +1405,17 @@ fn classifyAndRun(
 
     var realm = cynic.runtime.Realm.initWithBytesAllocator(arena, bytes_allocator);
     defer realm.deinit();
+    // LIFO `defer`: runs BEFORE `realm.deinit()` above, so the heap
+    // counters are still readable. One spot covers all 20+ returns
+    // inside this block.
+    defer if (mem_out) |out| {
+        out.* = .{
+            .bytes_alloc_total = realm.heap.bytes_alloc_total,
+            .bytes_live_peak = realm.heap.bytes_live_peak,
+            .gc_cycles = realm.heap.gc_cycles_total,
+            .gc_time_ns = realm.heap.gc_time_ns_total,
+        };
+    };
     realm.installBuiltins() catch return .{ .kind = .fail_false_reject };
     // Cap each test at a generous opcode budget so an
     // infinite-loop fixture (`while(true){}`, recursive yield,
@@ -1764,6 +1868,70 @@ fn printTopHeavy(io: std.Io, heavy: []HeavyEntry, n: u32) !void {
         const line = try std.fmt.bufPrint(&buf, "  {d:>6}MB  {s}\n", .{ e.mb, e.path });
         try std.Io.File.stdout().writeStreamingAll(io, line);
     }
+}
+
+/// Sort the captured alloc-fixture entries descending and print
+/// the top N. Catches allocate-and-discard workloads that
+/// `--top-rss` misses (RSS is peak live; this is cumulative).
+/// `--threads=1` only; the alloc counter lives on each per-realm
+/// heap so the ordering is unstable across workers.
+fn printTopAlloc(io: std.Io, alloc_list: []AllocEntry, n: u32) !void {
+    std.mem.sort(AllocEntry, alloc_list, {}, struct {
+        fn lt(_: void, a: AllocEntry, b: AllocEntry) bool {
+            return a.kb > b.kb;
+        }
+    }.lt);
+    var buf: [1024]u8 = undefined;
+    const limit = @min(@as(usize, n), alloc_list.len);
+    const head = try std.fmt.bufPrint(&buf, "\ntop {d} fixtures by cumulative bytes allocated (≥{d}KB):\n", .{ limit, alloc_threshold_kb });
+    try std.Io.File.stdout().writeStreamingAll(io, head);
+    for (alloc_list[0..limit]) |e| {
+        // Print MiB when the value is large enough to warrant it;
+        // otherwise KiB. Keeps the column readable.
+        if (e.kb >= 1024) {
+            const line = try std.fmt.bufPrint(&buf, "  {d:>6}MB  {s}\n", .{ e.kb / 1024, e.path });
+            try std.Io.File.stdout().writeStreamingAll(io, line);
+        } else {
+            const line = try std.fmt.bufPrint(&buf, "  {d:>6}KB  {s}\n", .{ e.kb, e.path });
+            try std.Io.File.stdout().writeStreamingAll(io, line);
+        }
+    }
+}
+
+/// End-of-sweep one-pager. Sums per-fixture heap counters into a
+/// single view: cumulative allocator pressure, max charged peak
+/// across fixtures, total GC cycles + pause time, average bytes
+/// allocated per fixture. Complement to `--top-alloc` (which
+/// names individual outliers).
+fn printMemSummary(io: std.Io, agg: *const MemAggregate, stats: *const Stats) !void {
+    var buf: [1024]u8 = undefined;
+    const fixtures = agg.fixtures_with_alloc;
+    const avg_kb: u64 = if (fixtures > 0)
+        (agg.bytes_alloc_total / fixtures) / 1024
+    else
+        0;
+    const avg_gc_us: u64 = if (agg.gc_cycles_total > 0)
+        (agg.gc_time_ns_total / agg.gc_cycles_total) / 1000
+    else
+        0;
+    const head = try std.fmt.bufPrint(&buf,
+        "\nmemory summary (across {d} fixtures with engine activity, of {d} total):\n" ++
+            "  cumulative bytes allocated:    {d} MiB\n" ++
+            "  max per-fixture charged peak:  {d} MiB\n" ++
+            "  avg bytes / fixture:           {d} KiB\n" ++
+            "  GC cycles:                     {d} (total pause {d} ms, avg {d} \u{00B5}s)\n",
+        .{
+            fixtures,
+            stats.total,
+            agg.bytes_alloc_total / (1024 * 1024),
+            agg.max_fixture_live_peak / (1024 * 1024),
+            avg_kb,
+            agg.gc_cycles_total,
+            agg.gc_time_ns_total / (1000 * 1000),
+            avg_gc_us,
+        },
+    );
+    try std.Io.File.stdout().writeStreamingAll(io, head);
 }
 
 /// One score-row in memory. The on-disk format groups these by
@@ -2579,6 +2747,14 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             // workers make the "which fixture tripped it" pointer
             // useless. Pin to one worker.
             if (opts.max_rss_mb > 0) opts.threads = 1;
+        } else if (std.mem.eql(u8, arg, "--mem-summary")) {
+            opts.mem_summary = true;
+            // Per-fixture heap counters live on each realm's heap;
+            // the accumulator + capture are single-threaded today.
+            opts.threads = 1;
+        } else if (std.mem.startsWith(u8, arg, "--top-alloc=")) {
+            opts.top_alloc = std.fmt.parseInt(u32, arg["--top-alloc=".len..], 10) catch 0;
+            if (opts.top_alloc > 0) opts.threads = 1;
         }
     }
     return opts;
