@@ -39,11 +39,19 @@ pub const SourcePos = struct {
 /// handler is a `finally`-only clause (or the parser-rare
 /// `try {... } catch {... }` shape with no binding) — the
 /// thrown value lands in the accumulator.
+///
+/// `is_finally` is true for the *synthetic* handler the compiler
+/// emits around a try-finally body. §27.5.1.3 GeneratorPrototype.
+/// return must thread the return-completion through pending
+/// finallys but skip user `catch` clauses; the unwind path
+/// inspects this flag to stop only at finally synthetics when
+/// driving a return-completion through a suspended generator.
 pub const Handler = struct {
     start_pc: u32,
     end_pc: u32,
     handler_pc: u32,
     catch_register: ?u8,
+    is_finally: bool = false,
 };
 
 /// Compile-time blueprint for a `JSFunction`. Each function

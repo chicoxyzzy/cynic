@@ -704,8 +704,40 @@ fn genReturn(realm: *Realm, this_value: Value, args: []const Value) @import("fun
     if (genBrandCheckTypeError(realm, this_value, "Generator.prototype.return called on non-generator")) |err| return err;
     const obj = heap_mod.valueAsPlainObject(this_value).?;
     const gen = obj.generator_ref.?;
+    const arg: Value = if (args.len > 0) args[0] else Value.undefined_;
+    // §27.5.1.3 step 3 — if the generator is suspended, drive a
+    // return-completion through any pending `try { … } finally`
+    // blocks. `initial` / `completed` skip the body re-entry:
+    // the spec calls GeneratorResumeAbrupt only if the generator
+    // is suspended at a yield (steps 3.b / 3.c). For the initial
+    // state, the body has never run, so there can be no
+    // surviving finally to honour; for completed, we're a no-op.
+    if (gen.state == .suspended) {
+        gen.pending_return = arg;
+        const outcome = resumeGenerator(realm.allocator, realm, gen, Value.undefined_) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        switch (outcome) {
+            // Finally body completed normally — surface the
+            // original return-completion value.
+            .value => |v| return genResultObject(realm, v, true) catch return error.OutOfMemory,
+            // Finally body threw or `return`ed with its own
+            // value — §14.15.3 step 4 (abrupt finally replaces
+            // the outer completion outright). For a thrown
+            // finally we surface that throw to the caller.
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+            // Finally body yielded again (e.g. `try { yield }
+            // finally { yield }`). Spec allows it; surface as
+            // `{value, done:false}`.
+            .yielded => |v| return genResultObject(realm, v, false) catch return error.OutOfMemory,
+        }
+    }
     gen.state = .completed;
-    return genResultObject(realm, if (args.len > 0) args[0] else Value.undefined_, true) catch return error.OutOfMemory;
+    return genResultObject(realm, arg, true) catch return error.OutOfMemory;
 }
 
 fn genThrow(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
@@ -1693,6 +1725,15 @@ pub fn resumeGenerator(
     sent_value: Value,
 ) RunError!RunResult {
     if (gen.state == .completed) {
+        // §27.5.1.3 step 4 — a Return on an already-completed
+        // generator still must reflect the supplied value in
+        // the result iterator record. `genReturn`'s fast path
+        // handles that; here we model the spec's "return
+        // undefined" path for `next()` on a completed gen.
+        if (gen.pending_return) |v| {
+            gen.pending_return = null;
+            return .{ .value = v };
+        }
         return .{ .value = Value.undefined_ };
     }
     if (gen.state == .executing) {
@@ -1721,13 +1762,74 @@ pub fn resumeGenerator(
         .owns_registers = false,
     });
 
+    // §27.5.1.3 step 3 — return-completion drive. Inject an
+    // unwind at the yield site so any `try { yield } finally
+    // { F }` runs F. We remember the return value across the
+    // dispatch loop so the synth-finally's terminal `throw_`
+    // round-tripping our sentinel surfaces as a clean `.value`.
+    var return_completion_val: ?Value = null;
+    if (gen.pending_return) |return_val| {
+        gen.pending_return = null;
+        return_completion_val = return_val;
+        // Mark the unwind as a return-completion so user
+        // `catch (e) { … }` clauses are skipped while we walk
+        // *to* the next finally. `unwindThrow` clears the flag
+        // the moment it lands on a finally handler.
+        realm.gen_return_completion = return_val;
+        if (!try unwindThrow(allocator, realm, &frames, return_val)) {
+            // No `finally` handler in range — the suspended
+            // yield is bare. Drop the flag, complete the
+            // generator, surface the return value.
+            realm.gen_return_completion = null;
+            gen.state = .completed;
+            return .{ .value = return_val };
+        }
+    }
+
     const result = try runFrames(allocator, realm, &frames);
+    // §14.15.3 step 4 — if we were driving a return-completion
+    // through a finally and the finally completed normally,
+    // its synth handler's terminal `throw_` rethrows the saved
+    // sentinel value. We recognise that round-trip by
+    // bit-equality with the value we put in and surface as a
+    // clean `.value`. If the finally instead threw a different
+    // value (or `return`ed / `break`ed with a value), that
+    // abrupt completion replaces the outer return-completion.
+    if (return_completion_val) |return_val| {
+        // The flag should already be cleared (unwindThrow drops
+        // it on finally entry); defensive belt-and-braces here.
+        realm.gen_return_completion = null;
+        gen.state = .completed;
+        switch (result) {
+            .thrown => |ex| {
+                if (valuesIdentical(ex, return_val)) {
+                    return .{ .value = return_val };
+                }
+                return .{ .thrown = ex };
+            },
+            .value => return .{ .value = return_val },
+            .yielded => |v| {
+                gen.state = .suspended;
+                return .{ .yielded = v };
+            },
+        }
+    }
     if (result == .yielded) {
         gen.state = .suspended;
     } else {
         gen.state = .completed;
     }
     return result;
+}
+
+/// Bit-equal comparison on Value's NaN-boxed payload. Sharper
+/// than SameValueZero — distinguishes `NaN` from `-NaN` and
+/// `+0` from `-0`. Used at internal sentinel boundaries (e.g.
+/// the return-completion rethrow round-trip) to recognise
+/// "this is the exact same Value we just put in" without
+/// allocating a wrapper object.
+fn valuesIdentical(a: Value, b: Value) bool {
+    return a.bits == b.bits;
 }
 
 /// Unwrap a (possibly chained) bound function. Returns the
@@ -6281,10 +6383,22 @@ fn unwindThrow(
     exception: Value,
 ) RunError!bool {
     const current_ex = exception;
+    // §27.5.1.3 — while a generator is being driven through its
+    // pending finallys with a return-completion (set up by
+    // `genReturn`), step past user `catch` clauses and stop
+    // only at synthetic finally handlers. Catching a Return
+    // completion in a user `catch (e) { … }` would observe an
+    // internal sentinel as `e`, which the spec forbids. The
+    // flag is read once per unwind; once we *land* on a finally
+    // handler, the finally body runs without the flag set
+    // (cleared below) — its own throws / returns are normal
+    // user code and must use normal handler-walk semantics.
+    const return_mode = realm.gen_return_completion != null;
     while (frames.items.len > 0) {
         const frame = &frames.items[frames.items.len - 1];
         for (frame.chunk.handlers) |h| {
             if (frame.ip > h.start_pc and frame.ip <= h.end_pc) {
+                if (return_mode and !h.is_finally) continue;
                 frame.ip = h.handler_pc;
                 if (h.catch_register) |slot| {
                     // catch param lives in the current
@@ -6299,6 +6413,14 @@ fn unwindThrow(
                 } else {
                     frame.accumulator = current_ex;
                 }
+                // Clear the return-completion flag once we've
+                // landed on a finally — the finally body runs
+                // as normal user code from here. The synth
+                // handler's `lda + throw_` at the body's end
+                // re-throws the saved value; `resumeGenerator`
+                // recognises the rethrown sentinel and
+                // surfaces `.value` instead of `.thrown`.
+                if (return_mode) realm.gen_return_completion = null;
                 return true;
             }
         }

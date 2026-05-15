@@ -6225,6 +6225,7 @@ fn compileTry(self: *Compiler, s: ast.statement.TryStmt) CompileError!void {
                 .end_pc = end_pc,
                 .handler_pc = synth_pc,
                 .catch_register = slot,
+                .is_finally = true,
             });
         } else if (catch_body_start != null and catch_body_end != null) {
             try self.builder.addHandler(.{
@@ -6232,6 +6233,7 @@ fn compileTry(self: *Compiler, s: ast.statement.TryStmt) CompileError!void {
                 .end_pc = catch_body_end.?,
                 .handler_pc = synth_pc,
                 .catch_register = slot,
+                .is_finally = true,
             });
         }
     } else {

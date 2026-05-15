@@ -75,6 +75,15 @@ pub const JSGenerator = struct {
     /// completed before returning) or via a microtask drain
     /// (body suspended on a pending await).
     result_promise: ?Value = null,
+    /// §27.5.1.3 GeneratorPrototype.return — when set, the next
+    /// `resumeGenerator` injects a return-completion at the
+    /// yield site so any pending `try { … } finally { … }`
+    /// blocks run before settlement. The value is the argument
+    /// to `.return(v)`; the resume helper consumes (clears) the
+    /// field on entry. Cleared on the way out — a finally that
+    /// `throw`s or `return`s replaces the completion outright
+    /// (§14.15.3 step 4).
+    pending_return: ?Value = null,
 
     pub fn init(
         allocator: std.mem.Allocator,

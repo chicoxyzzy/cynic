@@ -4097,6 +4097,52 @@ test "later: computed-key dstr in assignment pattern" {
     , "hi");
 }
 
+// ── §27.5.1.3 — Generator.prototype.return drives pending finallys ─────────
+
+test "later: gen.return runs pending finally before completing" {
+    try expectScriptStringWithBuiltins(
+        \\let log = "";
+        \\function* g() {
+        \\  try {
+        \\    yield 1;
+        \\    log += "no";
+        \\  } finally {
+        \\    log += "fin";
+        \\  }
+        \\}
+        \\let it = g();
+        \\it.next();          // suspended inside try
+        \\let r = it.return("done");
+        \\log + ":" + r.value + ":" + r.done;
+    , "fin:done:true");
+}
+
+test "later: for-of break calls gen.return which runs finally" {
+    try expectScriptIntWithBuiltins(
+        \\let finallyCount = 0;
+        \\function* values() {
+        \\  try { yield 1; } finally { finallyCount += 1; }
+        \\}
+        \\(function() {
+        \\  for (var x of values()) { break; }
+        \\})();
+        \\finallyCount;
+    , 1);
+}
+
+test "later: for-of return calls gen.return which runs finally" {
+    try expectScriptIntWithBuiltins(
+        \\let finallyCount = 0;
+        \\function* values() {
+        \\  try { yield 1; } finally { finallyCount += 1; }
+        \\}
+        \\(function() {
+        \\  for (var x of values()) { return; }
+        \\})();
+        \\finallyCount;
+    , 1);
+}
+
 // ── §14.4.14 / §27.6.3.7 — yield* delegation ───────────────────────────────
 
 test "later: sync yield* delegates to a generator" {

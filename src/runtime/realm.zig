@@ -238,6 +238,16 @@ pub const Realm = struct {
     /// Reflect.defineProperty translates it to `false`. The flag
     /// lets the two callers split the same throw site.
     define_own_property_rejected: bool = false,
+    /// §27.5.1.3 GeneratorPrototype.return — set while a generator
+    /// is being driven through its pending `try { … } finally`
+    /// blocks with a return-completion. The `throw_` opcode and
+    /// any other `unwindThrow` caller running inside that
+    /// generator's frame stack must skip past user `catch`
+    /// clauses and stop only at `is_finally` handlers. `null`
+    /// outside the return-completion unwind cycle; the value
+    /// stored is the return-completion value to surface once
+    /// every relevant finally has run.
+    gen_return_completion: ?Value = null,
     /// FIFO microtask queue (§9.4 HostEnqueueMicrotask). Drained
     /// at the end of every external entry — `cynic eval`,
     /// `cynic run`, each test262 invocation — and from any
