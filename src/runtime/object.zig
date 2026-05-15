@@ -1085,6 +1085,7 @@ pub const TypedKind = enum(u8) {
     uint16,
     int32,
     uint32,
+    float16,
     float32,
     float64,
     biguint64,
@@ -1093,7 +1094,7 @@ pub const TypedKind = enum(u8) {
     pub fn elementSize(k: TypedKind) u8 {
         return switch (k) {
             .int8, .uint8 => 1,
-            .int16, .uint16 => 2,
+            .int16, .uint16, .float16 => 2,
             .int32, .uint32, .float32 => 4,
             .float64, .biguint64, .bigint64 => 8,
         };

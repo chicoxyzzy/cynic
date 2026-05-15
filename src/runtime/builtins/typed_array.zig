@@ -103,6 +103,7 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethodOnProto(realm, proto, "getUint16", dataViewGetUint16, 1);
         try installNativeMethodOnProto(realm, proto, "getInt32", dataViewGetInt32, 1);
         try installNativeMethodOnProto(realm, proto, "getUint32", dataViewGetUint32, 1);
+        try installNativeMethodOnProto(realm, proto, "getFloat16", dataViewGetFloat16, 1);
         try installNativeMethodOnProto(realm, proto, "getFloat32", dataViewGetFloat32, 1);
         try installNativeMethodOnProto(realm, proto, "getFloat64", dataViewGetFloat64, 1);
         try installNativeMethodOnProto(realm, proto, "getBigInt64", dataViewGetBigInt64, 1);
@@ -113,6 +114,7 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethodOnProto(realm, proto, "setUint16", dataViewSetUint16, 2);
         try installNativeMethodOnProto(realm, proto, "setInt32", dataViewSetInt32, 2);
         try installNativeMethodOnProto(realm, proto, "setUint32", dataViewSetUint32, 2);
+        try installNativeMethodOnProto(realm, proto, "setFloat16", dataViewSetFloat16, 2);
         try installNativeMethodOnProto(realm, proto, "setFloat32", dataViewSetFloat32, 2);
         try installNativeMethodOnProto(realm, proto, "setFloat64", dataViewSetFloat64, 2);
         try installNativeMethodOnProto(realm, proto, "setBigInt64", dataViewSetBigInt64, 2);
@@ -213,6 +215,7 @@ pub fn install(realm: *Realm) !void {
         .{ .name = "Uint16Array", .kind = .uint16 },
         .{ .name = "Int32Array", .kind = .int32 },
         .{ .name = "Uint32Array", .kind = .uint32 },
+        .{ .name = "Float16Array", .kind = .float16 },
         .{ .name = "Float32Array", .kind = .float32 },
         .{ .name = "Float64Array", .kind = .float64 },
         .{ .name = "BigInt64Array", .kind = .bigint64 },
@@ -1280,6 +1283,7 @@ fn nameForTypedKind(kind: ObjMod.TypedKind) []const u8 {
         .uint16 => "Uint16Array",
         .int32 => "Int32Array",
         .uint32 => "Uint32Array",
+        .float16 => "Float16Array",
         .float32 => "Float32Array",
         .float64 => "Float64Array",
         .bigint64 => "BigInt64Array",
@@ -2129,6 +2133,16 @@ fn dataViewGetUint32(realm: *Realm, this_value: Value, args: []const Value) Nati
     if (v <= std.math.maxInt(i32)) return Value.fromInt32(@intCast(v));
     return Value.fromDouble(@floatFromInt(v));
 }
+// §25.3.4.6 DataView.prototype.getFloat16 — ES2024 Float16Array
+// proposal. Reads 2 bytes, decodes as IEEE 754 binary16 (1+5+10),
+// returns as a Number (f64). NaN/Inf/subnormals fall out of the
+// hardware @floatCast.
+fn dataViewGetFloat16(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const a = try dvGetPrologue(realm, this_value, args, 2);
+    const u = dvReadEndian(u16, a.buf, a.abs_offset, dvLittleEndian(args, 1));
+    const f: f16 = @bitCast(u);
+    return Value.fromDouble(@floatCast(f));
+}
 fn dataViewGetFloat32(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const a = try dvGetPrologue(realm, this_value, args, 4);
     const u = dvReadEndian(u32, a.buf, a.abs_offset, dvLittleEndian(args, 1));
@@ -2184,6 +2198,16 @@ fn dataViewSetUint32(realm: *Realm, this_value: Value, args: []const Value) Nati
     const a = try dvSetNumPrologue(realm, this_value, args, 4);
     const u: u32 = @bitCast(toInt32Mod(a.value));
     dvWriteEndian(u32, a.buf, a.abs_offset, u, dvLittleEndian(args, 2));
+    return Value.undefined_;
+}
+// §25.3.4.18 DataView.prototype.setFloat16 — round-to-nearest-ties-
+// to-even per IEEE 754 §11.5 falls out of Zig's @floatCast f64 → f16
+// on every supported target. Bit-cast to u16 and write 2 bytes.
+fn dataViewSetFloat16(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const a = try dvSetNumPrologue(realm, this_value, args, 2);
+    const f: f16 = @floatCast(a.value);
+    const u: u16 = @bitCast(f);
+    dvWriteEndian(u16, a.buf, a.abs_offset, u, dvLittleEndian(args, 2));
     return Value.undefined_;
 }
 fn dataViewSetFloat32(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -2421,6 +2445,16 @@ pub fn writeTypedElement(buf: []u8, kind: ObjMod.TypedKind, byte_pos: usize, val
             const u: u32 = @truncate(toUintMod(d, 4294967296.0));
             std.mem.writeInt(u32, buf[byte_pos..][0..4], u, .little);
         },
+        .float16 => {
+            // §10.4.5 Set IntegerIndexedElement / ES2024 Float16Array —
+            // ToNumber → round-to-nearest-ties-to-even (IEEE 754
+            // binary16). Zig's @floatCast does the right thing.
+            const v = coerceToNumber(value);
+            const d: f64 = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
+            const f: f16 = @floatCast(d);
+            const u: u16 = @bitCast(f);
+            std.mem.writeInt(u16, buf[byte_pos..][0..2], u, .little);
+        },
         .float32 => {
             const v = coerceToNumber(value);
             const d: f64 = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
@@ -2590,6 +2624,11 @@ pub fn readTypedElement(realm: *Realm, buf: []const u8, kind: ObjMod.TypedKind, 
             const u = std.mem.readInt(u32, buf[byte_pos..][0..4], .little);
             if (u <= std.math.maxInt(i32)) return Value.fromInt32(@intCast(u));
             return Value.fromDouble(@floatFromInt(u));
+        },
+        .float16 => {
+            const u = std.mem.readInt(u16, buf[byte_pos..][0..2], .little);
+            const f: f16 = @bitCast(u);
+            return Value.fromDouble(@floatCast(f));
         },
         .float32 => {
             const u = std.mem.readInt(u32, buf[byte_pos..][0..4], .little);
