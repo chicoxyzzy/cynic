@@ -634,19 +634,35 @@ fn arrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) Na
 }
 
 fn arraySlice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.1.3.28 Array.prototype.slice:
+    //   1-2. ToObject + ToLength
+    //   3-6. ToIntegerOrInfinity(start) -> actualStart
+    //   7-8. ToIntegerOrInfinity(end) -> final
+    //   9. count = max(final - actualStart, 0)
+    //   10. A = ? ArraySpeciesCreate(O, count)
+    //   11. Loop k in [start, final): HasProperty + (Get +
+    //       CreateDataPropertyOrThrow)
+    //   12. ? Set(A, "length", n, true)
     const obj = try toObjectThis(realm, this_value);
-    const raw_len = try toLengthOf(realm, obj);
-    const len = try intrinsics.clampArrayLengthR(realm, raw_len);
-    var start: i64 = if (args.len > 0) toInt(args[0]) else 0;
-    var end: i64 = if (args.len > 1 and !args[1].isUndefined()) toInt(args[1]) else len;
-    if (start < 0) start = @max(len + start, 0);
-    if (end < 0) end = @max(len + end, 0);
-    start = @min(start, len);
-    end = @min(end, len);
+    var raw_len = try toLengthOf(realm, obj);
+    const safe_max: i64 = (1 << 53) - 1;
+    if (raw_len > safe_max) raw_len = safe_max;
+    const len = raw_len;
+    // §7.1.5 ToIntegerOrInfinity for start / end — must route
+    // through ToNumber so accessor / valueOf hooks fire.
+    var start: i64 = 0;
+    if (args.len > 0) start = try toIntPropagating(realm, args[0]);
+    var end: i64 = len;
+    if (args.len > 1 and !args[1].isUndefined()) end = try toIntPropagating(realm, args[1]);
+    if (start < 0) start = @max(len + start, 0) else start = @min(start, len);
+    if (end < 0) end = @max(len + end, 0) else end = @min(end, len);
 
-    // §23.1.3.28 step 7 — `count = max(end - start, 0)`,
-    // ArraySpeciesCreate(O, count).
     const count = if (end > start) end - start else 0;
+    if (count > max_iter_length) {
+        const ex = intrinsics.newRangeError(realm, "Slice length exceeds maximum supported") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
     const out_v = try arraySpeciesCreate(realm, obj, count);
     const out = heap_mod.valueAsPlainObject(out_v) orelse return throwTypeError(realm, "ArraySpeciesCreate did not return an object");
     var write_idx: i64 = 0;
@@ -662,10 +678,12 @@ fn arraySlice(realm: *Realm, this_value: Value, args: []const Value) NativeError
         var wbuf: [24]u8 = undefined;
         const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{write_idx}) catch unreachable;
         const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+        // §23.1.3.28 step 11.c.ii — CreateDataPropertyOrThrow, not Set.
+        try createDataPropertyOrThrowGeneric(realm, out, owned.bytes, v);
         write_idx += 1;
     }
-    setLength(realm, out, write_idx) catch return error.OutOfMemory;
+    // §23.1.3.28 step 12 — ? Set(A, "length", n, true).
+    try setLengthOrThrow(realm, out, write_idx);
     return out_v;
 }
 
@@ -2113,7 +2131,7 @@ fn arrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.map callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
 
-    // §23.1.3.20 step 5 — ArraySpeciesCreate(O, len) so `@@species`
+    // §23.1.3.19 step 5 — ArraySpeciesCreate(O, len) so `@@species`
     // on the receiver's constructor controls the result type.
     const out_v = try arraySpeciesCreate(realm, obj, len);
     const out = heap_mod.valueAsPlainObject(out_v) orelse return throwTypeError(realm, "ArraySpeciesCreate did not return an object");
@@ -2130,9 +2148,10 @@ fn arrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
         const elem = try getPropertyChain(realm, obj, islice);
         const v = try invokeCallback(realm, callback, this_arg, elem, i, obj);
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+        // §23.1.3.19 step 6.c.iii — CreateDataPropertyOrThrow.
+        try createDataPropertyOrThrowGeneric(realm, out, owned.bytes, v);
     }
-    setLength(realm, out, len) catch return error.OutOfMemory;
+    try setLengthOrThrow(realm, out, len);
     return out_v;
 }
 
@@ -2159,11 +2178,12 @@ fn arrayFilter(realm: *Realm, this_value: Value, args: []const Value) NativeErro
             var wbuf: [24]u8 = undefined;
             const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{write_idx}) catch unreachable;
             const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-            out.set(realm.allocator, owned.bytes, elem) catch return error.OutOfMemory;
+            // §23.1.3.8 step 6.c.iii.2 — CreateDataPropertyOrThrow.
+            try createDataPropertyOrThrowGeneric(realm, out, owned.bytes, elem);
             write_idx += 1;
         }
     }
-    setLength(realm, out, write_idx) catch return error.OutOfMemory;
+    try setLengthOrThrow(realm, out, write_idx);
     return out_v;
 }
 
