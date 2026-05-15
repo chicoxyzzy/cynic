@@ -39,6 +39,10 @@
 //! --top-alloc=<n>         Print the N fixtures with the highest cumulative
 //!                         bytes allocated (≥64KB). Forces `--threads=1`.
 //!                         Different signal from `--top-rss` (peak RSS).
+//! --top-gc-time=<n>       Print the N fixtures with the highest accumulated GC
+//!                         pause time (≥1ms). Forces `--threads=1`. Different
+//!                         signal from `--top-alloc` — catches GC-time-dominant
+//!                         fixtures even when total bytes is moderate.
 
 const std = @import("std");
 const cynic = @import("cynic");
@@ -448,6 +452,12 @@ const Options = struct {
     /// and-discard workloads that `--top-rss` misses. Forces
     /// `--threads=1`.
     top_alloc: u32 = 0,
+    /// When >0, print the top-N fixtures by accumulated GC pause
+    /// time (via `heap.gc_time_ns_total`). Catches fixtures that
+    /// burn wall-time in GC — different signal from `--top-alloc`
+    /// (which counts bytes) and `--top-rss` (which captures peak
+    /// live). Forces `--threads=1`.
+    top_gc_time: u32 = 0,
 };
 
 /// Path of the pass-cache, written at the repo root after every
@@ -705,6 +715,11 @@ pub fn main(init: std.process.Init) !void {
         for (alloc_list.items) |e| gpa.free(e.path);
         alloc_list.deinit(gpa);
     }
+    var gc_time_list: std.ArrayListUnmanaged(GcTimeEntry) = .empty;
+    defer {
+        for (gc_time_list.items) |e| gpa.free(e.path);
+        gc_time_list.deinit(gpa);
+    }
     var mem_agg: MemAggregate = .{};
 
     // `--only-failing` shortcut: any test path present in the
@@ -826,7 +841,7 @@ pub fn main(init: std.process.Init) !void {
             const harness_pair: ?harness_mod.HarnessSources = harness_sources;
             const fx_start = if (opts.top_slow > 0) std.Io.Clock.now(.awake, io) else undefined;
             const fx_rss_pre: u64 = if (opts.top_rss > 0) (currentRssMb() orelse 0) else 0;
-            const need_mem = opts.mem_summary or opts.top_alloc > 0;
+            const need_mem = opts.mem_summary or opts.top_alloc > 0 or opts.top_gc_time > 0;
             var fx_mem: FixtureMem = .{};
             const outcome = try classifyAndRun(arena, bytes_allocator, io, corpus, rel, opts.mode, harness_pair, opts.gc_threshold, opts.gc_stats, if (need_mem) &fx_mem else null);
             if (need_mem) {
@@ -835,6 +850,12 @@ pub fn main(init: std.process.Init) !void {
                     const kb = fx_mem.bytes_alloc_total / 1024;
                     if (kb >= alloc_threshold_kb) {
                         try alloc_list.append(gpa, .{ .path = try gpa.dupe(u8, rel), .kb = kb });
+                    }
+                }
+                if (opts.top_gc_time > 0) {
+                    const us = fx_mem.gc_time_ns / 1000;
+                    if (us >= gc_time_threshold_us) {
+                        try gc_time_list.append(gpa, .{ .path = try gpa.dupe(u8, rel), .us = us });
                     }
                 }
             }
@@ -967,6 +988,9 @@ pub fn main(init: std.process.Init) !void {
     if (opts.top_alloc > 0 and alloc_list.items.len > 0) {
         try printTopAlloc(io, alloc_list.items, opts.top_alloc);
     }
+    if (opts.top_gc_time > 0 and gc_time_list.items.len > 0) {
+        try printTopGcTime(io, gc_time_list.items, opts.top_gc_time);
+    }
     if (opts.mem_summary) {
         try printMemSummary(io, &mem_agg, &stats);
     }
@@ -1036,6 +1060,21 @@ const AllocEntry = struct {
 /// fixtures. 64 KiB ≈ a single string-concat result; below that
 /// is allocator noise.
 const alloc_threshold_kb: u64 = 64;
+
+/// `--top-gc-time=N` capture. Pairs the per-fixture summed GC
+/// pause time (microseconds) with the test path. Different signal
+/// from `--top-alloc` (cumulative bytes) and `--top-rss` (peak RSS
+/// delta): some fixtures burn most of their wall-time in GC because
+/// they allocate-and-discard so much that the byte trigger fires
+/// repeatedly — those show up here.
+const GcTimeEntry = struct {
+    path: []const u8,
+    us: u64,
+};
+
+/// Threshold to filter the GC-time report. 1 ms ≈ a single GC
+/// cycle of typical size; below that is uninteresting.
+const gc_time_threshold_us: u64 = 1000;
 
 /// Per-fixture summary of heap counters that the sequential path
 /// captures before tearing down the realm. Fed into the harness-
@@ -1896,6 +1935,33 @@ fn printTopAlloc(io: std.Io, alloc_list: []AllocEntry, n: u32) !void {
             try std.Io.File.stdout().writeStreamingAll(io, line);
         } else {
             const line = try std.fmt.bufPrint(&buf, "  {d:>6}KB  {s}\n", .{ e.kb, e.path });
+            try std.Io.File.stdout().writeStreamingAll(io, line);
+        }
+    }
+}
+
+/// Sort the captured GC-time entries descending and print the
+/// top N. Catches fixtures that burn wall-time in GC because
+/// they allocate-and-discard so much the byte trigger fires
+/// repeatedly. `--threads=1` only; per-fixture counter lives
+/// on each per-realm heap.
+fn printTopGcTime(io: std.Io, gc_time_list: []GcTimeEntry, n: u32) !void {
+    std.mem.sort(GcTimeEntry, gc_time_list, {}, struct {
+        fn lt(_: void, a: GcTimeEntry, b: GcTimeEntry) bool {
+            return a.us > b.us;
+        }
+    }.lt);
+    var buf: [1024]u8 = undefined;
+    const limit = @min(@as(usize, n), gc_time_list.len);
+    const head = try std.fmt.bufPrint(&buf, "\ntop {d} fixtures by GC pause time (≥{d}\u{00B5}s):\n", .{ limit, gc_time_threshold_us });
+    try std.Io.File.stdout().writeStreamingAll(io, head);
+    for (gc_time_list[0..limit]) |e| {
+        // Print ms when the value is large enough; otherwise µs.
+        if (e.us >= 1000) {
+            const line = try std.fmt.bufPrint(&buf, "  {d:>6}ms  {s}\n", .{ e.us / 1000, e.path });
+            try std.Io.File.stdout().writeStreamingAll(io, line);
+        } else {
+            const line = try std.fmt.bufPrint(&buf, "  {d:>6}\u{00B5}s  {s}\n", .{ e.us, e.path });
             try std.Io.File.stdout().writeStreamingAll(io, line);
         }
     }
@@ -2780,6 +2846,9 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
         } else if (std.mem.startsWith(u8, arg, "--top-alloc=")) {
             opts.top_alloc = std.fmt.parseInt(u32, arg["--top-alloc=".len..], 10) catch 0;
             if (opts.top_alloc > 0) opts.threads = 1;
+        } else if (std.mem.startsWith(u8, arg, "--top-gc-time=")) {
+            opts.top_gc_time = std.fmt.parseInt(u32, arg["--top-gc-time=".len..], 10) catch 0;
+            if (opts.top_gc_time > 0) opts.threads = 1;
         }
     }
     return opts;

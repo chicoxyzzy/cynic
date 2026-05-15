@@ -172,7 +172,11 @@ which includes binary/libc/allocator slack. Forces
 allocated ≥ 64 KiB. Catches allocate-and-discard thrash that
 `--top-rss` misses — e.g. a fixture with 1 GiB cumulative
 alloc but 10 MiB peak live (all freed by GC) is invisible in
-RSS but obvious here. Forces `--threads=1`). The harness
+RSS but obvious here. Forces `--threads=1`),
+`--top-gc-time=<n>` (top-N fixtures by accumulated GC pause
+time ≥ 1 ms. Different signal from `--top-alloc` — surfaces
+fixtures whose wall-time is dominated by GC even when bytes
+look moderate. Forces `--threads=1`). The harness
 scores against the **Cynic-targeted scope**: paths under
 `harness/`, `staging/`, `intl402/`, Annex B language extensions,
 and the browser-era built-ins Cynic doesn't ship are dropped from

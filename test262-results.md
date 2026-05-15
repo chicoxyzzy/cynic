@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 84.89 % | 91.31 % | 34779 / 40969 | 34779 / 38088 |
+| **runtime** | 85.12 % | 91.56 % | 34872 / 40969 | 34872 / 38088 |
 
 
 ## Where the runtime stands, by area
@@ -31,16 +31,16 @@ browser-era built-ins …).
 | `built-ins/String` | 1045 | 172 | 5 | 86 % | 86 % |
 | `built-ins/TypedArray` | 1273 | 150 | 8 | 89 % | 89 % |
 | `built-ins/TypedArrayConstructors` | 534 | 126 | 16 | 79 % | 81 % |
-| `language/expressions` | 9266 | 703 | 979 | 85 % | 93 % |
+| `language/expressions` | 9298 | 671 | 979 | 85 % | 93 % |
 | `language/module-code` | 462 | 120 | 14 | 78 % | 79 % |
-| `language/statements` | 8092 | 396 | 672 | 88 % | 95 % |
+| `language/statements` | 8149 | 339 | 672 | 89 % | 96 % |
 | **_10–99 fails_** | | | | | |
 | `built-ins/ArrayBuffer` | 165 | 26 | 4 | 85 % | 86 % |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 11 | 27 | 0 | 29 % | 29 % |
 | `built-ins/AsyncGeneratorPrototype` | 22 | 26 | 0 | 46 % | 46 % |
 | `built-ins/BigInt` | 50 | 26 | 0 | 66 % | 66 % |
 | `built-ins/Date` | 526 | 65 | 0 | 89 % | 89 % |
-| `built-ins/GeneratorPrototype` | 32 | 29 | 0 | 52 % | 52 % |
+| `built-ins/GeneratorPrototype` | 36 | 25 | 0 | 59 % | 59 % |
 | `built-ins/Iterator` | 443 | 60 | 6 | 87 % | 88 % |
 | `built-ins/JSON` | 115 | 50 | 0 | 70 % | 70 % |
 | `built-ins/Map` | 179 | 23 | 1 | 88 % | 89 % |
@@ -139,15 +139,13 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 | -167 |  |
-| **runtime** | 84.89 % | 91.31 % | 34779 / 40969 | 34779 / 38088 | +1530 | 1m 39s |
+| **runtime** | 85.12 % | 91.56 % | 34872 / 40969 | 34872 / 38088 | +1623 | 1m 48s |
 
 Biggest movers (runtime):
 
-- `language/statements` +114
-- `language/expressions` +91
-- `built-ins/Array` +85
-- `language/computed-property-names` +6
-- `built-ins/Object` +5
+- `language/statements` +57
+- `language/expressions` +32
+- `built-ins/GeneratorPrototype` +4
 
 ### 2026-05-14 — cynic `aca1903`, test262 `d0c1b455`
 
