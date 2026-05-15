@@ -1267,7 +1267,39 @@ pub fn regexReplace(
                     unit_pos += if (seq_len == 4) 2 else 1;
                 }
             }
-            regex_obj.set(realm.allocator, "lastIndex", Value.fromInt32(@intCast(unit_pos))) catch return error.OutOfMemory;
+            // §22.2.6.11 step 8.j (literal) — `thisIndex = ?
+            // ToLength(? Get(rx, "lastIndex"))`, `nextIndex =
+            // AdvanceStringIndex(S, thisIndex, fullUnicode)`,
+            // `Set(rx, "lastIndex", nextIndex)`. The read goes
+            // through the accessor-aware chain walk so a user-
+            // installed `lastIndex` setter / shadow fires; the
+            // ToLength clamp gives `2**54` → `2**53` which the
+            // test262 `coerce-lastindex` fixture relies on.
+            // Fall back to the local `unit_pos` only when no user
+            // override is in play (the value we already wrote is
+            // the spec answer for the built-in exec).
+            const li_v = try intrinsics.getPropertyChain(realm, regex_obj, "lastIndex");
+            const this_index_raw: i64 = if (li_v.isInt32())
+                @max(0, @as(i64, li_v.asInt32()))
+            else
+                try intrinsics.toLengthValue(realm, li_v);
+            // §7.1.20 ToLength step 2 — `min(len, 2**53 - 1)`. The
+            // shared `toLengthValue` saturates to i64; cap to
+            // 2**53 - 1 here so a coercible `lastIndex` whose
+            // `valueOf` returns 2**54 yields the spec answer 2**53
+            // (per the `coerce-lastindex` fixture: AdvanceStringIndex
+            // adds 1, which rounds away in double precision).
+            const max_safe_integer: i64 = (1 << 53) - 1;
+            const this_index_i64: i64 = @min(this_index_raw, max_safe_integer);
+            const next_index_d: f64 = @as(f64, @floatFromInt(this_index_i64)) + 1.0;
+            regex_obj.set(
+                realm.allocator,
+                "lastIndex",
+                if (next_index_d <= @as(f64, @floatFromInt(std.math.maxInt(i32))))
+                    Value.fromInt32(@intCast(@as(i64, @intFromFloat(next_index_d))))
+                else
+                    Value.fromDouble(next_index_d),
+            ) catch return error.OutOfMemory;
         }
         if (!all) break;
     }

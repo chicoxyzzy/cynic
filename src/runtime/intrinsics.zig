@@ -828,6 +828,10 @@ pub fn toLengthOf(realm: *Realm, obj: *JSObject) NativeError!i64 {
 /// `ToNumber` on an Object triggers ToPrimitive — `valueOf` /
 /// `toString` — which can throw. Propagate that throw via
 /// `realm.pending_exception` instead of silently coercing to 0.
+pub fn toLengthValue(realm: *Realm, v: Value) NativeError!i64 {
+    return toLengthValuePropagating(realm, v);
+}
+
 fn toLengthValuePropagating(realm: *Realm, v: Value) NativeError!i64 {
     if (v.isInt32()) {
         const i = v.asInt32();
