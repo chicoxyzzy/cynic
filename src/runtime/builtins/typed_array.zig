@@ -806,7 +806,9 @@ fn typedArrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const tv = try taValidatedView(realm, this_value, "fill");
     const buf = tv.viewed.array_buffer orelse return throwTypeError(realm, "Cannot perform 'fill' on a detached buffer");
     const elem_size = tv.kind.elementSize();
-    const len_i: i64 = @intCast(tv.length);
+    // §23.2.3.10 — TypedArrayLength is taken against the buffer
+    // witness; for a length-tracking view this is the live count.
+    const len_i: i64 = @intCast(taCurrentLength(tv));
     // §23.2.3.10 step 3 — `ToNumber(value)` (or ToBigInt for
     // BigInt typed arrays) runs ONCE up front, before the start/
     // end coercions. Test262 fixtures pass side-effecting
@@ -1298,6 +1300,12 @@ fn taCallbackPreamble(realm: *Realm, this_value: Value, args: []const Value) Nat
     callback: *JSFunction,
     this_arg: Value,
     self_obj: *JSObject,
+    /// §23.2.3.x — length snapshot taken via TypedArrayLength
+    /// against the buffer witness at method entry. The spec
+    /// iterates this snapshot even if the buffer shrinks
+    /// mid-callback (out-of-range reads then yield `undefined`
+    /// per §10.4.5 IntegerIndexedElementGet).
+    len: usize,
 } {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray method on non-object");
     const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray method on non-TypedArray");
@@ -1308,12 +1316,12 @@ fn taCallbackPreamble(realm: *Realm, this_value: Value, args: []const Value) Nat
     if (taIsOutOfBounds(tv)) return throwTypeError(realm, "TypedArray method called on out-of-bounds TypedArray");
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "callback is not a function");
     const this_arg = argOr(args, 1, Value.undefined_);
-    return .{ .tv = tv, .buf = tv.viewed.array_buffer, .callback = callback, .this_arg = this_arg, .self_obj = obj };
+    return .{ .tv = tv, .buf = tv.viewed.array_buffer, .callback = callback, .this_arg = this_arg, .self_obj = obj, .len = taCurrentLength(tv) };
 }
 
 fn typedArrayAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const tv = try taValidatedView(realm, this_value, "at");
-    const len: i64 = @intCast(tv.length);
+    const len: i64 = @intCast(taCurrentLength(tv));
     const i = try taResolveIndex(realm, argOr(args, 0, Value.fromInt32(0)), len, 0);
     // `at` returns undefined for out-of-range; resolveIndex clamps,
     // so we re-check using the raw arg to detect "explicitly out of
@@ -1332,7 +1340,7 @@ fn typedArrayAt(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 fn typedArrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const tv = try taValidatedView(realm, this_value, "copyWithin");
     const buf = tv.viewed.array_buffer orelse return error.NativeThrew;
-    const len: i64 = @intCast(tv.length);
+    const len: i64 = @intCast(taCurrentLength(tv));
     const target = try taResolveIndex(realm, argOr(args, 0, Value.fromInt32(0)), len, 0);
     const start = try taResolveIndex(realm, argOr(args, 1, Value.fromInt32(0)), len, 0);
     const end = try taResolveIndex(realm, argOr(args, 2, Value.undefined_), len, len);
@@ -1358,7 +1366,7 @@ fn typedArrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) N
 fn typedArrayForEach(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
     var i: usize = 0;
-    while (i < ctx.tv.length) : (i += 1) {
+    while (i < ctx.len) : (i += 1) {
         const v = taSafeRead(realm, ctx.tv, @intCast(i));
         _ = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
     }
@@ -1368,7 +1376,7 @@ fn typedArrayForEach(realm: *Realm, this_value: Value, args: []const Value) Nati
 fn typedArrayEvery(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
     var i: usize = 0;
-    while (i < ctx.tv.length) : (i += 1) {
+    while (i < ctx.len) : (i += 1) {
         const v = taSafeRead(realm, ctx.tv, @intCast(i));
         const r = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
         if (!toBoolean(r)) return Value.false_;
@@ -1379,7 +1387,7 @@ fn typedArrayEvery(realm: *Realm, this_value: Value, args: []const Value) Native
 fn typedArraySome(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
     var i: usize = 0;
-    while (i < ctx.tv.length) : (i += 1) {
+    while (i < ctx.len) : (i += 1) {
         const v = taSafeRead(realm, ctx.tv, @intCast(i));
         const r = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
         if (toBoolean(r)) return Value.true_;
@@ -1390,7 +1398,7 @@ fn typedArraySome(realm: *Realm, this_value: Value, args: []const Value) NativeE
 fn typedArrayFind(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
     var i: usize = 0;
-    while (i < ctx.tv.length) : (i += 1) {
+    while (i < ctx.len) : (i += 1) {
         const v = taSafeRead(realm, ctx.tv, @intCast(i));
         const r = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
         if (toBoolean(r)) return v;
@@ -1401,7 +1409,7 @@ fn typedArrayFind(realm: *Realm, this_value: Value, args: []const Value) NativeE
 fn typedArrayFindIndex(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
     var i: usize = 0;
-    while (i < ctx.tv.length) : (i += 1) {
+    while (i < ctx.len) : (i += 1) {
         const v = taSafeRead(realm, ctx.tv, @intCast(i));
         const r = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
         if (toBoolean(r)) return numberFromI64(@intCast(i));
@@ -1411,7 +1419,7 @@ fn typedArrayFindIndex(realm: *Realm, this_value: Value, args: []const Value) Na
 
 fn typedArrayFindLast(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
-    var i: i64 = @as(i64, @intCast(ctx.tv.length)) - 1;
+    var i: i64 = @as(i64, @intCast(ctx.len)) - 1;
     while (i >= 0) : (i -= 1) {
         const v = taSafeRead(realm, ctx.tv, i);
         const r = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, i, ctx.self_obj);
@@ -1422,7 +1430,7 @@ fn typedArrayFindLast(realm: *Realm, this_value: Value, args: []const Value) Nat
 
 fn typedArrayFindLastIndex(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
-    var i: i64 = @as(i64, @intCast(ctx.tv.length)) - 1;
+    var i: i64 = @as(i64, @intCast(ctx.len)) - 1;
     while (i >= 0) : (i -= 1) {
         const v = taSafeRead(realm, ctx.tv, i);
         const r = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, i, ctx.self_obj);
@@ -1437,7 +1445,7 @@ fn typedArrayIncludes(realm: *Realm, this_value: Value, args: []const Value) Nat
     // at its stored value (fixed-length TAs aren't auto).
     const tv = try taValidatedView(realm, this_value, "includes");
     const target = argOr(args, 0, Value.undefined_);
-    const len: i64 = @intCast(tv.length);
+    const len: i64 = @intCast(taCurrentLength(tv));
     const from_arg = argOr(args, 1, Value.fromInt32(0));
     var from = try taResolveIndex(realm, from_arg, len, 0);
     if (from < 0) from = 0;
@@ -1461,7 +1469,7 @@ fn typedArrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nati
     // simple and matching V8/JSC: if detached, return -1.
     if (tv.viewed.array_buffer == null) return Value.fromInt32(-1);
     const target = argOr(args, 0, Value.undefined_);
-    const len: i64 = @intCast(tv.length);
+    const len: i64 = @intCast(taCurrentLength(tv));
     var from = try taResolveIndex(realm, argOr(args, 1, Value.fromInt32(0)), len, 0);
     if (from < 0) from = 0;
     // §23.2.3.14 step 8 — HasProperty(O, k) is `false` once the
@@ -1480,7 +1488,7 @@ fn typedArrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) 
     const tv = try taValidatedView(realm, this_value, "lastIndexOf");
     if (tv.viewed.array_buffer == null) return Value.fromInt32(-1);
     const target = argOr(args, 0, Value.undefined_);
-    const len: i64 = @intCast(tv.length);
+    const len: i64 = @intCast(taCurrentLength(tv));
     var from: i64 = len - 1;
     if (args.len > 1 and !args[1].isUndefined()) {
         from = try taResolveIndex(realm, args[1], len, len - 1);
@@ -1513,8 +1521,9 @@ fn typedArrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeE
     };
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
+    const join_len = taCurrentLength(tv);
     var i: usize = 0;
-    while (i < tv.length) : (i += 1) {
+    while (i < join_len) : (i += 1) {
         if (i > 0) out.appendSlice(realm.allocator, sep_s) catch return error.OutOfMemory;
         const v = taSafeRead(realm, tv, @intCast(i));
         // §23.2.3.15 step 7.c — `If element is undefined or null,
@@ -1546,8 +1555,9 @@ fn typedArrayToLocaleString(realm: *Realm, this_value: Value, args: []const Valu
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
     const interpreter = @import("../interpreter.zig");
+    const tls_len = taCurrentLength(tv);
     var i: usize = 0;
-    while (i < tv.length) : (i += 1) {
+    while (i < tls_len) : (i += 1) {
         if (i > 0) out.appendSlice(realm.allocator, ",") catch return error.OutOfMemory;
         const v = readTypedElement(realm, buf, tv.kind, tv.byte_offset + i * elem_size);
         // §23.2.3.34 step 7 — `Invoke(elt, "toLocaleString")`
@@ -1586,10 +1596,11 @@ fn typedArrayReduce(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "callback is not a function");
     const elem_size = tv.kind.elementSize();
     const has_init = args.len >= 2;
-    if (tv.length == 0 and !has_init) return throwTypeError(realm, "Reduce of empty TypedArray with no initial value");
+    const reduce_len = taCurrentLength(tv);
+    if (reduce_len == 0 and !has_init) return throwTypeError(realm, "Reduce of empty TypedArray with no initial value");
     var acc: Value = if (has_init) args[1] else readTypedElement(realm, buf, tv.kind, tv.byte_offset);
     var i: usize = if (has_init) 0 else 1;
-    while (i < tv.length) : (i += 1) {
+    while (i < reduce_len) : (i += 1) {
         const v = readTypedElement(realm, buf, tv.kind, tv.byte_offset + i * elem_size);
         const interpreter = @import("../interpreter.zig");
         const cb_args = [_]Value{ acc, v, numberFromI64(@intCast(i)), heap_mod.taggedObject(obj) };
@@ -1612,8 +1623,9 @@ fn typedArrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) 
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "callback is not a function");
     const elem_size = tv.kind.elementSize();
     const has_init = args.len >= 2;
-    if (tv.length == 0 and !has_init) return throwTypeError(realm, "Reduce of empty TypedArray with no initial value");
-    var i: i64 = @as(i64, @intCast(tv.length)) - 1;
+    const rr_len = taCurrentLength(tv);
+    if (rr_len == 0 and !has_init) return throwTypeError(realm, "Reduce of empty TypedArray with no initial value");
+    var i: i64 = @as(i64, @intCast(rr_len)) - 1;
     var acc: Value = if (has_init) args[1] else blk: {
         const v = readTypedElement(realm, buf, tv.kind, tv.byte_offset + @as(usize, @intCast(i)) * elem_size);
         i -= 1;
@@ -1641,7 +1653,7 @@ fn typedArrayReverse(realm: *Realm, this_value: Value, args: []const Value) Nati
     const buf = tv.viewed.array_buffer orelse return error.NativeThrew;
     const elem_size = tv.kind.elementSize();
     var lo: usize = 0;
-    var hi: usize = tv.length;
+    var hi: usize = taCurrentLength(tv);
     if (hi == 0) return this_value;
     hi -= 1;
     while (lo < hi) : ({
@@ -1665,7 +1677,7 @@ fn typedArrayReverse(realm: *Realm, this_value: Value, args: []const Value) Nati
 fn typedArraySlice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const tv_pre = try taValidatedView(realm, this_value, "slice");
     const self = heap_mod.valueAsPlainObject(this_value).?;
-    const len: i64 = @intCast(tv_pre.length);
+    const len: i64 = @intCast(taCurrentLength(tv_pre));
     const start = try taResolveIndex(realm, argOr(args, 0, Value.fromInt32(0)), len, 0);
     const end = try taResolveIndex(realm, argOr(args, 1, Value.undefined_), len, len);
     const new_len: usize = if (end > start) @intCast(end - start) else 0;
@@ -1707,7 +1719,11 @@ fn typedArraySubarray(realm: *Realm, this_value: Value, args: []const Value) Nat
     // against the current bounds — keep the brand check only.
     const self = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "subarray on non-TypedArray");
     const tv = self.typed_view orelse return throwTypeError(realm, "subarray on non-TypedArray");
-    const len: i64 = @intCast(tv.length);
+    // §23.2.3.30 subarray — uses GetArrayBufferMaxByteLength
+    // and the buffer witness's `[[ArrayLength]]`. For a length-
+    // tracking view this is the live count; for fixed-length
+    // views it's the stored length.
+    const len: i64 = @intCast(taCurrentLength(tv));
     const begin = try taResolveIndex(realm, argOr(args, 0, Value.fromInt32(0)), len, 0);
     const end = try taResolveIndex(realm, argOr(args, 1, Value.undefined_), len, len);
     const new_len: usize = if (end > begin) @intCast(end - begin) else 0;
@@ -1809,11 +1825,11 @@ fn taSpeciesCreateSubarray(
 fn typedArrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
     // §23.2.3.19 step 6 — TypedArraySpeciesCreate(O, « len »).
-    const out = try taSpeciesCreate(realm, ctx.self_obj, ctx.tv.kind, ctx.tv.length);
+    const out = try taSpeciesCreate(realm, ctx.self_obj, ctx.tv.kind, ctx.len);
     const out_buf = out.typed_view.?.viewed.array_buffer.?;
     const elem_size = ctx.tv.kind.elementSize();
     var i: usize = 0;
-    while (i < ctx.tv.length) : (i += 1) {
+    while (i < ctx.len) : (i += 1) {
         const v = taSafeRead(realm, ctx.tv, @intCast(i));
         const mapped = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
         writeTypedElement(out_buf, ctx.tv.kind, i * elem_size, mapped);
@@ -1830,7 +1846,7 @@ fn typedArrayFilter(realm: *Realm, this_value: Value, args: []const Value) Nativ
     var kept: std.ArrayListUnmanaged(usize) = .empty;
     defer kept.deinit(realm.allocator);
     var i: usize = 0;
-    while (i < ctx.tv.length) : (i += 1) {
+    while (i < ctx.len) : (i += 1) {
         const v = taSafeRead(realm, ctx.tv, @intCast(i));
         const r = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
         if (toBoolean(r)) kept.append(realm.allocator, i) catch return error.OutOfMemory;
@@ -2300,10 +2316,11 @@ fn typedArrayToSorted(realm: *Realm, this_value: Value, args: []const Value) Nat
     const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
     const cmp_v = argOr(args, 0, Value.undefined_);
     const cmp_fn: ?*JSFunction = if (cmp_v.isUndefined()) null else heap_mod.valueAsFunction(cmp_v) orelse return throwTypeError(realm, "toSorted comparator must be a function");
-    const out = try taMakeNew(realm, tv.kind, tv.length);
+    const ts_len = taCurrentLength(tv);
+    const out = try taMakeNew(realm, tv.kind, ts_len);
     const out_buf = out.typed_view.?.viewed.array_buffer.?;
     const elem_size = tv.kind.elementSize();
-    @memcpy(out_buf[0 .. tv.length * elem_size], buf[tv.byte_offset .. tv.byte_offset + tv.length * elem_size]);
+    @memcpy(out_buf[0 .. ts_len * elem_size], buf[tv.byte_offset .. tv.byte_offset + ts_len * elem_size]);
     try taSortInPlace(realm, out.typed_view.?, out_buf, cmp_fn);
     return heap_mod.taggedObject(out);
 }
@@ -2312,12 +2329,13 @@ fn typedArrayToReversed(realm: *Realm, this_value: Value, args: []const Value) N
     _ = args;
     const tv = try taValidatedView(realm, this_value, "toReversed");
     const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
-    const out = try taMakeNew(realm, tv.kind, tv.length);
+    const tr_len = taCurrentLength(tv);
+    const out = try taMakeNew(realm, tv.kind, tr_len);
     const out_buf = out.typed_view.?.viewed.array_buffer.?;
     const elem_size = tv.kind.elementSize();
     var i: usize = 0;
-    while (i < tv.length) : (i += 1) {
-        const src_off = tv.byte_offset + (tv.length - 1 - i) * elem_size;
+    while (i < tr_len) : (i += 1) {
+        const src_off = tv.byte_offset + (tr_len - 1 - i) * elem_size;
         const dst_off = i * elem_size;
         @memcpy(out_buf[dst_off .. dst_off + elem_size], buf[src_off .. src_off + elem_size]);
     }
@@ -2327,7 +2345,8 @@ fn typedArrayToReversed(realm: *Realm, this_value: Value, args: []const Value) N
 fn typedArrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const tv = try taValidatedView(realm, this_value, "with");
     const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
-    const len: i64 = @intCast(tv.length);
+    const w_len_us = taCurrentLength(tv);
+    const len: i64 = @intCast(w_len_us);
     const idx_arg = argOr(args, 0, Value.fromInt32(0));
     const value = argOr(args, 1, Value.undefined_);
     // §23.2.3.39 step 2 — ToIntegerOrInfinity(relativeIndex)
@@ -2355,10 +2374,10 @@ fn typedArrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const target_i: i64 = if (idx_i < 0) idx_i +| len else idx_i;
     if (target_i < 0 or target_i >= len) return throwRangeError(realm, "with: index out of range");
 
-    const out = try taMakeNew(realm, tv.kind, tv.length);
+    const out = try taMakeNew(realm, tv.kind, w_len_us);
     const out_buf = out.typed_view.?.viewed.array_buffer.?;
     const elem_size = tv.kind.elementSize();
-    @memcpy(out_buf[0 .. tv.length * elem_size], buf[tv.byte_offset .. tv.byte_offset + tv.length * elem_size]);
+    @memcpy(out_buf[0 .. w_len_us * elem_size], buf[tv.byte_offset .. tv.byte_offset + w_len_us * elem_size]);
     writeTypedElement(out_buf, tv.kind, @as(usize, @intCast(target_i)) * elem_size, value);
     return heap_mod.taggedObject(out);
 }
