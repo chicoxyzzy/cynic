@@ -3405,8 +3405,13 @@ fn runFrames(
                 const out_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
                 out_obj.prototype = realm.intrinsics.object_prototype;
                 if (heap_mod.valueAsPlainObject(src_v)) |src_obj| {
-                    // Build a quick lookup of excluded keys by
-                    // walking the array argument.
+                    // §14.3.3.4 RestBindingInitialization →
+                    // §7.3.27 CopyDataProperties: build the
+                    // excluded-key set, walk OwnPropertyKeys in
+                    // spec order (integer-indexed → insertion),
+                    // and route each read through `[[Get]]` so
+                    // an accessor getter on the source fires
+                    // (Object.assign uses the same shape).
                     var excluded: std.ArrayListUnmanaged([]const u8) = .empty;
                     defer excluded.deinit(allocator);
                     if (heap_mod.valueAsPlainObject(excl_v)) |excl_arr| {
@@ -3423,9 +3428,16 @@ fn runFrames(
                             }
                         }
                     }
-                    var it = src_obj.properties.iterator();
-                    while (it.next()) |entry| {
-                        const k = entry.key_ptr.*;
+                    // Snapshot the key list before we start calling
+                    // user getters — they could otherwise mutate the
+                    // property bag mid-iteration.
+                    const obj_mod_inner = @import("builtins/object.zig");
+                    const keys = obj_mod_inner.ownPropertyKeysOrdered(realm, src_obj) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => return error.InvalidOpcode,
+                    };
+                    defer allocator.free(keys);
+                    for (keys) |k| {
                         if (std.mem.startsWith(u8, k, "__cynic_")) continue;
                         const flags = src_obj.flagsFor(k);
                         if (!flags.enumerable) continue;
@@ -3437,8 +3449,25 @@ fn runFrames(
                             }
                         }
                         if (skip) continue;
-                        out_obj.set(allocator, k, entry.value_ptr.*) catch return error.OutOfMemory;
+                        // §7.3.27 step 4.c.iii — Get(from, nextKey).
+                        // A throw here propagates as an abrupt
+                        // completion through the destructuring.
+                        const v = intrinsics_mod.getPropertyChain(realm, src_obj, k) catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            else => {
+                                const ex = consumePendingException(realm) orelse try makeTypeError(realm, "rest property read failed");
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                break;
+                            },
+                        };
+                        out_obj.set(allocator, k, v) catch return error.OutOfMemory;
                     }
+                    if (committed) continue;
                 }
                 acc = heap_mod.taggedObject(out_obj);
             },
