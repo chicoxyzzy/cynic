@@ -1068,9 +1068,13 @@ fn objectDefineProperties(realm: *Realm, this_value: Value, args: []const Value)
         break :blk_props try intrinsics.toObjectThis(realm, props_v);
     };
 
-    var it = props.properties.iterator();
-    while (it.next()) |entry| {
-        const key = entry.key_ptr.*;
+    // §20.1.2.3.1 ObjectDefineProperties — walk OwnPropertyKeys in
+    // spec order (integer-indexed ascending, then string-keyed in
+    // insertion order). This includes accessor-backed keys, whose
+    // getters must fire per step 5.b.ii.
+    const keys = try ownPropertyKeysOrdered(realm, props);
+    defer realm.allocator.free(keys);
+    for (keys) |key| {
         if (!props.flagsFor(key).enumerable) continue;
         // §20.1.2.3.1 step 5.b.ii — Get each descriptor through the
         // chain so accessor-backed descriptor slots fire.
@@ -1379,14 +1383,14 @@ fn objectCreate(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // Optional second arg: properties descriptor.
     if (args.len > 1 and !args[1].isUndefined()) {
         const props = heap_mod.valueAsPlainObject(args[1]) orelse return throwTypeError(realm, "Object.create properties must be an object");
-        var it = props.properties.iterator();
-        while (it.next()) |entry| {
-            const key = entry.key_ptr.*;
+        // §20.1.2.2 Object.create step 3 → ObjectDefineProperties:
+        // walk OwnPropertyKeys in spec order; include accessor-backed
+        // own keys so step 5.b.ii getters fire.
+        const keys = try ownPropertyKeysOrdered(realm, props);
+        defer realm.allocator.free(keys);
+        for (keys) |key| {
             if (!props.flagsFor(key).enumerable) continue;
             const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-            // §20.1.2.3.1 ObjectDefineProperties step 5.b.ii — Get
-            // each descriptor through the chain so accessor-backed
-            // descriptor slots fire.
             const desc_v = try getPropertyChain(realm, props, key);
             const inner = [_]Value{ heap_mod.taggedObject(obj), Value.fromString(k_str), desc_v };
             _ = try objectDefineProperty(realm, Value.undefined_, &inner);
