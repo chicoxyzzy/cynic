@@ -2521,6 +2521,17 @@ fn dataViewSetBigUint64(realm: *Realm, this_value: Value, args: []const Value) N
 /// Array.prototype.sort). Custom comparator is optional. NaN sorts
 /// to the end.
 fn taCompareNumeric(a: Value, b: Value) i32 {
+    // §23.2.3.30 default ordering — numeric comparison, with NaN
+    // sorted to the end. BigInt-element TypedArrays (BigInt64 /
+    // BigUint64) compare by the underlying i128 value; the Number
+    // branch is never reached for them.
+    if (heap_mod.valueAsBigInt(a)) |abi| {
+        if (heap_mod.valueAsBigInt(b)) |bbi| {
+            if (abi.value < bbi.value) return -1;
+            if (abi.value > bbi.value) return 1;
+            return 0;
+        }
+    }
     const av: f64 = if (a.isInt32()) @floatFromInt(a.asInt32()) else if (a.isDouble()) a.asDouble() else 0;
     const bv: f64 = if (b.isInt32()) @floatFromInt(b.asInt32()) else if (b.isDouble()) b.asDouble() else 0;
     if (std.math.isNan(av) and std.math.isNan(bv)) return 0;
@@ -2539,9 +2550,16 @@ fn taSortInPlace(realm: *Realm, tv: ObjMod.TypedView, buf_in: []u8, comparator: 
     // comparator invocation and short-circuit out if detached.
     // Bounds-check every direct buf read/write so a shrunk
     // backing store doesn't slice past the live length.
+    //
+    // §10.4.5 [[ArrayLength]] — must come from `taCurrentLength`
+    // rather than `tv.length`. For a length-tracking view the
+    // latter is the construction-time snapshot (typically 0) and
+    // lags every subsequent resize; using it would sort only a
+    // prefix when the buffer has grown.
     var buf = buf_in;
+    const sort_len = taCurrentLength(tv);
     var i: usize = 1;
-    while (i < tv.length) : (i += 1) {
+    while (i < sort_len) : (i += 1) {
         const i_off = tv.byte_offset + i * elem_size;
         if (i_off + elem_size > buf.len) return;
         const cur = readTypedElement(realm, buf, tv.kind, i_off);
