@@ -140,6 +140,9 @@ code construction (aligns with SES).
 - `Date` with full getter / setter surface (UTC-only — see
   caveats).
 - `Map`, `Set`, `WeakMap`, `WeakSet` with `groupBy` statics.
+  `Set.prototype` covers the ES2025 family
+  (`union`, `intersection`, `difference`, `symmetricDifference`,
+  `isSubsetOf`, `isSupersetOf`, `isDisjointFrom`).
 - `Promise` static methods (`all`, `allSettled`, `any`, `race`,
   `resolve`, `reject`, `try`, `withResolvers`) + prototype `then`
   / `catch` / `finally`. Aggregators go through §27.2.1.5
@@ -173,10 +176,9 @@ code construction (aligns with SES).
   tz-data source.
 - `String.prototype.normalize` is a passthrough — needs UCD
   normalization tables for real NFC/NFD/NFKC/NFKD.
-- `Set.prototype.{union, intersection, difference,
-  symmetricDifference, isSubsetOf, isSupersetOf, isDisjointFrom}`
-  (ES2025) — not yet wired.
-- `WeakRef` / `FinalizationRegistry` — not yet.
+- `WeakRef` / `FinalizationRegistry` — the API surface ships;
+  the actual weakness lands with generational GC (today the
+  references are strong so collection never happens).
 - `Function.prototype.toString` — returns the original source slice
   for declared functions; callable Proxy returns the spec sentinel
   `function () { [native code] }`. Remaining edge: CR vs LF
