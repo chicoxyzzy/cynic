@@ -1828,16 +1828,20 @@ fn typedArrayToLocaleString(realm: *Realm, this_value: Value, args: []const Valu
 fn typedArrayReduce(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const tv = try taValidatedView(realm, this_value, "reduce");
     const obj = heap_mod.valueAsPlainObject(this_value).?;
-    const buf = tv.viewed.array_buffer orelse return throwTypeError(realm, "TypedArray detached");
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "callback is not a function");
-    const elem_size = tv.kind.elementSize();
     const has_init = args.len >= 2;
+    // §23.2.3.22 step 5 — `[[ArrayLength]]` is captured once at
+    // method entry; the loop iterates that many times even when
+    // the user callback shrinks the backing buffer mid-iteration.
+    // OOB reads inside the loop must collapse to `undefined`
+    // (§10.4.5.1 IntegerIndexedElementGet; ES2024 align-detached-
+    // buffer-semantics).
     const reduce_len = taCurrentLength(tv);
     if (reduce_len == 0 and !has_init) return throwTypeError(realm, "Reduce of empty TypedArray with no initial value");
-    var acc: Value = if (has_init) args[1] else readTypedElement(realm, buf, tv.kind, tv.byte_offset);
+    var acc: Value = if (has_init) args[1] else taSafeRead(realm, tv, 0);
     var i: usize = if (has_init) 0 else 1;
     while (i < reduce_len) : (i += 1) {
-        const v = readTypedElement(realm, buf, tv.kind, tv.byte_offset + i * elem_size);
+        const v = taSafeRead(realm, tv, @intCast(i));
         const interpreter = @import("../interpreter.zig");
         const cb_args = [_]Value{ acc, v, numberFromI64(@intCast(i)), heap_mod.taggedObject(obj) };
         const outcome = interpreter.callJSFunction(realm.allocator, realm, callback, Value.undefined_, &cb_args) catch |err| switch (err) {
@@ -1855,20 +1859,21 @@ fn typedArrayReduce(realm: *Realm, this_value: Value, args: []const Value) Nativ
 fn typedArrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const tv = try taValidatedView(realm, this_value, "reduceRight");
     const obj = heap_mod.valueAsPlainObject(this_value).?;
-    const buf = tv.viewed.array_buffer orelse return throwTypeError(realm, "TypedArray detached");
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "callback is not a function");
-    const elem_size = tv.kind.elementSize();
     const has_init = args.len >= 2;
+    // §23.2.3.23 — see `typedArrayReduce`: length captured at
+    // entry; OOB reads after a callback-driven shrink collapse to
+    // `undefined` via `taSafeRead`.
     const rr_len = taCurrentLength(tv);
     if (rr_len == 0 and !has_init) return throwTypeError(realm, "Reduce of empty TypedArray with no initial value");
     var i: i64 = @as(i64, @intCast(rr_len)) - 1;
     var acc: Value = if (has_init) args[1] else blk: {
-        const v = readTypedElement(realm, buf, tv.kind, tv.byte_offset + @as(usize, @intCast(i)) * elem_size);
+        const v = taSafeRead(realm, tv, i);
         i -= 1;
         break :blk v;
     };
     while (i >= 0) : (i -= 1) {
-        const v = readTypedElement(realm, buf, tv.kind, tv.byte_offset + @as(usize, @intCast(i)) * elem_size);
+        const v = taSafeRead(realm, tv, i);
         const interpreter = @import("../interpreter.zig");
         const cb_args = [_]Value{ acc, v, numberFromI64(i), heap_mod.taggedObject(obj) };
         const outcome = interpreter.callJSFunction(realm.allocator, realm, callback, Value.undefined_, &cb_args) catch |err| switch (err) {
