@@ -551,13 +551,15 @@ fn resolveComputedKey(
             else => return error.Propagated,
         };
     if (heap_mod_.valueAsSymbol(prim_v)) |sym| {
-        // Well-known symbols in Cynic carry their `@@`-prefixed
-        // name as the description, so the description IS the
-        // slot key. For user symbols without a description, fall
-        // back to a synthetic id (we don't have one — the
-        // fallback name keeps the engine moving).
-        if (sym.description) |desc| return desc;
-        return fallback;
+        // §7.1.19 ToPropertyKey — every Symbol carries a stable
+        // `prop_key` slug (`@@iterator` for well-known, `<sym:N>`
+        // for user-allocated). The interpreter's computed-key
+        // path stringifies via the same slug, so a class field /
+        // method keyed by `[sym]` lands at the same slot that
+        // `inst[sym]` reads. Falling back to `description` would
+        // collapse `Symbol("x")` and the property `"x"` into one
+        // slot and make `hasOwn(inst, sym)` miss.
+        return sym.prop_key;
     }
     const s = intrinsics.stringifyArg(realm, prim_v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
