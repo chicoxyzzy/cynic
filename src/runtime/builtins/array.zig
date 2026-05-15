@@ -2034,10 +2034,12 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
     state.set(realm.allocator, k_fa_this_arg, this_arg) catch return error.OutOfMemory;
     state.set(realm.allocator, k_fa_items, items) catch return error.OutOfMemory;
 
-    // step 3 — GetMethod(asyncItems, @@asyncIterator). Null/undefined
-    // input skips the iterator branches entirely and falls into the
-    // array-like length walk, which ToObject-coerces and throws
-    // TypeError → rejection.
+    // step 3 — GetMethod(asyncItems, @@asyncIterator). Per §7.3.10
+    // GetMethod, if the property is null/undefined return undefined
+    // (no method); if non-callable, throw TypeError. We then fall
+    // back to @@iterator with the same semantics. A non-object
+    // `asyncItems` carries no symbol-keyed slots, so it skips both
+    // iterator branches and lands in the array-like ToObject path.
     var iter_method_v: Value = Value.undefined_;
     var sync_iter_method_v: Value = Value.undefined_;
     if (heap_mod.valueAsPlainObject(items)) |obj| {
@@ -2045,10 +2047,17 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
             return rejectPendingException(realm, cap);
         };
         if (iter_method_v.isUndefined() or iter_method_v.isNull()) {
+            iter_method_v = Value.undefined_;
             sync_iter_method_v = getPropertyChain(realm, obj, "@@iterator") catch {
                 return rejectPendingException(realm, cap);
             };
-            iter_method_v = Value.undefined_;
+            if (sync_iter_method_v.isUndefined() or sync_iter_method_v.isNull()) {
+                sync_iter_method_v = Value.undefined_;
+            } else if (heap_mod.valueAsFunction(sync_iter_method_v) == null) {
+                return rejectWithTypeError(realm, cap, "Array.fromAsync: @@iterator is not callable");
+            }
+        } else if (heap_mod.valueAsFunction(iter_method_v) == null) {
+            return rejectWithTypeError(realm, cap, "Array.fromAsync: @@asyncIterator is not callable");
         }
     }
 
