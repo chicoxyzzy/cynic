@@ -417,6 +417,44 @@ test "later: nested loops — break leaves only the inner" {
     );
 }
 
+// §14.13 LabelledStatement + §14.16/14.17 Break/ContinueStatement —
+// labelled `break` and `continue` resolve to the loop whose
+// `labelSet` contains the target Identifier, walking outwards.
+test "later: labelled break exits the named outer loop" {
+    try expectScriptInt(
+        "let count = 0; outer: for (let i = 0; i < 3; i = i + 1) { for (let j = 0; j < 3; j = j + 1) { if (j === 1) break outer; count = count + 1; } } count;",
+        1, // outer breaks after the first inner iter
+    );
+}
+
+test "later: labelled continue skips to the named outer loop's update" {
+    try expectScriptInt(
+        "let count = 0; outer: for (let i = 0; i < 3; i = i + 1) { for (let j = 0; j < 3; j = j + 1) { count = count + 1; if (j === 1) continue outer; } } count;",
+        6, // each outer iter runs the inner twice (j=0, j=1→continue)
+    );
+}
+
+test "later: labelled break on a labelled while loop" {
+    try expectScriptInt(
+        "let i = 0; label: while (true) { i = i + 1; if (i === 3) break label; } i;",
+        3,
+    );
+}
+
+test "later: labelled continue on a single labelled for loop" {
+    try expectScriptInt(
+        "var count = 0; label: for (let x = 0; x < 10;) { x++; count++; continue label; } count;",
+        10,
+    );
+}
+
+test "later: labelled break from inside try inside named loop" {
+    try expectScriptInt(
+        "let i = 0; outer: while (true) { try { i = i + 1; break outer; } catch (e) {} } i;",
+        1,
+    );
+}
+
 // ── Exceptions ──────────────────────────────────────────────────────────
 
 test "later: throw + catch round-trip with binding" {

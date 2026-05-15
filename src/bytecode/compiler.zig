@@ -166,6 +166,20 @@ pub const Compiler = struct {
     /// the stack to `null` so a `return` inside a function inside
     /// an outer try-finally doesn't run the outer finally.
     finally_chain: ?*FinallyContext = null,
+    /// §14.13 LabelledStatement — accumulator of labels that
+    /// `compileLabeled` has pushed for the *next* iteration /
+    /// switch statement encountered. When a loop's compile
+    /// routine enters, it snapshots and clears this list into
+    /// its `LoopContext.labels`. A bare block / expression /
+    /// non-iteration statement consumes the label by collapsing
+    /// into a `BreakContext` (break-only target — see
+    /// `pending_break_labels` / `break_chain`). `LabelIdentifier`
+    /// scopes are per-function: a label in one function cannot
+    /// be the target of a `break` / `continue` in a nested
+    /// function. We rely on the fact that function compilers
+    /// each get a fresh `Compiler` to avoid threading function
+    /// boundaries here.
+    pending_labels: std.ArrayListUnmanaged([]const u8) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, realm: *Realm, source: []const u8) Compiler {
         return .{
@@ -178,6 +192,11 @@ pub const Compiler = struct {
 
     pub fn deinit(self: *Compiler) void {
         self.builder.deinit();
+        // Note: `pending_labels` and `class_stack` are torn down
+        // by their owning compile-entry routine (script /
+        // module / expression / function template). Doing it
+        // here would double-free when `errdefer c.deinit()`
+        // composes with the entry routine's explicit cleanup.
     }
 
     pub fn finish(self: *Compiler) !Chunk {
@@ -3260,6 +3279,7 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
     // first, sync fallback) and awaits each `next()` result.
     // The surrounding function must be async (or async generator)
     // for `await` to suspend; the parser already enforces that.
+    const labels = try self.drainPendingLabels();
 
     // Determine the binding shape early — we need it before
     // opening the loop scope so we know whether to mark it as
@@ -3490,6 +3510,7 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
         .iter_register = if (s.kind == .in_) null else r_iter,
         .parent = self.current_loop,
         .entry_finally_chain = self.finally_chain,
+        .labels = labels,
     };
     defer ctx.deinit(self.allocator);
     const saved_loop = self.current_loop;
@@ -3610,6 +3631,9 @@ fn compileForOfMemberAssign(self: *Compiler, m: ast.expression.MemberExpr, span:
 }
 
 fn compileSwitch(self: *Compiler, s: ast.statement.SwitchStmt) CompileError!void {
+    // §14.13 — `LABEL : SwitchStatement` lets `break LABEL ;`
+    // inside the cases exit the switch.
+    const labels = try self.drainPendingLabels();
     // A new block scope wraps the switch so `let`/`const` in case
     // bodies are scoped to the switch (§14.12.4 step 3).
     var switch_scope: Scope = .{ .parent = self.scope, .kind = .block };
@@ -3659,6 +3683,8 @@ fn compileSwitch(self: *Compiler, s: ast.statement.SwitchStmt) CompileError!void
         .continue_target = 0,
         .parent = self.current_loop,
         .entry_finally_chain = self.finally_chain,
+        .labels = labels,
+        .is_switch = true,
     };
     defer ctx.deinit(self.allocator);
     const saved_loop = self.current_loop;
@@ -5559,14 +5585,37 @@ const LoopContext = struct {
     /// run F. §14.15.3 step 4: an abrupt finally completion
     /// replaces the outer one outright.
     entry_finally_chain: ?*FinallyContext = null,
+    /// §14.13 LabelledStatement label set — the IdentifierNames
+    /// that an enclosing `LABEL : LoopStatement` wrapped this
+    /// loop with. `break LABEL ;` / `continue LABEL ;` walks the
+    /// `parent` chain to find the loop whose `labels` contains
+    /// the target. Empty (`&.{}`) for unlabelled loops. Borrowed
+    /// from the source buffer; lifetime is the parse arena.
+    labels: []const []const u8 = &.{},
+    /// True for `switch` LoopContexts — they accept `break`
+    /// (with or without a label) but reject `continue` per
+    /// §14.17.1 (target must be an *iteration* statement).
+    is_switch: bool = false,
 
     fn deinit(self: *LoopContext, allocator: std.mem.Allocator) void {
         self.break_patches.deinit(allocator);
         self.continue_patches.deinit(allocator);
+        if (self.labels.len > 0) allocator.free(self.labels);
+    }
+
+    fn hasLabel(self: *const LoopContext, name: []const u8) bool {
+        for (self.labels) |l| {
+            if (std.mem.eql(u8, l, name)) return true;
+        }
+        return false;
     }
 };
 
 fn compileWhile(self: *Compiler, s: ast.statement.WhileStmt) CompileError!void {
+    // §14.13 — claim any `LABEL :` that wrapped us BEFORE we
+    // emit the loop body, so `break LABEL ;` inside the body
+    // resolves to *this* LoopContext.
+    const labels = try self.drainPendingLabels();
     const loop_start = self.builder.here();
     try self.compileExpression(&s.test_);
     try self.builder.emitOp(.jmp_if_false, s.span);
@@ -5577,6 +5626,7 @@ fn compileWhile(self: *Compiler, s: ast.statement.WhileStmt) CompileError!void {
         .continue_target = loop_start,
         .parent = self.current_loop,
         .entry_finally_chain = self.finally_chain,
+        .labels = labels,
     };
     defer ctx.deinit(self.allocator);
     const saved = self.current_loop;
@@ -5599,11 +5649,13 @@ fn compileWhile(self: *Compiler, s: ast.statement.WhileStmt) CompileError!void {
 }
 
 fn compileDoWhile(self: *Compiler, s: ast.statement.DoWhileStmt) CompileError!void {
+    const labels = try self.drainPendingLabels();
     const loop_start = self.builder.here();
     var ctx: LoopContext = .{
         .continue_target = 0,
         .parent = self.current_loop,
         .entry_finally_chain = self.finally_chain,
+        .labels = labels,
     }; // patched after body
     defer ctx.deinit(self.allocator);
     const saved = self.current_loop;
@@ -5634,6 +5686,7 @@ fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
     // overwhelming majority of for-let loops); multi-declarator
     // heads and `var` heads stay on the legacy single-slot
     // path.
+    const labels = try self.drainPendingLabels();
 
     // Detect the single-let/const-binding case.
     var per_iter_env = false;
@@ -5733,6 +5786,7 @@ fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
         .needs_env_pop = per_iter_env,
         .parent = self.current_loop,
         .entry_finally_chain = self.finally_chain,
+        .labels = labels,
     };
     defer ctx.deinit(self.allocator);
     const saved_loop = self.current_loop;
@@ -5828,41 +5882,119 @@ fn emitFinalliesUntil(
     }
 }
 
-/// §14.13 LabelledStatement. For now the compiler treats a label as a
-/// transparent wrapper around its body — labelled break/continue
-/// resolution to a *named outer* loop isn't wired through the
-/// loop-context stack yet (only the innermost loop receives the jump).
-/// Parser conformance is unaffected; runtime tests for cross-loop
-/// labelled break/continue still trip and remain on the path-skip list
-/// pending the proper LoopCtx label threading.
+/// §14.13 LabelledStatement — `IDENTIFIER : Statement`. Push the
+/// label onto `pending_labels` so the *first* iteration statement
+/// encountered while compiling the body claims it as one of its
+/// `LoopContext.labels`. The label is popped on exit; a body that
+/// isn't an iteration statement (e.g. `LABEL: { … }`) silently
+/// drops the label — `break LABEL ;` from inside such a block
+/// isn't supported yet, but the label is otherwise transparent.
 fn compileLabeled(self: *Compiler, lb: ast.statement.LabeledStmt) CompileError!void {
+    const name = self.source[lb.label.start..lb.label.end];
+    try self.pending_labels.append(self.allocator, name);
+    // Best-effort cleanup: if the body's compile claims the
+    // pending label into a LoopContext, the list is already
+    // shorter (the loop drains everything). Only pop our own
+    // entry if it's still on top.
+    const len_before = self.pending_labels.items.len;
+    defer {
+        if (self.pending_labels.items.len == len_before) {
+            _ = self.pending_labels.pop();
+        }
+    }
     try self.compileStatement(lb.body);
 }
 
+/// Drain `pending_labels` into a freshly-allocated slice. Called
+/// at the top of each iteration-statement's compile routine; the
+/// returned slice is owned by the LoopContext and freed via
+/// `LoopContext.deinit`. Returns an empty slice (sharing the
+/// const `&.{}` static) when no labels are pending — that
+/// preserves the deinit-time `len > 0` guard.
+fn drainPendingLabels(self: *Compiler) CompileError![]const []const u8 {
+    const n = self.pending_labels.items.len;
+    if (n == 0) return &.{};
+    const dup = try self.allocator.alloc([]const u8, n);
+    @memcpy(dup, self.pending_labels.items);
+    self.pending_labels.clearRetainingCapacity();
+    return dup;
+}
+
+/// Locate the `LoopContext` that `break LABEL ;` should exit. If
+/// `label_span` is `null` (unlabelled `break ;`) returns the
+/// innermost loop. Otherwise walks `current_loop.parent*` for the
+/// loop whose `labels` includes the target. Returns `null` if no
+/// match — caller reports the diagnostic.
+fn findBreakTarget(self: *Compiler, label_span: ?Span) ?*LoopContext {
+    var c = self.current_loop;
+    if (label_span) |sp| {
+        const name = self.source[sp.start..sp.end];
+        while (c) |ctx| : (c = ctx.parent) {
+            if (ctx.hasLabel(name)) return ctx;
+        }
+        return null;
+    }
+    return c;
+}
+
+/// §14.17.1 ContinueStatement — the target must be an iteration
+/// statement (not a switch). Walks `current_loop.parent*` for a
+/// loop whose `labels` contains the target name; `is_switch`
+/// contexts are skipped over (a `continue` inside a switch
+/// targets the enclosing loop) and unlabelled `continue` lands
+/// on the innermost non-switch loop.
+fn findContinueTarget(self: *Compiler, label_span: ?Span) ?*LoopContext {
+    var c = self.current_loop;
+    if (label_span) |sp| {
+        const name = self.source[sp.start..sp.end];
+        while (c) |ctx| : (c = ctx.parent) {
+            if (ctx.is_switch) continue;
+            if (ctx.hasLabel(name)) return ctx;
+        }
+        return null;
+    }
+    while (c) |ctx| : (c = ctx.parent) {
+        if (!ctx.is_switch) return ctx;
+    }
+    return null;
+}
+
 fn compileBreak(self: *Compiler, s: ast.statement.BreakStmt) CompileError!void {
-    const ctx = self.current_loop orelse {
+    const target = self.findBreakTarget(s.label) orelse {
         try self.report(.unexpected_token, s.span);
         return error.UnsupportedStatement;
     };
-    // §7.4.6 IteratorClose — `for-of` iterator must be closed
-    // when `break` interrupts iteration. Other loop kinds skip.
-    if (ctx.iter_register) |r_iter| {
-        try self.builder.emitOp(.iter_close, s.span);
-        try self.builder.emitU8(r_iter);
-        // §7.4.6 — completion type is `break`; propagate inner
-        // throw, TypeError on non-Object return.
-        try self.builder.emitU8(0);
+    // §7.4.6 IteratorClose — every for-of loop strictly between
+    // this `break` and the target loop must have its iterator
+    // closed before we leave it. Walk the chain inner→outer up
+    // to *and including* the target.
+    var c: ?*LoopContext = self.current_loop;
+    while (c) |ctx| : (c = ctx.parent) {
+        if (ctx.iter_register) |r_iter| {
+            try self.builder.emitOp(.iter_close, s.span);
+            try self.builder.emitU8(r_iter);
+            // §7.4.6 — completion type is `break`; propagate
+            // inner throw, TypeError on non-Object return.
+            try self.builder.emitU8(0);
+        }
+        if (ctx == target) break;
     }
     // §14.15 — run every finally block opened between this
-    // `break` and the loop entry before transferring control.
-    try self.emitFinalliesUntil(ctx.entry_finally_chain, s.span);
+    // `break` and the target loop entry before transferring
+    // control.
+    try self.emitFinalliesUntil(target.entry_finally_chain, s.span);
     // `break` jumps past the natural `pop_env` site; emit one
-    // here so the per-iteration env doesn't outlive the loop.
-    if (ctx.needs_env_pop) try self.builder.emitOp(.pop_env, s.span);
+    // `pop_env` for every per-iter-env loop we skip out of
+    // (innermost → target inclusive).
+    c = self.current_loop;
+    while (c) |ctx| : (c = ctx.parent) {
+        if (ctx.needs_env_pop) try self.builder.emitOp(.pop_env, s.span);
+        if (ctx == target) break;
+    }
     try self.builder.emitOp(.jmp, s.span);
     const patch = self.builder.here();
     try self.builder.emitI16(0);
-    try ctx.break_patches.append(self.allocator, patch);
+    try target.break_patches.append(self.allocator, patch);
 }
 
 fn compileContinue(self: *Compiler, s: ast.statement.ContinueStmt) CompileError!void {
@@ -5871,20 +6003,41 @@ fn compileContinue(self: *Compiler, s: ast.statement.ContinueStmt) CompileError!
     // and `do-while` doesn't know its test PC until after the
     // body. Loop-specific compile routines walk
     // `continue_patches` at the end and patch each.
-    const ctx = self.current_loop orelse {
+    const target = self.findContinueTarget(s.label) orelse {
         try self.report(.unexpected_token, s.span);
         return error.UnsupportedStatement;
     };
+    // §7.4.6 IteratorClose — every for-of loop strictly between
+    // this `continue` and the target loop must have its iterator
+    // closed (we're leaving those loops outright). The target
+    // loop itself is re-entered, so its iterator stays open.
+    var c: ?*LoopContext = self.current_loop;
+    while (c) |ctx| : (c = ctx.parent) {
+        if (ctx == target) break;
+        if (ctx.iter_register) |r_iter| {
+            try self.builder.emitOp(.iter_close, s.span);
+            try self.builder.emitU8(r_iter);
+            try self.builder.emitU8(0);
+        }
+    }
     // §14.15 — run every finally block opened between this
-    // `continue` and the loop entry before transferring control.
-    try self.emitFinalliesUntil(ctx.entry_finally_chain, s.span);
-    // `continue` lands at `continue_target`, which (for
-    // for-of/for-in over `let`) emits the `pop_env` itself —
-    // so we don't need to pop here.
+    // `continue` and the target loop entry before transferring
+    // control.
+    try self.emitFinalliesUntil(target.entry_finally_chain, s.span);
+    // For every loop we skip OUTWARDS through (i.e. strictly
+    // inner to `target`), pop its per-iter env if it had one.
+    // The target loop's own per-iter env teardown is handled by
+    // its `continue_target` (which, for `for-of` over `let`,
+    // emits its own `pop_env`).
+    c = self.current_loop;
+    while (c) |ctx| : (c = ctx.parent) {
+        if (ctx == target) break;
+        if (ctx.needs_env_pop) try self.builder.emitOp(.pop_env, s.span);
+    }
     try self.builder.emitOp(.jmp, s.span);
     const patch = self.builder.here();
     try self.builder.emitI16(0);
-    try ctx.continue_patches.append(self.allocator, patch);
+    try target.continue_patches.append(self.allocator, patch);
 }
 
 fn compileThrow(self: *Compiler, s: ast.statement.ThrowStmt) CompileError!void {
@@ -6112,6 +6265,13 @@ fn compileFunctionTemplateExt(
     const saved_env_depth = self.env_depth;
     const saved_current_loop = self.current_loop;
     const saved_is_async = self.current_is_async;
+    // §14.13 — label scopes don't cross function boundaries.
+    // Stash the outer `pending_labels` (and the function body
+    // starts with an empty list), restore on exit. Without
+    // this, `LABEL : function f() { … }` would let the inner
+    // function's first loop claim the outer label.
+    const saved_pending_labels = self.pending_labels;
+    self.pending_labels = .empty;
 
     // Reset to a fresh inner state.
     self.builder = @import("chunk.zig").Builder.init(self.allocator);
@@ -6128,6 +6288,7 @@ fn compileFunctionTemplateExt(
         if (!inner_finished) {
             self.builder.deinit();
             fn_scope.deinit(self.allocator);
+            self.pending_labels.deinit(self.allocator);
             self.builder = saved_builder;
             self.scope = saved_scope;
             self.env_slot_count = saved_env_slot_count;
@@ -6135,6 +6296,7 @@ fn compileFunctionTemplateExt(
             self.env_depth = saved_env_depth;
             self.current_loop = saved_current_loop;
             self.current_is_async = saved_is_async;
+            self.pending_labels = saved_pending_labels;
         }
     }
 
@@ -6207,6 +6369,7 @@ fn compileFunctionTemplateExt(
     const inner_chunk = try self.builder.finish();
     inner_finished = true;
     fn_scope.deinit(self.allocator);
+    self.pending_labels.deinit(self.allocator);
 
     // Restore outer state.
     self.builder = saved_builder;
@@ -6216,6 +6379,7 @@ fn compileFunctionTemplateExt(
     self.env_depth = saved_env_depth;
     self.current_loop = saved_current_loop;
     self.current_is_async = saved_is_async;
+    self.pending_labels = saved_pending_labels;
 
     const sp_len = computeSpecLength(params);
     return self.builder.addFunctionTemplate(.{
@@ -6256,6 +6420,7 @@ pub fn compileScriptAsChunk(
     var c = Compiler.init(allocator, realm, source);
     errdefer c.deinit();
     defer c.class_stack.deinit(c.allocator);
+    defer c.pending_labels.deinit(c.allocator);
     c.diagnostics = diagnostics;
 
     var script_scope: Scope = .{ .parent = null, .kind = .script };
@@ -6311,6 +6476,7 @@ pub fn compileModuleAsChunk(
     var c = Compiler.init(allocator, realm, source);
     errdefer c.deinit();
     defer c.class_stack.deinit(c.allocator);
+    defer c.pending_labels.deinit(c.allocator);
     c.diagnostics = diagnostics;
     c.is_module = true;
 
@@ -6391,6 +6557,7 @@ pub fn compileExpressionAsChunk(
     var c = Compiler.init(allocator, realm, source);
     errdefer c.deinit();
     defer c.class_stack.deinit(c.allocator);
+    defer c.pending_labels.deinit(c.allocator);
     var script_scope: Scope = .{ .parent = null, .kind = .script };
     defer script_scope.deinit(c.allocator);
     c.scope = &script_scope;
