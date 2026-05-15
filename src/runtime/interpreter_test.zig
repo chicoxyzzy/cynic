@@ -713,6 +713,37 @@ test "later: BigInt comparison + equality" {
     , "true:true:false");
 }
 
+// §6.1.6.2.{17..23} BigInt::bitwise{AND,OR,XOR,NOT,leftShift,signedRightShift}
+test "later: BigInt bitwise AND / OR / XOR" {
+    try expectScriptStringWithBuiltins(
+        \\((0b1100n & 0b1010n).toString()) + ":" +
+        \\((0b1100n | 0b1010n).toString()) + ":" +
+        \\((0b1100n ^ 0b1010n).toString());
+    , "8:14:6");
+}
+
+test "later: BigInt bitwise NOT (~x === -x - 1n)" {
+    try expectScriptStringWithBuiltins(
+        \\(~0n).toString() + ":" + (~5n).toString() + ":" + (~-1n).toString();
+    , "-1:-6:0");
+}
+
+test "later: BigInt left-shift / signed right-shift" {
+    try expectScriptStringWithBuiltins(
+        \\(1n << 4n).toString() + ":" + (16n >> 2n).toString() + ":" + ((-8n) >> 1n).toString();
+    , "16:4:-4");
+}
+
+test "later: BigInt unsigned right-shift throws TypeError" {
+    try expectScriptThrows("1n >>> 1n;");
+}
+
+test "later: BigInt bitwise on negative + AND with -1n is identity" {
+    try expectScriptStringWithBuiltins(
+        \\(-2n & -3n).toString() + ":" + (-1n & 5n).toString() + ":" + (5n | -1n).toString();
+    , "-4:5:-1");
+}
+
 test "later: ArrayBuffer + Uint8Array indexed access" {
     try expectScriptStringWithBuiltins(
         \\const u8 = new Uint8Array(4);

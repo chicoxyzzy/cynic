@@ -290,11 +290,83 @@ pub fn bitwiseBinary(realm: *Realm, comptime op: BitwiseOp, lhs: Value, rhs: Val
         return null;
     }
     if (l_is_bigint and r_is_bigint) {
-        // BigInt bitwise still pending — surface a TypeError so
-        // callers see a deterministic failure rather than the
-        // Number-coerced 0 they used to get.
-        realm.pending_exception = try makeTypeError(realm, "BigInt bitwise operators not yet supported");
-        return null;
+        // §6.1.6.2.{17,18,19,20,21} BigInt::bitwise{AND,OR,XOR} /
+        // leftShift / signedRightShift. `>>>` (unsignedRightShift)
+        // is §6.1.6.2.22 — defined to throw TypeError on BigInt
+        // operands because BigInts have no fixed width.
+        const a_bi = heap_mod.valueAsBigInt(l).?;
+        const b_bi = heap_mod.valueAsBigInt(r).?;
+        const a_val = a_bi.value;
+        const b_val = b_bi.value;
+        const result: i128 = switch (op) {
+            // Two's-complement bitwise on i128 matches the spec's
+            // "infinite-length two's-complement string of bits"
+            // model exactly while the magnitude fits.
+            .bit_and => a_val & b_val,
+            .bit_or => a_val | b_val,
+            .bit_xor => a_val ^ b_val,
+            .shl => blk: {
+                // §6.1.6.2.20 BigInt::leftShift: negative y shifts
+                // right with floor rounding (equivalent to signed
+                // arithmetic shift right by |y|).
+                if (b_val == 0) break :blk a_val;
+                if (b_val > 0) {
+                    if (b_val >= 128) {
+                        realm.pending_exception = try makeRangeError(realm, "BigInt arithmetic overflow");
+                        return null;
+                    }
+                    const sh: u7 = @intCast(b_val);
+                    const shifted = std.math.shl(i128, a_val, sh);
+                    // Detect overflow: shifting back must reproduce a_val.
+                    if (a_val != 0 and std.math.shr(i128, shifted, sh) != a_val) {
+                        realm.pending_exception = try makeRangeError(realm, "BigInt arithmetic overflow");
+                        return null;
+                    }
+                    break :blk shifted;
+                }
+                // Negative shift count: arithmetic shift right by |b_val|.
+                const neg = -b_val;
+                if (neg >= 128) {
+                    break :blk if (a_val < 0) @as(i128, -1) else @as(i128, 0);
+                }
+                const sh: u7 = @intCast(neg);
+                break :blk std.math.shr(i128, a_val, sh);
+            },
+            .shr => blk: {
+                // §6.1.6.2.21 BigInt::signedRightShift(x, y) ≡
+                // leftShift(x, -y). Reuse the leftShift logic by
+                // negating y.
+                if (b_val == 0) break :blk a_val;
+                if (b_val > 0) {
+                    if (b_val >= 128) {
+                        break :blk if (a_val < 0) @as(i128, -1) else @as(i128, 0);
+                    }
+                    const sh: u7 = @intCast(b_val);
+                    break :blk std.math.shr(i128, a_val, sh);
+                }
+                // Negative right shift = left shift by |b_val|.
+                const neg = -b_val;
+                if (neg >= 128) {
+                    realm.pending_exception = try makeRangeError(realm, "BigInt arithmetic overflow");
+                    return null;
+                }
+                const sh: u7 = @intCast(neg);
+                const shifted = std.math.shl(i128, a_val, sh);
+                if (a_val != 0 and std.math.shr(i128, shifted, sh) != a_val) {
+                    realm.pending_exception = try makeRangeError(realm, "BigInt arithmetic overflow");
+                    return null;
+                }
+                break :blk shifted;
+            },
+            .shr_u => {
+                // §6.1.6.2.22 BigInt::unsignedRightShift always
+                // throws TypeError — BigInts are not fixed-width.
+                realm.pending_exception = try makeTypeError(realm, "BigInts have no unsigned right shift, use >> instead");
+                return null;
+            },
+        };
+        const out = realm.heap.allocateBigInt(result) catch return error.OutOfMemory;
+        return heap_mod.taggedBigInt(out);
     }
 
     const a = toInt32(l);
@@ -340,13 +412,17 @@ pub fn unaryNegate(realm: *Realm, v: Value) RunError!?Value {
 
 pub fn unaryBitNot(realm: *Realm, v: Value) RunError!?Value {
     const prim = (try toNumericPrimitive(realm, v)) orelse return null;
-    if (heap_mod.valueAsBigInt(prim)) |_| {
-        // BigInt ~ is `-(x + 1n)`. The full BigInt op suite isn't
-        // wired through bitwise yet, so surface a deterministic
-        // TypeError rather than silently coercing through
-        // toInt32 (which produces 0 for any BigInt).
-        realm.pending_exception = try makeTypeError(realm, "BigInt bitwise operators not yet supported");
-        return null;
+    if (heap_mod.valueAsBigInt(prim)) |bi| {
+        // §6.1.6.2.23 BigInt::bitwiseNOT(x) = -x - 1. The i128
+        // backing matches: `~x` in two's complement is exactly
+        // `-x - 1`, with no overflow except at i128 min/max which
+        // are well beyond practical use.
+        const neg = std.math.sub(i128, -bi.value, 1) catch {
+            realm.pending_exception = try makeRangeError(realm, "BigInt arithmetic overflow");
+            return null;
+        };
+        const out = realm.heap.allocateBigInt(neg) catch return error.OutOfMemory;
+        return heap_mod.taggedBigInt(out);
     }
     return Value.fromInt32(~toInt32(prim));
 }
