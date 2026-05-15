@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 82.58 % | 88.66 % | 33973 / 41138 | 33973 / 38319 |
+| **runtime** | 83.06 % | 89.19 % | 34030 / 40972 | 34030 / 38155 |
 
 
 ## Where the runtime stands, by area
@@ -24,37 +24,37 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_100–999 fails_** | | | | | |
-| `built-ins/Array` | 2597 | 448 | 36 | 84 % | 85 % |
-| `built-ins/Function` | 264 | 107 | 84 | 58 % | 71 % |
-| `built-ins/Object` | 3078 | 322 | 11 | 90 % | 91 % |
-| `built-ins/RegExp` | 1349 | 272 | 161 | 76 % | 83 % |
+| `built-ins/Array` | 2597 | 392 | 36 | 86 % | 87 % |
+| `built-ins/Function` | 264 | 106 | 84 | 58 % | 71 % |
+| `built-ins/Object` | 3078 | 319 | 11 | 90 % | 91 % |
+| `built-ins/RegExp` | 1350 | 271 | 161 | 76 % | 83 % |
 | `built-ins/String` | 1044 | 174 | 5 | 85 % | 86 % |
-| `built-ins/TypedArray` | 1130 | 293 | 8 | 79 % | 79 % |
-| `built-ins/TypedArrayConstructors` | 474 | 196 | 16 | 69 % | 71 % |
-| `language/expressions` | 9141 | 833 | 977 | 83 % | 92 % |
+| `built-ins/TypedArray` | 1154 | 203 | 8 | 85 % | 85 % |
+| `built-ins/TypedArrayConstructors` | 475 | 194 | 16 | 69 % | 71 % |
+| `language/expressions` | 9142 | 832 | 977 | 83 % | 92 % |
 | `language/module-code` | 460 | 122 | 14 | 77 % | 79 % |
-| `language/statements` | 7969 | 592 | 675 | 86 % | 93 % |
+| `language/statements` | 7969 | 586 | 675 | 86 % | 93 % |
 | **_10–99 fails_** | | | | | |
 | `built-ins/ArrayBuffer` | 165 | 27 | 4 | 84 % | 86 % |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 8 | 30 | 0 | 21 % | 21 % |
 | `built-ins/AsyncGeneratorPrototype` | 22 | 26 | 0 | 46 % | 46 % |
 | `built-ins/BigInt` | 51 | 26 | 0 | 66 % | 66 % |
-| `built-ins/DataView` | 448 | 63 | 11 | 86 % | 88 % |
+| `built-ins/DataView` | 453 | 36 | 11 | 91 % | 93 % |
 | `built-ins/Date` | 526 | 68 | 0 | 89 % | 89 % |
 | `built-ins/GeneratorPrototype` | 32 | 29 | 0 | 52 % | 52 % |
-| `built-ins/Iterator` | 441 | 63 | 6 | 86 % | 88 % |
+| `built-ins/Iterator` | 442 | 62 | 6 | 87 % | 88 % |
 | `built-ins/JSON` | 115 | 50 | 0 | 70 % | 70 % |
-| `built-ins/Map` | 178 | 25 | 1 | 87 % | 88 % |
+| `built-ins/Map` | 179 | 24 | 1 | 88 % | 88 % |
 | `built-ins/Math` | 311 | 16 | 0 | 95 % | 95 % |
 | `built-ins/NativeErrors` | 82 | 12 | 0 | 87 % | 87 % |
 | `built-ins/Number` | 318 | 22 | 0 | 94 % | 94 % |
-| `built-ins/Promise` | 581 | 56 | 40 | 86 % | 91 % |
+| `built-ins/Promise` | 600 | 29 | 38 | 90 % | 95 % |
 | `built-ins/Proxy` | 214 | 85 | 12 | 69 % | 72 % |
 | `built-ins/Reflect` | 120 | 33 | 0 | 78 % | 78 % |
 | `built-ins/Set` | 347 | 35 | 1 | 91 % | 91 % |
 | `built-ins/Symbol` | 80 | 10 | 8 | 82 % | 89 % |
-| `built-ins/WeakMap` | 123 | 18 | 0 | 87 % | 87 % |
-| `built-ins/WeakSet` | 73 | 12 | 0 | 86 % | 86 % |
+| `built-ins/WeakMap` | 124 | 17 | 0 | 88 % | 88 % |
+| `built-ins/WeakSet` | 74 | 11 | 0 | 87 % | 87 % |
 | `built-ins/global` | 16 | 13 | 0 | 55 % | 55 % |
 | `language/function-code` | 86 | 22 | 109 | 40 % | 80 % |
 | `language/global-code` | 19 | 18 | 5 | 45 % | 51 % |
@@ -70,12 +70,12 @@ browser-era built-ins …).
 | `built-ins/AsyncGeneratorFunction` | 7 | 4 | 0 | 64 % | 64 % |
 | `built-ins/Boolean` | 47 | 4 | 0 | 92 % | 92 % |
 | `built-ins/Error` | 50 | 8 | 0 | 86 % | 86 % |
-| `built-ins/FinalizationRegistry` | 44 | 3 | 0 | 94 % | 94 % |
+| `built-ins/FinalizationRegistry` | 45 | 2 | 0 | 96 % | 96 % |
 | `built-ins/GeneratorFunction` | 7 | 4 | 0 | 64 % | 64 % |
 | `built-ins/RegExpStringIteratorPrototype` | 9 | 8 | 0 | 53 % | 53 % |
 | `built-ins/StringIteratorPrototype` | 2 | 5 | 0 | 29 % | 29 % |
 | `built-ins/ThrowTypeError` | 12 | 2 | 0 | 86 % | 86 % |
-| `built-ins/WeakRef` | 26 | 3 | 0 | 90 % | 90 % |
+| `built-ins/WeakRef` | 27 | 2 | 0 | 93 % | 93 % |
 | `built-ins/decodeURI` | 53 | 2 | 0 | 96 % | 96 % |
 | `built-ins/decodeURIComponent` | 55 | 1 | 0 | 98 % | 98 % |
 | `built-ins/encodeURI` | 27 | 4 | 0 | 87 % | 87 % |
@@ -87,7 +87,7 @@ browser-era built-ins …).
 | `language/block-scope` | 140 | 5 | 0 | 97 % | 97 % |
 | `language/comments` | 22 | 7 | 23 | 42 % | 76 % |
 | `language/computed-property-names` | 39 | 9 | 0 | 81 % | 81 % |
-| `language/destructuring` | 15 | 3 | 1 | 79 % | 83 % |
+| `language/destructuring` | 15 | 2 | 1 | 83 % | 88 % |
 | `language/identifier-resolution` | 8 | 1 | 5 | 57 % | 89 % |
 | `language/rest-parameters` | 10 | 1 | 0 | 91 % | 91 % |
 | `language/source-text` | 0 | 1 | 0 | 0 % | 0 % |
@@ -138,33 +138,37 @@ browser-era built-ins …).
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 | -167 | 1.3 s |
-| **runtime** | 82.58 % | 88.66 % | 33973 / 41138 | 33973 / 38319 | +724 | 1m 45s |
+| **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 | -167 |  |
+| **runtime** | 83.06 % | 89.19 % | 34030 / 40972 | 34030 / 38155 | +781 | 1m 43s |
 
 Biggest movers (runtime):
 
-- `language/module-code` -1
+- `built-ins/TypedArray` +24
+- `built-ins/Promise` +19
+- `built-ins/DataView` +5
+- `built-ins/FinalizationRegistry` +1
+- `built-ins/Iterator` +1
 
 ### 2026-05-14 — cynic `aca1903`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **parser** | 73.44 % | 100.00 % | 30478 / 41501 | 30478 / 30478 | +108 | 2.1 s |
-| **runtime** | 80.12 % | 85.56 % | 33249 / 41501 | 33249 / 38860 | +474 | 4m 56s |
+| **parser** | 73.44 % | 100.00 % | 30478 / 41501 | 30478 / 30478 | +108 |  |
+| **runtime** | 80.12 % | 85.56 % | 33249 / 41501 | 33249 / 38860 | +474 |  |
 
 ### 2026-05-13 — cynic `550a57e`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **parser** | 65.76 % | 100.00 % | 30370 / 46183 | 30370 / 30370 | +964 | 1.3 s |
-| **runtime** | 70.79 % | 85.00 % | 32775 / 46296 | 32775 / 38559 | +1007 | 1m 47s |
+| **parser** | 65.76 % | 100.00 % | 30370 / 46183 | 30370 / 30370 | +964 |  |
+| **runtime** | 70.79 % | 85.00 % | 32775 / 46296 | 32775 / 38559 | +1007 |  |
 
 ### 2026-05-12 — cynic `6800720`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **parser** | 63.52 % | 96.48 % | 29406 / 46296 | 29406 / 30479 | +148 | 1.2 s |
-| **runtime** | 68.62 % | 82.38 % | 31768 / 46296 | 31768 / 38563 | +1877 | 2m 12s |
+| **parser** | 63.52 % | 96.48 % | 29406 / 46296 | 29406 / 30479 | +148 |  |
+| **runtime** | 68.62 % | 82.38 % | 31768 / 46296 | 31768 / 38563 | +1877 |  |
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
