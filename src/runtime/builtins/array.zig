@@ -282,34 +282,65 @@ fn arrayConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
 // ── Array.prototype methods ─────────────────────────────────────────────────
 
 fn arrayPush(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.1.3.18 Array.prototype.push:
+    //   1. O = ToObject(this)
+    //   2. len = ? ToLength(? Get(O, "length"))
+    //   3. argCount = items.length
+    //   4. If len + argCount > 2^53-1, throw TypeError
+    //   5. For each E of items: ? Set(O, ToString(len), E, true); len += 1
+    //   6. ? Set(O, "length", F(len), true)
+    //   7. Return F(len)
     const obj = try toObjectThis(realm, this_value);
-    var len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
+    var len = try toLengthOf(realm, obj);
+    // §7.1.20 ToLength caps at 2^53 - 1 (`min(len, 2^53 - 1)`).
+    // toLengthOf's saturating helper bottoms out at maxInt(i64);
+    // re-clamp here so the overflow check is against the spec
+    // safe-integer ceiling, not the i64 cap.
+    const safe_max: i64 = (1 << 53) - 1;
+    if (len > safe_max) len = safe_max;
+    const argc: i64 = @intCast(args.len);
+    // §23.1.3.18 step 4 — `len + argCount > 2^53 - 1` throws.
+    if (argc > 0 and len > safe_max - argc) {
+        return throwTypeError(realm, "Pushed value would exceed maximum length");
+    }
     for (args) |v| {
-        if (len >= max_iter_length) return throwRangeError(realm, "Array length exceeds maximum supported");
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
+        // Anchor the key — `setOrThrow` may land it in the
+        // property bag if the receiver isn't an Array exotic.
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        obj.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+        try setOrThrow(realm, obj, owned.bytes, v);
         len += 1;
     }
-    setLength(realm, obj, len) catch return error.OutOfMemory;
+    try setLengthOrThrow(realm, obj, len);
     return numberFromI64(len);
 }
 
 fn arrayPop(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.1.3.17 Array.prototype.pop:
+    //   1. O = ToObject(this)
+    //   2. len = ? ToLength(? Get(O, "length"))
+    //   3. If len = 0:
+    //        ? Set(O, "length", 0, true); return undefined
+    //   4. Else:
+    //        newLen = len - 1
+    //        index = ToString(newLen)
+    //        element = ? Get(O, index)
+    //        ? DeletePropertyOrThrow(O, index)
+    //        ? Set(O, "length", newLen, true); return element
     _ = args;
     const obj = try toObjectThis(realm, this_value);
     var len = try toLengthOf(realm, obj);
     if (len <= 0) {
-        setLength(realm, obj, 0) catch return error.OutOfMemory;
+        try setLengthOrThrow(realm, obj, 0);
         return Value.undefined_;
     }
     len -= 1;
     var ibuf: [24]u8 = undefined;
     const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
     const v = try getPropertyChain(realm, obj, islice);
-    _ = obj.deleteOwn(islice);
-    setLength(realm, obj, len) catch return error.OutOfMemory;
+    try deletePropertyOrThrow(realm, obj, islice);
+    try setLengthOrThrow(realm, obj, len);
     return v;
 }
 
@@ -328,6 +359,126 @@ pub fn numberFromI64(n: i64) Value {
         return Value.fromInt32(@intCast(n));
     }
     return Value.fromDouble(@floatFromInt(n));
+}
+
+/// §7.3.4 Set ( O, P, V, Throw ) — spec-faithful property write
+/// for native Array.prototype.* methods. Mirrors the interpreter's
+/// strictSetProperty path: invokes inherited accessor setters,
+/// honors `writable: false` / `extensible: false` with a thrown
+/// TypeError, runs ArraySetLength for length writes, and gates
+/// indexed writes against non-writable `length`.
+///
+/// Returns normally on success. Returns `error.NativeThrew` with
+/// `realm.pending_exception` populated when the spec mandates a
+/// TypeError (writability gate, integrity-level violation, getter-
+/// only accessor). The setter itself can throw — that exception
+/// also propagates through `error.NativeThrew`.
+pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, value: Value) NativeError!void {
+    // §10.1.9.1 OrdinarySet — walk the prototype chain for an
+    // accessor setter; own data on the way shadows the inherited
+    // accessor (`lookupAccessor` handles that contract).
+    if (interpreter.lookupAccessor(obj, key)) |acc_pair| {
+        if (acc_pair.setter) |setter| {
+            const args = [_]Value{value};
+            const outcome = interpreter.callJSFunction(realm.allocator, realm, setter, heap_mod.taggedObject(obj), &args) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            switch (outcome) {
+                .value, .yielded => return,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            }
+        }
+        // Getter-only accessor — strict-mode write throws.
+        return throwTypeError(realm, "Cannot set property which has only a getter");
+    }
+    // §10.4.2.4 ArraySetLength — write to `length` on an Array
+    // exotic (or anything in the array-prototype chain) coerces
+    // to u32, throws RangeError on invalid value, and truncates
+    // descending indexed slots. Non-writable length blocks.
+    if (std.mem.eql(u8, key, "length") and obj.is_array_exotic) {
+        if (obj.property_flags.get("length")) |flags| {
+            if (!flags.writable) {
+                return throwTypeError(realm, "Cannot assign to read-only property 'length'");
+            }
+        }
+        const new_len = interpreter.arrayLengthCoerce(value) orelse {
+            return throwRangeError(realm, "Invalid array length");
+        };
+        const tr = interpreter.truncateArrayAtLength(realm.allocator, obj, new_len);
+        obj.setArrayLength(realm.allocator, tr.final_length) catch return error.OutOfMemory;
+        if (tr.blocked) {
+            return throwTypeError(realm, "Cannot delete non-configurable array index");
+        }
+        return;
+    }
+    // §10.4.2.1 [[DefineOwnProperty]] — Array exotic indexed
+    // writes go through `setIndexed`. Auto-extend length-gate
+    // applies when `length: {writable:false}`.
+    if (obj.is_array_exotic) {
+        if (JSObject.canonicalIntegerIndex(key)) |idx| {
+            if (!obj.properties.contains(key)) {
+                if (obj.property_flags.get("length")) |flags| {
+                    if (!flags.writable) {
+                        const cur_len_v = obj.properties.get("length") orelse Value.fromInt32(0);
+                        const cur_len: u32 = if (cur_len_v.isInt32()) @intCast(@max(0, cur_len_v.asInt32())) else 0;
+                        if (idx >= cur_len) {
+                            return throwTypeError(realm, "Cannot extend non-writable array length");
+                        }
+                    }
+                }
+                obj.setIndexed(realm.allocator, idx, value) catch return error.OutOfMemory;
+                return;
+            }
+        }
+    }
+    // §10.1.9.2 OrdinarySetWithOwnDescriptor — own data wins; if
+    // absent, [[DefineOwnProperty]] fails (and so strict-mode
+    // [[Set]] throws TypeError) when the receiver is non-extensible.
+    const had_entry = obj.properties.contains(key);
+    if (had_entry) {
+        const flags = obj.flagsFor(key);
+        if (!flags.writable) {
+            return throwTypeError(realm, "Cannot assign to read-only property");
+        }
+        // §6.1.6.1 NumberValue — length is a Number; preserve the
+        // value bit-pattern (don't down-cast a double to int32).
+        obj.properties.put(realm.allocator, key, value) catch return error.OutOfMemory;
+        return;
+    }
+    if (!obj.extensible) {
+        return throwTypeError(realm, "Cannot add property, object is not extensible");
+    }
+    obj.set(realm.allocator, key, value) catch return error.OutOfMemory;
+}
+
+/// Spec-faithful `Set(O, "length", F(len), true)` — routes
+/// through `setOrThrow` so a non-writable `length`, an accessor
+/// setter, or an array-exotic `length` write get the same
+/// treatment as user JS `O.length = …`. Used by `push` / `pop`
+/// / `unshift` / `splice` etc. instead of the bypass `setLength`.
+pub fn setLengthOrThrow(realm: *Realm, obj: *JSObject, len: i64) NativeError!void {
+    // §6.1.6.1 NumberValue — `length` is a Number. The push/pop
+    // family deal in i64 (so the 2^53-1 overflow check has the
+    // headroom it needs); convert back to Value here so a length
+    // beyond i32 range lands as a double.
+    const lv: Value = if (len >= std.math.minInt(i32) and len <= std.math.maxInt(i32))
+        Value.fromInt32(@intCast(len))
+    else
+        Value.fromDouble(@floatFromInt(len));
+    try setOrThrow(realm, obj, "length", lv);
+}
+
+/// §7.3.5 DeletePropertyOrThrow — Strict-mode delete that throws
+/// TypeError if the [[Delete]] returns false. Used by push / pop /
+/// shift / unshift / splice to drop indices.
+pub fn deletePropertyOrThrow(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!void {
+    if (!obj.deleteOwn(key)) {
+        return throwTypeError(realm, "Cannot delete property");
+    }
 }
 
 fn arrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

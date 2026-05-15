@@ -673,19 +673,31 @@ pub fn toObjectThis(realm: *Realm, this_value: Value) NativeError!*JSObject {
         const w = realm.heap.allocateObject() catch return error.OutOfMemory;
         w.prototype = realm.intrinsics.string_prototype;
         w.boxed_string = s;
-        // §22.1.4 String exotic — `length` and indexed
-        // `[i]` are own non-writable, non-configurable, but
-        // we install them as plain entries; tests that
-        // inspect descriptors via `Object.getOwnPropertyDescriptor`
-        // on a primitive's wrapper are later.
-        w.set(realm.allocator, "length", Value.fromInt32(@intCast(s.bytes.len))) catch return error.OutOfMemory;
+        // §22.1.4 String exotic — `length` and integer-indexed
+        // entries are own *non-writable*, *non-configurable*
+        // properties. Install them with that descriptor so the
+        // strict-mode `Set(O, idx, V, true)` paths in
+        // Array.prototype.{push, unshift, splice, ...} throw
+        // TypeError instead of silently mutating the wrapper.
+        // `enumerable: true` matches §22.1.5.5 step 6.
+        const ro_flags = ObjMod.PropertyFlags{
+            .writable = false,
+            .enumerable = false, // length is non-enumerable
+            .configurable = false,
+        };
+        const idx_flags = ObjMod.PropertyFlags{
+            .writable = false,
+            .enumerable = true,
+            .configurable = false,
+        };
+        w.setWithFlags(realm.allocator, "length", Value.fromInt32(@intCast(s.bytes.len)), ro_flags) catch return error.OutOfMemory;
         var idx: usize = 0;
         while (idx < s.bytes.len) : (idx += 1) {
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
             const ch = realm.heap.allocateString(s.bytes[idx .. idx + 1]) catch return error.OutOfMemory;
             const own_key = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-            w.set(realm.allocator, own_key.bytes, Value.fromString(ch)) catch return error.OutOfMemory;
+            w.setWithFlags(realm.allocator, own_key.bytes, Value.fromString(ch), idx_flags) catch return error.OutOfMemory;
         }
         return w;
     }
