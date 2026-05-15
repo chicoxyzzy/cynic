@@ -942,11 +942,23 @@ pub fn openForInIterator(
                 }
             }
 
+            // §14.7.5.6 EnumerateObjectProperties — at each level
+            // we shadow non-enumerable own keys against the
+            // prototype chain. So we collect all own keys (to
+            // populate `seen`) but only emit the enumerable ones.
+            // `shadow_only` carries own-but-non-enumerable names so
+            // they get added to `seen` after emission without ever
+            // being yielded themselves.
+            var shadow_only: std.ArrayListUnmanaged([]const u8) = .empty;
+            defer shadow_only.deinit(realm.allocator);
             var it = cur.properties.iterator();
             while (it.next()) |entry| {
                 const key = entry.key_ptr.*;
                 if (std.mem.startsWith(u8, key, "__cynic_")) continue;
-                if (!cur.flagsFor(key).enumerable) continue;
+                if (!cur.flagsFor(key).enumerable) {
+                    shadow_only.append(realm.allocator, key) catch return error.OutOfMemory;
+                    continue;
+                }
                 if (canonicalIntegerIndexInterp(key)) |i| {
                     int_keys.append(realm.allocator, .{ .idx = i, .key = key }) catch return error.OutOfMemory;
                 } else {
@@ -960,7 +972,10 @@ pub fn openForInIterator(
             while (ait.next()) |entry| {
                 const key = entry.key_ptr.*;
                 if (std.mem.startsWith(u8, key, "__cynic_")) continue;
-                if (!cur.flagsFor(key).enumerable) continue;
+                if (!cur.flagsFor(key).enumerable) {
+                    shadow_only.append(realm.allocator, key) catch return error.OutOfMemory;
+                    continue;
+                }
                 if (canonicalIntegerIndexInterp(key)) |i| {
                     int_keys.append(realm.allocator, .{ .idx = i, .key = key }) catch return error.OutOfMemory;
                 } else {
@@ -992,6 +1007,12 @@ pub fn openForInIterator(
                 const key_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
                 arr.set(realm.allocator, idx_owned.bytes, Value.fromString(key_owned)) catch return error.OutOfMemory;
                 len += 1;
+            }
+            // §14.7.5.6 — own-but-non-enumerable names shadow
+            // prototype-side enumerable names of the same key.
+            // Add them to `seen` so the upper levels skip them.
+            for (shadow_only.items) |key| {
+                _ = seen.getOrPut(realm.allocator, key) catch return error.OutOfMemory;
             }
             current = cur.prototype;
         }

@@ -1692,6 +1692,23 @@ test "later: for-in walks own properties" {
     , "abc");
 }
 
+test "later: for-in own non-enumerable shadows proto enumerable" {
+    // §14.7.5.6 EnumerateObjectProperties — an own
+    // non-enumerable key shadows a prototype enumerable key of
+    // the same name, so it's neither enumerated nor "punched
+    // through" to the proto-side value.
+    try expectScriptStringWithBuiltins(
+        \\const proto = { p2: "proto" };
+        \\const o = Object.create(proto, {
+        \\  p1: { value: 1, enumerable: true },
+        \\  p2: { value: 2, enumerable: false }
+        \\});
+        \\let s = "";
+        \\for (const k in o) s = s + k;
+        \\s;
+    , "p1");
+}
+
 test "later: for-in over null/undefined yields nothing" {
     try expectScriptIntWithBuiltins(
         \\let n = 0;
