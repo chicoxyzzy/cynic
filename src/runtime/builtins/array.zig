@@ -1629,7 +1629,10 @@ fn computedKeyForSort(v: Value, scratch: *[64]u8) []const u8 {
 fn arrayReverse(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = try toObjectThis(realm, this_value);
-    const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
+    // §23.1.3.26 — use LengthOfArrayLike so the TA `length`
+    // accessor returns the live element count (length-tracking
+    // views over a resizable buffer).
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     var i: i64 = 0;
     const half = @divFloor(len, 2);
     while (i < half) : (i += 1) {
@@ -1638,8 +1641,12 @@ fn arrayReverse(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         const j = len - 1 - i;
         const jslice = std.fmt.bufPrint(&jbuf, "{d}", .{j}) catch unreachable;
-        const a = obj.get(islice);
-        const b = obj.get(jslice);
+        // Route reads through `getPropertyChain` so TypedArray
+        // numeric-index Get fires (else `obj.get` misses the
+        // backing buffer; `Array.prototype.reverse.call(ta)` then
+        // sees undefined at every index).
+        const a = try getPropertyChain(realm, obj, islice);
+        const b = try getPropertyChain(realm, obj, jslice);
         const owned_i = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         const owned_j = realm.heap.allocateString(jslice) catch return error.OutOfMemory;
         obj.set(realm.allocator, owned_i.bytes, b) catch return error.OutOfMemory;
