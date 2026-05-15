@@ -3382,17 +3382,28 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
     const r_result = try self.reserveTemp();
     defer self.releaseTemp();
 
-    const loop_start = self.builder.here();
-
-    // r_result = r_iter.next()
+    // §7.4.5 GetIteratorDirect step 2 — `[[NextMethod]]` is
+    // captured ONCE at iterator open and re-used per step.
+    // Reading `iter.next` in the loop body would fire a user
+    // `get next()` accessor every iteration; the fixtures
+    // expect exactly one read (`iterator-next-reference.js`).
+    // for-in (\`for_in_open\`) returns a Cynic-internal iterator
+    // whose \`next\` is a fixed native method, so caching is
+    // semantically a no-op there but still safe.
+    const r_next_fn = try self.reserveTemp();
+    defer self.releaseTemp();
     try self.builder.emitOp(.ldar, s.span);
     try self.builder.emitU8(r_iter);
     try self.builder.emitOp(.lda_property, s.span);
     try self.builder.emitU16(k_next);
-    const r_next_fn = try self.reserveTemp();
-    defer self.releaseTemp();
     try self.builder.emitOp(.star, s.span);
     try self.builder.emitU8(r_next_fn);
+
+    const loop_start = self.builder.here();
+
+    // r_result = r_iter.next() — uses the cached `next` from
+    // r_next_fn (read once above) instead of re-loading every
+    // iteration.
     // call_method r_recv=r_iter, r_callee=r_next_fn, argc=0
     try self.builder.emitOp(.call_method, s.span);
     try self.builder.emitU8(r_iter);
