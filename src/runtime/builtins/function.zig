@@ -490,14 +490,45 @@ fn variantCtorThrows(realm: *Realm, this_value: Value, args: []const Value) Nati
 
 fn functionToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    const fn_obj = heap_mod.valueAsFunction(this_value) orelse {
+    // §20.2.3.5 — `this` may be a Proxy whose target is callable.
+    // Walk the proxy chain to the underlying JSFunction (or, if the
+    // chain bottoms out at a non-function callable proxy, fall
+    // through to the native-function placeholder). A revoked proxy
+    // (proxy_revoked, no target_fn / target) throws TypeError.
+    const fn_obj_opt = heap_mod.valueAsFunction(this_value);
+    // §20.2.3.5 — Proxies whose target is callable are themselves
+    // callable. The spec says the produced string must conform to
+    // NativeFunction syntax — it must NOT echo the target's source
+    // text, since the proxy may interpose `apply`. So we always
+    // emit `function () { [native code] }` for a proxy receiver.
+    var receiver_is_proxy: bool = false;
+    if (fn_obj_opt == null) {
+        if (heap_mod.valueAsPlainObject(this_value)) |obj| {
+            if (obj.proxy_revoked) {
+                return throwTypeError(realm, "Function.prototype.toString called on revoked proxy");
+            }
+            // §10.5 — a proxy is callable only when its target was
+            // callable at construction time (`proxy_callable`).
+            // `proxy_target_fn` implies the same; a plain object
+            // target with no callability does NOT make the proxy
+            // callable and `Function.prototype.toString` must throw.
+            if (obj.proxy_target_fn != null or obj.proxy_callable) {
+                receiver_is_proxy = true;
+            }
+        }
+    }
+    if (fn_obj_opt == null and !receiver_is_proxy) {
         // §20.2.3.5 step 3 — `this` must be a callable Object;
-        // otherwise throw TypeError. Cynic's reflective Proxy
-        // wrappers count as callable when `proxy_target` is a
-        // function, but they're routed through `valueAsFunction`
-        // already, so reaching here means non-function.
+        // otherwise throw TypeError.
         return throwTypeError(realm, "Function.prototype.toString requires that 'this' be a Function");
-    };
+    }
+    if (receiver_is_proxy) {
+        const formatted = std.fmt.allocPrint(realm.allocator, "function () {{ [native code] }}", .{}) catch return error.OutOfMemory;
+        defer realm.allocator.free(formatted);
+        const s = realm.heap.allocateString(formatted) catch return error.OutOfMemory;
+        return Value.fromString(s);
+    }
+    const fn_obj = fn_obj_opt.?;
     // §20.2.3.5 step 6 — if the function carries source text,
     // hand it back verbatim. Engine-synthesised functions
     // (default constructors, native bridges, bound functions)

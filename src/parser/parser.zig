@@ -2363,6 +2363,12 @@ pub const Parser = struct {
             }
         }
 
+        // §20.2.3.5 — function source text starts *after* the `static`
+        // keyword (when present). The MethodDefinition span itself
+        // begins at `static` for diagnostics, but
+        // `Function.prototype.toString` slices from here.
+        const source_start = self.current.span.start;
+
         // Detect `async` modifier on a method (§15.8.4). `async` followed
         // by `(` would be a method literally named `async`; otherwise
         // (and with no LF), it's the async modifier.
@@ -2467,6 +2473,7 @@ pub const Parser = struct {
             }
             return .{ .method = .{
                 .span = .{ .start = start, .end = body.span.end },
+                .source_start = source_start,
                 .is_static = is_static,
                 .kind = method_kind,
                 .key = key,

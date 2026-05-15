@@ -3971,9 +3971,11 @@ fn compileClassTemplate(
                 .is_generator = m.is_generator,
                 .is_async = m.is_async,
                 // §20.2.3.5 — borrow the MethodDefinition's source
-                // span for `Function.prototype.toString`.
-                .source = if (m.span.start <= m.span.end and m.span.end <= self.source.len)
-                    self.source[m.span.start..m.span.end]
+                // span for `Function.prototype.toString`. `source_start`
+                // points after the `static` modifier when present, so
+                // the slice matches the spec's MethodDefinition source.
+                .source = if (m.source_start <= m.span.end and m.span.end <= self.source.len)
+                    self.source[m.source_start..m.span.end]
                 else
                     null,
                 .key_chunk = key_chunk,
