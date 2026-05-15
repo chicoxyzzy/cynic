@@ -249,6 +249,27 @@ pub const Heap = struct {
     /// referencing.
     gc_stats_cycle: u32 = 0,
     gc_stats: bool = false,
+    /// Cumulative bytes charged across this heap's lifetime (never
+    /// reset on GC). Dual of `bytes_live`, which only sees what's
+    /// alive right now. Catches workloads that allocate-and-discard
+    /// at high rates — e.g. a loop of `result += chunk` looks small
+    /// in `bytes_live` (one buffer at a time) but huge in
+    /// `bytes_alloc_total` (every intermediate). Drives the harness
+    /// `--mem-summary` / `--top-alloc` reports.
+    bytes_alloc_total: u64 = 0,
+    /// High-water mark of `bytes_live` reached during this heap's
+    /// lifetime. Different from per-fixture RSS delta — that's a
+    /// process-level peak (includes binary, libc, allocator slack);
+    /// this is the engine's *charged* peak (the slice that GC could
+    /// theoretically reclaim).
+    bytes_live_peak: usize = 0,
+    /// Total `collect()` cycles run on this heap. Independent of
+    /// `gc_stats_cycle` (which only bumps when `gc_stats` is on).
+    gc_cycles_total: u32 = 0,
+    /// Accumulated GC pause time in nanoseconds across every
+    /// `collect()` cycle. Average pause = `gc_time_ns_total /
+    /// gc_cycles_total`.
+    gc_time_ns_total: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator) Heap {
         return .{ .allocator = allocator, .bytes_allocator = allocator };
@@ -276,6 +297,8 @@ pub const Heap = struct {
         if (new_total > self.max_bytes) return error.OutOfMemory;
         self.bytes_live = new_total;
         self.bytes_since_gc +|= n;
+        self.bytes_alloc_total +|= n;
+        if (new_total > self.bytes_live_peak) self.bytes_live_peak = new_total;
     }
 
     /// Decrease the live byte counter. Idempotent w.r.t. the GC
@@ -869,6 +892,12 @@ pub const Heap = struct {
         self.allocs_since_gc = 0;
         self.bytes_since_gc = 0;
 
+        // Always-on cycle accounting (cheap; drives the harness
+        // `--mem-summary` line).
+        const elapsed_ns_total: i128 = monotonicNs() - t_start;
+        self.gc_cycles_total +|= 1;
+        if (elapsed_ns_total > 0) self.gc_time_ns_total +|= @intCast(elapsed_ns_total);
+
         // Per-cycle diagnostic report — flagged on by the
         // `--gc-stats` test262 harness option (or by hand for
         // ad-hoc debugging). Format: `[gc N] kind=pre→post ...`.
@@ -876,13 +905,15 @@ pub const Heap = struct {
         // being kept alive by something that should let go.
         if (self.gc_stats) {
             self.gc_stats_cycle += 1;
-            const elapsed_ns: i128 = monotonicNs() - t_start;
-            const elapsed_us: i128 = @divTrunc(elapsed_ns, 1000);
+            const elapsed_us: i128 = @divTrunc(elapsed_ns_total, 1000);
             std.debug.print(
-                "[gc {d}] {d}\u{00B5}s obj={d}\u{2192}{d} str={d}\u{2192}{d} fn={d}\u{2192}{d} env={d}\u{2192}{d} gen={d}\u{2192}{d} sym={d}\u{2192}{d} big={d}\u{2192}{d}\n",
+                "[gc {d}] {d}\u{00B5}s live={d}KB peak={d}KB alloc_total={d}KB obj={d}\u{2192}{d} str={d}\u{2192}{d} fn={d}\u{2192}{d} env={d}\u{2192}{d} gen={d}\u{2192}{d} sym={d}\u{2192}{d} big={d}\u{2192}{d}\n",
                 .{
                     self.gc_stats_cycle,
                     elapsed_us,
+                    self.bytes_live / 1024,
+                    self.bytes_live_peak / 1024,
+                    self.bytes_alloc_total / 1024,
                     pre_objs, self.objects.items.len,
                     pre_strs, self.strings.items.len,
                     pre_fns,  self.functions.items.len,
