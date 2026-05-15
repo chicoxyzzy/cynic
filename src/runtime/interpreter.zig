@@ -5957,10 +5957,17 @@ pub fn consumePendingException(realm: *Realm) ?Value {
 /// Walk `obj` and its prototype chain looking for an accessor
 /// (getter/setter) descriptor for `key`. Returns the
 /// `Accessor` if found, else null. §10.1.8 / §10.1.9.
+///
+/// §10.1.8.1 OrdinaryGet — an own *data* property on a level
+/// shadows any inherited accessor further up the chain. So at
+/// each cursor, an own accessor wins, an own data short-circuits
+/// to null (caller falls through to the data-lookup path), and
+/// only a complete miss continues up.
 pub fn lookupAccessor(obj: *JSObject, key: []const u8) ?@import("object.zig").Accessor {
     var cursor: ?*JSObject = obj;
     while (cursor) |c| : (cursor = c.prototype) {
         if (c.accessors.get(key)) |a| return a;
+        if (c.hasOwn(key)) return null;
     }
     return null;
 }
