@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 83.33 % | 89.49 % | 34011 / 40813 | 34011 / 38004 |
+| **runtime** | 83.41 % | 89.57 % | 34042 / 40813 | 34042 / 38004 |
 
 
 ## Where the runtime stands, by area
@@ -39,7 +39,6 @@ browser-era built-ins …).
 | `built-ins/AsyncFromSyncIteratorPrototype` | 8 | 30 | 0 | 21 % | 21 % |
 | `built-ins/AsyncGeneratorPrototype` | 22 | 26 | 0 | 46 % | 46 % |
 | `built-ins/BigInt` | 50 | 26 | 0 | 66 % | 66 % |
-| `built-ins/DataView` | 453 | 35 | 11 | 91 % | 93 % |
 | `built-ins/Date` | 526 | 65 | 0 | 89 % | 89 % |
 | `built-ins/GeneratorPrototype` | 32 | 29 | 0 | 52 % | 52 % |
 | `built-ins/Iterator` | 442 | 61 | 6 | 87 % | 88 % |
@@ -68,6 +67,7 @@ browser-era built-ins …).
 | `built-ins/AsyncFunction` | 11 | 3 | 0 | 79 % | 79 % |
 | `built-ins/AsyncGeneratorFunction` | 7 | 2 | 0 | 78 % | 78 % |
 | `built-ins/Boolean` | 47 | 3 | 0 | 94 % | 94 % |
+| `built-ins/DataView` | 484 | 4 | 11 | 97 % | 99 % |
 | `built-ins/Error` | 50 | 7 | 0 | 88 % | 88 % |
 | `built-ins/FinalizationRegistry` | 45 | 1 | 0 | 98 % | 98 % |
 | `built-ins/GeneratorFunction` | 7 | 2 | 0 | 78 % | 78 % |
@@ -139,13 +139,11 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 | -167 |  |
-| **runtime** | 83.33 % | 89.49 % | 34011 / 40813 | 34011 / 38004 | +762 | 1m 33s |
+| **runtime** | 83.41 % | 89.57 % | 34042 / 40813 | 34042 / 38004 | +793 | 2m 03s |
 
 Biggest movers (runtime):
 
-- `built-ins/Function` +23
-- `language/expressions` +4
-- `language/module-code` -1
+- `built-ins/DataView` +31
 
 ### 2026-05-14 — cynic `aca1903`, test262 `d0c1b455`
 
