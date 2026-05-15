@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 84.09 % | 90.28 % | 34449 / 40969 | 34449 / 38160 |
+| **runtime** | 84.15 % | 90.35 % | 34477 / 40969 | 34477 / 38160 |
 
 
 ## Where the runtime stands, by area
@@ -29,11 +29,11 @@ browser-era built-ins …).
 | `built-ins/Object` | 3083 | 316 | 11 | 90 % | 91 % |
 | `built-ins/RegExp` | 1349 | 261 | 161 | 76 % | 84 % |
 | `built-ins/String` | 1045 | 172 | 5 | 86 % | 86 % |
-| `built-ins/TypedArray` | 1246 | 177 | 8 | 87 % | 88 % |
+| `built-ins/TypedArray` | 1272 | 151 | 8 | 89 % | 89 % |
 | `built-ins/TypedArrayConstructors` | 534 | 126 | 16 | 79 % | 81 % |
-| `language/expressions` | 9175 | 796 | 977 | 84 % | 92 % |
+| `language/expressions` | 9176 | 795 | 977 | 84 % | 92 % |
 | `language/module-code` | 462 | 120 | 14 | 78 % | 79 % |
-| `language/statements` | 7977 | 511 | 672 | 87 % | 94 % |
+| `language/statements` | 7978 | 510 | 672 | 87 % | 94 % |
 | **_10–99 fails_** | | | | | |
 | `built-ins/ArrayBuffer` | 165 | 26 | 4 | 85 % | 86 % |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 11 | 27 | 0 | 29 % | 29 % |
@@ -139,14 +139,12 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 | -167 |  |
-| **runtime** | 84.09 % | 90.28 % | 34449 / 40969 | 34449 / 38160 | +1200 | 1m 27s |
+| **runtime** | 84.15 % | 90.35 % | 34477 / 40969 | 34477 / 38160 | +1228 | 1m 34s |
 
 Biggest movers (runtime):
 
-- `built-ins/Array` +18
-- `language/expressions` +5
-- `built-ins/Object` -1
-- `language/identifier-resolution` +1
+- `built-ins/TypedArray` +26
+- `language/expressions` +1
 - `language/statements` +1
 
 ### 2026-05-14 — cynic `aca1903`, test262 `d0c1b455`
