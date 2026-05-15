@@ -4974,6 +4974,25 @@ fn compileDestructure(self: *Compiler, target: ast.statement.BindingTarget) Comp
             try self.builder.emitU8(r_src);
             try self.builder.emitOp(.require_object_coercible, target.span());
             for (obj_pat.properties) |prop| {
+                if (prop.key == .computed) {
+                    // §14.3.3 BindingProperty : ComputedPropertyName
+                    // BindingElement. Step 1: evaluate the key,
+                    // ToPropertyKey-coerce. Step 2: GetV on
+                    // `r_src` via `lda_computed [r_obj]` (key in
+                    // acc, receiver in `r_obj`). The key
+                    // expression is evaluated BEFORE the value
+                    // is read, so a throwing `thrower()` key
+                    // propagates without ever touching the
+                    // value side (test262
+                    // `obj-ptrn-prop-eval-err.case`).
+                    try self.compileExpression(prop.key.computed);
+                    try self.builder.emitOp(.to_property_key, prop.span);
+                    try self.builder.emitOp(.lda_computed, prop.span);
+                    try self.builder.emitU8(r_src);
+                    try self.applyDefaultIfNeeded(prop.value);
+                    try self.assignPatternLeaf(prop.value.target);
+                    continue;
+                }
                 const key_span: Span = switch (prop.key) {
                     .ident => |s| s,
                     .string => |s| s,
@@ -5178,6 +5197,20 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
             // member with an identifier_reference argument.
             for (ol.properties) |prop| switch (prop) {
                 .property => |op| {
+                    if (op.key == .computed) {
+                        // §13.15.5.5 AssignmentProperty :
+                        // PropertyName : AssignmentElement (with
+                        // a ComputedPropertyName). Mirrors the
+                        // BindingProperty path in
+                        // `compileDestructure` — ToPropertyKey
+                        // the key, then `lda_computed [r_obj]`.
+                        try self.compileExpression(op.key.computed);
+                        try self.builder.emitOp(.to_property_key, op.span);
+                        try self.builder.emitOp(.lda_computed, op.span);
+                        try self.builder.emitU8(r_src);
+                        try self.assignAssignmentPatternElem(op.value);
+                        continue;
+                    }
                     const key_slice = try self.assignmentPatternKey(op.key);
                     const k = try self.internString(key_slice);
                     try self.builder.emitOp(.ldar, op.span);

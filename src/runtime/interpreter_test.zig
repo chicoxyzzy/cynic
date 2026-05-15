@@ -4059,6 +4059,44 @@ test "later: rest with numeric-key object pattern" {
     , "7:8:3");
 }
 
+// ── §13.15.5 / §14.3.3 — Computed-key object destructuring ───────────────────
+
+test "later: computed-key in object destructuring binds the value" {
+    try expectScriptStringWithBuiltins(
+        \\let k = "foo";
+        \\let { [k]: v } = { foo: "bar" };
+        \\v;
+    , "bar");
+}
+
+test "later: computed-key dstr evaluates the key expression" {
+    try expectScriptInt(
+        \\let calls = 0;
+        \\function k() { calls = calls + 1; return "x"; }
+        \\let { [k()]: v } = { x: 42 };
+        \\v + calls * 1000;
+    , 1042);
+}
+
+test "later: computed-key dstr — thrown key propagates" {
+    try expectScriptStringWithBuiltins(
+        \\function thrower() { throw "k-boom"; }
+        \\let captured = "no";
+        \\try { let { [thrower()]: x } = {}; }
+        \\catch (e) { captured = e; }
+        \\captured;
+    , "k-boom");
+}
+
+test "later: computed-key dstr in assignment pattern" {
+    try expectScriptStringWithBuiltins(
+        \\let k = "a";
+        \\let v;
+        \\({ [k]: v } = { a: "hi" });
+        \\v;
+    , "hi");
+}
+
 // ── §14.4.14 / §27.6.3.7 — yield* delegation ───────────────────────────────
 
 test "later: sync yield* delegates to a generator" {
