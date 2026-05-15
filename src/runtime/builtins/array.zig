@@ -2380,13 +2380,58 @@ fn fromAsyncIterOnMappedReject(realm: *Realm, this_value: Value, args: []const V
     return closeIterAndReject(realm, state);
 }
 
+/// §7.3.7 CreateDataPropertyOrThrow — used by Array.fromAsync's
+/// per-element write step (§23.1.2.1.1 steps 3.j.ii.8 and
+/// 3.k.vii.6, mirrored in 3.l.iii). Unlike `[[Set]]`, this op
+/// ignores any inherited setter / writable:false ancestor on the
+/// prototype chain and lands the value as an own data property
+/// with `{w:T, e:T, c:T}`. It still rejects with TypeError when:
+///   - the receiver is not extensible AND has no own slot, or
+///   - the existing own property is `configurable: false` (any
+///     non-default flag conflict implies a non-configurable
+///     redefine per §10.1.6.3 step 4).
+/// Returns `error.NativeThrew` with `realm.pending_exception`
+/// set on the reject path so the caller can route the failure
+/// into its promise / iterator-close machinery.
+fn createDataPropertyOrThrow(
+    realm: *Realm,
+    obj: *JSObject,
+    key: []const u8,
+    value: Value,
+) NativeError!void {
+    const ObjMod = @import("../object.zig");
+    const had_own = obj.hasOwn(key);
+    if (!had_own) {
+        if (!obj.extensible) {
+            return throwTypeError(realm, "Array.fromAsync: cannot define property on non-extensible object");
+        }
+    } else {
+        const cur = obj.flagsFor(key);
+        // §10.1.6.3 step 4 — redefining with `{w:T,e:T,c:T}` over
+        // a non-configurable own property fails whenever any of
+        // the current flags differs (configurable:false alone is
+        // sufficient; configurable:true with writable:false /
+        // enumerable:false is still allowed because the redefine
+        // can flip them back on).
+        if (!cur.configurable) {
+            return throwTypeError(realm, "Array.fromAsync: cannot redefine non-configurable property");
+        }
+    }
+    obj.setWithFlags(realm.allocator, key, value, ObjMod.PropertyFlags.default) catch return error.OutOfMemory;
+}
+
 fn appendAndStepIter(realm: *Realm, state: *JSObject, value: Value) NativeError!Value {
     const out = heap_mod.valueAsPlainObject(state.get(k_fa_array)) orelse return Value.undefined_;
     const k = state.get(k_fa_index).asInt32();
     var ibuf: [24]u8 = undefined;
     const islice = std.fmt.bufPrint(&ibuf, "{d}", .{k}) catch unreachable;
     const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-    out.set(realm.allocator, owned.bytes, value) catch return error.OutOfMemory;
+    // §23.1.2.1.1 step 3.j.ii.8 — `CreateDataPropertyOrThrow(A, Pk,
+    // mappedValue)`. Abrupt completion routes through
+    // `closeIterAndReject` (step 9 — `AsyncIteratorClose`).
+    createDataPropertyOrThrow(realm, out, owned.bytes, value) catch {
+        return closeIterAndReject(realm, state);
+    };
     state.set(realm.allocator, k_fa_index, Value.fromInt32(k + 1)) catch return error.OutOfMemory;
     fromAsyncIterStep(realm, state) catch {
         return rejectFromState(realm, state);
@@ -2484,7 +2529,12 @@ fn appendAndStepArrayLike(realm: *Realm, state: *JSObject, value: Value) NativeE
     var ibuf: [24]u8 = undefined;
     const islice = std.fmt.bufPrint(&ibuf, "{d}", .{k}) catch unreachable;
     const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-    out.set(realm.allocator, owned.bytes, value) catch return error.OutOfMemory;
+    // §23.1.2.1.1 step 3.l.iii — `CreateDataPropertyOrThrow(A, Pk,
+    // mappedValue)`. There's no iterator to close on the array-like
+    // path; an abrupt completion just rejects the outer promise.
+    createDataPropertyOrThrow(realm, out, owned.bytes, value) catch {
+        return rejectFromState(realm, state);
+    };
     state.set(realm.allocator, k_fa_index, Value.fromInt32(k + 1)) catch return error.OutOfMemory;
     fromAsyncArrayLikeStep(realm, state) catch {
         return rejectFromState(realm, state);
