@@ -330,6 +330,25 @@ sampling by `/profile`.
   — Zig inlines aggressively but the per-opcode handler structure
   may still leave hot ops behind a function-call boundary. Cheap
   if the disassembly is bad; no-op if it's already inlined.
+- **String concat in-place / ConsString**. Today every `result =
+  result + x` (and `result += x`) allocates a fresh
+  `len(result) + len(x)`-byte JSString. In tight build-string loops
+  this is O(N²) cumulative bytes — measurably so on test262: each
+  fixture under `built-ins/RegExp/CharacterClassEscapes/` allocates
+  ~270 MB cumulative for a final string of a few MB (12 fixtures
+  alloc ~1.6 GiB combined; surfaced by `--top-alloc`). The byte
+  trigger keeps RSS bounded (~255 MB peak across 35 GC cycles)
+  but the wall-time cost is real.
+  Two shapes:
+  - **`add_inplace` opcode** — compiler detects the `x = x + y`
+    register-rewrite pattern when `x`'s binding isn't captured by
+    any closure; emits an opcode that grows `JSString.bytes` with
+    amortized doubling. Half-day; narrow scope.
+  - **ConsString / ropes** — V8 / JSC style. `JSString` gets a
+    `kind` discriminator (`flat` vs `cons (left, right, len)`);
+    `concat()` is O(1); first observable use flattens to a single
+    buffer. Cleanest answer but ~412 `.bytes` access sites to
+    audit + plumb a `flatten()` accessor through. Multi-day.
 ## Proper Tail Calls (PTC) — research
 
 ES2015 §10.2.4 + §15.6.1 + §15.10.1 — function calls *in tail
