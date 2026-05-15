@@ -266,9 +266,10 @@ const expect_typed_array_prototype = [_][]const u8{
     "values",
     "with",
     "@@iterator",
-    // TODO(spec): %TypedArray%.prototype[@@toStringTag] (§23.2.3.34)
-    // is an accessor getter that returns the concrete view kind
-    // (e.g. "Int8Array"). Not installed yet on the abstract proto.
+    // §23.2.3.32 — `get %TypedArray%.prototype [ @@toStringTag ]`
+    // accessor; returns the [[TypedArrayName]] string for TA
+    // instances and `undefined` otherwise.
+    "@@toStringTag",
 };
 
 const Case = struct {

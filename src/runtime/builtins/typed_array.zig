@@ -137,12 +137,14 @@ pub fn install(realm: *Realm) !void {
     const ta_ctor = r_ta.ctor;
     const ta_proto = r_ta.proto;
 
-    // §23.2.3.32 %TypedArray%.prototype[@@toStringTag] is
-    // spec'd as a getter that reads `[[TypedArrayName]]`. Cynic
-    // installs a string @@toStringTag on each *concrete*
-    // prototype (Int8Array.prototype, etc.) below so the lookup
-    // walk finds the right tag without needing the per-instance
-    // accessor.
+    // §23.2.3.32 — `get %TypedArray%.prototype [ @@toStringTag ]`
+    // is an accessor on `%TypedArray%.prototype` that reads
+    // `[[TypedArrayName]]` off `this`. Returns `undefined` when
+    // `this` lacks a typed-view slot (test262 verifies via
+    // `getter.call({})`, DataView, ArrayBuffer, …). The concrete
+    // prototypes (`Int8Array.prototype` etc.) inherit this
+    // accessor — they must NOT carry an own @@toStringTag.
+    try installNativeGetter(realm, ta_proto, "@@toStringTag", typedArrayToStringTagGetter);
 
     // Accessors and methods on %TypedArray%.prototype.
     {
@@ -238,7 +240,7 @@ pub fn install(realm: *Realm) !void {
         // Each concrete constructor has the same arity as
         // %TypedArray% itself (signature is up to (buffer,
         // byteOffset, length) or one of the other 3-arg forms).
-        const ctor = try realm.heap.allocateFunctionNative(typedArrayConstructorBuilder(variant.kind), 3, variant.name);
+        const ctor = try realm.heap.allocateFunctionNative(typedArrayConstructorBuilder(variant.kind, variant.name), 3, variant.name);
         ctor.is_class_constructor = true;
         ctor.static_parent = ta_ctor; // §23.2.6 — Int8Array.[[Prototype]] = %TypedArray%
         const proto = try realm.heap.allocateObject();
@@ -247,13 +249,11 @@ pub fn install(realm: *Realm) !void {
         // §23.2.6.2 — `<TypedArray>.prototype.BYTES_PER_ELEMENT`
         // is `{w:false, e:false, c:false}`.
         try proto.setWithFlags(realm.allocator, "BYTES_PER_ELEMENT", Value.fromInt32(variant.kind.elementSize()), frozen);
-        // §23.2.6 — concrete typed arrays don't get their own
-        // @@toStringTag accessor in the spec; %TypedArray%.proto's
-        // accessor reads `[[TypedArrayName]]`. With Cynic's
-        // string-only @@toStringTag, install the per-kind tag
-        // directly on each concrete proto. Object.toString sees
-        // it through the prototype chain.
-        try installToStringTag(realm, proto, variant.name);
+        // §23.2.6 — concrete typed arrays inherit @@toStringTag
+        // from `%TypedArray%.prototype` (installed above as a
+        // spec-faithful getter that reads [[TypedArrayName]]).
+        // No own @@toStringTag here — `hasOwnProperty(Symbol.
+        // toStringTag)` must be `false` on each concrete proto.
         ctor.prototype = proto;
         // §23.2.5.2 — `<TypedArray>.prototype` is also frozen.
         try ctor.setWithFlags(realm.allocator, "prototype", heap_mod.taggedObject(proto), frozen);
@@ -536,7 +536,7 @@ fn arrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) Nativ
     return heap_mod.taggedObject(out);
 }
 
-fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind) NativeFn {
+fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_name: []const u8) NativeFn {
     return struct {
         fn ctor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
             const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray constructor requires 'new'");
@@ -585,7 +585,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind) NativeFn {
                 buf_obj.array_buffer = buf_bytes;
                 buf_obj.has_array_buffer_data = true;
 
-                inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length };
+                inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name };
                 return this_value;
             }
 
@@ -614,7 +614,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind) NativeFn {
                         length = @intFromFloat(ld);
                         if (length * elem_size > remaining) return throwRangeError(realm, "view exceeds buffer");
                     }
-                    inst.typed_view = .{ .kind = kind, .viewed = src, .byte_offset = byte_offset, .length = length };
+                    inst.typed_view = .{ .kind = kind, .viewed = src, .byte_offset = byte_offset, .length = length, .name = ta_name };
                     return this_value;
                 }
 
@@ -682,7 +682,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind) NativeFn {
                     @memset(buf_bytes, 0);
                     buf_obj.array_buffer = buf_bytes;
                 buf_obj.has_array_buffer_data = true;
-                    inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length };
+                    inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name };
                     var idx: usize = 0;
                     while (idx < length) : (idx += 1) {
                         writeTypedElement(buf_bytes, kind, idx * elem_size, collected.items[idx]);
@@ -705,7 +705,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind) NativeFn {
                         @memset(buf_bytes, 0);
                         buf_obj.array_buffer = buf_bytes;
                 buf_obj.has_array_buffer_data = true;
-                        inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length };
+                        inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name };
                         // Copy each element via the same write path.
                         var i: usize = 0;
                         while (i < length) : (i += 1) {
@@ -742,6 +742,23 @@ fn typedArrayByteOffset(realm: *Realm, this_value: Value, args: []const Value) N
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray accessor on non-object");
     const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray.prototype.byteOffset called on a non-TypedArray");
     return Value.fromInt32(@intCast(tv.byte_offset));
+}
+
+/// §23.2.3.32 get %TypedArray%.prototype [ @@toStringTag ].
+/// Returns the [[TypedArrayName]] string when `this` is a
+/// TypedArray instance; otherwise `undefined` (never throws,
+/// even on non-Object — invoking as a function passes
+/// `undefined` as `this`).
+fn typedArrayToStringTagGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    // §23.2.3.32 step 1-3 — non-Object `this`, or Object without
+    // a [[TypedArrayName]] slot, returns `undefined` (and the
+    // getter never throws).
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse return Value.undefined_;
+    const tv = obj.typed_view orelse return Value.undefined_;
+    if (tv.name.len == 0) return Value.undefined_;
+    const s = realm.heap.allocateString(tv.name) catch return error.OutOfMemory;
+    return Value.fromString(s);
 }
 
 fn typedArrayBuffer(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -1081,7 +1098,7 @@ fn taMakeNew(realm: *Realm, kind: ObjMod.TypedKind, length: usize) NativeError!*
     @memset(buf_bytes, 0);
     buf_obj.array_buffer = buf_bytes;
                 buf_obj.has_array_buffer_data = true;
-    inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length };
+    inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ctor_name };
     return inst;
 }
 
@@ -1637,6 +1654,7 @@ fn taSpeciesCreateSubarray(
             .viewed = buffer,
             .byte_offset = byte_offset,
             .length = length,
+            .name = nameForTypedKind(kind),
         };
         return inst;
     }

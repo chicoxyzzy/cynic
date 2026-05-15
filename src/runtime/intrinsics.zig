@@ -593,7 +593,16 @@ pub fn installNativeGetter(realm: *Realm, proto: *JSObject, name: []const u8, ge
     // `Object.getOwnPropertyDescriptor(proto, key).get.name`.
     // Allocate via the realm's class-arena so the slice lives
     // for the realm's lifetime without leaking through GC.
-    const getter_name = std.fmt.allocPrint(realm.classAllocator(), "get {s}", .{name}) catch return error.OutOfMemory;
+    // §17 — when the property key is a well-known Symbol the
+    // function's `.name` is `"get [Symbol.<descr>]"`, not the
+    // raw `@@<descr>` slot key. Cynic stores well-known symbols
+    // under `"@@<descr>"`; rewrite when formatting the name so
+    // test262 (`get foo.name === "get [Symbol.toStringTag]"`)
+    // sees the spec-faithful form.
+    const getter_name = if (std.mem.startsWith(u8, name, "@@"))
+        std.fmt.allocPrint(realm.classAllocator(), "get [Symbol.{s}]", .{name[2..]}) catch return error.OutOfMemory
+    else
+        std.fmt.allocPrint(realm.classAllocator(), "get {s}", .{name}) catch return error.OutOfMemory;
     const getter = try realm.heap.allocateFunctionNative(getter_fn, 0, getter_name);
     getter.proto = realm.intrinsics.function_prototype;
     const entry = try proto.accessors.getOrPut(realm.allocator, name);

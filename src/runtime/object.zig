@@ -1081,6 +1081,11 @@ pub const TypedView = struct {
     byte_offset: usize,
     /// Number of *elements* in the view (not bytes).
     length: usize,
+    /// §23.2 [[TypedArrayName]] — the string name returned by
+    /// `%TypedArray%.prototype[@@toStringTag]`. Stored as a
+    /// static string slice so Uint8Array vs Uint8ClampedArray
+    /// (which share `kind = .uint8`) can be told apart.
+    name: []const u8 = "",
 };
 
 /// `[[DataView]]` (§25.3.1) — a view over an ArrayBuffer
