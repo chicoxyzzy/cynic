@@ -259,6 +259,11 @@ pub const JSObject = struct {
     /// storage. §7.3.27 PrivateElementFind brand-checks via this
     /// map: a lookup miss is a TypeError.
     private_properties: std.StringArrayHashMapUnmanaged(Value) = .empty,
+    /// Names in `private_properties` whose [[Kind]] is "method"
+    /// (§7.3.30 PrivateSet step 4). Writes to these names throw
+    /// TypeError per the spec; plain data fields are absent from
+    /// this set and remain writable.
+    private_methods: std.StringArrayHashMapUnmanaged(void) = .empty,
     /// §15.7 — private getters / setters declared as
     /// `class C { get #x() {} set #x(v) {} }`. Parallel to
     /// `private_properties` but routes reads through the getter
@@ -517,6 +522,7 @@ pub const JSObject = struct {
         self.properties.deinit(allocator);
         self.property_flags.deinit(allocator);
         self.private_properties.deinit(allocator);
+        self.private_methods.deinit(allocator);
         self.private_accessors.deinit(allocator);
         self.accessors.deinit(allocator);
         if (self.map_data) |m| m.deinit(allocator);

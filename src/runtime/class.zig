@@ -388,6 +388,8 @@ pub fn buildClass(
         switch (m.kind) {
             .method => if (is_priv_static) {
                 try ctor.private_properties.put(realm.allocator, runtime_name, heap_mod.taggedFunction(fn_obj));
+                // §7.3.30 PrivateSet step 4 — methods are read-only.
+                try ctor.private_methods.put(realm.allocator, runtime_name, {});
             } else {
                 try ctor.set(realm.allocator, runtime_name, heap_mod.taggedFunction(fn_obj));
                 try ctor.property_flags.put(realm.allocator, runtime_name, static_method_flags);

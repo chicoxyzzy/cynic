@@ -222,6 +222,10 @@ pub const JSFunction = struct {
     /// receiver is the constructor function itself.
     private_properties: std.StringArrayHashMapUnmanaged(Value) = .empty,
     private_accessors: std.StringArrayHashMapUnmanaged(Accessor) = .empty,
+    /// Names in `private_properties` whose [[Kind]] is "method"
+    /// (§7.3.30 step 4) — writes to these throw TypeError. Plain
+    /// data fields are absent from this set and remain writable.
+    private_methods: std.StringArrayHashMapUnmanaged(void) = .empty,
     /// `Function.prototype` — the object that becomes the
     /// `[[Prototype]]` of instances created by `new f(…)`. Auto-
     /// allocated for non-arrow functions at construction time
@@ -290,6 +294,7 @@ pub const JSFunction = struct {
         self.accessors.deinit(allocator);
         self.private_properties.deinit(allocator);
         self.private_accessors.deinit(allocator);
+        self.private_methods.deinit(allocator);
         if (self.bound_args) |a| allocator.free(a);
         allocator.destroy(self);
     }

@@ -3772,6 +3772,25 @@ test "later: read of write-only private accessor throws TypeError" {
     , "type");
 }
 
+test "later: assigning to a private method throws TypeError" {
+    // §7.3.30 PrivateSet step 4 — methods aren't writable.
+    try expectScriptStringWithBuiltins(
+        \\class C { #m() {} assign() { this.#m = 0; } }
+        \\let kind = "none";
+        \\try { new C().assign(); } catch (e) { kind = e instanceof TypeError ? "type" : "other"; }
+        \\kind;
+    , "type");
+}
+
+test "later: assigning to a static private method throws TypeError" {
+    try expectScriptStringWithBuiltins(
+        \\class C { static #m() {} static assign() { this.#m = 0; } }
+        \\let kind = "none";
+        \\try { C.assign(); } catch (e) { kind = e instanceof TypeError ? "type" : "other"; }
+        \\kind;
+    , "type");
+}
+
 test "later: read of static write-only private accessor throws TypeError" {
     // §10.1.8.1 PrivateFieldGet step 6.b — static accessor path.
     try expectScriptStringWithBuiltins(

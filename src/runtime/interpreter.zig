@@ -3907,7 +3907,11 @@ fn runFrames(
                         for (inits) |entry| {
                             if (entry.init_fn) |fn_obj| {
                                 switch (entry.accessor_kind) {
-                                    .none => inst.private_properties.put(allocator, entry.name, heap_mod.taggedFunction(fn_obj)) catch return error.OutOfMemory,
+                                    .none => {
+                                        inst.private_properties.put(allocator, entry.name, heap_mod.taggedFunction(fn_obj)) catch return error.OutOfMemory;
+                                        // §7.3.30 PrivateSet step 4 — methods are read-only.
+                                        inst.private_methods.put(allocator, entry.name, {}) catch return error.OutOfMemory;
+                                    },
                                     .getter => {
                                         const ent = inst.private_accessors.getOrPut(allocator, entry.name) catch return error.OutOfMemory;
                                         if (!ent.found_existing) ent.value_ptr.* = .{};
@@ -4697,6 +4701,16 @@ fn runFrames(
                             return .{ .thrown = ex };
                         }
                         continue;
+                    } else if (fn_recv.private_methods.contains(key_s.bytes)) {
+                        // §7.3.30 PrivateSet step 4 — methods aren't writable.
+                        const ex = try makeTypeError(realm, "Cannot assign to private method");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
                     } else {
                         fn_recv.private_properties.put(allocator, key_s.bytes, acc) catch return error.OutOfMemory;
                     }
@@ -4744,6 +4758,16 @@ fn runFrames(
                     }
                 } else if (!recv.private_properties.contains(key_s.bytes)) {
                     const ex = try makeTypeError(realm, "Cannot write private field — brand check failed");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                } else if (recv.private_methods.contains(key_s.bytes)) {
+                    // §7.3.30 PrivateSet step 4 — methods aren't writable.
+                    const ex = try makeTypeError(realm, "Cannot assign to private method");
                     f.ip = ip;
                     f.accumulator = acc;
                     committed = true;
