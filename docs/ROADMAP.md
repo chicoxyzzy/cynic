@@ -115,6 +115,31 @@ code construction (aligns with SES).
 
 - Generator `.return()` running pending `finally` blocks inside
   the body (currently only finally-on-throw fires).
+- **Async-generator yield-star resume-arg routing + the
+  `AsyncGeneratorRequest` queue (§27.6.3.5 / §15.6).** Today
+  `asyncGenReturn` / `asyncGenThrow` synthesize an abrupt
+  completion on the outer generator with no awareness of any
+  inner iterator the body is `yield*`-delegating into. The
+  `%AsyncFromSyncIteratorPrototype%` intrinsic (§27.6.1) is
+  shipped and correct — the missing piece is the routing layer.
+  Lands in five staged commits:
+  1. `AsyncGeneratorRequest` queue on `JSGenerator` (§27.6.3.5)
+     — wire `asyncGenNext`/`Return`/`Throw` to enqueue, with
+     `AsyncGeneratorResumeNext` as the drain. Prerequisite for
+     everything below; alone fixes the `request-queue-order-
+     state-executing.js` cluster.
+  2. Bytecode `set_yield_delegate` / `clear_yield_delegate`
+     opcodes + `JSGenerator.inner_iter` slot + GC marking.
+  3. Compiler: emit slot ops around the async `yield*` loop
+     (`compileYieldDelegate`).
+  4. `asyncGenReturn` / `asyncGenThrow`: when the slot is live,
+     `callValue` the inner method, `Await` the result through
+     the microtask queue (no synchronous-settle per AGENTS.md),
+     then resume.
+  5. IteratorClose-on-absent-throw path (§14.4.14 step 7.iii).
+  Unlocks the `built-ins/AsyncFromSyncIteratorPrototype` bucket
+  (21 % spec today) and `built-ins/AsyncGeneratorPrototype/
+  {throw,return}/*` clusters.
 - Tail-call optimization (PTC).
 - Top-level `await` in modules.
 - `typeof` of a callable proxy returning `"function"`.
