@@ -7,9 +7,13 @@ Default to **runtime mode** — that's where today's failures live;
 parser is at 100 % attempted. Use parser mode only if the user
 asks for false-reject / false-accept triage specifically.
 
-1. Run `zig build test262 -- --quiet --mode=runtime
-   --list-failures=2000` and capture the output. Wrap in
-   `timeout 1800`.
+1. Capture the failure list — pair `--only-failing` with the
+   harness so this run skip-as-passes the ~34 k cached pass-set
+   and finishes in ≤ 30 s (vs ~100 s for a full sweep):
+   `zig build test262 -- --quiet --mode=runtime --only-failing
+   --list-failures=2000` and capture the output. If
+   `.test262-pass-cache.txt` is stale (no recent full sweep),
+   drop `--only-failing` and wrap in `timeout 1800`.
 
 2. Parse out the failure paths and group by directory (everything
    before the basename). Show the top 10 directories by failure

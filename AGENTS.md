@@ -203,6 +203,36 @@ sweep. Do NOT use `/usr/bin/time -l` for this — it measures
 For a stricter guard pair the filter with `--max-rss=<mb>` or
 `--leak-check` (DebugAllocator); see flag table above.
 
+**Fast iteration with `--only-failing`.** A full runtime sweep is
+~100 s; that's too long to run after every fix. Use the cached
+pass-set instead: any full sweep with `--write-results` populates
+`.test262-pass-cache.txt` (~34 k known-passing fixtures). The
+next run with `--only-failing` skip-as-passes those, so it only
+executes the ~7 k failing/skipped tests — typically ≤ 30 s.
+
+Iteration loop for a triage-and-fix session:
+
+    # Baseline. Tighten the filter as much as you can.
+    zig build test262 -- --quiet --mode=runtime \
+      --filter=<narrowest pattern>
+
+    # Per-fix verification (filter + --only-failing).
+    zig build test262 -- --quiet --mode=runtime \
+      --filter=<bucket root> --only-failing
+
+    # Leak check.
+    zig build test262 -- --quiet --mode=runtime \
+      --filter=<bucket root> --top-rss=10
+
+    # Session-end full sweep (no filter, no --only-failing —
+    # this refreshes the cache for the next session).
+    zig build test262 -- --quiet --mode=runtime --write-results
+
+The `--only-failing` cache won't surface a regression that flips
+a previously-passing fixture to fail outside the touched bucket
+— a session-end full sweep is the safety net. Don't use
+`--only-failing` for score rows; they must be authoritative.
+
 CI runs `zig build` and `zig build test` as gating jobs, plus
 `zig build test262 -- --quiet` as an advisory job
 ([.github/workflows/ci.yml](.github/workflows/ci.yml)). A
