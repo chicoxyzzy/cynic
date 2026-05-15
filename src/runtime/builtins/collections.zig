@@ -197,10 +197,20 @@ fn validateTypedArrayIfPresent(realm: *Realm, this_value: Value) NativeError!voi
     // for a detached buffer).
     const buf = tv.viewed.array_buffer orelse
         return throwTypeError(realm, "TypedArray iterator on detached buffer");
-    const elem_size = tv.kind.elementSize();
-    // Resizable AB shrunk under the view → OOB, TypeError.
-    if (tv.byte_offset + tv.length * elem_size > buf.len) {
-        return throwTypeError(realm, "TypedArray iterator on out-of-bounds TypedArray");
+    // §10.4.5 IsTypedArrayOutOfBounds — for a length-tracking view,
+    // OOB means `byte_offset > buf.len`; for a fixed-length view it
+    // means `byte_offset + length*elem_size > buf.len`. The snapshot
+    // `tv.length` is meaningless on length-tracking views (it's 0
+    // at construction time and never updated).
+    if (tv.length_tracking) {
+        if (tv.byte_offset > buf.len) {
+            return throwTypeError(realm, "TypedArray iterator on out-of-bounds TypedArray");
+        }
+    } else {
+        const elem_size = tv.kind.elementSize();
+        if (tv.byte_offset + tv.length * elem_size > buf.len) {
+            return throwTypeError(realm, "TypedArray iterator on out-of-bounds TypedArray");
+        }
     }
 }
 
@@ -239,14 +249,24 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) ?struct { idx: i32, value
         // typed-view dispatch; iterate them directly off the
         // typed_view to avoid the per-step accessor call.
         if (obj.typed_view) |tv| {
-            length = @intCast(tv.length);
-            if (idx >= 0 and @as(usize, @intCast(idx)) < tv.length) {
-                if (tv.viewed.array_buffer) |buf| {
-                    const elem_size = tv.kind.elementSize();
+            // §23.2.5.1 / §10.4.5 — recompute the live length on
+            // every step. A length-tracking view's backing buffer
+            // may have been grown or shrunk between iterations;
+            // a fixed-length view's buffer may have shrunk so the
+            // view is now OOB (live length collapses to 0 per
+            // IsTypedArrayOutOfBounds + IsValidIntegerIndex).
+            if (tv.viewed.array_buffer) |buf| {
+                const elem_size = tv.kind.elementSize();
+                const live_len: usize = if (tv.length_tracking) blk: {
+                    if (tv.byte_offset > buf.len) break :blk 0;
+                    break :blk (buf.len - tv.byte_offset) / elem_size;
+                } else blk: {
+                    if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
+                    break :blk tv.length;
+                };
+                length = @intCast(live_len);
+                if (idx >= 0 and @as(usize, @intCast(idx)) < live_len) {
                     const off = tv.byte_offset + @as(usize, @intCast(idx)) * elem_size;
-                    // §10.4.5 IsValidIntegerIndex — a view's
-                    // backing resizable AB may shrink under it;
-                    // out-of-bounds reads return `undefined`.
                     if (off + elem_size <= buf.len) {
                         elem = readTypedElement(realm, buf, tv.kind, off);
                     }
