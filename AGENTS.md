@@ -97,7 +97,7 @@ These are project rules — they apply to everyone.
 | Find a hot function | `tools/profile.sh "<filter>"` (or `/profile`); requires `samply` |
 | See engine memory shape | `zig build test262 -- --filter=<x> --mem-summary --top-alloc=10` (engine-side counters) |
 | Profile allocations with call stacks (macOS) | `xcrun xctrace record --template Allocations --launch -- <path-to-test262-binary> --filter=<x>` |
-| Find spec text | [tc39.es/ecma262](https://tc39.es/ecma262/) |
+| Find spec text | [tc39.es/ecma262](https://tc39.es/ecma262/), or via the `tc39` MCP server in `.mcp.json` — `search_spec` / `get_spec_section` (also `list_proposals`, `search_notes`) |
 | Inspect test262 fixtures | `vendor/test262/test/<area>` |
 
 ## Build & test

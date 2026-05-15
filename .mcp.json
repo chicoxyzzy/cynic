@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "tc39": {
+      "type": "http",
+      "url": "https://tc39-spec-mcp.jasnell.workers.dev/mcp"
+    }
+  }
+}
