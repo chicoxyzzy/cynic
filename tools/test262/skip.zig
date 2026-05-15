@@ -67,6 +67,20 @@ pub const skip_ses_paths = [_][]const u8{
     "built-ins/SharedArrayBuffer/",
 };
 
+/// Basename-suffix skips for fixtures that *exercise* SAB / Atomics
+/// indirectly from another bucket. test262 generates an `-sab.js`
+/// sibling alongside each `-buffer-arg` / `set/` / `DataView/` /
+/// internals fixture (same body, `SharedArrayBuffer` swapped for
+/// `ArrayBuffer`). The non-`-sab` sibling stays attempted and tests
+/// the same behaviour against `ArrayBuffer` — skipping `-sab.js`
+/// removes duplicate coverage of a permanently-OOS host primitive
+/// without losing signal. ~96 fixtures across `built-ins/DataView`,
+/// `built-ins/TypedArray/prototype/set`, and
+/// `built-ins/TypedArrayConstructors/{ctors,ctors-bigint,internals}`.
+pub const skip_ses_path_suffixes = [_][]const u8{
+    "-sab.js",
+};
+
 /// `built-ins/Function/` is a *mixed* bucket — the prototype
 /// methods (`apply`, `call`, `bind`, …) are in scope, but every
 /// test under §15.3.2 / §15.3.5 exercises `Function(string)` /
@@ -264,6 +278,9 @@ pub fn pathIsCynicOutOfScope(rel_path: []const u8) bool {
         if (std.mem.indexOf(u8, rel_path, pair[0]) != null and
             std.mem.indexOf(u8, rel_path, pair[1]) != null) return true;
     }
+    for (skip_ses_path_suffixes) |suffix| {
+        if (std.mem.endsWith(u8, rel_path, suffix)) return true;
+    }
     return false;
 }
 
@@ -315,6 +332,18 @@ test "skip: SES out of scope" {
     // …prototype methods stay in scope.
     try testing.expect(!pathIsCynicOutOfScope("built-ins/Function/prototype/apply/length.js"));
     try testing.expect(!pathIsCynicOutOfScope("built-ins/Function/prototype/call/length.js"));
+    // SAB-suffix generator siblings — duplicate coverage of a
+    // permanently-OOS host primitive; the `-buffer-arg/byteoffset…`
+    // ArrayBuffer sibling stays attempted.
+    try testing.expect(pathIsCynicOutOfScope(
+        "built-ins/TypedArrayConstructors/ctors/buffer-arg/byteoffset-is-negative-throws-sab.js",
+    ));
+    try testing.expect(pathIsCynicOutOfScope(
+        "built-ins/DataView/prototype/getInt32/index-is-out-of-range-sab.js",
+    ));
+    try testing.expect(!pathIsCynicOutOfScope(
+        "built-ins/TypedArrayConstructors/ctors/buffer-arg/byteoffset-is-negative-throws.js",
+    ));
     // Class field initializer fixtures whose assertion depends on
     // eval (cluster narrowed via the `class/elements/ + -eval-` pair).
     try testing.expect(pathIsCynicOutOfScope("language/expressions/class/elements/derived-cls-direct-eval-err-contains-supercall.js"));
