@@ -4007,3 +4007,42 @@ test "later: async yield* delegates to an async generator" {
         \\got;
     , "0,1,2,3");
 }
+
+test "globalThis: late-installed host binding is visible via globalThis.X" {
+    // §19.3 — `realm.globals` is a live view over the globalThis
+    // object. A host-installed binding pushed AFTER `installBuiltins`
+    // returns must show up via `globalThis.X` without a snapshot
+    // catch-up. This pins the test262 `$DONE` / `$262` pattern.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    // Install a fresh global after intrinsics setup.
+    const name_v = try realm.heap.allocateString("LATE_HOST_BINDING");
+    _ = name_v;
+    try realm.globals.put(realm.allocator, "LATE_HOST_BINDING", @import("value.zig").Value.fromInt32(42));
+    // Read it back via `globalThis.LATE_HOST_BINDING` — the
+    // snapshot-era implementation returned `undefined` here.
+    const v = switch (try evaluateScriptResult(&realm, "globalThis.LATE_HOST_BINDING")) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isInt32());
+    try testing.expectEqual(@as(i32, 42), v.asInt32());
+}
+
+test "globalThis: bare-identifier read sees a late-installed host binding" {
+    // Sibling to the test above — the bare-identifier
+    // (`lda_global`) path resolves against `realm.globals`, which
+    // is the same storage as `gt.properties`. A regression that
+    // forks the two would surface here too.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    try realm.globals.put(realm.allocator, "LATE_BARE_BINDING", @import("value.zig").Value.fromInt32(7));
+    const v = switch (try evaluateScriptResult(&realm, "LATE_BARE_BINDING + 1")) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isInt32());
+    try testing.expectEqual(@as(i32, 8), v.asInt32());
+}

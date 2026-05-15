@@ -83,6 +83,108 @@ pub const ModuleLoader = *const fn (
     base_url: ?[]const u8,
 ) ModuleLoaderError!ModuleLoadResult;
 
+/// §19.3 globalThis — live view over the host's global bindings.
+///
+/// Before `intrinsics.install` allocates the globalThis JSObject
+/// the host pre-installs a handful of bindings (`print`, `console`,
+/// the typed Error constructors) on a fallback hashmap. Once the
+/// globalThis object exists, `bindToObject` migrates the fallback
+/// into `gt.properties` and pins the pointer; every subsequent
+/// `get` / `put` / `contains` / `iterator` routes through the
+/// object's own property bag. That means a host- or user-installed
+/// binding lands on `globalThis.<name>` automatically — no
+/// snapshot, no catch-up pass, no hand mirror.
+pub const GlobalBindings = struct {
+    /// Live target: when set, every operation reads / writes the
+    /// JSObject's `properties` map. The interpreter's
+    /// `lda_global` / `sta_global` paths go through this — so a
+    /// late-installed binding (e.g. test262's `$DONE` / `$262`)
+    /// reaches both bare-identifier and `globalThis.X` lookups.
+    target: ?*@import("object.zig").JSObject = null,
+    /// Fallback storage — only used during bootstrap before
+    /// `bindToObject` runs. Migrated wholesale into `target`'s
+    /// `properties` map when the globalThis object is allocated.
+    fallback: std.StringArrayHashMapUnmanaged(Value) = .empty,
+
+    fn map(self: *GlobalBindings) *std.StringArrayHashMapUnmanaged(Value) {
+        if (self.target) |t| return &t.properties;
+        return &self.fallback;
+    }
+    fn mapConst(self: *const GlobalBindings) *const std.StringArrayHashMapUnmanaged(Value) {
+        if (self.target) |t| return &t.properties;
+        return &self.fallback;
+    }
+
+    pub fn get(self: *const GlobalBindings, key: []const u8) ?Value {
+        return self.mapConst().get(key);
+    }
+    pub fn put(self: *GlobalBindings, allocator: std.mem.Allocator, key: []const u8, value: Value) !void {
+        if (self.target) |t| {
+            // §17 — host-installed bindings on the global object
+            // default to `{ writable: true, enumerable: false,
+            // configurable: true }`. The old snapshot path stamped
+            // these via `setWithFlags`; we preserve that descriptor
+            // here for new keys so `Object.keys(globalThis)`
+            // doesn't suddenly enumerate every built-in. Existing
+            // entries keep whatever flags the installer set
+            // (handles the §19.1 frozen `NaN`/`Infinity`/`undefined`
+            // case once those flags are stamped).
+            const had_key = t.properties.contains(key);
+            try t.properties.put(allocator, key, value);
+            if (!had_key) {
+                try t.property_flags.put(allocator, key, .{
+                    .writable = true,
+                    .enumerable = false,
+                    .configurable = true,
+                });
+            }
+            return;
+        }
+        try self.fallback.put(allocator, key, value);
+    }
+    pub fn contains(self: *const GlobalBindings, key: []const u8) bool {
+        return self.mapConst().contains(key);
+    }
+    pub fn iterator(self: *const GlobalBindings) std.StringArrayHashMapUnmanaged(Value).Iterator {
+        return self.mapConst().iterator();
+    }
+    pub fn count(self: *const GlobalBindings) usize {
+        return self.mapConst().count();
+    }
+    pub fn getOrPut(
+        self: *GlobalBindings,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+    ) !std.StringArrayHashMapUnmanaged(Value).GetOrPutResult {
+        return self.map().getOrPut(allocator, key);
+    }
+    pub fn deinit(self: *GlobalBindings, allocator: std.mem.Allocator) void {
+        // The `target`'s properties map is owned by the JSObject
+        // (and freed by the heap sweep). We only ever own the
+        // fallback — which after `bindToObject` is empty, but
+        // still holds its backing array allocation.
+        self.fallback.deinit(allocator);
+    }
+
+    /// Promote the JSObject to the live target. Any bindings the
+    /// host already pushed into `fallback` (`print`, `console`,
+    /// `Error`, …) are copied onto `gt.properties` so identifier
+    /// lookups don't regress. `gt`'s own `properties` map is
+    /// reused — `setWithFlags` on `gt` for the same key from
+    /// inside `intrinsics.install` will overwrite the copy with
+    /// the spec-mandated descriptor flags.
+    pub fn bindToObject(self: *GlobalBindings, allocator: std.mem.Allocator, gt: *@import("object.zig").JSObject) !void {
+        if (self.target != null) return;
+        var it = self.fallback.iterator();
+        while (it.next()) |e| {
+            try gt.properties.put(allocator, e.key_ptr.*, e.value_ptr.*);
+        }
+        self.fallback.deinit(allocator);
+        self.fallback = .empty;
+        self.target = gt;
+    }
+};
+
 pub const Realm = struct {
     allocator: std.mem.Allocator,
     /// `*Heap` so multiple Realms can share one heap — required
@@ -105,7 +207,7 @@ pub const Realm = struct {
     /// identifier reference doesn't resolve in any user scope.
     /// Slices borrow from the source / built-ins; lifetime is
     /// the realm.
-    globals: std.StringArrayHashMapUnmanaged(Value) = .empty,
+    globals: GlobalBindings = .{},
     /// Buffered output from `print` / `console.log`. The host
     /// reads it after a script finishes (CLI flushes to stdout;
     /// the test262 runner discards it). Avoids threading

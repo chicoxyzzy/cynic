@@ -1440,26 +1440,13 @@ fn classifyAndRun(
     // `$DONE(err)` to signal completion. Install the host hook
     // before running anything; the runner checks
     // `realm.async_done_called` / `async_done_error` after the
-    // microtask queue drains.
-    //
-    // Also mirror the binding onto the `globalThis` snapshot
-    // object. `harness/asyncHelpers.js::asyncTest` opens with
-    // `Object.prototype.hasOwnProperty.call(globalThis, "$DONE")`
-    // — `lda_global` resolves bare `$DONE` against `realm.globals`,
-    // but `globalThis.$DONE` only sees what was on the snapshot
-    // built by `intrinsics.install`. Without this mirror,
-    // `asyncTest` throws "asyncTest called without async flag"
-    // and every Array.fromAsync + async-tagged fixture that uses
-    // `asyncTest` false-rejects.
+    // microtask queue drains. `realm.globals` is a live view over
+    // the globalThis object's properties, so `globalThis.$DONE`
+    // sees the binding without a hand-mirror.
     {
         const done_fn = realm.heap.allocateFunctionNative(test262Done, 1, "$DONE") catch return .{ .kind = .fail_false_reject };
         const done_v = cynic.runtime.heap.taggedFunction(done_fn);
         realm.globals.put(realm.allocator, "$DONE", done_v) catch return .{ .kind = .fail_false_reject };
-        if (realm.globals.get("globalThis")) |gt_v| {
-            if (cynic.runtime.heap.valueAsPlainObject(gt_v)) |gt_obj| {
-                gt_obj.set(realm.allocator, "$DONE", done_v) catch return .{ .kind = .fail_false_reject };
-            }
-        }
     }
 
     // §INTERPRETING.md — `$262` is the test262 host hook
@@ -1468,16 +1455,6 @@ fn classifyAndRun(
     // doesn't implement (`createRealm`, `agent.*`, `IsHTMLDDA`)
     // skip via the feature filter; the rest get a working shim.
     install262(&realm) catch return .{ .kind = .fail_false_reject };
-    // Mirror `$262` onto the `globalThis` snapshot for the same
-    // reason as `$DONE` above — some fixtures reach for
-    // `globalThis.$262` explicitly.
-    if (realm.globals.get("globalThis")) |gt_v2| {
-        if (cynic.runtime.heap.valueAsPlainObject(gt_v2)) |gt_obj2| {
-            if (realm.globals.get("$262")) |v262| {
-                gt_obj2.set(realm.allocator, "$262", v262) catch return .{ .kind = .fail_false_reject };
-            }
-        }
-    }
 
     // Install the module loader for both `is_module` tests AND
     // script tests that use dynamic `import()` (the `dynamic-import`
