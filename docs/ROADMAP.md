@@ -113,8 +113,6 @@ code construction (aligns with SES).
 
 **In progress / planned.**
 
-- Generator `.return()` running pending `finally` blocks inside
-  the body (currently only finally-on-throw fires).
 - **Async-generator yield-star resume-arg routing + the
   `AsyncGeneratorRequest` queue (§27.6.3.5 / §15.6).** Today
   `asyncGenReturn` / `asyncGenThrow` synthesize an abrupt
@@ -143,11 +141,31 @@ code construction (aligns with SES).
 - Tail-call optimization (PTC).
 - Top-level `await` in modules.
 - `typeof` of a callable proxy returning `"function"`.
-- Plug the four known-leaking patterns at `gc_threshold=1`
-  (generator wrapper iteration, promise microtask chain,
-  property-bag growth, array spread) — see
-  [docs/handbook/gc.md](handbook/gc.md#known-root-gaps).
 - Generational / incremental GC.
+
+**Recently landed (was in progress; now done).**
+
+- Generator `.return()` drives pending `try { yield } finally`
+  blocks via `unwindThrow` + an `is_finally` Handler flag and
+  the `realm.gen_return_completion` sentinel that skips user
+  `catch` clauses (§27.5.1.3).
+- Async arrow IIFE now wraps the body value in a Promise
+  (§15.8) — `(async () => 1)()` returns a Promise instead of
+  the body's value. One-line compiler fix.
+- `globalThis` is a live view over `realm.globals` (no
+  snapshot) — late-installed host bindings (`$DONE`, `$262`,
+  etc.) reflect through automatically. Replaces the
+  `intrinsics.install`-time snapshot pattern.
+- Labeled `break` / `continue` threaded through
+  `LoopContext.labels` (§14.13 / §14.16 / §14.17).
+- Computed-key object destructuring in both declaration and
+  assignment patterns (§14.3.3 / §13.15.5).
+- Class inner `C` lexical binding (§15.7.1 step 8): visible to
+  method bodies, distinct from any outer scope's `C`.
+- Three closed root gaps from the previous handbook list
+  (frame stacks, promise reactions, key anchors) — the
+  remaining residuals at `gc_threshold=1` would be new natives
+  missing a `HandleScope`, not the previously-tracked four.
 
 ## Standard library
 
@@ -189,7 +207,25 @@ code construction (aligns with SES).
 - `Iterator` global with `from` + prototype helpers (`map`,
   `filter`, `take`, `drop`, `flatMap`, `toArray`, `forEach`,
   `find`, `some`, `every`, `reduce`).
-- TypedArrays + DataView covering the common surface.
+- TypedArrays + DataView covering the common surface. ES2024
+  `Float16Array` + `DataView.{get,set}Float16` are wired
+  (IEEE 754 binary16). ES2024 resizable ArrayBuffer (resize +
+  maxByteLength), `IsFixedLengthArrayBuffer` propagation, and
+  length-tracking views (`new TA(rab)` with omitted length) are
+  shipped — view byteOffset / length / byteLength getters and
+  every prototype iteration method re-resolve length per access.
+  `%TypedArray%.from` + `%TypedArray%.of` ship as static methods
+  on the abstract intrinsic and are inherited by every concrete
+  ctor via the static_parent chain. `%TypedArray%[@@species]`
+  accessor installed with accessor-aware lookup for subclass
+  species ctor dispatch. Detached-buffer state on `ArrayBuffer`
+  + `ValidateTypedArray` propagates to every TA/DataView
+  operation per §25.1.3 / §10.4.5.x.
+- `Array.fromAsync` (§23.1.2.1.1) — drives sync iterables,
+  `@@asyncIterator`, and array-like fallback through a
+  capability + bound `.then` chain (spec-conformant deferral via
+  the microtask queue). Honors `this`-constructor for subclass
+  calls and writes each element via CreateDataPropertyOrThrow.
 - Error class hierarchy: `Error`, `TypeError`, `RangeError`,
   `ReferenceError`, `SyntaxError`, `URIError`, `EvalError`,
   `AggregateError`.
