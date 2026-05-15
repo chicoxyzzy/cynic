@@ -448,6 +448,29 @@ pub const Op = enum(u8) {
     /// hoist. Inner-scope assignments still go through
     /// `sta_env`.
     sta_global,
+    /// `[op] [k:u16] [r:u8]` — snapshot whether the binding
+    /// named `Chunk.constants[k]` is currently present on the
+    /// realm globals. Writes `true` into register `r` when the
+    /// binding is *unresolved* (a later strict-mode PutValue
+    /// would throw), `false` otherwise. Cynic is strict-only,
+    /// so §13.15.2 step 1.a "Evaluation of the LHS produces a
+    /// Reference Record { [[Base]]: unresolvable, … }" is
+    /// captured *before* the RHS runs and consumed by
+    /// `sta_global_strict` afterwards. Recording the snapshot
+    /// in a register (rather than throwing eagerly) preserves
+    /// the spec ordering — a side-effecting RHS that itself
+    /// throws (e.g. `s = (new Number("a")).toFixed(Infinity)`
+    /// raising RangeError) wins over the ReferenceError that
+    /// PutValue would otherwise raise later.
+    capture_unresolved_global,
+    /// `[op] [k:u16] [r:u8]` — strict-mode store companion to
+    /// `capture_unresolved_global`. If register `r` is truthy
+    /// (the snapshot saw an unresolvable Reference) raise a
+    /// ReferenceError on `Chunk.constants[k]` (§6.2.5.5 step
+    /// 6); otherwise write `acc` into `realm.globals[name]`.
+    /// Emitted in place of `sta_global` whenever the LHS of an
+    /// assignment failed to resolve at compile time.
+    sta_global_strict,
 
     // ── Objects / properties ────────────────────────────────────
     /// Allocate a fresh empty `JSObject` whose `[[Prototype]]` is
@@ -650,6 +673,9 @@ pub const Op = enum(u8) {
             .module_load,
             .module_export,
             => 2, // u16 / i16
+            .capture_unresolved_global,
+            .sta_global_strict,
+            => 3, // k:u16 + r:u8
             .call,
             .new_call,
             .super_call,
@@ -768,6 +794,8 @@ pub const Op = enum(u8) {
             .lda_global => "LdaGlobal",
             .lda_global_or_undef => "LdaGlobalOrUndef",
             .sta_global => "StaGlobal",
+            .capture_unresolved_global => "CaptureUnresolvedGlobal",
+            .sta_global_strict => "StaGlobalStrict",
             .throw_ => "Throw",
             .throw_if_hole => "ThrowIfHole",
             .require_object_coercible => "RequireObjectCoercible",

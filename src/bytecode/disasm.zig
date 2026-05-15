@@ -156,6 +156,11 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
                 const k = readU16(chunk.code, i + 1);
                 try buf.print(allocator, " k{d}", .{k});
             },
+            .capture_unresolved_global, .sta_global_strict => {
+                const k = readU16(chunk.code, i + 1);
+                const r = chunk.code[i + 3];
+                try buf.print(allocator, " k{d} r{d}", .{ k, r });
+            },
             else => {}, // 0-operand
         }
 

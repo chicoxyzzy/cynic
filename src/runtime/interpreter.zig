@@ -4961,6 +4961,64 @@ fn runFrames(
                 }
                 try realm.globals.put(realm.allocator, key_s.bytes, acc);
             },
+            .capture_unresolved_global => {
+                // §13.15.2 step 1.a — Evaluation of the LHS of
+                // an `Identifier = expr` assignment produces a
+                // Reference Record with `[[Base]]: unresolvable`
+                // when the identifier has no binding. Cynic
+                // captures *that* state into a register here,
+                // ahead of the RHS, so a side-effecting RHS
+                // (e.g. `this.foo = …` populating the binding)
+                // doesn't mask the unresolvable Reference at
+                // PutValue (§6.2.5.5 step 6). The flag is read
+                // by `sta_global_strict` after the RHS settles.
+                const k = readU16(code, ip);
+                ip += 2;
+                const r = code[ip];
+                ip += 1;
+                if (k >= local_chunk.constants.len) return error.InvalidOpcode;
+                const key_v = local_chunk.constants[k];
+                if (!key_v.isString()) return error.InvalidOpcode;
+                const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+                registers[r] = if (realm.globals.contains(key_s.bytes))
+                    Value.fromBool(false)
+                else
+                    Value.fromBool(true);
+            },
+            .sta_global_strict => {
+                // §13.15.2 step 1.d — PutValue on the Reference
+                // captured by `capture_unresolved_global`. If
+                // the snapshot saw an unresolvable Reference,
+                // §6.2.5.5 step 6 throws ReferenceError in
+                // strict mode (Cynic's only mode); otherwise
+                // write through to the realm globals just like
+                // `sta_global`. Note the post-RHS check uses the
+                // *snapshot*, not the current state — between
+                // the snapshot and now the RHS may have created
+                // the binding (e.g. via `this.x = …`), but the
+                // Reference is still unresolvable per spec.
+                const k = readU16(code, ip);
+                ip += 2;
+                const r = code[ip];
+                ip += 1;
+                if (k >= local_chunk.constants.len) return error.InvalidOpcode;
+                const key_v = local_chunk.constants[k];
+                if (!key_v.isString()) return error.InvalidOpcode;
+                const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+                const flag = registers[r];
+                const was_unresolved = flag.isBool() and flag.asBool();
+                if (was_unresolved) {
+                    const ex = try makeReferenceError(realm, key_s.bytes);
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                }
+                try realm.globals.put(realm.allocator, key_s.bytes, acc);
+            },
 
             // ── Objects / properties ────────────────────────────────────
             .make_object => {

@@ -2639,19 +2639,19 @@ pub const Compiler = struct {
         }
         const name = self.source[target_ptr.identifier_reference.span.start..target_ptr.identifier_reference.span.end];
         const scope = self.scope orelse return error.UnresolvedReference;
-        const binding: Binding = scope.resolve(name) orelse Binding{
-            // Not in any user-visible scope. Treat the assignment
-            // as a global write — `sta_global` creates the binding
-            // if absent. This matches the "create on assign" path
-            // that real engines take for forward-declared
-            // top-level vars and is also what's needed for tests
-            // that compile assignments to names whose
-            // reachability is gated by an earlier throw (the
-            // assignment never actually runs). Strict-mode
-            // ReferenceError on truly-unresolvable PutValue is a
-            // runtime check we leave to `sta_global` once we wire
-            // a globalThis sentinel; today every top-level write
-            // succeeds the way browsers do under sloppy mode.
+        const resolved = scope.resolve(name);
+        const binding: Binding = resolved orelse Binding{
+            // Not in any user-visible scope. The assignment is a
+            // write against the global object, which Cynic models
+            // as `realm.globals`. Cynic is strict-only, so
+            // §13.15.2 → §6.2.5.5 step 6 requires throwing
+            // ReferenceError when the Reference is unresolvable
+            // at PutValue time. The §13.15.2 evaluation order
+            // captures the LHS Reference *before* the RHS runs,
+            // so we emit an `assert_global_defined` ahead of the
+            // RHS (see below) — a side-effecting RHS (e.g.
+            // `this.x = 1` populating the binding mid-expression)
+            // must not mask the unresolvable Reference.
             .name = name,
             .env_slot = 0,
             .env_depth = 0,
@@ -2663,6 +2663,31 @@ pub const Compiler = struct {
             try self.report(.assignment_to_const, a.span);
             return error.AssignmentToConst;
         }
+
+        // §13.15.2 step 1.a — for a plain `Identifier = expr`
+        // assignment whose LHS doesn't resolve in any user-
+        // visible scope, snapshot the unresolvable-Reference
+        // state *before* the RHS runs. The flag lives in a
+        // reserved register and is consumed by
+        // `sta_global_strict` after the RHS settles, so a
+        // side-effecting RHS that itself throws (e.g.
+        // `s = (new Number("a")).toFixed(Infinity)` → RangeError)
+        // wins over the ReferenceError that PutValue would
+        // otherwise raise. Compound (`x += e`) and logical
+        // (`x ||= e`) forms read the LHS via `lda_global`
+        // first, which already throws on miss, so they don't
+        // need the snapshot. Bindings resolved at compile time
+        // live on env slots or pre-hoisted globals — also no
+        // snapshot needed.
+        const r_unresolved_flag: ?u8 = if (resolved == null and a.op == .eq) blk: {
+            const r = try self.reserveTemp();
+            const k = try self.internString(name);
+            try self.builder.emitOp(.capture_unresolved_global, a.target.span());
+            try self.builder.emitU16(k);
+            try self.builder.emitU8(r);
+            break :blk r;
+        } else null;
+        defer if (r_unresolved_flag != null) self.releaseTemp();
 
         if (a.op == .eq) {
             // §13.15.2 — for plain `x = e` where `e` is an
@@ -2731,7 +2756,16 @@ pub const Compiler = struct {
             try self.builder.emitOp(op, a.span);
             try self.builder.emitU8(t);
         }
-        try self.emitStoreBinding(binding, a.span);
+        if (r_unresolved_flag) |r| {
+            // `sta_global_strict` consumes the snapshot taken
+            // ahead of the RHS — see §13.15.2 step 1.d.
+            const k = try self.internString(binding.name);
+            try self.builder.emitOp(.sta_global_strict, a.span);
+            try self.builder.emitU16(k);
+            try self.builder.emitU8(r);
+        } else {
+            try self.emitStoreBinding(binding, a.span);
+        }
     }
 
     // ── Literals ────────────────────────────────────────────────────────

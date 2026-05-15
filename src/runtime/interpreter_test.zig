@@ -1067,6 +1067,32 @@ test "later: ReferenceError on unresolved global is a real object" {
     , "ref");
 }
 
+// §13.15.2 step 1.a — Evaluation of the LHS Reference happens
+// *before* the RHS, so a side-effecting RHS that creates a
+// matching global must not mask the unresolvable LHS Reference.
+// Cynic is strict-only; §6.2.5.5 step 6 then throws.
+test "strict: assignment LHS resolvability snapshot precedes RHS" {
+    try expectScriptStringWithBuiltins(
+        \\let kind = "none";
+        \\try {
+        \\  undeclaredA = (this.undeclaredA = 5);
+        \\} catch (e) {
+        \\  if (e instanceof ReferenceError) kind = "ref";
+        \\}
+        \\kind;
+    , "ref");
+}
+
+// Sanity guard for the same path: forward writes against
+// already-declared globals continue to succeed.
+test "strict: bare assignment to a pre-declared global stores" {
+    try expectScriptIntWithBuiltins(
+        \\var declared;
+        \\declared = 17;
+        \\declared;
+    , 17);
+}
+
 test "later: empty class declaration creates a constructor" {
     try expectScriptStringWithBuiltins(
         \\class Empty {}
