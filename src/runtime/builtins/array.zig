@@ -677,12 +677,16 @@ fn arrayConcat(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     for (args) |arg| {
         try concatAppend(realm, out, arg, &write_idx);
     }
-    setLength(realm, out, write_idx) catch return error.OutOfMemory;
+    // §23.1.3.2 step 6 — ? Set(A, "length", n, true). Routes
+    // through `setOrThrow` so a user-installed length setter on
+    // the species ctor fires and a non-writable length throws.
+    try setLengthOrThrow(realm, out, write_idx);
     return out_v;
 }
 
 fn concatAppend(realm: *Realm, out: *JSObject, value: Value, write_idx: *i64) NativeError!void {
     const spreadable = try isConcatSpreadable(realm, value);
+    const safe_max: i64 = (1 << 53) - 1;
     if (spreadable) {
         const arr = heap_mod.valueAsPlainObject(value) orelse {
             try concatWriteOne(realm, out, value, write_idx);
@@ -690,10 +694,13 @@ fn concatAppend(realm: *Realm, out: *JSObject, value: Value, write_idx: *i64) Na
         };
         // §23.1.3.2 step 8.d.iii — ? LengthOfArrayLike(E). Must
         // propagate ToLength throws (e.g. poisoned `length.toString`
-        // on an opted-in non-array spreadable).
-        const len = try intrinsics.clampArrayLengthR(realm, try intrinsics.toLengthOf(realm, arr));
-        if (write_idx.* + len > 9007199254740991) {
-            return throwTypeError(realm, "concat: result length exceeds 2^53-1");
+        // on an opted-in non-array spreadable). Cap at 2^53-1 per
+        // §7.1.20 ToLength.
+        var len = try intrinsics.toLengthOf(realm, arr);
+        if (len > safe_max) len = safe_max;
+        // §23.1.3.2 step 8.d.ii — `n + len > 2^53 - 1` throws.
+        if (write_idx.* + len > safe_max) {
+            return throwTypeError(realm, "Array.prototype.concat length exceeds maximum length");
         }
         var i: i64 = 0;
         while (i < len) : (i += 1) {
@@ -708,8 +715,9 @@ fn concatAppend(realm: *Realm, out: *JSObject, value: Value, write_idx: *i64) Na
             try concatWriteOne(realm, out, v, write_idx);
         }
     } else {
-        if (write_idx.* >= 9007199254740991) {
-            return throwTypeError(realm, "concat: result length exceeds 2^53-1");
+        // §23.1.3.2 step 8.e.i — `n >= 2^53 - 1` throws.
+        if (write_idx.* >= safe_max) {
+            return throwTypeError(realm, "Array.prototype.concat length exceeds maximum length");
         }
         try concatWriteOne(realm, out, value, write_idx);
     }
@@ -719,7 +727,14 @@ fn concatWriteOne(realm: *Realm, out: *JSObject, v: Value, write_idx: *i64) Nati
     var wbuf: [24]u8 = undefined;
     const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{write_idx.*}) catch unreachable;
     const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-    out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+    // §23.1.3.2 step 8.d.iii.3.b / step 8.e.iii — the per-item
+    // write is CreateDataPropertyOrThrow, NOT a regular [[Set]].
+    // The species-provided result array may have non-writable own
+    // slots configured by its constructor; the spec mandates a
+    // CreateDataProperty, which redefines the slot back to the
+    // default `{w:T,e:T,c:T}` and rejects non-configurable own
+    // slots / non-extensible receivers.
+    try createDataPropertyOrThrowGeneric(realm, out, owned.bytes, v);
     write_idx.* += 1;
 }
 
