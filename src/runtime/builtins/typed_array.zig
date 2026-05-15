@@ -2274,11 +2274,19 @@ fn dvGetPrologue(realm: *Realm, this_value: Value, args: []const Value, elem_siz
     const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: buffer is detached");
     // §25.3.1.1 GetViewByteLength — live byte length for length-
     // tracking views; the stored snapshot for fixed-length ones.
-    // If the view is itself OOB, throw TypeError per spec.
+    // If the view is itself OOB after a resize of the underlying
+    // resizable buffer, throw TypeError per spec (IsViewOutOfBounds).
     const view_byte_len: usize = if (dv.length_tracking) blk: {
         if (dv.byte_offset > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
         break :blk buf.len - dv.byte_offset;
-    } else dv.byte_length;
+    } else blk: {
+        // Fixed-length view: byteOffset + byteLength must still fit
+        // in the (possibly shrunk) resizable buffer.
+        if (dv.byte_offset > buf.len or dv.byte_length > buf.len - dv.byte_offset) {
+            return throwTypeError(realm, "DataView: out-of-bounds");
+        }
+        break :blk dv.byte_length;
+    };
     // step 12-13 — bounds (overflow-safe).
     if (elem_size > view_byte_len or off > view_byte_len - elem_size) {
         return throwRangeError(realm, "DataView: byte offset out of bounds");
@@ -2300,7 +2308,12 @@ fn dvSetNumPrologue(realm: *Realm, this_value: Value, args: []const Value, elem_
     const view_byte_len: usize = if (dv.length_tracking) blk: {
         if (dv.byte_offset > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
         break :blk buf.len - dv.byte_offset;
-    } else dv.byte_length;
+    } else blk: {
+        if (dv.byte_offset > buf.len or dv.byte_length > buf.len - dv.byte_offset) {
+            return throwTypeError(realm, "DataView: out-of-bounds");
+        }
+        break :blk dv.byte_length;
+    };
     if (elem_size > view_byte_len or off > view_byte_len - elem_size) {
         return throwRangeError(realm, "DataView: byte offset out of bounds");
     }
@@ -2464,7 +2477,12 @@ fn dataViewSetBigInt64(realm: *Realm, this_value: Value, args: []const Value) Na
     const vbl: usize = if (dv.length_tracking) blk: {
         if (dv.byte_offset > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
         break :blk buf.len - dv.byte_offset;
-    } else dv.byte_length;
+    } else blk: {
+        if (dv.byte_offset > buf.len or dv.byte_length > buf.len - dv.byte_offset) {
+            return throwTypeError(realm, "DataView: out-of-bounds");
+        }
+        break :blk dv.byte_length;
+    };
     if (8 > vbl or off > vbl - 8) return throwRangeError(realm, "DataView: byte offset out of bounds");
     dvWriteEndian(i64, buf, dv.byte_offset + off, i, dvLittleEndian(args, 2));
     return Value.undefined_;
@@ -2477,7 +2495,12 @@ fn dataViewSetBigUint64(realm: *Realm, this_value: Value, args: []const Value) N
     const vbl: usize = if (dv.length_tracking) blk: {
         if (dv.byte_offset > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
         break :blk buf.len - dv.byte_offset;
-    } else dv.byte_length;
+    } else blk: {
+        if (dv.byte_offset > buf.len or dv.byte_length > buf.len - dv.byte_offset) {
+            return throwTypeError(realm, "DataView: out-of-bounds");
+        }
+        break :blk dv.byte_length;
+    };
     if (8 > vbl or off > vbl - 8) return throwRangeError(realm, "DataView: byte offset out of bounds");
     const u: u64 = @bitCast(i);
     dvWriteEndian(u64, buf, dv.byte_offset + off, u, dvLittleEndian(args, 2));
