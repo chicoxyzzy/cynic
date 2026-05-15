@@ -45,11 +45,23 @@ pub const skip_annex_b_paths = [_][]const u8{
 };
 
 pub const skip_annex_b_features = [_][]const u8{
-    // Empty: Annex B identifiers and accessors (`__proto__`,
-    // `__defineGetter__`, `RegExp.$1`, etc.) parse as ordinary
-    // member access; they fail at runtime because Cynic doesn't
-    // install the globals, and that failure should be visible in
-    // runtime-mode scoring rather than hidden here.
+    // Object.prototype's Annex B accessor methods — `__defineGetter__`,
+    // `__defineSetter__`, `__lookupGetter__`, `__lookupSetter__`. Test262
+    // tags fixtures for them with `features: [__getter__]` / `[__setter__]`.
+    // Cynic doesn't install them per AGENTS.md "Annex B in its entirety —
+    // out." Each fixture's failure is honest noise on the dashboard, not
+    // an engine bug worth tracking. ~54 fixtures combined.
+    "__getter__",
+    "__setter__",
+    // Object.prototype.__proto__ accessor (Annex B §B.2.2.1). Same policy.
+    // ~16 fixtures.
+    "__proto__",
+    // RegExp legacy statics (`RegExp.$1`, `RegExp.input`, etc.) and the
+    // `IsHTMLDDA` host primitive. Both Annex B. No fixtures hit these
+    // today (already drained by other means) but listed for symmetry —
+    // a future test262 bump might add coverage.
+    "legacy-regexp",
+    "IsHTMLDDA",
 };
 
 // ── Group 2: SES alignment ──────────────────────────────────────────

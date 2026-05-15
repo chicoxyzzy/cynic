@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 84.15 % | 90.35 % | 34477 / 40969 | 34477 / 38160 |
+| **runtime** | 84.15 % | 90.52 % | 34476 / 40969 | 34476 / 38088 |
 
 
 ## Where the runtime stands, by area
@@ -26,12 +26,12 @@ browser-era built-ins …).
 | **_100–999 fails_** | | | | | |
 | `built-ins/Array` | 2765 | 275 | 36 | 90 % | 91 % |
 | `built-ins/Function` | 265 | 103 | 84 | 59 % | 72 % |
-| `built-ins/Object` | 3083 | 316 | 11 | 90 % | 91 % |
+| `built-ins/Object` | 3083 | 247 | 80 | 90 % | 93 % |
 | `built-ins/RegExp` | 1349 | 261 | 161 | 76 % | 84 % |
 | `built-ins/String` | 1045 | 172 | 5 | 86 % | 86 % |
 | `built-ins/TypedArray` | 1272 | 151 | 8 | 89 % | 89 % |
 | `built-ins/TypedArrayConstructors` | 534 | 126 | 16 | 79 % | 81 % |
-| `language/expressions` | 9176 | 795 | 977 | 84 % | 92 % |
+| `language/expressions` | 9175 | 794 | 979 | 84 % | 92 % |
 | `language/module-code` | 462 | 120 | 14 | 78 % | 79 % |
 | `language/statements` | 7978 | 510 | 672 | 87 % | 94 % |
 | **_10–99 fails_** | | | | | |
@@ -47,7 +47,7 @@ browser-era built-ins …).
 | `built-ins/Math` | 311 | 16 | 0 | 95 % | 95 % |
 | `built-ins/Number` | 318 | 21 | 0 | 94 % | 94 % |
 | `built-ins/Promise` | 603 | 25 | 38 | 91 % | 96 % |
-| `built-ins/Proxy` | 214 | 85 | 12 | 69 % | 72 % |
+| `built-ins/Proxy` | 214 | 84 | 13 | 69 % | 72 % |
 | `built-ins/Reflect` | 120 | 33 | 0 | 78 % | 78 % |
 | `built-ins/Set` | 347 | 34 | 1 | 91 % | 91 % |
 | `built-ins/Symbol` | 65 | 10 | 6 | 80 % | 87 % |
@@ -139,13 +139,11 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 | -167 |  |
-| **runtime** | 84.15 % | 90.35 % | 34477 / 40969 | 34477 / 38160 | +1228 | 1m 34s |
+| **runtime** | 84.15 % | 90.52 % | 34476 / 40969 | 34476 / 38088 | +1227 | 1m 48s |
 
 Biggest movers (runtime):
 
-- `built-ins/TypedArray` +26
-- `language/expressions` +1
-- `language/statements` +1
+- `language/expressions` -1
 
 ### 2026-05-14 — cynic `aca1903`, test262 `d0c1b455`
 
