@@ -946,6 +946,33 @@ pub fn openForInIterator(
                 }
             }
 
+            // §10.4.5.x IntegerIndexedExoticObject — for-in over a
+            // TypedArray enumerates its in-bounds indices `[0,
+            // [[ArrayLength]])` as own enumerable string keys.
+            // Length comes from the LIVE buffer-witness count so a
+            // length-tracking view (or a fixed-length view shrunk
+            // OOB) reports the current state, not its snapshot.
+            if (cur.typed_view) |tv| {
+                const buf_opt = tv.viewed.array_buffer;
+                const live_len: u32 = blk: {
+                    const buf = buf_opt orelse break :blk 0;
+                    const elem_size = tv.kind.elementSize();
+                    if (tv.length_tracking) {
+                        if (tv.byte_offset > buf.len) break :blk 0;
+                        break :blk @intCast((buf.len - tv.byte_offset) / elem_size);
+                    }
+                    if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
+                    break :blk @intCast(tv.length);
+                };
+                var ti: u32 = 0;
+                while (ti < live_len) : (ti += 1) {
+                    var ibuf: [16]u8 = undefined;
+                    const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ti}) catch continue;
+                    const key_owned_str = realm.heap.allocateString(ks) catch return error.OutOfMemory;
+                    int_keys.append(realm.allocator, .{ .idx = ti, .key = key_owned_str.bytes }) catch return error.OutOfMemory;
+                }
+            }
+
             // §14.7.5.6 EnumerateObjectProperties — at each level
             // we shadow non-enumerable own keys against the
             // prototype chain. So we collect all own keys (to
