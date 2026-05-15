@@ -1464,6 +1464,18 @@ fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
     const obj = heap_mod.valueAsPlainObject(arg) orelse return arg; // §20.1.2.5 — primitives pass through
+    // §10.4.5.4 IntegerIndexedExoticObject [[PreventExtensions]] —
+    // returns false when IsTypedArrayFixedLength(O) is false, which
+    // covers every length-tracking view AND every fixed-length
+    // view whose backing ArrayBuffer is resizable (§25.1.4.4 chains
+    // through IsFixedLengthArrayBuffer). SetIntegrityLevel(O,
+    // frozen) then throws TypeError. Only TAs backed by genuinely
+    // fixed-length ArrayBuffers can be frozen.
+    if (obj.typed_view) |tv| {
+        if (tv.viewed.array_buffer_max_byte_length != null) {
+            return throwTypeError(realm, "Cannot freeze TypedArray backed by resizable buffer");
+        }
+    }
     obj.extensible = false;
     // §10.1.4.1 SetIntegrityLevel(O, frozen) — mark every own
     // data property `{ writable: false, configurable: false }`
