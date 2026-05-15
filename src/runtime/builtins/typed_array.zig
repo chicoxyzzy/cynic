@@ -690,33 +690,45 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                     return this_value;
                 }
 
-                // Array-like source — copy elements.
-                const len_v = src.get("length");
-                if (len_v.isInt32() or len_v.isDouble()) {
-                    const ld: f64 = if (len_v.isInt32()) @floatFromInt(len_v.asInt32()) else len_v.asDouble();
-                    if (!std.math.isNan(ld) and ld >= 0) {
-                        const length: usize = @intFromFloat(ld);
-                        const byte_len = length * elem_size;
-                        const buf_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-                        if (heap_mod.valueAsFunction(realm.globals.get("ArrayBuffer") orelse Value.undefined_)) |ab| {
-                            buf_obj.prototype = ab.prototype;
-                        }
-                        const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
-                        @memset(buf_bytes, 0);
-                        buf_obj.array_buffer = buf_bytes;
-                buf_obj.has_array_buffer_data = true;
-                        inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name };
-                        // Copy each element via the same write path.
-                        var i: usize = 0;
-                        while (i < length) : (i += 1) {
-                            var ibuf: [16]u8 = undefined;
-                            const s = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-                            const src_v = src.get(s);
-                            writeTypedElement(buf_bytes, kind, i * elem_size, src_v);
-                        }
-                        return this_value;
-                    }
+                // Array-like source — §23.2.5.1.6
+                // InitializeTypedArrayFromArrayLike. `length` is
+                // observed via Get + ToLength (accessors / proxy
+                // traps fire). Each indexed element is fetched via
+                // Get and coerced via ToNumber (or ToBigInt for
+                // BigInt views); valueOf / Symbol.toPrimitive
+                // throws must propagate.
+                const length_i = try intrinsics.toLengthOf(realm, src);
+                const length: usize = @intCast(length_i);
+                const byte_len = length * elem_size;
+                const buf_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+                if (heap_mod.valueAsFunction(realm.globals.get("ArrayBuffer") orelse Value.undefined_)) |ab| {
+                    buf_obj.prototype = ab.prototype;
                 }
+                const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
+                @memset(buf_bytes, 0);
+                buf_obj.array_buffer = buf_bytes;
+                buf_obj.has_array_buffer_data = true;
+                inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name };
+                // Copy each element via Get + ToNumber/ToBigInt.
+                const bigint_mod = @import("bigint.zig");
+                var i: usize = 0;
+                while (i < length) : (i += 1) {
+                    var ibuf: [16]u8 = undefined;
+                    const s = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+                    const src_v = try getPropertyChain(realm, src, s);
+                    // §10.4.5.x IntegerIndexedElementSet — coerce
+                    // before the write so valueOf / Symbol.toPrimitive
+                    // exceptions propagate per §23.2.5.1.6 step 8.c.
+                    const coerced = switch (kind) {
+                        .bigint64, .biguint64 => bigint_mod.toBigIntValue(realm, src_v) catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            else => return error.NativeThrew,
+                        },
+                        else => try intrinsics.toNumber(realm, src_v),
+                    };
+                    writeTypedElement(buf_bytes, kind, i * elem_size, coerced);
+                }
+                return this_value;
             }
             return throwTypeError(realm, "TypedArray: unsupported constructor argument");
         }
