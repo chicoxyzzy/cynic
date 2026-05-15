@@ -3592,8 +3592,49 @@ fn runFrames(
                     if (iter_obj.properties.get("__cynic_iter_done__")) |dv| {
                         if (toBoolean(dv)) continue;
                     }
-                    const ret_v = iter_obj.get("return");
-                    if (heap_mod.valueAsFunction(ret_v)) |ret_fn| {
+                    // §7.4.6 IteratorClose step 4 → §7.3.10 GetMethod —
+                    // a present but non-callable `return` throws
+                    // TypeError. Only `undefined` / `null` skip the
+                    // call. A throw here propagates per mode: on a
+                    // normal/break/return completion (mode==0) it
+                    // surfaces; on a throw completion (mode==1) the
+                    // outer throw still wins.
+                    //
+                    // Accessor-aware so `get return() { … }` fires
+                    // exactly once (the fixtures track gets via a
+                    // side-effect counter).
+                    const ret_v = intrinsics_mod.getPropertyChain(realm, iter_obj, "return") catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => {
+                            const ex = consumePendingException(realm) orelse try makeTypeError(realm, "iterator 'return' read failed");
+                            if (mode == 1) {
+                                // Throw completion swallows inner errors.
+                                continue;
+                            }
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue;
+                        },
+                    };
+                    const ret_fn_opt: ?*JSFunction = blk: {
+                        if (ret_v.isUndefined() or ret_v.isNull()) break :blk null;
+                        if (heap_mod.valueAsFunction(ret_v)) |rf| break :blk rf;
+                        if (mode == 1) break :blk null;
+                        const ex = try makeTypeError(realm, "iterator 'return' is not callable");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        break :blk null;
+                    };
+                    if (committed) continue;
+                    if (ret_fn_opt) |ret_fn| {
                         // §7.4.6 IteratorClose — completion-type
                         // dispatch. `mode == 1` ⇒ the surrounding
                         // completion is `throw`: per step 7, the
