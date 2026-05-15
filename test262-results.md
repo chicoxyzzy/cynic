@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total |
 |---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 |
-| **runtime** | 81.44 % | 87.40 % | 33667 / 41339 |
+| **runtime** | 81.62 % | 87.59 % | 33741 / 41339 |
 
 
 ## Where the runtime stands, by area
@@ -24,17 +24,17 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_100–999 fails_** | | | | | |
-| `built-ins/Array` | 2567 | 478 | 36 | 83 % | 84 % |
+| `built-ins/Array` | 2577 | 468 | 36 | 84 % | 85 % |
 | `built-ins/DataView` | 446 | 104 | 11 | 80 % | 81 % |
 | `built-ins/Function` | 260 | 111 | 84 | 57 % | 70 % |
 | `built-ins/Object` | 3070 | 330 | 11 | 90 % | 90 % |
 | `built-ins/RegExp` | 1343 | 374 | 161 | 72 % | 78 % |
 | `built-ins/String` | 1044 | 174 | 5 | 85 % | 86 % |
-| `built-ins/TypedArray` | 1016 | 414 | 8 | 71 % | 71 % |
-| `built-ins/TypedArrayConstructors` | 433 | 287 | 16 | 59 % | 60 % |
-| `language/expressions` | 9055 | 924 | 977 | 83 % | 91 % |
-| `language/module-code` | 460 | 122 | 14 | 77 % | 79 % |
-| `language/statements` | 7956 | 609 | 675 | 86 % | 93 % |
+| `built-ins/TypedArray` | 1076 | 354 | 8 | 75 % | 75 % |
+| `built-ins/TypedArrayConstructors` | 440 | 280 | 16 | 60 % | 61 % |
+| `language/expressions` | 9054 | 925 | 977 | 83 % | 91 % |
+| `language/module-code` | 459 | 123 | 14 | 77 % | 79 % |
+| `language/statements` | 7955 | 610 | 675 | 86 % | 93 % |
 | **_10–99 fails_** | | | | | |
 | `built-ins/ArrayBuffer` | 165 | 27 | 4 | 84 % | 86 % |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 8 | 30 | 0 | 21 % | 21 % |
@@ -138,15 +138,15 @@ browser-era built-ins …).
 |         | spec% | attempted% | pass / total | Δ pass | elapsed |
 |---|---|---|---|---:|---:|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | -167 | 1.3 s |
-| **runtime** | 81.44 % | 87.40 % | 33667 / 41339 | +418 | 4m 21s |
+| **runtime** | 81.62 % | 87.59 % | 33741 / 41339 | +492 | 1m 41s |
 
 Biggest movers (runtime):
 
-- `built-ins/Object` +92
-- `built-ins/Promise` +75
-- `language/expressions` +16
-- `built-ins/Array` +1
-- `built-ins/Map` +1
+- `built-ins/TypedArray` +60
+- `built-ins/Array` +10
+- `built-ins/TypedArrayConstructors` +7
+- `language/expressions` -1
+- `language/module-code` -1
 
 ### 2026-05-14 — cynic `aca1903`, test262 `d0c1b455`
 
