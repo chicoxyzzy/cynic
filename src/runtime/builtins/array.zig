@@ -1807,57 +1807,96 @@ fn arrayReverse(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 }
 
 fn arrayShift(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.1.3.25 Array.prototype.shift:
+    //   1. O = ToObject(this); 2. len = ? ToLength(? Get(O, "length"))
+    //   3. If len = 0: ? Set(O, "length", 0, true); return undefined
+    //   4. first = ? Get(O, "0")
+    //   5. For k from 1 to len-1: move O[k] to O[k-1] using
+    //      HasProperty + (Get + Set or DeletePropertyOrThrow)
+    //   6. ? DeletePropertyOrThrow(O, ToString(len - 1))
+    //   7. ? Set(O, "length", len - 1, true); return first
     _ = args;
     const obj = try toObjectThis(realm, this_value);
-    const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
-    if (len == 0) {
-        setLength(realm, obj, 0) catch return error.OutOfMemory;
+    var len = try toLengthOf(realm, obj);
+    const safe_max: i64 = (1 << 53) - 1;
+    if (len > safe_max) len = safe_max;
+    if (len <= 0) {
+        try setLengthOrThrow(realm, obj, 0);
         return Value.undefined_;
     }
-    const head = obj.get("0");
-    var i: i64 = 1;
-    while (i < len) : (i += 1) {
-        var ibuf: [24]u8 = undefined;
-        var pbuf: [24]u8 = undefined;
-        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        const pslice = std.fmt.bufPrint(&pbuf, "{d}", .{i - 1}) catch unreachable;
-        const v = obj.get(islice);
-        const owned = realm.heap.allocateString(pslice) catch return error.OutOfMemory;
-        obj.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+    const head = try getPropertyChain(realm, obj, "0");
+    var k: i64 = 1;
+    while (k < len) : (k += 1) {
+        var fbuf: [24]u8 = undefined;
+        var tbuf: [24]u8 = undefined;
+        const fslice = std.fmt.bufPrint(&fbuf, "{d}", .{k}) catch unreachable;
+        const tslice = std.fmt.bufPrint(&tbuf, "{d}", .{k - 1}) catch unreachable;
+        // §23.1.3.25 step 5.d / 5.e — HasProperty(O, from)
+        // distinguishes "real entry" from "hole" so a sparse
+        // shift collapses holes properly.
+        if (obj.hasProperty(fslice)) {
+            const v = try getPropertyChain(realm, obj, fslice);
+            const owned = realm.heap.allocateString(tslice) catch return error.OutOfMemory;
+            try setOrThrow(realm, obj, owned.bytes, v);
+        } else {
+            try deletePropertyOrThrow(realm, obj, tslice);
+        }
     }
     {
         var lbuf: [24]u8 = undefined;
         const lslice = std.fmt.bufPrint(&lbuf, "{d}", .{len - 1}) catch unreachable;
-        _ = obj.deleteOwn(lslice);
+        try deletePropertyOrThrow(realm, obj, lslice);
     }
-    setLength(realm, obj, len - 1) catch return error.OutOfMemory;
+    try setLengthOrThrow(realm, obj, len - 1);
     return head;
 }
 
 fn arrayUnshift(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.1.3.32 Array.prototype.unshift:
+    //   1. O = ToObject(this); 2. len = ? ToLength(? Get(O, "length"))
+    //   3. argCount = items.length
+    //   4. If argCount > 0:
+    //      a. If len + argCount > 2^53-1 throw TypeError
+    //      b. shift O[k-1] -> O[k+argCount-1] for k = len-1 downto 0,
+    //         using HasProperty + (Set or DeletePropertyOrThrow)
+    //      c. ? Set(O, ToString(j), items[j], true) for j in [0, argCount)
+    //   5. ? Set(O, "length", len + argCount, true)
     const obj = try toObjectThis(realm, this_value);
-    const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
+    var len = try toLengthOf(realm, obj);
+    const safe_max: i64 = (1 << 53) - 1;
+    if (len > safe_max) len = safe_max;
     const argc: i64 = @intCast(args.len);
-    // Shift existing elements right by argc.
-    var i: i64 = len - 1;
-    while (i >= 0) : (i -= 1) {
-        var sb: [24]u8 = undefined;
-        var db: [24]u8 = undefined;
-        const sslice = std.fmt.bufPrint(&sb, "{d}", .{i}) catch unreachable;
-        const dslice = std.fmt.bufPrint(&db, "{d}", .{i + argc}) catch unreachable;
-        const v = obj.get(sslice);
-        const owned = realm.heap.allocateString(dslice) catch return error.OutOfMemory;
-        obj.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
-    }
-    // Insert new args at the start.
-    for (args, 0..) |a, idx| {
-        var b: [24]u8 = undefined;
-        const slc = std.fmt.bufPrint(&b, "{d}", .{idx}) catch unreachable;
-        const owned = realm.heap.allocateString(slc) catch return error.OutOfMemory;
-        obj.set(realm.allocator, owned.bytes, a) catch return error.OutOfMemory;
+    if (argc > 0) {
+        if (len > safe_max - argc) {
+            return throwTypeError(realm, "Unshifted length would exceed maximum length");
+        }
+        // Shift right from the top so we don't overwrite source slots.
+        var i: i64 = len;
+        while (i > 0) : (i -= 1) {
+            const from = i - 1;
+            const to = from + argc;
+            var fbuf: [24]u8 = undefined;
+            var tbuf: [24]u8 = undefined;
+            const fslice = std.fmt.bufPrint(&fbuf, "{d}", .{from}) catch unreachable;
+            const tslice = std.fmt.bufPrint(&tbuf, "{d}", .{to}) catch unreachable;
+            if (obj.hasProperty(fslice)) {
+                const v = try getPropertyChain(realm, obj, fslice);
+                const owned = realm.heap.allocateString(tslice) catch return error.OutOfMemory;
+                try setOrThrow(realm, obj, owned.bytes, v);
+            } else {
+                try deletePropertyOrThrow(realm, obj, tslice);
+            }
+        }
+        // Insert new args at indices [0, argCount).
+        for (args, 0..) |a, idx| {
+            var b: [24]u8 = undefined;
+            const slc = std.fmt.bufPrint(&b, "{d}", .{idx}) catch unreachable;
+            const owned = realm.heap.allocateString(slc) catch return error.OutOfMemory;
+            try setOrThrow(realm, obj, owned.bytes, a);
+        }
     }
     const new_len = len + argc;
-    setLength(realm, obj, new_len) catch return error.OutOfMemory;
+    try setLengthOrThrow(realm, obj, new_len);
     return numberFromI64(new_len);
 }
 
