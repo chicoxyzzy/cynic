@@ -726,6 +726,27 @@ pub const JSObject = struct {
                 if (self.hasOwnIndexedSlot(idx)) return true;
             }
         }
+        // §10.4.5.2 Integer-Indexed Exotic [[HasProperty]] — if the
+        // key is a CanonicalNumericIndexString, the lookup ends at
+        // the typed-array view (no proto-chain fallthrough for the
+        // numeric form). Out-of-bounds / detached / non-integer /
+        // negative / -0 all resolve to `false` *without* walking
+        // the prototype chain.
+        if (self.typed_view) |tv| {
+            const ta_mod = @import("builtins/typed_array.zig");
+            if (ta_mod.canonicalNumericIndex(key)) |num| {
+                if (std.math.isNan(num) or std.math.isInf(num)) return false;
+                if (@trunc(num) != num) return false;
+                if (num == 0.0 and std.math.signbit(num)) return false;
+                if (num < 0) return false;
+                const idx_u: usize = @intFromFloat(num);
+                const buf = tv.viewed.array_buffer orelse return false;
+                if (idx_u >= tv.length) return false;
+                const elem_size = tv.kind.elementSize();
+                if (tv.byte_offset + (idx_u + 1) * elem_size > buf.len) return false;
+                return true;
+            }
+        }
         if (self.prototype) |proto| return proto.hasProperty(key);
         return false;
     }

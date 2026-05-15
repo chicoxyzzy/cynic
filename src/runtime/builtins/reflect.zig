@@ -134,12 +134,10 @@ fn reflectHas(realm: *Realm, this_value: Value, args: []const Value) NativeError
                 },
             }
         }
-        var cursor: ?*JSObject = cur;
-        while (cursor) |c| : (cursor = c.prototype) {
-            if (c.properties.contains(key_slice)) return Value.true_;
-            if (c.accessors.contains(key_slice)) return Value.true_;
-        }
-        return Value.false_;
+        // §7.3.12 HasProperty — JSObject.hasProperty walks the
+        // chain and handles array-exotic + typed-array-exotic
+        // indexed slots (§10.4.5.2 Integer-Indexed [[HasProperty]]).
+        return Value.fromBool(cur.hasProperty(key_slice));
     }
     if (heap_mod.valueAsFunction(arg)) |fn_obj| {
         if (fn_obj.properties.contains(key_slice)) return Value.true_;
