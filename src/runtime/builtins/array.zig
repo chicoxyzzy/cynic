@@ -218,6 +218,13 @@ pub fn arraySpeciesCreate(realm: *Realm, original: *JSObject, length: i64) Nativ
 }
 
 fn defaultArrayCreate(realm: *Realm, length: i64) NativeError!Value {
+    // §10.4.2.2 ArrayCreate step 3 — `length > 2^32 - 1` throws
+    // RangeError. Splice / slice / etc. forward `actualDeleteCount`
+    // computed from an i64 length and ToInteger'd args, so a
+    // proxy reporting length=2^32 or larger triggers this gate.
+    if (length < 0 or length > 0xFFFFFFFF) {
+        return throwRangeError(realm, "Invalid array length");
+    }
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
@@ -1304,81 +1311,185 @@ fn arrayFlatMap(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 }
 
 fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.1.3.29 Array.prototype.splice (start, deleteCount, ...items):
+    //   1. O = ToObject(this); 2. len = ? ToLength(? Get(O, "length"))
+    //   3-6. relativeStart = ? ToIntegerOrInfinity(start), clamp -> actualStart
+    //   7. If args.len == 0:  insertCount=0, actualDeleteCount=0
+    //   8. ElseIf args.len == 1: insertCount=0, actualDeleteCount=len-actualStart
+    //   9. Else: insertCount=args.len-2; dc=? ToInteger(deleteCount);
+    //            actualDeleteCount = min(max(dc,0), len-actualStart)
+    //   10. If len + insertCount - actualDeleteCount > 2^53-1, throw TypeError
+    //   11. A = ? ArraySpeciesCreate(O, actualDeleteCount)
+    //   12-13. Copy O[actualStart..+actualDeleteCount-1] into A via
+    //         HasProperty + (Get + CreateDataPropertyOrThrow)
+    //   14. ? Set(A, "length", actualDeleteCount, true)
+    //   15-18. Shift remaining elements left or right; insert items
+    //   19. ? Set(O, "length", len - actualDeleteCount + insertCount, true)
+    //   20. Return A
     const obj = try toObjectThis(realm, this_value);
-    const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(obj));
-    var start: i64 = if (args.len > 0) toInt(args[0]) else 0;
-    if (start < 0) start = @max(len + start, 0);
-    start = @min(start, len);
-    var delete_count: i64 = if (args.len < 2)
-        len - start
-    else
-        toInt(args[1]);
-    if (delete_count < 0) delete_count = 0;
-    if (delete_count > len - start) delete_count = len - start;
+    var len = try toLengthOf(realm, obj);
+    const safe_max: i64 = (1 << 53) - 1;
+    if (len > safe_max) len = safe_max;
 
-    // Removed array — §23.1.3.29 step 9 ArraySpeciesCreate(O, actualDeleteCount).
+    // §23.1.3.29 step 3 — ToIntegerOrInfinity(start). Use ToNumber so
+    // accessor / valueOf hooks fire and Symbol throws.
+    var start: i64 = 0;
+    if (args.len > 0) {
+        const nv = try intrinsics.toNumber(realm, args[0]);
+        const d: f64 = if (nv.isInt32()) @floatFromInt(nv.asInt32()) else nv.asDouble();
+        if (std.math.isNan(d)) {
+            start = 0;
+        } else if (d == -std.math.inf(f64)) {
+            start = 0;
+        } else if (d == std.math.inf(f64)) {
+            start = len;
+        } else {
+            const t = @trunc(d);
+            if (t < 0) {
+                const candidate = len + @as(i64, @intFromFloat(@max(t, -@as(f64, @floatFromInt(safe_max))))) ;
+                start = @max(candidate, 0);
+            } else {
+                start = @min(@as(i64, @intFromFloat(@min(t, @as(f64, @floatFromInt(safe_max))))), len);
+            }
+        }
+    }
+
+    var delete_count: i64 = 0;
+    if (args.len == 1) {
+        delete_count = len - start;
+    } else if (args.len >= 2) {
+        const nv = try intrinsics.toNumber(realm, args[1]);
+        const d: f64 = if (nv.isInt32()) @floatFromInt(nv.asInt32()) else nv.asDouble();
+        if (std.math.isNan(d) or d < 0) {
+            delete_count = 0;
+        } else if (d == std.math.inf(f64)) {
+            delete_count = len - start;
+        } else {
+            const t = @trunc(d);
+            const clamped: i64 = @intFromFloat(@min(t, @as(f64, @floatFromInt(safe_max))));
+            delete_count = @max(@min(clamped, len - start), 0);
+        }
+    }
+
+    const insert_count: i64 = if (args.len > 2) @as(i64, @intCast(args.len - 2)) else 0;
+    // §23.1.3.29 step 10 — 2^53 - 1 cap on the resulting length.
+    if (len + insert_count - delete_count > safe_max) {
+        return throwTypeError(realm, "Splice would exceed maximum length");
+    }
+
+    // §23.1.3.29 step 11 — ArraySpeciesCreate(O, actualDeleteCount).
+    // The ArrayCreate inside `defaultArrayCreate` enforces the
+    // 2^32-1 cap → RangeError when actualDeleteCount is huge.
     const removed_v = try arraySpeciesCreate(realm, obj, delete_count);
     const removed = heap_mod.valueAsPlainObject(removed_v) orelse return throwTypeError(realm, "ArraySpeciesCreate did not return an object");
+
+    // §23.1.3.29 step 12-13 — copy O[start..start+actualDeleteCount-1]
+    // into A. Uses HasProperty for hole-aware copy + CreateDataPropertyOrThrow
+    // so existing accessor props on `A` don't intercept the per-index write.
     var i: i64 = 0;
     while (i < delete_count) : (i += 1) {
         var rbuf: [24]u8 = undefined;
         const rslice = std.fmt.bufPrint(&rbuf, "{d}", .{start + i}) catch unreachable;
-        const v = obj.get(rslice);
+        if (!obj.hasProperty(rslice)) continue;
+        const v = try getPropertyChain(realm, obj, rslice);
         var wbuf: [24]u8 = undefined;
         const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{i}) catch unreachable;
         const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-        removed.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+        try createDataPropertyOrThrowGeneric(realm, removed, owned.bytes, v);
     }
-    setLength(realm, removed, delete_count) catch return error.OutOfMemory;
+    try setLengthOrThrow(realm, removed, delete_count);
 
-    // Insert items.
-    const insert_count: i64 = if (args.len > 2) @as(i64, @intCast(args.len - 2)) else 0;
     const new_len = len - delete_count + insert_count;
 
     if (insert_count < delete_count) {
-        // Shift left.
-        var k: i64 = start + delete_count;
-        while (k < len) : (k += 1) {
+        // §23.1.3.29 step 15.b — shift O[start+actualDeleteCount..len-1]
+        // left by (actualDeleteCount - insertCount) using
+        // HasProperty + (Set or DeletePropertyOrThrow).
+        var k: i64 = start;
+        while (k < len - delete_count) : (k += 1) {
+            const from = k + delete_count;
+            const to = k + insert_count;
             var sb: [24]u8 = undefined;
             var db: [24]u8 = undefined;
-            const sslice = std.fmt.bufPrint(&sb, "{d}", .{k}) catch unreachable;
-            const dslice = std.fmt.bufPrint(&db, "{d}", .{k - delete_count + insert_count}) catch unreachable;
-            const v = obj.get(sslice);
-            const owned = realm.heap.allocateString(dslice) catch return error.OutOfMemory;
-            obj.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+            const sslice = std.fmt.bufPrint(&sb, "{d}", .{from}) catch unreachable;
+            const dslice = std.fmt.bufPrint(&db, "{d}", .{to}) catch unreachable;
+            if (obj.hasProperty(sslice)) {
+                const v = try getPropertyChain(realm, obj, sslice);
+                const owned = realm.heap.allocateString(dslice) catch return error.OutOfMemory;
+                try setOrThrow(realm, obj, owned.bytes, v);
+            } else {
+                try deletePropertyOrThrow(realm, obj, dslice);
+            }
         }
-        // Trim.
-        var trim: i64 = new_len;
-        while (trim < len) : (trim += 1) {
+        // §23.1.3.29 step 15.d — DeletePropertyOrThrow indices in
+        // [new_len, len) descending so a non-configurable element
+        // surfaces an honest TypeError.
+        var trim: i64 = len;
+        while (trim > new_len) {
+            trim -= 1;
             var tb: [24]u8 = undefined;
             const tslice = std.fmt.bufPrint(&tb, "{d}", .{trim}) catch unreachable;
-            _ = obj.deleteOwn(tslice);
+            try deletePropertyOrThrow(realm, obj, tslice);
         }
     } else if (insert_count > delete_count) {
-        // Shift right (from the end so we don't overwrite).
-        var k: i64 = len - 1;
-        while (k >= start + delete_count) : (k -= 1) {
+        // §23.1.3.29 step 16 — shift right from the top.
+        var k: i64 = len - delete_count;
+        while (k > start) {
+            k -= 1;
+            const from = k + delete_count;
+            const to = k + insert_count;
             var sb: [24]u8 = undefined;
             var db: [24]u8 = undefined;
-            const sslice = std.fmt.bufPrint(&sb, "{d}", .{k}) catch unreachable;
-            const dslice = std.fmt.bufPrint(&db, "{d}", .{k - delete_count + insert_count}) catch unreachable;
-            const v = obj.get(sslice);
-            const owned = realm.heap.allocateString(dslice) catch return error.OutOfMemory;
-            obj.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+            const sslice = std.fmt.bufPrint(&sb, "{d}", .{from}) catch unreachable;
+            const dslice = std.fmt.bufPrint(&db, "{d}", .{to}) catch unreachable;
+            if (obj.hasProperty(sslice)) {
+                const v = try getPropertyChain(realm, obj, sslice);
+                const owned = realm.heap.allocateString(dslice) catch return error.OutOfMemory;
+                try setOrThrow(realm, obj, owned.bytes, v);
+            } else {
+                try deletePropertyOrThrow(realm, obj, dslice);
+            }
         }
     }
 
-    // Insert.
+    // §23.1.3.29 step 17-18 — insert items.
     var ins: i64 = 0;
     while (ins < insert_count) : (ins += 1) {
         var b: [24]u8 = undefined;
         const slc = std.fmt.bufPrint(&b, "{d}", .{start + ins}) catch unreachable;
         const owned = realm.heap.allocateString(slc) catch return error.OutOfMemory;
-        obj.set(realm.allocator, owned.bytes, args[2 + @as(usize, @intCast(ins))]) catch return error.OutOfMemory;
+        try setOrThrow(realm, obj, owned.bytes, args[2 + @as(usize, @intCast(ins))]);
     }
 
-    setLength(realm, obj, new_len) catch return error.OutOfMemory;
+    // §23.1.3.29 step 19 — ? Set(O, "length", len - dc + ic, true).
+    try setLengthOrThrow(realm, obj, new_len);
     return removed_v;
+}
+
+/// §7.3.7 CreateDataPropertyOrThrow — local variant for callers
+/// not in the `Array.fromAsync` state-machine. Lands `value` as an
+/// own data property with `{w:T,e:T,c:T}`; rejects non-extensible
+/// receivers and non-configurable redefines with TypeError.
+fn createDataPropertyOrThrowGeneric(realm: *Realm, obj: *JSObject, key: []const u8, value: Value) NativeError!void {
+    const ObjMod = @import("../object.zig");
+    const had_own = obj.hasOwn(key);
+    if (!had_own and !obj.extensible) {
+        return throwTypeError(realm, "Cannot define property on non-extensible object");
+    }
+    if (had_own) {
+        const cur = obj.flagsFor(key);
+        if (!cur.configurable) {
+            return throwTypeError(realm, "Cannot redefine non-configurable property");
+        }
+        // §10.1.6.3 OrdinaryDefineOwnProperty — a configurable slot
+        // can be redefined back to the all-true default. Clear any
+        // demoted indexed-slot entry from `properties` so the
+        // subsequent `setWithFlags(default)` lands in `elements`
+        // again rather than leaving the bag-promoted descriptor.
+        _ = obj.properties.swapRemove(key);
+        _ = obj.property_flags.swapRemove(key);
+    }
+    obj.setWithFlags(realm.allocator, key, value, ObjMod.PropertyFlags.default) catch return error.OutOfMemory;
 }
 
 fn arrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
