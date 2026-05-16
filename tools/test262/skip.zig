@@ -156,6 +156,47 @@ pub const skip_ses_substrings = [_][]const u8{
     // function-ctor fixtures above. 12 fixtures across field /
     // method / getter / setter and their static counterparts.
     "-visible-to-direct-eval",
+
+    // `built-ins/Function/prototype/{apply,call}/S15.3.4.{3,4}_A*.js`
+    // — Sputnik-era tests for apply/call. Most build the function
+    // under test via `new Function(p, "src")` or `Function(p, "src")`,
+    // i.e. dynamic code construction; same permanent SES carve-out
+    // (`Function(string)`) as the `built-ins/Function/{S,}15.3.{2,5}`
+    // substrings above. Other fixtures in `apply/`/`call/` test the
+    // method's own descriptor / signature shape and stay attempted.
+    //
+    // Two clean ranges — A7 of apply and A6 of call are entirely
+    // Function-string-using; the rest are scattered across A1 / A3 /
+    // A5 / A8 (apply) and A1 / A3 / A5 / A7 (call) with passing
+    // siblings, so we list those exact fixtures.
+    "Function/prototype/apply/S15.3.4.3_A7_",
+    "Function/prototype/call/S15.3.4.4_A6_",
+    "Function/prototype/apply/S15.3.4.3_A1_T1.js",
+    "Function/prototype/apply/S15.3.4.3_A3_T1.js",
+    "Function/prototype/apply/S15.3.4.3_A3_T2.js",
+    "Function/prototype/apply/S15.3.4.3_A3_T3.js",
+    "Function/prototype/apply/S15.3.4.3_A3_T4.js",
+    "Function/prototype/apply/S15.3.4.3_A3_T5.js",
+    "Function/prototype/apply/S15.3.4.3_A3_T7.js",
+    "Function/prototype/apply/S15.3.4.3_A3_T9.js",
+    "Function/prototype/apply/S15.3.4.3_A5_T1.js",
+    "Function/prototype/apply/S15.3.4.3_A5_T2.js",
+    "Function/prototype/apply/S15.3.4.3_A5_T7.js",
+    "Function/prototype/apply/S15.3.4.3_A5_T8.js",
+    "Function/prototype/apply/S15.3.4.3_A8_T6.js",
+    "Function/prototype/call/S15.3.4.4_A1_T1.js",
+    "Function/prototype/call/S15.3.4.4_A3_T1.js",
+    "Function/prototype/call/S15.3.4.4_A3_T2.js",
+    "Function/prototype/call/S15.3.4.4_A3_T3.js",
+    "Function/prototype/call/S15.3.4.4_A3_T4.js",
+    "Function/prototype/call/S15.3.4.4_A3_T5.js",
+    "Function/prototype/call/S15.3.4.4_A3_T7.js",
+    "Function/prototype/call/S15.3.4.4_A3_T9.js",
+    "Function/prototype/call/S15.3.4.4_A5_T1.js",
+    "Function/prototype/call/S15.3.4.4_A5_T2.js",
+    "Function/prototype/call/S15.3.4.4_A5_T7.js",
+    "Function/prototype/call/S15.3.4.4_A5_T8.js",
+    "Function/prototype/call/S15.3.4.4_A7_T6.js",
 };
 
 /// AND-pair filters — both substrings must appear in the path. Used
