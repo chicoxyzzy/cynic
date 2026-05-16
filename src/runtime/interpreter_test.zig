@@ -4484,6 +4484,37 @@ test "String.prototype.endsWith: endPosition is code-unit indexed" {
     try testing.expect(v.isBool() and v.asBool());
 }
 
+// ── §22.1.3.14 padStart / §22.1.3.13 padEnd — code-unit padding ───────────
+
+test "String.prototype.padStart: ASCII" {
+    try expectScriptStringWithBuiltins("\"abc\".padStart(5, \"-\");", "--abc");
+}
+
+test "String.prototype.padStart: maxLength counted in code units" {
+    // "a\xFF" — 2 code units, 3 bytes. padStart(4, "-") should
+    // add 2 dashes, not 1.
+    try expectScriptStringWithBuiltins("\"a\\xFF\".padStart(4, \"-\");", "--a\xC3\xBF");
+}
+
+test "String.prototype.padStart: supplementary receiver counts as two code units" {
+    // "\u{1F600}" — 2 code units, 4 bytes. padStart(4, "-") adds 2.
+    try expectScriptStringWithBuiltins("\"\\u{1F600}\".padStart(4, \"-\");", "--\xF0\x9F\x98\x80");
+}
+
+test "String.prototype.padStart: fill truncated by code units" {
+    // fill = "\u{1F600}" (2 cu); target=5, receiver=1 cu, pad=4 cu
+    // → two full copies of the supplementary pair.
+    try expectScriptStringWithBuiltins("\"x\".padStart(5, \"\\u{1F600}\");", "\xF0\x9F\x98\x80\xF0\x9F\x98\x80x");
+}
+
+test "String.prototype.padEnd: ASCII" {
+    try expectScriptStringWithBuiltins("\"abc\".padEnd(5, \".\");", "abc..");
+}
+
+test "String.prototype.padEnd: maxLength counted in code units" {
+    try expectScriptStringWithBuiltins("\"\\u{1F600}\".padEnd(4, \".\");", "\xF0\x9F\x98\x80..");
+}
+
 test "String.prototype.includes: position is code-unit indexed" {
     // "a\u{1F600}c".includes("c", 3) — should find c at code-unit
     // index 3. A byte-counting impl would translate pos=3 → byte=3,

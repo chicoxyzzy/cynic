@@ -1135,10 +1135,17 @@ fn stringPadStart(realm: *Realm, this_value: Value, args: []const Value) NativeE
 fn stringPadEnd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     return stringPad(realm, this_value, args, false);
 }
+/// §22.1.3.14 padStart / §22.1.3.13 padEnd — `start = true` for
+/// padStart, false for padEnd. Both delegate to abstract op
+/// StringPad: `maxLength` and the padding count are expressed in
+/// UTF-16 code units; the fill string is truncated by code units
+/// (not bytes) when its last copy would overshoot.
 fn stringPad(realm: *Realm, this_value: Value, args: []const Value, start: bool) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
-    // §22.1.3.18 step 4 — ToLength(maxLength). NaN / negative
-    // values clamp to 0.
+    // §22.1.3.14 step 3 — ToLength(maxLength). NaN / negative
+    // values clamp to 0 (§7.1.20 makes negatives → 0; we follow
+    // the more permissive ToIntegerOrInfinity per the spec which
+    // §22.1.3.14 invokes).
     const target_v_raw = argOr(args, 0, Value.fromInt32(0));
     const target_num = try intrinsics.toNumber(realm, target_v_raw);
     const target_len: i64 = blk: {
@@ -1147,35 +1154,62 @@ fn stringPad(realm: *Realm, this_value: Value, args: []const Value, start: bool)
         if (std.math.isNan(d) or std.math.isInf(d) or d < 0) break :blk 0;
         break :blk @intFromFloat(@trunc(d));
     };
-    if (target_len <= @as(i64, @intCast(s.bytes.len))) {
+    // Receiver code-unit length; pad only when the target exceeds
+    // it (StringPad step 1).
+    const s_cu_len = utf16.lengthInCodeUnits(s.bytes);
+    if (target_len <= @as(i64, @intCast(s_cu_len))) {
         const out = realm.heap.allocateString(s.bytes) catch return error.OutOfMemory;
         return Value.fromString(out);
     }
-    // §22.1.3.18 step 5 — fillString defaults to single space; any
-    // other primitive is ToString-coerced (matches Number / Boolean
-    // padding tests).
+    // StringPad step 3 — fillString defaults to a single space.
+    // Other primitives are ToString-coerced.
     const fill_v = argOr(args, 1, Value.undefined_);
     const fill_str: *JSString = if (fill_v.isUndefined())
         try stringifyArg(realm, Value.fromString(realm.heap.allocateString(" ") catch return error.OutOfMemory))
     else
         try stringifyArg(realm, fill_v);
-    const fill_slice: []const u8 = fill_str.bytes;
-    if (fill_slice.len == 0) {
+    if (fill_str.bytes.len == 0) {
+        // StringPad step 4 — empty fillString is a no-op.
         const out = realm.heap.allocateString(s.bytes) catch return error.OutOfMemory;
         return Value.fromString(out);
     }
-    const total: usize = @intCast(target_len);
-    if (total > 1024 * 1024) return error.NativeThrew; // sanity cap
-    const buf = realm.allocator.alloc(u8, total) catch return error.OutOfMemory;
-    defer realm.allocator.free(buf);
-    const pad_total = total - s.bytes.len;
-    var i: usize = 0;
-    while (i < pad_total) : (i += 1) {
-        buf[if (start) i else (s.bytes.len + i)] = fill_slice[i % fill_slice.len];
+    const fill_cu_len = utf16.lengthInCodeUnits(fill_str.bytes);
+    const target_cu: usize = @intCast(target_len);
+    if (target_cu > 1024 * 1024) return error.NativeThrew; // sanity cap
+    const pad_cu = target_cu - s_cu_len;
+    // StringPad step 7 — build a truncated padding string of length
+    // `pad_cu` code units by concatenating `fillString` enough
+    // times and slicing the last copy to fit.
+    var pad_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer pad_buf.deinit(realm.allocator);
+    var produced_cu: usize = 0;
+    while (produced_cu + fill_cu_len <= pad_cu) {
+        pad_buf.appendSlice(realm.allocator, fill_str.bytes) catch return error.OutOfMemory;
+        produced_cu += fill_cu_len;
     }
-    const start_offset: usize = if (start) pad_total else 0;
-    @memcpy(buf[start_offset .. start_offset + s.bytes.len], s.bytes);
-    const out = realm.heap.allocateString(buf) catch return error.OutOfMemory;
+    if (produced_cu < pad_cu) {
+        // Need a partial copy of `fill_str` of (pad_cu - produced_cu)
+        // code units. Slice in code-unit space so a fill string
+        // ending mid-surrogate-pair is split correctly.
+        const remaining_cu = pad_cu - produced_cu;
+        const tail = utf16.sliceCodeUnits(fill_str.bytes, 0, remaining_cu);
+        if (tail.head_surrogate != 0)
+            utf16.appendCodeUnitAsWtf8(realm.allocator, &pad_buf, tail.head_surrogate) catch return error.OutOfMemory;
+        pad_buf.appendSlice(realm.allocator, tail.bytes) catch return error.OutOfMemory;
+        if (tail.tail_surrogate != 0)
+            utf16.appendCodeUnitAsWtf8(realm.allocator, &pad_buf, tail.tail_surrogate) catch return error.OutOfMemory;
+    }
+    // StringPad step 8 / 10 — prepend or append.
+    var out_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer out_buf.deinit(realm.allocator);
+    if (start) {
+        out_buf.appendSlice(realm.allocator, pad_buf.items) catch return error.OutOfMemory;
+        out_buf.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
+    } else {
+        out_buf.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
+        out_buf.appendSlice(realm.allocator, pad_buf.items) catch return error.OutOfMemory;
+    }
+    const out = realm.heap.allocateString(out_buf.items) catch return error.OutOfMemory;
     return Value.fromString(out);
 }
 
