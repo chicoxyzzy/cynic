@@ -21,6 +21,28 @@ pub fn referencesArguments(source: []const u8, body: []ast.statement.Statement) 
     return false;
 }
 
+/// 10.2.10 FunctionDeclarationInstantiation - parameter
+/// initializers (default-value expressions for `function f(x =
+/// <expr>, ...)`) are evaluated in a scope where `arguments` is
+/// already bound, so `<expr>` may reference the full caller arg
+/// list. We scan param defaults separately from the body so the
+/// `arguments` binding gets installed *before* the parameter
+/// prologue when any default mentions it. Non-default params
+/// (plain identifiers / patterns without `=`) can't see
+/// `arguments` directly - only the `<expr>` after `=` is an
+/// expression context where lookups happen.
+pub fn paramsReferenceArguments(source: []const u8, params: []const ast.statement.FunctionParam) bool {
+    for (params) |p| switch (p) {
+        .simple => |sp| {
+            if (sp.default) |*d| {
+                if (expressionReferencesArguments(source, d)) return true;
+            }
+        },
+        .rest => {},
+    };
+    return false;
+}
+
 pub fn statementReferencesArguments(source: []const u8, s: *const ast.statement.Statement) bool {
     return switch (s.*) {
         .expression => |es| expressionReferencesArguments(source, &es.expression),
@@ -130,3 +152,5 @@ pub fn expressionReferencesArguments(source: []const u8, e: *const Expression) b
         else => false,
     };
 }
+
+// PROBE LINE

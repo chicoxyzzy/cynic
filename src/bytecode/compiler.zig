@@ -66,6 +66,7 @@ const decodeStringContent = literals.decodeStringContent;
 
 const arguments_scan = @import("arguments_scan.zig");
 const referencesArguments = arguments_scan.referencesArguments;
+const paramsReferenceArguments = arguments_scan.paramsReferenceArguments;
 
 pub const CompileError = error{
     OutOfMemory,
@@ -5133,26 +5134,42 @@ fn compileConstructorBody(
     const slot_count_patch = self.builder.here();
     try self.builder.emitU8(0);
 
+    // §10.4.4 + §10.2.10 step 22/27 — install `arguments`
+    // BEFORE the param prologue so default expressions like
+    // `constructor(x = arguments[2])` observe the full caller
+    // argumentsList. See `compileFunctionTemplateExt` for the
+    // spec citation.
+    if (paramsReferenceArguments(self.source, params) or
+        referencesArguments(self.source, body_stmts))
+    {
+        const slot = try self.declareBinding("arguments", .let_, span);
+        try self.builder.emitOp(.lda_arguments, span);
+        try self.builder.emitOp(.sta_env, span);
+        try self.builder.emitU8(0);
+        try self.builder.emitU8(slot);
+    }
+
+    // §10.2.4 IteratorBindingInitialization — reserve the leading
+    // register slots so temps allocated by default-expression
+    // compilation don't clobber caller-supplied arg registers.
+    // See `compileFunctionTemplateExt` for the failure mode.
+    const saved_ctor_prologue_temps = self.temps_in_use;
+    self.temps_in_use = @intCast(@min(params.len, std.math.maxInt(u8)));
+    if (self.temps_in_use > self.builder.register_count) {
+        self.builder.register_count = self.temps_in_use;
+    }
     for (params, 0..) |*p, i| {
         switch (p.*) {
             .simple => |*sp| try self.emitParamPrologue(sp, @intCast(i)),
             .rest => |*rp| try self.emitRestParamPrologue(rp, @intCast(i)),
         }
     }
+    self.temps_in_use = saved_ctor_prologue_temps;
 
     // Base class: run field initializers at the start of the
     // user body. Derived classes wait for super_call to trigger.
     if (!is_derived and has_fields) {
         try self.builder.emitOp(.init_instance_fields, span);
-    }
-
-    // §10.4.4 — implicit `arguments` binding.
-    if (referencesArguments(self.source, body_stmts)) {
-        const slot = try self.declareBinding("arguments", .let_, span);
-        try self.builder.emitOp(.lda_arguments, span);
-        try self.builder.emitOp(.sta_env, span);
-        try self.builder.emitU8(0);
-        try self.builder.emitU8(slot);
     }
 
     // §13.3.2 — same pre-body sequence as `compileMethodBody`:
@@ -5246,22 +5263,37 @@ fn compileMethodBody(
     const slot_count_patch = self.builder.here();
     try self.builder.emitU8(0);
 
-    // Param prologue, same as compileFunctionTemplate.
-    for (params, 0..) |*p, i| {
-        switch (p.*) {
-            .simple => |*sp| try self.emitParamPrologue(sp, @intCast(i)),
-            .rest => |*rp| try self.emitRestParamPrologue(rp, @intCast(i)),
-        }
-    }
-
-    // §10.4.4 — implicit `arguments` for class methods (non-arrow).
-    if (referencesArguments(self.source, body_stmts)) {
+    // §10.4.4 + §10.2.10 step 22/27 — install `arguments`
+    // BEFORE the param prologue so default expressions like
+    // `m(x = arguments[2])` observe the full caller
+    // argumentsList. See `compileFunctionTemplateExt` for the
+    // spec citation.
+    if (paramsReferenceArguments(self.source, params) or
+        referencesArguments(self.source, body_stmts))
+    {
         const slot = try self.declareBinding("arguments", .let_, span);
         try self.builder.emitOp(.lda_arguments, span);
         try self.builder.emitOp(.sta_env, span);
         try self.builder.emitU8(0);
         try self.builder.emitU8(slot);
     }
+
+    // Param prologue, same as compileFunctionTemplate. The
+    // leading register slots are reserved so default-expression
+    // temps don't clobber caller-supplied arg registers — see
+    // `compileFunctionTemplateExt`.
+    const saved_method_prologue_temps = self.temps_in_use;
+    self.temps_in_use = @intCast(@min(params.len, std.math.maxInt(u8)));
+    if (self.temps_in_use > self.builder.register_count) {
+        self.builder.register_count = self.temps_in_use;
+    }
+    for (params, 0..) |*p, i| {
+        switch (p.*) {
+            .simple => |*sp| try self.emitParamPrologue(sp, @intCast(i)),
+            .rest => |*rp| try self.emitRestParamPrologue(rp, @intCast(i)),
+        }
+    }
+    self.temps_in_use = saved_method_prologue_temps;
 
     // §27.5 / §27.6 — generator methods suspend here so
     // `wrapGenerator` returns the wrapper after param init.
@@ -7548,22 +7580,19 @@ fn compileFunctionTemplateExt(
     const slot_count_patch = self.builder.here();
     try self.builder.emitU8(0);
 
-    // Declare params (env slots 0, 1,...) and emit the param-
-    // receive preamble. Each arg arrives in caller-supplied
-    // register r{i}; we Ldar then StaEnv into the function's
-    // own env slot.
-    for (params, 0..) |*p, i| {
-        switch (p.*) {
-            .simple => |*sp| try self.emitParamPrologue(sp, @intCast(i)),
-            .rest => |*rp| try self.emitRestParamPrologue(rp, @intCast(i)),
-        }
-    }
-
     // §10.4.4 Implicit `arguments` binding for non-arrow
-    // functions. Only installed when the body actually
-    // references `arguments` — saves a slot otherwise.
+    // functions. Installed BEFORE the param prologue so default
+    // expressions like `function f(x = arguments[2])` observe the
+    // full caller argumentsList — §10.2.10 step 22/27
+    // evaluates parameter initializers in a scope where
+    // `arguments` is already bound. Only emitted when the body
+    // or any param default references `arguments`, otherwise the
+    // slot is saved. V8 / JSC / SpiderMonkey all install up
+    // front; installing after params is an observable strict-mode
+    // bug that flips `arguments.length` and indexed access on
+    // unbound trailing args.
     if (!is_arrow) {
-        const refs = switch (body) {
+        const refs = paramsReferenceArguments(self.source, params) or switch (body) {
             .block => |stmts| referencesArguments(self.source, stmts),
             .expression => false, // concise-body arrows can't be reached here
         };
@@ -7575,6 +7604,36 @@ fn compileFunctionTemplateExt(
             try self.builder.emitU8(slot);
         }
     }
+
+    // Declare params (env slots 0, 1,...) and emit the param-
+    // receive preamble. Each arg arrives in caller-supplied
+    // register r{i}; we Ldar then StaEnv into the function's
+    // own env slot.
+    //
+    // §10.2.4 IteratorBindingInitialization — reserve the leading
+    // register slots r0..r{params.len-1} as off-limits for the
+    // temp allocator while the prologue runs. Without this,
+    // `function f(x = arguments[2], y = arguments[3])` had the
+    // default-expression compiler grab r0 / r1 as scratch
+    // (for the `lda_computed` receiver), overwriting the
+    // caller-supplied arg in register 1 with a saved
+    // arguments-object handle — so `y` later read the
+    // wrong register and got the arguments object instead of
+    // its caller-supplied undefined. Restored to 0 after the
+    // loop; named-binding values now live in env slots, so the
+    // registers are free for body temps.
+    const saved_prologue_temps = self.temps_in_use;
+    self.temps_in_use = @intCast(@min(params.len, std.math.maxInt(u8)));
+    if (self.temps_in_use > self.builder.register_count) {
+        self.builder.register_count = self.temps_in_use;
+    }
+    for (params, 0..) |*p, i| {
+        switch (p.*) {
+            .simple => |*sp| try self.emitParamPrologue(sp, @intCast(i)),
+            .rest => |*rp| try self.emitRestParamPrologue(rp, @intCast(i)),
+        }
+    }
+    self.temps_in_use = saved_prologue_temps;
 
     // §27.5 / §27.6 — param init has run; suspend so the
     // wrapper can be handed back. Body resumes on first
