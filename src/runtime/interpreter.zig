@@ -227,20 +227,41 @@ fn translatePrivateKey(buf: []u8, key: []const u8, brand: []const u8) []const u8
 }
 
 /// §15.7.14 step 31 — pull the per-ClassTail-evaluation brand
-/// prefix off the executing frame. Instance method bodies set
-/// `home_object` (the class prototype). Static method bodies set
-/// `home_function` (the class constructor). Field initializer
-/// thunks and the constructor itself also set `home_object`. When
-/// neither slot carries a brand (private access from outside a
-/// class — a parser-rejected shape — or a class without any
-/// private declarations), returns "" so `translatePrivateKey`
-/// falls through to the compile-time key.
-fn framePrivateBrand(f: anytype) []const u8 {
+/// prefix relevant to a private access. Tried in order:
+///   1. `f.home_object.private_brand` — instance method body,
+///      field initializer, derived ctor.
+///   2. `f.home_function.private_brand` — static method body.
+///   3. Walk the receiver's prototype chain (for the common case
+///      where a plain inner function in a method does
+///      `obj.#field`: the inner function has no `home_*`, but the
+///      receiver's proto carries the class's brand — see the
+///      `*-access-on-inner-function.js` fixture family).
+///   4. If the receiver itself is the class constructor (static-
+///      private access through `C.#x` from an inner function),
+///      its `private_brand` is the right answer.
+/// Returns "" when nothing matches — `translatePrivateKey` then
+/// falls through to the compile-time key and the lookup fails
+/// with the spec-mandated brand-check TypeError.
+fn framePrivateBrand(f: anytype, recv_hint: Value) []const u8 {
     if (f.home_object) |home| {
         if (home.private_brand.len > 0) return home.private_brand;
     }
     if (f.home_function) |home_fn| {
         if (home_fn.private_brand.len > 0) return home_fn.private_brand;
+    }
+    // §15.7.14 — the brand is observable through the receiver's
+    // prototype chain (every instance proto carries its class's
+    // brand). This handles inner-function accesses that don't have
+    // a `home_*` slot set.
+    if (heap_mod.valueAsPlainObject(recv_hint)) |obj| {
+        var cur: ?*JSObject = obj.prototype;
+        while (cur) |c| {
+            if (c.private_brand.len > 0) return c.private_brand;
+            cur = c.prototype;
+        }
+    }
+    if (heap_mod.valueAsFunction(recv_hint)) |fn_obj| {
+        if (fn_obj.private_brand.len > 0) return fn_obj.private_brand;
     }
     return "";
 }
@@ -345,6 +366,8 @@ pub fn wrapGenerator(
     captured_env: ?*Environment,
     this_value: Value,
     args: []const Value,
+    home_object: ?*JSObject,
+    home_function: ?*JSFunction,
 ) RunError!RunResult {
     // Generator's register file must hold the function body's
     // declared registers AND any extra inbound argument values.
@@ -358,6 +381,10 @@ pub fn wrapGenerator(
         captured_env,
         this_value,
     ) catch return error.OutOfMemory;
+    // §15.7.14 step 31 — propagate home_* so private-name access
+    // inside the generator body translates the brand correctly.
+    gen.home_object = home_object;
+    gen.home_function = home_function;
     // Pre-load argument values into the generator's register
     // file so the function prologue's Ldar / sta_env sequence
     // sees them at indices 0..argc-1.
@@ -407,6 +434,8 @@ pub fn wrapAsyncGenerator(
     captured_env: ?*Environment,
     this_value: Value,
     args: []const Value,
+    home_object: ?*JSObject,
+    home_function: ?*JSFunction,
 ) RunError!RunResult {
     const wanted: usize = @max(@as(usize, chunk.register_count), args.len);
     const reg_count: u8 = @intCast(@min(wanted, std.math.maxInt(u8)));
@@ -421,6 +450,10 @@ pub fn wrapAsyncGenerator(
     // `.next` / `.return` / `.throw` go through the queue-based
     // drain. `async_state` defaults to `.suspended_start`.
     gen.is_async_generator = true;
+    // §15.7.14 step 31 — propagate home_* so private-name access
+    // inside the async-generator body translates the brand correctly.
+    gen.home_object = home_object;
+    gen.home_function = home_function;
     var i: usize = 0;
     while (i < args.len and i < gen.registers.len) : (i += 1) {
         gen.registers[i] = args[i];
@@ -2712,8 +2745,8 @@ pub fn callJSFunction(
     // produce Promises.
     if (callee.is_generator) {
         if (callee.is_async)
-            return try wrapAsyncGenerator(allocator, realm, callee_chunk, callee.captured_env, this_value, args);
-        return try wrapGenerator(allocator, realm, callee_chunk, callee.captured_env, this_value, args);
+            return try wrapAsyncGenerator(allocator, realm, callee_chunk, callee.captured_env, this_value, args, callee.home_object, callee.home_function);
+        return try wrapGenerator(allocator, realm, callee_chunk, callee.captured_env, this_value, args, callee.home_object, callee.home_function);
     }
 
     // §27.7 — pure `async function` (no `*`): allocate a fresh
@@ -2724,7 +2757,7 @@ pub fn callJSFunction(
     // the call's return value.
     if (callee.is_async) {
         const callee_this: Value = if (callee.is_arrow) callee.captured_this else this_value;
-        return startAsyncCall(allocator, realm, callee_chunk, callee.captured_env, callee_this, args);
+        return startAsyncCall(allocator, realm, callee_chunk, callee.captured_env, callee_this, args, callee.home_object, callee.home_function);
     }
 
     var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
@@ -2849,6 +2882,8 @@ pub fn startAsyncCall(
     captured_env: ?*Environment,
     this_value: Value,
     args: []const Value,
+    home_object: ?*JSObject,
+    home_function: ?*JSFunction,
 ) RunError!RunResult {
     // Pre-allocate the Promise so the gen can settle it.
     const promise_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
@@ -2864,6 +2899,15 @@ pub fn startAsyncCall(
     const gen = realm.heap.allocateGenerator(chunk, reg_count, captured_env, this_value) catch return error.OutOfMemory;
     gen.is_async = true;
     gen.result_promise = result_promise;
+    // §15.7.14 step 31 — async function bodies execute through a
+    // backing generator; the resumption frame inherits home_* from
+    // gen via the .home_object / .home_function fields on
+    // gen. Without copying these, private-name access inside an
+    // async method falls through the brand translation and lookup
+    // fails. Mirrors how wrapGenerator threads home_* for non-async
+    // generators.
+    gen.home_object = home_object;
+    gen.home_function = home_function;
     var i: usize = 0;
     while (i < args.len and i < gen.registers.len) : (i += 1) {
         gen.registers[i] = args[i];
@@ -3539,9 +3583,9 @@ fn runFrames(
                     const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
                     const args_start = @as(usize, r_callee) + 1;
                     const wrap_result = if (callee_fn.is_async)
-                        try wrapAsyncGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, Value.undefined_, registers[args_start .. args_start + argc])
+                        try wrapAsyncGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, Value.undefined_, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function)
                     else
-                        try wrapGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, Value.undefined_, registers[args_start .. args_start + argc]);
+                        try wrapGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, Value.undefined_, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function);
                     switch (wrap_result) {
                         .value, .yielded => |v| acc = v,
                         .thrown => |ex| {
@@ -3594,7 +3638,7 @@ fn runFrames(
                     const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
                     const args_start = @as(usize, r_callee) + 1;
                     const callee_this: Value = if (callee_fn.is_arrow) callee_fn.captured_this else Value.undefined_;
-                    const outcome = try startAsyncCall(allocator, realm, callee_chunk, callee_fn.captured_env, callee_this, registers[args_start .. args_start + argc]);
+                    const outcome = try startAsyncCall(allocator, realm, callee_chunk, callee_fn.captured_env, callee_this, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function);
                     switch (outcome) {
                         .value, .yielded => |v| acc = v,
                         .thrown => |ex| {
@@ -3755,9 +3799,9 @@ fn runFrames(
                     const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
                     const args_start = @as(usize, r_callee) + 1;
                     const wrap_result = if (callee_fn.is_async)
-                        try wrapAsyncGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, recv, registers[args_start .. args_start + argc])
+                        try wrapAsyncGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, recv, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function)
                     else
-                        try wrapGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, recv, registers[args_start .. args_start + argc]);
+                        try wrapGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, recv, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function);
                     switch (wrap_result) {
                         .value, .yielded => |v| acc = v,
                         .thrown => |ex| {
@@ -3800,7 +3844,7 @@ fn runFrames(
                     const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
                     const args_start = @as(usize, r_callee) + 1;
                     const callee_this: Value = if (callee_fn.is_arrow) callee_fn.captured_this else recv;
-                    const outcome = try startAsyncCall(allocator, realm, callee_chunk, callee_fn.captured_env, callee_this, registers[args_start .. args_start + argc]);
+                    const outcome = try startAsyncCall(allocator, realm, callee_chunk, callee_fn.captured_env, callee_this, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function);
                     switch (outcome) {
                         .value, .yielded => |v| acc = v,
                         .thrown => |ex| {
@@ -4986,7 +5030,7 @@ fn runFrames(
                 // lives on the method's home_object / home_function
                 // — both set by `class.zig` at ClassTail evaluation.
                 var brand_buf: [128]u8 = undefined;
-                const lookup_key = translatePrivateKey(&brand_buf, key_s.bytes, framePrivateBrand(f));
+                const lookup_key = translatePrivateKey(&brand_buf, key_s.bytes, framePrivateBrand(f, acc));
                 // §15.7 — `class C { static #x = …; static M() { return C.#x; } }`
                 // routes the read through the constructor's
                 // private slots when the receiver is the class
@@ -5753,7 +5797,7 @@ fn runFrames(
                 // shared compile-time prefix and let two unrelated
                 // ClassTail evaluations share storage.
                 var brand_buf: [128]u8 = undefined;
-                const lookup_key = translatePrivateKey(&brand_buf, key_s.bytes, framePrivateBrand(f));
+                const lookup_key = translatePrivateKey(&brand_buf, key_s.bytes, framePrivateBrand(f, acc));
                 // §15.7 static private — receiver is the class
                 // constructor function. Mirror the JSObject path
                 // (accessor wins, then data, then brand-check
