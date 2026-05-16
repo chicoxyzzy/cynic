@@ -1450,8 +1450,21 @@ fn taResolveIndex(realm: *Realm, arg: Value, length: i64, default_val: i64) Nati
 /// hooked up to a fresh ArrayBuffer. Used by the methods that
 /// produce new typed arrays (`slice`, `map`, `filter`, `toReversed`,
 /// `toSorted`, `with`).
+///
+/// `name_hint` (optional) lets callers disambiguate the two
+/// constructors that share `kind = .uint8` — `Uint8Array` and
+/// `Uint8ClampedArray`. When non-empty, it overrides the kind →
+/// name mapping; otherwise the default-per-kind name is used.
+/// `slice` / `map` / `filter` on a `Uint8ClampedArray` must
+/// allocate a `Uint8ClampedArray` for the result (§23.2.4.7
+/// TypedArraySpeciesCreate uses the exemplar's [[TypedArrayName]]
+/// for the default constructor).
 fn taMakeNew(realm: *Realm, kind: ObjMod.TypedKind, length: usize) NativeError!*JSObject {
-    const ctor_name = nameForTypedKind(kind);
+    return taMakeNewNamed(realm, kind, length, "");
+}
+
+fn taMakeNewNamed(realm: *Realm, kind: ObjMod.TypedKind, length: usize, name_hint: []const u8) NativeError!*JSObject {
+    const ctor_name = if (name_hint.len != 0) name_hint else nameForTypedKind(kind);
     const ctor_v = realm.globals.get(ctor_name) orelse return throwTypeError(realm, "TypedArray constructor not found");
     const ctor = heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "TypedArray constructor not callable");
     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
@@ -1557,8 +1570,12 @@ fn taSpeciesCreate(realm: *Realm, exemplar: *JSObject, kind: ObjMod.TypedKind, l
     }
 
     // §7.3.22 step 5 — undefined/null → default.
+    // Use the exemplar's [[TypedArrayName]] so Uint8Array vs
+    // Uint8ClampedArray (which share `kind = .uint8`) round-trip
+    // through species fallback as themselves.
     if (species_v.isUndefined() or species_v.isNull()) {
-        return taMakeNew(realm, kind, length);
+        const exemplar_name: []const u8 = if (exemplar.typed_view) |tv| tv.name else "";
+        return taMakeNewNamed(realm, kind, length, exemplar_name);
     }
     // §7.3.22 step 6 — must be a constructor.
     const species_fn = heap_mod.valueAsFunction(species_v) orelse return throwTypeError(realm, "TypedArray @@species is not a constructor");
@@ -1583,11 +1600,25 @@ fn taSpeciesCreate(realm: *Realm, exemplar: *JSObject, kind: ObjMod.TypedKind, l
             return error.NativeThrew;
         },
     };
-    // §23.2.4.7 step 4 — result must be a TypedArray with matching kind and >= length.
+    // §23.2.4.4 TypedArrayCreate post-conditions:
+    //   - The result is a TypedArray (has [[TypedArrayName]]).
+    //   - result.[[ContentType]] === exemplar.[[ContentType]].
+    //     ContentType is `bigint` for BigInt64Array/BigUint64Array
+    //     and `number` for everything else — kind equality is
+    //     too strict (an Int8Array ↔ Uint8Array swap is fine).
+    //   - When argumentList is « length », result.[[ArrayLength]]
+    //     ≥ length. The "too short" check is done by the caller
+    //     (slice/filter/map post-allocate); we still do it here as
+    //     the only common bottleneck.
     const result_obj = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "TypedArray species ctor returned non-object");
     const result_tv = result_obj.typed_view orelse return throwTypeError(realm, "TypedArray species ctor returned non-TypedArray");
-    if (result_tv.kind != kind) return throwTypeError(realm, "TypedArray species ctor returned wrong content type");
-    if (result_tv.length < length) return throwTypeError(realm, "TypedArray species ctor returned too-short TypedArray");
+    if (result_tv.kind.isBigInt() != kind.isBigInt()) return throwTypeError(realm, "TypedArray species ctor returned wrong content type");
+    if (taCurrentLength(result_tv) < length) return throwTypeError(realm, "TypedArray species ctor returned too-short TypedArray");
+    // §23.2.4.4 step 2.b — if the species ctor returned the same
+    // buffer as the exemplar (i.e. the result aliases over
+    // exemplar's storage), TypedArrayCreate would still allow it.
+    // We don't track an "is same buffer" check explicitly; callers
+    // that copy element-by-element (slice/filter/map) handle it.
     return result_obj;
 }
 
@@ -1640,20 +1671,31 @@ fn taCallbackPreamble(realm: *Realm, this_value: Value, args: []const Value) Nat
 }
 
 fn typedArrayAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.2.3.1 %TypedArray%.prototype.at(index).
     const tv = try taValidatedView(realm, this_value, "at");
+    const idx_arg = argOr(args, 0, Value.fromInt32(0));
+    // §23.2.3.1 step 4 — ToIntegerOrInfinity(index).
+    // We must run the coercion (fires user `valueOf`) BEFORE
+    // looking at the typed array length, and use the coerced
+    // integer (not the raw arg) for the negative-from-end /
+    // range test.
+    const idx_num = try intrinsics.toNumber(realm, idx_arg);
+    const idx_n: f64 = if (idx_num.isInt32())
+        @floatFromInt(idx_num.asInt32())
+    else if (idx_num.isDouble())
+        idx_num.asDouble()
+    else
+        0;
     const len: i64 = @intCast(taCurrentLength(tv));
-    const i = try taResolveIndex(realm, argOr(args, 0, Value.fromInt32(0)), len, 0);
-    // `at` returns undefined for out-of-range; resolveIndex clamps,
-    // so we re-check using the raw arg to detect "explicitly out of
-    // range" vs "negative index in range."
-    const raw = argOr(args, 0, Value.fromInt32(0));
-    const raw_n: f64 = if (raw.isInt32()) @floatFromInt(raw.asInt32()) else if (raw.isDouble()) raw.asDouble() else 0;
-    const raw_i: i64 = if (std.math.isNan(raw_n)) 0 else @intFromFloat(@trunc(raw_n));
-    const target_i: i64 = if (raw_i < 0) raw_i + len else raw_i;
+    // §7.1.5 ToIntegerOrInfinity — NaN→0; trunc otherwise.
+    const trunc_n = if (std.math.isNan(idx_n)) 0.0 else @trunc(idx_n);
+    const max_i: f64 = @floatFromInt(std.math.maxInt(i64));
+    const min_i: f64 = @floatFromInt(std.math.minInt(i64));
+    const raw_i: i64 = if (trunc_n >= max_i) std.math.maxInt(i64) else if (trunc_n <= min_i) std.math.minInt(i64) else @intFromFloat(trunc_n);
+    const target_i: i64 = if (raw_i < 0) raw_i +| len else raw_i;
     if (target_i < 0 or target_i >= len) return Value.undefined_;
-    _ = i;
-    // §23.2.3.1 — `at` reads through the IntegerIndexedElementGet
-    // path; ES2024 detached buffers return undefined, not throw.
+    // §23.2.3.1 step 8 — `at` reads through IntegerIndexedElementGet;
+    // ES2024 detached buffers return undefined, not throw.
     return taSafeRead(realm, tv, target_i);
 }
 
@@ -1764,8 +1806,13 @@ fn typedArrayIncludes(realm: *Realm, this_value: Value, args: []const Value) Nat
     // as undefined per element; we don't throw. The length stays
     // at its stored value (fixed-length TAs aren't auto).
     const tv = try taValidatedView(realm, this_value, "includes");
-    const target = argOr(args, 0, Value.undefined_);
     const len: i64 = @intCast(taCurrentLength(tv));
+    // §23.2.3.14 step 4 — If len is 0, return false. Length is
+    // checked BEFORE ToIntegerOrInfinity(fromIndex), so an empty
+    // TA + throwing fromIndex returns false without firing the
+    // valueOf throw.
+    if (len == 0) return Value.false_;
+    const target = argOr(args, 0, Value.undefined_);
     const from_arg = argOr(args, 1, Value.fromInt32(0));
     var from = try taResolveIndex(realm, from_arg, len, 0);
     if (from < 0) from = 0;
@@ -1779,20 +1826,19 @@ fn typedArrayIncludes(realm: *Realm, this_value: Value, args: []const Value) Nat
 
 fn typedArrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const tv = try taValidatedView(realm, this_value, "indexOf");
-    // §23.2.3.18 — when detached, no element strictly equals the
-    // target (reads are `undefined`, strict-equality of two
-    // undefineds is true *but* indexOf checks element-not-undefined
-    // via SameValueZero — actually wait, indexOf uses IsStrictlyEqual,
-    // not SameValueZero. `undefined === target` only when target is
-    // undefined, but indexOf step 6 short-circuits the loop when
-    // searchElement is undefined and len=0). To keep behavior
-    // simple and matching V8/JSC: if detached, return -1.
-    if (tv.viewed.array_buffer == null) return Value.fromInt32(-1);
-    const target = argOr(args, 0, Value.undefined_);
+    // §23.2.3.16 step 4 — If len is 0, return -1. The length
+    // check happens BEFORE ToIntegerOrInfinity(fromIndex), so a
+    // throwing `fromIndex.valueOf` is not observed on an empty
+    // TypedArray.
     const len: i64 = @intCast(taCurrentLength(tv));
+    if (len == 0) return Value.fromInt32(-1);
+    // §23.2.3.16 — indexOf uses IsStrictlyEqual; reads from a
+    // detached buffer surface as undefined and only equal a
+    // strictly-undefined search target.
+    const target = argOr(args, 0, Value.undefined_);
     var from = try taResolveIndex(realm, argOr(args, 1, Value.fromInt32(0)), len, 0);
     if (from < 0) from = 0;
-    // §23.2.3.14 step 8 — HasProperty(O, k) is `false` once the
+    // §23.2.3.16 step 8 — HasProperty(O, k) is `false` once the
     // buffer is detached (mid-call via `fromIndex.valueOf`); the
     // spec's loop returns -1 in that case.
     if (tv.viewed.array_buffer == null) return Value.fromInt32(-1);
@@ -1806,17 +1852,45 @@ fn typedArrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nati
 
 fn typedArrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const tv = try taValidatedView(realm, this_value, "lastIndexOf");
-    if (tv.viewed.array_buffer == null) return Value.fromInt32(-1);
-    const target = argOr(args, 0, Value.undefined_);
+    // §23.2.3.18 step 4 — If len is 0, return -1.  This happens
+    // BEFORE ToIntegerOrInfinity(fromIndex), so an empty TA + a
+    // throwing fromIndex still returns -1.
     const len: i64 = @intCast(taCurrentLength(tv));
+    if (len == 0) return Value.fromInt32(-1);
+    const target = argOr(args, 0, Value.undefined_);
     var from: i64 = len - 1;
     if (args.len > 1 and !args[1].isUndefined()) {
-        from = try taResolveIndex(realm, args[1], len, len - 1);
-        if (from >= len) from = len - 1;
+        // §23.2.3.18 step 5 — ToIntegerOrInfinity(fromIndex).
+        // Use taResolveIndex which routes through `toNumber` so
+        // user `valueOf` fires + throws propagate.
+        const fi_num = try intrinsics.toNumber(realm, args[1]);
+        const fi_n: f64 = if (fi_num.isInt32())
+            @floatFromInt(fi_num.asInt32())
+        else if (fi_num.isDouble())
+            fi_num.asDouble()
+        else
+            0;
+        // §23.2.3.18 step 6 — relativeIndex semantics:
+        //   if fromIndex < 0: from := len + fromIndex
+        //   else: from := min(fromIndex, len - 1)
+        if (std.math.isNan(fi_n)) {
+            from = 0;
+        } else {
+            const trunc_n = @trunc(fi_n);
+            const max_i: f64 = @floatFromInt(std.math.maxInt(i64));
+            const min_i: f64 = @floatFromInt(std.math.minInt(i64));
+            const fi_i: i64 = if (trunc_n >= max_i)
+                std.math.maxInt(i64)
+            else if (trunc_n <= min_i)
+                std.math.minInt(i64)
+            else
+                @intFromFloat(trunc_n);
+            from = if (fi_i < 0) len +| fi_i else @min(fi_i, len - 1);
+        }
     }
-    // §23.2.3.17 step 8 — `kPresent` is `false` after detach (the
-    // `fromIndex.valueOf` may have triggered it), so the loop
-    // returns -1 without inspecting elements.
+    // §23.2.3.18 step 8 — `kPresent` is `false` after detach
+    // (the `fromIndex.valueOf` may have triggered it), so the
+    // loop returns -1 without inspecting elements.
     if (tv.viewed.array_buffer == null) return Value.fromInt32(-1);
     var i: i64 = from;
     while (i >= 0) : (i -= 1) {
@@ -2735,7 +2809,10 @@ fn typedArrayToSorted(realm: *Realm, this_value: Value, args: []const Value) Nat
     const cmp_v = argOr(args, 0, Value.undefined_);
     const cmp_fn: ?*JSFunction = if (cmp_v.isUndefined()) null else heap_mod.valueAsFunction(cmp_v) orelse return throwTypeError(realm, "toSorted comparator must be a function");
     const ts_len = taCurrentLength(tv);
-    const out = try taMakeNew(realm, tv.kind, ts_len);
+    // §23.2.3.34 toSorted — ignores @@species; allocates default
+    // %TypedArray% per [[TypedArrayName]] so Uint8ClampedArray
+    // round-trips as itself.
+    const out = try taMakeNewNamed(realm, tv.kind, ts_len, tv.name);
     const out_buf = out.typed_view.?.viewed.array_buffer.?;
     const elem_size = tv.kind.elementSize();
     @memcpy(out_buf[0 .. ts_len * elem_size], buf[tv.byte_offset .. tv.byte_offset + ts_len * elem_size]);
@@ -2748,7 +2825,9 @@ fn typedArrayToReversed(realm: *Realm, this_value: Value, args: []const Value) N
     const tv = try taValidatedView(realm, this_value, "toReversed");
     const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
     const tr_len = taCurrentLength(tv);
-    const out = try taMakeNew(realm, tv.kind, tr_len);
+    // §23.2.3.33 toReversed — ignores @@species; preserve
+    // [[TypedArrayName]] so Uint8ClampedArray stays clamped.
+    const out = try taMakeNewNamed(realm, tv.kind, tr_len, tv.name);
     const out_buf = out.typed_view.?.viewed.array_buffer.?;
     const elem_size = tv.kind.elementSize();
     var i: usize = 0;
@@ -2761,17 +2840,20 @@ fn typedArrayToReversed(realm: *Realm, this_value: Value, args: []const Value) N
 }
 
 fn typedArrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const bigint_mod = @import("bigint.zig");
+    // §23.2.3.39 step 1-2 — ValidateTypedArray(O, seq-cst) and
+    // snapshot len. We deliberately re-read length / buffer
+    // BELOW after coercions because step 9 (IsValidIntegerIndex)
+    // tests against the post-coercion buffer state.
     const tv = try taValidatedView(realm, this_value, "with");
-    const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
-    const w_len_us = taCurrentLength(tv);
-    const len: i64 = @intCast(w_len_us);
+    const initial_len: i64 = @intCast(taCurrentLength(tv));
+
     const idx_arg = argOr(args, 0, Value.fromInt32(0));
-    const value = argOr(args, 1, Value.undefined_);
-    // §23.2.3.39 step 2 — ToIntegerOrInfinity(relativeIndex)
-    // applies ToNumber first, which fires ToPrimitive →
-    // valueOf / toString on objects and throws on Symbol /
-    // BigInt. Route through `toNumber` (realm-aware) so user
-    // valueOf throws propagate before we touch `value`.
+    const value_arg = argOr(args, 1, Value.undefined_);
+
+    // §23.2.3.39 step 4 — ToIntegerOrInfinity(index). Coerce
+    // INDEX FIRST so logs.push("index"), logs.push("value")
+    // ordering is preserved (see order-of-evaluation.js).
     const idx_num = try intrinsics.toNumber(realm, idx_arg);
     const idx_n: f64 = if (idx_num.isInt32())
         @floatFromInt(idx_num.asInt32())
@@ -2779,24 +2861,54 @@ fn typedArrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeE
         idx_num.asDouble()
     else
         0;
-    // §7.1.5 ToIntegerOrInfinity yields ±Infinity for an infinite
-    // operand; the subsequent `actualIndex >= len` (or < 0) then
-    // throws RangeError. Cynic's index path uses i64, so map
-    // ±Infinity onto sentinel min/max BEFORE the int cast to
-    // avoid an UB-trapping `@intFromFloat`. NaN already coerces
-    // to 0 per spec.
     const trunc_n = if (std.math.isNan(idx_n)) 0.0 else @trunc(idx_n);
     const max_i: f64 = @floatFromInt(std.math.maxInt(i64));
     const min_i: f64 = @floatFromInt(std.math.minInt(i64));
     const idx_i: i64 = if (trunc_n >= max_i) std.math.maxInt(i64) else if (trunc_n <= min_i) std.math.minInt(i64) else @intFromFloat(trunc_n);
-    const target_i: i64 = if (idx_i < 0) idx_i +| len else idx_i;
-    if (target_i < 0 or target_i >= len) return throwRangeError(realm, "with: index out of range");
+    // §23.2.3.39 step 5/6 — actualIndex; we'll re-check range
+    // against the *post-coercion* len below.
+    const actual_index: i64 = if (idx_i < 0) idx_i +| initial_len else idx_i;
 
-    const out = try taMakeNew(realm, tv.kind, w_len_us);
+    // §23.2.3.39 step 7-8 — coerce VALUE next. ToBigInt for
+    // BigInt typed arrays, ToNumber otherwise. Either may throw,
+    // and either may run side-effecting valueOf hooks that
+    // mutate `O` (early-type-coercion.js) or resize a backing
+    // RAB (valid-typedarray-index-checked-after-coercions.js).
+    const numeric_value: Value = switch (tv.kind) {
+        .bigint64, .biguint64 => bigint_mod.toBigIntValue(realm, value_arg) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        },
+        else => try intrinsics.toNumber(realm, value_arg),
+    };
+
+    // §23.2.3.39 step 9 — IsValidIntegerIndex against current
+    // buffer witness (post-coercion). This is what makes
+    // `with(100, throwingValue)` propagate the value-coercion
+    // throw rather than RangeError.
+    const post_len: i64 = @intCast(taCurrentLength(tv));
+    if (actual_index < 0 or actual_index >= post_len) {
+        return throwRangeError(realm, "with: index out of range");
+    }
+    const out_len_us: usize = @intCast(post_len);
+
+    // §23.2.3.39 step 10-11 — TypedArrayCreateSameType, then
+    // copy + overwrite. SameType means default ctor for the
+    // exemplar's [[TypedArrayName]] — preserve clamped vs unclamped.
+    const out = try taMakeNewNamed(realm, tv.kind, out_len_us, tv.name);
     const out_buf = out.typed_view.?.viewed.array_buffer.?;
+    const buf_now = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached after coercion");
     const elem_size = tv.kind.elementSize();
-    @memcpy(out_buf[0 .. w_len_us * elem_size], buf[tv.byte_offset .. tv.byte_offset + w_len_us * elem_size]);
-    writeTypedElement(out_buf, tv.kind, @as(usize, @intCast(target_i)) * elem_size, value);
+    const src_byte_len = out_len_us * elem_size;
+    // The source view's window may have shrunk during coercion;
+    // copy whatever's in bounds and zero-fill the rest (the
+    // allocation already zeroed it, so just clamp the memcpy).
+    const src_avail: usize = if (buf_now.len > tv.byte_offset) buf_now.len - tv.byte_offset else 0;
+    const copy_len = @min(src_byte_len, src_avail);
+    if (copy_len > 0) {
+        @memcpy(out_buf[0..copy_len], buf_now[tv.byte_offset .. tv.byte_offset + copy_len]);
+    }
+    writeTypedElement(out_buf, tv.kind, @as(usize, @intCast(actual_index)) * elem_size, numeric_value);
     return heap_mod.taggedObject(out);
 }
 

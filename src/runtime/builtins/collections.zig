@@ -193,11 +193,30 @@ fn makeArrayLikeIterator(realm: *Realm, src: Value, kind: enum { entries, keys, 
 
 /// §10.4.5 ValidateTypedArray check shared by the
 /// TypedArray.prototype { keys, values, entries } variants of
-/// the array-like iterator factory. For non-TypedArray receivers
-/// (regular Array.prototype.values, etc.) this is a no-op.
+/// the array-like iterator factory.
+///
+/// Spec §23.2.4.4 ValidateTypedArray(O, order):
+///   1. If Type(O) is not Object → TypeError
+///   2. If O does not have a [[TypedArrayName]] internal slot
+///      → TypeError
+///   3. (subsequent steps test buffer state)
+///
+/// Cynic's TA-method entry point — `%TypedArray%.prototype.
+/// {keys,values,entries}` — therefore must throw TypeError for
+/// any non-TA receiver (undefined, Array, DataView, plain
+/// object, primitive). Only after the slot check do we test for
+/// detached / OOB.
 fn validateTypedArrayIfPresent(realm: *Realm, this_value: Value) NativeError!void {
-    const obj = heap_mod.valueAsPlainObject(this_value) orelse return;
-    const tv = obj.typed_view orelse return;
+    // §23.2.4.4 step 1 — Type(O) not Object → TypeError.
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "TypedArray iterator requires a TypedArray receiver");
+    // §23.2.4.4 step 2 — missing [[TypedArrayName]] → TypeError.
+    // `typed_view` is the Zig-side carrier for the [[TypedArrayName]] /
+    // [[ViewedArrayBuffer]] / [[ByteOffset]] / [[ArrayLength]] slot
+    // family; `null` means this object is plain / Array / DataView /
+    // ArrayBuffer / %TypedArray%.prototype itself.
+    const tv = obj.typed_view orelse
+        return throwTypeError(realm, "TypedArray iterator requires a TypedArray receiver");
     // §23.2.4.4 ValidateTypedArray (called by entries / keys /
     // values) — throws TypeError when the buffer is detached
     // (IsTypedArrayOutOfBounds is `true` per ES2024 §25.1.3.x
