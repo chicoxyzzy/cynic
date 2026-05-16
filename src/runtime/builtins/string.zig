@@ -303,17 +303,29 @@ fn appendWtf8(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), cp
     }
 }
 
-/// §22.1.3.12 entry that runs the IsRegExp-global check + the
-/// Symbol.matchAll dispatch. Wired as `String.prototype.matchAll`.
+/// §22.1.3.14 String.prototype.matchAll ( regexpOrPattern ). The
+/// Object-gated dispatch in step 3 deliberately skips IsRegExp +
+/// GetMethod for primitive `regexpOrPattern` — so a string-keyed
+/// `String.prototype[@@matchAll]` shadow is never consulted when
+/// the argument is a string. For Object args, step 3.b.iii throws
+/// TypeError on a non-global RegExp *before* GetMethod runs; step
+/// 3.c forwards to the symbol method if present. Otherwise steps
+/// 4-6 build a fresh `/.../g` via RegExpCreate and invoke
+/// `@@matchAll` on it — which lets `delete RegExp.prototype[@@matchAll]`
+/// surface as the expected TypeError when the method is missing.
 fn stringMatchAllDispatched(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     if (this_value.isNull() or this_value.isUndefined())
         return throwTypeError(realm, "String.prototype.matchAll called on null or undefined");
     const arg = argOr(args, 0, Value.undefined_);
-    // §22.1.3.12 step 2.a-c — If IsRegExp(regexp) and the regex
-    // isn't global, throw *before* the Symbol.matchAll dispatch
-    // (per the `flag-g-missing` test262 fixtures).
-    if (try isRegExp(realm, arg)) {
-        if (heap_mod.valueAsPlainObject(arg)) |arg_obj| {
+    // §22.1.3.14 step 3 — "If regexpOrPattern is an Object, then".
+    // Primitives (null, undefined, strings, numbers, …) skip the
+    // entire IsRegExp + GetMethod block.
+    if (heap_mod.valueAsPlainObject(arg)) |arg_obj| {
+        // step 3.a-b — IsRegExp(regexp); when true, validate `flags`
+        // contains "g". `flags` is read with the accessor on
+        // %RegExp.prototype% (§22.2.6.4), which `getPropertyChain`
+        // honours.
+        if (try isRegExp(realm, arg)) {
             const flags_v = try intrinsics.getPropertyChain(realm, arg_obj, "flags");
             if (flags_v.isUndefined() or flags_v.isNull())
                 return throwTypeError(realm, "String.prototype.matchAll: regex has no flags");
@@ -321,40 +333,24 @@ fn stringMatchAllDispatched(realm: *Realm, this_value: Value, args: []const Valu
             if (std.mem.indexOfScalar(u8, flags_s.bytes, 'g') == null)
                 return throwTypeError(realm, "String.prototype.matchAll requires a global regex");
         }
+        // step 3.c-d — GetMethod(regexpOrPattern, @@matchAll); if
+        // not undefined, Call(matcher, regexpOrPattern, « thisValue »).
+        // Note: `thisValue` is passed un-coerced (the matcher does
+        // its own ToString). This matters for `toString-this-val.js`
+        // which observes the toPrimitive call only once.
+        if (try getSymbolMethod(realm, arg, "@@matchAll")) |matcher| {
+            return invokeSymbolMethod(realm, matcher, arg, this_value, null);
+        }
     }
-    // §22.1.3.12 step 2.d — GetMethod(regexp, @@matchAll).
-    if (try getSymbolMethod(realm, arg, "@@matchAll")) |matcher| {
-        const recv_s = try coerceThisToJSString(realm, this_value);
-        return invokeSymbolMethod(realm, matcher, arg, Value.fromString(recv_s), null);
-    }
-    return stringMatchAll(realm, this_value, args);
-}
-
-/// §22.1.3.12 String.prototype.matchAll(regex) — return an
-/// iterator that yields each `regex.exec` result. Per spec the
-/// regex must carry the global flag (otherwise TypeError).
-fn stringMatchAll(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // step 4 — Let str be ? ToString(thisValue).
     const s = try coerceThisToJSString(realm, this_value);
-    const arg = argOr(args, 0, Value.undefined_);
-    const regex_obj = if (isRegexLike(arg)) |r| r else blk: {
-        const re_v = try ensureRegExp(realm, arg);
-        break :blk heap_mod.valueAsPlainObject(re_v) orelse return throwTypeError(realm, "matchAll target is not a regex");
-    };
-    if (!regexFlagBool(realm, regex_obj, "global")) {
-        return throwTypeError(realm, "String.prototype.matchAll requires a global regex");
-    }
-    // §22.2.9.1 CreateRegExpStringIterator — allocate the
-    // iterator with its `[[IteratingRegExp]]`, `[[IteratedString]]`,
-    // and `[[Done]]` slots. `next` / `@@iterator` /
-    // `Symbol.toStringTag` come from %RegExpStringIteratorPrototype%
-    // (§22.2.9.2), wired by `install` above.
-    const iter = realm.heap.allocateObject() catch return error.OutOfMemory;
-    iter.prototype = realm.intrinsics.regexp_string_iterator_prototype orelse realm.intrinsics.object_prototype;
-    iter.set(realm.allocator, "__cynic_matchall_re__", heap_mod.taggedObject(regex_obj)) catch return error.OutOfMemory;
-    iter.set(realm.allocator, "__cynic_matchall_input__", Value.fromString(s)) catch return error.OutOfMemory;
-    iter.set(realm.allocator, "__cynic_matchall_done__", Value.fromBool(false)) catch return error.OutOfMemory;
-    regex_obj.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
-    return heap_mod.taggedObject(iter);
+    // step 5 — Let regexp be ? RegExpCreate(regexpOrPattern, "g").
+    const rx_v = try regExpCreate(realm, arg, "g");
+    // step 6 — Return ? Invoke(regexp, @@matchAll, « str »).
+    const rx_obj = heap_mod.valueAsPlainObject(rx_v) orelse return throwTypeError(realm, "matchAll: RegExpCreate did not return an object");
+    const matcher_v = try intrinsics.getPropertyChain(realm, rx_obj, "@@matchAll");
+    const matcher_fn = heap_mod.valueAsFunction(matcher_v) orelse return throwTypeError(realm, "matchAll: regexp[@@matchAll] is not callable");
+    return invokeSymbolMethod(realm, matcher_fn, rx_v, Value.fromString(s), null);
 }
 
 fn iterResult(realm: *Realm, value: Value, done: bool) NativeError!Value {
@@ -506,13 +502,31 @@ fn ensureRegExp(realm: *Realm, arg: Value) NativeError!Value {
             if (heap_mod.valueAsFunction(exec_v) != null) return arg;
         }
     }
+    return regExpCreate(realm, arg, null);
+}
+
+/// §22.2.3.3 RegExpCreate ( P, F ) — unconditionally allocate a
+/// new RegExp from (pattern, flags). Differs from `ensureRegExp`
+/// in that the caller asks for a *fresh* instance even when the
+/// pattern is already a RegExp; this matches the §22.1.3.14
+/// step 5 "Let regexp be ? RegExpCreate(regexpOrPattern, "g")"
+/// invariant. `flags` is the flags string (e.g. "g"); when null,
+/// passes no flags argument (so the constructor inherits flags
+/// from a RegExp pattern, per §22.2.3.1 step 3.b).
+fn regExpCreate(realm: *Realm, pattern: Value, flags: ?[]const u8) NativeError!Value {
     const ctor_v = realm.globals.get("RegExp") orelse Value.undefined_;
     const ctor = heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "RegExp constructor is missing");
     const interp = @import("../interpreter.zig");
     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
     inst.prototype = ctor.prototype;
-    const args_call = [_]Value{arg};
-    const out = interp.callJSFunction(realm.allocator, realm, ctor, heap_mod.taggedObject(inst), &args_call) catch |err| switch (err) {
+    var argbuf: [2]Value = .{ pattern, Value.undefined_ };
+    var argn: usize = 1;
+    if (flags) |fs| {
+        const fs_str = realm.heap.allocateString(fs) catch return error.OutOfMemory;
+        argbuf[1] = Value.fromString(fs_str);
+        argn = 2;
+    }
+    const out = interp.callJSFunction(realm.allocator, realm, ctor, heap_mod.taggedObject(inst), argbuf[0..argn]) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
