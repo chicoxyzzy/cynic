@@ -680,12 +680,76 @@ fn getSubstitution(
     return realm.heap.allocateString(out.items) catch return error.OutOfMemory;
 }
 
-/// §22.2.6.12 RegExp.prototype [ @@search ] ( string ).
+/// §22.2.6.13 RegExp.prototype [ @@search ] ( string ). A step-by-
+/// step traversal so each observable side effect (`Get(rx,
+/// "lastIndex")` / SameValue gate on the `Set(rx, "lastIndex",
+/// 0)` / RegExpExec via `Get(rx, "exec")` / `Get(result,
+/// "index")` / the SameValue-gated `Set(rx, "lastIndex",
+/// previousLastIndex)` restore) lines up with the fixtures under
+/// `built-ins/RegExp/prototype/Symbol.search/`.
+///
+/// We can't delegate to `string.zig:stringSearch`: it writes
+/// `lastIndex` via the bypass `set` (so a non-writable
+/// `lastIndex` is silently swallowed instead of throwing), and it
+/// unconditionally writes the pre-exec 0 and the post-exec
+/// restore — the SameValue gates per §22.2.6.13 step 5 / step 8
+/// require the writes to be skipped when the value is already
+/// where the spec wants it (`lastindex-no-restore` exercises both
+/// gates).
 fn regexpProtoSearch(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (heap_mod.valueAsPlainObject(this_value) == null) return throwTypeError(realm, "RegExp.prototype[Symbol.search] called on non-object");
-    const string_mod = @import("string.zig");
-    const inner = [_]Value{this_value};
-    return string_mod.stringSearch(realm, argOr(args, 0, Value.undefined_), &inner);
+    // step 1-2 — `Let rx be the this value`. step 2 — non-Object
+    // → TypeError.
+    const rx = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "RegExp.prototype[Symbol.search] called on non-object");
+
+    // step 3 — `Let S be ? ToString(string)`.
+    const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
+
+    // step 4 — `Let previousLastIndex be ? Get(rx, "lastIndex")`.
+    // The `get-lastindex-err` fixture throws from the getter; it
+    // surfaces through `getPropertyChain`.
+    const previous_last_index = try intrinsics.getPropertyChain(realm, rx, "lastIndex");
+
+    // step 5 — `If SameValue(previousLastIndex, +0𝔽) is false,
+    // perform ? Set(rx, "lastIndex", +0𝔽, true)`. The SameValue
+    // gate is observable: `lastindex-no-restore` asserts the
+    // setter fires *zero* times when `lastIndex` is already 0,
+    // and exactly once otherwise. `set-lastindex-init-err`
+    // exercises both the poisoned-setter and the non-writable
+    // path (where `setPropertyChainOrThrow` raises TypeError).
+    const zero = Value.fromInt32(0);
+    if (!intrinsics.sameValue(previous_last_index, zero)) {
+        try setPropertyChainOrThrow(realm, rx, "lastIndex", zero);
+    }
+
+    // step 6 — `Let result be ? RegExpExec(rx, S)`. Goes through
+    // `Get(rx, "exec")` per §22.2.7.1 step 3; the
+    // `cstm-exec-return-invalid` fixture asserts the post-call
+    // Object-or-Null check raises TypeError.
+    const result_v = try regExpExecGeneric(realm, rx, s);
+
+    // step 7 — `Let currentLastIndex be ? Get(rx, "lastIndex")`.
+    const current_last_index = try intrinsics.getPropertyChain(realm, rx, "lastIndex");
+
+    // step 8 — `If SameValue(currentLastIndex, previousLastIndex)
+    // is false, perform ? Set(rx, "lastIndex", previousLastIndex,
+    // true)`. `set-lastindex-restore` asserts the setter fires
+    // exactly once when `exec` mutated `lastIndex`;
+    // `set-lastindex-restore-err` exercises the poisoned-setter
+    // and the non-writable-after-exec paths.
+    if (!intrinsics.sameValue(current_last_index, previous_last_index)) {
+        try setPropertyChainOrThrow(realm, rx, "lastIndex", previous_last_index);
+    }
+
+    // step 9 — `If result is null, return -1𝔽`.
+    if (result_v.isNull()) return Value.fromInt32(-1);
+
+    // step 10 — `Return ? Get(result, "index")`. The
+    // `success-get-index-err` fixture throws from the `index`
+    // getter; `getPropertyChain` propagates.
+    const result_obj = heap_mod.valueAsPlainObject(result_v) orelse
+        return throwTypeError(realm, "RegExp.prototype[Symbol.search]: RegExpExec returned non-Object");
+    return try intrinsics.getPropertyChain(realm, result_obj, "index");
 }
 
 /// §22.2.5.13 RegExp.prototype [ @@split ] ( string, limit ). A
