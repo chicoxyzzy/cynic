@@ -2403,7 +2403,7 @@ fn objectProtoIsPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
 /// inherited-string property, override the built-in tag
 /// with that string.
 /// 6. Format `"[object " + tag + "]"`.
-fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+pub fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     if (this_value.isUndefined()) {
         const s = realm.heap.allocateString("[object Undefined]") catch return error.OutOfMemory;

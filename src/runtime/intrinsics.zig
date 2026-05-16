@@ -745,7 +745,12 @@ pub fn toObjectThis(realm: *Realm, this_value: Value) NativeError!*JSObject {
         // wrapper so read-only Array.prototype.X.call(fn, …)
         // observes `length` and `fn[i]` per spec.
         const w = realm.heap.allocateObject() catch return error.OutOfMemory;
-        w.prototype = realm.intrinsics.object_prototype;
+        // Inherit the function's proto chain so `obj instanceof
+        // Function` succeeds inside Array.prototype.X callbacks
+        // (Sputnik 15.4.4.x-1-9 family). The function's `proto`
+        // slot points at `%Function.prototype%` (or a user-
+        // subclassed proto), exactly what the wrapper needs.
+        w.prototype = fn_obj.proto;
         var it = fn_obj.properties.iterator();
         while (it.next()) |entry| {
             w.set(realm.allocator, entry.key_ptr.*, entry.value_ptr.*) catch return error.OutOfMemory;

@@ -67,7 +67,7 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethodOnProto(realm, arr_proto, "find", arrayFind, 1);
         try installNativeMethodOnProto(realm, arr_proto, "findIndex", arrayFindIndex, 1);
         try installNativeMethodOnProto(realm, arr_proto, "reduce", arrayReduce, 1);
-        try installNativeMethodOnProto(realm, arr_proto, "toString", arrayJoin, 0);
+        try installNativeMethodOnProto(realm, arr_proto, "toString", arrayToString, 0);
         try installNativeMethodOnProto(realm, arr_proto, "toLocaleString", arrayToLocaleString, 0);
         try installNativeMethodOnProto(realm, arr_proto, "reverse", arrayReverse, 0);
         try installNativeMethodOnProto(realm, arr_proto, "shift", arrayShift, 0);
@@ -587,6 +587,35 @@ fn arrayIncludes(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         if (sameValueZero(v, target)) return Value.true_;
     }
     return Value.false_;
+}
+
+/// §23.1.3.36 Array.prototype.toString:
+///   1. array = ? ToObject(this value)
+///   2. func = ? Get(array, "join")
+///   3. If IsCallable(func) is false, set func = %Object.prototype.toString%
+///   4. Return ? Call(func, array)
+/// Drives `Array.prototype.toString.call(true)` to fall back to
+/// `Object.prototype.toString.call(true)` → `"[object Boolean]"`,
+/// because a Boolean wrapper has no `join` in its proto chain.
+fn arrayToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const obj = try toObjectThis(realm, this_value);
+    const func_v = try getPropertyChain(realm, obj, "join");
+    if (heap_mod.valueAsFunction(func_v)) |func| {
+        const outcome = interpreter.callJSFunction(realm.allocator, realm, func, heap_mod.taggedObject(obj), &.{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        switch (outcome) {
+            .value, .yielded => |v| return v,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        }
+    }
+    // §23.1.3.36 step 3 — fall back to Object.prototype.toString.
+    return @import("object.zig").objectProtoToString(realm, heap_mod.taggedObject(obj), &.{});
 }
 
 fn arrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -1813,7 +1842,7 @@ fn arrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) Native
     start = @min(start, len);
     end = @min(end, len);
     const count: i64 = @min(end - start, len - target);
-    if (count <= 0) return this_value;
+    if (count <= 0) return heap_mod.taggedObject(obj);
 
     // §23.1.3.4 steps 14-18 — HasProperty / Get / Set / Delete on
     // each visited index. Direction matters when ranges overlap.
@@ -1831,7 +1860,12 @@ fn arrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) Native
             try copyWithinStep(realm, obj, start + k, target + k);
         }
     }
-    return this_value;
+    // §23.1.3.4 step 19 — Return O. For a non-Object receiver
+    // (Boolean / Number / String / Symbol / BigInt), `toObjectThis`
+    // produced a fresh wrapper above; `this_value` is the raw
+    // primitive. Return the wrapper so `copyWithin.call(true)` is
+    // a Boolean wrapper per §7.1.18 ToObject step 4.
+    return heap_mod.taggedObject(obj);
 }
 
 fn copyWithinStep(realm: *Realm, obj: *JSObject, src: i64, dst: i64) NativeError!void {
@@ -2252,7 +2286,9 @@ fn arrayReverse(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             try setOrThrow(realm, obj, owned_j.bytes, lower_v);
         }
     }
-    return this_value;
+    // §23.1.3.26 step 6 — Return O (the ToObject wrapper, not the
+    // raw `this_value` primitive).
+    return heap_mod.taggedObject(obj);
 }
 
 fn arrayShift(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
