@@ -5434,6 +5434,34 @@ fn runFrames(
                 const name_v = local_chunk.constants[k];
                 if (!name_v.isString()) return error.InvalidOpcode;
                 const name_s: *JSString = @ptrCast(@alignCast(name_v.asString()));
+                // §16.2.3.7 ExportDeclaration : `export default`
+                // AssignmentExpression, step 3 — if the value is
+                // an anonymous function-like definition and has no
+                // own `name` property, SetFunctionName(value,
+                // "default"). The compiler routes both anonymous
+                // FunctionExpressions / ClassExpressions and the
+                // `export default function () {}` / `export default
+                // class {}` forms through `default_value` with the
+                // expression's compiled value in `acc` — both
+                // land here with an empty-named JSFunction. Named
+                // forms already have a non-empty own `name`, so the
+                // own-property check leaves them alone.
+                if (std.mem.eql(u8, name_s.bytes, "default")) {
+                    if (heap_mod.valueAsFunction(acc)) |fn_obj| {
+                        const cur = fn_obj.get("name");
+                        const has_nonempty_name = blk: {
+                            if (!cur.isString()) break :blk false;
+                            const cs: *JSString = @ptrCast(@alignCast(cur.asString()));
+                            break :blk cs.bytes.len != 0;
+                        };
+                        if (!has_nonempty_name) {
+                            const owned = realm.heap.allocateString("default") catch return error.OutOfMemory;
+                            fn_obj.set(realm.allocator, "name", Value.fromString(owned)) catch return error.OutOfMemory;
+                            fn_obj.name_string = owned;
+                            fn_obj.name = owned.bytes;
+                        }
+                    }
+                }
                 if (realm.current_module) |mr| {
                     mr.exports.set(realm.allocator, name_s.bytes, acc) catch return error.OutOfMemory;
                 }
