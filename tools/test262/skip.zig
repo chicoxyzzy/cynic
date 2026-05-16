@@ -209,6 +209,38 @@ pub const skip_ses_substrings = [_][]const u8{
     // 40 fixtures share the `eval-` prefix; the rest of the
     // `statementList/` tree (positive parsing tests) stays attempted.
     "language/statementList/eval-",
+
+    // `language/statements/function/{13.0-8-s,13.0-12-s,13.0_4-17gs,
+    // 13.1-2-s,13.1-4-s,13.2-10-s..13.2-19-s,name-unicode,
+    // S13.2.2_A8_T3}` — every fixture in this Sputnik-era
+    // batch tests strict-mode reachability by constructing a
+    // function body from a string via `Function("…")` /
+    // `new Function("…")` / `Function.call(this,"src")` /
+    // `eval("function f(){…}")`. All four mechanisms are the
+    // permanent SES carve-out per AGENTS.md (“eval and runtime
+    // code construction”): §15.3.2 (Function constructor),
+    // §19.2.1 (eval). The non-Function-string siblings (e.g.
+    // `S13_A3_T1`, `S14_A2`, `params-dflt-ref-arguments`) stay
+    // attempted — they test other behaviour and surface as
+    // honest engine bugs when they fail. 13 fixtures, each
+    // listed by basename for clarity.
+    "language/statements/function/13.0-8-s.js",
+    "language/statements/function/13.0-12-s.js",
+    "language/statements/function/13.0_4-17gs.js",
+    "language/statements/function/13.1-2-s.js",
+    "language/statements/function/13.1-4-s.js",
+    "language/statements/function/13.2-10-s.js",
+    "language/statements/function/13.2-11-s.js",
+    "language/statements/function/13.2-12-s.js",
+    "language/statements/function/13.2-13-s.js",
+    "language/statements/function/13.2-14-s.js",
+    "language/statements/function/13.2-15-s.js",
+    "language/statements/function/13.2-16-s.js",
+    "language/statements/function/13.2-17-s.js",
+    "language/statements/function/13.2-18-s.js",
+    "language/statements/function/13.2-19-s.js",
+    "language/statements/function/name-unicode.js",
+    "language/statements/function/S13.2.2_A8_T3.js",
 };
 
 /// AND-pair filters — both substrings must appear in the path. Used
