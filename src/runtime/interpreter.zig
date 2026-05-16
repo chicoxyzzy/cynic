@@ -4328,6 +4328,11 @@ fn runFrames(
                     // (Object.assign uses the same shape).
                     var excluded: std.ArrayListUnmanaged([]const u8) = .empty;
                     defer excluded.deinit(allocator);
+                    var excluded_owned: std.ArrayListUnmanaged([]u8) = .empty;
+                    defer {
+                        for (excluded_owned.items) |s| allocator.free(s);
+                        excluded_owned.deinit(allocator);
+                    }
                     if (heap_mod.valueAsPlainObject(excl_v)) |excl_arr| {
                         const len_v = excl_arr.get("length");
                         const len_i: i64 = if (len_v.isInt32()) len_v.asInt32() else 0;
@@ -4336,9 +4341,34 @@ fn runFrames(
                         while (i < len_i) : (i += 1) {
                             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
                             const k_v = excl_arr.get(islice);
+                            if (k_v.isUndefined()) continue;
+                            // Computed-key exclusions
+                            // (`{[expr]: x, ...rest}`) store the raw
+                            // post-ToPropertyKey value here — could be
+                            // a string or a number primitive that hasn't
+                            // been stringified yet (our
+                            // `coerceToPropertyKey` short-circuits
+                            // non-object primitives per §7.1.19's
+                            // ToPrimitive-first path). Normalise via
+                            // the same key-to-string helper that
+                            // `sta_computed` uses on the source side,
+                            // so the exclusion string matches the
+                            // source's stored key form.
                             if (k_v.isString()) {
                                 const ks: *JSString = @ptrCast(@alignCast(k_v.asString()));
                                 excluded.append(allocator, ks.bytes) catch return error.OutOfMemory;
+                            } else if (heap_mod.valueAsSymbol(k_v)) |sym| {
+                                // Symbols exclude by their `prop_key`.
+                                excluded.append(allocator, sym.prop_key) catch return error.OutOfMemory;
+                            } else {
+                                var kbuf: [64]u8 = undefined;
+                                const ks = computedKeyToString(k_v, &kbuf);
+                                const dup = allocator.dupe(u8, ks) catch return error.OutOfMemory;
+                                excluded_owned.append(allocator, dup) catch {
+                                    allocator.free(dup);
+                                    return error.OutOfMemory;
+                                };
+                                excluded.append(allocator, dup) catch return error.OutOfMemory;
                             }
                         }
                     }

@@ -5449,6 +5449,15 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
             const r_done = try self.reserveTemp();
             defer self.releaseTemp();
 
+            // §13.15.5.2 ArrayAssignmentPattern step 5 — if any
+            // abrupt completion (throw OR return-completion in a
+            // generator) escapes the destructure walk and the
+            // iterator is not yet [[Done]], IteratorClose must run.
+            // Wrap from just after iter_open through the trailing
+            // close/drain in a synthetic handler that calls
+            // iter_close r_iter in throw mode and rethrows.
+            const handler_start_pc = self.builder.here();
+
             for (al.elements[0..elem_count]) |maybe_elt| {
                 if (maybe_elt) |elt| {
                     // §13.15.5.4 IteratorDestructuringAssignmentEval
@@ -5473,6 +5482,25 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
             }
 
             if (rest_arg) |arg| {
+                // §13.15.5.3 AssignmentRestElement step 1 — when the
+                // rest target is neither an ObjectLiteral nor an
+                // ArrayLiteral, evaluate its LHS reference BEFORE
+                // draining the iterator (so a throwing lref —
+                // `[...{}[thrower()]]` — fires before any further
+                // iter_step). Inner pattern leaves walk through the
+                // assignAssignmentPatternLeaf branch and don't need
+                // pre-eval here.
+                const rest_inner = blk: {
+                    var t = arg.*;
+                    while (t == .parenthesized) t = t.parenthesized.expression.*;
+                    break :blk t;
+                };
+                const rest_is_pattern = rest_inner == .array_literal or rest_inner == .object_literal;
+                const rest_prepared: PreparedLeaf = if (rest_is_pattern)
+                    .none
+                else
+                    try self.prepareAssignmentLeaf(arg.*);
+
                 // Drain the iterator into a fresh Array, then
                 // bind it to the rest leaf.
                 const r_rest = try self.reserveTemp();
@@ -5520,8 +5548,22 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
 
                 try self.builder.emitOp(.ldar, target.span());
                 try self.builder.emitU8(r_rest);
-                try self.assignAssignmentPatternLeaf(arg.*);
-            } else {
+                if (rest_is_pattern) {
+                    try self.assignAssignmentPatternLeaf(arg.*);
+                } else {
+                    try self.assignAssignmentPatternElemPrepared(arg.*, rest_prepared);
+                    self.releasePreparedLeaf(rest_prepared);
+                }
+            }
+
+            // Mark the end of the handler region BEFORE emitting the
+            // trailing normal-completion `iter_close`. The normal
+            // close itself propagates inner throws (mode=0); having
+            // it covered by our synthetic handler would double-close
+            // — `return()` would fire twice (test262
+            // array-empty-iter-close-err.js asserts returnCount=1).
+            const handler_end_pc = self.builder.here();
+            if (rest_arg == null) {
                 // §7.4.10 — close iter if still open.
                 try self.builder.emitOp(.iter_close, target.span());
                 try self.builder.emitU8(r_iter);
@@ -5529,6 +5571,69 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
                 // throws and TypeError on non-Object return.
                 try self.builder.emitU8(0);
             }
+
+            // §13.15.5.2 step 5 / §27.5.1.3 — abrupt completion
+            // escaping the destructure walk while the iterator is
+            // not [[Done]] must IteratorClose. Two handlers cover
+            // the same region:
+            //
+            //   • Throw-mode (`is_finally=false`, iter_close mode=1)
+            //     — outer throw wins per §7.4.6 step 7; inner
+            //     return() errors are swallowed.
+            //   • Return-mode (`is_finally=true`, iter_close mode=0)
+            //     — `unwindThrow` routes generator-return completions
+            //     here (it skips non-finally handlers while
+            //     `gen_return_completion` is set). Treat the
+            //     completion as normal/return per §7.4.6 step 8/9:
+            //     inner throws propagate, non-Object return result
+            //     surfaces TypeError.
+            //
+            // Order matters — the non-finally entry must come first
+            // so a true throw lands on it (without `is_finally`
+            // discrimination throws would match either handler).
+            try self.builder.emitOp(.jmp, target.span());
+            const skip_handlers_patch = self.builder.here();
+            try self.builder.emitI16(0);
+
+            const throw_handler_pc = self.builder.here();
+            const r_caught_throw = try self.reserveTemp();
+            try self.builder.emitOp(.star, target.span());
+            try self.builder.emitU8(r_caught_throw);
+            try self.builder.emitOp(.iter_close, target.span());
+            try self.builder.emitU8(r_iter);
+            try self.builder.emitU8(1);
+            try self.builder.emitOp(.ldar, target.span());
+            try self.builder.emitU8(r_caught_throw);
+            try self.builder.emitOp(.throw_, target.span());
+            self.releaseTemp();
+
+            const return_handler_pc = self.builder.here();
+            const r_caught_ret = try self.reserveTemp();
+            try self.builder.emitOp(.star, target.span());
+            try self.builder.emitU8(r_caught_ret);
+            try self.builder.emitOp(.iter_close, target.span());
+            try self.builder.emitU8(r_iter);
+            try self.builder.emitU8(0);
+            try self.builder.emitOp(.ldar, target.span());
+            try self.builder.emitU8(r_caught_ret);
+            try self.builder.emitOp(.throw_, target.span());
+            self.releaseTemp();
+
+            try self.builder.patchI16(skip_handlers_patch, self.builder.here());
+            try self.builder.addHandler(.{
+                .start_pc = handler_start_pc,
+                .end_pc = handler_end_pc,
+                .handler_pc = throw_handler_pc,
+                .catch_register = null,
+                .is_finally = false,
+            });
+            try self.builder.addHandler(.{
+                .start_pc = handler_start_pc,
+                .end_pc = handler_end_pc,
+                .handler_pc = return_handler_pc,
+                .catch_register = null,
+                .is_finally = true,
+            });
         },
         .object_literal => |ol| {
             // §13.15.5.4 — assignment to an object pattern
@@ -5538,9 +5643,44 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
             try self.builder.emitOp(.ldar, target.span());
             try self.builder.emitU8(r_src);
             try self.builder.emitOp(.require_object_coercible, target.span());
+
+            // Pre-allocate the rest exclusion array when the pattern
+            // ends in `...rest`. We populate it during the first
+            // pass so a computed key's *runtime* value (post-
+            // ToPropertyKey) is what excludes — not the source-text
+            // form. V8 / JSC do the same via CopyDataPropertiesWith-
+            // ExcludedProperties: each bound key contributes one
+            // exclusion entry resolved when it's evaluated.
+            var rest_arg: ?*ast.expression.Expression = null;
+            var rest_span: Span = target.span();
+            var bound_count: i32 = 0;
+            for (ol.properties) |p2| switch (p2) {
+                .property => bound_count += 1,
+                .spread => |sp| {
+                    rest_arg = sp.argument;
+                    rest_span = sp.span;
+                },
+                .method => return error.UnsupportedExpression,
+            };
+
+            const r_excl_opt: ?u8 = if (rest_arg != null) try self.reserveTemp() else null;
+            defer if (r_excl_opt != null) self.releaseTemp();
+            if (r_excl_opt) |r_excl| {
+                try self.builder.emitOp(.make_array, rest_span);
+                try self.builder.emitOp(.star, rest_span);
+                try self.builder.emitU8(r_excl);
+                const k_length = try self.internString("length");
+                try self.builder.emitOp(.lda_smi, rest_span);
+                try self.builder.emitI32(bound_count);
+                try self.builder.emitOp(.sta_property, rest_span);
+                try self.builder.emitU16(k_length);
+                try self.builder.emitU8(r_excl);
+            }
+
             // Object pattern leaves can include `{...rest}` —
             // the parser parses that as a `.spread` property
             // member with an identifier_reference argument.
+            var excl_idx: u32 = 0;
             for (ol.properties) |prop| switch (prop) {
                 .property => |op| {
                     // §13.15.5.5 AssignmentProperty : PropertyName :
@@ -5560,6 +5700,41 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
                         try self.builder.emitOp(.star, op.span);
                         try self.builder.emitU8(r);
                         src_key_r = r;
+                        // Pin the computed key (its post-ToPropertyKey
+                        // value) into the rest exclusion list. The
+                        // runtime side honours string entries; symbol
+                        // keys aren't copied by `object_rest_from`
+                        // anyway, so a symbol key in the list is
+                        // harmless (the matching property won't be
+                        // copied either).
+                        if (r_excl_opt) |r_excl| {
+                            try self.builder.emitOp(.ldar, op.span);
+                            try self.builder.emitU8(r);
+                            var ibuf: [16]u8 = undefined;
+                            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{excl_idx}) catch unreachable;
+                            const ik = try self.internString(islice);
+                            try self.builder.emitOp(.sta_property, op.span);
+                            try self.builder.emitU16(ik);
+                            try self.builder.emitU8(r_excl);
+                            excl_idx += 1;
+                        }
+                    } else if (r_excl_opt) |r_excl| {
+                        // Static key — record by its decoded textual
+                        // key. Done at first-pass time so the rest
+                        // sees the same exclusions regardless of any
+                        // user-getter side effects fired by the
+                        // matching `lda_property` below.
+                        const ks = try self.assignmentPatternKey(op.key);
+                        const kk = try self.internString(ks);
+                        try self.builder.emitOp(.lda_constant, op.span);
+                        try self.builder.emitU16(kk);
+                        var ibuf: [16]u8 = undefined;
+                        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{excl_idx}) catch unreachable;
+                        const ik = try self.internString(islice);
+                        try self.builder.emitOp(.sta_property, op.span);
+                        try self.builder.emitU16(ik);
+                        try self.builder.emitU8(r_excl);
+                        excl_idx += 1;
                     }
                     // §13.15.5.6 KeyedDestructuringAssignmentEval
                     // step 1 — when the inner DestructuringAssignment-
@@ -5597,51 +5772,19 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
                     try self.assignAssignmentPatternElemPrepared(op.value, prepared);
                     self.releasePreparedLeaf(prepared);
                 },
-                .spread => |sp| {
-                    // §13.15.5 RestElement on object pattern —
-                    // collect own enumerables not in the
-                    // already-bound key list. Mirrors the
-                    // declaration path's `object_rest_from` shape.
-                    const r_excl = try self.reserveTemp();
-                    defer self.releaseTemp();
-                    try self.builder.emitOp(.make_array, sp.span);
-                    try self.builder.emitOp(.star, sp.span);
-                    try self.builder.emitU8(r_excl);
-                    const k_length = try self.internString("length");
-                    var bound_count: i32 = 0;
-                    for (ol.properties) |p2| switch (p2) {
-                        .property => bound_count += 1,
-                        else => {},
-                    };
-                    try self.builder.emitOp(.lda_smi, sp.span);
-                    try self.builder.emitI32(bound_count);
-                    try self.builder.emitOp(.sta_property, sp.span);
-                    try self.builder.emitU16(k_length);
-                    try self.builder.emitU8(r_excl);
-                    var i: u32 = 0;
-                    for (ol.properties) |p2| switch (p2) {
-                        .property => |op2| {
-                            const ks = try self.assignmentPatternKey(op2.key);
-                            const kk = try self.internString(ks);
-                            try self.builder.emitOp(.lda_constant, sp.span);
-                            try self.builder.emitU16(kk);
-                            var ibuf: [16]u8 = undefined;
-                            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-                            const ik = try self.internString(islice);
-                            try self.builder.emitOp(.sta_property, sp.span);
-                            try self.builder.emitU16(ik);
-                            try self.builder.emitU8(r_excl);
-                            i += 1;
-                        },
-                        else => {},
-                    };
-                    try self.builder.emitOp(.object_rest_from, sp.span);
-                    try self.builder.emitU8(r_src);
-                    try self.builder.emitU8(r_excl);
-                    try self.assignAssignmentPatternLeaf(sp.argument.*);
-                },
+                .spread => {},
                 .method => return error.UnsupportedExpression,
             };
+
+            if (rest_arg) |rt| {
+                // §13.15.5 RestElement on object pattern — collect
+                // every own enumerable property of `r_src` not in
+                // the excluded list (`r_excl`) into a fresh object.
+                try self.builder.emitOp(.object_rest_from, rest_span);
+                try self.builder.emitU8(r_src);
+                try self.builder.emitU8(r_excl_opt.?);
+                try self.assignAssignmentPatternLeaf(rt.*);
+            }
         },
         else => return error.UnsupportedExpression,
     }
