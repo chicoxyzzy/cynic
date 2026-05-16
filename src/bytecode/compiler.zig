@@ -625,67 +625,202 @@ pub const Compiler = struct {
         defer self.releaseTemp();
 
         if (is_async) {
-            // §27.6.3.7 async yield* — inline the iterator-step
-            // + await dance. We can't use `iter_step` here
-            // because async iters return Promise<{value, done}>
-            // from `next()`; the await happens BEFORE the
-            // `.done` / `.value` reads. Mirrors the for-await-of
-            // shape in compileForInOf.
+            // §27.6.3.7 async yield* — same shape as the sync
+            // path but every inner method invocation is followed
+            // by an `await_`. Synthetic handlers around each
+            // inner `gen_yield` re-enter the loop on the outer
+            // async-gen's `.throw(e)` / `.return(v)`.
             const k_next = try self.internString("next");
+            const k_return = try self.internString("return");
+            const k_throw = try self.internString("throw");
             const k_value = try self.internString("value");
-            const k_done = try self.internString("done");
-            const r_next_fn = try self.reserveTemp();
+            const k_done_key = try self.internString("done");
+            const k_type_error = try self.internString("TypeError");
+
+            const r_received = try self.reserveTemp();
             defer self.releaseTemp();
+            try self.builder.emitOp(.lda_undefined, y.span);
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_received);
             const r_result = try self.reserveTemp();
             defer self.releaseTemp();
+            const r_recv = try self.reserveTemp();
+            defer self.releaseTemp();
+            const r_callee = try self.reserveTemp();
+            defer self.releaseTemp();
+            const r_arg0 = try self.reserveTemp();
+            defer self.releaseTemp();
 
-            const loop_start = self.builder.here();
-            // r_result = await r_iter.next()
+            // ── Next path ──
+            const next_path_start = self.builder.here();
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_iter);
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_recv);
             try self.builder.emitOp(.ldar, y.span);
             try self.builder.emitU8(r_iter);
             try self.builder.emitOp(.lda_property, y.span);
             try self.builder.emitU16(k_next);
             try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_next_fn);
+            try self.builder.emitU8(r_callee);
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_received);
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_arg0);
             try self.builder.emitOp(.call_method, y.span);
-            try self.builder.emitU8(r_iter);
-            try self.builder.emitU8(r_next_fn);
-            try self.builder.emitU8(0);
+            try self.builder.emitU8(r_recv);
+            try self.builder.emitU8(r_callee);
+            try self.builder.emitU8(1);
             try self.builder.emitOp(.await_, y.span);
+            // ── Shared body — acc holds the awaited result ──
+            const body_after_call = self.builder.here();
             try self.builder.emitOp(.star, y.span);
             try self.builder.emitU8(r_result);
-            // if (r_result.done) break.
             try self.builder.emitOp(.ldar, y.span);
             try self.builder.emitU8(r_result);
             try self.builder.emitOp(.lda_property, y.span);
-            try self.builder.emitU16(k_done);
+            try self.builder.emitU16(k_done_key);
             try self.builder.emitOp(.jmp_if_true, y.span);
             const exit_patch = self.builder.here();
             try self.builder.emitI16(0);
-            // r_val = r_result.value
             try self.builder.emitOp(.ldar, y.span);
             try self.builder.emitU8(r_result);
             try self.builder.emitOp(.lda_property, y.span);
             try self.builder.emitU16(k_value);
             try self.builder.emitOp(.star, y.span);
             try self.builder.emitU8(r_val);
-            // yield r_val to outer consumer.
             try self.builder.emitOp(.ldar, y.span);
             try self.builder.emitU8(r_val);
+            const yield_start_pc = self.builder.here();
             try self.builder.emitOp(.gen_yield, y.span);
-            // Loop.
+            const yield_end_pc = self.builder.here();
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_received);
             try self.builder.emitOp(.jmp, y.span);
             const back_patch = self.builder.here();
             try self.builder.emitI16(0);
-            try self.builder.patchI16(back_patch, loop_start);
-            const exit_target = self.builder.here();
-            try self.builder.patchI16(exit_patch, exit_target);
-            // §14.4.14 step 5.b.ii.6 — value of yield* is the
-            // inner iterator's final `.value`.
+            try self.builder.patchI16(back_patch, next_path_start);
+
+            // ── Throw handler ──
+            const throw_handler_pc = self.builder.here();
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_received);
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_iter);
+            try self.builder.emitOp(.lda_property, y.span);
+            try self.builder.emitU16(k_throw);
+            try self.builder.emitOp(.jmp_if_nullish, y.span);
+            const no_throw_patch = self.builder.here();
+            try self.builder.emitI16(0);
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_callee);
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_iter);
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_recv);
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_received);
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_arg0);
+            try self.builder.emitOp(.call_method, y.span);
+            try self.builder.emitU8(r_recv);
+            try self.builder.emitU8(r_callee);
+            try self.builder.emitU8(1);
+            try self.builder.emitOp(.await_, y.span);
+            try self.builder.emitOp(.jmp, y.span);
+            const throw_to_body_patch = self.builder.here();
+            try self.builder.emitI16(0);
+            try self.builder.patchI16(throw_to_body_patch, body_after_call);
+            const no_throw_target = self.builder.here();
+            try self.builder.patchI16(no_throw_patch, no_throw_target);
+            try self.builder.emitOp(.iter_close, y.span);
+            try self.builder.emitU8(r_iter);
+            try self.builder.emitU8(0);
+            try self.builder.emitOp(.lda_global, y.span);
+            try self.builder.emitU16(k_type_error);
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_callee);
+            try self.builder.emitOp(.new_call, y.span);
+            try self.builder.emitU8(r_callee);
+            try self.builder.emitU8(0);
+            try self.builder.emitOp(.throw_, y.span);
+
+            // ── Return handler ──
+            const return_handler_pc = self.builder.here();
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_received);
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_iter);
+            try self.builder.emitOp(.lda_property, y.span);
+            try self.builder.emitU16(k_return);
+            try self.builder.emitOp(.jmp_if_nullish, y.span);
+            const no_return_patch = self.builder.here();
+            try self.builder.emitI16(0);
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_callee);
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_iter);
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_recv);
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_received);
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_arg0);
+            try self.builder.emitOp(.call_method, y.span);
+            try self.builder.emitU8(r_recv);
+            try self.builder.emitU8(r_callee);
+            try self.builder.emitU8(1);
+            try self.builder.emitOp(.await_, y.span);
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_result);
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_result);
+            try self.builder.emitOp(.lda_property, y.span);
+            try self.builder.emitU16(k_done_key);
+            try self.builder.emitOp(.jmp_if_false, y.span);
+            const return_not_done_patch = self.builder.here();
+            try self.builder.emitI16(0);
             try self.builder.emitOp(.ldar, y.span);
             try self.builder.emitU8(r_result);
             try self.builder.emitOp(.lda_property, y.span);
             try self.builder.emitU16(k_value);
+            try self.builder.emitOp(.return_, y.span);
+            const return_not_done_target = self.builder.here();
+            try self.builder.patchI16(return_not_done_patch, return_not_done_target);
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_result);
+            try self.builder.emitOp(.jmp, y.span);
+            const return_to_body_patch = self.builder.here();
+            try self.builder.emitI16(0);
+            try self.builder.patchI16(return_to_body_patch, body_after_call);
+            const no_return_target = self.builder.here();
+            try self.builder.patchI16(no_return_patch, no_return_target);
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_received);
+            try self.builder.emitOp(.return_, y.span);
+
+            // ── Exit ──
+            const exit_target = self.builder.here();
+            try self.builder.patchI16(exit_patch, exit_target);
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_result);
+            try self.builder.emitOp(.lda_property, y.span);
+            try self.builder.emitU16(k_value);
+
+            try self.builder.addHandler(.{
+                .start_pc = yield_start_pc,
+                .end_pc = yield_end_pc,
+                .handler_pc = throw_handler_pc,
+                .catch_register = null,
+                .is_finally = false,
+            });
+            try self.builder.addHandler(.{
+                .start_pc = yield_start_pc,
+                .end_pc = yield_end_pc,
+                .handler_pc = return_handler_pc,
+                .catch_register = null,
+                .is_finally = true,
+            });
             return;
         }
 
