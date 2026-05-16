@@ -4762,8 +4762,19 @@ fn runFrames(
                     }
                     continue;
                 };
+                // §13.3.7.3 MakeSuperPropertyReference step 5 —
+                // RequireObjectCoercible(GetSuperBase()). When the
+                // home object's `[[Prototype]]` is null (e.g.
+                // `class C extends null`), the check fires before
+                // the property access and throws TypeError.
                 const parent_proto = home.prototype orelse {
-                    acc = Value.undefined_;
+                    const ex = try makeTypeError(realm, "Cannot read properties of null (super)");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
                     continue;
                 };
                 // §10.1.8 OrdinaryGet via super reference — the
@@ -4823,8 +4834,18 @@ fn runFrames(
                     }
                     continue;
                 };
+                // §13.3.7.3 MakeSuperPropertyReference step 5 —
+                // RequireObjectCoercible on the home object's
+                // `[[Prototype]]`. A null prototype throws TypeError
+                // before the bracket-key conversion runs.
                 const parent_proto = home.prototype orelse {
-                    acc = Value.undefined_;
+                    const ex = try makeTypeError(realm, "Cannot read properties of null (super)");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
                     continue;
                 };
                 // §7.1.19 ToPropertyKey on the bracket key.
@@ -4924,9 +4945,23 @@ fn runFrames(
                     }
                     continue;
                 };
-                const parent_proto = home.prototype;
+                // §13.3.7.3 MakeSuperPropertyReference step 5 —
+                // RequireObjectCoercible on the home object's
+                // `[[Prototype]]`. A null prototype throws TypeError
+                // before the [[Set]] runs.
+                const parent_proto = home.prototype orelse {
+                    const ex = try makeTypeError(realm, "Cannot set properties of null (super)");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                };
                 var did_setter = false;
-                if (parent_proto) |p| {
+                {
+                    const p = parent_proto;
                     if (lookupAccessor(p, key_s.bytes)) |acc_pair| {
                         if (acc_pair.setter) |setter| {
                             const args_one = [_]Value{value};
@@ -4978,11 +5013,25 @@ fn runFrames(
                     }
                     continue;
                 };
+                // §13.3.7.3 MakeSuperPropertyReference step 5 —
+                // RequireObjectCoercible on the home object's
+                // `[[Prototype]]`. A null prototype throws TypeError
+                // before the bracket-key conversion or [[Set]] runs.
+                const parent_proto = home.prototype orelse {
+                    const ex = try makeTypeError(realm, "Cannot set properties of null (super)");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                };
                 var key_buf: [64]u8 = undefined;
                 const key_slice = computedKeyToString(key_v, &key_buf);
-                const parent_proto = home.prototype;
                 var did_setter = false;
-                if (parent_proto) |p| {
+                {
+                    const p = parent_proto;
                     if (lookupAccessor(p, key_slice)) |acc_pair| {
                         if (acc_pair.setter) |setter| {
                             const args_one = [_]Value{value};
