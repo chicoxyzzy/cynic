@@ -82,6 +82,42 @@ These are project rules — they apply to everyone.
   `src/unicode/ident_tables.zig`. Bumping is a spec-conformance
   task, not a cosmetic refresh.
 
+- **Strings are UTF-16 code units at the JS level; WTF-8 at the
+  storage level.** ECMA-262 §6.1.4 specifies the String type as
+  "the set of all ordered sequences of zero or more 16-bit
+  unsigned integer values"; §22.1.5 makes `length` the code-unit
+  count, and every position argument on `String.prototype.*`
+  (`charAt`, `slice`, `indexOf`, `padStart`, …) is a code-unit
+  index. Cynic stores `JSString.bytes` as WTF-8 — UTF-8 with
+  CESU-8 surrogate escapes (3-byte `0xED 0xA[0-F] 0x[8-B][0-F]`
+  encodes a lone surrogate; valid surrogate pairs encode as the
+  4-byte UTF-8 form of the supplementary code point). This means
+  one UTF-16 code unit corresponds to either a 1/2/3-byte UTF-8
+  sequence (one code unit) or half of a 4-byte sequence (two
+  code units per supplementary character).
+
+  Position-aware `String.prototype.*` methods MUST use
+  `src/runtime/utf16.zig`'s helpers
+  (`lengthInCodeUnits`, `byteIndexForCodeUnit`,
+  `codeUnitIndexForByte`, `codeUnitAt`, `sliceCodeUnits`,
+  `appendCodeUnitAsWtf8`) to translate between byte offsets and
+  code-unit indices. The `slice` / `substring` family handles
+  the mid-pair-surrogate case: cutting through a 4-byte UTF-8
+  character at an odd code-unit boundary yields a lone-surrogate
+  WTF-8 string the helpers can build.
+
+  Methods that don't dereference positions — `concat`,
+  `toLowerCase`, `toUpperCase`, `trim*`, `repeat`,
+  `normalize` (passthrough today) — pass WTF-8 bytes through
+  unchanged. Symbol-dispatched methods (`split`, `replace`,
+  `replaceAll`, `match`, `matchAll`, `search`) route into
+  libregexp via the bridge, which has its own UTF-16 view
+  built in — don't reinvent code-unit arithmetic there.
+
+  When adding or fixing a String.prototype method, cite the
+  spec section (§22.1.3.x) and use the helpers; never index
+  raw `bytes`.
+
 ## When you need to …
 
 | Goal | Read |
