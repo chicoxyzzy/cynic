@@ -240,9 +240,10 @@ pub fn ownPropertyKeysOrdered(
 /// `null` when no trap fires; the caller falls back to walking
 /// the target's own keys directly.
 fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []const u8 {
-    const proxy_target = obj.proxy_target orelse return null;
+    if (obj.proxy_target == null and !obj.proxy_revoked) return null;
     // §10.5.11 step 2 — revoked proxy throws TypeError.
     if (obj.proxy_revoked) return throwTypeError(realm, "Cannot perform 'ownKeys' on a revoked proxy");
+    const proxy_target = obj.proxy_target.?;
     const handler = obj.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'ownKeys' on a proxy with null handler");
     const trap_v = handler.get("ownKeys");
     // §10.5.11 step 5 — trap is `undefined` / `null` → fall back
@@ -717,8 +718,9 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
     // §10.5.6 Proxy [[DefineOwnProperty]] — dispatch through the
     // handler's `defineProperty` trap before falling back.
     if (heap_mod.valueAsPlainObject(target_v)) |obj_in| {
-        if (obj_in.proxy_target) |proxy_target| {
+        if (obj_in.proxy_target != null or obj_in.proxy_revoked) {
             if (obj_in.proxy_revoked) return throwTypeError(realm, "Cannot perform 'defineProperty' on a revoked proxy");
+            const proxy_target = obj_in.proxy_target.?;
             const handler = obj_in.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'defineProperty' on a proxy with null handler");
             const trap_v = handler.get("defineProperty");
             // §10.5.6 step 5 — IsCallable check. `undefined` /
@@ -1129,8 +1131,9 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
     // §10.5.5 Proxy [[GetOwnProperty]] — when target is a proxy,
     // dispatch through `handler.getOwnPropertyDescriptor`.
     if (heap_mod.valueAsPlainObject(target)) |obj_in| {
-        if (obj_in.proxy_target) |proxy_target| {
+        if (obj_in.proxy_target != null or obj_in.proxy_revoked) {
             if (obj_in.proxy_revoked) return throwTypeError(realm, "Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");
+            const proxy_target = obj_in.proxy_target.?;
             const handler = obj_in.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'getOwnPropertyDescriptor' on a proxy with null handler");
             const trap_v = handler.get("getOwnPropertyDescriptor");
             if (!trap_v.isUndefined() and !trap_v.isNull()) {
@@ -1760,10 +1763,14 @@ pub fn proxySetPrototypeOfBool(realm: *Realm, obj: *JSObject, proto_v: Value) Na
         },
     };
     if (!boolean_result) return false;
-    // §10.5.2 step 11-15 — non-extensible invariant: when trap
-    // reported success but target is non-extensible, the new
-    // prototype must SameValue target.[[GetPrototypeOf]]().
-    if (!proxy_target.extensible) {
+    // §10.5.2 step 11-15 — `extensibleTarget = ? IsExtensible(target)`.
+    // The target may itself be a proxy, in which case its isExtensible
+    // trap fires (and ordering is observable).
+    const ext_args = [_]Value{heap_mod.taggedObject(proxy_target)};
+    const ext_v = try objectIsExtensible(realm, Value.undefined_, &ext_args);
+    if (!intrinsics.toBoolean(ext_v)) {
+        // Non-extensible target — the new prototype must SameValue
+        // target.[[GetPrototypeOf]]().
         const target_proto_args = [_]Value{heap_mod.taggedObject(proxy_target)};
         const target_proto = try objectGetPrototypeOf(realm, Value.undefined_, &target_proto_args);
         if (!intrinsics.sameValue(proto_v, target_proto)) {
