@@ -860,30 +860,51 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
         var array_length_new: ?u32 = null;
         if (target.is_array_exotic and std.mem.eql(u8, key, "length") and parsed.has_value) {
             const arith = @import("../interpreter_arith.zig");
-            // §7.1.1 ToPrimitive with hint "number" — calls
-            // valueOf / toString on Object inputs. Symbols throw.
-            const prim = try intrinsics.toPrimitive(realm, parsed.value, .number);
-            if (heap_mod.valueAsSymbol(prim) != null) {
+            // §10.4.2.4 ArraySetLength runs ToNumber TWICE on the
+            // descriptor value — once via ToUint32 (step 3) and once
+            // standalone (step 4) — then SameValueZero-compares the
+            // results to reject non-uint32 inputs (NaN, Infinity,
+            // fractional, negative, ≥ 2³²). Both observably invoke
+            // `valueOf` / `toString` on Object values; user code can
+            // (and test262 does) install side-effecting hooks that
+            // mutate the descriptor in between (e.g. flipping
+            // `length: { writable: false }`), so we MUST call them
+            // both — collapsing into one call hides spec-mandated
+            // observability.
+            const prim1 = try intrinsics.toPrimitive(realm, parsed.value, .number);
+            if (heap_mod.valueAsSymbol(prim1) != null) {
                 return throwTypeError(realm, "Cannot convert a Symbol value to a number");
             }
-            const num = arith.toNumber(prim);
-            if (std.math.isNan(num) or std.math.isInf(num)) {
+            const num1 = arith.toNumber(prim1);
+            const prim2 = try intrinsics.toPrimitive(realm, parsed.value, .number);
+            if (heap_mod.valueAsSymbol(prim2) != null) {
+                return throwTypeError(realm, "Cannot convert a Symbol value to a number");
+            }
+            const num2 = arith.toNumber(prim2);
+            // §7.1.6 ToUint32 short-cuts NaN / ±Infinity / ±0 to 0;
+            // the post-step SameValueZero check then catches the
+            // mismatch and raises RangeError per §10.4.2.4 step 3.d.
+            if (std.math.isNan(num1) or std.math.isInf(num1)) {
                 return throwRangeError(realm, "Invalid array length");
             }
-            // ToUint32: floor toward zero modulo 2^32; the
-            // SameValueZero(ToUint32, ToNumber) check rejects
-            // negative, fractional, and >= 2^32 values per
-            // §10.4.2.4 step 3.d.
-            if (num < 0 or @trunc(num) != num or num > @as(f64, @floatFromInt(std.math.maxInt(u32)))) {
+            // Spec-faithful ToUint32: trunc toward zero, then mod 2³².
+            // We then SameValueZero-compare against `num2` (the
+            // second ToNumber). A non-integer or out-of-range
+            // `num1` produces a `new_len` that diverges from `num2`
+            // and triggers RangeError below.
+            if (num1 < 0 or @trunc(num1) != num1 or num1 > @as(f64, @floatFromInt(std.math.maxInt(u32)))) {
                 return throwRangeError(realm, "Invalid array length");
             }
-            const new_len: u32 = @intFromFloat(num);
+            const new_len: u32 = @intFromFloat(num1);
+            // §10.4.2.4 step 5 — SameValueZero(newLen, numberLen).
+            // After the two ToNumber calls we have all the
+            // observable side effects; mismatching numbers (e.g.
+            // valueOf returned different values on the two calls)
+            // throw RangeError.
+            if (@as(f64, @floatFromInt(new_len)) != num2) {
+                return throwRangeError(realm, "Invalid array length");
+            }
             array_length_new = new_len;
-            // Replace the raw descriptor value with the coerced
-            // length so the rest of `defineProperty` writes a
-            // clean integer (matters when value is null / "12" /
-            // a valueOf-returning object — the property map
-            // should hold the numeric, not the original).
             parsed.value = Value.fromInt32(@intCast(new_len));
         }
 

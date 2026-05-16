@@ -412,9 +412,19 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, value: Value) 
                 return throwTypeError(realm, "Cannot assign to read-only property 'length'");
             }
         }
-        const new_len = interpreter.arrayLengthCoerce(value) orelse {
+        // §10.4.2.4 ArraySetLength — drives the spec-mandated TWO
+        // ToNumber calls (step 3 via ToUint32, step 4 standalone).
+        // User valueOf throws propagate via error.NativeThrew.
+        const new_len = (try interpreter.arrayLengthCoerceSpec(realm, value)) orelse {
             return throwRangeError(realm, "Invalid array length");
         };
+        // Re-check writability — a user valueOf could have flipped
+        // `length: { writable: false }` between the two coercions.
+        if (obj.property_flags.get("length")) |flags| {
+            if (!flags.writable) {
+                return throwTypeError(realm, "Cannot assign to read-only property 'length'");
+            }
+        }
         const tr = interpreter.truncateArrayAtLength(realm.allocator, obj, new_len);
         obj.setArrayLength(realm.allocator, tr.final_length) catch return error.OutOfMemory;
         if (tr.blocked) {
@@ -835,13 +845,28 @@ fn arrayOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
 /// iterables), and array-like fallback (`length` + indexed get,
 /// for `{length: n}` and DOM-style nodelists).
 fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value;
     const items = argOr(args, 0, Value.undefined_);
     const mapfn_v = argOr(args, 1, Value.undefined_);
     const this_arg = argOr(args, 2, Value.undefined_);
     const mapfn: ?*JSFunction = if (mapfn_v.isUndefined()) null else heap_mod.valueAsFunction(mapfn_v) orelse return throwTypeError(realm, "Array.from: mapfn is not a function");
 
-    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    // §23.1.2.1 Array.from — `let C = this value`. When C is a
+    // constructor, the result is allocated via Construct(C) on the
+    // iterator path and Construct(C, « 𝔽(len) ») on the array-like
+    // path; otherwise we fall back to ArrayCreate. `Array.from.call(
+    // C, …)` is the test262 entry point for the constructor path.
+    const this_ctor: ?*JSFunction = blk: {
+        const f = heap_mod.valueAsFunction(this_value) orelse break :blk null;
+        if (!f.has_construct or f.is_arrow) break :blk null;
+        break :blk f;
+    };
+
+    // Allocate a default Array-exotic receiver; the iterator /
+    // array-like branches below MAY override this with the result
+    // of `Construct(C, …)` when `this` is a user-supplied
+    // constructor. String fast-path keeps the default receiver
+    // (Array.from on a string doesn't observe the constructor).
+    var out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
 
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
@@ -890,6 +915,19 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     // it resolves to a callable, take the iterator-protocol path.
     const iter_method_v = try getPropertyChain(realm, src, "@@iterator");
     if (heap_mod.valueAsFunction(iter_method_v)) |iter_method| {
+        // §23.1.2.1 step 5.a — `If IsConstructor(C) is true, let A
+        // be ? Construct(C)`. Replace the default Array receiver
+        // with the constructed object; element writes below land
+        // on it instead.
+        if (this_ctor) |c| {
+            const ctor_v = constructForFromAsync(realm, c, &.{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            const ctor_obj = heap_mod.valueAsPlainObject(ctor_v) orelse return throwTypeError(realm, "Array.from: constructor did not return an object");
+            out = ctor_obj;
+            scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+        }
         const iter_outcome = interpreter.callJSFunction(realm.allocator, realm, iter_method, items, &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
@@ -947,6 +985,19 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 
     // Array-like fallback (`length` + indexed get).
     const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(src));
+    // §23.1.2.1 step 6.a — `If IsConstructor(C) is true, let A be
+    // ? Construct(C, « 𝔽(len) »)`. Replace the default Array
+    // receiver with the constructed object.
+    if (this_ctor) |c| {
+        const ctor_args = [_]Value{numberFromI64(len)};
+        const ctor_v = constructForFromAsync(realm, c, &ctor_args) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        const ctor_obj = heap_mod.valueAsPlainObject(ctor_v) orelse return throwTypeError(realm, "Array.from: constructor did not return an object");
+        out = ctor_obj;
+        scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+    }
     var i: i64 = 0;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;

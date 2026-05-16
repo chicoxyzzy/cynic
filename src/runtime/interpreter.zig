@@ -7365,10 +7365,34 @@ fn strictSetPropertyAnchored(
                     return throwInSetter(realm, frames, f, ip, value, ex);
                 }
             }
-            const new_len = arrayLengthCoerce(value) orelse {
+            // §10.4.2.4 ArraySetLength — drives two observable
+            // ToNumber calls (step 3 via ToUint32, step 4 standalone).
+            // A user-side valueOf / toString throw surfaces via
+            // `error.NativeThrew` + `realm.pending_exception`; we
+            // translate that into the strict-set's setter throw path.
+            const coerce_result = arrayLengthCoerceSpec(realm, value) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.NativeThrew => {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    return throwInSetter(realm, frames, f, ip, value, ex);
+                },
+            };
+            const new_len = coerce_result orelse {
                 const ex = try makeRangeError(realm, "Invalid array length");
                 return throwInSetter(realm, frames, f, ip, value, ex);
             };
+            // Re-check writability AFTER the coercion — a user
+            // valueOf may have flipped `length: { writable: false }`
+            // between the two ToNumber calls (§10.4.2.4 step 17.b
+            // gates the actual write on the *current* writability,
+            // not the pre-coercion state).
+            if (obj.property_flags.get("length")) |flags| {
+                if (!flags.writable) {
+                    const ex = try makeTypeError(realm, "Cannot assign to read-only property 'length'");
+                    return throwInSetter(realm, frames, f, ip, value, ex);
+                }
+            }
             const truncate_result = truncateArrayAtLength(allocator, obj, new_len);
             const final_len = truncate_result.final_length;
             // §6.1.6.1 NumberValue — Array length is a Number, not
@@ -7869,11 +7893,49 @@ fn coerceToPropertyKey(
     return coerceForCompare(allocator, realm, frames, f, ip, value, .string);
 }
 
+/// §10.4.2.4 ArraySetLength steps 3-5 — the spec-faithful array-
+/// length coercion. Calls ToNumber TWICE on `value` (once via
+/// ToUint32 in step 3, once standalone in step 4) so a user-side
+/// `valueOf` / `toString` / `@@toPrimitive` fires on both rounds,
+/// then SameValueZero-compares the rounded uint32 against the
+/// second ToNumber result. Returns:
+///   • `.ok` u32 on success.
+///   • `null` if the value coerces but the rounded uint32 doesn't
+///     match (NaN / ±∞ / fractional / negative / ≥ 2³² / valueOf
+///     returned different values on the two calls). Caller throws
+///     RangeError.
+///   • `error.NativeThrew` if a user-side coercion threw, or the
+///     value is a Symbol (can't ToNumber).
+pub fn arrayLengthCoerceSpec(realm: *Realm, value: Value) @import("function.zig").NativeError!?u32 {
+    // §7.1.6 ToUint32 first ⇒ first ToNumber (step 3).
+    const prim1 = try intrinsics_mod.toPrimitive(realm, value, .number);
+    if (heap_mod.valueAsSymbol(prim1) != null) {
+        return intrinsics_mod.throwTypeError(realm, "Cannot convert a Symbol value to a number");
+    }
+    const num1 = arith.toNumber(prim1);
+    // §10.4.2.4 step 4 — standalone ToNumber. Observably distinct
+    // from the ToUint32 call: a user's `valueOf` runs again here
+    // and can mutate `arr.length` writability mid-flight.
+    const prim2 = try intrinsics_mod.toPrimitive(realm, value, .number);
+    if (heap_mod.valueAsSymbol(prim2) != null) {
+        return intrinsics_mod.throwTypeError(realm, "Cannot convert a Symbol value to a number");
+    }
+    const num2 = arith.toNumber(prim2);
+    if (std.math.isNan(num1) or std.math.isInf(num1)) return null;
+    if (num1 < 0 or @trunc(num1) != num1 or num1 > @as(f64, @floatFromInt(std.math.maxInt(u32)))) return null;
+    const new_len: u32 = @intFromFloat(num1);
+    // §10.4.2.4 step 5 — SameValueZero(newLen, numberLen).
+    if (@as(f64, @floatFromInt(new_len)) != num2) return null;
+    return new_len;
+}
+
 /// §7.1.5 ToUint32 — coerces to u32 with the round-toward-zero,
 /// modulo 2^32 semantics. For our array-length usage we need to
 /// reject NaN, Infinity, fractional, and negative inputs (the
 /// spec throws RangeError when ToUint32(value) !== ToNumber(value)).
-/// Returns null on rejection.
+/// Returns null on rejection. **Primitive-only** — does NOT call
+/// user-side coercion hooks; for spec-faithful ToNumber dispatch
+/// (which fires `valueOf` etc.) use `arrayLengthCoerceSpec`.
 pub fn arrayLengthCoerce(v: Value) ?u32 {
     if (v.isInt32()) {
         const i = v.asInt32();
