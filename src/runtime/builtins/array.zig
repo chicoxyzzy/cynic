@@ -520,26 +520,18 @@ fn arrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const obj = try toObjectThis(realm, this_value);
     const target = argOr(args, 0, Value.undefined_);
     // §23.1.3.16 step 1-7 — clamp `len` at 2^53 - 1 per §7.1.20
-    // ToLength. Don't apply Cynic's 16M iteration cap here; a
-    // huge `length` with a `fromIndex` near MAX_SAFE_INTEGER is
-    // bounded by the (small) iteration window — the runtime cap
-    // applies only to the *effective* loop count below.
+    // ToLength. Don't cap the iteration window: indexOf short-
+    // circuits on first match, and fixtures like 15.4.4.14-3-8
+    // (`{0: 0, length: Infinity}`) expect the answer at index 0
+    // without a RangeError.
     var raw_len = try toLengthOf(realm, obj);
     if (raw_len <= 0) return Value.fromInt32(-1);
     const safe_max: i64 = (1 << 53) - 1;
     if (raw_len > safe_max) raw_len = safe_max;
     const start = (try startIndexFrom(realm, args, raw_len)) orelse return Value.fromInt32(-1);
-    // Apply the iteration cap to the *window* (start..len), not
-    // to `len` itself. Fixtures like `length-near-integer-limit`
-    // sit at len=2^53-1 with fromIndex=len-3; the loop touches
-    // 3 indices and we shouldn't refuse it.
-    if (raw_len - start > max_iter_length) {
-        const ex = intrinsics.newRangeError(realm, "Array length window exceeds maximum supported") catch return error.OutOfMemory;
-        realm.pending_exception = ex;
-        return error.NativeThrew;
-    }
     var i: i64 = start;
     while (i < raw_len) : (i += 1) {
+        if ((i & 0x3FF) == 0) try intrinsics.checkInterruptInNative(realm);
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         if (!obj.hasProperty(islice)) continue;
@@ -1225,10 +1217,18 @@ fn arrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nativ
         if (try sparseReverseSearch(realm, obj, start, target)) |found| return numberFromI64(found);
         return Value.fromInt32(-1);
     }
-    // Bound the linear loop on the [0, start] window. With a
-    // `len` near MAX_SAFE_INTEGER and `start` near it too, the
-    // window may still exceed the runtime cap — refuse it
-    // explicitly rather than spinning.
+    // Plain-object array-likes with a huge `length` (e.g.
+    // `{0: x, 4294967295: x, length: 4294967296}` from
+    // 15.4.4.15-3-28) can't run a linear loop from `start` down
+    // to 0 — it would chew through ~2^32 iterations. Walk the
+    // receiver's own integer-indexed property bag descending,
+    // checking only the keys that actually exist. Inherited
+    // indexed accessors on the prototype chain are skipped
+    // (matches the sparseReverseSearch trade-off).
+    if (!obj.is_array_exotic and start + 1 > max_iter_length) {
+        if (try plainObjectReverseSearch(realm, obj, start, target)) |found| return numberFromI64(found);
+        return Value.fromInt32(-1);
+    }
     if (start + 1 > max_iter_length) {
         const ex = intrinsics.newRangeError(realm, "Array length window exceeds maximum supported") catch return error.OutOfMemory;
         realm.pending_exception = ex;
@@ -1236,6 +1236,7 @@ fn arrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nativ
     }
     var i: i64 = start;
     while (i >= 0) : (i -= 1) {
+        if ((i & 0x3FF) == 0) try intrinsics.checkInterruptInNative(realm);
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         if (!obj.hasProperty(islice)) continue;
@@ -1243,6 +1244,39 @@ fn arrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nativ
         if (strictEqualsLite(v, target)) return numberFromI64(i);
     }
     return Value.fromInt32(-1);
+}
+
+/// Plain-object reverse-search helper for `lastIndexOf` against
+/// an array-like with a huge nominal `length` and a small set of
+/// actual own integer-indexed properties. Walks the property bag
+/// (and packed elements, if any) descending, considering only
+/// keys ≤ `start`. Returns the index that strict-equals `target`,
+/// or `null` if none. Skips the inherited-indexed-accessor case
+/// — same trade-off `sparseReverseSearch` makes.
+fn plainObjectReverseSearch(realm: *Realm, obj: *JSObject, start: i64, target: Value) NativeError!?i64 {
+    const start_u32: u32 = if (start > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(start);
+    var keys: std.ArrayListUnmanaged(u32) = .empty;
+    defer keys.deinit(realm.allocator);
+    var it = obj.properties.iterator();
+    while (it.next()) |entry| {
+        const k = entry.key_ptr.*;
+        const idx = std.fmt.parseInt(u32, k, 10) catch continue;
+        if (idx > start_u32) continue;
+        keys.append(realm.allocator, idx) catch return error.OutOfMemory;
+    }
+    std.mem.sort(u32, keys.items, {}, struct {
+        fn descending(_: void, a: u32, b: u32) bool {
+            return a > b;
+        }
+    }.descending);
+    for (keys.items) |k| {
+        var ibuf: [24]u8 = undefined;
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{k}) catch unreachable;
+        if (!obj.hasProperty(islice)) continue;
+        const v = try getPropertyChain(realm, obj, islice);
+        if (strictEqualsLite(v, target)) return @as(i64, k);
+    }
+    return null;
 }
 
 /// Sparse-aware reverse search. When the receiver is an array
@@ -2441,11 +2475,18 @@ fn arrayFilter(realm: *Realm, this_value: Value, args: []const Value) NativeErro
 fn arrayEvery(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     // §23.1.3.6 spec step order: ToObject → length → IsCallable.
     const obj = try toObjectThis(realm, this_value);
-    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
+    // §7.1.20 ToLength caps at 2^53-1; don't pre-clamp at Cynic's
+    // 16M iteration ceiling. `every` short-circuits on the first
+    // falsy callback result — fixtures like 15.4.4.16-3-8 set
+    // `length: Infinity` and expect the answer at index 0.
+    const safe_max: i64 = (1 << 53) - 1;
+    var len = try toLengthOf(realm, obj);
+    if (len > safe_max) len = safe_max;
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.every callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
     var i: i64 = 0;
     while (i < len) : (i += 1) {
+        if ((i & 0x3FF) == 0) try intrinsics.checkInterruptInNative(realm);
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         if (!obj.hasProperty(islice)) continue;
@@ -2458,11 +2499,15 @@ fn arrayEvery(realm: *Realm, this_value: Value, args: []const Value) NativeError
 
 fn arraySome(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
+    // §7.1.20 ToLength cap; `some` short-circuits on first truthy.
+    const safe_max: i64 = (1 << 53) - 1;
+    var len = try toLengthOf(realm, obj);
+    if (len > safe_max) len = safe_max;
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.some callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
     var i: i64 = 0;
     while (i < len) : (i += 1) {
+        if ((i & 0x3FF) == 0) try intrinsics.checkInterruptInNative(realm);
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         if (!obj.hasProperty(islice)) continue;
@@ -2475,11 +2520,14 @@ fn arraySome(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 
 fn arrayFind(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
+    const safe_max: i64 = (1 << 53) - 1;
+    var len = try toLengthOf(realm, obj);
+    if (len > safe_max) len = safe_max;
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.find callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
     var i: i64 = 0;
     while (i < len) : (i += 1) {
+        if ((i & 0x3FF) == 0) try intrinsics.checkInterruptInNative(realm);
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         const elem = try getPropertyChain(realm, obj, islice);
@@ -2491,11 +2539,14 @@ fn arrayFind(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 
 fn arrayFindIndex(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
+    const safe_max: i64 = (1 << 53) - 1;
+    var len = try toLengthOf(realm, obj);
+    if (len > safe_max) len = safe_max;
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.findIndex callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
     var i: i64 = 0;
     while (i < len) : (i += 1) {
+        if ((i & 0x3FF) == 0) try intrinsics.checkInterruptInNative(realm);
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         const elem = try getPropertyChain(realm, obj, islice);
