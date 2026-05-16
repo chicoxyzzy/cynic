@@ -48,15 +48,15 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, sp, "repeat", stringRepeat, 1);
     try installNativeMethodOnProto(realm, sp, "startsWith", stringStartsWith, 1);
     try installNativeMethodOnProto(realm, sp, "endsWith", stringEndsWith, 1);
-    try installNativeMethodOnProto(realm, sp, "split", stringSplit, 2);
+    try installNativeMethodOnProto(realm, sp, "split", stringSplitDispatched, 2);
     // §22.1.3.{17,18} padStart / padEnd — spec `length: 1`, even
     // though both accept (maxLength, fillString).
     try installNativeMethodOnProto(realm, sp, "padStart", stringPadStart, 1);
     try installNativeMethodOnProto(realm, sp, "padEnd", stringPadEnd, 1);
     try installNativeMethodOnProto(realm, sp, "at", stringAt, 1);
     try installNativeMethodOnProto(realm, sp, "lastIndexOf", stringLastIndexOf, 1);
-    try installNativeMethodOnProto(realm, sp, "replace", stringReplace, 2);
-    try installNativeMethodOnProto(realm, sp, "replaceAll", stringReplaceAll, 2);
+    try installNativeMethodOnProto(realm, sp, "replace", stringReplaceDispatched, 2);
+    try installNativeMethodOnProto(realm, sp, "replaceAll", stringReplaceAllDispatched, 2);
     try installNativeMethodOnProto(realm, sp, "trimStart", stringTrimStart, 0);
     try installNativeMethodOnProto(realm, sp, "trimEnd", stringTrimEnd, 0);
     try installNativeMethodOnProto(realm, sp, "normalize", stringNormalize, 1);
@@ -64,9 +64,9 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, sp, "localeCompare", stringLocaleCompare, 1);
     try installNativeMethodOnProto(realm, sp, "toLocaleUpperCase", stringToUpperCase, 0);
     try installNativeMethodOnProto(realm, sp, "toLocaleLowerCase", stringToLowerCase, 0);
-    try installNativeMethodOnProto(realm, sp, "match", stringMatch, 1);
-    try installNativeMethodOnProto(realm, sp, "matchAll", stringMatchAll, 1);
-    try installNativeMethodOnProto(realm, sp, "search", stringSearch, 1);
+    try installNativeMethodOnProto(realm, sp, "match", stringMatchDispatched, 1);
+    try installNativeMethodOnProto(realm, sp, "matchAll", stringMatchAllDispatched, 1);
+    try installNativeMethodOnProto(realm, sp, "search", stringSearchDispatched, 1);
     // §22.1.3.12 / §22.1.3.30 — ES2024 well-formed-Unicode helpers.
     // Both have `length: 0` and do not take any arguments.
     try installNativeMethodOnProto(realm, sp, "isWellFormed", stringIsWellFormed, 0);
@@ -302,6 +302,33 @@ fn appendWtf8(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), cp
     }
 }
 
+/// §22.1.3.12 entry that runs the IsRegExp-global check + the
+/// Symbol.matchAll dispatch. Wired as `String.prototype.matchAll`.
+fn stringMatchAllDispatched(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (this_value.isNull() or this_value.isUndefined())
+        return throwTypeError(realm, "String.prototype.matchAll called on null or undefined");
+    const arg = argOr(args, 0, Value.undefined_);
+    // §22.1.3.12 step 2.a-c — If IsRegExp(regexp) and the regex
+    // isn't global, throw *before* the Symbol.matchAll dispatch
+    // (per the `flag-g-missing` test262 fixtures).
+    if (try isRegExp(realm, arg)) {
+        if (heap_mod.valueAsPlainObject(arg)) |arg_obj| {
+            const flags_v = try intrinsics.getPropertyChain(realm, arg_obj, "flags");
+            if (flags_v.isUndefined() or flags_v.isNull())
+                return throwTypeError(realm, "String.prototype.matchAll: regex has no flags");
+            const flags_s = try intrinsics.stringifyArg(realm, flags_v);
+            if (std.mem.indexOfScalar(u8, flags_s.bytes, 'g') == null)
+                return throwTypeError(realm, "String.prototype.matchAll requires a global regex");
+        }
+    }
+    // §22.1.3.12 step 2.d — GetMethod(regexp, @@matchAll).
+    if (try getSymbolMethod(realm, arg, "@@matchAll")) |matcher| {
+        const recv_s = try coerceThisToJSString(realm, this_value);
+        return invokeSymbolMethod(realm, matcher, arg, Value.fromString(recv_s), null);
+    }
+    return stringMatchAll(realm, this_value, args);
+}
+
 /// §22.1.3.12 String.prototype.matchAll(regex) — return an
 /// iterator that yields each `regex.exec` result. Per spec the
 /// regex must carry the global flag (otherwise TypeError).
@@ -335,6 +362,21 @@ fn iterResult(realm: *Realm, value: Value, done: bool) NativeError!Value {
     obj.set(realm.allocator, "value", value) catch return error.OutOfMemory;
     obj.set(realm.allocator, "done", Value.fromBool(done)) catch return error.OutOfMemory;
     return heap_mod.taggedObject(obj);
+}
+
+/// §22.1.3.11 entry that runs Symbol.match dispatch first; wired
+/// as `String.prototype.match`. The fallback path calls the symbol-
+/// free core (`stringMatch`) which `RegExp.prototype[@@match]`
+/// also re-enters.
+fn stringMatchDispatched(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (this_value.isNull() or this_value.isUndefined())
+        return throwTypeError(realm, "String.prototype.match called on null or undefined");
+    const regexp_arg = argOr(args, 0, Value.undefined_);
+    if (try getSymbolMethod(realm, regexp_arg, "@@match")) |matcher| {
+        const recv_s = try coerceThisToJSString(realm, this_value);
+        return invokeSymbolMethod(realm, matcher, regexp_arg, Value.fromString(recv_s), null);
+    }
+    return stringMatch(realm, this_value, args);
 }
 
 /// §22.1.3.11 String.prototype.match — coerce the argument to a
@@ -404,6 +446,19 @@ pub fn stringMatch(realm: *Realm, this_value: Value, args: []const Value) Native
     if (idx == 0) return Value.null_;
     result.set(realm.allocator, "length", Value.fromInt32(idx)) catch return error.OutOfMemory;
     return heap_mod.taggedObject(result);
+}
+
+/// §22.1.3.13 entry that runs Symbol.search dispatch first. Wired
+/// as `String.prototype.search`.
+fn stringSearchDispatched(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (this_value.isNull() or this_value.isUndefined())
+        return throwTypeError(realm, "String.prototype.search called on null or undefined");
+    const regexp_arg = argOr(args, 0, Value.undefined_);
+    if (try getSymbolMethod(realm, regexp_arg, "@@search")) |searcher| {
+        const recv_s = try coerceThisToJSString(realm, this_value);
+        return invokeSymbolMethod(realm, searcher, regexp_arg, Value.fromString(recv_s), null);
+    }
+    return stringSearch(realm, this_value, args);
 }
 
 /// §22.1.3.13 String.prototype.search — return the index of the
@@ -584,6 +639,63 @@ fn isRegExp(realm: *Realm, v: Value) NativeError!bool {
     const matcher = obj.get("@@match");
     if (!matcher.isUndefined()) return matcher.toBooleanPrimitive();
     return obj.regexp_source != null;
+}
+
+/// §7.3.10 GetMethod(V, P) — Let func = ? GetV(V, P). If func is
+/// either undefined or null, return undefined. If IsCallable(func)
+/// is false, throw a TypeError. Otherwise return func.
+///
+/// Used at the top of String.prototype.{split, replace, replaceAll,
+/// match, matchAll, search} to honour the §22.1.3 user-dispatch
+/// hook: when the argument carries a well-known Symbol method
+/// (Symbol.split / Symbol.replace / …), forward the entire
+/// operation to it. Cynic stores well-known Symbols as `@@<name>`
+/// property keys, so the lookup goes through `getPropertyChain`
+/// which fires accessor getters and walks the prototype chain.
+///
+/// Returns `null` when no callable @@-method is present (the
+/// caller falls back to its built-in path); returns the callable
+/// otherwise.
+fn getSymbolMethod(
+    realm: *Realm,
+    receiver: Value,
+    at_key: []const u8,
+) NativeError!?*JSFunction {
+    if (receiver.isUndefined() or receiver.isNull()) return null;
+    const obj = heap_mod.valueAsPlainObject(receiver) orelse return null;
+    const method = try intrinsics.getPropertyChain(realm, obj, at_key);
+    if (method.isUndefined() or method.isNull()) return null;
+    return heap_mod.valueAsFunction(method) orelse
+        return throwTypeError(realm, "Symbol-keyed dispatch method is not callable");
+}
+
+/// Invoke a user-supplied Symbol method with `(this_value, limit?)`
+/// (or `(this_value, replacement)` for @@replace). Returns the
+/// method's return value or propagates a throw.
+fn invokeSymbolMethod(
+    realm: *Realm,
+    method: *JSFunction,
+    receiver: Value,
+    arg1: Value,
+    arg2: ?Value,
+) NativeError!Value {
+    var argbuf: [2]Value = .{ arg1, undefined };
+    var n: usize = 1;
+    if (arg2) |a2| {
+        argbuf[1] = a2;
+        n = 2;
+    }
+    const outcome = interpreter.callJSFunction(realm.allocator, realm, method, receiver, argbuf[0..n]) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    return switch (outcome) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
 }
 
 fn clampPos(p: i64, len: usize) usize {
@@ -826,6 +938,22 @@ fn stringRepeat(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 }
 
 // ── Additional String methods ───────────────────────────────────────────────
+
+/// §22.1.3.21 entry that performs the Symbol.split dispatch. Wired
+/// at install-time as `String.prototype.split`. The post-dispatch
+/// fallback path delegates to the symbol-free `stringSplit` core,
+/// which is also re-used by `RegExp.prototype[@@split]`.
+fn stringSplitDispatched(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (this_value.isNull() or this_value.isUndefined())
+        return throwTypeError(realm, "String.prototype.split called on null or undefined");
+    const sep_v = argOr(args, 0, Value.undefined_);
+    const limit_v = argOr(args, 1, Value.undefined_);
+    if (try getSymbolMethod(realm, sep_v, "@@split")) |splitter| {
+        const recv_s = try coerceThisToJSString(realm, this_value);
+        return invokeSymbolMethod(realm, splitter, sep_v, Value.fromString(recv_s), limit_v);
+    }
+    return stringSplit(realm, this_value, args);
+}
 
 pub fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
@@ -1140,6 +1268,22 @@ fn flagsHas(realm: *Realm, regex_obj: *JSObject, flag: u8) bool {
 fn regexFlagBool(realm: *Realm, regex_obj: *JSObject, name: []const u8) bool {
     const v = intrinsics.getPropertyChain(realm, regex_obj, name) catch return false;
     return v.toBooleanPrimitive();
+}
+
+/// §22.1.3.18 entry that performs Symbol.replace dispatch. Wired
+/// as `String.prototype.replace`; the fallback path goes through
+/// the symbol-free core `stringReplace`, which is also called by
+/// `RegExp.prototype[@@replace]`.
+fn stringReplaceDispatched(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (this_value.isNull() or this_value.isUndefined())
+        return throwTypeError(realm, "String.prototype.replace called on null or undefined");
+    const pat_v = argOr(args, 0, Value.undefined_);
+    const repl_v = argOr(args, 1, Value.undefined_);
+    if (try getSymbolMethod(realm, pat_v, "@@replace")) |replacer| {
+        const recv_s = try coerceThisToJSString(realm, this_value);
+        return invokeSymbolMethod(realm, replacer, pat_v, Value.fromString(recv_s), repl_v);
+    }
+    return stringReplace(realm, this_value, args);
 }
 
 pub fn stringReplace(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -1536,6 +1680,35 @@ fn resolveReplacer(
     }
     const repl_s = try intrinsics.stringifyArg(realm, repl_v);
     return repl_s.bytes;
+}
+
+/// §22.1.3.19 entry that runs the IsRegExp-global check + the
+/// Symbol.replace dispatch. Wired as `String.prototype.replaceAll`.
+fn stringReplaceAllDispatched(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (this_value.isNull() or this_value.isUndefined())
+        return throwTypeError(realm, "String.prototype.replaceAll called on null or undefined");
+    const pat_v = argOr(args, 0, Value.undefined_);
+    const repl_v = argOr(args, 1, Value.undefined_);
+    // §22.1.3.19 step 2.a-b — IsRegExp(searchValue) → flags must
+    // contain 'g'. Runs *before* @@replace dispatch so a non-global
+    // regex with a user-installed @@replace still throws (per the
+    // test262 `replaceAll-flag-*` fixtures).
+    if (try isRegExp(realm, pat_v)) {
+        if (heap_mod.valueAsPlainObject(pat_v)) |regex_like_obj| {
+            const flags_v = try intrinsics.getPropertyChain(realm, regex_like_obj, "flags");
+            if (flags_v.isUndefined() or flags_v.isNull())
+                return throwTypeError(realm, "String.prototype.replaceAll: regex has no flags");
+            const flags_s = try intrinsics.stringifyArg(realm, flags_v);
+            if (std.mem.indexOfScalar(u8, flags_s.bytes, 'g') == null)
+                return throwTypeError(realm, "String.prototype.replaceAll requires a global regex");
+        }
+    }
+    // §22.1.3.19 step 2.c — GetMethod(searchValue, Symbol.replace).
+    if (try getSymbolMethod(realm, pat_v, "@@replace")) |replacer| {
+        const recv_s = try coerceThisToJSString(realm, this_value);
+        return invokeSymbolMethod(realm, replacer, pat_v, Value.fromString(recv_s), repl_v);
+    }
+    return stringReplaceAll(realm, this_value, args);
 }
 
 fn stringReplaceAll(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
