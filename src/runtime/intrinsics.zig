@@ -753,7 +753,15 @@ pub fn toObjectThis(realm: *Realm, this_value: Value) NativeError!*JSObject {
         w.prototype = fn_obj.proto;
         var it = fn_obj.properties.iterator();
         while (it.next()) |entry| {
-            w.set(realm.allocator, entry.key_ptr.*, entry.value_ptr.*) catch return error.OutOfMemory;
+            const key = entry.key_ptr.*;
+            // §10.2.4 — `length` / `name` on functions are
+            // `{writable:false, enumerable:false, configurable:true}`.
+            // Mirror the function's per-key flags so callers like
+            // `Array.prototype.shift.call(fn)` (§23.1.3.25 step 5
+            // Set(O, "length", 0, true)) hit the writable=false
+            // gate and throw TypeError as the spec requires.
+            const flags = fn_obj.property_flags.get(key) orelse ObjMod.PropertyFlags.default;
+            w.setWithFlags(realm.allocator, key, entry.value_ptr.*, flags) catch return error.OutOfMemory;
         }
         return w;
     }

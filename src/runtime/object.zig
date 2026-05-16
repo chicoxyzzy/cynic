@@ -493,6 +493,12 @@ pub const JSObject = struct {
     /// `Object.getOwnPropertyDescriptor(arr, "length")` returns a
     /// data descriptor as the spec demands.
     is_array_exotic: bool = false,
+    /// §10.4.4 — Arguments exotic brand. `Object.prototype.toString`
+    /// reads this to produce `"[object Arguments]"` per §22.1.3.6
+    /// step 4 (the "Arguments" case keyed off the internal slot
+    /// presence). Cynic's `lda_arguments` opcode sets this when it
+    /// synthesises the strict-mode unmapped arguments object.
+    is_arguments_exotic: bool = false,
     /// §9.4.6 Module Namespace exotic object — set when this object
     /// is a Module Namespace produced by `import(spec)` / `import * as
     /// ns from "…"`. The flag flips on `[[Set]]` / `[[Delete]]` /

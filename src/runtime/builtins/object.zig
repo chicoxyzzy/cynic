@@ -2438,6 +2438,8 @@ pub fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value
             // matters per the spec table.
             if (obj.is_array_exotic) break :blk "Array";
             if (obj.prototype != null and obj.prototype == realm.intrinsics.array_prototype) break :blk "Array";
+            // §10.4.4 / §22.1.3.6 step 4 "Arguments" case.
+            if (obj.is_arguments_exotic) break :blk "Arguments";
             if (obj.regex_bytecode != null) break :blk "RegExp";
             if (obj.array_buffer != null) break :blk "Object"; // ArrayBuffer uses @@toStringTag
             if (obj.boxed_primitive) |bp| {

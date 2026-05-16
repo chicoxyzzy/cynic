@@ -356,6 +356,12 @@ fn arrayPop(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
     _ = args;
     const obj = try toObjectThis(realm, this_value);
     var len = try toLengthOf(realm, obj);
+    // §7.1.20 ToLength caps at 2^53 - 1; the saturating helper
+    // bottoms out at i64.max so re-clamp here. Without the clamp,
+    // `pop()` on `{length: Infinity}` would decrement to i64.max-1
+    // and `Set(O, "length", ...)` would store that bogus value.
+    const safe_max: i64 = (1 << 53) - 1;
+    if (len > safe_max) len = safe_max;
     if (len <= 0) {
         try setLengthOrThrow(realm, obj, 0);
         return Value.undefined_;

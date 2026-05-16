@@ -5854,6 +5854,7 @@ fn runFrames(
                 // exotic auto-length-extend.
                 const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
                 obj.prototype = realm.intrinsics.object_prototype;
+                obj.is_arguments_exotic = true;
                 var i: u8 = 0;
                 while (i < f.argc) : (i += 1) {
                     var ibuf: [16]u8 = undefined;
