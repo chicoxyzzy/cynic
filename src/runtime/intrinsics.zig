@@ -1044,6 +1044,16 @@ pub fn throwSyntaxError(realm: *Realm, msg: []const u8) NativeError {
     return throwNative(realm, ex);
 }
 
+/// Convenience: throw a real `ReferenceError(msg)` from a native.
+/// Used by §9.4.6.7 Module Namespace [[Get]] when the source-module
+/// binding is still uninitialised — `GetBindingValue(N, true)`
+/// throws ReferenceError under the strict flag the namespace
+/// [[Get]] hard-codes.
+pub fn throwReferenceError(realm: *Realm, msg: []const u8) NativeError {
+    const ex = newReferenceError(realm, msg) catch return error.OutOfMemory;
+    return throwNative(realm, ex);
+}
+
 /// Native-side cooperative interrupt + budget poll. Long-running
 /// builtin loops (`Array.prototype.{map, filter, reduce}`,
 /// `String.prototype.{repeat, replace}`, regex matchers, large

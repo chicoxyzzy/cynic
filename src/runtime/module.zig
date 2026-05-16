@@ -25,6 +25,8 @@ const Chunk = @import("../bytecode/chunk.zig").Chunk;
 const Realm = @import("realm.zig").Realm;
 const heap_mod = @import("heap.zig");
 const PropertyFlags = @import("object.zig").PropertyFlags;
+const function_mod = @import("function.zig");
+const NativeError = function_mod.NativeError;
 
 pub const ModuleState = enum(u8) {
     /// Module hasn't started evaluating — entry just allocated.
@@ -145,4 +147,46 @@ pub fn getModuleNamespace(realm: *Realm, mr: *ModuleRecord) !*JSObject {
     ns.extensible = false;
     mr.namespace_finalized = true;
     return ns;
+}
+
+/// §9.4.6.7 Module Namespace [[Get]] (P, Receiver), data-property
+/// path (steps 8-13). After the exotic dispatch resolves a string
+/// key to a bound export, the spec routes the read through
+/// `GetBindingValue(N, true)` — and the `true` strict flag makes
+/// §8.1.1.1.6 throw a ReferenceError when the source-module
+/// binding is still uninitialised.
+///
+/// Cynic represents uninitialised exported bindings as the Hole
+/// sentinel pre-seeded into the namespace's property bag at module
+/// instantiation (see `compiler.seedTdzExportHoles` /
+/// §15.2.1.16.4 step 12). This helper translates that sentinel
+/// into the spec ReferenceError; all other values pass through.
+///
+/// Callers: `lda_property` / `lda_computed` for `ns.x` / `ns[k]`,
+/// `Object.getOwnPropertyDescriptor` (which materialises the
+/// descriptor's `[[Value]]`), `Object.prototype.hasOwnProperty`,
+/// `Object.prototype.propertyIsEnumerable`, `Object.keys` /
+/// `Object.values` / `Object.entries`, and the for-in iterator
+/// — every spec path that reaches §9.4.6.4 [[GetOwnProperty]]
+/// (which materialises `[[Value]]` via [[Get]]).
+///
+/// Skipped for non-string keys: §9.4.6.7 step 2 routes Symbol keys
+/// (and Cynic's flattened `@@toStringTag` key) through OrdinaryGet
+/// without the GetBindingValue dispatch.
+pub fn namespaceGetThrowingOnHole(
+    realm: *Realm,
+    ns: *JSObject,
+    key: []const u8,
+) NativeError!Value {
+    const v = ns.get(key);
+    if (v.isHole()) {
+        // Match V8 / JSC's wording so user code matching the
+        // message via `e.message.includes(name)` continues to
+        // work; the binding name is the most useful diagnostic
+        // we can surface here.
+        const ex = @import("builtins/error.zig").newReferenceError(realm, key) catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
+    return v;
 }

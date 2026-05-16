@@ -4037,9 +4037,16 @@ fn seedTdzExportHoles(self: *Compiler, body: []ast.statement.Statement, span: Sp
         switch (s) {
             .export_decl => |ed| switch (ed.body) {
                 .declaration => |inner| switch (inner.*) {
-                    .lexical => |ld| for (ld.declarators) |d| {
-                        if (identifierName(self.source, d.name)) |name| {
-                            try self.seedExportHole(name, d.span);
+                    // `export var` is hoist-initialised to
+                    // `undefined`, not Hole — seeding Hole would
+                    // flip pre-init importer reads from the spec
+                    // `undefined` to a spurious ReferenceError.
+                    // Only `let` / `const` participate in TDZ.
+                    .lexical => |ld| if (ld.kind != .var_) {
+                        for (ld.declarators) |d| {
+                            if (identifierName(self.source, d.name)) |name| {
+                                try self.seedExportHole(name, d.span);
+                            }
                         }
                     },
                     .class_decl => |cd| {
@@ -4056,7 +4063,65 @@ fn seedTdzExportHoles(self: *Compiler, body: []ast.statement.Statement, span: Sp
                     // ReferenceError.
                     try self.seedExportHole("default", ed.span);
                 },
-                .named, .all => {},
+                .named => |nb| {
+                    // §16.2.3.7 ExportDeclaration : `export
+                    // NamedExports` (no `from`) — `export { local
+                    // as exported }` resolves `exported` to the
+                    // local `let` / `const` / `class` binding's
+                    // value at module body evaluation. Per spec
+                    // §9.4.6.7 step 12-13 the importer's read
+                    // routes through GetBindingValue(localName,
+                    // true) which throws on the source TDZ-Hole.
+                    // Cynic publishes `exported` only when the
+                    // `export { ... }` statement actually runs, so
+                    // any cross-import read before then would see
+                    // an absent slot (`undefined`) instead of the
+                    // spec ReferenceError. Seed Hole for every
+                    // non-source named export whose local resolves
+                    // to a TDZ-tracked binding.
+                    //
+                    // §16.2.3.7 + `from` clause — re-exports
+                    // (`export { x } from "./y"`) get the same
+                    // Hole-seed: the publish runs only after the
+                    // source module loads + this body's re-export
+                    // statement executes, so without the seed
+                    // cross-module reads pre-evaluation would see
+                    // undefined. The compiler's re-export emit
+                    // (`compileExportDecl .named` with source) does
+                    // overwrite the Hole with the source's current
+                    // value at run time.
+                    for (nb.specifiers) |spec| {
+                        const exported_text = self.source[spec.exported_span.start..spec.exported_span.end];
+                        const exported_name = if (exported_text.len >= 2 and (exported_text[0] == '"' or exported_text[0] == '\''))
+                            exported_text[1 .. exported_text.len - 1]
+                        else
+                            exported_text;
+                        if (nb.source != null) {
+                            // Re-export — the local name is the
+                            // source's export, not a local binding;
+                            // seed Hole for the renamed key.
+                            try self.seedExportHole(exported_name, spec.span);
+                            continue;
+                        }
+                        // No `from`: skip when the local resolves
+                        // to a `var` / `function` (already
+                        // initialised at hoist) or doesn't resolve
+                        // (rare in a well-formed module — leave to
+                        // ResolveExport-time SyntaxError).
+                        const local_text = self.source[spec.local_span.start..spec.local_span.end];
+                        const local_name = if (local_text.len >= 2 and (local_text[0] == '"' or local_text[0] == '\''))
+                            local_text[1 .. local_text.len - 1]
+                        else
+                            local_text;
+                        const scope = self.scope orelse continue;
+                        const binding = scope.resolve(local_name) orelse continue;
+                        switch (binding.kind) {
+                            .let_, .const_ => try self.seedExportHole(exported_name, spec.span),
+                            .var_ => {},
+                        }
+                    }
+                },
+                .all => {},
             },
             else => {},
         }

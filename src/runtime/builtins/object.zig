@@ -482,6 +482,15 @@ fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError
     result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     var idx: usize = 0;
     for (keys) |key| {
+        // §7.3.21 EnumerableOwnProperties step 4.a.i calls
+        // O.[[GetOwnProperty]](key) to read the descriptor — on a
+        // module namespace, that invokes [[Get]] (§9.4.6.7) which
+        // throws ReferenceError on a TDZ-Hole-seeded binding. Run
+        // the throw probe before the enumerable check so the spec
+        // ordering matches (descriptor fetch ⇒ enumerable read).
+        if (obj.is_module_namespace and !std.mem.startsWith(u8, key, "@@") and !std.mem.startsWith(u8, key, "<sym:")) {
+            _ = try @import("../module.zig").namespaceGetThrowingOnHole(realm, obj, key);
+        }
         if (!obj.flagsFor(key).enumerable) continue;
         const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
         var ibuf: [16]u8 = undefined;
@@ -1477,7 +1486,17 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
 
         // Data descriptor.
         if (!obj.hasOwn(key)) return Value.undefined_;
-        const value = obj.get(key);
+        // §9.4.6.4 Module Namespace [[GetOwnProperty]] step 4 —
+        // `Let value be ? O.[[Get]](P, O)` materialises the
+        // descriptor's `[[Value]]` via the exotic [[Get]], which
+        // routes string keys through GetBindingValue(N, true) and
+        // throws ReferenceError on the source TDZ-Hole. Symbol
+        // keys (and Cynic's flattened `@@toStringTag`) bypass via
+        // §9.4.6.7 step 2.
+        const value = if (obj.is_module_namespace and !std.mem.startsWith(u8, key, "@@") and !std.mem.startsWith(u8, key, "<sym:"))
+            try @import("../module.zig").namespaceGetThrowingOnHole(realm, obj, key)
+        else
+            obj.get(key);
         const flags = obj.flagsFor(key);
         const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
         desc.prototype = realm.intrinsics.object_prototype;
@@ -2399,6 +2418,15 @@ fn objectHasOwnProperty(realm: *Realm, this_value: Value, args: []const Value) N
         return throwTypeError(realm, "Object.prototype.hasOwnProperty called on null or undefined");
     }
     if (heap_mod.valueAsPlainObject(this_value)) |obj| {
+        // §20.1.3.2 step 3 routes through §7.3.11 HasOwnProperty →
+        // §9.4.6.4 [[GetOwnProperty]] on a module namespace, which
+        // calls [[Get]] to materialise the descriptor's [[Value]]
+        // and throws ReferenceError if the binding is uninit
+        // (§9.4.6.7 step 13 / §8.1.1.1.6). Surface the throw here
+        // for the in-namespace exported string keys.
+        if (obj.is_module_namespace and obj.hasOwn(key) and !std.mem.startsWith(u8, key, "@@") and !std.mem.startsWith(u8, key, "<sym:")) {
+            _ = try @import("../module.zig").namespaceGetThrowingOnHole(realm, obj, key);
+        }
         return Value.fromBool(obj.hasOwn(key));
     }
     if (heap_mod.valueAsFunction(this_value)) |fn_obj| {
@@ -2424,6 +2452,14 @@ fn objectProtoPropertyIsEnumerable(realm: *Realm, this_value: Value, args: []con
     const key = descriptorKey(realm, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
     if (heap_mod.valueAsPlainObject(this_value)) |obj| {
         if (!obj.hasOwn(key)) return Value.false_;
+        // §20.1.3.4 step 3 calls O.[[GetOwnProperty]](P) to read
+        // the descriptor — on a module namespace, the §9.4.6.4
+        // exotic invokes [[Get]] (§9.4.6.7) which throws
+        // ReferenceError on a TDZ-Hole-seeded binding. Mirror that
+        // throw before we report enumerability.
+        if (obj.is_module_namespace and !std.mem.startsWith(u8, key, "@@") and !std.mem.startsWith(u8, key, "<sym:")) {
+            _ = try @import("../module.zig").namespaceGetThrowingOnHole(realm, obj, key);
+        }
         return Value.fromBool(obj.flagsFor(key).enumerable);
     }
     if (heap_mod.valueAsFunction(this_value)) |fn_obj| {

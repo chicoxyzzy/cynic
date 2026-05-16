@@ -31,6 +31,7 @@ const Chunk = @import("../bytecode/chunk.zig").Chunk;
 const Handler = @import("../bytecode/chunk.zig").Handler;
 const parser_mod = @import("../parser/parser.zig");
 const compiler_mod = @import("../bytecode/compiler.zig");
+const module_mod = @import("module.zig");
 
 // Arithmetic / coercion helpers live in `interpreter_arith.zig`.
 // Pull every fn the dispatch loop calls into local aliases so
@@ -1709,7 +1710,6 @@ pub fn loadModule(
     specifier: []const u8,
     base_url: ?[]const u8,
 ) RunError!LoadModuleOutcome {
-    const module_mod = @import("module.zig");
     const ModuleRecord = module_mod.ModuleRecord;
     const loader = realm.module_loader orelse {
         const ex = try makeTypeError(realm, "no module loader installed");
@@ -5070,10 +5070,36 @@ fn runFrames(
                     }
                 }
                 if (!did_setter) {
-                    // Fall back to a plain `this[key] = value`
-                    // write per §10.1.9.2 — the receiver is the
-                    // current `this`, not the parent prototype.
+                    // §10.1.9.2 OrdinarySetWithOwnDescriptor step
+                    // 1 reads `Receiver.[[GetOwnProperty]](P)`. On
+                    // a module namespace receiver that routes
+                    // through §9.4.6.4 → §9.4.6.7 [[Get]] →
+                    // GetBindingValue(N, true), which throws
+                    // ReferenceError when the source binding is
+                    // still the seeded TDZ-Hole. The plain
+                    // namespace [[Set]] reject (TypeError) only
+                    // fires once that descriptor read succeeds.
                     if (heap_mod.valueAsPlainObject(f.this_value)) |this_obj| {
+                        if (this_obj.is_module_namespace and !std.mem.startsWith(u8, key_s.bytes, "@@") and !std.mem.startsWith(u8, key_s.bytes, "<sym:") and this_obj.hasOwn(key_s.bytes)) {
+                            _ = module_mod.namespaceGetThrowingOnHole(realm, this_obj, key_s.bytes) catch |err| switch (err) {
+                                error.OutOfMemory => return error.OutOfMemory,
+                                error.NativeThrew => {
+                                    const ex = realm.pending_exception orelse Value.undefined_;
+                                    realm.pending_exception = null;
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    continue;
+                                },
+                            };
+                        }
+                        // Fall back to a plain `this[key] = value`
+                        // write per §10.1.9.2 — the receiver is
+                        // the current `this`, not the parent
+                        // prototype.
                         this_obj.set(allocator, key_s.bytes, value) catch return error.OutOfMemory;
                     }
                 }
@@ -5697,6 +5723,37 @@ fn runFrames(
                     empty.set(allocator, "length", Value.fromInt32(0)) catch return error.OutOfMemory;
                     acc = openIterator(allocator, realm, heap_mod.taggedObject(empty)) catch return error.OutOfMemory;
                 } else {
+                    // §9.4.6.4 Module Namespace [[GetOwnProperty]]
+                    // — EnumerateObjectProperties (§14.7.5.6) reads
+                    // each own descriptor, materialising
+                    // `[[Value]]` via [[Get]] (§9.4.6.7). Probe the
+                    // namespace for any TDZ-Hole-seeded exported
+                    // binding up front and throw ReferenceError if
+                    // present; matches the spec's per-key probe
+                    // before the loop body runs.
+                    if (heap_mod.valueAsPlainObject(acc)) |ns_obj| {
+                        if (ns_obj.is_module_namespace) {
+                            var ns_it = ns_obj.properties.iterator();
+                            const probe_outcome = blk_probe: while (ns_it.next()) |entry| {
+                                const k = entry.key_ptr.*;
+                                if (std.mem.startsWith(u8, k, "__cynic_")) continue;
+                                if (std.mem.startsWith(u8, k, "@@") or std.mem.startsWith(u8, k, "<sym:")) continue;
+                                if (entry.value_ptr.*.isHole()) {
+                                    const ex = makeReferenceError(realm, k) catch return error.OutOfMemory;
+                                    break :blk_probe ex;
+                                }
+                            } else break :blk_probe Value.undefined_;
+                            if (!probe_outcome.isUndefined()) {
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, probe_outcome)) {
+                                    return .{ .thrown = probe_outcome };
+                                }
+                                continue;
+                            }
+                        }
+                    }
                     acc = openForInIterator(allocator, realm, acc) catch return error.OutOfMemory;
                 }
             },
@@ -6717,10 +6774,38 @@ fn runFrames(
                             .uncaught => |ex| return .{ .thrown = ex },
                         }
                     }
-                    // §10.1.8 — accessor descriptor wins over data
-                    // property. Walk the prototype chain looking
-                    // for an accessor first.
-                    if (lookupAccessor(obj, key_s.bytes)) |acc_pair| {
+                    // §9.4.6.7 Module Namespace [[Get]] — for a
+                    // string key bound to an export, route through
+                    // GetBindingValue(N, true) (§8.1.1.1.6) which
+                    // throws ReferenceError on the TDZ-Hole the
+                    // source module pre-seeds for uninitialised
+                    // `let` / `const` / `class` / default exports.
+                    // Symbol keys (and Cynic's flattened
+                    // `@@toStringTag`) bypass the env-record
+                    // dispatch per step 2 and fall through to the
+                    // ordinary path. Accessors don't exist on a
+                    // module namespace, so the lookupAccessor walk
+                    // below is skipped for the namespace case.
+                    if (obj.is_module_namespace and !std.mem.startsWith(u8, key_s.bytes, "@@") and !std.mem.startsWith(u8, key_s.bytes, "<sym:")) {
+                        const v_ns = module_mod.namespaceGetThrowingOnHole(realm, obj, key_s.bytes) catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            error.NativeThrew => {
+                                const ex = realm.pending_exception orelse Value.undefined_;
+                                realm.pending_exception = null;
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue;
+                            },
+                        };
+                        acc = v_ns;
+                    } else if (lookupAccessor(obj, key_s.bytes)) |acc_pair| {
+                        // §10.1.8 — accessor descriptor wins over
+                        // data property. Walk the prototype chain
+                        // looking for an accessor first.
                         if (acc_pair.getter) |getter| {
                             const recv = acc;
                             const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
@@ -7080,6 +7165,31 @@ fn runFrames(
                             }
                             continue;
                         }
+                    }
+                    // §9.4.6.7 Module Namespace [[Get]] — mirror
+                    // `lda_property` for the computed-key form
+                    // (`ns[k]`). String keys bound to exports route
+                    // through GetBindingValue(N, true) and throw
+                    // ReferenceError on the TDZ-Hole. Symbol keys
+                    // (and Cynic's flattened `@@toStringTag`) take
+                    // the ordinary path.
+                    if (obj.is_module_namespace and !std.mem.startsWith(u8, key_slice, "@@") and !std.mem.startsWith(u8, key_slice, "<sym:")) {
+                        const v_ns = module_mod.namespaceGetThrowingOnHole(realm, obj, key_slice) catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            error.NativeThrew => {
+                                const ex = realm.pending_exception orelse Value.undefined_;
+                                realm.pending_exception = null;
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue;
+                            },
+                        };
+                        acc = v_ns;
+                        continue;
                     }
                     // §10.1.8 [[Get]] — accessor wins over data.
                     // Mirror the `lda_property` handling so
@@ -7980,6 +8090,18 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
     _ = realm;
     const obj_mod = @import("object.zig");
     if (heap_mod.valueAsPlainObject(recv)) |obj| {
+        // §9.4.6.6 Module Namespace [[Delete]]. Symbol keys
+        // (Cynic's flattened `@@toStringTag` / `<sym:*>`) fall
+        // through to OrdinaryDelete — `@@toStringTag` was
+        // installed non-configurable so the ordinary path rejects
+        // it. Any string key that's an export name is permanent;
+        // [[Delete]] returns false, which strict-mode `delete`
+        // surfaces as TypeError. Non-exported keys (never installed
+        // on the namespace) take the missing-key `true` branch
+        // below — `delete ns.undef` must succeed.
+        if (obj.is_module_namespace and !std.mem.startsWith(u8, key, "@@") and !std.mem.startsWith(u8, key, "<sym:") and obj.hasOwn(key)) {
+            return .{ .throw_typeerror = "Cannot delete module namespace export" };
+        }
         // §10.4.5.6 [[Delete]] for Integer-Indexed Exotic Objects.
         // CanonicalNumericIndexString(P) of "-0", "1.5", "-1",
         // "Infinity" etc. produces a non-undefined numericIndex. Any
