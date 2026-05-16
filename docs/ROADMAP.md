@@ -230,6 +230,29 @@ code construction (aligns with SES).
   `ReferenceError`, `SyntaxError`, `URIError`, `EvalError`,
   `AggregateError`.
 
+**Pre-Stage-4 proposals shipped (subject to change).** Cynic
+deliberately ships a handful of TC39 proposals before they reach
+Stage 4 / a published edition, where the spec text is stable
+enough and the feature unlocks useful programs. Each comes with a
+`PRE-STAGE-4 PROPOSAL` comment at the installer site so a future
+spec shift surfaces the right place to revisit. Tracked here so
+the list is auditable at a glance:
+
+- **`joint-iteration`** (Stage 3) — `Iterator.zip(iterables)` and
+  `Iterator.zipKeyed(iterables, options?)` on the `Iterator`
+  global. Installer in `src/runtime/builtins/iterator.zig`.
+  Semantics of the `mode` option ("shortest" | "longest" |
+  "strict") and padding may still shift.
+- **`upsert`** (Stage 3) — `Map.prototype.{getOrInsert,
+  getOrInsertComputed}` and the corresponding pair on
+  `WeakMap.prototype`. Installer in
+  `src/runtime/builtins/collections.zig`. Atomic "get value at
+  key, or insert default if absent."
+
+Revisit this list each TC39 meeting cycle. If a proposal stalls,
+demotes, or its semantics flip, follow the comment trail in the
+installer and either back the change out or update.
+
 **Caveats / planned.**
 
 - `Date` is UTC-only — `getTimezoneOffset` returns 0; locale

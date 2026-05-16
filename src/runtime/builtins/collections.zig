@@ -73,10 +73,14 @@ pub fn installMap(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, proto, "delete", mapDelete, 1);
     try installNativeMethodOnProto(realm, proto, "clear", mapClear, 0);
     try installNativeMethodOnProto(realm, proto, "forEach", mapForEach, 1);
-    // Stage-3 `upsert` proposal — atomic "get the value at this
-    // key, or insert a default if absent." `getOrInsert` takes
-    // a fixed default; `getOrInsertComputed` takes a callback
-    // that's invoked only on absence and stores its return.
+    // PRE-STAGE-4 PROPOSAL — `upsert` (Stage 3 as of 2026-05).
+    // Atomic "get the value at this key, or insert a default if absent."
+    // `getOrInsert` takes a fixed default; `getOrInsertComputed` takes
+    // a callback invoked only on absence whose return is stored.
+    // Same shape ships on WeakMap.prototype below. Documented in
+    // `docs/ROADMAP.md` under "Stage 1-3 proposals shipped". Spec
+    // text may shift before Stage 4 advancement; revisit on each
+    // proposal meeting.
     try installNativeMethodOnProto(realm, proto, "getOrInsert", mapGetOrInsert, 2);
     try installNativeMethodOnProto(realm, proto, "getOrInsertComputed", mapGetOrInsertComputed, 2);
     // §24.1.3 Map iterators — `entries()` is the default

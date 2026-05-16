@@ -50,6 +50,12 @@ pub fn install(realm: *Realm) !void {
 
     try installNativeMethod(realm, fn_obj, "from", iteratorFrom, 1);
     try installNativeMethod(realm, fn_obj, "concat", iteratorConcat, 0);
+    // PRE-STAGE-4 PROPOSAL — `joint-iteration` (Stage 3 as of 2026-05).
+    // `Iterator.zip(iterables)` and `Iterator.zipKeyed(iterables, options?)`
+    // ship ahead of inclusion in a published edition because they're
+    // useful and stable enough; spec text may still shift before Stage 4
+    // advancement (semantics of the `mode` option, padding behavior).
+    // Documented in `docs/ROADMAP.md` under "Stage 1-3 proposals shipped".
     try installNativeMethod(realm, fn_obj, "zip", iteratorZip, 1);
     try installNativeMethod(realm, fn_obj, "zipKeyed", iteratorZipKeyed, 1);
 
