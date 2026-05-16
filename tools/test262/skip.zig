@@ -212,6 +212,18 @@ pub const skip_stage_maturity_features = [_][]const u8{
     "await-dictionary",
 };
 
+/// Path-prefix skips for pre-Stage-4 proposals whose entire
+/// fixture sub-tree would otherwise score as 0 / N noise. Same
+/// stage-maturity rationale as `skip_stage_maturity_features`:
+/// the proposal hasn't reached a published edition yet, so
+/// shipping conformance against it isn't the point.
+pub const skip_stage_maturity_paths = [_][]const u8{
+    // Stage 2.7 — Cynic doesn't install the `ShadowRealm` global.
+    // Re-evaluate once the proposal advances or SES integration
+    // lands. ~64 fixtures.
+    "built-ins/ShadowRealm/",
+};
+
 // ── Group 4: Non-standard ───────────────────────────────────────────
 //
 // SpiderMonkey-only / browser-only behaviour. Currently empty:
@@ -254,11 +266,6 @@ pub const skip_planned_paths = [_][]const u8{
     // in 0 % noise. Path-skip wholesale until the implementation
     // phase.
     "built-ins/Temporal/",
-    // ShadowRealm — Stage 2.7 (not yet Stage 3). Cynic doesn't
-    // install the global; honest runtime-fail noise (0 / 64).
-    // Re-evaluate once the proposal advances or SES integration
-    // lands.
-    "built-ins/ShadowRealm/",
     // `Uint8Array.{fromBase64, fromHex, prototype.{setFromBase64,
     // setFromHex, toBase64, toHex}}` — Stage 4 (ES2025 ArrayBuffer
     // ↔ base64/hex). The whole `built-ins/Uint8Array/` tree
@@ -336,17 +343,19 @@ pub fn pathIsSkipped(rel_path: []const u8) bool {
     return false;
 }
 
-/// Cynic-scope skip — fixtures the project considers out of
-/// scope. Always check `pathIsSkipped` first; this is an extra
-/// filter on top.
-pub fn pathIsCynicOutOfScope(rel_path: []const u8) bool {
-    inline for (.{ skip_annex_b_paths, skip_ses_paths, skip_planned_paths }) |group| {
+/// Fixtures Cynic will **never** attempt — Annex B browser-era
+/// extensions and SES carve-outs (`eval`, `Function(string)`,
+/// `SharedArrayBuffer`, `Atomics`). These are deliberate project
+/// decisions in `AGENTS.md`; they don't go to zero with more
+/// engineering work, they go to zero by us refusing to ship the
+/// surface. Caller filters them at corpus walk-time so a
+/// regenerated `test262-results.md` doesn't carry their false-
+/// reject noise.
+pub fn pathIsPermanentlyOutOfScope(rel_path: []const u8) bool {
+    inline for (.{ skip_annex_b_paths, skip_ses_paths }) |group| {
         for (group) |prefix| {
             if (std.mem.startsWith(u8, rel_path, prefix)) return true;
         }
-    }
-    for (skip_planned_path_contains) |needle| {
-        if (std.mem.indexOf(u8, rel_path, needle) != null) return true;
     }
     for (skip_ses_substrings) |needle| {
         if (std.mem.indexOf(u8, rel_path, needle) != null) return true;
@@ -359,6 +368,37 @@ pub fn pathIsCynicOutOfScope(rel_path: []const u8) bool {
         if (std.mem.endsWith(u8, rel_path, suffix)) return true;
     }
     return false;
+}
+
+/// Fixtures Cynic skips **today** but should eventually attempt —
+/// either pre-Stage-4 proposals (ShadowRealm) or Stage-4-shipped
+/// surfaces blocked on vendor / runtime-glue gaps (Temporal,
+/// Uint8Array base64/hex, libregexp `/v` escapes). These move to
+/// the `attempted` column once the proposal advances or the
+/// blocking infra lands. Separated from
+/// `pathIsPermanentlyOutOfScope` so the "what work is left"
+/// signal stays distinct from the "what we refuse to do" signal.
+pub fn pathIsCurrentlySkipped(rel_path: []const u8) bool {
+    inline for (.{ skip_stage_maturity_paths, skip_planned_paths }) |group| {
+        for (group) |prefix| {
+            if (std.mem.startsWith(u8, rel_path, prefix)) return true;
+        }
+    }
+    for (skip_planned_path_contains) |needle| {
+        if (std.mem.indexOf(u8, rel_path, needle) != null) return true;
+    }
+    return false;
+}
+
+/// Compatibility wrapper used by the test262 harness at corpus
+/// walk-time. The harness doesn't currently distinguish the two
+/// reasons — both must be filtered out so the rolled-up score
+/// reflects what Cynic actually attempts. Future tooling (e.g.
+/// a "what's the maximum reachable score if we land all the
+/// planned work?" report) can call the two predicates
+/// independently.
+pub fn pathIsCynicOutOfScope(rel_path: []const u8) bool {
+    return pathIsPermanentlyOutOfScope(rel_path) or pathIsCurrentlySkipped(rel_path);
 }
 
 pub fn featureIsUnsupported(feature: []const u8) bool {
