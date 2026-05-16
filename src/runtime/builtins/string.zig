@@ -15,7 +15,10 @@ const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
 const interpreter = @import("../interpreter.zig");
+const interpreter_arith = @import("../interpreter_arith.zig");
 const utf16 = @import("../utf16.zig");
+
+const arith_toUint32 = interpreter_arith.toUint32;
 
 const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
 const argOr = intrinsics.argOr;
@@ -1031,45 +1034,81 @@ fn stringRepeat(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 
 // ── Additional String methods ───────────────────────────────────────────────
 
-/// §22.1.3.21 entry that performs the Symbol.split dispatch. Wired
+/// §22.1.3.23 entry that performs the Symbol.split dispatch. Wired
 /// at install-time as `String.prototype.split`. The post-dispatch
 /// fallback path delegates to the symbol-free `stringSplit` core,
-/// which is also re-used by `RegExp.prototype[@@split]`.
+/// which is also re-used by `RegExp.prototype[@@split]`. ToString
+/// on the receiver is deferred to the core so the @@split dispatch
+/// observes the uncoerced `thisValue` (per fixture
+/// `this-value-tostring-error`).
 fn stringSplitDispatched(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     if (this_value.isNull() or this_value.isUndefined())
         return throwTypeError(realm, "String.prototype.split called on null or undefined");
     const sep_v = argOr(args, 0, Value.undefined_);
     const limit_v = argOr(args, 1, Value.undefined_);
-    if (try getSymbolMethod(realm, sep_v, "@@split")) |splitter| {
-        const recv_s = try coerceThisToJSString(realm, this_value);
-        return invokeSymbolMethod(realm, splitter, sep_v, Value.fromString(recv_s), limit_v);
+    // §22.1.3.23 step 3 — "If separator is an Object" gate. Only
+    // Objects can carry a Symbol.split method.
+    if (heap_mod.valueAsPlainObject(sep_v)) |_| {
+        if (try getSymbolMethod(realm, sep_v, "@@split")) |splitter| {
+            return invokeSymbolMethod(realm, splitter, sep_v, this_value, limit_v);
+        }
     }
     return stringSplit(realm, this_value, args);
 }
 
 pub fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §22.1.3.23 step 4 — `str = ? ToString(thisValue)`. The
+    // ToString(this) call happens *before* the limit computation so
+    // a throwing toString on `this` short-circuits the rest.
     const s = try coerceThisToJSString(realm, this_value);
     const sep_v = argOr(args, 0, Value.undefined_);
     const limit_v = argOr(args, 1, Value.undefined_);
-    const limit: i64 = if (limit_v.isUndefined())
-        std.math.maxInt(i32)
-    else if (limit_v.isInt32())
-        limit_v.asInt32()
-    else if (limit_v.isDouble()) blk: {
-        const d = limit_v.asDouble();
-        if (std.math.isNan(d) or d < 0) break :blk 0;
-        if (d > @as(f64, @floatFromInt(std.math.maxInt(i32)))) break :blk std.math.maxInt(i32);
-        break :blk @intFromFloat(d);
-    } else std.math.maxInt(i32);
+    // §22.1.3.23 step 5 — `lim = ToUint32(limit)` (default 2^32-1
+    // when undefined). The ToUint32 walk runs even on objects, so
+    // a `{valueOf}` shadow fires; passing through `intrinsics.
+    // toNumber` invokes Symbol.toPrimitive / valueOf / toString in
+    // spec order.
+    const limit_raw: u32 = if (limit_v.isUndefined())
+        std.math.maxInt(u32)
+    else blk: {
+        const num_v = try intrinsics.toNumber(realm, limit_v);
+        break :blk arith_toUint32(num_v);
+    };
+    // Cap to i32 max for our cursor; any larger limit is
+    // operationally infinite for the bounded source.
+    const limit: i64 = @min(@as(i64, limit_raw), @as(i64, std.math.maxInt(i32)));
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
-
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+
+    // §22.1.3.23 — when separator is a regex (we already filtered
+    // out the @@split dispatch in `stringSplitDispatched`), drive
+    // matching through libregexp via the spec's sticky-splitter.
+    if (isRegexLike(sep_v)) |regex_obj| {
+        if (limit == 0) {
+            setLength(realm, out, 0) catch return error.OutOfMemory;
+            return heap_mod.taggedObject(out);
+        }
+        return regexSplit(realm, s, regex_obj, limit, out);
+    }
+
+    // step 6 — `separatorStr = ? ToString(separator)`. ToString
+    // runs BEFORE the `lim == 0` short-circuit (fixture
+    // `separator-tostring-error`).
+    const sep_str_v: Value = if (sep_v.isUndefined())
+        Value.undefined_
+    else if (sep_v.isString())
+        sep_v
+    else
+        Value.fromString(try stringifyArg(realm, sep_v));
+
+    // step 7 — `If lim = 0, return []`. After ToString(separator).
     if (limit == 0) {
         setLength(realm, out, 0) catch return error.OutOfMemory;
         return heap_mod.taggedObject(out);
     }
 
+    // step 8 — `If separator is undefined, return [str]`.
     if (sep_v.isUndefined()) {
         const owned = realm.heap.allocateString("0") catch return error.OutOfMemory;
         const cs = realm.heap.allocateString(s.bytes) catch return error.OutOfMemory;
@@ -1078,21 +1117,6 @@ pub fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) Native
         return heap_mod.taggedObject(out);
     }
 
-    // §22.1.3.23 — when separator is a regex, walk matches via
-    // `regex.exec`. Empty input still produces `[""]` unless the
-    // regex matches the empty string (in which case `[]`).
-    if (isRegexLike(sep_v)) |regex_obj| {
-        return regexSplit(realm, s, regex_obj, limit, out);
-    }
-
-    // §22.1.3.21 step 6 — separator that's neither a regex nor
-    // a string gets ToString'd. Booleans, numbers, BigInts, and
-    // most objects (with the regex-like fast path already taken
-    // above) all flow through here.
-    const sep_str_v: Value = if (sep_v.isString())
-        sep_v
-    else
-        Value.fromString(try stringifyArg(realm, sep_v));
     const sep: *JSString = @ptrCast(@alignCast(sep_str_v.asString()));
 
     // Empty separator — split into chars. Honour `limit`.
@@ -1287,8 +1311,12 @@ fn stringLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nati
     return Value.fromInt32(-1);
 }
 
-/// §22.1.3.23 String.prototype.split with a regex separator.
-/// Pre-allocated `out` is the result Array; we populate it.
+/// §22.2.6.14 RegExp.prototype [ @@split ] core. Mirrors the
+/// spec's `searchIndex` / `lastMatchEnd` / sticky-splitter pair:
+/// we construct a sticky clone of `regex_obj` (adding "y" to its
+/// flags if missing) so `RegExpExec` either matches *exactly* at
+/// the current `searchIndex` or returns null. That eliminates
+/// the slice-and-re-search trick that mis-handled `/^/` and `/$/`.
 fn regexSplit(
     realm: *Realm,
     s: *JSString,
@@ -1296,61 +1324,112 @@ fn regexSplit(
     limit: i64,
     out: *JSObject,
 ) NativeError!Value {
-    // Spec §22.1.3.23 ignores `g` flag — we drive matching by
-    // slicing the source after each match. The match position
-    // reported by exec is relative to the slice; we add `cursor`
-    // for the absolute offset.
-    regex_obj.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
+    // Spec step 5 — `flags = ? ToString(? Get(regexp, "flags"))`
+    // routed through the accessor-aware chain so a user-installed
+    // `flags` getter / own-property shadow fires.
+    const flags_v = try intrinsics.getPropertyChain(realm, regex_obj, "flags");
+    const flags_str = try intrinsics.stringifyArg(realm, flags_v);
+    // unicodeMatching = flags contains "u" or "v". For Cynic's
+    // UTF-16-by-WTF-8 model AdvanceStringIndex(s, q) always
+    // advances by one code unit, ignoring fullUnicode — the
+    // byte-level cursor walking we already do handles the
+    // surrogate-pair codepoints uniformly.
+    const has_y = std.mem.indexOfScalar(u8, flags_str.bytes, 'y') != null;
+    // Step 8-9 — build newFlags. Append "y" only when missing.
+    var new_flags_buf: [16]u8 = undefined;
+    const new_flags: []const u8 = if (has_y) flags_str.bytes else blk: {
+        const len = flags_str.bytes.len;
+        @memcpy(new_flags_buf[0..len], flags_str.bytes);
+        new_flags_buf[len] = 'y';
+        break :blk new_flags_buf[0 .. len + 1];
+    };
+    // Step 10 — splitter = Construct(C, « regexp, newFlags »).
+    // Cynic uses the global RegExp constructor (SpeciesConstructor
+    // lookup is later); reading `regexp.source` for the pattern.
+    const source_v = try intrinsics.getPropertyChain(realm, regex_obj, "source");
+    const splitter_v = try regExpCreate(realm, source_v, new_flags);
+    const splitter = heap_mod.valueAsPlainObject(splitter_v) orelse return throwTypeError(realm, "split: failed to construct splitter");
+
+    // §22.2.6.14 step 15 — empty string fast path: one exec; if
+    // null, return `[str]`; else `[]`.
     var idx: i32 = 0;
-    var cursor: usize = 0;
     var ibuf: [24]u8 = undefined;
+    if (s.bytes.len == 0) {
+        splitter.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
+        const er = try regexExecCall(realm, splitter, s);
+        if (er.isNull()) {
+            const owned = realm.heap.allocateString("0") catch return error.OutOfMemory;
+            const empty_s = realm.heap.allocateString("") catch return error.OutOfMemory;
+            out.set(realm.allocator, owned.bytes, Value.fromString(empty_s)) catch return error.OutOfMemory;
+            setLength(realm, out, 1) catch return error.OutOfMemory;
+        } else {
+            setLength(realm, out, 0) catch return error.OutOfMemory;
+        }
+        return heap_mod.taggedObject(out);
+    }
+
+    // §22.2.6.14 steps 18-20 — main loop. `last_match_end` tracks
+    // the index just past the previous emitted match;
+    // `search_index` is where the next sticky exec attempts to
+    // anchor. They diverge across zero-width / no-match steps.
+    var last_match_end: usize = 0;
+    var search_index: usize = 0;
     const max_iter: usize = 1 << 20;
     var step: usize = 0;
-    while (step < max_iter) : (step += 1) {
-        if (idx >= limit) break;
-        if (cursor >= s.bytes.len) break;
-        const tail = realm.heap.allocateString(s.bytes[cursor..]) catch return error.OutOfMemory;
-        const exec_result = try regexExecCall(realm, regex_obj, tail);
-        if (exec_result.isNull()) break;
-        const match_arr = heap_mod.valueAsPlainObject(exec_result) orelse break;
-        const m_idx_v = match_arr.get("index");
-        const m_off: usize = if (m_idx_v.isInt32() and m_idx_v.asInt32() >= 0) @intCast(m_idx_v.asInt32()) else 0;
-        const m_idx: usize = cursor + m_off;
-        const whole_v = match_arr.get("0");
-        const whole: *JSString = if (whole_v.isString()) @ptrCast(@alignCast(whole_v.asString())) else return error.NativeThrew;
-
-        // Spec: zero-width match at cursor is skipped.
-        if (m_idx == cursor and whole.bytes.len == 0) {
-            cursor += 1;
+    while (step < max_iter and search_index < s.bytes.len) : (step += 1) {
+        splitter.set(realm.allocator, "lastIndex", Value.fromInt32(@intCast(search_index))) catch return error.OutOfMemory;
+        const er = try regexExecCall(realm, splitter, s);
+        if (er.isNull()) {
+            // Step 20.c — no match at search_index → advance.
+            search_index = advanceUnitOnString(s.bytes, search_index);
             continue;
         }
-
-        // Append the substring before the match as a result element.
-        const part = s.bytes[cursor..m_idx];
+        const match_arr = heap_mod.valueAsPlainObject(er) orelse return throwTypeError(realm, "split: exec did not return Object/null");
+        // Step 20.d.i — matchEnd = ToLength(Get(splitter, "lastIndex")),
+        // clamped to size.
+        const li_v = try intrinsics.getPropertyChain(realm, splitter, "lastIndex");
+        const li_raw: i64 = if (li_v.isInt32()) @max(0, @as(i64, li_v.asInt32())) else try intrinsics.toLengthValue(realm, li_v);
+        const match_end: usize = @min(@as(usize, @intCast(li_raw)), s.bytes.len);
+        if (match_end == last_match_end) {
+            // Step 20.d.iii — zero-width or already-emitted boundary
+            // → advance the search position only.
+            search_index = advanceUnitOnString(s.bytes, search_index);
+            continue;
+        }
+        // Step 20.d.iv — emit the substring from lastMatchEnd to
+        // searchIndex.
+        const part = s.bytes[last_match_end..search_index];
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         const part_str = realm.heap.allocateString(part) catch return error.OutOfMemory;
         out.set(realm.allocator, owned.bytes, Value.fromString(part_str)) catch return error.OutOfMemory;
         idx += 1;
-
-        // Spec also pushes any capture groups as result elements.
+        if (idx >= limit) {
+            setLength(realm, out, @intCast(idx)) catch return error.OutOfMemory;
+            return heap_mod.taggedObject(out);
+        }
+        last_match_end = match_end;
+        // Step 20.d.iv.{vi..xi} — append each capture group.
         const cap_count_v = match_arr.get("length");
         const cap_count: i32 = if (cap_count_v.isInt32()) cap_count_v.asInt32() else 1;
         var ci: i32 = 1;
         while (ci < cap_count) : (ci += 1) {
-            if (idx >= limit) break;
-            const ci_buf_islice = std.fmt.bufPrint(&ibuf, "{d}", .{ci}) catch unreachable;
-            const cap_v = match_arr.get(ci_buf_islice);
+            const ci_islice = std.fmt.bufPrint(&ibuf, "{d}", .{ci}) catch unreachable;
+            const cap_v = match_arr.get(ci_islice);
             const out_islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
             const out_owned = realm.heap.allocateString(out_islice) catch return error.OutOfMemory;
             out.set(realm.allocator, out_owned.bytes, cap_v) catch return error.OutOfMemory;
             idx += 1;
+            if (idx >= limit) {
+                setLength(realm, out, @intCast(idx)) catch return error.OutOfMemory;
+                return heap_mod.taggedObject(out);
+            }
         }
-        cursor = m_idx + whole.bytes.len;
+        search_index = last_match_end;
     }
+    // §22.2.6.14 step 21 — emit the trailing substring.
     if (idx < limit) {
-        // Push the remainder.
-        const part = s.bytes[cursor..];
+        const part = s.bytes[last_match_end..];
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         const part_str = realm.heap.allocateString(part) catch return error.OutOfMemory;
