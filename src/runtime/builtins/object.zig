@@ -1571,6 +1571,74 @@ fn objectCreate(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     return heap_mod.taggedObject(obj);
 }
 
+/// §20.1.2.1 step 3.b — `Set(to, nextKey, propValue, true)`. The
+/// `true` Throw argument means a failed [[Set]] surfaces as
+/// TypeError, not a silent drop. Per §10.1.9.2
+/// OrdinarySetWithOwnDescriptor:
+///   • An own accessor (own or inherited) routes through its
+///     setter; a getter-only accessor returns false → TypeError.
+///   • An own data property with `writable: false` returns false
+///     → TypeError ("assignment to read-only property").
+///   • No own descriptor + receiver is non-extensible →
+///     CreateDataProperty fails → TypeError.
+///   • Otherwise write succeeds.
+/// Keeps the `key` slice anchored on the target via `setComputedOwned`
+/// so the JSString backing the property name survives GC.
+fn assignSetOrThrow(
+    realm: *Realm,
+    target: *JSObject,
+    key_string: *JSString,
+    value: Value,
+) NativeError!void {
+    const interpreter = @import("../interpreter.zig");
+    const allocator = realm.allocator;
+    const key = key_string.bytes;
+    // §10.1.9.2 — accessor descriptor on the receiver or its
+    // proto chain wins. A getter-only accessor (no `set`) is a
+    // TypeError under strict-mode Set.
+    if (interpreter.lookupAccessor(target, key)) |acc| {
+        if (acc.setter) |setter| {
+            const setter_args = [_]Value{value};
+            const outcome = interpreter.callJSFunction(allocator, realm, setter, heap_mod.taggedObject(target), &setter_args) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            switch (outcome) {
+                .value, .yielded => return,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            }
+        }
+        return throwTypeError(realm, "Cannot set property which has only a getter");
+    }
+    const had_entry = target.properties.contains(key);
+    const had_indexed = blk_idx: {
+        if (target.is_array_exotic) {
+            if (JSObject.canonicalIntegerIndex(key)) |idx| break :blk_idx target.hasOwnIndexedSlot(idx);
+        }
+        break :blk_idx false;
+    };
+    if (had_entry) {
+        // §10.1.9.2 step 3.a — non-writable own data → TypeError
+        // under strict Set.
+        const flags = target.flagsFor(key);
+        if (!flags.writable) {
+            return throwTypeError(realm, "Cannot assign to read-only property");
+        }
+        target.properties.put(allocator, key, value) catch return error.OutOfMemory;
+        return;
+    }
+    if (!had_indexed and !target.extensible) {
+        // §10.1.9.2 step 2.b / §10.1.6.3 ValidateAndApplyPropertyDescriptor —
+        // creating a new property on a non-extensible receiver
+        // fails; strict-mode Set surfaces that as TypeError.
+        return throwTypeError(realm, "Cannot add property, object is not extensible");
+    }
+    target.setComputedOwned(allocator, key_string, value) catch return error.OutOfMemory;
+}
+
 fn objectAssign(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     // §20.1.2.1 step 1 — `target = ? ToObject(target)`. Primitives
@@ -1604,7 +1672,12 @@ fn objectAssign(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             // §20.1.2.1 step 5.c.iv — Get(from, nextKey) so accessor
             // getters on the source fire instead of being read past.
             const v = try getPropertyChain(realm, src, key);
-            target.set(realm.allocator, key, v) catch return error.OutOfMemory;
+            // §20.1.2.1 step 5.c.iv.2.b — `Set(to, nextKey, propValue, true)`.
+            // Strict-mode Set per §10.1.9 throws TypeError on any
+            // failure (non-extensible + new key, non-writable own
+            // data, getter-only accessor, setter throw).
+            const key_string = realm.heap.allocateString(key) catch return error.OutOfMemory;
+            try assignSetOrThrow(realm, target, key_string, v);
         }
     }
     return heap_mod.taggedObject(target);
