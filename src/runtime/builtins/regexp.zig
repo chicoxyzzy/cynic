@@ -162,17 +162,112 @@ fn installSymbolMethod(
     });
 }
 
-/// §22.2.6.7 RegExp.prototype [ @@match ] ( string ). The
-/// `this`-and-arg shape is swapped from `String.prototype.match`,
-/// so we just call `stringMatch` with the receiver and argument
-/// flipped. The shared implementation walks `this.exec` /
-/// `this.flags` / `this.lastIndex` via dynamic `Get`, so most
-/// user-overridable subclass behaviour falls out naturally.
+/// §22.2.5.8 RegExp.prototype [ @@match ] ( string ). A step-by-
+/// step traversal of the spec algorithm so each observable side
+/// effect (`Get(rx, "flags")`, the global-only `Get(rx,
+/// "unicode")`, the per-iteration `Set(rx, "lastIndex", …)` /
+/// `RegExpExec(rx, S)` / `Get(result, "0")` chain, the zero-width
+/// `Get(rx, "lastIndex")` ToLength + `AdvanceStringIndex`
+/// reset) lines up with the fixtures under
+/// `built-ins/RegExp/prototype/Symbol.match/`.
+///
+/// We can't just delegate to `string.zig:stringMatch` (the old
+/// implementation): it shortcuts the `flags` ToString, never
+/// reads `unicode`, and writes `lastIndex` via the bypass `set`
+/// (so a non-writable `lastIndex` is silently swallowed instead
+/// of throwing).
 fn regexpProtoMatch(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (heap_mod.valueAsPlainObject(this_value) == null) return throwTypeError(realm, "RegExp.prototype[Symbol.match] called on non-object");
-    const string_mod = @import("string.zig");
-    const inner = [_]Value{this_value};
-    return string_mod.stringMatch(realm, argOr(args, 0, Value.undefined_), &inner);
+    // step 1 — `Let rx be the this value`. step 2 — `If rx is not
+    // an Object, throw a TypeError`.
+    const rx = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.match] called on non-object");
+
+    // step 3 — `Let S be ? ToString(string)`.
+    const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
+
+    // step 4 — `Let flags be ? ToString(? Get(rx, "flags"))`. The
+    // `flags-tostring-error` / `get-flags-err` fixtures rely on
+    // the `flags` getter / its `toString` propagating through the
+    // accessor-aware chain walk.
+    const flags_v = try intrinsics.getPropertyChain(realm, rx, "flags");
+    const flags_s = try intrinsics.stringifyArg(realm, flags_v);
+
+    // step 5 — `If flags does not contain "g", return ?
+    // RegExpExec(rx, S)`.
+    const is_global = std.mem.indexOfScalar(u8, flags_s.bytes, 'g') != null;
+    if (!is_global) return try regExpExecGeneric(realm, rx, s);
+
+    // step 6.a — `If flags contains "u" or "v", let fullUnicode
+    // be true; else false`. Per §22.2.5.8 step 6 (ES2024+), the
+    // `unicode` *property* is no longer consulted — only the
+    // `flags` string. The `get-global-err` fixture explicitly
+    // asserts `unicode` is not read.
+    const full_unicode = std.mem.indexOfScalar(u8, flags_s.bytes, 'u') != null or
+        std.mem.indexOfScalar(u8, flags_s.bytes, 'v') != null;
+
+    // step 6.b — `Perform ? Set(rx, "lastIndex", +0𝔽, true)`. A
+    // non-writable `lastIndex` raises TypeError per `g-init-
+    // lastindex-err.js`.
+    try setPropertyChainOrThrow(realm, rx, "lastIndex", Value.fromInt32(0));
+
+    // step 6.c — `Let A be ! ArrayCreate(0)`. Allocate an array-
+    // exotic JSObject so `Array.isArray(result)` is true.
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    out.prototype = realm.intrinsics.array_prototype;
+    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+
+    // step 6.d — `Let n be 0`.
+    var n: i32 = 0;
+    var ibuf: [24]u8 = undefined;
+    // step 6.e — `Repeat`.
+    while (true) {
+        // step 6.e.i — `Let result be ? RegExpExec(rx, S)`.
+        const result_v = try regExpExecGeneric(realm, rx, s);
+        // step 6.e.ii — `If result is null`:
+        if (result_v.isNull()) {
+            // `If n = 0, return null`.
+            if (n == 0) return Value.null_;
+            // `Return A`.
+            intrinsics.setLength(realm, out, n) catch return error.OutOfMemory;
+            return heap_mod.taggedObject(out);
+        }
+        // step 6.e.iii — `Else`:
+        const result_obj = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.match]: RegExpExec returned non-Object");
+        // step 6.e.iii.1 — `Let matchStr be ?
+        // ToString(? Get(result, "0"))`. Accessor-aware Get so a
+        // `get 0()` poisoned getter (g-get-result-err.js)
+        // propagates; ToString coerces a non-string match value
+        // (g-coerce-result-err.js).
+        const zero_v = try intrinsics.getPropertyChain(realm, result_obj, "0");
+        const match_str = try intrinsics.stringifyArg(realm, zero_v);
+        // step 6.e.iii.2 — `Perform
+        // CreateDataPropertyOrThrow(A, ToString(n), matchStr)`.
+        const name_slice = std.fmt.bufPrint(&ibuf, "{d}", .{n}) catch unreachable;
+        const key = realm.heap.allocateString(name_slice) catch return error.OutOfMemory;
+        out.set(realm.allocator, key.bytes, Value.fromString(match_str)) catch return error.OutOfMemory;
+        // step 6.e.iii.3 — `If matchStr is the empty String`:
+        if (match_str.bytes.len == 0) {
+            // step 6.e.iii.3.a — `Let thisIndex be ?
+            // ToLength(? Get(rx, "lastIndex"))`. Throwing
+            // valueOf surfaces here (g-match-empty-coerce-
+            // lastindex-err.js).
+            const li_v = try intrinsics.getPropertyChain(realm, rx, "lastIndex");
+            const this_index = try intrinsics.toLengthValue(realm, li_v);
+            // step 6.e.iii.3.b — `Let nextIndex be
+            // AdvanceStringIndex(S, thisIndex, fullUnicode)`.
+            const next_index = advanceStringIndex(s.bytes, this_index, full_unicode);
+            // step 6.e.iii.3.c — `Perform
+            // ? Set(rx, "lastIndex", nextIndex, true)`. A non-
+            // writable `lastIndex` here surfaces TypeError
+            // (g-match-empty-set-lastindex-err.js).
+            const ni_v: Value = if (next_index <= @as(i64, std.math.maxInt(i32)))
+                Value.fromInt32(@intCast(next_index))
+            else
+                Value.fromDouble(@floatFromInt(next_index));
+            try setPropertyChainOrThrow(realm, rx, "lastIndex", ni_v);
+        }
+        // step 6.e.iii.4 — `Set n to n + 1`.
+        n += 1;
+    }
 }
 
 /// §22.2.6.10 RegExp.prototype [ @@replace ] ( string, replaceValue ).
@@ -520,8 +615,10 @@ fn regExpExecGeneric(realm: *Realm, r: *JSObject, s: *JSString) NativeError!Valu
 
 /// `Set(O, P, V, Throw)` — accessor-chain-aware write. The setter,
 /// if any, fires with `this = O`; absent that, the property is
-/// written as a data property on `O`. Spec §7.3.4: a thrown
-/// completion from the setter propagates.
+/// written as a data property on `O` *honoring writable*: an
+/// existing own data property with `writable: false` raises
+/// TypeError per §10.1.9 step 4.b. Spec §7.3.4 propagates a
+/// thrown completion from the setter.
 fn setPropertyChainOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, value: Value) NativeError!void {
     // Walk the prototype chain looking for an accessor with a
     // setter. If found, invoke it with `this = obj`.
@@ -550,7 +647,12 @@ fn setPropertyChainOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, value
         }
         cur = o.prototype;
     }
-    obj.set(realm.allocator, key, value) catch return error.OutOfMemory;
+    // No accessor — §10.1.9 step 4: OrdinaryDefineOwnProperty with
+    // a value descriptor. An existing own data property with
+    // `writable: false` returns false; under Throw=true that's a
+    // TypeError. `setIfWritable` already enforces this.
+    const ok = obj.setIfWritable(realm.allocator, key, value) catch return error.OutOfMemory;
+    if (!ok) return throwTypeError(realm, "Cannot assign to read-only property");
 }
 
 /// AdvanceStringIndex(S, index, unicode) — §22.2.7.3. When the
@@ -887,11 +989,21 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const is_global = (re_flags & LRE_FLAG_GLOBAL) != 0;
     const is_sticky = (re_flags & LRE_FLAG_STICKY) != 0;
 
-    const last_index_v = regex_obj.get("lastIndex");
-    var last_index: usize = if (last_index_v.isInt32() and last_index_v.asInt32() >= 0) @intCast(last_index_v.asInt32()) else 0;
+    // §22.2.7.2 RegExpBuiltinExec step 4 — `lastIndex = ?
+    // ToLength(? Get(R, "lastIndex"))`. Use the accessor-aware
+    // chain walk so a user-installed `lastIndex` getter (or a
+    // shadow data property surfaced through the proto chain)
+    // fires. ToLength coerces strings / valueOf-objects per spec.
+    const last_index_v = try intrinsics.getPropertyChain(realm, regex_obj, "lastIndex");
+    const last_index_i64: i64 = try intrinsics.toLengthValue(realm, last_index_v);
+    var last_index: usize = if (last_index_i64 > 0) @intCast(last_index_i64) else 0;
+    // §22.2.7.2 step 7 — `If global is false and sticky is false,
+    // set lastIndex to 0`.
     if (!is_global and !is_sticky) last_index = 0;
     if (last_index > input.units.len) {
-        regex_obj.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
+        if (is_global or is_sticky) {
+            try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(0));
+        }
         return Value.null_;
     }
 
@@ -917,8 +1029,13 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
         @ptrCast(realm),
     );
     if (ret <= 0) {
+        // §22.2.7.2 step 15.c.i (sticky failure) / step 16 — when
+        // global or sticky, write lastIndex = 0 *honoring writable*:
+        // a non-writable `lastIndex` becomes a TypeError. The
+        // fixtures (`builtin-failure-y-set-lastindex-err`,
+        // `builtin-failure-g-set-lastindex-err`) rely on this.
         if (is_global or is_sticky) {
-            regex_obj.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
+            try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(0));
         }
         return Value.null_;
     }
@@ -928,8 +1045,12 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const whole_start: usize = if (captures[0]) |p| (@intFromPtr(p) - cbuf_addr) / 2 else 0;
     const whole_end: usize = if (captures[1]) |p| (@intFromPtr(p) - cbuf_addr) / 2 else 0;
 
+    // §22.2.7.2 step 18 — `If global is true or sticky is true,
+    // Set(R, "lastIndex", e, true)`. Throw=true → a non-writable
+    // own `lastIndex` raises TypeError (per the `builtin-success-
+    // {y,g}-set-lastindex-err` fixtures).
     if (is_global or is_sticky) {
-        regex_obj.set(realm.allocator, "lastIndex", Value.fromInt32(@intCast(whole_end))) catch return error.OutOfMemory;
+        try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(@intCast(whole_end)));
     }
 
     // Build the result array per §22.2.7.2 — `[whole,...captures]`
