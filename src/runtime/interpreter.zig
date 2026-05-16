@@ -18,6 +18,7 @@ const std = @import("std");
 
 const Value = @import("value.zig").Value;
 const JSString = @import("string.zig").JSString;
+const utf16 = @import("utf16.zig");
 const JSFunction = @import("function.zig").JSFunction;
 const object_mod = @import("object.zig");
 const JSObject = object_mod.JSObject;
@@ -5692,7 +5693,10 @@ fn runFrames(
                     // looked up through the realm's intrinsic.
                     const recv: *JSString = @ptrCast(@alignCast(acc.asString()));
                     if (std.mem.eql(u8, key_s.bytes, "length")) {
-                        acc = Value.fromInt32(@intCast(recv.bytes.len));
+                        // §22.1.5.1 — String.prototype.length is the
+                        // count of UTF-16 code units in the String
+                        // value (§6.1.4), not the WTF-8 byte length.
+                        acc = Value.fromInt32(@intCast(utf16.lengthInCodeUnits(recv.bytes)));
                     } else if (realm.intrinsics.string_prototype) |sp| {
                         acc = sp.get(key_s.bytes);
                     } else acc = Value.undefined_;
@@ -5916,16 +5920,25 @@ fn runFrames(
                         acc = fn_obj.get(key_slice);
                     }
                 } else if (recv.isString()) {
-                    // §6.1.4.4 — string primitives expose.length,
-                    // numeric-index character access, and inherited
-                    // String.prototype methods.
+                    // §22.1.4.4 — String exotic objects expose
+                    // `length` (count of UTF-16 code units) and
+                    // numeric-index character access (one-element
+                    // String of the code unit at the index), plus
+                    // inherited String.prototype methods.
                     const s: *JSString = @ptrCast(@alignCast(recv.asString()));
                     if (std.mem.eql(u8, key_slice, "length")) {
-                        acc = Value.fromInt32(@intCast(s.bytes.len));
+                        acc = Value.fromInt32(@intCast(utf16.lengthInCodeUnits(s.bytes)));
                     } else if (std.fmt.parseInt(usize, key_slice, 10)) |idx| {
-                        if (idx < s.bytes.len) {
-                            const ch = s.bytes[idx .. idx + 1];
-                            const ns = realm.heap.allocateString(ch) catch return error.OutOfMemory;
+                        // §22.1.4.4 [[GetOwnProperty]] — the indexed
+                        // own property is the one-element String
+                        // value containing the code unit at index
+                        // `idx`. Walk the code-unit view and emit
+                        // the WTF-8 encoding of that single unit.
+                        if (utf16.codeUnitAt(s.bytes, idx)) |cu| {
+                            var buf: std.ArrayListUnmanaged(u8) = .empty;
+                            defer buf.deinit(allocator);
+                            utf16.appendCodeUnitAsWtf8(allocator, &buf, cu) catch return error.OutOfMemory;
+                            const ns = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
                             acc = Value.fromString(ns);
                         } else {
                             acc = Value.undefined_;

@@ -63,6 +63,12 @@ pub const JSString = struct {
         struct_allocator.destroy(self);
     }
 
+    /// Internal byte length of the WTF-8 buffer. NOT the spec
+    /// `String.prototype.length` — that's counted in UTF-16 code
+    /// units (§22.1.5.1) and lives in `runtime/utf16.zig`'s
+    /// `lengthInCodeUnits`. Callers exposing the JS-visible
+    /// `length` MUST go through utf16; this one is for the heap /
+    /// arena layer that operates on the byte buffer directly.
     pub fn length(self: *const JSString) usize {
         return self.bytes.len;
     }

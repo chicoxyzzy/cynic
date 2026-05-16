@@ -35,6 +35,7 @@ const NativeFn = @import("function.zig").NativeFn;
 const NativeError = @import("function.zig").NativeError;
 const JSObject = @import("object.zig").JSObject;
 const JSString = @import("string.zig").JSString;
+const utf16_mod = @import("utf16.zig");
 const ObjMod = @import("object.zig"); // for `MapData` / `SetData` create + `TypedKind` references that survive in TypedArray re-exports
 const heap_mod = @import("heap.zig");
 const Realm = @import("realm.zig").Realm;
@@ -690,12 +691,24 @@ pub fn toObjectThis(realm: *Realm, this_value: Value) NativeError!*JSObject {
             .enumerable = true,
             .configurable = false,
         };
-        w.setWithFlags(realm.allocator, "length", Value.fromInt32(@intCast(s.bytes.len)), ro_flags) catch return error.OutOfMemory;
+        // §22.1.4.4 [[GetOwnProperty]] — `length` and the indexed
+        // own properties report UTF-16 code-unit positions, not
+        // WTF-8 byte offsets. Walk the code-unit view of `s.bytes`.
+        const cu_len = utf16_mod.lengthInCodeUnits(s.bytes);
+        w.setWithFlags(realm.allocator, "length", Value.fromInt32(@intCast(cu_len)), ro_flags) catch return error.OutOfMemory;
         var idx: usize = 0;
-        while (idx < s.bytes.len) : (idx += 1) {
+        while (idx < cu_len) : (idx += 1) {
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
-            const ch = realm.heap.allocateString(s.bytes[idx .. idx + 1]) catch return error.OutOfMemory;
+            // Decode the code unit at `idx` and re-encode as a
+            // single-unit WTF-8 string for the wrapper slot. This
+            // splits a supplementary code point into two distinct
+            // entries (lead at i, trail at i+1).
+            const cu = utf16_mod.codeUnitAt(s.bytes, idx) orelse 0xFFFD;
+            var cu_buf: std.ArrayListUnmanaged(u8) = .empty;
+            defer cu_buf.deinit(realm.allocator);
+            utf16_mod.appendCodeUnitAsWtf8(realm.allocator, &cu_buf, cu) catch return error.OutOfMemory;
+            const ch = realm.heap.allocateString(cu_buf.items) catch return error.OutOfMemory;
             const own_key = realm.heap.allocateString(islice) catch return error.OutOfMemory;
             w.setWithFlags(realm.allocator, own_key.bytes, Value.fromString(ch), idx_flags) catch return error.OutOfMemory;
         }
@@ -1085,14 +1098,22 @@ fn stringConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
             // these `new String("abc").length` was undefined and
             // any iteration / index-access against the wrapper
             // failed.
-            inst.setWithFlags(realm.allocator, "length", Value.fromInt32(@intCast(ps.bytes.len)), .{
+            // §22.1.4.4 — `length` and indexed entries are counted
+            // and indexed in UTF-16 code units, not WTF-8 bytes.
+            const cu_len = utf16_mod.lengthInCodeUnits(ps.bytes);
+            inst.setWithFlags(realm.allocator, "length", Value.fromInt32(@intCast(cu_len)), .{
                 .writable = false, .enumerable = false, .configurable = false,
             }) catch return error.OutOfMemory;
             var ibuf: [24]u8 = undefined;
-            for (ps.bytes, 0..) |b, i| {
-                const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+            var ci: usize = 0;
+            while (ci < cu_len) : (ci += 1) {
+                const islice = std.fmt.bufPrint(&ibuf, "{d}", .{ci}) catch unreachable;
                 const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-                const ch = realm.heap.allocateString(&[_]u8{b}) catch return error.OutOfMemory;
+                const cu = utf16_mod.codeUnitAt(ps.bytes, ci) orelse 0xFFFD;
+                var cu_buf: std.ArrayListUnmanaged(u8) = .empty;
+                defer cu_buf.deinit(realm.allocator);
+                utf16_mod.appendCodeUnitAsWtf8(realm.allocator, &cu_buf, cu) catch return error.OutOfMemory;
+                const ch = realm.heap.allocateString(cu_buf.items) catch return error.OutOfMemory;
                 inst.setWithFlags(realm.allocator, owned.bytes, Value.fromString(ch), .{
                     .writable = false, .enumerable = true, .configurable = false,
                 }) catch return error.OutOfMemory;

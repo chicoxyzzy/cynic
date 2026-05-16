@@ -4243,3 +4243,41 @@ test "globalThis: bare-identifier read sees a late-installed host binding" {
     try testing.expect(v.isInt32());
     try testing.expectEqual(@as(i32, 8), v.asInt32());
 }
+
+// ── §22.1.5 String.prototype.length — code-unit counts ─────────────────────
+
+test "String.prototype.length: ASCII matches char count" {
+    try expectScriptIntWithBuiltins("\"abc\".length;", 3);
+}
+
+test "String.prototype.length: BMP non-ASCII counts as one code unit" {
+    // §22.1.5.1 — `\xFF` is U+00FF, a single BMP code unit
+    // (encoded as 2 WTF-8 bytes). Byte-length would have returned 2.
+    try expectScriptIntWithBuiltins("\"a\\xFFc\".length;", 3);
+}
+
+test "String.prototype.length: supplementary counts as two code units" {
+    // U+1F600 is a supplementary code point that occupies one
+    // 4-byte UTF-8 sequence but exposes two UTF-16 code units
+    // (high+low surrogate pair). Byte-length would have returned 6.
+    try expectScriptIntWithBuiltins("\"a\\u{1F600}c\".length;", 4);
+}
+
+test "String.prototype.length: lone surrogate counts as one code unit" {
+    // \uD83D is a lone high surrogate; it's its own single code
+    // unit even though the WTF-8 encoding takes 3 bytes.
+    try expectScriptIntWithBuiltins("\"a\\uD83Dc\".length;", 3);
+}
+
+test "String.prototype.length: indexed access by code unit (BMP)" {
+    try expectScriptStringWithBuiltins("\"a\\xFFc\"[1];", "\xC3\xBF");
+}
+
+test "String.prototype.length: indexed access splits surrogate pair" {
+    // `s[1]` and `s[2]` of "a\u{1F600}c" yield the high and low
+    // surrogate halves of the pair (each encoded as a 3-byte
+    // WTF-8 escape).
+    try expectScriptStringWithBuiltins("\"a\\u{1F600}c\"[1];", "\xED\xA0\xBD");
+    try expectScriptStringWithBuiltins("\"a\\u{1F600}c\"[2];", "\xED\xB8\x80");
+    try expectScriptStringWithBuiltins("\"a\\u{1F600}c\"[3];", "c");
+}
