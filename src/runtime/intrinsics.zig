@@ -442,6 +442,19 @@ fn installStubConstructor(
     proto.prototype = parent_proto;
     try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
     fn_obj.prototype = proto;
+    // §17 — built-in constructors have a non-writable, non-
+    // enumerable, non-configurable `prototype` data property.
+    // The `flagsForOwn` synthesizer would otherwise hand back the
+    // ordinary-function default (writable: true) since
+    // `is_class_constructor` is reserved for `class C {}` literals
+    // (it gates the "Class constructor cannot be invoked without
+    // 'new'" check). Stash the override directly in
+    // `property_flags` so it wins the lookup.
+    try fn_obj.property_flags.put(realm.allocator, "prototype", .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = false,
+    });
     try realm.globals.put(realm.allocator, name, heap_mod.taggedFunction(fn_obj));
     return proto;
 }
@@ -455,6 +468,12 @@ fn installCtorReusingProto(realm: *Realm, name: []const u8, proto: *JSObject) !v
     const fn_obj = try realm.heap.allocateFunctionNative(stubConstructorNative, 1, name);
     try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
     fn_obj.prototype = proto;
+    // §17 — same non-writable-prototype default as the stub path above.
+    try fn_obj.property_flags.put(realm.allocator, "prototype", .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = false,
+    });
     try realm.globals.put(realm.allocator, name, heap_mod.taggedFunction(fn_obj));
 }
 
@@ -1054,6 +1073,14 @@ fn replaceGlobalNative(realm: *Realm, name: []const u8, native: NativeFn) !void 
     if (fresh.prototype) |p| {
         try p.set(realm.allocator, "constructor", heap_mod.taggedFunction(fresh));
     }
+    // Re-apply the §17 non-writable-prototype default that
+    // `installStubConstructor` set on the original function; the
+    // fresh JSFunction has a clean `property_flags` map otherwise.
+    try fresh.property_flags.put(realm.allocator, "prototype", .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = false,
+    });
     try realm.globals.put(realm.allocator, name, heap_mod.taggedFunction(fresh));
 }
 

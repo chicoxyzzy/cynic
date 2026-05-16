@@ -4415,8 +4415,22 @@ fn compileConstructorBody(
         try self.builder.emitU8(slot);
     }
 
+    // §13.3.2 — same pre-body sequence as `compileMethodBody`:
+    // pre-declare let/const slots (TDZ), pre-declare every `var`
+    // and `function` binding reachable through nested blocks, then
+    // initialise every `var` to undefined so a forward `read`
+    // never falls through to a parent scope. Without
+    // hoistVarAndFunctions + emitVarInits, `class C { constructor() {
+    // var x = 1; this.x = x; } }` raised CompileError because `x`
+    // was undeclared at the use site.
     try self.hoistLetConst(body_stmts);
-    for (body_stmts) |*s| try self.compileStatement(s);
+    try self.hoistVarAndFunctions(body_stmts);
+    try self.emitVarInits(span);
+    // Same two-pass order as the function path: function
+    // declarations first (so later code can call them), then the
+    // remaining statements.
+    for (body_stmts) |*s| if (s.* == .function_decl) try self.compileStatement(s);
+    for (body_stmts) |*s| if (s.* != .function_decl) try self.compileStatement(s);
     try self.builder.emitOp(.lda_undefined, span);
     try self.builder.emitOp(.return_, span);
 
