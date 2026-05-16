@@ -58,13 +58,23 @@ pub fn install(realm: *Realm) !void {
 }
 
 fn reflectPreventExtensions(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
     // §28.1.10 — Reflect.preventExtensions throws on non-object;
     // returns Boolean (true on success, false on failure).
     const target = argOr(args, 0, Value.undefined_);
-    if (heap_mod.valueAsPlainObject(target) == null and heap_mod.valueAsFunction(target) == null) {
-        return throwTypeError(realm, "Reflect.preventExtensions called on non-object");
+    const obj = heap_mod.valueAsPlainObject(target) orelse {
+        if (heap_mod.valueAsFunction(target) == null) {
+            return throwTypeError(realm, "Reflect.preventExtensions called on non-object");
+        }
+        // Functions: no proxy path, no extensible bit modelled today.
+        return Value.fromBool(true);
+    };
+    if (obj.proxy_target != null or obj.proxy_revoked) {
+        const obj_mod = @import("object.zig");
+        const ok = try obj_mod.proxyPreventExtensionsBool(realm, obj);
+        return Value.fromBool(ok);
     }
-    _ = try intrinsics.objectPreventExtensions(realm, this_value, args);
+    obj.extensible = false;
     return Value.fromBool(true);
 }
 

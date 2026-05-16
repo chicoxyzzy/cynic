@@ -3889,7 +3889,11 @@ fn runFrames(
                             .uncaught => |ex| return .{ .thrown = ex },
                         }
                     }
-                    if (c.properties.contains(key_slice) or c.accessors.contains(key_slice)) {
+                    // §10.1.7.1 OrdinaryHasProperty step 3 —
+                    // `HasOwnProperty(O, P)` includes array-exotic /
+                    // typed-array integer-indexed slots, not just
+                    // the `properties` / `accessors` maps.
+                    if (c.hasOwn(key_slice)) {
                         found = true;
                         break :walk;
                     }

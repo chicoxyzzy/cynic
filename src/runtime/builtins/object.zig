@@ -1586,47 +1586,56 @@ fn objectIsSealed(realm: *Realm, this_value: Value, args: []const Value) NativeE
     return Value.true_;
 }
 
+/// §10.5.4 Proxy [[PreventExtensions]] — shared bool helper.
+/// Returns the boolean status (`Reflect.preventExtensions` surfaces
+/// it directly; `Object.preventExtensions` throws on `false`).
+pub fn proxyPreventExtensionsBool(realm: *Realm, obj: *JSObject) NativeError!bool {
+    if (obj.proxy_revoked) return throwTypeError(realm, "Cannot perform 'preventExtensions' on a revoked proxy");
+    const proxy_target = obj.proxy_target.?;
+    const handler = obj.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'preventExtensions' on a proxy with null handler");
+    const trap_v = handler.get("preventExtensions");
+    if (trap_v.isUndefined() or trap_v.isNull()) {
+        // Trap absent — forward to target.[[PreventExtensions]].
+        if (proxy_target.proxy_target != null or proxy_target.proxy_revoked) {
+            return try proxyPreventExtensionsBool(realm, proxy_target);
+        }
+        proxy_target.extensible = false;
+        return true;
+    }
+    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'preventExtensions' trap is not callable");
+    const interpreter = @import("../interpreter.zig");
+    const trap_args = [_]Value{heap_mod.taggedObject(proxy_target)};
+    const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const truthy = switch (outcome) {
+        .value, .yielded => |v| intrinsics.toBoolean(v),
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+    if (!truthy) return false;
+    // §10.5.4 step 8 — invariant: trap reported success ⇒ target
+    // must be non-extensible. Use `IsExtensible` rather than the
+    // raw flag so a nested proxy target dispatches correctly.
+    const ext_args = [_]Value{heap_mod.taggedObject(proxy_target)};
+    const ext_v = try objectIsExtensible(realm, Value.undefined_, &ext_args);
+    if (intrinsics.toBoolean(ext_v)) {
+        return throwTypeError(realm, "'preventExtensions' on proxy reported success but target is still extensible");
+    }
+    return true;
+}
+
 pub fn objectPreventExtensions(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
     if (heap_mod.valueAsPlainObject(arg)) |obj| {
-        // §10.5.4 Proxy [[PreventExtensions]] — trap dispatch
-        // with the proxy-revoked / null-handler guards.
         if (obj.proxy_target != null or obj.proxy_revoked) {
-            if (obj.proxy_revoked) return throwTypeError(realm, "Cannot perform 'preventExtensions' on a revoked proxy");
-            const proxy_target = obj.proxy_target.?;
-            const handler = obj.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'preventExtensions' on a proxy with null handler");
-            const trap_v = handler.get("preventExtensions");
-            // §10.5.4 step 5 — GetMethod: non-callable non-nullish → TypeError.
-            if (!trap_v.isUndefined() and !trap_v.isNull()) {
-                const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'preventExtensions' trap is not callable");
-                const interpreter = @import("../interpreter.zig");
-                const trap_args = [_]Value{heap_mod.taggedObject(proxy_target)};
-                const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => return error.NativeThrew,
-                };
-                switch (outcome) {
-                    .value, .yielded => |v| {
-                        if (!intrinsics.toBoolean(v)) {
-                            return throwTypeError(realm, "'preventExtensions' on proxy returned falsy");
-                        }
-                        // §10.5.4 step 8 — invariant: when the
-                        // trap reports success, the target must
-                        // actually be non-extensible.
-                        if (proxy_target.extensible) {
-                            return throwTypeError(realm, "'preventExtensions' on proxy reported success but target is still extensible");
-                        }
-                        return arg;
-                    },
-                    .thrown => |ex| {
-                        realm.pending_exception = ex;
-                        return error.NativeThrew;
-                    },
-                }
-            }
-            const inner_args = [_]Value{heap_mod.taggedObject(proxy_target)};
-            return objectPreventExtensions(realm, Value.undefined_, &inner_args);
+            const ok = try proxyPreventExtensionsBool(realm, obj);
+            if (!ok) return throwTypeError(realm, "'preventExtensions' on proxy returned falsy");
+            return arg;
         }
         obj.extensible = false;
     }
