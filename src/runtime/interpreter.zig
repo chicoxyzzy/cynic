@@ -7371,7 +7371,16 @@ fn strictSetPropertyAnchored(
             };
             const truncate_result = truncateArrayAtLength(allocator, obj, new_len);
             const final_len = truncate_result.final_length;
-            obj.set(allocator, "length", Value.fromInt32(@intCast(@min(final_len, std.math.maxInt(i32))))) catch return error.OutOfMemory;
+            // §6.1.6.1 NumberValue — Array length is a Number, not
+            // int32. Values past `maxInt(i32)` (e.g. setting length to
+            // `2**32 - 1` to grow a sparse array) must be stored as a
+            // double, otherwise the read-back silently truncates to
+            // `2**31 - 1` and `verifyProperty` / `isWritable` fail.
+            const len_value: Value = if (final_len > std.math.maxInt(i32))
+                Value.fromDouble(@floatFromInt(final_len))
+            else
+                Value.fromInt32(@intCast(final_len));
+            obj.set(allocator, "length", len_value) catch return error.OutOfMemory;
             if (truncate_result.blocked) {
                 const ex = try makeTypeError(realm, "Cannot delete non-configurable array index");
                 return throwInSetter(realm, frames, f, ip, value, ex);

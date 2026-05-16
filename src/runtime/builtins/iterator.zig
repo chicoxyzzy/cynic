@@ -1442,39 +1442,38 @@ fn collectZipIters(realm: *Realm, iterables_v: Value) NativeError![]ZipIterSlot 
     const input_next_v = try snapshotIterNextValue(realm, input_iter);
 
     var iters: std.ArrayListUnmanaged(ZipIterSlot) = .empty;
+    // The errdefer below frees the list backing on every error
+    // path; the per-branch close walks below close the user-
+    // observable iterators but must NOT call `iters.deinit` —
+    // doing so would let the errdefer run a second time over the
+    // freed pointer and segfault on the next allocator pass.
     errdefer iters.deinit(realm.allocator);
     while (true) {
         // §7.4.4 IteratorNext callability check fires here.
         const input_next_fn = heap_mod.valueAsFunction(input_next_v) orelse {
             closeAllSwallowSlots(realm, iters.items, 0);
-            iters.deinit(realm.allocator);
             return throwTypeError(realm, "iterator has no callable next");
         };
         const r = invokeIterNextFn(realm, input_iter, input_next_fn) catch |err| {
             closeAllSwallowSlots(realm, iters.items, 0);
-            iters.deinit(realm.allocator);
             return err;
         };
         if (heap_mod.valueAsPlainObject(r) == null) {
             closeAllSwallowSlots(realm, iters.items, 0);
-            iters.deinit(realm.allocator);
             return typeErrorAfterClose(realm, input_iter, "Iterator result is not an object");
         }
         const done_v = iterGet(realm, r, "done") catch |err| {
             closeAllSwallowSlots(realm, iters.items, 0);
-            iters.deinit(realm.allocator);
             return err;
         };
         if (intrinsics.toBoolean(done_v)) break;
         const value = iterGet(realm, r, "value") catch |err| {
             closeAllSwallowSlots(realm, iters.items, 0);
-            iters.deinit(realm.allocator);
             return err;
         };
         const sub_iter = getIteratorFlattenable(realm, value, true) catch |err| {
             closeAllSwallowSlots(realm, iters.items, 0);
             closeIteratorSwallow(realm, input_iter);
-            iters.deinit(realm.allocator);
             return err;
         };
         // §7.4.2 step 1 — snapshot the sub-iter's `next` once.
@@ -1482,14 +1481,12 @@ fn collectZipIters(realm: *Realm, iterables_v: Value) NativeError![]ZipIterSlot 
             closeIteratorSwallow(realm, sub_iter);
             closeAllSwallowSlots(realm, iters.items, 0);
             closeIteratorSwallow(realm, input_iter);
-            iters.deinit(realm.allocator);
             return err;
         };
         iters.append(realm.allocator, .{ .iter = sub_iter, .next = sub_next_v }) catch {
             closeIteratorSwallow(realm, sub_iter);
             closeAllSwallowSlots(realm, iters.items, 0);
             closeIteratorSwallow(realm, input_iter);
-            iters.deinit(realm.allocator);
             return error.OutOfMemory;
         };
     }

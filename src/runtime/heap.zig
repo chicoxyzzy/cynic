@@ -354,6 +354,20 @@ pub const Heap = struct {
         return s;
     }
 
+    /// Look up an existing Symbol by its stored `prop_key`. Used
+    /// by `Reflect.ownKeys` / Object key enumeration where Cynic
+    /// stores symbol-keyed entries under their string key
+    /// (`@@iterator`, `<sym:N>`) and needs the actual Symbol value
+    /// back for the output array. Linear scan — symbol count is
+    /// small (well-known + a handful of user-allocated). Returns
+    /// `null` for keys with no registered Symbol.
+    pub fn symbolForKey(self: *Heap, prop_key: []const u8) ?*JSSymbol {
+        for (self.symbols.items) |s| {
+            if (std.mem.eql(u8, s.prop_key, prop_key)) return s;
+        }
+        return null;
+    }
+
     /// Allocate a Symbol with an explicit, caller-chosen
     /// property-key string. Used by well-known symbols
     /// (`Symbol.iterator` etc.) where the conventional

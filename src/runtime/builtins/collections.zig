@@ -515,7 +515,10 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
         };
         const result_v = switch (step) {
             .value, .yielded => |v| v,
-            .thrown => return error.NativeThrew,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
         };
         const result = heap_mod.valueAsPlainObject(result_v) orelse break;
         if (intrinsics.toBoolean(try intrinsics.getPropertyChain(realm, result, "done"))) break;
@@ -527,7 +530,10 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
         };
         const key_v = switch (key_outcome) {
             .value, .yielded => |v| v,
-            .thrown => return error.NativeThrew,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
         };
         // Look up or create the bucket array (under the Map's
         // SameValueZero key equality).
@@ -659,6 +665,12 @@ fn mapGetOrInsert(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Map.prototype.getOrInsert called on non-Map");
     if (inst.map_data == null) return throwTypeError(realm, "Map.prototype.getOrInsert called on non-Map");
     const d = inst.map_data.?;
+    // §24.1.5 step 2 — `RequireInternalSlot(M, [[MapData]])` rejects
+    // a WeakMap (which has [[WeakMapData]] instead). Cynic stores
+    // both under `map_data`, distinguished by `is_weak`; reject the
+    // weak path explicitly so `Map.prototype.getOrInsert.call(weakMap, …)`
+    // throws TypeError per spec.
+    if (d.is_weak) return throwTypeError(realm, "Map.prototype.getOrInsert called on a WeakMap");
     // §24.1.4.{N} upsert — CanonicalizeKeyedCollectionKey on
     // the lookup key, so -0 finds the +0 entry and a fresh
     // insert stores +0.
@@ -677,6 +689,9 @@ fn mapGetOrInsertComputed(realm: *Realm, this_value: Value, args: []const Value)
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Map.prototype.getOrInsertComputed called on non-Map");
     if (inst.map_data == null) return throwTypeError(realm, "Map.prototype.getOrInsertComputed called on non-Map");
     const d = inst.map_data.?;
+    // §24.1.5 step 2 — RequireInternalSlot rejects WeakMap. See
+    // `mapGetOrInsert` above for the same gate.
+    if (d.is_weak) return throwTypeError(realm, "Map.prototype.getOrInsertComputed called on a WeakMap");
     const raw_key = argOr(args, 0, Value.undefined_);
     // Stage-3 upsert: per CanonicalizeKeyedCollectionKey, -0
     // canonicalizes to +0 before any further use. The callback
@@ -689,14 +704,24 @@ fn mapGetOrInsertComputed(realm: *Realm, this_value: Value, args: []const Value)
     // callback can mutate the Map; the proposal says "use the
     // newly-computed value regardless" (overwrites any concurrent
     // insert).
+    // §24.1.5 / §24.3.5 (proposal) step 6 — `Call(callbackfn, undefined, « key »)`.
+    // The `this` argument is `undefined`, NOT the Map instance.
     const cb_args = [_]Value{key};
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, cb, this_value, &cb_args) catch |err| switch (err) {
+    const outcome = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &cb_args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
     const value = switch (outcome) {
         .value, .yielded => |v| v,
-        .thrown => return error.NativeThrew,
+        // §27.5.4 (proposal) — propagate the callback's exception.
+        // The runtime returns `.thrown` with the thrown value; we
+        // must pin it on `realm.pending_exception` before raising
+        // `NativeThrew`, otherwise the dispatcher sees a generic
+        // "native error" instead of the user's `Error`.
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
     };
     mapSetInternal(realm, inst, key, value) catch return error.OutOfMemory;
     return value;
@@ -749,7 +774,10 @@ fn mapForEach(realm: *Realm, this_value: Value, args: []const Value) NativeError
         };
         switch (outcome) {
             .value, .yielded => {},
-            .thrown => return error.NativeThrew,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
         }
     }
     return Value.undefined_;
@@ -803,12 +831,29 @@ fn weakMapDelete(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     return Value.false_;
 }
 
+/// §6.1.5 CanBeHeldWeakly — the gate that WeakMap / WeakSet keys
+/// must pass. Objects qualify unconditionally; for Symbols, only
+/// non-registered ones (i.e. `Symbol(desc)`, not `Symbol.for(k)`)
+/// can be held weakly — registered symbols are interned globally
+/// and would prevent GC of the WeakMap's hidden table.
+fn canBeHeldWeakly(key: Value) bool {
+    // `Value.isObject()` is true for every heap-kind value (plain
+    // objects, functions, symbols, bigints) — so we have to pick
+    // the kinds apart explicitly. Symbols need the registered-vs-
+    // not check; everything else falls back to "is it an Object?"
+    // which for §6.1.5 means plain Object or callable (Function).
+    if (heap_mod.valueAsSymbol(key)) |sym| return !sym.is_registered;
+    if (heap_mod.valueAsPlainObject(key) != null) return true;
+    if (heap_mod.valueAsFunction(key) != null) return true;
+    return false;
+}
+
 fn weakMapGetOrInsert(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "WeakMap.prototype.getOrInsert called on non-WeakMap");
     const d = inst.map_data orelse return throwTypeError(realm, "WeakMap.prototype.getOrInsert called on non-WeakMap");
     if (!d.is_weak) return throwTypeError(realm, "WeakMap.prototype.getOrInsert called on non-WeakMap");
     const key = argOr(args, 0, Value.undefined_);
-    if (!key.isObject() and !heap_mod.isSymbol(key)) return throwTypeError(realm, "WeakMap key must be an Object or Symbol");
+    if (!canBeHeldWeakly(key)) return throwTypeError(realm, "WeakMap key cannot be held weakly");
     if (mapEntryIndex(d, key)) |i| return d.entries.items[i].value;
     const value = argOr(args, 1, Value.undefined_);
     mapSetInternal(realm, inst, key, value) catch return error.OutOfMemory;
@@ -820,7 +865,7 @@ fn weakMapGetOrInsertComputed(realm: *Realm, this_value: Value, args: []const Va
     const d = inst.map_data orelse return throwTypeError(realm, "WeakMap.prototype.getOrInsertComputed called on non-WeakMap");
     if (!d.is_weak) return throwTypeError(realm, "WeakMap.prototype.getOrInsertComputed called on non-WeakMap");
     const key = argOr(args, 0, Value.undefined_);
-    if (!key.isObject() and !heap_mod.isSymbol(key)) return throwTypeError(realm, "WeakMap key must be an Object or Symbol");
+    if (!canBeHeldWeakly(key)) return throwTypeError(realm, "WeakMap key cannot be held weakly");
     const cb = heap_mod.valueAsFunction(argOr(args, 1, Value.undefined_)) orelse return throwTypeError(realm, "callbackfn must be a function");
     if (mapEntryIndex(d, key)) |i| return d.entries.items[i].value;
 

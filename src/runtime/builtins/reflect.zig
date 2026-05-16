@@ -422,14 +422,24 @@ fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) 
 fn reflectOwnKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
+
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+
+    // §17 — built-in function objects are ordinary objects too, so
+    // Reflect.ownKeys(builtin) walks the same property map but
+    // doesn't see integer-indexed elements or accessors. Mirrors the
+    // `objectGetOwnPropertyNames` function-arg path.
     var idx: usize = 0;
     if (heap_mod.valueAsFunction(arg)) |fn_obj| {
         var fit = fn_obj.properties.iterator();
         while (fit.next()) |entry| : (idx += 1) {
             const k = entry.key_ptr.*;
+            if (std.mem.startsWith(u8, k, "__cynic_")) {
+                idx -= 1; // skip-but-don't-advance the output index
+                continue;
+            }
             const key_str = realm.heap.allocateString(k) catch return error.OutOfMemory;
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
@@ -439,14 +449,38 @@ fn reflectOwnKeys(realm: *Realm, this_value: Value, args: []const Value) NativeE
         out.set(realm.allocator, "length", Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
         return heap_mod.taggedObject(out);
     }
+
     const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.ownKeys target must be an object");
-    var it = target.properties.iterator();
-    while (it.next()) |entry| : (idx += 1) {
-        const key_str = realm.heap.allocateString(entry.key_ptr.*) catch return error.OutOfMemory;
+    // §28.1.11 step 2 — call `target.[[OwnPropertyKeys]]()`. The
+    // canonical implementation lives in `ownPropertyKeysOrdered`
+    // (§10.1.11 OrdinaryOwnPropertyKeys): integer-indexed first in
+    // ascending numeric order, then string keys in insertion order,
+    // then symbol keys. Without this, Reflect.ownKeys missed every
+    // packed-array element and reordered objects with a mix of
+    // integer-like and string keys.
+    const obj_mod = @import("object.zig");
+    const keys = try obj_mod.ownPropertyKeysOrdered(realm, target);
+    defer realm.allocator.free(keys);
+    for (keys) |k| {
+        // Symbol keys stored as `@@<name>` or `<sym:N>` need to surface
+        // as actual Symbol values per §28.1.11; the rest are strings.
+        const v: Value = if (std.mem.startsWith(u8, k, "@@") or std.mem.startsWith(u8, k, "<sym:")) blk: {
+            // Look up an existing well-known / registered Symbol by
+            // its string key; fall back to a fresh anonymous symbol
+            // if no registry hit. The fallback keeps the shape right
+            // even when the symbol's description was lost.
+            if (realm.heap.symbolForKey(k)) |sym| break :blk heap_mod.taggedSymbol(sym);
+            const fresh = realm.heap.allocateSymbol(k) catch return error.OutOfMemory;
+            break :blk heap_mod.taggedSymbol(fresh);
+        } else blk: {
+            const key_str = realm.heap.allocateString(k) catch return error.OutOfMemory;
+            break :blk Value.fromString(key_str);
+        };
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, Value.fromString(key_str)) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+        idx += 1;
     }
     out.set(realm.allocator, "length", Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
     return heap_mod.taggedObject(out);
