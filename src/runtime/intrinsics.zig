@@ -1476,10 +1476,14 @@ pub fn toNumber(realm: *Realm, v: Value) NativeError!Value {
 // ── Equality helpers ────────────────────────────────────────────────────────
 
 pub fn strictEqualsLite(a: Value, b: Value) bool {
+    // §7.2.16 IsStrictlyEqual step 4 — Number::equal returns false
+    // when either operand is NaN, even when both are the same NaN
+    // (same bit pattern). Check this BEFORE the bits fast path.
+    if (a.isDouble() and std.math.isNan(a.asDouble())) return false;
+    if (b.isDouble() and std.math.isNan(b.asDouble())) return false;
     if (a.bits == b.bits) return true;
-    // NaN never equals itself even by bit pattern (canonicalised
-    // here, so matches), but other strict-equality cross-type
-    // rules — int vs double — need a check.
+    // Cross-type int vs double comparison (§7.2.16 Number::equal
+    // operates on the mathematical value).
     if (a.isInt32() and b.isDouble()) return @as(f64, @floatFromInt(a.asInt32())) == b.asDouble();
     if (a.isDouble() and b.isInt32()) return a.asDouble() == @as(f64, @floatFromInt(b.asInt32()));
     if (a.isString() and b.isString()) {
@@ -1499,7 +1503,37 @@ pub fn strictEqualsLite(a: Value, b: Value) bool {
 }
 
 pub fn sameValueZero(a: Value, b: Value) bool {
-    return strictEqualsLite(a, b);
+    // §7.2.11 SameValueZero — NaN compares equal to NaN (unlike
+    // strict equality), and +0/-0 are treated as equal. Used by
+    // `Array.prototype.includes`, `Map`/`Set` keys, etc.
+    if (a.isDouble() and b.isDouble()) {
+        const da = a.asDouble();
+        const db = b.asDouble();
+        if (std.math.isNan(da) and std.math.isNan(db)) return true;
+        return da == db;
+    }
+    if (a.isInt32() and b.isDouble()) {
+        const db = b.asDouble();
+        if (std.math.isNan(db)) return false;
+        return @as(f64, @floatFromInt(a.asInt32())) == db;
+    }
+    if (a.isDouble() and b.isInt32()) {
+        const da = a.asDouble();
+        if (std.math.isNan(da)) return false;
+        return da == @as(f64, @floatFromInt(b.asInt32()));
+    }
+    if (a.bits == b.bits) return true;
+    if (a.isString() and b.isString()) {
+        const sa: *JSString = @ptrCast(@alignCast(a.asString()));
+        const sb: *JSString = @ptrCast(@alignCast(b.asString()));
+        return std.mem.eql(u8, sa.bytes, sb.bytes);
+    }
+    if (heap_mod.valueAsBigInt(a)) |ba| {
+        if (heap_mod.valueAsBigInt(b)) |bb| {
+            return ba.value == bb.value;
+        }
+    }
+    return false;
 }
 
 /// §7.2.10 SameValue — like SameValueZero but distinguishes
