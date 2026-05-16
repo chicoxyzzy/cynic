@@ -77,12 +77,15 @@ pub fn installMap(realm: *Realm) !void {
     // Atomic "get the value at this key, or insert a default if absent."
     // `getOrInsert` takes a fixed default; `getOrInsertComputed` takes
     // a callback invoked only on absence whose return is stored.
-    // Same shape ships on WeakMap.prototype below. Documented in
-    // `docs/ROADMAP.md` under "Stage 1-3 proposals shipped". Spec
-    // text may shift before Stage 4 advancement; revisit on each
-    // proposal meeting.
-    try installNativeMethodOnProto(realm, proto, "getOrInsert", mapGetOrInsert, 2);
-    try installNativeMethodOnProto(realm, proto, "getOrInsertComputed", mapGetOrInsertComputed, 2);
+    // Same shape ships on WeakMap.prototype below. Gated on the per-
+    // realm feature flag so embedders / the `cynic` CLI need
+    // `--enable=upsert` (or `--enable-experimental`) to see it.
+    // Documented in `docs/ROADMAP.md` under "Pre-Stage-4 proposals
+    // shipped".
+    if (realm.feature_flags.contains(.upsert)) {
+        try installNativeMethodOnProto(realm, proto, "getOrInsert", mapGetOrInsert, 2);
+        try installNativeMethodOnProto(realm, proto, "getOrInsertComputed", mapGetOrInsertComputed, 2);
+    }
     // §24.1.3 Map iterators — `entries()` is the default
     // (`@@iterator` aliases it), `keys()` and `values()` produce
     // single-element views. Each returns an iterator object
@@ -766,9 +769,13 @@ pub fn installWeakMap(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, proto, "get", weakMapGet, 1);
     try installNativeMethodOnProto(realm, proto, "has", weakMapHas, 1);
     try installNativeMethodOnProto(realm, proto, "delete", weakMapDelete, 1);
-    // §24.3 ES2024 additions.
-    try installNativeMethodOnProto(realm, proto, "getOrInsert", weakMapGetOrInsert, 2);
-    try installNativeMethodOnProto(realm, proto, "getOrInsertComputed", weakMapGetOrInsertComputed, 2);
+    // PRE-STAGE-4 PROPOSAL — `upsert` (Stage 3 as of 2026-05).
+    // Gated on the per-realm feature flag — see the Map proto
+    // installer above for the design notes.
+    if (realm.feature_flags.contains(.upsert)) {
+        try installNativeMethodOnProto(realm, proto, "getOrInsert", weakMapGetOrInsert, 2);
+        try installNativeMethodOnProto(realm, proto, "getOrInsertComputed", weakMapGetOrInsertComputed, 2);
+    }
 }
 
 fn weakMapDataOf(this_value: Value) ?*@import("../object.zig").MapData {

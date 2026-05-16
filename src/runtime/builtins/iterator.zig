@@ -52,12 +52,17 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethod(realm, fn_obj, "concat", iteratorConcat, 0);
     // PRE-STAGE-4 PROPOSAL — `joint-iteration` (Stage 3 as of 2026-05).
     // `Iterator.zip(iterables)` and `Iterator.zipKeyed(iterables, options?)`
-    // ship ahead of inclusion in a published edition because they're
-    // useful and stable enough; spec text may still shift before Stage 4
-    // advancement (semantics of the `mode` option, padding behavior).
-    // Documented in `docs/ROADMAP.md` under "Stage 1-3 proposals shipped".
-    try installNativeMethod(realm, fn_obj, "zip", iteratorZip, 1);
-    try installNativeMethod(realm, fn_obj, "zipKeyed", iteratorZipKeyed, 1);
+    // ship ahead of inclusion in a published edition; spec text may
+    // still shift before Stage 4 advancement (semantics of the `mode`
+    // option, padding behavior). Gated on the per-realm feature flag
+    // so embedders / the `cynic` CLI need `--enable=joint-iteration`
+    // (or `--enable-experimental`) to see the methods. The test262
+    // harness flips every flag on at fixture init. Documented in
+    // `docs/ROADMAP.md` under "Pre-Stage-4 proposals shipped".
+    if (realm.feature_flags.contains(.joint_iteration)) {
+        try installNativeMethod(realm, fn_obj, "zip", iteratorZip, 1);
+        try installNativeMethod(realm, fn_obj, "zipKeyed", iteratorZipKeyed, 1);
+    }
 
     try installNativeMethodOnProto(realm, proto, "map", iteratorMap, 1);
     try installNativeMethodOnProto(realm, proto, "filter", iteratorFilter, 1);

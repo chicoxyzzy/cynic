@@ -230,13 +230,22 @@ code construction (aligns with SES).
   `ReferenceError`, `SyntaxError`, `URIError`, `EvalError`,
   `AggregateError`.
 
-**Pre-Stage-4 proposals shipped (subject to change).** Cynic
-deliberately ships a handful of TC39 proposals before they reach
-Stage 4 / a published edition, where the spec text is stable
-enough and the feature unlocks useful programs. Each comes with a
-`PRE-STAGE-4 PROPOSAL` comment at the installer site so a future
-spec shift surfaces the right place to revisit. Tracked here so
-the list is auditable at a glance:
+**Pre-Stage-4 proposals shipped (opt-in).** Cynic deliberately
+ships a handful of TC39 proposals before they reach Stage 4 / a
+published edition, where the spec text is stable enough and the
+feature unlocks useful programs. Each is gated behind a per-realm
+feature flag — `Realm.feature_flags`, defined in
+`src/runtime/features.zig`. The `cynic` CLI defaults to all-off
+(embedder-friendly default) and exposes flags to opt in:
+
+- `--enable=<name>` / `--disable=<name>` — toggle one feature.
+- `--enable-experimental` / `--disable-experimental` — toggle the
+  whole tracked set.
+- `--list-features` — print the available set with descriptions.
+
+Each shipped proposal carries a `PRE-STAGE-4 PROPOSAL` comment at
+the installer site so a future spec shift surfaces the right
+place to revisit. The current set:
 
 - **`joint-iteration`** (Stage 3) — `Iterator.zip(iterables)` and
   `Iterator.zipKeyed(iterables, options?)` on the `Iterator`
@@ -253,15 +262,20 @@ Revisit this list each TC39 meeting cycle. If a proposal stalls,
 demotes, or its semantics flip, follow the comment trail in the
 installer and either back the change out or update.
 
-*TODO:* render a per-feature pass / fail / skip / spec% /
-attempted% table in `test262-results.md` (one row per entry
-above) sourced from the test262 fixtures whose `features:`
-frontmatter names the proposal. Lets a future spec shift surface
-the broken-implementation signal at the dashboard level. Wiring
-through the harness's per-fixture loop (a `PreStage4Stats`
-counter on `WorkerCtx` + `recordOutcome` + the per-worker merge
-plus the renderer next to `writeScoreboard`) is straightforward
-but cross-cuts ~6 functions; deferred to a focused session.
+The conformance harness scores each tracked feature as its own
+**dedicated phase sweep** — a `joint-iteration` fixture runs in a
+realm where `Map.prototype.getOrInsert` is undefined, and vice
+versa, so each row reflects the proposal in honest isolation.
+A `zig build test262 -- --write-results` invocation runs the
+main ECMA-262 sweep (pre-Stage-4 fixtures excluded entirely
+from `total` / cache / per-area buckets) followed by one
+dedicated sweep per feature; the per-feature numbers source the
+`## Pre-Stage-4 proposals shipped` table in
+`test262-results.md`. Iterate on one feature in isolation with
+`--phase=feature:<name>`. Adding a new pre-Stage-4 proposal:
+extend `FeatureFlag` in `src/runtime/features.zig`, gate the
+installer site, and the harness picks up the new column
+automatically on the next full sweep.
 
 **Caveats / planned.**
 

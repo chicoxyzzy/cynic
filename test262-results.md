@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 85.65 % | 92.13 % | 35090 / 40969 | 35090 / 38088 |
+| **runtime** | 85.68 % | 92.18 % | 34973 / 40819 | 34973 / 37938 |
 
 
 ## Where the runtime stands, by area
@@ -31,7 +31,7 @@ browser-era built-ins …).
 | `built-ins/TypedArray` | 1276 | 147 | 8 | 89 % | 90 % |
 | `built-ins/TypedArrayConstructors` | 546 | 114 | 16 | 81 % | 83 % |
 | `language/expressions` | 9302 | 667 | 979 | 85 % | 93 % |
-| `language/module-code` | 462 | 120 | 14 | 78 % | 79 % |
+| `language/module-code` | 461 | 121 | 14 | 77 % | 79 % |
 | `language/statements` | 8150 | 338 | 672 | 89 % | 96 % |
 | **_10–99 fails_** | | | | | |
 | `built-ins/ArrayBuffer` | 166 | 25 | 4 | 85 % | 87 % |
@@ -39,9 +39,9 @@ browser-era built-ins …).
 | `built-ins/AsyncGeneratorPrototype` | 37 | 11 | 0 | 77 % | 77 % |
 | `built-ins/Date` | 527 | 64 | 0 | 89 % | 89 % |
 | `built-ins/GeneratorPrototype` | 36 | 25 | 0 | 59 % | 59 % |
-| `built-ins/Iterator` | 443 | 60 | 6 | 87 % | 88 % |
+| `built-ins/Iterator` | 391 | 34 | 6 | 91 % | 92 % |
 | `built-ins/JSON` | 115 | 50 | 0 | 70 % | 70 % |
-| `built-ins/Map` | 179 | 23 | 1 | 88 % | 89 % |
+| `built-ins/Map` | 152 | 17 | 1 | 89 % | 90 % |
 | `built-ins/Math` | 311 | 16 | 0 | 95 % | 95 % |
 | `built-ins/Number` | 326 | 13 | 0 | 96 % | 96 % |
 | `built-ins/Promise` | 603 | 25 | 38 | 91 % | 96 % |
@@ -50,7 +50,7 @@ browser-era built-ins …).
 | `built-ins/Set` | 347 | 34 | 1 | 91 % | 91 % |
 | `built-ins/String` | 1147 | 70 | 5 | 94 % | 94 % |
 | `built-ins/Symbol` | 65 | 10 | 6 | 80 % | 87 % |
-| `built-ins/WeakMap` | 124 | 16 | 0 | 89 % | 89 % |
+| `built-ins/WeakMap` | 87 | 14 | 0 | 86 % | 86 % |
 | `built-ins/WeakSet` | 74 | 10 | 0 | 88 % | 88 % |
 | `built-ins/global` | 17 | 12 | 0 | 59 % | 59 % |
 | `language/function-code` | 86 | 22 | 109 | 40 % | 80 % |
@@ -114,6 +114,30 @@ browser-era built-ins …).
 | `language/source-text` | 1 | 0 | 0 | 100 % | 100 % |
 
 
+## Pre-Stage-4 proposals shipped
+
+Per-feature scores for the TC39 proposals Cynic ships at
+Stage 1–3, ahead of their inclusion in the published
+edition. **Each row is sourced from a dedicated phase
+sweep** that runs only the fixtures whose frontmatter
+`features:` list names the proposal, in a realm where only
+that proposal's flag is enabled — a `joint-iteration`
+fixture is scored here against a realm where
+`Map.prototype.getOrInsert` is undefined, and vice versa,
+so each row reflects the proposal in honest isolation.
+**These fixtures are excluded entirely from the top-line
+`## Current scores` and the per-area scoreboard** — they
+are not in `total` and not in any bucket, so the headline
+number tracks stable ECMA-262 conformance only. When a
+proposal advances to Stage 4 the row stays here until its
+features ship in mainline ECMA-262.
+
+| feature | pass | fail | skip | spec% | attempted% |
+|---|---:|---:|---:|---:|---:|
+| `joint-iteration` | 52 | 26 | 0 | 67 % | 67 % |
+| `upsert` | 64 | 8 | 0 | 89 % | 89 % |
+
+
 ## Legend
 
 **Rows**
@@ -130,22 +154,19 @@ browser-era built-ins …).
 - **Δ pass** (history) — change in `pass` versus the row immediately above (chronologically previous run of the same `mode`).
 - **elapsed** (history) — wall-clock time of the run that produced the row. Recorded only for full sweeps (no `--filter`, no `--only-failing`); partial runs leave it blank to keep the regression signal clean. Sub-minute as `12.3 s`, minute+ as `2m 40s`.
 
-**Scope.** `total` excludes paths universally out of scope (`harness/`, `staging/`, `intl402/`), Annex B language extensions, and browser-era built-ins Cynic doesn't ship (`escape` / `unescape`, `String.prototype` HTML wrappers, `Date.{getYear, setYear}`).
+**Scope.** `total` excludes paths universally out of scope (`harness/`, `staging/`, `intl402/`), Annex B language extensions, and browser-era built-ins Cynic doesn't ship (`escape` / `unescape`, `String.prototype` HTML wrappers, `Date.{getYear, setYear}`). Fixtures referencing a pre-Stage-4 proposal (see the per-feature table) are *also* excluded from `total` — they don't appear in the rolled-up rows or the per-area scoreboard at all. Each proposal's row in `## Pre-Stage-4 proposals shipped` is sourced from a dedicated phase sweep that runs only the matching fixtures, in a realm where only that one proposal's flag is enabled.
 
 ## History
 
-### 2026-05-16 — cynic `45d3f4d`, test262 `d0c1b455`
+### 2026-05-16 — cynic `338e709`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 85.65 % | 92.13 % | 35090 / 40969 | 35090 / 38088 | +218 | 1m 36s |
+| **runtime** | 85.68 % | 92.18 % | 34973 / 40819 | 34973 / 37938 | +101 | 1m 48s |
 
 Biggest movers (runtime):
 
-- `built-ins/AsyncGeneratorPrototype` +15
-- `language/expressions` +2
-- `built-ins/AsyncFromSyncIteratorPrototype` +1
-- `language/module-code` +1
+- `language/expressions` +1
 
 ### 2026-05-15 — cynic `2b05c51`, test262 `d0c1b455`
 

@@ -10,7 +10,7 @@ at 100 % attempted for a while); we still capture both.
    are in the healthy band on a filtered sweep before kicking off
    a full one:
 
-       zig build test262 -- --quiet --mode=runtime \
+       zig build test262 -- --quiet \
          --filter=language/expressions --top-rss=10
 
    Healthy: top deltas ≤ ~20 MiB on `language/expressions`, ≤ ~50 MiB
@@ -20,11 +20,14 @@ at 100 % attempted for a while); we still capture both.
    it measures `zig build`'s RSS (~1 GB during link), not the
    harness.
 
-2. Parser sweep — `zig build test262 -- --quiet --write-results`
-   (parser is the default mode).
+2. Runtime sweep (default mode — includes main + every pre-Stage-4
+   feature phase in one invocation, populating the per-feature
+   scoreboard alongside the main row):
 
-3. Runtime sweep — `zig build test262 -- --quiet --write-results
-   --mode=runtime`. Wrap in `timeout 1800` if the laptop is slow.
+       timeout 1800 zig build test262 -- --quiet --write-results
+
+3. Parser sweep — `zig build test262 -- --quiet --mode=parser
+   --write-results`.
 
 4. Read the last two rows for each mode in `test262-results.md`
    (the freshly appended ones and the rows above them).

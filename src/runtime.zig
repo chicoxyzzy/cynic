@@ -29,6 +29,10 @@ pub const HandleScope = heap.HandleScope;
 pub const realm = @import("runtime/realm.zig");
 pub const Realm = realm.Realm;
 
+pub const features = @import("runtime/features.zig");
+pub const FeatureFlag = features.FeatureFlag;
+pub const FeatureSet = features.FeatureSet;
+
 pub const intrinsics = @import("runtime/intrinsics.zig");
 
 pub const generator = @import("runtime/generator.zig");

@@ -22,6 +22,8 @@ const NativeFn = @import("function.zig").NativeFn;
 const heap_mod = @import("heap.zig");
 const intrinsics_mod = @import("intrinsics.zig");
 const Intrinsics = intrinsics_mod.Intrinsics;
+const features = @import("features.zig");
+pub const FeatureSet = features.FeatureSet;
 
 /// One pending microtask. Drained in FIFO order from
 /// `realm.microtask_queue` either at top-level entry boundaries
@@ -336,6 +338,17 @@ pub const Realm = struct {
     /// allocation inside a child `runFrames` collects values that
     /// the parent's for-of's `r_iter` register still points at.
     frame_stacks: std.ArrayListUnmanaged(*std.ArrayListUnmanaged(@import("interpreter.zig").CallFrame)) = .empty,
+    /// Pre-Stage-4 / experimental TC39 proposals enabled for this
+    /// realm. See `runtime/features.zig`. Default is empty —
+    /// embedders and the `cynic` CLI opt in via `--enable=<name>`
+    /// or `--enable-experimental`; the test262 harness sets this
+    /// to `features.all()` so proposal fixtures actually exercise
+    /// the surface they're testing. Read by gated installers (e.g.
+    /// `Iterator.zip`, `Map.prototype.getOrInsert`) before they
+    /// register their methods on the prototype, so a disabled
+    /// feature is invisible at the property-lookup level rather
+    /// than just throwing at call time.
+    feature_flags: FeatureSet = FeatureSet.initEmpty(),
 
     pub fn init(allocator: std.mem.Allocator) Realm {
         const heap_ptr = allocator.create(Heap) catch unreachable;

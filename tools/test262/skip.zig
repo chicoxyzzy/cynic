@@ -525,14 +525,27 @@ test "skip: unsupported features — stage maturity + planned" {
     try testing.expect(featureIsUnsupported("regexp-duplicate-named-groups"));
 }
 
+test "skip: Annex B feature flags are hidden via feature filter" {
+    // Object.prototype.__proto__ accessor (§B.2.2.1), the four
+    // accessor methods (§B.2.2.{2,3,4,5}), the RegExp legacy
+    // statics (§B.2.{4,5}), and the IsHTMLDDA host primitive
+    // (§B.2.7) all live in skip_annex_b_features. Cynic doesn't
+    // ship them per "Annex B in its entirety — out"; their
+    // fixtures would otherwise show as honest runtime fails for
+    // a permanent carve-out.
+    try testing.expect(featureIsUnsupported("__proto__"));
+    try testing.expect(featureIsUnsupported("__getter__"));
+    try testing.expect(featureIsUnsupported("__setter__"));
+    try testing.expect(featureIsUnsupported("legacy-regexp"));
+    try testing.expect(featureIsUnsupported("IsHTMLDDA"));
+}
+
 test "skip: runtime-only gaps are NOT hidden" {
-    // Annex B browser-era / SES-policy / Stage 3 runtime features
-    // all parse fine; their fixtures show as honest runtime fails.
-    try testing.expect(!featureIsUnsupported("__proto__"));
-    try testing.expect(!featureIsUnsupported("__getter__"));
-    try testing.expect(!featureIsUnsupported("__setter__"));
-    try testing.expect(!featureIsUnsupported("legacy-regexp"));
-    try testing.expect(!featureIsUnsupported("IsHTMLDDA"));
+    // SES-policy and Stage 3+ runtime features all parse fine;
+    // their fixtures show as honest runtime fails. Path-skipped
+    // OOS surfaces (eval, SharedArrayBuffer, Atomics) match by
+    // path, not by feature tag — the feature tag stays runnable
+    // so non-OOS callers don't get over-filtered.
     try testing.expect(!featureIsUnsupported("Reflect.parse"));
     try testing.expect(!featureIsUnsupported("ShadowRealm"));
     try testing.expect(!featureIsUnsupported("SharedArrayBuffer"));

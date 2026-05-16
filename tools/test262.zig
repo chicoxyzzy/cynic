@@ -1,48 +1,83 @@
-//! test262 conformance harness — parser-only.
+//! test262 conformance harness.
 //!
 //! Walks a test262 corpus (defaults to `vendor/test262/test/`), reads
 //! the YAML frontmatter from each `.js` file, applies skip rules, and
-//! invokes Cynic's parser. Tallies pass / fail / skip and prints a
-//! final report.
+//! either parses or executes each fixture against a fresh Realm.
+//! Tallies pass / fail / skip and prints a final report.
+//!
+//! Pre-Stage-4 TC39 proposals Cynic ships (joint-iteration, upsert)
+//! are scored as their own dedicated phase sweeps — see `--phase`.
 //!
 //! Usage:
-//! zig build test262 -- [flags]
+//!   zig build test262 -- [flags]
 //!
-//! Flags:
-//! --corpus=<path> Override the corpus root (default: vendor/test262/test).
-//! --filter=<substring> Only attempt files whose relative path contains <substring>.
-//! --list-failures=<n> After the tally, print up to N failing test paths.
-//! --quiet Suppress live progress on stderr.
-//! --verbose Per-file outcome on stderr.
-//! --write-results Append a row to test262-results.md.
-//! --only-failing Skip-as-pass tests listed in `.test262-pass-cache.txt`.
-//! Iterative-dev shortcut: previously-failing tests re-run in
-//! seconds instead of minutes. The cache is (re)written only on
-//! full runs (no `--filter`, no `--only-failing`).
-//! --threads=<n> Worker-thread count. `0` (default) = auto-detect via
-//! `std.Thread.getCpuCount`. `1` keeps the original sequential
-//! code path. Values >1 spawn a worker pool; live in-place
-//! progress is suppressed when threads>1.
-//! --gc-threshold=<n>      Per-fixture allocation-pressure GC threshold. Default 65,536.
-//! --gc-stats              Per-realm one-line stderr report after every GC cycle.
-//! --top-slow=<n>          Print the N slowest fixtures (≥50ms) after the final tally.
-//! --top-rss=<n>           Print the N memory-heaviest fixtures (≥8MB RSS delta) after the
-//!                         final tally. Pair with `--threads=1` for clean readings.
-//! --leak-check            Route the per-fixture bytes allocator through
-//!                         `std.heap.DebugAllocator`; report unfreed allocations with
-//!                         stack traces at exit. Forces `--threads=1`. Pair with `--filter`.
-//! --max-rss=<mb>          Abort the run with exit code 2 if process RSS crosses
-//!                         <mb> MiB after a fixture; print the offending path.
-//!                         Forces `--threads=1`.
-//! --mem-summary           End-of-sweep one-pager: cumulative bytes allocated,
-//!                         max charged peak, GC cycles + pause. Forces `--threads=1`.
-//! --top-alloc=<n>         Print the N fixtures with the highest cumulative
-//!                         bytes allocated (≥64KB). Forces `--threads=1`.
-//!                         Different signal from `--top-rss` (peak RSS).
-//! --top-gc-time=<n>       Print the N fixtures with the highest accumulated GC
-//!                         pause time (≥1ms). Forces `--threads=1`. Different
-//!                         signal from `--top-alloc` — catches GC-time-dominant
-//!                         fixtures even when total bytes is moderate.
+//! Corpus & filters:
+//!   --corpus=<path>         Corpus root. Default `vendor/test262/test`.
+//!   --harness-dir=<path>    Harness root with sta.js / assert.js. Default
+//!                           `vendor/test262/harness`.
+//!   --filter=<substring>    Only attempt fixtures whose relative path contains
+//!                           <substring>. Forwarded to every phase.
+//!   --no-harness            Skip the sta.js + assert.js preamble. Runtime mode
+//!                           only; measures the no-harness floor.
+//!
+//! Mode & phasing:
+//!   --mode=runtime|parser   `runtime` (default) parses, compiles, executes each
+//!                           fixture and matches the result against the spec
+//!                           expectation. `parser` runs the parser only and
+//!                           classifies on accept / reject vs negative frontmatter.
+//!   --phase=<spec>          Pin the harness to one sweep instead of the default.
+//!                           `--phase=main` runs only the main ECMA-262 sweep
+//!                           (pre-Stage-4 fixtures excluded). `--phase=feature:<name>`
+//!                           runs only that proposal's dedicated sweep (only its
+//!                           realm flag on, only its tagged fixtures included).
+//!                           Default: just main, unless `--write-results` is set —
+//!                           then main + every tracked feature in sequence.
+//!
+//! Output:
+//!   --quiet                 Suppress live progress on stderr.
+//!   --verbose               Per-file outcome on stderr.
+//!   --write-results         Replace today's row (per `mode`) in
+//!                           `test262-results.md` with this run's stats.
+//!                           Implies running every phase.
+//!   --list-failures=<n>     After the tally, print up to N failing test paths
+//!                           (main phase only).
+//!
+//! Iteration / parallelism:
+//!   --only-failing          Skip-as-pass any fixture listed in
+//!                           `.test262-pass-cache.txt`. Iterative-dev shortcut:
+//!                           previously-failing tests re-run in seconds. Cache is
+//!                           (re)written only on full runs (no `--filter`, no
+//!                           `--only-failing`) and only by the main phase.
+//!   --threads=<n>           Worker-thread count. `0` (default) = auto-detect via
+//!                           `std.Thread.getCpuCount`. `1` keeps the sequential
+//!                           code path. Live in-place progress is suppressed when
+//!                           threads>1. Diagnostic flags below pin this to 1
+//!                           after arg parsing (order-independent).
+//!
+//! Memory & GC tuning:
+//!   --gc-threshold=<n>      Per-fixture allocation-pressure GC threshold. Default
+//!                           32768. `0` falls through to the engine default.
+//!   --gc-stats              Per-realm one-line stderr report after every GC cycle.
+//!
+//! Diagnostics (each pins --threads=1):
+//!   --leak-check            Route per-fixture bytes through `std.heap.DebugAllocator`;
+//!                           every unfreed allocation prints a stack trace at exit.
+//!                           Pair with `--filter` — full corpus under leak-check is
+//!                           10-20× slower than ReleaseFast.
+//!   --max-rss=<mb>          Abort the run with exit code 2 if process RSS crosses
+//!                           <mb> MiB after a fixture; print the offending path.
+//!   --mem-summary           End-of-sweep one-pager: cumulative bytes allocated,
+//!                           max charged peak, total GC cycles + pause.
+//!   --top-alloc=<n>         Top-N fixtures by cumulative bytes allocated (≥64 KiB).
+//!                           Catches allocate-and-discard thrash that `--top-rss` misses.
+//!   --top-gc-time=<n>       Top-N fixtures by accumulated GC pause time (≥1 ms).
+//!                           Catches GC-time-dominant fixtures even when total
+//!                           bytes is moderate.
+//!
+//! Performance reporting (work alongside the worker pool):
+//!   --top-slow=<n>          Top-N slowest fixtures (≥50 ms wall-clock).
+//!   --top-rss=<n>           Top-N memory-heaviest fixtures (≥8 MiB RSS delta).
+//!                           Pair with `--threads=1` for clean readings.
 
 const std = @import("std");
 const cynic = @import("cynic");
@@ -352,6 +387,15 @@ const SkipReason = enum {
     unsupported_feature,
     no_frontmatter,
     malformed_frontmatter,
+    /// Fixture is filtered out of the current sweep's `Phase`.
+    /// The main phase excludes any fixture tagged with a tracked
+    /// pre-Stage-4 proposal; each `feature:<flag>` phase only
+    /// admits fixtures tagged with exactly that flag. Out-of-phase
+    /// fixtures are ignored entirely — they don't bump `stats`,
+    /// don't enter buckets, and don't enter the pass cache. The
+    /// per-feature scoreboard is sourced from dedicated phase
+    /// sweeps, each with only its one flag enabled.
+    out_of_phase,
 };
 
 const Mode = enum { parser, runtime };
@@ -363,7 +407,11 @@ const Options = struct {
     quiet: bool = false,
     verbose: bool = false,
     write_results: bool = false,
-    mode: Mode = .parser,
+    /// `runtime` is the headline mode — parses, compiles, executes
+    /// each fixture and compares the result to the spec expectation.
+    /// `parser` runs the parser only and is useful when iterating on
+    /// parser changes in isolation; opt into it with `--mode=parser`.
+    mode: Mode = .runtime,
     /// When set in `runtime` mode, prepend `harness/sta.js` and
     /// `harness/assert.js` to every test source. Default: enabled.
     /// Disable via `--no-harness` to measure the no-harness floor.
@@ -458,6 +506,13 @@ const Options = struct {
     /// (which counts bytes) and `--top-rss` (which captures peak
     /// live). Forces `--threads=1`.
     top_gc_time: u32 = 0,
+    /// Explicit phase override. `null` (default) means: run only the
+    /// main phase unless `--write-results` is set, in which case
+    /// run main + every tracked pre-Stage-4 feature in dedicated
+    /// per-feature sweeps. Setting this pins the harness to one
+    /// phase regardless of `--write-results`. Accepted spellings:
+    /// `--phase=main`, `--phase=feature:<flag>` (e.g. `feature:joint-iteration`).
+    phase: ?Phase = null,
 };
 
 /// Path of the pass-cache, written at the repo root after every
@@ -576,6 +631,124 @@ const BucketMap = struct {
     }
 };
 
+/// TC39 proposals at Stage 1–3 that Cynic ships ahead of the
+/// published edition. The list of flags lives next to the engine
+/// (`src/runtime/features.zig`); the harness binds the same set
+/// here so adding a new proposal in one place picks up the
+/// per-feature scoreboard automatically. Each name matches a
+/// frontmatter `features:` tag in upstream test262.
+const FeatureFlag = cynic.runtime.FeatureFlag;
+const tracked_pre_stage4_features = blk: {
+    const fields = @typeInfo(FeatureFlag).@"enum".fields;
+    var arr: [fields.len][]const u8 = undefined;
+    for (fields, 0..) |f, i| {
+        const tag: FeatureFlag = @enumFromInt(f.value);
+        arr[i] = tag.name();
+    }
+    break :blk arr;
+};
+
+/// Bitmask of which tracked features a single fixture's
+/// frontmatter referenced. Sized to `u32` — comfortable headroom
+/// for the handful of proposals we ever expect to track at once.
+const PreStage4Mask = u32;
+
+fn computePreStage4Mask(features: []const []const u8) PreStage4Mask {
+    var mask: PreStage4Mask = 0;
+    for (features) |feat| {
+        for (tracked_pre_stage4_features, 0..) |name, idx| {
+            if (std.mem.eql(u8, feat, name)) mask |= (@as(PreStage4Mask, 1) << @intCast(idx));
+        }
+    }
+    return mask;
+}
+
+/// Per-feature outcome counters. `slots[i]` mirrors
+/// `tracked_pre_stage4_features[i]`. Workers accumulate locally
+/// and `merge` rolls up under `merge_mu` at worker exit — same
+/// shape as `BucketMap` so the contention model is identical.
+const PreStage4Stats = struct {
+    slots: [tracked_pre_stage4_features.len]Bucket =
+        .{Bucket{ .name = "" }} ** tracked_pre_stage4_features.len,
+
+    fn bump(self: *PreStage4Stats, mask: PreStage4Mask, kind: BucketKind) void {
+        if (mask == 0) return;
+        var i: usize = 0;
+        while (i < tracked_pre_stage4_features.len) : (i += 1) {
+            if ((mask & (@as(PreStage4Mask, 1) << @intCast(i))) == 0) continue;
+            const slot = &self.slots[i];
+            switch (kind) {
+                .pass => slot.pass += 1,
+                .fail => slot.fail += 1,
+                .skip => slot.skip += 1,
+            }
+            slot.total += 1;
+        }
+    }
+
+    fn merge(dst: *PreStage4Stats, src: *const PreStage4Stats) void {
+        for (&dst.slots, src.slots) |*d, s| {
+            d.pass += s.pass;
+            d.fail += s.fail;
+            d.skip += s.skip;
+            d.total += s.total;
+        }
+    }
+};
+
+/// One sweep's selector. The main phase scores stable ECMA-262
+/// only — any fixture whose frontmatter references a tracked
+/// pre-Stage-4 proposal is filtered out before it can land in
+/// `stats`. Each `.feature` phase runs a dedicated sweep with
+/// only its one flag enabled, so the per-feature scoreboard
+/// reflects what each proposal looks like in isolation (a
+/// `joint-iteration` fixture runs in a realm where
+/// `Map.prototype.getOrInsert` is undefined, and vice versa).
+const Phase = union(enum) {
+    main,
+    feature: cynic.runtime.FeatureFlag,
+
+    /// FeatureSet to install on the per-fixture realm. Main
+    /// returns empty (no proposals); a feature phase returns a
+    /// singleton set with only its flag.
+    fn realmFeatures(self: Phase) cynic.runtime.FeatureSet {
+        return switch (self) {
+            .main => cynic.runtime.FeatureSet.initEmpty(),
+            .feature => |f| blk: {
+                var s = cynic.runtime.FeatureSet.initEmpty();
+                s.insert(f);
+                break :blk s;
+            },
+        };
+    }
+
+    /// Phase membership predicate for a fixture, given its
+    /// pre-Stage-4 frontmatter bitmask. Main admits only fixtures
+    /// that reference no tracked proposal (mask == 0); a feature
+    /// phase admits only fixtures whose mask has the matching bit.
+    fn includesFixture(self: Phase, pre_stage4_mask: PreStage4Mask) bool {
+        return switch (self) {
+            .main => pre_stage4_mask == 0,
+            .feature => |f| has: {
+                const idx: usize = @intFromEnum(f);
+                const bit = @as(PreStage4Mask, 1) << @intCast(idx);
+                break :has (pre_stage4_mask & bit) != 0;
+            },
+        };
+    }
+
+    /// Short label for progress prefixes and the per-phase tally
+    /// banner. `"main"` for the headline sweep; the feature's
+    /// `name()` (kebab-case, same string as the test262
+    /// frontmatter `features:` tag) for proposal sweeps.
+    fn label(self: Phase) []const u8 {
+        return switch (self) {
+            .main => "main",
+            .feature => |f| f.name(),
+        };
+    }
+};
+
 /// Set of relative test paths that passed in the previous full
 /// run. Backed by `StringHashMapUnmanaged(void)` for set
 /// semantics. Owns its keys (each is `gpa.dupe`'d on insert).
@@ -690,16 +863,117 @@ pub fn main(init: std.process.Init) !void {
         };
     }
 
-    // Cynic-scoped tally: paths Cynic considers out of scope
+    // Phase plan. Default: just main. With `--write-results` (and
+    // no explicit `--phase`), populate every row of the per-feature
+    // scoreboard by running main + every tracked feature in its
+    // own sweep. An explicit `--phase` pins us to that one.
+    const tracked_count = @typeInfo(cynic.runtime.FeatureFlag).@"enum".fields.len;
+    var phases_buf: [tracked_count + 1]Phase = undefined;
+    var phases_len: usize = 0;
+    if (opts.phase) |p| {
+        phases_buf[0] = p;
+        phases_len = 1;
+    } else if (opts.write_results) {
+        phases_buf[0] = .main;
+        phases_len = 1;
+        inline for (@typeInfo(cynic.runtime.FeatureFlag).@"enum".fields) |f| {
+            phases_buf[phases_len] = .{ .feature = @enumFromInt(f.value) };
+            phases_len += 1;
+        }
+    } else {
+        phases_buf[0] = .main;
+        phases_len = 1;
+    }
+
+    var main_result: ?PhaseResult = null;
+    defer if (main_result) |*r| r.deinit(gpa);
+    var feature_results: [tracked_count]?PhaseResult = .{null} ** tracked_count;
+    defer for (&feature_results) |*slot| if (slot.*) |*pr| pr.deinit(gpa);
+
+    for (phases_buf[0..phases_len]) |phase| {
+        const res = try runSweep(gpa, io, cwd, corpus, harness_sources, &opts, phase);
+        switch (phase) {
+            .main => {
+                if (main_result) |*old| old.deinit(gpa);
+                main_result = res;
+            },
+            .feature => |f| {
+                const idx: usize = @intFromEnum(f);
+                if (feature_results[idx]) |*old| old.deinit(gpa);
+                feature_results[idx] = res;
+            },
+        }
+    }
+
+    // Score-row write: only off the main phase. Pre-Stage-4 per-feature
+    // rows come from the dedicated phase sweeps we just ran (each in a
+    // realm with only its one flag enabled), folded into a
+    // `PreStage4Stats` for `writeResults`.
+    if (opts.write_results) {
+        var pre_stage4: PreStage4Stats = .{};
+        for (feature_results, 0..) |maybe_r, i| {
+            if (maybe_r) |r| {
+                pre_stage4.slots[i] = .{
+                    .name = tracked_pre_stage4_features[i],
+                    .pass = r.stats.pass(),
+                    .fail = r.stats.fail(),
+                    .skip = r.stats.skip,
+                    .total = r.stats.total,
+                };
+            }
+        }
+        if (main_result) |*mr| {
+            const is_full = opts.filter == null and !opts.only_failing;
+            const elapsed_for_row: ?u64 = if (is_full and mr.elapsed_ms > 0) @intCast(mr.elapsed_ms) else null;
+            const now_ts = std.Io.Clock.now(.real, io);
+            try writeResults(gpa, io, &mr.stats, &mr.buckets, &pre_stage4, now_ts.toSeconds(), opts.mode, elapsed_for_row);
+        }
+    }
+
+    // Refresh the pass cache from the main phase only. Per-feature
+    // phases never contribute to the cache — `--only-failing` always
+    // re-runs them (they're tiny and their pass set is realm-flag-
+    // dependent, so caching across flag configurations would lie).
+    if (main_result) |*mr| {
+        const is_full = opts.filter == null and !opts.only_failing;
+        if (is_full) try writePassCache(gpa, io, cwd, mr.pass_paths.items);
+    }
+}
+
+/// Execute one phase's sweep — main or a single pre-Stage-4
+/// feature. Walks the corpus, dispatches `classifyAndRun` per
+/// fixture, captures per-fixture diagnostics (slow / heavy / alloc
+/// / gc-time / mem), prints the per-phase tally, and returns the
+/// rolled-up `PhaseResult` so the caller can compose the score
+/// row across phases. Per-phase diagnostic captures (`--top-slow`,
+/// `--top-rss`, …) only print for the main phase — they're tied
+/// to the headline ECMA-262 sweep, not the proposal-only mini-runs.
+fn runSweep(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    cwd: std.Io.Dir,
+    corpus: std.Io.Dir,
+    harness_sources: ?harness_mod.HarnessSources,
+    opts: *const Options,
+    phase: Phase,
+) !PhaseResult {
+    // Cynic-scoped tally. Paths Cynic considers out of scope
     // (Annex B language extensions, browser-era built-ins) are
     // dropped from the denominator entirely — spec% means
-    // "fraction of Cynic-targeted tests that pass." `total` here
-    // is corpus-minus-OOS, not the raw 53k.
+    // "fraction of Cynic-targeted tests that pass."
     var stats: Stats = .{};
     var failures: std.ArrayListUnmanaged(Failure) = .empty;
-    defer failures.deinit(gpa);
+    errdefer {
+        for (failures.items) |f| gpa.free(f.path);
+        failures.deinit(gpa);
+    }
     var buckets: BucketMap = .init(gpa);
-    defer buckets.deinit();
+    errdefer buckets.deinit();
+    var pass_paths: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (pass_paths.items) |p| gpa.free(p);
+        pass_paths.deinit(gpa);
+    }
     var slow: std.ArrayListUnmanaged(SlowEntry) = .empty;
     defer {
         for (slow.items) |e| gpa.free(e.path);
@@ -722,25 +996,22 @@ pub fn main(init: std.process.Init) !void {
     }
     var mem_agg: MemAggregate = .{};
 
-    // `--only-failing` shortcut: any test path present in the
-    // cache is counted as a pass without being classified or
-    // executed. The cache is the previous full run's pass set.
-    // A missing cache file degrades gracefully to a full run.
+    // `--only-failing` shortcut: only the main phase consults the
+    // pass cache. Per-feature phases run the (tiny) tagged-fixture
+    // set every time — the pass cache is by-path and doesn't
+    // distinguish realms with different proposals installed.
     var pass_cache: PassCache = .empty;
     defer pass_cache.deinit(gpa);
-    if (opts.only_failing) {
+    const load_pass_cache = phase == .main and opts.only_failing;
+    if (load_pass_cache) {
         try loadPassCache(gpa, io, cwd, &pass_cache);
     }
 
-    // A "full run" is the only time we (re)write the cache —
-    // partial runs would shrink the pass set silently. Filtered
-    // runs and `--only-failing` runs both leave the cache alone.
-    const is_full_run = opts.filter == null and !opts.only_failing;
-    var pass_paths: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer {
-        for (pass_paths.items) |p| gpa.free(p);
-        pass_paths.deinit(gpa);
-    }
+    // A "full run" is the only time the main phase (re)writes the
+    // cache. Per-feature phases never contribute to the cache so
+    // their `is_full_run` value is moot (their `pass_paths` stays
+    // empty downstream).
+    const is_full_run = opts.filter == null and !opts.only_failing and phase == .main;
 
     const start_ts = std.Io.Clock.now(.awake, io);
 
@@ -748,10 +1019,9 @@ pub fn main(init: std.process.Init) !void {
     // owned `[]const u8`. Cheap filters (extension, `_FIXTURE`,
     // `--filter` substring, OOS path table, universal-skip path
     // table) are applied here so workers never see paths they
-    // would just discard. Frontmatter-driven skips
-    // (no-strict / raw / unsupported-feature / no-frontmatter)
-    // still happen inside `classifyAndRun` because they require
-    // reading the file.
+    // would just discard. Frontmatter-driven skips and the
+    // phase-membership filter still happen inside `classifyAndRun`
+    // because they require reading the file.
     var paths: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
         for (paths.items) |p| gpa.free(p);
@@ -767,10 +1037,6 @@ pub fn main(init: std.process.Init) !void {
             if (opts.filter) |needle| {
                 if (std.mem.indexOf(u8, entry.path, needle) == null) continue;
             }
-            // Universal skips — `harness/`, `staging/`,
-            // `intl402/` — never produce a meaningful pass / fail.
-            // Drop them up front instead of dispatching a worker
-            // just to mark them `skip`.
             if (skip_rules.pathIsSkipped(entry.path)) continue;
             if (skip_rules.pathIsCynicOutOfScope(entry.path)) continue;
             try paths.append(gpa, try gpa.dupe(u8, entry.path));
@@ -787,18 +1053,12 @@ pub fn main(init: std.process.Init) !void {
     const thread_count: u32 = @max(auto_threads, 1);
 
     if (thread_count <= 1) {
-        // Sequential path — kept identical to the pre-parallel
-        // baseline so `--threads=1` reproduces the reference run
-        // (live in-place progress, single arena reused per test).
+        // Sequential path. `--leak-check` swaps the per-fixture
+        // bytes allocator for a `DebugAllocator` (single-threaded
+        // only — the flag parser already pins threads=1).
         var per_file_arena: std.heap.ArenaAllocator = .init(gpa);
         defer per_file_arena.deinit();
 
-        // `--leak-check` swaps the per-fixture bytes allocator
-        // for a `DebugAllocator`. Every unfreed allocation prints
-        // a stack trace at the deinit below, so a leaked
-        // `JSString.bytes` or ArrayBuffer slab points at its exact
-        // call site. Single-thread-only (DebugAllocator is not
-        // thread-safe — the flag parser already forces threads=1).
         var leak_check_alloc: std.heap.DebugAllocator(.{}) = .init;
         defer if (opts.leak_check) {
             const status = leak_check_alloc.deinit();
@@ -816,9 +1076,8 @@ pub fn main(init: std.process.Init) !void {
             if (opts.leak_check) leak_check_alloc.allocator() else gpa;
 
         for (paths.items) |rel| {
-            stats.total += 1;
-
             if (opts.only_failing and pass_cache.contains(rel)) {
+                stats.total += 1;
                 stats.pass_pos += 1;
                 stats.pos_attempted += 1;
                 try buckets.bump(bucketName(rel), .pass);
@@ -830,11 +1089,6 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             }
 
-            // §`Heap`: GC frees JSStrings via `allocator.free`, which
-            // on an arena is a no-op — bytes hold their pages until the
-            // arena itself releases. `retain_capacity` would let every
-            // fixture's peak accumulate on the worker; `free_all`
-            // returns pages between fixtures and keeps RSS bounded.
             _ = per_file_arena.reset(.free_all);
             const arena = per_file_arena.allocator();
 
@@ -843,7 +1097,7 @@ pub fn main(init: std.process.Init) !void {
             const fx_rss_pre: u64 = if (opts.top_rss > 0) (currentRssMb() orelse 0) else 0;
             const need_mem = opts.mem_summary or opts.top_alloc > 0 or opts.top_gc_time > 0;
             var fx_mem: FixtureMem = .{};
-            const outcome = try classifyAndRun(arena, bytes_allocator, io, corpus, rel, opts.mode, harness_pair, opts.gc_threshold, opts.gc_stats, if (need_mem) &fx_mem else null);
+            const outcome = try classifyAndRun(arena, bytes_allocator, io, corpus, rel, opts.mode, harness_pair, opts.gc_threshold, opts.gc_stats, if (need_mem) &fx_mem else null, phase);
             if (need_mem) {
                 mem_agg.add(fx_mem);
                 if (opts.top_alloc > 0) {
@@ -889,24 +1143,15 @@ pub fn main(init: std.process.Init) !void {
 
             if (opts.verbose) {
                 try printVerbose(io, rel, outcome);
-            } else if (!opts.quiet and stats.total % 500 == 0) {
+            } else if (!opts.quiet and stats.total > 0 and stats.total % 500 == 0) {
                 try printProgress(io, &stats);
             }
         }
     } else {
-        // Parallel path. Each worker has its own arena + Stats +
-        // BucketMap + failures + pass_paths; results merge into the
-        // globals under `merge_mu` at worker exit. Workers pull
-        // paths off `index` (atomic; the only hot synchronisation
-        // point in the steady state).
+        // Parallel path.
         var index: std.atomic.Value(usize) = .init(0);
         var merge_mu: std.Io.Mutex = .init;
 
-        // Per-worker "currently running" slots. Each worker
-        // writes its current path index here at the top of every
-        // test; the monitor reads them to surface what each
-        // worker is on. A wedged sweep names the offending
-        // fixture instead of leaving you to bisect by filter.
         const current_paths = try gpa.alloc(std.atomic.Value(usize), thread_count);
         defer gpa.free(current_paths);
         for (current_paths) |*slot| slot.* = .init(idle_slot);
@@ -924,7 +1169,7 @@ pub fn main(init: std.process.Init) !void {
                 .corpus = corpus,
                 .paths = paths.items,
                 .index = &index,
-                .opts = &opts,
+                .opts = opts,
                 .pass_cache = &pass_cache,
                 .harness_sources = harness_sources,
                 .merge_mu = &merge_mu,
@@ -935,6 +1180,7 @@ pub fn main(init: std.process.Init) !void {
                 .global_slow = &slow,
                 .global_heavy = &heavy,
                 .is_full_run = is_full_run,
+                .phase = phase,
                 .worker_id = wid,
                 .current_paths = current_paths,
             };
@@ -942,11 +1188,6 @@ pub fn main(init: std.process.Init) !void {
             spawned += 1;
         }
 
-        // Periodic progress monitor — drives a `\n`-terminated
-        // status line every 5 s so CI logs (which buffer stderr
-        // and don't render `\r`-redrawn output) see something
-        // before the run finishes. Only prints when not quiet
-        // and not in verbose-per-test mode.
         var monitor_done: std.atomic.Value(bool) = .init(false);
         var monitor_thread: ?std.Thread = null;
         if (!opts.quiet and !opts.verbose) {
@@ -975,42 +1216,47 @@ pub fn main(init: std.process.Init) !void {
         try std.Io.File.stderr().writeStreamingAll(io, "\r\x1b[K");
     }
 
+    // Per-phase tally banner, prefixed with the phase label so a
+    // multi-phase `--write-results` invocation surfaces each sweep
+    // distinctly in the log.
+    if (!opts.quiet) {
+        var label_buf: [64]u8 = undefined;
+        const banner = try std.fmt.bufPrint(&label_buf, "\n[{s}] ", .{phase.label()});
+        try std.Io.File.stdout().writeStreamingAll(io, banner);
+    }
     try printTally(io, &stats, elapsed);
-    if (opts.list_failures > 0) {
-        try printFailureList(io, failures.items, opts.list_failures);
-    }
-    if (opts.top_slow > 0 and slow.items.len > 0) {
-        try printTopSlow(io, slow.items, opts.top_slow);
-    }
-    if (opts.top_rss > 0 and heavy.items.len > 0) {
-        try printTopHeavy(io, heavy.items, opts.top_rss);
-    }
-    if (opts.top_alloc > 0 and alloc_list.items.len > 0) {
-        try printTopAlloc(io, alloc_list.items, opts.top_alloc);
-    }
-    if (opts.top_gc_time > 0 and gc_time_list.items.len > 0) {
-        try printTopGcTime(io, gc_time_list.items, opts.top_gc_time);
-    }
-    if (opts.mem_summary) {
-        try printMemSummary(io, &mem_agg, &stats);
-    }
-    if (opts.write_results) {
-        const now_ts = std.Io.Clock.now(.real, io);
-        // Elapsed is only carried into the row when we ran the
-        // whole corpus — a filtered run's wall-time isn't
-        // comparable to yesterday's full sweep, so a fresh row
-        // would skew the regression signal.
-        const elapsed_for_row: ?u64 = if (is_full_run and elapsed > 0) @intCast(elapsed) else null;
-        try writeResults(gpa, io, &stats, &buckets, now_ts.toSeconds(), opts.mode, elapsed_for_row);
-    }
-    // Refresh the pass cache only on full runs — partial runs
-    // (filtered or `--only-failing`) would shrink the recorded
-    // pass set and break the next `--only-failing` invocation.
-    if (is_full_run) {
-        try writePassCache(gpa, io, cwd, pass_paths.items);
+    // Diagnostic-flag output is only meaningful for the main phase
+    // — pre-Stage-4 sweeps walk a handful of tagged fixtures so
+    // slow / heavy / alloc rankings would be noise.
+    if (phase == .main) {
+        if (opts.list_failures > 0) {
+            try printFailureList(io, failures.items, opts.list_failures);
+        }
+        if (opts.top_slow > 0 and slow.items.len > 0) {
+            try printTopSlow(io, slow.items, opts.top_slow);
+        }
+        if (opts.top_rss > 0 and heavy.items.len > 0) {
+            try printTopHeavy(io, heavy.items, opts.top_rss);
+        }
+        if (opts.top_alloc > 0 and alloc_list.items.len > 0) {
+            try printTopAlloc(io, alloc_list.items, opts.top_alloc);
+        }
+        if (opts.top_gc_time > 0 and gc_time_list.items.len > 0) {
+            try printTopGcTime(io, gc_time_list.items, opts.top_gc_time);
+        }
+        if (opts.mem_summary) {
+            try printMemSummary(io, &mem_agg, &stats);
+        }
     }
 
-    for (failures.items) |f| gpa.free(f.path);
+    return .{
+        .phase = phase,
+        .stats = stats,
+        .buckets = buckets,
+        .failures = failures,
+        .pass_paths = pass_paths,
+        .elapsed_ms = elapsed,
+    };
 }
 
 const Failure = struct {
@@ -1115,11 +1361,45 @@ const RunResult = struct {
     skip_reason: ?SkipReason = null,
 };
 
+/// One sweep's rolled-up state — what `runSweep` returns and
+/// `main` consumes. Owns its `buckets`, `failures` (path slices),
+/// and `pass_paths` (path slices); the orchestrator calls
+/// `deinit` once it has fed them into `writeResults` /
+/// `writePassCache`. Per-fixture diagnostic captures (`slow`,
+/// `heavy`, `alloc_list`, `gc_time_list`, `mem_agg`) live and die
+/// inside `runSweep`; only the persistent score state survives
+/// here.
+const PhaseResult = struct {
+    phase: Phase,
+    stats: Stats,
+    buckets: BucketMap,
+    failures: std.ArrayListUnmanaged(Failure),
+    pass_paths: std.ArrayListUnmanaged([]const u8),
+    /// Sweep wall-clock duration in milliseconds. Only meaningful
+    /// for the main phase on a full run — fed into the score row's
+    /// `elapsed` column. Always captured for symmetry.
+    elapsed_ms: i64,
+
+    fn deinit(self: *PhaseResult, gpa: std.mem.Allocator) void {
+        self.buckets.deinit();
+        for (self.failures.items) |f| gpa.free(f.path);
+        self.failures.deinit(gpa);
+        for (self.pass_paths.items) |p| gpa.free(p);
+        self.pass_paths.deinit(gpa);
+    }
+};
+
 /// Update `stats` / `buckets` / `failures` / `pass_paths` for one
 /// test outcome. Pulled out so the sequential and per-worker code
 /// paths share the bookkeeping logic instead of drifting. Worker
 /// version operates on its private structs and merges under
 /// `merge_mu` at exit; sequential version passes the globals.
+///
+/// `stats.total` is bumped *here* (not at dispatch). Out-of-phase
+/// fixtures — those filtered to a different phase, with
+/// `outcome.skip_reason == .out_of_phase` — return immediately
+/// without touching anything: no stats bump, no bucket bump, no
+/// failures, no pass_paths.
 fn recordOutcome(
     gpa: std.mem.Allocator,
     stats: *Stats,
@@ -1130,6 +1410,11 @@ fn recordOutcome(
     outcome: RunResult,
     is_full_run: bool,
 ) !void {
+    if (outcome.kind == .skip and outcome.skip_reason != null and outcome.skip_reason.? == .out_of_phase) {
+        return;
+    }
+    stats.total += 1;
+
     const bucket_kind: ?BucketKind = switch (outcome.kind) {
         .pass_positive, .pass_negative => .pass,
         .fail_false_reject, .fail_false_accept => .fail,
@@ -1189,6 +1474,9 @@ const WorkerCtx = struct {
     global_slow: *std.ArrayListUnmanaged(SlowEntry),
     global_heavy: *std.ArrayListUnmanaged(HeavyEntry),
     is_full_run: bool,
+    /// Sweep phase selector. Forwarded to `classifyAndRun` so each
+    /// worker filters fixtures the same way the orchestrator picked.
+    phase: Phase,
     /// Worker's identity (0..thread_count-1). Used to claim a
     /// slot in `current_paths` so the progress monitor can name
     /// the path each worker is currently chewing on.
@@ -1264,9 +1552,13 @@ fn workerLoop(
         ctx.current_paths[ctx.worker_id].store(i, .release);
         const rel = ctx.paths[i];
 
-        stats.total += 1;
-
+        // `--only-failing` short-circuit. The cache is loaded only
+        // for the main phase (per-feature phases skip cache loading
+        // upstream, so this never fires there). A cached pass
+        // counts as a positive pass and bumps `stats.total`
+        // directly — no frontmatter read, no `classifyAndRun`.
         if (ctx.opts.only_failing and ctx.pass_cache.contains(rel)) {
+            stats.total += 1;
             stats.pass_pos += 1;
             stats.pos_attempted += 1;
             try buckets.bump(bucketName(rel), .pass);
@@ -1280,7 +1572,7 @@ fn workerLoop(
         const fx_rss_pre: u64 = if (ctx.opts.top_rss > 0) (currentRssMb() orelse 0) else 0;
         // Workers don't participate in `--mem-summary` / `--top-alloc`
         // (single-thread only — those flags pin `--threads=1` upstream).
-        const outcome = classifyAndRun(arena, ctx.gpa, ctx.io, ctx.corpus, rel, ctx.opts.mode, ctx.harness_sources, ctx.opts.gc_threshold, ctx.opts.gc_stats, null) catch |err| {
+        const outcome = classifyAndRun(arena, ctx.gpa, ctx.io, ctx.corpus, rel, ctx.opts.mode, ctx.harness_sources, ctx.opts.gc_threshold, ctx.opts.gc_stats, null, ctx.phase) catch |err| {
             if (err == error.OutOfMemory) return err;
             try recordOutcome(ctx.gpa, stats, buckets, failures, pass_paths, rel, .{ .kind = .fail_false_reject }, ctx.is_full_run);
             continue;
@@ -1348,6 +1640,13 @@ fn classifyAndRun(
     /// the fixture's heap counters here via a `defer` so every
     /// return point is covered. Parser path leaves it at zero.
     mem_out: ?*FixtureMem,
+    /// Sweep phase selector. Drives both the per-fixture skip
+    /// decision (does this fixture belong in *this* sweep?) and
+    /// the realm's `feature_flags` install set. Main excludes every
+    /// pre-Stage-4-tagged fixture; each feature phase admits only
+    /// fixtures tagged with that one flag and runs them in a realm
+    /// where only that flag is enabled.
+    phase: Phase,
 ) !RunResult {
     // Hard exclusions — `harness/`, `staging/`, `intl402/`.
     // Cynic-out-of-scope paths (Annex B / browser-era) are
@@ -1369,6 +1668,17 @@ fn classifyAndRun(
         error.UnterminatedFrontmatter => return .{ .kind = .skip, .skip_reason = .malformed_frontmatter },
         error.OutOfMemory => return err,
     };
+
+    // Snapshot the tracked-feature bitmask now that frontmatter has
+    // parsed, then gate fixture admission on the current sweep's
+    // phase. Main rejects anything tagged with a pre-Stage-4 proposal;
+    // each `feature:<flag>` phase admits only its own fixtures. An
+    // out-of-phase return is the harness's signal to `recordOutcome`
+    // to drop this fixture entirely (no stats, no buckets, no cache).
+    const pre_stage4_mask = computePreStage4Mask(fm.features);
+    if (!phase.includesFixture(pre_stage4_mask)) {
+        return .{ .kind = .skip, .skip_reason = .out_of_phase };
+    }
 
     if (fm.flags.no_strict) return .{ .kind = .skip, .skip_reason = .no_strict };
     if (fm.flags.raw) return .{ .kind = .skip, .skip_reason = .raw_flag };
@@ -1455,6 +1765,14 @@ fn classifyAndRun(
             .gc_time_ns = realm.heap.gc_time_ns_total,
         };
     };
+    // Install only the proposal flag(s) the current phase
+    // demands. The main phase installs none — pre-Stage-4 fixtures
+    // are filtered out above, and we don't want a stable-spec
+    // fixture's behaviour to depend on whether a hidden proposal
+    // accessor exists. Each `feature:<flag>` phase installs only
+    // that one flag, so the per-feature scoreboard reflects each
+    // proposal honestly in isolation.
+    realm.feature_flags = phase.realmFeatures();
     realm.installBuiltins() catch return .{ .kind = .fail_false_reject };
     // Cap each test at a generous opcode budget so an
     // infinite-loop fixture (`while(true){}`, recursive yield,
@@ -2057,6 +2375,7 @@ fn writeResults(
     io: std.Io,
     stats: *const Stats,
     buckets: *const BucketMap,
+    pre_stage4: *const PreStage4Stats,
     epoch_seconds: i64,
     mode: Mode,
     elapsed_ms: ?u64,
@@ -2133,10 +2452,18 @@ fn writeResults(
         null
     else
         extractScoreboardSection(existing);
+    // Same parser-refresh dance as `preserved_scoreboard`: when we
+    // didn't just run the runtime mode the per-feature table needs
+    // to come from the file's previous contents, not the empty
+    // `pre_stage4` we just initialised.
+    const preserved_pre_stage4: ?[]const u8 = if (mode == .runtime)
+        null
+    else
+        extractPreStage4Section(existing);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(gpa);
-    try writeFileBody(gpa, &buf, rows.items, buckets, &prev_bucket_pass, mode, preserved_scoreboard);
+    try writeFileBody(gpa, &buf, rows.items, buckets, pre_stage4, &prev_bucket_pass, mode, preserved_scoreboard, preserved_pre_stage4);
 
     try cwd.writeFile(io, .{ .sub_path = path, .data = buf.items });
 }
@@ -2377,6 +2704,7 @@ fn writeFileBody(
     out: *std.ArrayListUnmanaged(u8),
     rows: []Row,
     buckets: *const BucketMap,
+    pre_stage4: *const PreStage4Stats,
     prev_bucket_pass: *const std.StringHashMapUnmanaged(u32),
     mode_just_run: Mode,
     /// Verbatim text of the previous `## Where the runtime …`
@@ -2386,6 +2714,10 @@ fn writeFileBody(
     /// scoreboard appears for the first time only after a
     /// runtime run).
     preserved_scoreboard: ?[]const u8,
+    /// Same preservation contract as `preserved_scoreboard`, but
+    /// for the per-feature table that tracks Cynic's shipped
+    /// pre-Stage-4 proposals.
+    preserved_pre_stage4: ?[]const u8,
 ) !void {
     try out.appendSlice(gpa,
         \\# test262 conformance score history
@@ -2413,6 +2745,15 @@ fn writeFileBody(
         try out.appendSlice(gpa, s);
     }
 
+    // Per-feature scoreboard for the pre-Stage-4 proposals Cynic
+    // ships ahead of the published edition. Same preservation
+    // contract as the per-area scoreboard.
+    if (mode_just_run == .runtime and preStage4HasData(pre_stage4)) {
+        try writePreStage4Scoreboard(gpa, out, pre_stage4);
+    } else if (preserved_pre_stage4) |s| {
+        try out.appendSlice(gpa, s);
+    }
+
     try out.appendSlice(gpa,
         \\
         \\## Legend
@@ -2431,7 +2772,7 @@ fn writeFileBody(
         \\- **Δ pass** (history) — change in `pass` versus the row immediately above (chronologically previous run of the same `mode`).
         \\- **elapsed** (history) — wall-clock time of the run that produced the row. Recorded only for full sweeps (no `--filter`, no `--only-failing`); partial runs leave it blank to keep the regression signal clean. Sub-minute as `12.3 s`, minute+ as `2m 40s`.
         \\
-        \\**Scope.** `total` excludes paths universally out of scope (`harness/`, `staging/`, `intl402/`), Annex B language extensions, and browser-era built-ins Cynic doesn't ship (`escape` / `unescape`, `String.prototype` HTML wrappers, `Date.{getYear, setYear}`).
+        \\**Scope.** `total` excludes paths universally out of scope (`harness/`, `staging/`, `intl402/`), Annex B language extensions, and browser-era built-ins Cynic doesn't ship (`escape` / `unescape`, `String.prototype` HTML wrappers, `Date.{getYear, setYear}`). Fixtures referencing a pre-Stage-4 proposal (see the per-feature table) are *also* excluded from `total` — they don't appear in the rolled-up rows or the per-area scoreboard at all. Each proposal's row in `## Pre-Stage-4 proposals shipped` is sourced from a dedicated phase sweep that runs only the matching fixtures, in a realm where only that one proposal's flag is enabled.
         \\
         \\## History
         \\
@@ -2630,6 +2971,77 @@ fn writeScoreboard(
     try out.appendSlice(gpa, "\n");
 }
 
+fn preStage4HasData(pre_stage4: *const PreStage4Stats) bool {
+    for (pre_stage4.slots) |s| {
+        if (s.total > 0) return true;
+    }
+    return false;
+}
+
+/// Render the per-feature scoreboard for the pre-Stage-4 proposals
+/// Cynic ships ahead of the published edition. Mirrors
+/// `writeScoreboard` in column layout so the two tables read the
+/// same; the heading is distinct so the section can be located /
+/// preserved verbatim across parser-mode refreshes via
+/// `extractPreStage4Section`.
+fn writePreStage4Scoreboard(
+    gpa: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    pre_stage4: *const PreStage4Stats,
+) !void {
+    try out.appendSlice(gpa,
+        \\
+        \\## Pre-Stage-4 proposals shipped
+        \\
+        \\Per-feature scores for the TC39 proposals Cynic ships at
+        \\Stage 1–3, ahead of their inclusion in the published
+        \\edition. **Each row is sourced from a dedicated phase
+        \\sweep** that runs only the fixtures whose frontmatter
+        \\`features:` list names the proposal, in a realm where only
+        \\that proposal's flag is enabled — a `joint-iteration`
+        \\fixture is scored here against a realm where
+        \\`Map.prototype.getOrInsert` is undefined, and vice versa,
+        \\so each row reflects the proposal in honest isolation.
+        \\**These fixtures are excluded entirely from the top-line
+        \\`## Current scores` and the per-area scoreboard** — they
+        \\are not in `total` and not in any bucket, so the headline
+        \\number tracks stable ECMA-262 conformance only. When a
+        \\proposal advances to Stage 4 the row stays here until its
+        \\features ship in mainline ECMA-262.
+        \\
+        \\| feature | pass | fail | skip | spec% | attempted% |
+        \\|---|---:|---:|---:|---:|---:|
+        \\
+    );
+
+    var buf: [320]u8 = undefined;
+    for (pre_stage4.slots, 0..) |b, i| {
+        const name = tracked_pre_stage4_features[i];
+        const pct: f64 = if (b.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass)) / @as(f64, @floatFromInt(b.total));
+        const attempted: u32 = b.pass + b.fail;
+        const att_pct: f64 = if (attempted == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass)) / @as(f64, @floatFromInt(attempted));
+        const line = try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d} | {d:.0} % | {d:.0} % |\n", .{
+            name, b.pass, b.fail, b.skip, pct, att_pct,
+        });
+        try out.appendSlice(gpa, line);
+    }
+    try out.appendSlice(gpa, "\n");
+}
+
+/// Return the raw text of the `## Pre-Stage-4 proposals shipped`
+/// section so a parser-mode refresh can re-emit it verbatim
+/// instead of dropping the table.
+fn extractPreStage4Section(existing: []const u8) ?[]const u8 {
+    const heading = "## Pre-Stage-4 proposals shipped";
+    const start = std.mem.indexOf(u8, existing, heading) orelse return null;
+    const stop_marker = "\n## ";
+    const stop = std.mem.indexOfPos(u8, existing, start + heading.len, stop_marker) orelse return null;
+    var end = stop;
+    while (end > start and existing[end - 1] == '\n') end -= 1;
+    end += 1;
+    return existing[start..end];
+}
+
 fn writeBiggestMovers(
     gpa: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
@@ -2820,7 +3232,7 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
         } else if (std.mem.startsWith(u8, arg, "--threads=")) {
             opts.threads = std.fmt.parseInt(u32, arg["--threads=".len..], 10) catch 0;
         } else if (std.mem.startsWith(u8, arg, "--gc-threshold=")) {
-            opts.gc_threshold = std.fmt.parseInt(u32, arg["--gc-threshold=".len..], 10) catch 4096;
+            opts.gc_threshold = std.fmt.parseInt(u32, arg["--gc-threshold=".len..], 10) catch 32768;
         } else if (std.mem.eql(u8, arg, "--gc-stats")) {
             opts.gc_stats = true;
         } else if (std.mem.startsWith(u8, arg, "--top-slow=")) {
@@ -2829,28 +3241,49 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.top_rss = std.fmt.parseInt(u32, arg["--top-rss=".len..], 10) catch 0;
         } else if (std.mem.eql(u8, arg, "--leak-check")) {
             opts.leak_check = true;
-            // DebugAllocator is single-threaded; force-pin workers
-            // before the dispatcher reads `opts.threads`.
-            opts.threads = 1;
         } else if (std.mem.startsWith(u8, arg, "--max-rss=")) {
             opts.max_rss_mb = std.fmt.parseInt(u32, arg["--max-rss=".len..], 10) catch 0;
-            // Process RSS is a single-process watermark; multiple
-            // workers make the "which fixture tripped it" pointer
-            // useless. Pin to one worker.
-            if (opts.max_rss_mb > 0) opts.threads = 1;
         } else if (std.mem.eql(u8, arg, "--mem-summary")) {
             opts.mem_summary = true;
-            // Per-fixture heap counters live on each realm's heap;
-            // the accumulator + capture are single-threaded today.
-            opts.threads = 1;
         } else if (std.mem.startsWith(u8, arg, "--top-alloc=")) {
             opts.top_alloc = std.fmt.parseInt(u32, arg["--top-alloc=".len..], 10) catch 0;
-            if (opts.top_alloc > 0) opts.threads = 1;
         } else if (std.mem.startsWith(u8, arg, "--top-gc-time=")) {
             opts.top_gc_time = std.fmt.parseInt(u32, arg["--top-gc-time=".len..], 10) catch 0;
-            if (opts.top_gc_time > 0) opts.threads = 1;
+        } else if (std.mem.startsWith(u8, arg, "--phase=")) {
+            const spec = arg["--phase=".len..];
+            if (std.mem.eql(u8, spec, "main")) {
+                opts.phase = .main;
+            } else if (std.mem.startsWith(u8, spec, "feature:")) {
+                const fname = spec["feature:".len..];
+                const flag = cynic.runtime.FeatureFlag.fromName(fname) orelse {
+                    std.debug.print("error: unknown --phase feature: '{s}'\n", .{fname});
+                    std.process.exit(1);
+                };
+                opts.phase = .{ .feature = flag };
+            } else {
+                std.debug.print("error: --phase expects 'main' or 'feature:<name>', got '{s}'\n", .{spec});
+                std.process.exit(1);
+            }
         }
     }
+
+    // Single-threaded pin for flags that need it. The diagnostic
+    // flags below all require single-process state — DebugAllocator
+    // isn't thread-safe (`--leak-check`), process RSS is a process-
+    // wide watermark (`--max-rss`), and the per-fixture heap
+    // counters + cumulative-bytes / GC-pause accumulators are
+    // single-threaded today (`--mem-summary`, `--top-alloc`,
+    // `--top-gc-time`). Apply the pin AFTER arg parsing so the
+    // result is independent of flag order — `--threads=4 --leak-check`
+    // and `--leak-check --threads=4` both end up at 1.
+    const force_single_thread =
+        opts.leak_check or
+        opts.mem_summary or
+        opts.max_rss_mb > 0 or
+        opts.top_alloc > 0 or
+        opts.top_gc_time > 0;
+    if (force_single_thread) opts.threads = 1;
+
     return opts;
 }
 

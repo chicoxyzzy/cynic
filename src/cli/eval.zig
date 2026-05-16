@@ -8,8 +8,9 @@ const cynic = @import("cynic");
 const Realm = cynic.runtime.Realm;
 const Value = cynic.runtime.Value;
 const JSString = cynic.runtime.JSString;
+const FeatureSet = cynic.runtime.FeatureSet;
 
-pub fn run(allocator: std.mem.Allocator, io: std.Io, source: []const u8) !void {
+pub fn run(allocator: std.mem.Allocator, io: std.Io, source: []const u8, feature_flags: FeatureSet) !void {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
@@ -32,6 +33,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, source: []const u8) !void {
 
     var realm = Realm.init(allocator);
     defer realm.deinit();
+    realm.feature_flags = feature_flags;
     try realm.installBuiltins();
 
     var chunk = cynic.bytecode.compileExpressionAsChunk(allocator, &realm, &expr, source) catch |err| {

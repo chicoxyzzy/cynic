@@ -18,8 +18,9 @@ const cynic = @import("cynic");
 const Realm = cynic.runtime.Realm;
 const Value = cynic.runtime.Value;
 const JSString = cynic.runtime.JSString;
+const FeatureSet = cynic.runtime.FeatureSet;
 
-pub fn run(allocator: std.mem.Allocator, io: std.Io, paths: []const []const u8) !void {
+pub fn run(allocator: std.mem.Allocator, io: std.Io, paths: []const []const u8, feature_flags: FeatureSet) !void {
     std.debug.assert(paths.len > 0);
 
     // Each chunk holds borrowed slices into its source buffer
@@ -34,6 +35,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, paths: []const []const u8) 
 
     var realm = Realm.init(allocator);
     defer realm.deinit();
+    realm.feature_flags = feature_flags;
     try realm.installBuiltins();
 
     var last_outcome: cynic.runtime.interpreter.RunResult = .{ .value = Value.undefined_ };

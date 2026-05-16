@@ -122,7 +122,7 @@ git submodule update --init vendor/test262   # one-time; needed for `zig build t
 
 zig build              # build cynic into zig-out/bin/
 zig build test         # run all unit tests
-zig build test262      # test262 conformance (parser mode by default)
+zig build test262      # test262 conformance (runtime mode by default; main + every pre-Stage-4 feature phase when --write-results is set)
 zig build run -- lex   path/to/file.js              # tokenize and print
 zig build run -- parse path/to/file.js              # parse a Script
 zig build run -- parse --module path/to/file.js     # parse a Module
@@ -136,11 +136,25 @@ Requires Zig **0.17-dev** (master). The Zig project skipped a stable
 0.16, so CI tracks `master` via `mlugg/setup-zig`. If your local
 `zig version` reports an older dev tag, bump it.
 
+The `cynic` CLI keeps pre-Stage-4 / experimental TC39 proposals off
+by default — embedders see only stable ECMA-262. Opt in:
+
+```sh
+cynic --list-features                       # show available proposals
+cynic --enable=joint-iteration eval '...'   # one feature
+cynic --enable-experimental run foo.js      # all tracked features
+cynic --disable=upsert eval '...'           # repeatable; later flags win
+```
+
+See `src/runtime/features.zig` for the set and
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for what each proposal ships.
+
 `zig build test262` accepts forwarded flags after `--`:
 
 - `--filter=<substring>` — run only matching paths.
 - `--list-failures=<n>` — print the first `n` failing paths after the tally.
-- `--mode={parser,runtime}` — parser-only (default) or full parse → compile → execute.
+- `--mode={runtime,parser}` — full parse → compile → execute (default), or parser-only.
+- `--phase=<spec>` — pin the harness to a single sweep. `--phase=main` is the headline ECMA-262 sweep (pre-Stage-4 fixtures excluded); `--phase=feature:<name>` (e.g. `feature:joint-iteration`, `feature:upsert`) runs only that proposal's dedicated isolated sweep. Default: just main, unless `--write-results` is set — then main + every tracked feature run in sequence.
 - `--quiet` / `--verbose` — progress noise dial.
 - `--no-harness` — skip the `sta.js` + `assert.js` preamble in runtime mode (for measuring the floor).
 - `--threads=<n>` — worker count (`0` = auto, `1` = sequential, `>1` = pool).

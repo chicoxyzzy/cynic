@@ -147,17 +147,37 @@ Common commands:
 
     zig build                                       # build cynic into zig-out/bin/
     zig build test                                  # all unit tests
-    zig build test262                               # parser-only conformance run
+    zig build test262                               # full conformance run (runtime mode)
     zig build run -- parse <file>                   # script-mode parse
     zig build run -- parse --module <file>          # module-mode parse (alias: -m)
     zig build run -- parse <file>.mjs               # `.mjs` auto-detected as module
     zig build run -- eval '<expr>'                  # compile + run a single expression
     zig build run -- run <file>                     # compile + run a script
 
+The `cynic` CLI defaults pre-Stage-4 / experimental TC39
+proposals (currently `joint-iteration`, `upsert`) to off so
+embedders see only stable ECMA-262. Opt in:
+
+    cynic --enable=<name> run foo.js                # one feature
+    cynic --enable-experimental run foo.js          # all tracked features
+    cynic --list-features                           # show available + descriptions
+
+See `src/runtime/features.zig` for the full list and
+[docs/ROADMAP.md](docs/ROADMAP.md) under "Pre-Stage-4 proposals
+shipped" for what each ships. The test262 harness independently
+flips every tracked flag on inside the per-feature dedicated
+sweeps.
+
 `zig build test262` accepts forwarded flags after `--`:
 `--filter=<substring>`, `--list-failures=<n>`, `--quiet`, `--verbose`,
-`--mode={parser,runtime}` (default `parser`; `runtime` parses,
-compiles, and executes each test), `--no-harness` (disable the
+`--mode={runtime,parser}` (default `runtime`; runs parse +
+compile + execute. Pass `--mode=parser` for parser-only iteration),
+`--phase=<spec>` (`main` runs the headline ECMA-262 sweep with
+pre-Stage-4 fixtures excluded; `feature:<name>` runs only that
+proposal's dedicated isolated sweep — only its realm flag on,
+only its tagged fixtures included. Default: just main, unless
+`--write-results` is set — then main + every tracked feature
+run in sequence), `--no-harness` (disable the
 `sta.js` + `assert.js` preamble in runtime mode),
 `--write-results` (updates `test262-results.md`),
 `--only-failing` (skip-as-pass any test path listed in
@@ -246,7 +266,7 @@ allocation path can bypass it. Before kicking off a full
 `zig build test262`, run a filtered sweep with `--top-rss` and
 confirm the top per-fixture deltas are in the healthy band:
 
-    zig build test262 -- --quiet --mode=runtime \
+    zig build test262 -- --quiet \
       --filter=language/expressions --top-rss=10
 
 Healthy: top per-fixture deltas ≤ ~20 MiB on
@@ -269,26 +289,28 @@ executes the ~7 k failing/skipped tests — typically ≤ 30 s.
 Iteration loop for a triage-and-fix session:
 
     # Baseline. Tighten the filter as much as you can.
-    zig build test262 -- --quiet --mode=runtime \
+    zig build test262 -- --quiet \
       --filter=<narrowest pattern>
 
     # Per-fix verification (filter + --only-failing).
-    zig build test262 -- --quiet --mode=runtime \
+    zig build test262 -- --quiet \
       --filter=<bucket root> --only-failing
 
     # Leak check.
-    zig build test262 -- --quiet --mode=runtime \
+    zig build test262 -- --quiet \
       --filter=<bucket root> --top-rss=10
 
     # Session-end full sweep (no filter, no --only-failing —
-    # this refreshes the cache for the next session).
-    zig build test262 -- --quiet --mode=runtime --write-results
+    # this refreshes the cache for the next session, and runs the
+    # main phase + every pre-Stage-4 feature phase in one go).
+    zig build test262 -- --quiet --write-results
 
     # Between agent batches, when you only want to refresh the
-    # cache (no score row): drop --write-results. Same full sweep
-    # but no edit to `test262-results.md`. Refreshes the cache
-    # for the next agent in ~100 s.
-    zig build test262 -- --quiet --mode=runtime
+    # cache (no score row): drop --write-results. Same main-phase
+    # sweep but no per-feature phases and no edit to
+    # `test262-results.md`. Refreshes the cache for the next
+    # agent in ~100 s.
+    zig build test262 -- --quiet
 
 The `--only-failing` cache won't surface a regression that flips
 a previously-passing fixture to fail outside the touched bucket

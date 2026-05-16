@@ -15,11 +15,23 @@ const evaluateScript = interpreter.evaluateScript;
 const Value = @import("value.zig").Value;
 const JSString = @import("string.zig").JSString;
 const Realm = @import("realm.zig").Realm;
+const features = @import("features.zig");
 const parser_mod = @import("../parser/parser.zig");
 const compiler_mod = @import("../bytecode/compiler.zig");
 const compileExpressionAsChunk = compiler_mod.compileExpressionAsChunk;
 const compileScriptAsChunk = compiler_mod.compileScriptAsChunk;
 const cynic_diag = @import("../diagnostic.zig");
+
+/// Unit tests run against the full engine surface — every gated
+/// pre-Stage-4 proposal is enabled. Embedders / the `cynic` CLI
+/// default to all-off; the test262 harness independently flips
+/// everything on. This helper centralises the "install builtins
+/// with every feature" pattern shared by every `*WithBuiltins`
+/// helper below.
+fn installBuiltinsAllFeatures(realm: *Realm) !void {
+    realm.feature_flags = features.FeatureSet.initFull();
+    try realm.installBuiltins();
+}
 
 fn evaluate(realm: *Realm, source: []const u8) !Value {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
@@ -54,7 +66,7 @@ fn evaluateScriptResult(realm: *Realm, source: []const u8) !RunResult {
 fn expectScriptIntWithBuiltins(source: []const u8, expected: i32) !void {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
     const v = switch (try evaluateScriptResult(&realm, source)) {
         .value, .yielded => |val| val,
         .thrown => return error.UncaughtException,
@@ -65,7 +77,7 @@ fn expectScriptIntWithBuiltins(source: []const u8, expected: i32) !void {
 fn expectScriptStringWithBuiltins(source: []const u8, expected: []const u8) !void {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
     const v = switch (try evaluateScriptResult(&realm, source)) {
         .value, .yielded => |val| val,
         .thrown => return error.UncaughtException,
@@ -2313,7 +2325,7 @@ test "later: fizzbuzz-shaped program runs to completion" {
 test "later: top-level var visible in a later script on the same realm" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
 
     const r1 = try evaluateScript(testing.allocator, &realm, "var x = 1;");
     try testing.expect(r1 != .thrown);
@@ -2329,7 +2341,7 @@ test "later: top-level var visible in a later script on the same realm" {
 test "later: top-level let visible in a later script on the same realm" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
 
     _ = try evaluateScript(testing.allocator, &realm, "let x = 42;");
     const r = try evaluateScript(testing.allocator, &realm, "x;");
@@ -2343,7 +2355,7 @@ test "later: top-level let visible in a later script on the same realm" {
 test "later: top-level function declaration visible across scripts" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
 
     _ = try evaluateScript(testing.allocator, &realm, "function f() { return 7; }");
     const r = try evaluateScript(testing.allocator, &realm, "f();");
@@ -2357,7 +2369,7 @@ test "later: top-level function declaration visible across scripts" {
 test "later: throw in script A doesn't poison script B" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
 
     const r_throw = try evaluateScript(testing.allocator, &realm, "throw 1;");
     try testing.expect(r_throw == .thrown);
@@ -2373,7 +2385,7 @@ test "later: throw in script A doesn't poison script B" {
 test "later: cross-script var update is observable" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
 
     _ = try evaluateScript(testing.allocator, &realm, "var counter = 0;");
     _ = try evaluateScript(testing.allocator, &realm, "counter = counter + 1;");
@@ -2389,7 +2401,7 @@ test "later: cross-script var update is observable" {
 test "later: const declared in script A is reachable in script B" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
 
     _ = try evaluateScript(testing.allocator, &realm, "const PI = 3;");
     const r = try evaluateScript(testing.allocator, &realm, "PI + 1;");
@@ -2403,7 +2415,7 @@ test "later: const declared in script A is reachable in script B" {
 test "later: delete o.x removes own property; subsequent read is undefined" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
 
     const r = try evaluateScript(testing.allocator, &realm,
         \\(function () { var o = {x: 1, y: 2}; delete o.x; return o.x === undefined && o.y === 2; })()
@@ -2418,7 +2430,7 @@ test "later: delete o.x removes own property; subsequent read is undefined" {
 test "later: delete o[k] (computed key) removes own property" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
 
     const r = try evaluateScript(testing.allocator, &realm,
         \\(function () { var o = {a: 1}; var k = "a"; delete o[k]; return o.a === undefined; })()
@@ -2433,7 +2445,7 @@ test "later: delete o[k] (computed key) removes own property" {
 test "later: delete on non-Reference operand evaluates and yields true" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
 
     const r = try evaluateScript(testing.allocator, &realm, "delete (1 + 1);");
     const v = switch (r) {
@@ -2446,7 +2458,7 @@ test "later: delete on non-Reference operand evaluates and yields true" {
 test "later: built-in fn 'name' descriptor matches §10.2.9" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
 
     const r = try evaluateScript(testing.allocator, &realm,
         \\(function () {
@@ -2467,7 +2479,7 @@ test "later: built-in fn 'name' descriptor matches §10.2.9" {
 test "later: built-in fn 'length' descriptor matches §10.2.4" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
 
     const r = try evaluateScript(testing.allocator, &realm,
         \\(function () {
@@ -2488,7 +2500,7 @@ test "later: built-in fn 'length' descriptor matches §10.2.4" {
 test "later/later: writable=false on built-in fn name throws TypeError in strict" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
 
     const r = try evaluateScript(testing.allocator, &realm,
         \\(function () {
@@ -2510,7 +2522,7 @@ test "later/later: writable=false on built-in fn name throws TypeError in strict
 test "later: delete on configurable=true built-in fn slot succeeds" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
 
     // `name` is configurable=true on built-in functions —
     // delete should succeed and subsequent `hasOwn` should
@@ -2753,7 +2765,7 @@ test "later: Set methods accept any set-like (Map keys + has + size)" {
 fn expectScriptIntUnderGcPressure(source: []const u8, expected: i32) !void {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
     realm.heap.gc_threshold = 1;
     const v = switch (try evaluateScriptResult(&realm, source)) {
         .value, .yielded => |val| val,
@@ -2799,7 +2811,7 @@ test "GC: closures keep captured envs alive under gc_threshold=1" {
 fn expectScriptStringUnderGcPressure(source: []const u8, expected: []const u8) !void {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
     realm.heap.gc_threshold = 1;
     const v = switch (try evaluateScriptResult(&realm, source)) {
         .value, .yielded => |val| val,
@@ -2978,7 +2990,7 @@ test "GC: property-bag growth survives gc_threshold=1" {
 fn expectHeapBoundedAfterClassLoop(source: []const u8, slack: usize) !void {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
     realm.collectGarbage();
     const baseline_objects = realm.heap.objects.items.len;
     const baseline_functions = realm.heap.functions.items.len;
@@ -3194,7 +3206,7 @@ test "Array.prototype.reduceRight: empty array without initial throws TypeError"
 fn expectScriptThrowsWithBuiltins(source: []const u8) !void {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
     const result = try evaluateScriptResult(&realm, source);
     switch (result) {
         .value, .yielded => return error.ExpectedThrow,
@@ -4235,7 +4247,7 @@ test "globalThis: late-installed host binding is visible via globalThis.X" {
     // catch-up. This pins the test262 `$DONE` / `$262` pattern.
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
     // Install a fresh global after intrinsics setup.
     const name_v = try realm.heap.allocateString("LATE_HOST_BINDING");
     _ = name_v;
@@ -4257,7 +4269,7 @@ test "globalThis: bare-identifier read sees a late-installed host binding" {
     // forks the two would surface here too.
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
     try realm.globals.put(realm.allocator, "LATE_BARE_BINDING", @import("value.zig").Value.fromInt32(7));
     const v = switch (try evaluateScriptResult(&realm, "LATE_BARE_BINDING + 1")) {
         .value, .yielded => |val| val,
@@ -4355,7 +4367,7 @@ test "String.prototype.at: negative wraps from end (supplementary)" {
 test "String.prototype.at: out of range returns undefined" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
     const v = switch (try evaluateScriptResult(&realm, "\"abc\".at(99);")) {
         .value, .yielded => |val| val,
         .thrown => return error.UncaughtException,
@@ -4460,7 +4472,7 @@ test "String.prototype.lastIndexOf: lone surrogate haystack" {
 test "String.prototype.startsWith: ASCII" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
     const v = switch (try evaluateScriptResult(&realm, "\"abc\".startsWith(\"ab\");")) {
         .value, .yielded => |val| val,
         .thrown => return error.UncaughtException,
@@ -4475,7 +4487,7 @@ test "String.prototype.startsWith: position is code-unit indexed (supplementary)
     // mid-supplementary and return false.
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
     const v = switch (try evaluateScriptResult(&realm, "\"a\\u{1F600}c\".startsWith(\"c\", 3);")) {
         .value, .yielded => |val| val,
         .thrown => return error.UncaughtException,
@@ -4486,7 +4498,7 @@ test "String.prototype.startsWith: position is code-unit indexed (supplementary)
 test "String.prototype.endsWith: ASCII" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
     const v = switch (try evaluateScriptResult(&realm, "\"abc\".endsWith(\"bc\");")) {
         .value, .yielded => |val| val,
         .thrown => return error.UncaughtException,
@@ -4499,7 +4511,7 @@ test "String.prototype.endsWith: endPosition is code-unit indexed" {
     // length 2 ending at unit 3 is exactly the supplementary pair.
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
     const v = switch (try evaluateScriptResult(&realm, "\"a\\u{1F600}c\".endsWith(\"\\u{1F600}\", 3);")) {
         .value, .yielded => |val| val,
         .thrown => return error.UncaughtException,
@@ -4546,7 +4558,7 @@ test "String.prototype.includes: position is code-unit indexed" {
     // off-by-one.
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    try realm.installBuiltins();
+    try installBuiltinsAllFeatures(&realm);
     const v = switch (try evaluateScriptResult(&realm, "\"a\\u{1F600}c\".includes(\"c\", 3);")) {
         .value, .yielded => |val| val,
         .thrown => return error.UncaughtException,
