@@ -7057,35 +7057,29 @@ fn runFrames(
                             .uncaught => |ex| return .{ .thrown = ex },
                         }
                     }
-                    // §23.2.4 IntegerIndex — typed-array
-                    // numeric index access reads from the
-                    // backing buffer. For length-tracking views
-                    // over a resizable ArrayBuffer the live length
-                    // is recomputed against the (possibly grown
-                    // or shrunk) buffer; a fixed-length view past
-                    // the current buffer end reports undefined.
+                    // §10.4.5.4 Integer-Indexed Exotic [[Get]] — when
+                    // the key is a CanonicalNumericIndexString, the
+                    // lookup is intercepted by IntegerIndexedElementGet.
+                    // Per §10.4.5.9: any non-IsValidIntegerIndex form
+                    // (non-integer, -0, negative, ≥ length, detached
+                    // buffer) returns `undefined` WITHOUT walking the
+                    // prototype chain. So `ta["-0"]`, `ta["1.1"]`,
+                    // `ta["-1"]`, `ta["1000000000000000000000"]` all
+                    // bypass an accessor installed on
+                    // TypedArray.prototype["<same key>"].
                     if (obj.typed_view) |tv| {
-                        if (std.fmt.parseInt(usize, key_slice, 10)) |idx| {
-                            if (tv.viewed.array_buffer) |buf| {
+                        const ta_mod = @import("builtins/typed_array.zig");
+                        if (ta_mod.canonicalNumericIndex(key_slice)) |num| {
+                            if (ta_mod.isValidIntegerIndexPub(tv, num)) {
+                                const buf = tv.viewed.array_buffer.?;
                                 const elem_size = tv.kind.elementSize();
-                                const live_len: usize = if (tv.length_tracking) blk: {
-                                    if (tv.byte_offset > buf.len) break :blk 0;
-                                    break :blk (buf.len - tv.byte_offset) / elem_size;
-                                } else blk: {
-                                    if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
-                                    break :blk tv.length;
-                                };
-                                if (idx < live_len) {
-                                    const byte_pos = tv.byte_offset + idx * elem_size;
-                                    if (byte_pos + elem_size <= buf.len) {
-                                        acc = intrinsics_mod.readTypedElement(realm, buf, tv.kind, byte_pos);
-                                        continue;
-                                    }
-                                }
+                                const idx: usize = @intFromFloat(num);
+                                acc = intrinsics_mod.readTypedElement(realm, buf, tv.kind, tv.byte_offset + idx * elem_size);
+                            } else {
+                                acc = Value.undefined_;
                             }
-                            acc = Value.undefined_;
                             continue;
-                        } else |_| {}
+                        }
                     }
                     // §10.1.8 [[Get]] — accessor wins over data.
                     // Mirror the `lda_property` handling so
@@ -7259,18 +7253,23 @@ fn runFrames(
                 // [[Set]] / IntegerIndexedElementSet writes
                 // straight to the backing buffer after the
                 // mandatory type conversion of `value`.
+                // CanonicalNumericIndexString-shaped keys intercept
+                // the OrdinarySet path: a valid integer index writes
+                // through; an invalid one (NaN/Infinity/-0/non-integer/
+                // negative/out-of-bounds) silently drops after the
+                // ToNumber/ToBigInt side effects fire.
                 if (heap_mod.valueAsPlainObject(recv)) |obj| {
                     if (obj.typed_view) |tv| {
-                        if (std.fmt.parseInt(usize, key_slice, 10)) |idx| {
-                            // §10.4.5.13 IntegerIndexedElementSet step 1-2 —
-                            // type coercion runs BEFORE the bounds /
-                            // detached check. A BigInt typed array
-                            // calls ToBigInt(value); every other kind
-                            // calls ToNumber(value). Either coercion
-                            // can throw (Symbol → TypeError; undefined
-                            // → TypeError for BigInt; user valueOf), so
-                            // it must surface before the silent drop on
-                            // an out-of-bounds index.
+                        const ta_mod = @import("builtins/typed_array.zig");
+                        if (ta_mod.canonicalNumericIndex(key_slice)) |num| {
+                            // §10.4.5.13 SetTypedArrayElement — type
+                            // coercion runs FIRST, with full side-effect
+                            // visibility (user `valueOf` / `Symbol.toPrimitive`
+                            // may throw or detach the buffer). After the
+                            // coercion settles we re-check IsValidIntegerIndex;
+                            // an invalid index (NaN, -0, non-integer,
+                            // negative, ≥ length, detached) silently drops the
+                            // write. [[Set]] still returns true in both branches.
                             const coerce_outcome: union(enum) { value: Value, thrown: Value } = if (tv.kind.isBigInt()) blk: {
                                 const r = @import("builtins/bigint.zig").toBigIntValue(realm, acc) catch |err| switch (err) {
                                     error.OutOfMemory => return error.OutOfMemory,
@@ -7302,68 +7301,17 @@ fn runFrames(
                                     continue;
                                 },
                             };
-                            // §10.4.5.16 IsValidIntegerIndex —
-                            // length-tracking views over a
-                            // resizable buffer use the live length;
-                            // out-of-bounds writes are silently
-                            // dropped per spec (after the mandatory
-                            // ToNumber/ToBigInt above).
-                            if (tv.viewed.array_buffer) |buf| {
-                                const elem_size = tv.kind.elementSize();
-                                const live_len: usize = if (tv.length_tracking) blk: {
-                                    if (tv.byte_offset > buf.len) break :blk 0;
-                                    break :blk (buf.len - tv.byte_offset) / elem_size;
-                                } else blk: {
-                                    if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
-                                    break :blk tv.length;
-                                };
-                                if (idx < live_len) {
-                                    const byte_pos = tv.byte_offset + idx * elem_size;
-                                    if (byte_pos + elem_size <= buf.len) {
-                                        intrinsics_mod.writeTypedElement(buf, tv.kind, byte_pos, coerced);
-                                    }
-                                }
-                            }
-                            continue;
-                        } else |_| {}
-                        // §10.4.5.5 [[Set]] step 2.b — `CanonicalNumericIndexString`
-                        // covers more than non-negative integers: "1.1", "-0",
-                        // "-1", "NaN", "Infinity" all map to numbers. Those
-                        // route to `IntegerIndexedElementSet`, which performs
-                        // the ToNumber/ToBigInt coercion (observable
-                        // `valueOf` side-effects) and then silently drops the
-                        // store because `IsValidIntegerIndex` returns false.
-                        // [[Set]] still returns `true`, so don't fall through
-                        // to OrdinarySet (which would store a sticky property).
-                        if (isCanonicalNumericIndexString(key_slice)) {
-                            if (tv.kind.isBigInt()) {
-                                _ = @import("builtins/bigint.zig").toBigIntValue(realm, acc) catch |err| switch (err) {
-                                    error.OutOfMemory => return error.OutOfMemory,
-                                    else => {
-                                        const ex = consumePendingException(realm) orelse try makeTypeError(realm, "TypedArray element type-coercion failed");
-                                        f.ip = ip;
-                                        f.accumulator = acc;
-                                        committed = true;
-                                        if (!try unwindThrow(allocator, realm, frames, ex)) {
-                                            return .{ .thrown = ex };
-                                        }
-                                        continue;
-                                    },
-                                };
-                            } else {
-                                _ = intrinsics_mod.toNumber(realm, acc) catch |err| switch (err) {
-                                    error.OutOfMemory => return error.OutOfMemory,
-                                    error.NativeThrew => {
-                                        const ex = consumePendingException(realm) orelse try makeTypeError(realm, "TypedArray element type-coercion failed");
-                                        f.ip = ip;
-                                        f.accumulator = acc;
-                                        committed = true;
-                                        if (!try unwindThrow(allocator, realm, frames, ex)) {
-                                            return .{ .thrown = ex };
-                                        }
-                                        continue;
-                                    },
-                                };
+                            // Re-fetch the live view (a user `valueOf` could
+                            // have detached / shrunk the buffer between
+                            // ToNumber and the write).
+                            const live_tv = obj.typed_view orelse {
+                                continue;
+                            };
+                            if (ta_mod.isValidIntegerIndexPub(live_tv, num)) {
+                                const buf = live_tv.viewed.array_buffer.?;
+                                const elem_size = live_tv.kind.elementSize();
+                                const idx: usize = @intFromFloat(num);
+                                intrinsics_mod.writeTypedElement(buf, live_tv.kind, live_tv.byte_offset + idx * elem_size, coerced);
                             }
                             continue;
                         }
@@ -7952,14 +7900,20 @@ pub fn isCanonicalNumericIndexString(s: []const u8) bool {
     if (std.mem.eql(u8, s, "NaN")) return true;
     if (std.mem.eql(u8, s, "Infinity")) return true;
     if (std.mem.eql(u8, s, "-Infinity")) return true;
-    // Parse as a JS-style number. `std.fmt.parseFloat` accepts the
-    // strict numeric grammar Cynic needs here (no hex / no leading
-    // `+`); reject NaN result to filter junk like "abc". The
-    // canonical-string round-trip check is over-strict for our
-    // purpose — IntegerIndexedElementSet drops on any non-valid
-    // index anyway, so "01" / "1.10" both fall into the drop path.
+    // §7.1.21 CanonicalNumericIndexString — the spec requires the
+    // strict round-trip `ToString(ToNumber(S)) === S`. The test262
+    // fixtures hand-pick keys that PARSE as numbers but FAIL the
+    // round-trip (e.g. `"1.0"`, `"+1"`, `"1000000000000000000000"`,
+    // `"0.0000001"`); those must NOT route to IntegerIndexedElementSet
+    // — they're ordinary properties. `formatDoubleSafe` mirrors
+    // §6.1.6.1.20 NumberToString (exponential notation past 10^21,
+    // etc.), so it produces the JS canonical form for the
+    // round-trip check.
     const d = std.fmt.parseFloat(f64, s) catch return false;
-    return !std.math.isNan(d);
+    if (std.math.isNan(d)) return false;
+    var buf: [64]u8 = undefined;
+    const printed = formatDoubleSafe(&buf, d);
+    return std.mem.eql(u8, printed, s);
 }
 
 fn computedKeyToString(v: Value, scratch: *[64]u8) []const u8 {
@@ -8023,6 +7977,24 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
     _ = realm;
     const obj_mod = @import("object.zig");
     if (heap_mod.valueAsPlainObject(recv)) |obj| {
+        // §10.4.5.6 [[Delete]] for Integer-Indexed Exotic Objects.
+        // CanonicalNumericIndexString(P) of "-0", "1.5", "-1",
+        // "Infinity" etc. produces a non-undefined numericIndex. Any
+        // such key is intercepted here BEFORE OrdinaryDelete. Per
+        // ES2024 align-detached-buffer-semantics: a non-
+        // IsValidIntegerIndex form returns true (silently succeeds);
+        // a valid index returns false (the slot is permanent →
+        // TypeError under strict-mode `delete`). Non-canonical
+        // numeric keys (e.g. "1.0", "+1", "0.0000001") fall through
+        // to OrdinaryDelete, which lets the ordinary property bag
+        // surface them normally.
+        if (obj.typed_view) |tv| {
+            const ta_mod = @import("builtins/typed_array.zig");
+            if (ta_mod.canonicalNumericIndex(key)) |num| {
+                if (!ta_mod.isValidIntegerIndexPub(tv, num)) return .{ .ok = true };
+                return .{ .throw_typeerror = "Cannot delete TypedArray index property" };
+            }
+        }
         // Accessor descriptor — accessors store their own
         // configurable bit in `property_flags` keyed by the
         // accessor name. If absent we treat as configurable=true

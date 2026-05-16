@@ -689,26 +689,27 @@ pub const JSObject = struct {
         // the interpreter's sta_property bytecode instead. Drop
         // out-of-bounds writes silently per spec.
         if (self.typed_view) |tv| {
-            if (std.fmt.parseInt(usize, key, 10)) |idx_u| {
-                if (tv.viewed.array_buffer) |buf| {
+            // §10.4.5.5 [[Set]] for Integer-Indexed Exotic Objects —
+            // the intercept gate is CanonicalNumericIndexString, NOT
+            // Zig `parseInt` (which accepts a leading `+` / `-` that
+            // CanonicalNumericIndexString rejects). Without the
+            // round-trip check, keys like "+1" / "01" land in the
+            // OOB-drop branch and never make it to the property bag,
+            // making `Reflect.set(ta, "+1", v)` a silent no-op.
+            const ta_mod = @import("builtins/typed_array.zig");
+            if (ta_mod.canonicalNumericIndex(key)) |num| {
+                if (ta_mod.isValidIntegerIndexPub(tv, num)) {
+                    const buf = tv.viewed.array_buffer.?;
                     const elem_size = tv.kind.elementSize();
-                    const live_len: usize = if (tv.length_tracking) blk: {
-                        if (tv.byte_offset > buf.len) break :blk 0;
-                        break :blk (buf.len - tv.byte_offset) / elem_size;
-                    } else blk: {
-                        if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
-                        break :blk tv.length;
-                    };
-                    if (idx_u < live_len) {
-                        const byte_pos = tv.byte_offset + idx_u * elem_size;
-                        if (byte_pos + elem_size <= buf.len) {
-                            const intrinsics_mod = @import("intrinsics.zig");
-                            intrinsics_mod.writeTypedElement(buf, tv.kind, byte_pos, v);
-                        }
-                    }
+                    const idx: usize = @intFromFloat(num);
+                    const intrinsics_mod = @import("intrinsics.zig");
+                    intrinsics_mod.writeTypedElement(buf, tv.kind, tv.byte_offset + idx * elem_size, v);
                 }
+                // CanonicalNumericIndex keys (whether valid or OOB)
+                // never land in the ordinary property bag — that's
+                // the typed-array exotic's whole point.
                 return;
-            } else |_| {}
+            }
         }
         try self.properties.put(allocator, key, v);
     }

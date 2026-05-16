@@ -2908,8 +2908,14 @@ pub fn canonicalNumericIndex(s: []const u8) ?f64 {
     }
     if (i != s.len) return null;
     const n = std.fmt.parseFloat(f64, s) catch return null;
+    // §7.1.21 CanonicalNumericIndexString — round-trip via the
+    // ECMAScript Number.prototype.toString (§6.1.6.1.20). The
+    // shared `formatDoubleSafe` helper produces the JS form
+    // (`1e+21` past 10^21, `0.0000001` etc.), which is what the
+    // spec compares against. Plain `{d}` would emit a decimal
+    // expansion for `1e21` and falsely accept "1000000000000000000000".
     var buf: [64]u8 = undefined;
-    const printed = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return null;
+    const printed = @import("../interpreter.zig").formatDoubleSafe(&buf, n);
     if (!std.mem.eql(u8, printed, s)) return null;
     return n;
 }
@@ -2918,9 +2924,18 @@ pub const TypedArrayDefineResult = enum { applied, reject };
 
 /// §10.4.5.3 [[DefineOwnProperty]] for Integer-Indexed Exotic Objects.
 /// Caller has already passed `key` through CanonicalNumericIndexString.
-/// Returns `.applied` if the value (if any) was written to the typed
-/// slot; `.reject` if the spec says return false (out-of-bounds,
-/// non-integer, non-default descriptor flags, detached buffer).
+/// Per current spec, IsValidIntegerIndex(O, numericIndex) is checked
+/// FIRST (rejecting NaN, ±Inf, non-integer, -0, negative, ≥ length,
+/// detached buffer). Only on success does step vi run
+/// SetTypedArrayElement, which calls ToNumber / ToBigInt with full
+/// side-effect observability — a user `valueOf` can throw or detach
+/// the buffer mid-flight (the second IsValidIntegerIndex check
+/// inside SetTypedArrayElement then silently drops the write).
+///
+/// Returns `.applied` if the descriptor was accepted (write done or
+/// dropped per spec; no further action on the caller's side);
+/// `.reject` if the spec says return false (invalid index, non-default
+/// descriptor flags, accessor on top of a typed slot).
 pub fn typedArrayDefineOwnProperty(
     realm: *Realm,
     obj: *JSObject,
@@ -2936,18 +2951,63 @@ pub fn typedArrayDefineOwnProperty(
     writable: bool,
 ) NativeError!TypedArrayDefineResult {
     const tv = obj.typed_view orelse unreachable;
-    if (std.math.isNan(num)) return .reject;
-    if (std.math.isInf(num)) return .reject;
-    if (@trunc(num) != num) return .reject;
-    if (num == 0.0 and std.math.signbit(num)) return .reject;
-    if (num < 0) return .reject;
-    const idx: usize = @intFromFloat(num);
-    const buf = tv.viewed.array_buffer orelse return .reject;
-    // §10.4.5.16 IsValidIntegerIndex — live length for length-
-    // tracking views; for fixed-length views the snapshot, but
-    // gated on IsTypedArrayOutOfBounds (a shrunk resizable buffer
-    // can leave a fixed-length view entirely OOB, in which case
-    // every index is invalid).
+    // §10.4.5.3 step b.i — IsValidIntegerIndex(O, numericIndex).
+    // Rejects NaN, ±Infinity, non-integer, -0, negatives, ≥ length,
+    // and any index against a detached or OOB-resizable view.
+    if (!isValidIntegerIndex(tv, num)) return .reject;
+    // §10.4.5.3 steps b.ii-v — descriptor must default to
+    // {writable: true, enumerable: true, configurable: true}.
+    // Any explicit `false` (or accessor shape) rejects.
+    if (is_accessor) return .reject;
+    if (has_configurable and !configurable) return .reject;
+    if (has_enumerable and !enumerable) return .reject;
+    if (has_writable and !writable) return .reject;
+    if (has_value) {
+        // §10.4.5.3 step b.vi → SetTypedArrayElement(O, idx, value).
+        // ToNumber/ToBigInt fires with full observability — a user
+        // `valueOf` may throw (caller surfaces as TypeError) or detach
+        // the backing buffer. After coercion we re-check
+        // IsValidIntegerIndex (spec: SetTypedArrayElement step 4); a
+        // detach turns the write into a silent no-op while still
+        // returning `.applied` so the caller reports the [[DefineOwnProperty]]
+        // result as true.
+        const coerced = try coerceForTypedSlot(realm, tv.kind, value);
+        const live_tv = obj.typed_view orelse return .applied;
+        if (!isValidIntegerIndex(live_tv, num)) return .applied;
+        const buf = live_tv.viewed.array_buffer orelse return .applied;
+        const elem_size = live_tv.kind.elementSize();
+        const idx: usize = @intFromFloat(num);
+        writeTypedElement(buf, live_tv.kind, live_tv.byte_offset + idx * elem_size, coerced);
+    }
+    return .applied;
+}
+
+/// Public façade over `isValidIntegerIndex` for callers outside
+/// this file (interpreter `delete`, the `[[HasProperty]]` /
+/// `[[Get]]` / `[[Set]]` fallthrough sites in `object.zig` /
+/// `reflect.zig`). The internal callers stay on the unexported
+/// helper.
+pub fn isValidIntegerIndexPub(tv: ObjMod.TypedView, num: f64) bool {
+    return isValidIntegerIndex(tv, num);
+}
+
+/// §10.4.5.13 IsValidIntegerIndex — true iff `num` is a finite
+/// non-negative integer that doesn't coincide with `-0`, lies within
+/// the current live length of the view, and the backing buffer is
+/// still attached and big enough to cover the slot. Floats above
+/// the usize range (e.g. `1e21`, an in-spec CanonicalNumericIndex
+/// that exceeds any conceivable buffer length) short-circuit to
+/// false before the `@intFromFloat` cast — without the guard the
+/// safety-checked truncation panics on `integer part of floating
+/// point value out of bounds`.
+fn isValidIntegerIndex(tv: ObjMod.TypedView, num: f64) bool {
+    if (std.math.isNan(num)) return false;
+    if (std.math.isInf(num)) return false;
+    if (@trunc(num) != num) return false;
+    if (num == 0.0 and std.math.signbit(num)) return false;
+    if (num < 0) return false;
+    if (num >= @as(f64, @floatFromInt(std.math.maxInt(usize)))) return false;
+    const buf = tv.viewed.array_buffer orelse return false;
     const elem_size = tv.kind.elementSize();
     const live_len: usize = if (tv.length_tracking) blk: {
         if (tv.byte_offset > buf.len) break :blk 0;
@@ -2956,31 +3016,24 @@ pub fn typedArrayDefineOwnProperty(
         if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
         break :blk tv.length;
     };
-    if (idx >= live_len) return .reject;
-    if (tv.byte_offset + (idx + 1) * elem_size > buf.len) return .reject;
-    if (is_accessor) return .reject;
-    if (has_configurable and !configurable) return .reject;
-    if (has_enumerable and !enumerable) return .reject;
-    if (has_writable and !writable) return .reject;
-    if (has_value) {
-        switch (tv.kind) {
-            .bigint64, .biguint64 => {
-                if (heap_mod.valueAsBigInt(value) == null) {
-                    return throwTypeError(realm, "Cannot convert non-BigInt value to BigInt");
-                }
-            },
-            else => {
-                if (heap_mod.valueAsBigInt(value) != null) {
-                    return throwTypeError(realm, "Cannot convert a BigInt value to a number");
-                }
-                if (heap_mod.valueAsSymbol(value) != null) {
-                    return throwTypeError(realm, "Cannot convert a Symbol value to a number");
-                }
-            },
-        }
-        writeTypedElement(buf, tv.kind, tv.byte_offset + idx * elem_size, value);
+    const idx: usize = @intFromFloat(num);
+    if (idx >= live_len) return false;
+    if (tv.byte_offset + (idx + 1) * elem_size > buf.len) return false;
+    return true;
+}
+
+/// §10.4.5.16 SetTypedArrayElement step 1-2 — coerce the inbound
+/// JS value to the typed slot's element type. BigInt views run
+/// `? ToBigInt(value)` (rejects Number / null / undefined / Symbol);
+/// Number views run `? ToNumber(value)` (rejects BigInt / Symbol).
+/// Both sides observe user-defined `valueOf` / `Symbol.toPrimitive`
+/// hooks, so callers MUST treat this as a side-effecting operation
+/// (a user hook can detach the backing buffer mid-coercion).
+pub fn coerceForTypedSlot(realm: *Realm, kind: ObjMod.TypedKind, value: Value) NativeError!Value {
+    switch (kind) {
+        .bigint64, .biguint64 => return try @import("bigint.zig").toBigIntValue(realm, value),
+        else => return try @import("../intrinsics.zig").toNumber(realm, value),
     }
-    return .applied;
 }
 
 /// §10.4.5.2 [[GetOwnProperty]] for Integer-Indexed Exotic Objects.
@@ -2989,27 +3042,10 @@ pub fn typedArrayDefineOwnProperty(
 /// `null` for any key that isn't a valid integer index.
 pub fn typedArrayGetOwnPropertyValue(realm: *Realm, obj: *JSObject, num: f64) ?Value {
     const tv = obj.typed_view orelse return null;
-    if (std.math.isNan(num)) return null;
-    if (std.math.isInf(num)) return null;
-    if (@trunc(num) != num) return null;
-    if (num == 0.0 and std.math.signbit(num)) return null;
-    if (num < 0) return null;
-    const idx: usize = @intFromFloat(num);
+    if (!isValidIntegerIndex(tv, num)) return null;
     const buf = tv.viewed.array_buffer orelse return null;
-    // §10.4.5.2 + §10.4.5.16 — live length for length-tracking
-    // views; for fixed-length views the snapshot, but gated on
-    // IsTypedArrayOutOfBounds (a shrunk resizable buffer can
-    // leave a fixed-length view entirely OOB).
     const elem_size = tv.kind.elementSize();
-    const live_len: usize = if (tv.length_tracking) blk: {
-        if (tv.byte_offset > buf.len) break :blk 0;
-        break :blk (buf.len - tv.byte_offset) / elem_size;
-    } else blk: {
-        if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
-        break :blk tv.length;
-    };
-    if (idx >= live_len) return null;
-    if (tv.byte_offset + (idx + 1) * elem_size > buf.len) return null;
+    const idx: usize = @intFromFloat(num);
     return readTypedElement(realm, buf, tv.kind, tv.byte_offset + idx * elem_size);
 }
 

@@ -190,10 +190,47 @@ pub fn ownPropertyKeysOrdered(
             }
         }
     }
+    // §10.4.5.7 [[OwnPropertyKeys]] for Integer-Indexed Exotic
+    // Objects — every index in [0, [[ArrayLength]]) is an own
+    // String-keyed property in ascending numeric order, ahead of
+    // the ordinary property keys. Length-tracking views over a
+    // resizable ArrayBuffer report against the current live
+    // length; a fixed-length view past the buffer's current
+    // bound reports zero indices (per §10.4.5.13
+    // IsValidIntegerIndex's IsTypedArrayOutOfBounds gate).
+    if (obj.typed_view) |tv| {
+        const live_len: u32 = blk: {
+            const buf = tv.viewed.array_buffer orelse break :blk 0;
+            const elem_size = tv.kind.elementSize();
+            if (tv.length_tracking) {
+                if (tv.byte_offset > buf.len) break :blk 0;
+                break :blk @intCast((buf.len - tv.byte_offset) / elem_size);
+            }
+            if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
+            break :blk @intCast(tv.length);
+        };
+        var ti: u32 = 0;
+        while (ti < live_len) : (ti += 1) {
+            var ibuf: [16]u8 = undefined;
+            const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ti}) catch continue;
+            const owned = realm.heap.allocateString(ks) catch return error.OutOfMemory;
+            integer_keys.append(realm.allocator, .{ .idx = ti, .key = owned.bytes }) catch return error.OutOfMemory;
+        }
+    }
     var it = obj.properties.iterator();
     while (it.next()) |entry| {
         const k = entry.key_ptr.*;
         if (std.mem.startsWith(u8, k, "__cynic_")) continue;
+        // §10.4.5.7 — for typed arrays, the integer-index slots
+        // are already pulled from the live view above; any
+        // matching keys lingering in `properties` (e.g. from a
+        // historical bypass-set) must NOT be reported twice and
+        // are also NOT eligible to land in the ordinary keys
+        // bucket (the spec says integer-indexed keys live only
+        // in the prefix). Drop them.
+        if (obj.typed_view != null) {
+            if (canonicalIntegerIndex(k)) |_| continue;
+        }
         if (canonicalIntegerIndex(k)) |i| {
             integer_keys.append(realm.allocator, .{ .idx = i, .key = k }) catch return error.OutOfMemory;
         } else {
@@ -206,6 +243,9 @@ pub fn ownPropertyKeysOrdered(
         const k = entry.key_ptr.*;
         if (std.mem.startsWith(u8, k, "__cynic_")) continue;
         if (obj.properties.contains(k)) continue; // already counted
+        if (obj.typed_view != null) {
+            if (canonicalIntegerIndex(k)) |_| continue;
+        }
         if (canonicalIntegerIndex(k)) |i| {
             integer_keys.append(realm.allocator, .{ .idx = i, .key = k }) catch return error.OutOfMemory;
         } else {
@@ -255,14 +295,35 @@ pub fn ownPropertyKeysOrdered(
         for (sym_keys.items) |k| string_keys.append(realm.allocator, k) catch return error.OutOfMemory;
     }
 
-    const total = integer_keys.items.len + string_keys.items.len;
+    // §7.3.21 OrdinaryOwnPropertyKeys final ordering — integer
+    // indices first (already sorted), then String keys in insertion
+    // order, then Symbol keys in insertion order. Cynic flattens
+    // Symbols to `@@<name>` / `<sym:N>` prop_keys; partition the
+    // string slot accordingly so a typed array (or any object
+    // with mixed string + symbol keys) reports the spec order.
+    var ord_str: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer ord_str.deinit(realm.allocator);
+    var ord_sym: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer ord_sym.deinit(realm.allocator);
+    for (string_keys.items) |k| {
+        if (std.mem.startsWith(u8, k, "@@") or std.mem.startsWith(u8, k, "<sym:")) {
+            ord_sym.append(realm.allocator, k) catch return error.OutOfMemory;
+        } else {
+            ord_str.append(realm.allocator, k) catch return error.OutOfMemory;
+        }
+    }
+    const total = integer_keys.items.len + ord_str.items.len + ord_sym.items.len;
     const out = realm.allocator.alloc([]const u8, total) catch return error.OutOfMemory;
     var i: usize = 0;
     for (integer_keys.items) |e| {
         out[i] = e.key;
         i += 1;
     }
-    for (string_keys.items) |k| {
+    for (ord_str.items) |k| {
+        out[i] = k;
+        i += 1;
+    }
+    for (ord_sym.items) |k| {
         out[i] = k;
         i += 1;
     }
@@ -1072,8 +1133,11 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
         // §10.1.6.3 ValidateAndApplyPropertyDescriptor step 2:
         // when no current descriptor exists, the object must be
         // [[Extensible]] — otherwise return false (with Throw=true
-        // this surfaces as a TypeError).
+        // this surfaces as a TypeError). Reflect.defineProperty
+        // observes the boolean instead; mark the rejected flag so
+        // its catch can translate.
         if (!had_own and !target.extensible) {
+            realm.define_own_property_rejected = true;
             return throwTypeError(realm, "Object.defineProperty: object is not extensible");
         }
 

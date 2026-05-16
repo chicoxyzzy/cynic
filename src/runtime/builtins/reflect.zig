@@ -300,58 +300,50 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     //   only observable on the same-receiver path).
     // [[Set]] always returns `true` in both branches.
     if (target.typed_view) |tv| {
+        const ta_mod = @import("typed_array.zig");
         const has_receiver = args.len >= 4;
-        const receiver_v: Value = if (has_receiver) args[3] else arg;
         const same_receiver = blk: {
             if (!has_receiver) break :blk true;
+            const receiver_v: Value = args[3];
             if (heap_mod.valueAsPlainObject(receiver_v)) |r_obj| break :blk r_obj == target;
             break :blk false;
         };
-        if (std.fmt.parseInt(usize, key_slice, 10)) |idx| {
-            const valid_index = idx < tv.length;
+        // §10.4.5.5 [[Set]] for Integer-Indexed Exotic Objects —
+        // CanonicalNumericIndexString(P) gates the intercept. Shapes
+        // like "1.0", "+1", "1000000000000000000000", "0.0000001"
+        // fall through to OrdinarySet so an ordinary writable
+        // property can land on the typed array (matches the
+        // `key-is-not-canonical-index.js` fixture).
+        if (ta_mod.canonicalNumericIndex(key_slice)) |num| {
             if (same_receiver) {
-                const coerced: Value = if (tv.kind.isBigInt())
-                    try @import("bigint.zig").toBigIntValue(realm, v)
-                else
-                    try @import("../intrinsics.zig").toNumber(realm, v);
-                if (valid_index) {
-                    if (tv.viewed.array_buffer) |buf| {
-                        const elem_size = tv.kind.elementSize();
-                        @import("../intrinsics.zig").writeTypedElement(buf, tv.kind, tv.byte_offset + idx * elem_size, coerced);
-                    }
+                // Same-receiver path: SetTypedArrayElement always
+                // runs ToNumber / ToBigInt first (side effects
+                // visible) and then drops the write when
+                // IsValidIntegerIndex is false. [[Set]] returns true.
+                const coerced = try ta_mod.coerceForTypedSlot(realm, tv.kind, v);
+                const live_tv = target.typed_view orelse return Value.true_;
+                if (ta_mod.isValidIntegerIndexPub(live_tv, num)) {
+                    const buf = live_tv.viewed.array_buffer.?;
+                    const elem_size = live_tv.kind.elementSize();
+                    const idx: usize = @intFromFloat(num);
+                    @import("../intrinsics.zig").writeTypedElement(buf, live_tv.kind, live_tv.byte_offset + idx * elem_size, coerced);
                 }
                 return Value.true_;
             }
-            // Receiver != target: only TypedArraySetElement when
-            // valid; otherwise just return true without ToNumber.
-            if (!valid_index) return Value.true_;
-            // Fall through — Receiver != target AND in-bounds: per
-            // spec we still call OrdinarySet on Receiver (not on
-            // target), which is the existing `target.set` path
-            // below. That stores on `target` though, which would
-            // be wrong; but no test262 fixture exercises that
-            // path with a different in-bounds receiver, so we
-            // keep behaviour conservative and route through it.
-        } else |_| {
-            // §7.1.21 CanonicalNumericIndexString covers more than
-            // non-negative integers — "-1", "-0", "1.1", "NaN",
-            // "Infinity". §10.4.5.5 routes those to
-            // IntegerIndexedElementSet (same-receiver: coerce +
-            // silent-drop because IsValidIntegerIndex is false;
-            // different-receiver: silent return-true). [[Set]]
-            // returns `true` in both branches. Without this guard
-            // the fall-through OrdinarySet would stick the key on
-            // the TA as a regular property.
-            const interp = @import("../interpreter.zig");
-            if (interp.isCanonicalNumericIndexString(key_slice)) {
-                if (same_receiver) {
-                    _ = if (tv.kind.isBigInt())
-                        try @import("bigint.zig").toBigIntValue(realm, v)
-                    else
-                        try @import("../intrinsics.zig").toNumber(realm, v);
-                }
-                return Value.true_;
-            }
+            // Different-receiver path: spec step 2.b.ii — when the
+            // numeric index is invalid against the typed array, [[Set]]
+            // returns true *without* doing anything (no ToNumber).
+            if (!ta_mod.isValidIntegerIndexPub(tv, num)) return Value.true_;
+            // Different-receiver, in-bounds: spec step 3 — fall
+            // through to OrdinarySet(O, P, V, Receiver), which lands
+            // on the receiver. Cynic doesn't yet wire a full
+            // receiver-aware OrdinarySet through reflectSet; the
+            // residual fixtures gated on this behaviour
+            // (`Set/key-is-valid-index-reflect-set.js`) need a
+            // dedicated OrdinarySet helper to land. Returning true
+            // here keeps the spec-mandated boolean while leaving the
+            // receiver mutation as a known gap.
+            return Value.true_;
         }
     }
     // §10.4.2.1 Array exotic [[DefineOwnProperty]] — when writing
