@@ -158,9 +158,8 @@ const expect_array_prototype = [_][]const u8{
 };
 
 // TODO(spec): String.prototype.length is the receiver's length on
-// a wrapped String, plus §22.1.3.10 isWellFormed and §22.1.3.34
-// toWellFormed (ES2024). Not installed yet — pure additions once
-// the §22 build-out continues.
+// a wrapped String. The §22 build-out otherwise tracks ECMA-262
+// 2024 — isWellFormed / toWellFormed are wired below.
 const expect_string_prototype = [_][]const u8{
     "constructor",
     "at",
@@ -171,6 +170,7 @@ const expect_string_prototype = [_][]const u8{
     "endsWith",
     "includes",
     "indexOf",
+    "isWellFormed",
     "lastIndexOf",
     "localeCompare",
     "match",
@@ -191,6 +191,7 @@ const expect_string_prototype = [_][]const u8{
     "toLowerCase",
     "toString",
     "toUpperCase",
+    "toWellFormed",
     "trim",
     "trimEnd",
     "trimStart",

@@ -67,6 +67,10 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, sp, "match", stringMatch, 1);
     try installNativeMethodOnProto(realm, sp, "matchAll", stringMatchAll, 1);
     try installNativeMethodOnProto(realm, sp, "search", stringSearch, 1);
+    // §22.1.3.12 / §22.1.3.30 — ES2024 well-formed-Unicode helpers.
+    // Both have `length: 0` and do not take any arguments.
+    try installNativeMethodOnProto(realm, sp, "isWellFormed", stringIsWellFormed, 0);
+    try installNativeMethodOnProto(realm, sp, "toWellFormed", stringToWellFormed, 0);
     // §22.1.3.36 String.prototype[@@iterator] — yields each
     // code-point of the string (or a code unit at the unicode
     // boundary, but Cynic stores UTF-8 so we walk code points).
@@ -1622,20 +1626,205 @@ fn stringNormalize(realm: *Realm, this_value: Value, args: []const Value) Native
     return Value.fromString(s);
 }
 
-/// §22.1.3.4 String.prototype.codePointAt — UTF-8-aware.
-/// Returns the code point starting at byte index `pos` (treating
-/// `pos` as a UTF-16 code-unit index doesn't apply since Cynic
-/// strings are UTF-8). Out-of-range → undefined.
+/// §22.1.3.4 String.prototype.codePointAt — UTF-16-code-unit-
+/// indexed. Cynic's strings are stored as WTF-8: every BMP char
+/// (including lone surrogates D800-DFFF as 3-byte 0xED-AX-BY
+/// sequences) is 1 code unit; supplementary chars are stored as
+/// one 4-byte UTF-8 sequence but expose two code units (a high +
+/// low surrogate pair). The spec's CodePointAt(S, position)
+/// returns the astral codepoint at the *leading* surrogate index,
+/// and the bare trail surrogate value at the trail index. Out-of-
+/// range positions (< 0 or ≥ size) return undefined per step 5.
 fn stringCodePointAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
+    // §7.1.5 ToIntegerOrInfinity — NaN → 0; finite truncates to int.
     const pos_v = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
-    const pos = intrinsics.toInt(pos_v);
-    if (pos < 0 or pos >= s.bytes.len) return Value.undefined_;
-    const idx: usize = @intCast(pos);
-    const seq_len = std.unicode.utf8ByteSequenceLength(s.bytes[idx]) catch return Value.undefined_;
-    if (idx + seq_len > s.bytes.len) return Value.undefined_;
-    const cp = std.unicode.utf8Decode(s.bytes[idx .. idx + seq_len]) catch return Value.undefined_;
-    return Value.fromInt32(@intCast(cp));
+    const pos: i64 = if (pos_v.isInt32()) pos_v.asInt32() else blk: {
+        const d = pos_v.asDouble();
+        if (std.math.isNan(d)) break :blk 0;
+        if (std.math.isInf(d)) break :blk if (d > 0) std.math.maxInt(i32) else -1;
+        break :blk @intFromFloat(@trunc(d));
+    };
+    if (pos < 0) return Value.undefined_;
+    const target_unit: usize = @intCast(pos);
+    // Walk UTF-16 code units until we hit `target_unit`. The current
+    // byte cursor + unit cursor advance together: 1/2/3-byte UTF-8
+    // → 1 unit; 4-byte UTF-8 → 2 units, where landing on the second
+    // unit means "return the trail-surrogate code unit value".
+    var byte_pos: usize = 0;
+    var unit_pos: usize = 0;
+    while (byte_pos < s.bytes.len) {
+        const seq_len = utf8SeqLen(s.bytes[byte_pos]);
+        if (byte_pos + seq_len > s.bytes.len) return Value.undefined_;
+        if (seq_len == 4) {
+            // Astral codepoint occupies 2 UTF-16 units.
+            if (unit_pos == target_unit) {
+                const cp = std.unicode.utf8Decode(s.bytes[byte_pos .. byte_pos + 4]) catch return Value.undefined_;
+                return Value.fromInt32(@intCast(cp));
+            }
+            if (unit_pos + 1 == target_unit) {
+                const cp = std.unicode.utf8Decode(s.bytes[byte_pos .. byte_pos + 4]) catch return Value.undefined_;
+                // §11.1.4 UTF16EncodeCodePoint — trail surrogate of the pair.
+                const adjusted: u32 = @as(u32, @intCast(cp)) - 0x10000;
+                const trail: u16 = @intCast(0xDC00 + (adjusted & 0x3FF));
+                return Value.fromInt32(@intCast(trail));
+            }
+            byte_pos += 4;
+            unit_pos += 2;
+        } else {
+            if (unit_pos == target_unit) {
+                // §10.1.1 — for 1/2/3-byte WTF-8 the codepoint *is*
+                // a single UTF-16 code unit (BMP scalar or lone
+                // surrogate D800-DFFF). Decode it as a u16 value.
+                const cu = wtf8DecodeBmp(s.bytes[byte_pos..byte_pos + seq_len]) orelse return Value.undefined_;
+                return Value.fromInt32(@intCast(cu));
+            }
+            byte_pos += seq_len;
+            unit_pos += 1;
+        }
+    }
+    // Walked past the end without finding the unit → out of range.
+    return Value.undefined_;
+}
+
+/// Decode a 1/2/3-byte WTF-8 sequence into a single UTF-16 code
+/// unit. Returns null on malformed input. 3-byte sequences whose
+/// codepoint is in 0xD800..0xDFFF round-trip as the lone surrogate
+/// (Cynic's WTF-8 storage).
+fn wtf8DecodeBmp(bytes: []const u8) ?u16 {
+    if (bytes.len == 0) return null;
+    const b0 = bytes[0];
+    if (b0 < 0x80) return @intCast(b0);
+    if (bytes.len == 2) {
+        const cp = (@as(u16, b0 & 0x1F) << 6) | @as(u16, bytes[1] & 0x3F);
+        return cp;
+    }
+    if (bytes.len == 3) {
+        const cp = (@as(u16, b0 & 0x0F) << 12) | (@as(u16, bytes[1] & 0x3F) << 6) | @as(u16, bytes[2] & 0x3F);
+        return cp;
+    }
+    return null;
+}
+
+/// §22.1.3.12 String.prototype.isWellFormed — return true iff the
+/// receiver, viewed as a sequence of UTF-16 code units, contains
+/// no unpaired surrogate (§11.1.4 IsStringWellFormedUnicode).
+/// Cynic's WTF-8 storage exposes lone surrogates as 3-byte
+/// sequences in the U+D800..U+DFFF range; well-formed strings
+/// either contain 4-byte (astral) UTF-8 or non-surrogate 1/2/3-byte
+/// sequences. A *valid pair* (high 0xED 0xA0..0xAF + low 0xED
+/// 0xB0..0xBF in adjacent 3-byte sequences) also counts as well-
+/// formed because `+`-concatenation of two surrogate halves yields
+/// a logical pair even though Cynic stored them separately.
+fn stringIsWellFormed(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const s = try coerceThisToJSString(realm, this_value);
+    var i: usize = 0;
+    while (i < s.bytes.len) {
+        const b = s.bytes[i];
+        const seq_len = utf8SeqLen(b);
+        if (i + seq_len > s.bytes.len) return Value.fromBool(false);
+        if (isLoneHighSurrogateAt(s.bytes, i)) {
+            // Followed by a lone low surrogate? Treat as a paired
+            // surrogate-pair (formed at boundary by `+`-concat).
+            if (i + 6 <= s.bytes.len and isLoneLowSurrogateAt(s.bytes, i + 3)) {
+                i += 6;
+                continue;
+            }
+            return Value.fromBool(false);
+        }
+        if (isLoneLowSurrogateAt(s.bytes, i)) return Value.fromBool(false);
+        i += seq_len;
+    }
+    return Value.fromBool(true);
+}
+
+/// True iff bytes starting at `i` form a 3-byte WTF-8 high-surrogate
+/// sequence (codepoints 0xD800..0xDBFF, encoded as 0xED 0xA0..0xAF
+/// 0x80..0xBF). Out-of-bounds is treated as "no".
+fn isLoneHighSurrogateAt(bytes: []const u8, i: usize) bool {
+    if (i + 3 > bytes.len) return false;
+    if (bytes[i] != 0xED) return false;
+    return (bytes[i + 1] & 0xF0) == 0xA0;
+}
+
+/// True iff bytes starting at `i` form a 3-byte WTF-8 low-surrogate
+/// sequence (codepoints 0xDC00..0xDFFF, encoded as 0xED 0xB0..0xBF
+/// 0x80..0xBF).
+fn isLoneLowSurrogateAt(bytes: []const u8, i: usize) bool {
+    if (i + 3 > bytes.len) return false;
+    if (bytes[i] != 0xED) return false;
+    return (bytes[i + 1] & 0xF0) == 0xB0;
+}
+
+/// §22.1.3.30 String.prototype.toWellFormed — replace every
+/// unpaired surrogate code unit with U+FFFD REPLACEMENT CHARACTER.
+/// Adjacent WTF-8 surrogate-half sequences that form a valid pair
+/// (high followed by low) are folded into a single UTF-8 4-byte
+/// sequence so the result is genuine UTF-8.
+fn stringToWellFormed(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const s = try coerceThisToJSString(realm, this_value);
+    // Fast path — receivers without any lone surrogate round-trip
+    // without copying. A high-surrogate followed by a low-surrogate
+    // is *not* a lone surrogate; it still requires fold-up below.
+    var needs_rewrite = false;
+    {
+        var i: usize = 0;
+        while (i < s.bytes.len) {
+            const b = s.bytes[i];
+            const seq_len = utf8SeqLen(b);
+            if (i + seq_len > s.bytes.len) {
+                needs_rewrite = true;
+                break;
+            }
+            if (seq_len == 3 and b == 0xED and (s.bytes[i + 1] & 0xE0) == 0xA0) {
+                needs_rewrite = true;
+                break;
+            }
+            i += seq_len;
+        }
+    }
+    if (!needs_rewrite) return Value.fromString(s);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(realm.allocator);
+    // U+FFFD is `0xEF 0xBF 0xBD` in UTF-8.
+    const replacement = [_]u8{ 0xEF, 0xBF, 0xBD };
+    var i: usize = 0;
+    while (i < s.bytes.len) {
+        const b = s.bytes[i];
+        const seq_len = utf8SeqLen(b);
+        if (i + seq_len > s.bytes.len) {
+            buf.appendSlice(realm.allocator, &replacement) catch return error.OutOfMemory;
+            i += 1;
+            continue;
+        }
+        if (isLoneHighSurrogateAt(s.bytes, i)) {
+            if (i + 6 <= s.bytes.len and isLoneLowSurrogateAt(s.bytes, i + 3)) {
+                // §22.1.3.30 step 6.c — paired surrogate, emit as-is.
+                // Folding into a UTF-8 4-byte sequence would break
+                // String-value equality against the WTF-8 source
+                // (see returns-well-formed-string.js, which asserts
+                // `('a'+lead+trail+'d').toWellFormed() === 'a'+lead+trail+'d'`).
+                buf.appendSlice(realm.allocator, s.bytes[i .. i + 6]) catch return error.OutOfMemory;
+                i += 6;
+                continue;
+            }
+            buf.appendSlice(realm.allocator, &replacement) catch return error.OutOfMemory;
+            i += 3;
+            continue;
+        }
+        if (isLoneLowSurrogateAt(s.bytes, i)) {
+            buf.appendSlice(realm.allocator, &replacement) catch return error.OutOfMemory;
+            i += 3;
+            continue;
+        }
+        buf.appendSlice(realm.allocator, s.bytes[i .. i + seq_len]) catch return error.OutOfMemory;
+        i += seq_len;
+    }
+    const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
+    return Value.fromString(out);
 }
 
 /// §22.1.3.10 String.prototype.localeCompare — without ICU,
