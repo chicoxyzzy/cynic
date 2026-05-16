@@ -227,14 +227,22 @@ fn validateTypedArrayIfPresent(realm: *Realm, this_value: Value) NativeError!voi
 /// `.next()` calls (live length re-resolution in `arrayLikeIterStep`).
 pub fn arrayLikeValuesMethod(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
+    // §23.1.3.34 step 1 — Let O be ? ToObject(this value);
+    // ReturnIfAbrupt(O). Throws TypeError on null / undefined.
+    _ = try intrinsics.toObjectThis(realm, this_value);
     return makeArrayLikeIterator(realm, this_value, .values) catch return error.OutOfMemory;
 }
 pub fn arrayLikeKeysMethod(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
+    // §23.1.3.16 step 1 — ToObject(this value); throws on
+    // null / undefined before iterator construction.
+    _ = try intrinsics.toObjectThis(realm, this_value);
     return makeArrayLikeIterator(realm, this_value, .keys) catch return error.OutOfMemory;
 }
 pub fn arrayLikeEntriesMethod(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
+    // §23.1.3.5 step 1 — ToObject(this value).
+    _ = try intrinsics.toObjectThis(realm, this_value);
     return makeArrayLikeIterator(realm, this_value, .entries) catch return error.OutOfMemory;
 }
 /// TypedArray.prototype.{values, keys, entries} — §23.2.3.30 et al

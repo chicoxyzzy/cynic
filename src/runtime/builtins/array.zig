@@ -96,7 +96,38 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethodOnProto(realm, arr_proto, "values", collections.arrayLikeValuesMethod, 0);
         try installNativeMethodOnProto(realm, arr_proto, "keys", collections.arrayLikeKeysMethod, 0);
         try installNativeMethodOnProto(realm, arr_proto, "entries", collections.arrayLikeEntriesMethod, 0);
-        try installNativeMethodOnProto(realm, arr_proto, "@@iterator", collections.arrayLikeValuesMethod, 0);
+        // §23.1.3.34 — the initial value of `@@iterator` IS the
+        // `values` function (same object identity), not a parallel
+        // native. Alias the slot so `Array.prototype[Symbol.iterator]
+        // === Array.prototype.values`.
+        const values_v = arr_proto.get("values");
+        arr_proto.setWithFlags(realm.allocator, "@@iterator", values_v, .{
+            .writable = true, .enumerable = false, .configurable = true,
+        }) catch return error.OutOfMemory;
+        // §23.1.3.36 Array.prototype [ @@unscopables ] — a null-
+        // prototype object listing the post-ES5 methods to exclude
+        // from `with` scopes. The slot itself is
+        // `{w:F, e:F, c:T}` per the spec table; the inner data
+        // properties are `{w:T, e:T, c:T}`.
+        const u = realm.heap.allocateObject() catch return error.OutOfMemory;
+        u.prototype = null;
+        const ObjMod = @import("../object.zig");
+        const dflt = ObjMod.PropertyFlags.default;
+        const names = [_][]const u8{
+            "copyWithin", "entries", "fill", "find", "findIndex",
+            // §1.1 of the `array-find-from-last` proposal.
+            "findLast", "findLastIndex",
+            "flat", "flatMap", "includes", "keys", "values",
+            // `change-array-by-copy` adds these three but
+            // intentionally NOT `with`.
+            "toReversed", "toSorted", "toSpliced",
+        };
+        for (names) |n| {
+            u.setWithFlags(realm.allocator, n, Value.true_, dflt) catch return error.OutOfMemory;
+        }
+        arr_proto.setWithFlags(realm.allocator, "@@unscopables", heap_mod.taggedObject(u), .{
+            .writable = false, .enumerable = false, .configurable = true,
+        }) catch return error.OutOfMemory;
     }
     if (heap_mod.valueAsFunction(realm.globals.get("Array").?)) |arr_ctor| {
         // Replace the stub-constructor body with the real
@@ -675,8 +706,14 @@ fn arrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) Na
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         const v = try getPropertyChain(realm, obj, islice);
         if (v.isUndefined() or v.isNull()) continue;
+        // §23.1.3.32 step 6.b — Invoke(elt, "toLocaleString").
+        // For primitive elements (Boolean / Number / String /
+        // BigInt) the spec routes the call through the boxed
+        // wrapper; the method itself lives on `<Wrapper>.prototype`,
+        // so we must walk the proto chain (the bare `boxed.get`
+        // only sees own slots — Boolean wrappers have none).
         const boxed = try intrinsics.toObjectThis(realm, v);
-        const method_v = boxed.get("toLocaleString");
+        const method_v = try getPropertyChain(realm, boxed, "toLocaleString");
         var str_v: Value = v;
         if (heap_mod.valueAsFunction(method_v)) |_| {
             const outcome = interpreter.callValue(realm.allocator, realm, method_v, heap_mod.taggedObject(boxed), &.{}) catch |err| switch (err) {
