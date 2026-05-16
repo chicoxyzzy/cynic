@@ -210,6 +210,21 @@ pub const skip_ses_substrings = [_][]const u8{
     // `statementList/` tree (positive parsing tests) stays attempted.
     "language/statementList/eval-",
 
+    // `language/literals/regexp/*` — every failing fixture in this
+    // family probes RegExp parser reach via runtime `eval()`:
+    // `eval("/" + cu + "/")`, `eval("/(?<a\uD801>.)/")`, etc. The
+    // RegExp literal under test is genuinely parser-shaped, but the
+    // verification harness is `eval`, so the fixtures false-reject
+    // for the permanent SES carve-out (AGENTS.md "eval and runtime
+    // code construction") rather than a real regex-parser bug. The
+    // 20 `S7.8.5_A*` Sputnik variants share the prefix; the three
+    // V8 fixtures (7.8.5-1, named-groups/invalid-lone-surrogate-
+    // groupname, mongolian-vowel-separator-eval) are listed exactly.
+    "language/literals/regexp/S7.8.5_A",
+    "language/literals/regexp/7.8.5-1.js",
+    "language/literals/regexp/named-groups/invalid-lone-surrogate-groupname.js",
+    "language/literals/regexp/mongolian-vowel-separator-eval.js",
+
     // `language/statements/function/{13.0-8-s,13.0-12-s,13.0_4-17gs,
     // 13.1-2-s,13.1-4-s,13.2-10-s..13.2-19-s,name-unicode,
     // S13.2.2_A8_T3}` — every fixture in this Sputnik-era
