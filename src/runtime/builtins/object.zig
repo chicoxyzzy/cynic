@@ -1285,8 +1285,23 @@ fn objectDefineProperties(realm: *Realm, this_value: Value, args: []const Value)
 
 pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const target = argOr(args, 0, Value.undefined_);
-    const key = descriptorKey(realm, argOr(args, 1, Value.undefined_)) catch return error.OutOfMemory;
+    const raw_target = argOr(args, 0, Value.undefined_);
+    // §20.1.2.7 step 1 — `Let obj be ? ToObject(O)`. ES2015+
+    // primitive-coerces the argument (ES5 threw TypeError for
+    // non-object O). String primitives become a String exotic
+    // wrapper with own indexed-character and `length` descriptors
+    // per §10.4.3, so `Object.getOwnPropertyDescriptor('foo', '0')`
+    // returns `{value: 'f', writable: false, enumerable: true,
+    // configurable: false}`. Null / undefined still throw via
+    // `toObjectThis`.
+    const target = if (raw_target.isInt32() or raw_target.isDouble() or raw_target.isString() or raw_target.isBool() or heap_mod.isSymbol(raw_target) or heap_mod.isBigInt(raw_target))
+        heap_mod.taggedObject(try intrinsics.toObjectThis(realm, raw_target))
+    else
+        raw_target;
+    // §20.1.2.7 step 2 — `Let key be ? ToPropertyKey(P)`. Runs
+    // after ToObject so a poisoned ToPropertyKey side-effect
+    // can't fire when the target would already have thrown.
+    const key = try descriptorKey(realm, argOr(args, 1, Value.undefined_));
 
     // §10.5.5 Proxy [[GetOwnProperty]] — when target is a proxy,
     // dispatch through `handler.getOwnPropertyDescriptor`.
@@ -1445,7 +1460,16 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
 
 fn objectGetOwnPropertyDescriptors(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.getOwnPropertyDescriptors target is not an object");
+    const raw = argOr(args, 0, Value.undefined_);
+    // §20.1.2.8 step 1 — `Let obj be ? ToObject(O)`. ES2015+
+    // primitive-coerces the arg (string primitives become a
+    // String exotic wrapper with indexed-character descriptors
+    // per §10.4.3). Mirrors `getOwnPropertyDescriptor`.
+    const target = if (raw.isInt32() or raw.isDouble() or raw.isString() or raw.isBool() or heap_mod.isSymbol(raw) or heap_mod.isBigInt(raw))
+        heap_mod.taggedObject(try intrinsics.toObjectThis(realm, raw))
+    else
+        raw;
+    const obj = heap_mod.valueAsPlainObject(target) orelse return throwTypeError(realm, "Object.getOwnPropertyDescriptors target is not an object");
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.object_prototype;
     // §20.1.2.10 — walk OwnPropertyKeys(O), which on an Array
