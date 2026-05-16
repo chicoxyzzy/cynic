@@ -62,12 +62,54 @@ pub const ClassError = error{
 /// `home_object = ctor.prototype` (so `super` from a static
 /// method walks the static chain), install on `ctor`.
 /// 8. Return the constructor as `acc`.
+/// §15.7.14 step 31 — every evaluation of a ClassTail allocates
+/// a fresh `[[PrivateBrand]]` for each `#x` declared in it. The
+/// compile-time `template.private_prefix` (`"P{class_uid}#"`) is
+/// shared by every evaluation of the same source-text class; the
+/// runtime brand prefix here is a *per-evaluation* identity that
+/// the runtime swaps in for the compile-time prefix when reading
+/// or writing private slots. Two `f()` calls of a class-producing
+/// factory therefore yield classes with distinct brand identities —
+/// `A.read(new B())` raises TypeError per §7.3.27 PrivateElementFind.
+///
+/// Returns a `"B{n}#"` slice owned by the realm's class arena.
+fn allocateBrandPrefix(realm: *Realm) ClassError![]const u8 {
+    const n = realm.class_brand_counter;
+    realm.class_brand_counter += 1;
+    return std.fmt.allocPrint(realm.classAllocator(), "B{d}#", .{n}) catch return error.OutOfMemory;
+}
+
+/// Translate a compile-time-mangled private key (`"P0#x"`) into a
+/// runtime-mangled key (`"B7#x"`) using the per-evaluation brand
+/// prefix. The result is allocated in the realm's class arena —
+/// it lives for the realm's lifetime so the heap-side
+/// `private_properties` map can borrow the slice safely. Falls
+/// through unchanged for non-private keys (Symbol-keyed methods,
+/// numeric / string-literal keys), keeping the call site simple.
+fn brandMangle(
+    realm: *Realm,
+    template_prefix: []const u8,
+    runtime_prefix: []const u8,
+    key: []const u8,
+) ClassError![]const u8 {
+    if (!std.mem.startsWith(u8, key, template_prefix)) return key;
+    const suffix = key[template_prefix.len..];
+    return std.fmt.allocPrint(realm.classAllocator(), "{s}{s}", .{ runtime_prefix, suffix }) catch return error.OutOfMemory;
+}
+
 pub fn buildClass(
     realm: *Realm,
     template: *const ClassTemplate,
     captured_env: ?*Environment,
     heritage_v: ?Value,
 ) ClassError!Value {
+    // §15.7.14 step 31 — allocate the per-evaluation
+    // [[PrivateBrand]] up front. `proto` and `ctor` both get the
+    // same brand so instance and static private accesses route to
+    // the same identity. The compile-time `template.private_prefix`
+    // continues to live in the bytecode constants pool; the brand
+    // is consulted only at install / lookup time.
+    const brand_prefix = try allocateBrandPrefix(realm);
     // 1. Heritage check — if `extends X`, X must be a constructor.
     // `has_heritage` distinguishes `class C {}` (proto inherits
     // %Object.prototype%) from `class C extends null {}` (proto
@@ -129,6 +171,11 @@ pub fn buildClass(
 
     // 2. Allocate the prototype object.
     const proto = try realm.heap.allocateObject();
+    // §15.7.14 step 31 — stamp the per-evaluation brand on the
+    // prototype so the interpreter can translate a compile-time
+    // private key into the runtime slot key when the executing
+    // method's `home_object` is this prototype.
+    proto.private_brand = brand_prefix;
     // §15.7.14 step 6 — `proto.[[Prototype]]` is:
     //   • parent.prototype, if `extends X`
     //   • null, if `extends null`
@@ -161,6 +208,10 @@ pub fn buildClass(
     }
     try class_scope.push(heap_mod.taggedFunction(ctor));
     ctor.is_class_constructor = true;
+    // §15.7.14 step 31 — mirror the brand on the constructor so
+    // static-private accesses (which route via `home_function`)
+    // route to the same per-evaluation identity.
+    ctor.private_brand = brand_prefix;
     if (parent_ctor != null) ctor.constructor_kind = .derived;
     // Wire the ctor's [[Prototype]] for `Function.prototype.call`/`apply`/`bind`.
     ctor.proto = realm.intrinsics.function_prototype;
@@ -290,12 +341,18 @@ pub fn buildClass(
             // `private_properties`; getter / setter halves land
             // in `private_accessors` and dispatch through the
             // function at access time.
+            //
+            // §15.7.14 step 31 — the slot key uses the
+            // per-evaluation brand prefix, not the shared
+            // compile-time prefix, so a second invocation of this
+            // class factory installs slots at a different key.
+            const slot_name = try brandMangle(realm, template.private_prefix, brand_prefix, m.name);
             const ak: ObjMod.AccessorKind = switch (m.kind) {
                 .method => .none,
                 .getter => .getter,
                 .setter => .setter,
             };
-            private_methods[pm_idx] = .{ .name = m.name, .init_fn = fn_obj, .accessor_kind = ak };
+            private_methods[pm_idx] = .{ .name = slot_name, .init_fn = fn_obj, .accessor_kind = ak };
             pm_idx += 1;
             continue;
         }
@@ -355,10 +412,19 @@ pub fn buildClass(
                 fp.home_object = proto;
                 fp.proto = realm.intrinsics.function_prototype;
             }
+            // §15.7.14 step 31 — for `#x` fields, swap the
+            // compile-time prefix for the per-evaluation brand so
+            // each instance lands its slot under a brand-unique
+            // key. Public-named fields fall through unchanged.
+            const is_private_field = std.mem.startsWith(u8, runtime_name, template.private_prefix);
+            const slot_name = if (is_private_field)
+                try brandMangle(realm, template.private_prefix, brand_prefix, runtime_name)
+            else
+                runtime_name;
             inits[i] = .{
-                .name = runtime_name,
+                .name = slot_name,
                 .init_fn = init_fn,
-                .is_private = std.mem.startsWith(u8, runtime_name, template.private_prefix),
+                .is_private = is_private_field,
             };
         }
         proto.instance_field_inits = inits;
@@ -422,6 +488,13 @@ pub fn buildClass(
         // method walks `ctor.proto` to reach the parent class.
         fn_obj.home_function = ctor;
         const is_priv_static = std.mem.startsWith(u8, runtime_name, template.private_prefix);
+        // §15.7.14 step 31 — static private slots are also
+        // brand-stamped per ClassTail evaluation. `slot_name` is
+        // the runtime key; public names fall through unchanged.
+        const slot_name = if (is_priv_static)
+            try brandMangle(realm, template.private_prefix, brand_prefix, runtime_name)
+        else
+            runtime_name;
         // §15.7.14 step 18 — Class constructors carry a non-
         // configurable, non-writable `prototype` slot (§10.2.4
         // SetFunctionLength → §10.2.5 OrdinaryFunctionCreate).
@@ -450,35 +523,35 @@ pub fn buildClass(
         };
         switch (m.kind) {
             .method => if (is_priv_static) {
-                try ctor.private_properties.put(realm.allocator, runtime_name, heap_mod.taggedFunction(fn_obj));
+                try ctor.private_properties.put(realm.allocator, slot_name, heap_mod.taggedFunction(fn_obj));
                 // §7.3.30 PrivateSet step 4 — methods are read-only.
-                try ctor.private_methods.put(realm.allocator, runtime_name, {});
+                try ctor.private_methods.put(realm.allocator, slot_name, {});
             } else {
-                try ctor.set(realm.allocator, runtime_name, heap_mod.taggedFunction(fn_obj));
-                try ctor.property_flags.put(realm.allocator, runtime_name, static_method_flags);
+                try ctor.set(realm.allocator, slot_name, heap_mod.taggedFunction(fn_obj));
+                try ctor.property_flags.put(realm.allocator, slot_name, static_method_flags);
             },
             .getter => if (is_priv_static) {
-                const entry = try ctor.private_accessors.getOrPut(realm.allocator, runtime_name);
+                const entry = try ctor.private_accessors.getOrPut(realm.allocator, slot_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 entry.value_ptr.*.getter = fn_obj;
             } else {
                 // §17 static accessor on a class constructor —
                 // landed in the JSFunction's `accessors` map
                 // (added in the JSFunction-accessors commit).
-                const entry = try ctor.accessors.getOrPut(realm.allocator, runtime_name);
+                const entry = try ctor.accessors.getOrPut(realm.allocator, slot_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 entry.value_ptr.*.getter = fn_obj;
-                try ctor.property_flags.put(realm.allocator, runtime_name, static_accessor_flags);
+                try ctor.property_flags.put(realm.allocator, slot_name, static_accessor_flags);
             },
             .setter => if (is_priv_static) {
-                const entry = try ctor.private_accessors.getOrPut(realm.allocator, runtime_name);
+                const entry = try ctor.private_accessors.getOrPut(realm.allocator, slot_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 entry.value_ptr.*.setter = fn_obj;
             } else {
-                const entry = try ctor.accessors.getOrPut(realm.allocator, runtime_name);
+                const entry = try ctor.accessors.getOrPut(realm.allocator, slot_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 entry.value_ptr.*.setter = fn_obj;
-                try ctor.property_flags.put(realm.allocator, runtime_name, static_accessor_flags);
+                try ctor.property_flags.put(realm.allocator, slot_name, static_accessor_flags);
             },
         }
     }
@@ -515,8 +588,10 @@ pub fn buildClass(
         if (std.mem.startsWith(u8, runtime_name, template.private_prefix)) {
             // §15.7 — `static #x = expr` lands in the
             // constructor's private slot, not the regular
-            // property bag.
-            try ctor.private_properties.put(realm.allocator, runtime_name, v);
+            // property bag. §15.7.14 step 31 — key by the
+            // per-evaluation brand prefix.
+            const slot_name = try brandMangle(realm, template.private_prefix, brand_prefix, runtime_name);
+            try ctor.private_properties.put(realm.allocator, slot_name, v);
         } else {
             // §15.7.14 step 18 — guard against `static prototype = …`
             // for the same reason as static methods: the class's

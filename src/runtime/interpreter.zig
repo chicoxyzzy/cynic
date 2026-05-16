@@ -190,6 +190,61 @@ pub const EvaluateError = error{
     InvalidOpcode,
 };
 
+/// §15.7.14 step 31 PrivateBoundIdentifiers — every evaluation of
+/// a ClassTail allocates a fresh `[[PrivateBrand]]`. The compiler
+/// bakes a class-source-unique prefix (`"P{class_uid}#"`) into
+/// every private key constant, but the brand identity must be
+/// per-evaluation: two `f()` invocations of a class factory
+/// produce classes with different brands, so `A.read(new B())`
+/// throws TypeError per §7.3.27 PrivateElementFind.
+///
+/// At install time `class.zig` stamps the per-evaluation prefix
+/// (`"B{n}#"`) on `proto.private_brand` and `ctor.private_brand`,
+/// and keys every private slot by that runtime prefix. At lookup
+/// time, this helper rewrites the compile-time-mangled key
+/// (`"P0#x"`) into the runtime key (`"B7#x"`) by stripping
+/// everything up to and including `#` and prepending the brand.
+///
+/// `brand` is the executing method's `home_object.private_brand`
+/// (instance method / constructor) or `home_function.private_brand`
+/// (static method). When neither is set — e.g. private syntax
+/// reached outside a class body, which the parser already rejects —
+/// the original key is returned unchanged and the slot lookup
+/// fails naturally with the spec-mandated brand-check TypeError.
+///
+/// Writes into the caller's stack buffer; returns a slice into it.
+/// 64 bytes accommodates a 4-digit brand counter and a 60-byte
+/// private name (anything realistic — JS identifiers are usually
+/// under 30 chars).
+fn translatePrivateKey(buf: []u8, key: []const u8, brand: []const u8) []const u8 {
+    if (brand.len == 0) return key;
+    const hash_idx = std.mem.indexOfScalar(u8, key, '#') orelse return key;
+    const suffix = key[hash_idx + 1 ..];
+    if (brand.len + suffix.len > buf.len) return key;
+    @memcpy(buf[0..brand.len], brand);
+    @memcpy(buf[brand.len .. brand.len + suffix.len], suffix);
+    return buf[0 .. brand.len + suffix.len];
+}
+
+/// §15.7.14 step 31 — pull the per-ClassTail-evaluation brand
+/// prefix off the executing frame. Instance method bodies set
+/// `home_object` (the class prototype). Static method bodies set
+/// `home_function` (the class constructor). Field initializer
+/// thunks and the constructor itself also set `home_object`. When
+/// neither slot carries a brand (private access from outside a
+/// class — a parser-rejected shape — or a class without any
+/// private declarations), returns "" so `translatePrivateKey`
+/// falls through to the compile-time key.
+fn framePrivateBrand(f: anytype) []const u8 {
+    if (f.home_object) |home| {
+        if (home.private_brand.len > 0) return home.private_brand;
+    }
+    if (f.home_function) |home_fn| {
+        if (home_fn.private_brand.len > 0) return home_fn.private_brand;
+    }
+    return "";
+}
+
 /// Evaluate `source` as a Script body against `realm`. Parses,
 /// compiles, and executes — internal arena holds the AST and
 /// chunk for the call's lifetime; the runtime side-effects on
@@ -4925,12 +4980,19 @@ fn runFrames(
                 const key_v = local_chunk.constants[k];
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+                // §15.7.14 step 31 — rewrite the compile-time
+                // mangled key into the per-evaluation runtime key
+                // using the executing method's brand. The brand
+                // lives on the method's home_object / home_function
+                // — both set by `class.zig` at ClassTail evaluation.
+                var brand_buf: [128]u8 = undefined;
+                const lookup_key = translatePrivateKey(&brand_buf, key_s.bytes, framePrivateBrand(f));
                 // §15.7 — `class C { static #x = …; static M() { return C.#x; } }`
                 // routes the read through the constructor's
                 // private slots when the receiver is the class
                 // function itself.
                 if (heap_mod.valueAsFunction(acc)) |fn_recv| {
-                    if (fn_recv.private_accessors.get(key_s.bytes)) |pa| {
+                    if (fn_recv.private_accessors.get(lookup_key)) |pa| {
                         if (pa.getter) |getter| {
                             const outcome = try callJSFunction(allocator, realm, getter, acc, &.{});
                             switch (outcome) {
@@ -4958,7 +5020,7 @@ fn runFrames(
                         }
                         continue;
                     }
-                    if (fn_recv.private_properties.get(key_s.bytes)) |v| {
+                    if (fn_recv.private_properties.get(lookup_key)) |v| {
                         acc = v;
                         continue;
                     }
@@ -4985,7 +5047,7 @@ fn runFrames(
                 // data slots on read. A read of a write-only
                 // accessor (`set #x` without `get #x`) throws
                 // TypeError per §10.1.8.1 PrivateFieldGet step 6.b.
-                if (recv.private_accessors.get(key_s.bytes)) |pa| {
+                if (recv.private_accessors.get(lookup_key)) |pa| {
                     if (pa.getter) |getter| {
                         const outcome = try callJSFunction(allocator, realm, getter, heap_mod.taggedObject(recv), &.{});
                         switch (outcome) {
@@ -5010,7 +5072,7 @@ fn runFrames(
                         }
                         continue;
                     }
-                } else if (recv.private_properties.get(key_s.bytes)) |v| {
+                } else if (recv.private_properties.get(lookup_key)) |v| {
                     acc = v;
                 } else {
                     const ex = try makeTypeError(realm, "Cannot read private field — brand check failed");
@@ -5684,12 +5746,20 @@ fn runFrames(
                 const key_v = local_chunk.constants[k];
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+                // §15.7.14 step 31 — translate the compile-time
+                // mangled key into the per-evaluation runtime key
+                // (see `translatePrivateKey`). Without this, a
+                // write through `obj.#x` would fall back to the
+                // shared compile-time prefix and let two unrelated
+                // ClassTail evaluations share storage.
+                var brand_buf: [128]u8 = undefined;
+                const lookup_key = translatePrivateKey(&brand_buf, key_s.bytes, framePrivateBrand(f));
                 // §15.7 static private — receiver is the class
                 // constructor function. Mirror the JSObject path
                 // (accessor wins, then data, then brand-check
                 // failure).
                 if (heap_mod.valueAsFunction(registers[r_obj])) |fn_recv| {
-                    if (fn_recv.private_accessors.get(key_s.bytes)) |pa| {
+                    if (fn_recv.private_accessors.get(lookup_key)) |pa| {
                         if (pa.setter) |setter| {
                             const args_one = [_]Value{acc};
                             const outcome = try callJSFunction(allocator, realm, setter, registers[r_obj], &args_one);
@@ -5715,7 +5785,7 @@ fn runFrames(
                             }
                             continue;
                         }
-                    } else if (!fn_recv.private_properties.contains(key_s.bytes)) {
+                    } else if (!fn_recv.private_properties.contains(lookup_key)) {
                         const ex = try makeTypeError(realm, "Cannot write private field — brand check failed");
                         f.ip = ip;
                         f.accumulator = acc;
@@ -5724,7 +5794,7 @@ fn runFrames(
                             return .{ .thrown = ex };
                         }
                         continue;
-                    } else if (fn_recv.private_methods.contains(key_s.bytes)) {
+                    } else if (fn_recv.private_methods.contains(lookup_key)) {
                         // §7.3.30 PrivateSet step 4 — methods aren't writable.
                         const ex = try makeTypeError(realm, "Cannot assign to private method");
                         f.ip = ip;
@@ -5735,7 +5805,15 @@ fn runFrames(
                         }
                         continue;
                     } else {
-                        fn_recv.private_properties.put(allocator, key_s.bytes, acc) catch return error.OutOfMemory;
+                        // Use the existing key slice in the map
+                        // (it's the per-evaluation brand-prefixed
+                        // string in `class_arena`); putByKey would
+                        // reuse the stored slot. `put` with our
+                        // stack-buffered `lookup_key` would store
+                        // a dangling pointer past this stack frame
+                        // — use `getPtr` to mutate in place.
+                        const slot = fn_recv.private_properties.getPtr(lookup_key) orelse return error.InvalidOpcode;
+                        slot.* = acc;
                     }
                     continue;
                 }
@@ -5753,7 +5831,7 @@ fn runFrames(
                 // data slots on write. A write to a read-only
                 // accessor (`get #x` without `set #x`) throws
                 // TypeError per §10.1.9.1 step 6.b.
-                if (recv.private_accessors.get(key_s.bytes)) |pa| {
+                if (recv.private_accessors.get(lookup_key)) |pa| {
                     if (pa.setter) |setter| {
                         const args_one = [_]Value{acc};
                         const outcome = try callJSFunction(allocator, realm, setter, heap_mod.taggedObject(recv), &args_one);
@@ -5779,7 +5857,7 @@ fn runFrames(
                         }
                         continue;
                     }
-                } else if (!recv.private_properties.contains(key_s.bytes)) {
+                } else if (!recv.private_properties.contains(lookup_key)) {
                     const ex = try makeTypeError(realm, "Cannot write private field — brand check failed");
                     f.ip = ip;
                     f.accumulator = acc;
@@ -5788,7 +5866,7 @@ fn runFrames(
                         return .{ .thrown = ex };
                     }
                     continue;
-                } else if (recv.private_methods.contains(key_s.bytes)) {
+                } else if (recv.private_methods.contains(lookup_key)) {
                     // §7.3.30 PrivateSet step 4 — methods aren't writable.
                     const ex = try makeTypeError(realm, "Cannot assign to private method");
                     f.ip = ip;
@@ -5799,7 +5877,12 @@ fn runFrames(
                     }
                     continue;
                 } else {
-                    recv.private_properties.put(allocator, key_s.bytes, acc) catch return error.OutOfMemory;
+                    // The slot key already exists in the map
+                    // (brand-prefixed string in `class_arena`);
+                    // mutate the value in place so we don't store
+                    // the stack-buffered `lookup_key`.
+                    const slot = recv.private_properties.getPtr(lookup_key) orelse return error.InvalidOpcode;
+                    slot.* = acc;
                 }
             },
 

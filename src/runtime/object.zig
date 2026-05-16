@@ -287,6 +287,17 @@ pub const JSObject = struct {
     /// constructor time, so brand checks succeed and the methods
     /// are callable through `this.#name()`.
     private_method_inits: ?[]const FieldInit = null,
+    /// §15.7.14 step 31 [[PrivateBrand]] — per-class-evaluation
+    /// private-name prefix (e.g. `"B7#"`). Every evaluation of a
+    /// ClassTail allocates a fresh prefix so two classes produced
+    /// by the same source-text (e.g. inside a `makeC()` factory)
+    /// get distinct brand identities. The interpreter rewrites the
+    /// compile-time `template.private_prefix` part of an
+    /// `lda_private` / `sta_private` key into this string before
+    /// looking up on `private_properties` / `private_accessors`.
+    /// Empty on non-class-related JSObjects. Borrowed from the
+    /// realm's class arena (realm-lifetime).
+    private_brand: []const u8 = "",
     /// Prototype object for prototype-chain lookups. later
     /// resolves member access through `[[Get]]` (§10.1.8) which
     /// walks this chain when the own property is absent.

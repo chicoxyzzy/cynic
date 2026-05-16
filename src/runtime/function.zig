@@ -248,6 +248,14 @@ pub const JSFunction = struct {
     /// (§7.3.30 step 4) — writes to these throw TypeError. Plain
     /// data fields are absent from this set and remain writable.
     private_methods: std.StringArrayHashMapUnmanaged(void) = .empty,
+    /// §15.7.14 step 31 [[PrivateBrand]] — per-class-evaluation
+    /// private-name prefix. See `JSObject.private_brand` for the
+    /// design. Set on the class constructor at ClassTail
+    /// evaluation; the interpreter consults this via
+    /// `home_function` when a private read/write runs inside a
+    /// static method body. Empty on non-class-related functions.
+    /// Borrowed from the realm's class arena.
+    private_brand: []const u8 = "",
     /// `Function.prototype` — the object that becomes the
     /// `[[Prototype]]` of instances created by `new f(…)`. Auto-
     /// allocated for non-arrow functions at construction time
