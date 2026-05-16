@@ -270,12 +270,415 @@ fn regexpProtoMatch(realm: *Realm, this_value: Value, args: []const Value) Nativ
     }
 }
 
-/// §22.2.6.10 RegExp.prototype [ @@replace ] ( string, replaceValue ).
+/// §22.2.5.11 RegExp.prototype [ @@replace ] ( string, replaceValue ).
+/// A step-by-step traversal of the spec so each observable side
+/// effect lines up with the fixtures under
+/// `built-ins/RegExp/prototype/Symbol.replace/`:
+///   • step 6 — non-functional ToString-coerces replaceValue *up
+///     front* (`fn-err` keeps the functional path; the ToString
+///     branch runs before any matching).
+///   • step 7 — `flags = ? ToString(? Get(rx, "flags"))`
+///     (`get-flags-err`).
+///   • step 8-9 — derive `global` / `fullUnicode` from the *flags
+///     string* only (`get-global-err` asserts both `global` and
+///     `unicode` are unread).
+///   • step 9.b — `Set(rx, "lastIndex", 0, true)` honors writable
+///     (`g-init-lastindex-err`).
+///   • step 12 — RegExpExec loop, with empty-match
+///     `AdvanceStringIndex` + `Set(rx, "lastIndex", nextIndex,
+///     true)`.
+///   • step 15 — per-result substitution. `LengthOfArrayLike` /
+///     each capture `Get + ToString` / `Get(result, "groups")` /
+///     functional `Call(replacer, undefined, …)` all surface user
+///     throws (`result-get-length-err`, `result-get-capture-err`,
+///     `result-coerce-capture-err`, `result-get-groups-err`,
+///     `result-coerce-groups-err`, `result-get-groups-prop-err`,
+///     `fn-err`).
+///
+/// We can't delegate to `string.zig:stringReplace` (the old
+/// implementation): that path shortcuts the `flags` ToString,
+/// reads `Get(rx, "global")` directly, writes `lastIndex` via the
+/// bypass `set` (so a non-writable `lastIndex` is silently
+/// swallowed), and re-reads `match_arr["1"]` inside the
+/// substitution expander rather than pre-coercing per
+/// step 15.i.
 fn regexpProtoReplace(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (heap_mod.valueAsPlainObject(this_value) == null) return throwTypeError(realm, "RegExp.prototype[Symbol.replace] called on non-object");
-    const string_mod = @import("string.zig");
-    const inner = [_]Value{ this_value, argOr(args, 1, Value.undefined_) };
-    return string_mod.stringReplace(realm, argOr(args, 0, Value.undefined_), &inner);
+    // step 1-2 — `Let rx be the this value`; non-Object →
+    // TypeError.
+    const rx = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.replace] called on non-object");
+
+    // step 3 — `Let S be ? ToString(string)`.
+    const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
+
+    // step 4 — `Let lengthS be the number of code unit elements
+    // in S`.
+    const utf16 = @import("../utf16.zig");
+    const length_s_usize = utf16.lengthInCodeUnits(s.bytes);
+    const length_s: i64 = @intCast(length_s_usize);
+
+    // step 5 — `Let functionalReplace be IsCallable(replaceValue)`.
+    const repl_v_in = argOr(args, 1, Value.undefined_);
+    const functional = heap_mod.valueAsFunction(repl_v_in) != null;
+    // step 6 — `If functionalReplace is false, set replaceValue to
+    // ? ToString(replaceValue)`. Run eagerly so a poisoned
+    // `toString` on the replacement fires before any matching
+    // (mirrors `String.prototype.replace`).
+    const repl_template: ?*JSString = if (functional) null else try intrinsics.stringifyArg(realm, repl_v_in);
+
+    // step 7 — `flags = ? ToString(? Get(rx, "flags"))`.
+    const flags_v = try intrinsics.getPropertyChain(realm, rx, "flags");
+    const flags_s = try intrinsics.stringifyArg(realm, flags_v);
+
+    // step 8 — `If flags contains "g", let global be true; else
+    // false`.
+    const is_global = std.mem.indexOfScalar(u8, flags_s.bytes, 'g') != null;
+    // step 9.a — `If flags contains "u" or "v", let fullUnicode be
+    // true`.
+    const full_unicode = std.mem.indexOfScalar(u8, flags_s.bytes, 'u') != null or
+        std.mem.indexOfScalar(u8, flags_s.bytes, 'v') != null;
+
+    // step 9.b — `If global is true, perform ? Set(rx,
+    // "lastIndex", +0𝔽, true)`. Honors writable.
+    if (is_global) {
+        try setPropertyChainOrThrow(realm, rx, "lastIndex", Value.fromInt32(0));
+    }
+
+    // step 10-12 — collect results. Each iteration may throw from
+    // RegExpExec or from the empty-match `lastIndex` Set.
+    var results: std.ArrayListUnmanaged(*JSObject) = .empty;
+    defer results.deinit(realm.allocator);
+    while (true) {
+        // step 12.a — `Let result be ? RegExpExec(rx, S)`.
+        const result_v = try regExpExecGeneric(realm, rx, s);
+        // step 12.b — `If result is null, set done to true`.
+        if (result_v.isNull()) break;
+        const result_obj = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.replace]: RegExpExec returned non-Object");
+        results.append(realm.allocator, result_obj) catch return error.OutOfMemory;
+        // step 12.c.ii — `If global is false, set done to true`.
+        if (!is_global) break;
+        // step 12.c.iii — `Let matchStr be ? ToString(? Get(result,
+        // "0"))`. Then if matchStr is "", advance lastIndex.
+        const zero_v = try intrinsics.getPropertyChain(realm, result_obj, "0");
+        const match_str = try intrinsics.stringifyArg(realm, zero_v);
+        if (match_str.bytes.len == 0) {
+            // §22.2.5.11 step 12.c.iii.2.a — `thisIndex = ?
+            // ToLength(? Get(rx, "lastIndex"))`. §7.1.20 ToLength
+            // clamps to `min(len, 2^53 - 1)`; `toLengthValue` only
+            // saturates to i64, so apply the spec cap here. The
+            // `coerce-lastindex` fixture exercises 2^54 → 2^53.
+            const li_v = try intrinsics.getPropertyChain(realm, rx, "lastIndex");
+            const this_index_raw = try intrinsics.toLengthValue(realm, li_v);
+            const max_safe_integer: i64 = (1 << 53) - 1;
+            const this_index: i64 = @min(this_index_raw, max_safe_integer);
+            const next_index_d: f64 = @as(f64, @floatFromInt(this_index)) + 1.0;
+            // For large indices the surrogate-pair branch is
+            // unobservable (S is shorter); collapse to `+1`.
+            // For typical sub-2^31 indices we route through
+            // `advanceStringIndex` which handles fullUnicode.
+            const ni_v: Value = blk: {
+                if (this_index <= @as(i64, std.math.maxInt(i32)) - 1) {
+                    const ni = advanceStringIndex(s.bytes, this_index, full_unicode);
+                    if (ni <= @as(i64, std.math.maxInt(i32)))
+                        break :blk Value.fromInt32(@intCast(ni))
+                    else
+                        break :blk Value.fromDouble(@floatFromInt(ni));
+                }
+                break :blk Value.fromDouble(next_index_d);
+            };
+            try setPropertyChainOrThrow(realm, rx, "lastIndex", ni_v);
+        }
+    }
+
+    // step 13-14 — accumulator buffer + `nextSourcePosition`. The
+    // buffer is WTF-8 bytes; `next_src_unit` is the next code-unit
+    // index in S we haven't yet flushed.
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(realm.allocator);
+    var next_src_unit: i64 = 0;
+
+    // step 15 — `For each result of results, do`.
+    var captures_buf: std.ArrayListUnmanaged(Value) = .empty;
+    defer captures_buf.deinit(realm.allocator);
+    for (results.items) |result_obj| {
+        // step 15.a-b — `nCaptures = max(LengthOfArrayLike(result)
+        // - 1, 0)`.
+        const len_v = try intrinsics.getPropertyChain(realm, result_obj, "length");
+        const len_raw = try intrinsics.toLengthValue(realm, len_v);
+        const n_captures: i64 = if (len_raw > 0) len_raw - 1 else 0;
+
+        // step 15.c — `Let matched be ? ToString(? Get(result,
+        // "0"))`.
+        const zero_v = try intrinsics.getPropertyChain(realm, result_obj, "0");
+        const matched = try intrinsics.stringifyArg(realm, zero_v);
+
+        // step 15.d — `Let matchLength be the number of code unit
+        // elements in matched`.
+        const match_length: i64 = @intCast(utf16.lengthInCodeUnits(matched.bytes));
+
+        // step 15.e — `Let position be ? ToIntegerOrInfinity(?
+        // Get(result, "index"))`. ToIntegerOrInfinity on a non-
+        // finite double yields ±∞; we then clamp to [0, lengthS].
+        const idx_v = try intrinsics.getPropertyChain(realm, result_obj, "index");
+        const idx_num_v = try intrinsics.toNumber(realm, idx_v);
+        const idx_d: f64 = if (idx_num_v.isInt32())
+            @floatFromInt(idx_num_v.asInt32())
+        else if (idx_num_v.isDouble())
+            idx_num_v.asDouble()
+        else
+            0.0;
+        const position: i64 = if (std.math.isNan(idx_d))
+            0
+        else if (!std.math.isFinite(idx_d))
+            (if (idx_d > 0) length_s else 0)
+        else clamp: {
+            const trunc_d = @trunc(idx_d);
+            if (trunc_d <= 0) break :clamp 0;
+            if (trunc_d >= @as(f64, @floatFromInt(length_s))) break :clamp length_s;
+            break :clamp @as(i64, @intFromFloat(trunc_d));
+        };
+
+        // step 15.g-i — collect captures. Each `Get(result, n)`
+        // surfaces accessor throws; ToString runs on non-undefined
+        // values.
+        captures_buf.clearRetainingCapacity();
+        var n: i64 = 1;
+        var cap_key_buf: [24]u8 = undefined;
+        while (n <= n_captures) : (n += 1) {
+            const cap_key = std.fmt.bufPrint(&cap_key_buf, "{d}", .{n}) catch unreachable;
+            const cap_n = try intrinsics.getPropertyChain(realm, result_obj, cap_key);
+            const cap_coerced: Value = if (cap_n.isUndefined())
+                Value.undefined_
+            else
+                Value.fromString(try intrinsics.stringifyArg(realm, cap_n));
+            captures_buf.append(realm.allocator, cap_coerced) catch return error.OutOfMemory;
+        }
+
+        // step 15.j — `Let namedCaptures be ? Get(result, "groups")`.
+        const named_captures_raw = try intrinsics.getPropertyChain(realm, result_obj, "groups");
+
+        // step 15.k / 15.l — compute replacement.
+        var replacement_owned: ?*JSString = null;
+        if (functional) {
+            // step 15.k — `replacerArgs = « matched, …captures,
+            // position, S »`, then namedCaptures if not undefined.
+            var rargs: std.ArrayListUnmanaged(Value) = .empty;
+            defer rargs.deinit(realm.allocator);
+            rargs.append(realm.allocator, Value.fromString(matched)) catch return error.OutOfMemory;
+            for (captures_buf.items) |cv| {
+                rargs.append(realm.allocator, cv) catch return error.OutOfMemory;
+            }
+            rargs.append(realm.allocator, Value.fromInt32(@intCast(position))) catch return error.OutOfMemory;
+            rargs.append(realm.allocator, Value.fromString(s)) catch return error.OutOfMemory;
+            if (!named_captures_raw.isUndefined()) {
+                rargs.append(realm.allocator, named_captures_raw) catch return error.OutOfMemory;
+            }
+            const interp = @import("../interpreter.zig");
+            const fn_obj = heap_mod.valueAsFunction(repl_v_in).?;
+            const outcome = interp.callJSFunction(realm.allocator, realm, fn_obj, Value.undefined_, rargs.items) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            const ret_v: Value = switch (outcome) {
+                .value, .yielded => |v| v,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            };
+            replacement_owned = try intrinsics.stringifyArg(realm, ret_v);
+        } else {
+            // step 15.l.i — `If namedCaptures is not undefined,
+            // set namedCaptures to ? ToObject(namedCaptures)`. A
+            // null `groups` raises TypeError per
+            // `result-coerce-groups-err`. A string / number gets
+            // wrapped to its boxed object so `getNameProperty`
+            // sees properties (`result-coerce-groups`).
+            const named_captures: Value = if (named_captures_raw.isUndefined())
+                Value.undefined_
+            else if (named_captures_raw.isNull())
+                return throwTypeError(realm, "@@replace: groups is null")
+            else
+                heap_mod.taggedObject(try intrinsics.toObjectThis(realm, named_captures_raw));
+            // step 15.l.ii — `GetSubstitution(matched, S, position,
+            // captures, namedCaptures, replaceValue)`.
+            replacement_owned = try getSubstitution(
+                realm,
+                repl_template.?.bytes,
+                matched,
+                s,
+                position,
+                captures_buf.items,
+                named_captures,
+            );
+        }
+
+        // step 15.m — `If position ≥ nextSourcePosition`:
+        if (position >= next_src_unit) {
+            // Append S[nextSourcePosition..position] + replacement.
+            const tail_slice = utf16.sliceCodeUnits(s.bytes, @intCast(next_src_unit), @intCast(position));
+            try appendUtf16SliceBytes(realm, &out, tail_slice);
+            out.appendSlice(realm.allocator, replacement_owned.?.bytes) catch return error.OutOfMemory;
+            next_src_unit = position + match_length;
+        }
+    }
+
+    // step 16-17 — `If nextSourcePosition < lengthS`, append the
+    // tail substring.
+    if (next_src_unit < length_s) {
+        const tail_slice = utf16.sliceCodeUnits(s.bytes, @intCast(next_src_unit), length_s_usize);
+        try appendUtf16SliceBytes(realm, &out, tail_slice);
+    }
+    const out_str = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
+    return Value.fromString(out_str);
+}
+
+/// Append the bytes of a `utf16.Slice` (head/tail surrogate halves
+/// + body) to an output buffer. Mirrors `jsStringFromUtf16Slice`
+/// but writes into the caller's buffer rather than allocating a
+/// fresh JSString.
+fn appendUtf16SliceBytes(
+    realm: *Realm,
+    out: *std.ArrayListUnmanaged(u8),
+    sl: @import("../utf16.zig").Slice,
+) NativeError!void {
+    const utf16 = @import("../utf16.zig");
+    if (sl.head_surrogate != 0)
+        utf16.appendCodeUnitAsWtf8(realm.allocator, out, sl.head_surrogate) catch return error.OutOfMemory;
+    out.appendSlice(realm.allocator, sl.bytes) catch return error.OutOfMemory;
+    if (sl.tail_surrogate != 0)
+        utf16.appendCodeUnitAsWtf8(realm.allocator, out, sl.tail_surrogate) catch return error.OutOfMemory;
+}
+
+/// §22.1.3.19.1 GetSubstitution — string-template path. Walks the
+/// template, expanding `$&`, `$\``, `$'`, `$N`, `$NN`, `$<name>`
+/// per Table 64. `captures` is the pre-coerced capture list (each
+/// element is a String value or `undefined`); `namedCaptures` is
+/// either `undefined` or an Object.
+///
+/// `position` is in UTF-16 code units; substring slicing for
+/// `$\`` / `$'` runs through `utf16.sliceCodeUnits` so a cut at a
+/// mid-pair boundary lands on a well-formed WTF-8 slice.
+fn getSubstitution(
+    realm: *Realm,
+    template: []const u8,
+    matched: *JSString,
+    source: *JSString,
+    position: i64,
+    captures: []const Value,
+    named_captures: Value,
+) NativeError!*JSString {
+    const utf16 = @import("../utf16.zig");
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(realm.allocator);
+
+    const match_length: i64 = @intCast(utf16.lengthInCodeUnits(matched.bytes));
+    const tail_pos: i64 = position + match_length;
+    const source_unit_len: i64 = @intCast(utf16.lengthInCodeUnits(source.bytes));
+
+    var i: usize = 0;
+    while (i < template.len) {
+        const ch = template[i];
+        if (ch != '$' or i + 1 >= template.len) {
+            out.append(realm.allocator, ch) catch return error.OutOfMemory;
+            i += 1;
+            continue;
+        }
+        const next = template[i + 1];
+        switch (next) {
+            '$' => {
+                out.append(realm.allocator, '$') catch return error.OutOfMemory;
+                i += 2;
+            },
+            '&' => {
+                out.appendSlice(realm.allocator, matched.bytes) catch return error.OutOfMemory;
+                i += 2;
+            },
+            '`' => {
+                // §22.1.3.19.1 Table 64 — `$\`` is the substring
+                // of S from 0 to position (in code units).
+                const sl = utf16.sliceCodeUnits(source.bytes, 0, @intCast(position));
+                try appendUtf16SliceBytes(realm, &out, sl);
+                i += 2;
+            },
+            '\'' => {
+                // `$'` — substring from (position + matchLength)
+                // to end. Clamp the start to lengthS.
+                const start_u: i64 = if (tail_pos > source_unit_len) source_unit_len else tail_pos;
+                const sl = utf16.sliceCodeUnits(source.bytes, @intCast(start_u), @intCast(source_unit_len));
+                try appendUtf16SliceBytes(realm, &out, sl);
+                i += 2;
+            },
+            '0'...'9' => {
+                // Two-digit form takes precedence when the
+                // resulting index is within captures.length.
+                var digit_count: usize = 1;
+                var index: usize = next - '0';
+                if (i + 2 < template.len and template[i + 2] >= '0' and template[i + 2] <= '9') {
+                    const two_digit = index * 10 + (template[i + 2] - '0');
+                    if (two_digit >= 1 and two_digit <= captures.len) {
+                        digit_count = 2;
+                        index = two_digit;
+                    }
+                }
+                if (index >= 1 and index <= captures.len) {
+                    const cap = captures[index - 1];
+                    if (cap.isString()) {
+                        const cs: *JSString = @ptrCast(@alignCast(cap.asString()));
+                        out.appendSlice(realm.allocator, cs.bytes) catch return error.OutOfMemory;
+                    }
+                    // `undefined` capture → empty (no append).
+                    i += 1 + digit_count;
+                } else {
+                    out.appendSlice(realm.allocator, template[i .. i + 1 + digit_count]) catch return error.OutOfMemory;
+                    i += 1 + digit_count;
+                }
+            },
+            '<' => {
+                // §22.1.3.19.1 — `$<name>`. With namedCaptures
+                // undefined the ref is literal. Otherwise scan to
+                // the next `>` and look up the name; on miss or
+                // unterminated, the ref expands per spec table.
+                if (named_captures.isUndefined()) {
+                    out.appendSlice(realm.allocator, "$<") catch return error.OutOfMemory;
+                    i += 2;
+                    continue;
+                }
+                var j: usize = i + 2;
+                while (j < template.len and template[j] != '>') : (j += 1) {}
+                if (j >= template.len) {
+                    // Unterminated `$<…` — Cynic treats it as the
+                    // literal `$<…` rest. Matches the v8 / JSC
+                    // observable behaviour: the entire `$<` plus
+                    // trailing characters land in the output.
+                    out.appendSlice(realm.allocator, template[i..]) catch return error.OutOfMemory;
+                    i = template.len;
+                    continue;
+                }
+                const name = template[i + 2 .. j];
+                const named_obj = heap_mod.valueAsPlainObject(named_captures) orelse {
+                    i = j + 1;
+                    continue;
+                };
+                // The named-captures object may be a boxed String
+                // (per step 15.l.i ToObject); read via the
+                // accessor-aware chain walk so a `get foo()`
+                // throw on the `groups` object propagates
+                // (`result-get-groups-prop-err`).
+                const cap_v = try intrinsics.getPropertyChain(realm, named_obj, name);
+                if (!cap_v.isUndefined()) {
+                    const cs = try intrinsics.stringifyArg(realm, cap_v);
+                    out.appendSlice(realm.allocator, cs.bytes) catch return error.OutOfMemory;
+                }
+                i = j + 1;
+            },
+            else => {
+                // Bare `$X` — keep both chars literal.
+                out.append(realm.allocator, '$') catch return error.OutOfMemory;
+                i += 1;
+            },
+        }
+    }
+    return realm.heap.allocateString(out.items) catch return error.OutOfMemory;
 }
 
 /// §22.2.6.12 RegExp.prototype [ @@search ] ( string ).
