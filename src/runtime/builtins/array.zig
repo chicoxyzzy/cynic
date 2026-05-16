@@ -1235,7 +1235,11 @@ fn arrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     // exception instead of being silently coerced to 0.
     const obj = try toObjectThis(realm, this_value);
     const value = argOr(args, 0, Value.undefined_);
-    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
+    // §7.1.20 cap; the effective fill range (start..end) is what
+    // we'll iterate, not `len`.
+    const safe_max: i64 = (1 << 53) - 1;
+    var len = try toLengthOf(realm, obj);
+    if (len > safe_max) len = safe_max;
     // §23.1.3.7 step 5-9 — start / end use ToIntegerOrInfinity,
     // which fires through ToPrimitive (valueOf / toString /
     // @@toPrimitive). The `try` propagates a thrown coercion.
@@ -1245,8 +1249,17 @@ fn arrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     if (end < 0) end = @max(len + end, 0);
     start = @min(start, len);
     end = @min(end, len);
+    // Cap only the *effective* fill window, not `len`. Fixtures
+    // like `fill/length-near-integer-limit` have `length: 2^53-1`
+    // and a 3-index window — must not RangeError.
+    if (end - start > max_iter_length) {
+        const ex = intrinsics.newRangeError(realm, "Array.fill window exceeds maximum supported") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
     var i = start;
     while (i < end) : (i += 1) {
+        if ((i & 0x3FF) == 0) try intrinsics.checkInterruptInNative(realm);
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
@@ -1321,23 +1334,25 @@ fn arrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nativ
 /// Plain-object reverse-search helper for `lastIndexOf` against
 /// an array-like with a huge nominal `length` and a small set of
 /// actual own integer-indexed properties. Walks the property bag
-/// (and packed elements, if any) descending, considering only
-/// keys ≤ `start`. Returns the index that strict-equals `target`,
+/// descending, considering only own keys whose ToInteger value is
+/// in [0, `start`]. Returns the index that strict-equals `target`,
 /// or `null` if none. Skips the inherited-indexed-accessor case
-/// — same trade-off `sparseReverseSearch` makes.
+/// — same trade-off `sparseReverseSearch` makes. Keys ≤ 2^53-1
+/// (the §7.1.20 ToLength ceiling) are honoured so fixtures like
+/// `lastIndexOf/length-near-integer-limit` (own key at 2^53-4)
+/// find the match.
 fn plainObjectReverseSearch(realm: *Realm, obj: *JSObject, start: i64, target: Value) NativeError!?i64 {
-    const start_u32: u32 = if (start > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(start);
-    var keys: std.ArrayListUnmanaged(u32) = .empty;
+    var keys: std.ArrayListUnmanaged(i64) = .empty;
     defer keys.deinit(realm.allocator);
     var it = obj.properties.iterator();
     while (it.next()) |entry| {
         const k = entry.key_ptr.*;
-        const idx = std.fmt.parseInt(u32, k, 10) catch continue;
-        if (idx > start_u32) continue;
+        const idx = std.fmt.parseInt(i64, k, 10) catch continue;
+        if (idx < 0 or idx > start) continue;
         keys.append(realm.allocator, idx) catch return error.OutOfMemory;
     }
-    std.mem.sort(u32, keys.items, {}, struct {
-        fn descending(_: void, a: u32, b: u32) bool {
+    std.mem.sort(i64, keys.items, {}, struct {
+        fn descending(_: void, a: i64, b: i64) bool {
             return a > b;
         }
     }.descending);
@@ -1346,7 +1361,7 @@ fn plainObjectReverseSearch(realm: *Realm, obj: *JSObject, start: i64, target: V
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{k}) catch unreachable;
         if (!obj.hasProperty(islice)) continue;
         const v = try getPropertyChain(realm, obj, islice);
-        if (strictEqualsLite(v, target)) return @as(i64, k);
+        if (strictEqualsLite(v, target)) return k;
     }
     return null;
 }
@@ -1544,7 +1559,17 @@ fn arrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) Nativ
         return acc;
     }
 
-    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
+    var raw_len = try toLengthOf(realm, obj);
+    const safe_max_rr: i64 = (1 << 53) - 1;
+    if (raw_len > safe_max_rr) raw_len = safe_max_rr;
+    // Plain-object array-like with a near-MAX_SAFE_INTEGER `length`
+    // and a small set of own integer-indexed properties: walk those
+    // own keys descending instead of running a linear loop. Fixture
+    // `reduceRight/length-near-integer-limit` is the motivating case.
+    if (!obj.is_array_exotic and raw_len > max_iter_length) {
+        return reduceRightOwnIndicesDescending(realm, obj, raw_len - 1, callback, acc, have_acc);
+    }
+    const len = try intrinsics.clampArrayLengthR(realm, raw_len);
     var i: i64 = len - 1;
     if (!have_acc) {
         while (i >= 0) : (i -= 1) {
@@ -1574,6 +1599,65 @@ fn arrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) Nativ
         switch (outcome) {
             .value, .yielded => |v| acc = v,
             .thrown => return error.NativeThrew,
+        }
+    }
+    return acc;
+}
+
+/// reduceRight specialization for plain-object array-likes with a
+/// huge nominal `length`. Walks own integer-indexed properties
+/// descending in [0, start], invoking `callback(acc, val, idx, O)`
+/// per spec. Skips inherited indexed accessors (same trade-off as
+/// `sparseReverseSearch`). Used only when the linear-loop path
+/// would chew through more than `max_iter_length` indices.
+fn reduceRightOwnIndicesDescending(
+    realm: *Realm,
+    obj: *JSObject,
+    start: i64,
+    callback: *@import("../function.zig").JSFunction,
+    initial_acc: Value,
+    have_initial: bool,
+) NativeError!Value {
+    var keys: std.ArrayListUnmanaged(i64) = .empty;
+    defer keys.deinit(realm.allocator);
+    var it = obj.properties.iterator();
+    while (it.next()) |entry| {
+        const k = entry.key_ptr.*;
+        const idx = std.fmt.parseInt(i64, k, 10) catch continue;
+        if (idx < 0 or idx > start) continue;
+        keys.append(realm.allocator, idx) catch return error.OutOfMemory;
+    }
+    std.mem.sort(i64, keys.items, {}, struct {
+        fn descending(_: void, a: i64, b: i64) bool { return a > b; }
+    }.descending);
+    var acc = initial_acc;
+    var have_acc = have_initial;
+    var idx: usize = 0;
+    if (!have_acc) {
+        if (keys.items.len == 0) return throwTypeError(realm, "Reduce of empty array with no initial value");
+        var ib: [24]u8 = undefined;
+        const isl = std.fmt.bufPrint(&ib, "{d}", .{keys.items[0]}) catch unreachable;
+        acc = try getPropertyChain(realm, obj, isl);
+        have_acc = true;
+        idx = 1;
+    }
+    while (idx < keys.items.len) : (idx += 1) {
+        const k = keys.items[idx];
+        var ib: [24]u8 = undefined;
+        const isl = std.fmt.bufPrint(&ib, "{d}", .{k}) catch unreachable;
+        if (!obj.hasProperty(isl)) continue;
+        const elem = try getPropertyChain(realm, obj, isl);
+        const cb_args = [_]Value{ acc, elem, numberFromI64(k), heap_mod.taggedObject(obj) };
+        const outcome = interpreter.callJSFunction(realm.allocator, realm, callback, Value.undefined_, &cb_args) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        switch (outcome) {
+            .value, .yielded => |v| acc = v,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
         }
     }
     return acc;
@@ -1906,7 +1990,14 @@ fn arrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) Native
     // §23.1.3.4 step 1-3 — ToObject, then LengthOfArrayLike via the
     // accessor-aware path so a throwing `length` getter propagates.
     const obj = try toObjectThis(realm, this_value);
-    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
+    // §7.1.20 ToLength cap at 2^53-1. Don't apply Cynic's 16M
+    // iteration cap to `len` itself — the spec bounds the loop on
+    // the small `count` derived from (end - start, len - target),
+    // and a fixture with `length: 2^53-1` and a 3-element range
+    // must not RangeError.
+    const safe_max: i64 = (1 << 53) - 1;
+    var len = try toLengthOf(realm, obj);
+    if (len > safe_max) len = safe_max;
     // §23.1.3.4 steps 4-8 — ToIntegerOrInfinity on target / start /
     // end. Each can be an object with a throwing `valueOf` /
     // `toString` (or a Symbol → TypeError); use the propagating
@@ -1922,6 +2013,11 @@ fn arrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) Native
     end = @min(end, len);
     const count: i64 = @min(end - start, len - target);
     if (count <= 0) return heap_mod.taggedObject(obj);
+    if (count > max_iter_length) {
+        const ex = intrinsics.newRangeError(realm, "copyWithin count exceeds maximum supported") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
 
     // §23.1.3.4 steps 14-18 — HasProperty / Get / Set / Delete on
     // each visited index. Direction matters when ranges overlap.
@@ -1931,11 +2027,13 @@ fn arrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) Native
     if (start < target and target < start + count) {
         var k: i64 = count - 1;
         while (k >= 0) : (k -= 1) {
+            if ((k & 0x3FF) == 0) try intrinsics.checkInterruptInNative(realm);
             try copyWithinStep(realm, obj, start + k, target + k);
         }
     } else {
         var k: i64 = 0;
         while (k < count) : (k += 1) {
+            if ((k & 0x3FF) == 0) try intrinsics.checkInterruptInNative(realm);
             try copyWithinStep(realm, obj, start + k, target + k);
         }
     }
@@ -2334,11 +2432,19 @@ fn arrayReverse(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const obj = try toObjectThis(realm, this_value);
     // §23.1.3.26 — use LengthOfArrayLike so the TA `length`
     // accessor returns the live element count (length-tracking
-    // views over a resizable buffer).
-    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
+    // views over a resizable buffer). Don't pre-clamp at Cynic's
+    // 16M iteration cap: fixtures like
+    // `length-exceeding-integer-limit-with-object` set a length
+    // beyond 2^53 with a poisoned getter near the top, and rely on
+    // the loop starting (so the getter fires) — not on visiting
+    // every index.
+    const safe_max: i64 = (1 << 53) - 1;
+    var len = try toLengthOf(realm, obj);
+    if (len > safe_max) len = safe_max;
     var i: i64 = 0;
     const half = @divFloor(len, 2);
     while (i < half) : (i += 1) {
+        if ((i & 0x3FF) == 0) try intrinsics.checkInterruptInNative(realm);
         var ibuf: [24]u8 = undefined;
         var jbuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
