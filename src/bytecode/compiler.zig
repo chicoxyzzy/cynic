@@ -1122,7 +1122,8 @@ pub const Compiler = struct {
             return error.UnsupportedExpression;
         }
         const span = u.operand.identifier_reference.span;
-        const name = self.source[span.start..span.end];
+        // §12.7 — resolve against the StringValue (decoded escapes).
+        const name = try self.bindingName(span);
         const scope = self.scope orelse return error.UnresolvedReference;
         const binding: Binding = scope.resolve(name) orelse blk: {
             if (self.realm.globals.contains(name)) {
@@ -2127,6 +2128,18 @@ pub const Compiler = struct {
         return out.items;
     }
 
+    /// §12.7 IdentifierName — the StringValue of an IdentifierName
+    /// is the decoded code-point sequence, NOT the raw source.
+    /// `var \u{61} = 1` declares a binding named `"a"`, and `a`
+    /// resolves to it. Callers that read an identifier span as the
+    /// name of a binding (declaration, reference, assignment) MUST
+    /// route through here so the escape-disguised form and the
+    /// canonical form hash to the same key. Fast path returns the
+    /// borrowed source slice when no escapes are present.
+    fn bindingName(self: *Compiler, span: Span) CompileError![]const u8 {
+        return self.decodeIdentifierName(self.source[span.start..span.end]);
+    }
+
     fn compileMember(self: *Compiler, m: ast.expression.MemberExpr) CompileError!void {
         // `super.x` and `super[expr]` — `super_get` for ident keys,
         // `super_get_computed` (key in acc) for the bracket form.
@@ -2514,7 +2527,8 @@ pub const Compiler = struct {
     }
 
     fn compileFunctionExpr(self: *Compiler, fe: ast.expression.FunctionExpr) CompileError!void {
-        const name_slice = if (fe.name) |n| self.source[n.span.start..n.span.end] else null;
+        // §12.7 — bind the inner name (recursion target) by StringValue.
+        const name_slice = if (fe.name) |n| try self.bindingName(n.span) else null;
         // §15.2 FunctionExpression — must propagate is_generator /
         // is_async into the template so the resulting JSFunction
         // gets `is_generator=true` (returns an iterator on call)
@@ -3240,7 +3254,9 @@ pub const Compiler = struct {
     }
 
     fn compileIdentRef(self: *Compiler, span: Span) CompileError!void {
-        const name = self.source[span.start..span.end];
+        // §12.7 — IdentifierReference resolves against the
+        // StringValue (decoded `\u…` escapes), not the raw source.
+        const name = try self.bindingName(span);
         const scope = self.scope orelse return error.UnresolvedReference;
         const binding = scope.resolve(name) orelse {
             // Spec-mandated keywords that don't bind via the
@@ -3288,7 +3304,8 @@ pub const Compiler = struct {
         if (target_ptr.* != .identifier_reference) {
             return error.UnsupportedExpression;
         }
-        const name = self.source[target_ptr.identifier_reference.span.start..target_ptr.identifier_reference.span.end];
+        // §12.7 — assignment target resolves against StringValue.
+        const name = try self.bindingName(target_ptr.identifier_reference.span);
         const scope = self.scope orelse return error.UnresolvedReference;
         const resolved = scope.resolve(name);
         const binding: Binding = resolved orelse Binding{
@@ -3566,7 +3583,8 @@ pub const Compiler = struct {
         // behavior, matching the spec.
         if (u.op == .typeof_ and u.operand.* == .identifier_reference) {
             const span = u.operand.identifier_reference.span;
-            const name = self.source[span.start..span.end];
+            // §12.7 — typeof's silent-miss path also keys on StringValue.
+            const name = try self.bindingName(span);
             const scope = self.scope orelse return error.UnresolvedReference;
             if (scope.resolve(name) == null and !std.mem.eql(u8, name, "undefined")) {
                 const k = try self.internString(name);
@@ -3776,17 +3794,17 @@ fn compileImportDecl(self: *Compiler, id: ast.statement.ImportDecl) CompileError
     if (!self.is_module) {
         // Script mode — declare the binding names so a later
         // reference doesn't `UnresolvedReference`, but no module
-        // loading happens.
+        // loading happens. §12.7: bindings key off StringValue.
         if (id.default) |bid| {
-            const name = self.source[bid.span.start..bid.span.end];
+            const name = try self.bindingName(bid.span);
             _ = try self.declareBinding(name, .let_, bid.span);
         }
         if (id.namespace) |bid| {
-            const name = self.source[bid.span.start..bid.span.end];
+            const name = try self.bindingName(bid.span);
             _ = try self.declareBinding(name, .let_, bid.span);
         }
         for (id.named) |spec| {
-            const name = self.source[spec.local.span.start..spec.local.span.end];
+            const name = try self.bindingName(spec.local.span);
             _ = try self.declareBinding(name, .let_, spec.local.span);
         }
         return;
@@ -3820,7 +3838,7 @@ fn compileImportDecl(self: *Compiler, id: ast.statement.ImportDecl) CompileError
     // (it's "owned" by the import decl for indirect dereference)
     // so reload via the existing emit machinery.
     if (id.namespace) |bid| {
-        const name = self.source[bid.span.start..bid.span.end];
+        const name = try self.bindingName(bid.span);
         const ns_binding = try self.declareBindingFull(name, .const_, bid.span);
         // Reload namespace from `ns_slot` into the accumulator,
         // then store into the const binding's own env slot.
@@ -3830,7 +3848,7 @@ fn compileImportDecl(self: *Compiler, id: ast.statement.ImportDecl) CompileError
         try self.emitStoreBinding(ns_binding, bid.span);
     }
     if (id.default) |bid| {
-        const name = self.source[bid.span.start..bid.span.end];
+        const name = try self.bindingName(bid.span);
         const binding: Binding = .{
             .name = name,
             .env_slot = 0,
@@ -3853,8 +3871,8 @@ fn compileImportDecl(self: *Compiler, id: ast.statement.ImportDecl) CompileError
         const imported_name = if (imported_text.len >= 2 and (imported_text[0] == '"' or imported_text[0] == '\''))
             imported_text[1 .. imported_text.len - 1]
         else
-            imported_text;
-        const local_name = self.source[spec.local.span.start..spec.local.span.end];
+            try self.decodeIdentifierName(imported_text);
+        const local_name = try self.bindingName(spec.local.span);
         const binding: Binding = .{
             .name = local_name,
             .env_slot = 0,
@@ -3967,14 +3985,14 @@ fn publishExportedNamesFromDecl(self: *Compiler, stmt: *const Statement) Compile
             }
         },
         .function_decl => |fd| {
-            const name = self.source[fd.name.span.start..fd.name.span.end];
+            const name = try self.bindingName(fd.name.span);
             try self.emitBindingRead(name, fd.name.span);
             const k = try self.internString(name);
             try self.builder.emitOp(.module_export, fd.name.span);
             try self.builder.emitU16(k);
         },
         .class_decl => |cd| {
-            const name = self.source[cd.name.span.start..cd.name.span.end];
+            const name = try self.bindingName(cd.name.span);
             try self.emitBindingRead(name, cd.name.span);
             const k = try self.internString(name);
             try self.builder.emitOp(.module_export, cd.name.span);
@@ -4025,7 +4043,7 @@ fn seedTdzExportHoles(self: *Compiler, body: []ast.statement.Statement, span: Sp
                         }
                     },
                     .class_decl => |cd| {
-                        const name = self.source[cd.name.span.start..cd.name.span.end];
+                        const name = try self.bindingName(cd.name.span);
                         try self.seedExportHole(name, cd.name.span);
                     },
                     else => {},
@@ -4095,7 +4113,8 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
             const d = ld.declarators[0];
             switch (d.name) {
                 .identifier => |id| {
-                    bind_name = self.source[id.span.start..id.span.end];
+                    // §12.7 — bind by StringValue.
+                    bind_name = try self.bindingName(id.span);
                     bind_span = id.span;
                 },
                 .array, .object => {
@@ -4126,7 +4145,8 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
             }
             switch (lhs) {
             .identifier_reference => |ir| {
-                bind_name = self.source[ir.span.start..ir.span.end];
+                // §12.7 — bind by StringValue.
+                bind_name = try self.bindingName(ir.span);
                 bind_span = ir.span;
                 bind_target_kind = .identifier_assign;
             },
@@ -4572,7 +4592,8 @@ fn compileReturn(self: *Compiler, s: ast.statement.ReturnStmt) CompileError!void
 }
 
 fn compileFunctionDecl(self: *Compiler, fd: ast.statement.FunctionDecl) CompileError!void {
-    const name_slice = self.source[fd.name.span.start..fd.name.span.end];
+    // §12.7 — bind by StringValue (decoded `\u…` escapes).
+    const name_slice = try self.bindingName(fd.name.span);
     // Declare the binding FIRST so the function body can resolve
     // its own name (e.g. for recursion). With env-based scoping
     // the body sees `name` at depth=1, slot=this-slot.
@@ -4606,14 +4627,16 @@ fn compileFunctionDecl(self: *Compiler, fd: ast.statement.FunctionDecl) CompileE
 }
 
 fn compileClassDecl(self: *Compiler, cd: ast.statement.ClassDecl) CompileError!void {
-    const name_slice = self.source[cd.name.span.start..cd.name.span.end];
+    // §12.7 — bind by StringValue.
+    const name_slice = try self.bindingName(cd.name.span);
     const binding = try self.declareBindingFull(name_slice, .let_, cd.name.span);
     try self.emitClassBuild(name_slice, if (cd.superclass) |s| &s else null, cd.body, cd.span);
     try self.emitStoreBinding(binding, cd.span);
 }
 
 fn compileClassExpr(self: *Compiler, ce: ast.expression.ClassExpr) CompileError!void {
-    const name_slice: ?[]const u8 = if (ce.name) |n| self.source[n.span.start..n.span.end] else null;
+    // §12.7 — bind by StringValue when a name is present.
+    const name_slice: ?[]const u8 = if (ce.name) |n| try self.bindingName(n.span) else null;
     try self.emitClassBuild(name_slice, ce.superclass, ce.body, ce.span);
 }
 
@@ -5566,7 +5589,8 @@ fn hoistStatement(self: *Compiler, s: *ast.statement.Statement, inside_nested_bl
                 // binding at emission time.
                 return;
             }
-            const name = self.source[fd.name.span.start..fd.name.span.end];
+            // §12.7 — declare against StringValue.
+            const name = try self.bindingName(fd.name.span);
             _ = try self.declareBindingFull(name, .var_, fd.name.span);
         },
         // sec-moduledeclarationinstantiation step 17 -- function /
@@ -5625,7 +5649,7 @@ fn hoistStatement(self: *Compiler, s: *ast.statement.Statement, inside_nested_bl
 fn declarePatternVarBindings(self: *Compiler, target: ast.statement.BindingTarget) CompileError!void {
     switch (target) {
         .identifier => |id| {
-            const name = self.source[id.span.start..id.span.end];
+            const name = try self.bindingName(id.span);
             _ = try self.declareBindingFull(name, .var_, id.span);
         },
         .array => |arr| {
@@ -5637,7 +5661,7 @@ fn declarePatternVarBindings(self: *Compiler, target: ast.statement.BindingTarge
         .object => |obj| {
             for (obj.properties) |prop| try self.declarePatternVarBindings(prop.value.target);
             if (obj.rest) |rest_id| {
-                const name = self.source[rest_id.span.start..rest_id.span.end];
+                const name = try self.bindingName(rest_id.span);
                 _ = try self.declareBindingFull(name, .var_, rest_id.span);
             }
         },
@@ -5696,7 +5720,7 @@ fn countPatternBindings(target: ast.statement.BindingTarget) u8 {
 fn declarePatternBindings(self: *Compiler, target: ast.statement.BindingTarget, kind: BindingKind) CompileError!void {
     switch (target) {
         .identifier => |id| {
-            const name = self.source[id.span.start..id.span.end];
+            const name = try self.bindingName(id.span);
             _ = try self.declareBinding(name, kind, id.span);
         },
         .array => |arr_pat| {
@@ -5714,7 +5738,7 @@ fn declarePatternBindings(self: *Compiler, target: ast.statement.BindingTarget, 
                 try self.declarePatternBindings(prop.value.target, kind);
             }
             if (obj_pat.rest) |rest_id| {
-                const name = self.source[rest_id.span.start..rest_id.span.end];
+                const name = try self.bindingName(rest_id.span);
                 _ = try self.declareBinding(name, kind, rest_id.span);
             }
         },
@@ -5731,7 +5755,8 @@ fn compileLexicalDecl(self: *Compiler, ld: ast.statement.LexicalDecl) CompileErr
         for (ld.declarators) |d| {
             switch (d.name) {
                 .identifier => |id| {
-                    const name = self.source[id.span.start..id.span.end];
+                    // §12.7 — `var` binding name is the StringValue.
+                    const name = try self.bindingName(id.span);
                     if (d.init) |*init_expr| {
                         // §14.3.1.2 — anonymous function-likes
                         // adopt the binding identifier as `.name`.
@@ -5773,7 +5798,8 @@ fn compileLexicalDecl(self: *Compiler, ld: ast.statement.LexicalDecl) CompileErr
     for (ld.declarators) |d| {
         switch (d.name) {
             .identifier => |id| {
-                const name = self.source[id.span.start..id.span.end];
+                // §12.7 — `let`/`const` binding name is the StringValue.
+                const name = try self.bindingName(id.span);
                 const binding = self.scope.?.lookupLocal(name) orelse return error.UnresolvedReference;
                 if (d.init) |*init_expr| {
                     // §14.3.1.2 — anonymous function-likes adopt
@@ -5817,8 +5843,8 @@ fn compileDestructure(self: *Compiler, target: ast.statement.BindingTarget) Comp
         .identifier => |id| {
             // Tolerated path for nested cases — declarators with
             // a plain ident name have already taken the direct
-            // sta_env path above.
-            const name = self.source[id.span.start..id.span.end];
+            // sta_env path above. §12.7 — bind by StringValue.
+            const name = try self.bindingName(id.span);
             try self.builder.emitOp(.ldar, id.span);
             try self.builder.emitU8(r_src);
             try self.assignToBinding(name, id.span);
@@ -6432,7 +6458,8 @@ fn assignAssignmentPatternElem(self: *Compiler, elt: ast.expression.Expression) 
             var t = elt.assignment.target;
             while (t.* == .parenthesized) t = t.parenthesized.expression;
             if (t.* == .identifier_reference) {
-                break :blk self.source[t.identifier_reference.span.start..t.identifier_reference.span.end];
+                // §12.7 — `SetFunctionName` uses the StringValue.
+                break :blk try self.bindingName(t.identifier_reference.span);
             }
             break :blk null;
         };
@@ -6593,7 +6620,8 @@ fn assignAssignmentPatternElemPrepared(
             var t = elt.assignment.target;
             while (t.* == .parenthesized) t = t.parenthesized.expression;
             if (t.* == .identifier_reference) {
-                break :blk self.source[t.identifier_reference.span.start..t.identifier_reference.span.end];
+                // §12.7 — `SetFunctionName` uses the StringValue.
+                break :blk try self.bindingName(t.identifier_reference.span);
             }
             break :blk null;
         };
@@ -6621,7 +6649,8 @@ fn destructureLeafTarget(elt: ast.expression.Expression) ast.expression.Expressi
 fn assignAssignmentPatternLeaf(self: *Compiler, target: ast.expression.Expression) CompileError!void {
     switch (target) {
         .identifier_reference => |ir| {
-            const name = self.source[ir.span.start..ir.span.end];
+            // §12.7 — assignment-pattern leaf resolves by StringValue.
+            const name = try self.bindingName(ir.span);
             const scope = self.scope orelse return error.UnresolvedReference;
             // §13.15.5.3 — fall through to a global write when the
             // identifier doesn't resolve in any user-visible scope.
@@ -6746,7 +6775,8 @@ fn applyDefaultExprNamed(self: *Compiler, default_expr: *const ast.expression.Ex
 /// array through `compileDestructure`.
 fn emitRestParamPrologue(self: *Compiler, rp: *const ast.statement.RestParam, start_index: u8) CompileError!void {
     if (rp.target == .identifier) {
-        const param_name = self.source[rp.target.identifier.span.start..rp.target.identifier.span.end];
+        // §12.7 — bind by StringValue.
+        const param_name = try self.bindingName(rp.target.identifier.span);
         const slot = try self.declareParam(param_name, rp.span);
         try self.builder.emitOp(.rest_args_from, rp.span);
         try self.builder.emitU8(start_index);
@@ -6769,7 +6799,8 @@ fn emitRestParamPrologue(self: *Compiler, rp: *const ast.statement.RestParam, st
 /// after the default is in `acc`.
 fn emitParamPrologue(self: *Compiler, sp: *const ast.statement.SimpleParam, i: u8) CompileError!void {
     if (sp.target == .identifier) {
-        const param_name = self.source[sp.target.identifier.span.start..sp.target.identifier.span.end];
+        // §12.7 — bind by StringValue.
+        const param_name = try self.bindingName(sp.target.identifier.span);
         const slot = try self.declareParam(param_name, sp.span);
         // Load the caller-supplied register into acc.
         try self.builder.emitOp(.ldar, sp.span);
@@ -6823,7 +6854,8 @@ fn applyDefaultIfNeeded(self: *Compiler, elem: ast.statement.BindingElement) Com
 fn assignPatternLeaf(self: *Compiler, target: ast.statement.BindingTarget) CompileError!void {
     switch (target) {
         .identifier => |id| {
-            const name = self.source[id.span.start..id.span.end];
+            // §12.7 — bind by StringValue.
+            const name = try self.bindingName(id.span);
             try self.assignToBinding(name, id.span);
         },
         .array, .object => try self.compileDestructure(target),
@@ -6843,6 +6875,18 @@ fn assignToBinding(self: *Compiler, name: []const u8, span: Span) CompileError!v
 fn identifierName(source: []const u8, target: ast.statement.BindingTarget) ?[]const u8 {
     return switch (target) {
         .identifier => |id| source[id.span.start..id.span.end],
+        else => null,
+    };
+}
+
+/// §12.7 IdentifierName — variant of `identifierName` that decodes
+/// `\u…` escapes via the compiler's `bindingName` helper. Callers
+/// that need the canonical StringValue for binding declare / resolve
+/// (rather than the raw source slice for diagnostics or printing)
+/// should prefer this form.
+fn identifierBindingName(self: *Compiler, target: ast.statement.BindingTarget) CompileError!?[]const u8 {
+    return switch (target) {
+        .identifier => |id| try self.bindingName(id.span),
         else => null,
     };
 }
@@ -7038,7 +7082,9 @@ fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
     if (s.init) |head| switch (head) {
         .lexical => |ld| if (ld.kind != .var_ and ld.declarators.len == 1) {
             const d = ld.declarators[0];
-            if (identifierName(self.source, d.name)) |name| {
+            // §12.7 — per-iter env binding uses the StringValue.
+            if (d.name == .identifier) {
+                const name = try self.bindingName(d.name.identifier.span);
                 per_iter_env = true;
                 single_name = name;
                 single_span = d.span;
@@ -7453,8 +7499,9 @@ fn compileTry(self: *Compiler, s: ast.statement.TryStmt) CompileError!void {
             // the pattern, and deconstruct from the synthetic slot
             // at the top of the handler body.
             switch (target) {
-                .identifier => {
-                    const name = identifierName(self.source, target) orelse return error.UnsupportedStatement;
+                .identifier => |cid| {
+                    // §12.7 — bind by StringValue.
+                    const name = try self.bindingName(cid.span);
                     catch_register = try self.declareBinding(name, .let_, h.span);
                 },
                 .array, .object => {
