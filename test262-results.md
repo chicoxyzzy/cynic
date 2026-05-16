@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 86.37 % | 92.93 % | 35202 / 40757 | 35202 / 37880 |
+| **runtime** | 86.63 % | 93.21 % | 35309 / 40757 | 35309 / 37880 |
 
 
 ## Where the runtime stands, by area
@@ -29,9 +29,8 @@ browser-era built-ins …).
 | `built-ins/RegExp` | 1358 | 252 | 161 | 77 % | 84 % |
 | `built-ins/TypedArray` | 1276 | 147 | 8 | 89 % | 90 % |
 | `built-ins/TypedArrayConstructors` | 554 | 106 | 16 | 82 % | 84 % |
-| `language/expressions` | 9388 | 577 | 975 | 86 % | 94 % |
-| `language/module-code` | 464 | 118 | 14 | 78 % | 80 % |
-| `language/statements` | 8164 | 316 | 672 | 89 % | 96 % |
+| `language/expressions` | 9439 | 526 | 975 | 86 % | 95 % |
+| `language/statements` | 8194 | 286 | 672 | 90 % | 97 % |
 | **_10–99 fails_** | | | | | |
 | `built-ins/ArrayBuffer` | 166 | 25 | 4 | 85 % | 87 % |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 12 | 26 | 0 | 32 % | 32 % |
@@ -57,6 +56,7 @@ browser-era built-ins …).
 | `language/global-code` | 19 | 18 | 5 | 45 % | 51 % |
 | `language/identifiers` | 252 | 16 | 0 | 94 % | 94 % |
 | `language/literals` | 409 | 28 | 97 | 77 % | 94 % |
+| `language/module-code` | 490 | 92 | 14 | 82 % | 84 % |
 | `language/statementList` | 40 | 40 | 0 | 50 % | 50 % |
 | `language/white-space` | 51 | 16 | 0 | 76 % | 76 % |
 | **_1–9 fails_** | | | | | |
@@ -158,19 +158,17 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-16 — cynic `c72910f`, test262 `d0c1b455`
+### 2026-05-16 — cynic `f4c58c0`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 86.37 % | 92.93 % | 35202 / 40757 | 35202 / 37880 | +330 | 1m 57s |
+| **runtime** | 86.63 % | 93.21 % | 35309 / 40757 | 35309 / 37880 | +437 | 1m 53s |
 
 Biggest movers (runtime):
 
-- `language/expressions` +86
-- `built-ins/Object` +62
-- `built-ins/Array` +43
-- `language/statements` +14
-- `built-ins/TypedArrayConstructors` +8
+- `language/expressions` +51
+- `language/statements` +30
+- `language/module-code` +26
 
 ### 2026-05-15 — cynic `2b05c51`, test262 `d0c1b455`
 
