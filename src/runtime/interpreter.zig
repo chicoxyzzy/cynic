@@ -6869,43 +6869,49 @@ fn runFrames(
                 // that wins; otherwise the freshly-allocated `this`
                 // does. Non-constructor frames return `acc` verbatim.
                 var ret = acc;
+                // §10.2.2 [[Construct]] steps 7-11: the return-value
+                // coercion and the uninitialized-`this` gate happen
+                // *after* the callee's execution context has been
+                // popped. That ordering is observable — a user
+                // try/catch inside the body must NOT catch the
+                // synthetic TypeError / ReferenceError that those
+                // steps raise. We compute the verdict here, then
+                // pop the frame, then dispatch the throw against
+                // the caller stack.
+                //
+                // Possible verdicts:
+                //   .normal: hand `ret` back to the caller.
+                //   .type_error: derived ctor returned a non-Object
+                //                non-undefined (step 7c).
+                //   .ref_error:  derived ctor returned undefined
+                //                without calling super (step 11 →
+                //                §9.1.1.3.4 GetThisBinding).
+                const Verdict = enum { normal, type_error, ref_error };
+                var verdict: Verdict = .normal;
                 if (f.is_construct) {
                     const returned_object =
                         heap_mod.valueAsPlainObject(acc) != null or
                         heap_mod.valueAsFunction(acc) != null;
                     if (!returned_object) {
-                        // §10.2.1.4 step 14 — a derived
-                        // constructor MUST return either an
-                        // Object or undefined. Returning a
-                        // primitive (number / string / null /
-                        // bool / symbol / bigint) is a
-                        // TypeError. Base constructors fall back
-                        // to `this` for non-Object returns.
                         if (f.is_derived_ctor and !acc.isUndefined()) {
-                            const ex = try makeTypeError(realm, "Derived constructor must return an Object or undefined");
-                            f.ip = ip;
-                            f.accumulator = acc;
-                            committed = true;
-                            if (!try unwindThrow(allocator, realm, frames, ex)) {
-                                return .{ .thrown = ex };
-                            }
-                            continue;
+                            // §10.2.2 step 7c — derived ctors must
+                            // return either an Object or undefined.
+                            // null / number / string / bool /
+                            // symbol / bigint all trip the gate.
+                            verdict = .type_error;
+                        } else if (f.is_derived_ctor and !f.super_called) {
+                            // §10.2.2 step 11 → §9.1.1.3.4
+                            // GetThisBinding — `this` is still
+                            // uninitialized because `super(...)`
+                            // never executed.
+                            verdict = .ref_error;
+                        } else {
+                            // §10.2.2 step 7b — base ctor (or
+                            // derived ctor after super) returning
+                            // a non-Object falls back to the
+                            // initialized `this`.
+                            ret = f.this_value;
                         }
-                        // §10.2.1.4 step 5 — derived ctor falling
-                        // off the end (or `return;`) requires that
-                        // `super(...)` has run. Otherwise `this` is
-                        // uninitialized and a ReferenceError fires.
-                        if (f.is_derived_ctor and acc.isUndefined() and !f.super_called) {
-                            const ex = try makeReferenceError(realm, "Must call super constructor in derived class before returning from derived constructor");
-                            f.ip = ip;
-                            f.accumulator = acc;
-                            committed = true;
-                            if (!try unwindThrow(allocator, realm, frames, ex)) {
-                                return .{ .thrown = ex };
-                            }
-                            continue;
-                        }
-                        ret = f.this_value;
                     }
                 }
                 // §27.7 AsyncFunctionStart — an async function's
@@ -6924,6 +6930,26 @@ fn runFrames(
                 if (f.owns_registers) allocator.free(registers);
                 _ = frames.pop();
                 committed = true;
+                // §10.2.2 [[Construct]] steps 7c / 11 — raise the
+                // derived-ctor exception against the *caller* of
+                // the constructor. The callee's frame is already
+                // popped, so unwindThrow won't see the body's own
+                // try/catch handlers (the spec runs steps 7-11
+                // after popping the execution context).
+                if (verdict != .normal) {
+                    const ex = switch (verdict) {
+                        .type_error => try makeTypeError(realm, "Derived constructors may only return object or undefined"),
+                        .ref_error => try makeReferenceError(realm, "Must call super constructor in derived class before returning from derived constructor"),
+                        .normal => unreachable,
+                    };
+                    if (frames.items.len == 0) {
+                        return .{ .thrown = ex };
+                    }
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                }
                 if (frames.items.len == 0) {
                     return .{ .value = ret };
                 }
@@ -7395,16 +7421,15 @@ fn strictSetPropertyAnchored(
             }
             const truncate_result = truncateArrayAtLength(allocator, obj, new_len);
             const final_len = truncate_result.final_length;
-            // §6.1.6.1 NumberValue — Array length is a Number, not
-            // int32. Values past `maxInt(i32)` (e.g. setting length to
-            // `2**32 - 1` to grow a sparse array) must be stored as a
-            // double, otherwise the read-back silently truncates to
-            // `2**31 - 1` and `verifyProperty` / `isWritable` fail.
-            const len_value: Value = if (final_len > std.math.maxInt(i32))
-                Value.fromDouble(@floatFromInt(final_len))
-            else
-                Value.fromInt32(@intCast(final_len));
-            obj.set(allocator, "length", len_value) catch return error.OutOfMemory;
+            // §10.4.2.4 ArraySetLength step 16 — write the final
+            // length THROUGH the array-exotic storage so the indexed
+            // backing matches. `setArrayLength` calls
+            // `ensureElementsLen` on grow (so a later own indexed
+            // write via `setIndexed` doesn't snap `length` back to
+            // `elements.items.len` via `syncLengthProperty`) and is a
+            // no-op truncate on shrink (the descending walk above
+            // already cleared the slots up to `final_len`).
+            obj.setArrayLength(allocator, final_len) catch return error.OutOfMemory;
             if (truncate_result.blocked) {
                 const ex = try makeTypeError(realm, "Cannot delete non-configurable array index");
                 return throwInSetter(realm, frames, f, ip, value, ex);

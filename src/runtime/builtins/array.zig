@@ -1708,58 +1708,63 @@ fn arraySort(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     if (len <= 1) return heap_mod.taggedObject(obj);
 
-    // §23.1.3.30.1 SortIndexedProperties — gather only present
-    // entries (HasProperty true), partition out undefineds, sort
-    // the remaining values, write items back at 0..items.len,
-    // then a run of undefineds, then Delete the trailing slots
-    // so holes that existed in the receiver propagate to the end.
+    // §23.1.3.30 Array.prototype.sort — spec-precise drive.
+    // §23.1.3.30.1 SortIndexedProperties(obj, len, SortCompare,
+    // skip-holes): collect items via [[HasProperty]] +
+    // [[Get]] (both walk the prototype chain and fire accessor
+    // getters, so getters that mutate the array are observed
+    // exactly once per slot). Sort the collected items with
+    // SortCompare, which §23.1.3.30.2 CompareArrayElements
+    // pushes undefineds to the end without invoking the
+    // user comparator.
+    //
+    // Then per §23.1.3.30 steps 7-8: write items back via [[Set]]
+    // at 0..items.len-1 (firing inherited accessor setters,
+    // honouring read-only / non-extensible, surfacing length-
+    // mutating setters) and DeletePropertyOrThrow at
+    // items.len..original-len-1 to preserve "absent" slots.
     var items: std.ArrayList(Value) = .empty;
     defer items.deinit(realm.allocator);
-    var undef_count: i64 = 0;
-    var hole_count: i64 = 0;
     var i: i64 = 0;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        if (!obj.hasProperty(islice)) {
-            hole_count += 1;
-            continue;
-        }
+        // skip-holes: only enumerate present keys (own or inherited).
+        // `JSObject.hasProperty` walks the prototype chain, so an
+        // accessor inherited from %Object.prototype% is observed
+        // as present and read through [[Get]].
+        if (!obj.hasProperty(islice)) continue;
         const v = try getPropertyChain(realm, obj, islice);
-        if (v.isUndefined()) {
-            undef_count += 1;
-        } else {
-            items.append(realm.allocator, v) catch return error.OutOfMemory;
-        }
+        items.append(realm.allocator, v) catch return error.OutOfMemory;
     }
 
+    // §23.1.3.30.1 step 4 — sort items with SortCompare. Undefineds
+    // are pushed to the end by `sortCompare` itself; no partition
+    // needed.
     try sortBufferStable(realm, items.items, cmp_fn);
 
-    // Write sorted items back at 0..items.len.
+    // §23.1.3.30 step 7 — Set(O, ToString(j), sortedList[j], true).
+    // Honours accessor setters (own and inherited), read-only data,
+    // array-exotic `length` writes, and a non-extensible receiver.
     var w: usize = 0;
     while (w < items.items.len) : (w += 1) {
         var wbuf: [24]u8 = undefined;
         const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{w}) catch unreachable;
+        // Anchor the key — `setOrThrow` may stash it in the
+        // property bag if no accessor / array-exotic path absorbs
+        // the write.
         const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-        obj.set(realm.allocator, owned.bytes, items.items[w]) catch return error.OutOfMemory;
+        try setOrThrow(realm, obj, owned.bytes, items.items[w]);
     }
-    // Then `undef_count` undefineds (so `[undef, 1].sort()` puts
-    // `1` first and the undefined back at index 1).
-    var u: i64 = 0;
-    while (u < undef_count) : (u += 1) {
-        var wbuf: [24]u8 = undefined;
-        const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{@as(i64, @intCast(items.items.len)) + u}) catch unreachable;
-        const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-        obj.set(realm.allocator, owned.bytes, Value.undefined_) catch return error.OutOfMemory;
-    }
-    // Holes: delete the remaining trailing indices, preserving
-    // them as absent rather than padding with undefined.
-    var d: i64 = 0;
-    const written: i64 = @as(i64, @intCast(items.items.len)) + undef_count;
-    while (d < hole_count) : (d += 1) {
+    // §23.1.3.30 step 8 — DeletePropertyOrThrow up to the *original*
+    // len. A setter that shrunk the array doesn't shorten the
+    // delete loop; the spec runs against the snapshot taken at
+    // step 3.
+    var d: i64 = @intCast(items.items.len);
+    while (d < len) : (d += 1) {
         var dbuf: [24]u8 = undefined;
-        const dslice = std.fmt.bufPrint(&dbuf, "{d}", .{written + d}) catch unreachable;
-        _ = obj.deleteOwn(dslice);
+        const dslice = std.fmt.bufPrint(&dbuf, "{d}", .{d}) catch unreachable;
+        try deletePropertyOrThrow(realm, obj, dslice);
     }
     return heap_mod.taggedObject(obj);
 }
@@ -1783,13 +1788,22 @@ fn sortBufferStable(realm: *Realm, buf: []Value, cmp_fn: ?*JSFunction) NativeErr
     }
 }
 
-/// §23.1.3.30.2 CompareArrayElements. Returns -1, 0, or +1
-/// (the sign of the comparator's result, NaN treated as +0).
-/// With a user comparator, ToNumber is applied to the result.
-/// Without one, both operands go through ToString (hint
-/// "string"), then are compared lexically. Undefineds never
-/// reach here — `arraySort` partitions them out before sorting.
+/// §23.1.3.30.2 CompareArrayElements. Returns -1, 0, or +1.
+/// Per steps 1-3, undefined operands sort after everything else
+/// without invoking the user comparator — this is observable:
+/// fixtures like `precise-comparefn-throws` expect a throwing
+/// comparator to be skipped when one side is undefined.
+/// With a user comparator, ToNumber is applied to the result
+/// (NaN treated as +0). Without one, both operands go through
+/// ToString and are compared lexically.
 fn sortCompare(realm: *Realm, x: Value, y: Value, cmp_fn: ?*JSFunction) NativeError!i32 {
+    // §23.1.3.30.2 steps 1-3 — undefineds last, before the user
+    // comparator runs.
+    const x_undef = x.isUndefined();
+    const y_undef = y.isUndefined();
+    if (x_undef and y_undef) return 0;
+    if (x_undef) return 1;
+    if (y_undef) return -1;
     if (cmp_fn) |c| {
         const cb_args = [_]Value{ x, y };
         const outcome = interpreter.callJSFunction(realm.allocator, realm, c, Value.undefined_, &cb_args) catch |err| switch (err) {

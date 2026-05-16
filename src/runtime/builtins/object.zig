@@ -934,8 +934,12 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             cur_setter = a.setter;
         }
 
-        // Non-configurable redefine guard.
+        // Non-configurable redefine guard. §28.1.3 wants
+        // Reflect.defineProperty to return `false` here while
+        // Object.defineProperty throws — the flag lets the catch
+        // in `reflectDefineProperty` translate.
         if (had_own and !isCompatibleRedefine(cur_is_accessor, cur_flags, cur_value, cur_getter, cur_setter, parsed)) {
+            realm.define_own_property_rejected = true;
             return throwTypeError(realm, "Object.defineProperty: cannot redefine non-configurable property");
         }
 
@@ -1051,6 +1055,12 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             cur_setter = a.setter;
         }
         if (had_own and !isCompatibleRedefine(cur_is_accessor, cur_flags, cur_value, cur_getter, cur_setter, parsed)) {
+            // §28.1.3 — Reflect.defineProperty returns false for the
+            // spec's `[[DefineOwnProperty]]` rejection; Object.
+            // defineProperty turns the same rejection into TypeError.
+            // Set the flag so Reflect.defineProperty's catch can
+            // translate.
+            realm.define_own_property_rejected = true;
             return throwTypeError(realm, "Object.defineProperty: cannot redefine non-configurable property");
         }
 

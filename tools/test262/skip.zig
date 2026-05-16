@@ -134,6 +134,19 @@ pub const skip_ses_substrings = [_][]const u8{
     // confirmed eval-based.
     "/cptn-",
 
+    // `language/{expressions,statements}/class/private-*-brand-check-
+    // multiple-evaluations-of-class-*-function-ctor.js` and the
+    // matching `-eval-indirect.js` variants — every one of these
+    // fixtures builds a class via `new Function(classStringExpression)`
+    // (or `(0, eval)(...)`) so each evaluation produces a fresh
+    // brand. Cynic doesn't ship runtime code construction (SES
+    // carve-out, see AGENTS.md), so the fixtures false-reject for
+    // a permanent OOS reason rather than a real engine bug. 11
+    // fixtures across getter / setter / method / static-method.
+    "-brand-check-multiple-evaluations-of-class-function-ctor",
+    "-brand-check-multiple-evaluations-of-class-realm-function-ctor",
+    "-brand-check-multiple-evaluations-of-class-eval-indirect",
+
 };
 
 /// AND-pair filters — both substrings must appear in the path. Used
