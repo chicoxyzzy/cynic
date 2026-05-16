@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 85.68 % | 92.18 % | 34973 / 40819 | 34973 / 37938 |
+| **runtime** | 86.37 % | 92.93 % | 35202 / 40757 | 35202 / 37880 |
 
 
 ## Where the runtime stands, by area
@@ -24,31 +24,31 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_100–999 fails_** | | | | | |
-| `built-ins/Array` | 2851 | 189 | 36 | 93 % | 94 % |
-| `built-ins/Function` | 265 | 103 | 84 | 59 % | 72 % |
-| `built-ins/Object` | 3088 | 242 | 80 | 91 % | 93 % |
+| `built-ins/Array` | 2894 | 146 | 36 | 94 % | 95 % |
+| `built-ins/Object` | 3150 | 180 | 80 | 92 % | 95 % |
 | `built-ins/RegExp` | 1358 | 252 | 161 | 77 % | 84 % |
 | `built-ins/TypedArray` | 1276 | 147 | 8 | 89 % | 90 % |
-| `built-ins/TypedArrayConstructors` | 546 | 114 | 16 | 81 % | 83 % |
-| `language/expressions` | 9302 | 667 | 979 | 85 % | 93 % |
-| `language/module-code` | 461 | 121 | 14 | 77 % | 79 % |
-| `language/statements` | 8150 | 338 | 672 | 89 % | 96 % |
+| `built-ins/TypedArrayConstructors` | 554 | 106 | 16 | 82 % | 84 % |
+| `language/expressions` | 9388 | 577 | 975 | 86 % | 94 % |
+| `language/module-code` | 464 | 118 | 14 | 78 % | 80 % |
+| `language/statements` | 8164 | 316 | 672 | 89 % | 96 % |
 | **_10–99 fails_** | | | | | |
 | `built-ins/ArrayBuffer` | 166 | 25 | 4 | 85 % | 87 % |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 12 | 26 | 0 | 32 % | 32 % |
 | `built-ins/AsyncGeneratorPrototype` | 37 | 11 | 0 | 77 % | 77 % |
 | `built-ins/Date` | 527 | 64 | 0 | 89 % | 89 % |
+| `built-ins/Function` | 265 | 57 | 84 | 65 % | 82 % |
 | `built-ins/GeneratorPrototype` | 36 | 25 | 0 | 59 % | 59 % |
 | `built-ins/Iterator` | 391 | 34 | 6 | 91 % | 92 % |
 | `built-ins/JSON` | 115 | 50 | 0 | 70 % | 70 % |
-| `built-ins/Map` | 152 | 17 | 1 | 89 % | 90 % |
+| `built-ins/Map` | 155 | 14 | 1 | 91 % | 92 % |
 | `built-ins/Math` | 311 | 16 | 0 | 95 % | 95 % |
-| `built-ins/Number` | 326 | 13 | 0 | 96 % | 96 % |
+| `built-ins/Number` | 327 | 12 | 0 | 96 % | 96 % |
 | `built-ins/Promise` | 603 | 25 | 38 | 91 % | 96 % |
 | `built-ins/Proxy` | 243 | 55 | 13 | 78 % | 82 % |
-| `built-ins/Reflect` | 123 | 30 | 0 | 80 % | 80 % |
+| `built-ins/Reflect` | 129 | 24 | 0 | 84 % | 84 % |
 | `built-ins/Set` | 347 | 34 | 1 | 91 % | 91 % |
-| `built-ins/String` | 1147 | 70 | 5 | 94 % | 94 % |
+| `built-ins/String` | 1148 | 69 | 5 | 94 % | 94 % |
 | `built-ins/Symbol` | 65 | 10 | 6 | 80 % | 87 % |
 | `built-ins/WeakMap` | 87 | 14 | 0 | 86 % | 86 % |
 | `built-ins/WeakSet` | 74 | 10 | 0 | 88 % | 88 % |
@@ -65,7 +65,7 @@ browser-era built-ins …).
 | `built-ins/AsyncFunction` | 11 | 3 | 0 | 79 % | 79 % |
 | `built-ins/AsyncGeneratorFunction` | 7 | 2 | 0 | 78 % | 78 % |
 | `built-ins/BigInt` | 69 | 7 | 0 | 91 % | 91 % |
-| `built-ins/Boolean` | 47 | 3 | 0 | 94 % | 94 % |
+| `built-ins/Boolean` | 48 | 2 | 0 | 96 % | 96 % |
 | `built-ins/DataView` | 509 | 1 | 11 | 98 % | 100 % |
 | `built-ins/Error` | 50 | 7 | 0 | 88 % | 88 % |
 | `built-ins/GeneratorFunction` | 7 | 2 | 0 | 78 % | 78 % |
@@ -86,7 +86,6 @@ browser-era built-ins …).
 | `language/computed-property-names` | 45 | 3 | 0 | 94 % | 94 % |
 | `language/destructuring` | 16 | 2 | 1 | 84 % | 89 % |
 | `language/line-terminators` | 32 | 9 | 0 | 78 % | 78 % |
-| `language/rest-parameters` | 10 | 1 | 0 | 91 % | 91 % |
 | `language/types` | 98 | 6 | 9 | 87 % | 94 % |
 | **_0 fails (passing or wholly OOS)_** | | | | | |
 | ~~`built-ins/AbstractModuleSource`~~ | ~~0~~ | ~~0~~ | ~~8~~ | ~~0 %~~ | ~~0 %~~ |
@@ -111,6 +110,7 @@ browser-era built-ins …).
 | `language/keywords` | 25 | 0 | 0 | 100 % | 100 % |
 | `language/punctuators` | 11 | 0 | 0 | 100 % | 100 % |
 | `language/reserved-words` | 27 | 0 | 0 | 100 % | 100 % |
+| `language/rest-parameters` | 11 | 0 | 0 | 100 % | 100 % |
 | `language/source-text` | 1 | 0 | 0 | 100 % | 100 % |
 
 
@@ -135,7 +135,7 @@ features ship in mainline ECMA-262.
 | feature | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | `joint-iteration` | 52 | 26 | 0 | 67 % | 67 % |
-| `upsert` | 64 | 8 | 0 | 89 % | 89 % |
+| `upsert` | 72 | 0 | 0 | 100 % | 100 % |
 
 
 ## Legend
@@ -158,15 +158,19 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-16 — cynic `338e709`, test262 `d0c1b455`
+### 2026-05-16 — cynic `c72910f`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 85.68 % | 92.18 % | 34973 / 40819 | 34973 / 37938 | +101 | 1m 48s |
+| **runtime** | 86.37 % | 92.93 % | 35202 / 40757 | 35202 / 37880 | +330 | 1m 57s |
 
 Biggest movers (runtime):
 
-- `language/expressions` +1
+- `language/expressions` +86
+- `built-ins/Object` +62
+- `built-ins/Array` +43
+- `language/statements` +14
+- `built-ins/TypedArrayConstructors` +8
 
 ### 2026-05-15 — cynic `2b05c51`, test262 `d0c1b455`
 

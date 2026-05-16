@@ -2354,15 +2354,24 @@ fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value) Na
         return Value.fromString(s);
     }
 
-    // Step 4 — built-in default tag. Drives every "[object X]"
-    // shape that doesn't go through Symbol.toStringTag.
+    // Step 4 — built-in default tag. Per §20.1.3.6 the spec
+    // ToObject's `this value` first, then picks the tag from
+    // the wrapper's internal slot. Cynic short-circuits the
+    // wrapping for String / Number / Boolean primitives (their
+    // wrappers carry [[StringData]] / [[NumberData]] /
+    // [[BooleanData]] — so the slot wins step 4 and short-
+    // circuiting is observably equivalent for the default case).
+    // Symbol and BigInt primitives are different: their wrappers
+    // have NO listed internal slot, so step 4 produces "Object"
+    // and the final tag is determined by step 5's @@toStringTag
+    // walk on Symbol.prototype / BigInt.prototype. User code that
+    // deletes the @@toStringTag must see "[object Object]" — short-
+    // circuiting them here breaks that observability.
     const builtin_tag: []const u8 = blk: {
         if (heap_mod.isFunction(this_value)) break :blk "Function";
         if (this_value.isString()) break :blk "String";
         if (this_value.isNumber()) break :blk "Number";
         if (this_value.isBool()) break :blk "Boolean";
-        if (heap_mod.isSymbol(this_value)) break :blk "Symbol";
-        if (heap_mod.isBigInt(this_value)) break :blk "BigInt";
         if (heap_mod.valueAsPlainObject(this_value)) |obj| {
             // §22.1.3.6 step 4 — pick the built-in tag from the
             // internal slot present on the receiver. Order
@@ -2417,7 +2426,6 @@ fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value) Na
 /// key). Plain objects, functions, and primitive wrappers all
 /// route here. `null` means "no override; use built-in tag."
 fn lookupToStringTag(realm: *Realm, this_value: Value) ?Value {
-    _ = realm;
     if (heap_mod.valueAsPlainObject(this_value)) |obj| {
         const v = obj.get("@@toStringTag");
         if (v.isString()) return v;
@@ -2427,6 +2435,33 @@ fn lookupToStringTag(realm: *Realm, this_value: Value) ?Value {
         const v = fn_obj.get("@@toStringTag");
         if (v.isString()) return v;
         return null;
+    }
+    // §20.1.3.6 step 3 + step 14 — primitive receivers `ToObject`
+    // to their wrapper whose [[Prototype]] is the matching
+    // constructor's `.prototype`. Symbol / BigInt wrappers have no
+    // dedicated builtinTag slot, so the spec's "[object Symbol]" /
+    // "[object BigInt]" rendering comes from `@@toStringTag` on
+    // Symbol.prototype / BigInt.prototype. Mirror that here so a
+    // user-side `delete Symbol.prototype[Symbol.toStringTag]` is
+    // observable as "[object Object]". Reach the prototype via
+    // the global constructor since `realm.intrinsics` doesn't
+    // pin Symbol / BigInt protos directly.
+    const proto_for_primitive: ?*JSObject = blk: {
+        if (heap_mod.valueAsSymbol(this_value)) |_| {
+            const ctor_v = realm.globals.get("Symbol") orelse break :blk null;
+            const ctor = heap_mod.valueAsFunction(ctor_v) orelse break :blk null;
+            break :blk ctor.prototype;
+        }
+        if (heap_mod.valueAsBigInt(this_value)) |_| {
+            const ctor_v = realm.globals.get("BigInt") orelse break :blk null;
+            const ctor = heap_mod.valueAsFunction(ctor_v) orelse break :blk null;
+            break :blk ctor.prototype;
+        }
+        break :blk null;
+    };
+    if (proto_for_primitive) |proto| {
+        const v = proto.get("@@toStringTag");
+        if (v.isString()) return v;
     }
     return null;
 }
