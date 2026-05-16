@@ -66,6 +66,27 @@ pub const Binding = struct {
     /// module, not global. Likewise nested function bodies always
     /// use env slots.
     is_global: bool = false,
+    /// §8.1.1.5.5 CreateImportBinding — when true, this binding is
+    /// an indirect alias for `(namespace, import_name)` rather
+    /// than a value-holding env slot. Reads dereference through
+    /// the namespace object stored in `import_ns_slot`; writes
+    /// throw a TypeError (import bindings are immutable per spec).
+    /// V8 / JSC / SpiderMonkey all implement imports as indirect
+    /// slots so the live-binding semantics fall out for free —
+    /// the importer sees post-init state of the source module's
+    /// binding without any explicit refresh.
+    is_import: bool = false,
+    /// Env slot holding the loaded module's namespace object —
+    /// `compileImportDecl` allocates one persistent slot per
+    /// `import` declaration and seeds it with the result of
+    /// `module_load`. Only meaningful when `is_import` is true.
+    import_ns_slot: u8 = 0,
+    /// Property key to read off the namespace — `"default"` for
+    /// default imports, the imported export name otherwise.
+    /// Borrowed; lives as long as the parser arena / compiler
+    /// arena that produced it. Only meaningful when `is_import`
+    /// is true.
+    import_name: []const u8 = "",
 };
 
 pub const ScopeKind = enum {

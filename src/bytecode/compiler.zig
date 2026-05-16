@@ -337,6 +337,32 @@ pub const Compiler = struct {
     /// Script bindings). Both append a `throw_if_hole` for `let`
     /// / `const` to enforce §13.3.1 TDZ.
     fn emitLoadBinding(self: *Compiler, binding: Binding, span: Span) !void {
+        if (binding.is_import) {
+            // §8.1.1.5.5 CreateImportBinding — indirect alias.
+            // Resolve at every read so the importer sees the live
+            // state of the source module's binding (live binding
+            // semantics, matching V8 / JSC / SpiderMonkey). The
+            // namespace slot is module-local (depth 0 in the
+            // module's own env); we still subtract env_depth so
+            // closures inside the module reach back through the
+            // env chain correctly.
+            const depth = self.env_depth - binding.env_depth;
+            try self.builder.emitOp(.lda_env, span);
+            try self.builder.emitU8(depth);
+            try self.builder.emitU8(binding.import_ns_slot);
+            const k_imp = try self.internString(binding.import_name);
+            try self.builder.emitOp(.lda_property, span);
+            try self.builder.emitU16(k_imp);
+            // §8.1.1.5.5 — accessing an indirect import binding
+            // whose source-module slot is still uninitialised must
+            // throw a ReferenceError. The source module pre-seeds
+            // the namespace with `Hole` for any exported `let` /
+            // `const` / `class` declaration that hasn't run yet
+            // (see `compileModuleAsChunk`), so this check is what
+            // promotes the Hole into the spec-mandated throw.
+            try self.builder.emitOp(.throw_if_hole, span);
+            return;
+        }
         if (binding.is_global) {
             const k = try self.internString(binding.name);
             try self.builder.emitOp(.lda_global, span);
@@ -356,6 +382,15 @@ pub const Compiler = struct {
     /// `emitLoadBinding` for the global vs env-slot fork. No TDZ
     /// check — stores are how the Hole gets overwritten.
     fn emitStoreBinding(self: *Compiler, binding: Binding, span: Span) !void {
+        if (binding.is_import) {
+            // §8.1.1.5.5 — import bindings are immutable. Writing
+            // to an imported binding is a SyntaxError early error
+            // (§13.15.1 / §14.3.3.1 for destructuring targets). We
+            // surface it via `assignment_to_const` which the same
+            // diagnostic family covers for `const x = 1; x = 2;`.
+            try self.report(.assignment_to_const, span);
+            return error.UnsupportedStatement;
+        }
         if (binding.is_global) {
             const k = try self.internString(binding.name);
             try self.builder.emitOp(.sta_global, span);
@@ -3122,27 +3157,36 @@ pub fn compileStatement(self: *Compiler, stmt: *const Statement) CompileError!vo
     }
 }
 
-/// §16.2.2 ImportDeclaration. In module mode emits
-/// a `module_load` for the source specifier, then for each
-/// imported name reads the matching property off the returned
-/// namespace and stores into the local binding's env slot. In
-/// script mode the bindings are declared but stay in TDZ
-/// (legacy later path).
+/// §16.2.2 ImportDeclaration. In module mode emits a
+/// `module_load` for the source specifier and stores the
+/// resulting namespace in a per-import-decl env slot, then
+/// records each imported name as an indirect alias for
+/// `(namespace_slot, exported_name)`. Reads at use sites then
+/// dereference through the namespace at access time — matching
+/// §8.1.1.5.5 CreateImportBinding's live-binding semantics
+/// (every production engine implements imports this way: V8 /
+/// JSC / SpiderMonkey use the same env-slot-points-at-namespace
+/// shape). In script mode the bindings are declared but stay in
+/// TDZ (no actual import resolution in script mode).
 fn compileImportDecl(self: *Compiler, id: ast.statement.ImportDecl) CompileError!void {
-    if (id.default) |bid| {
-        const name = self.source[bid.span.start..bid.span.end];
-        _ = try self.declareBinding(name, .let_, bid.span);
+    if (!self.is_module) {
+        // Script mode — declare the binding names so a later
+        // reference doesn't `UnresolvedReference`, but no module
+        // loading happens.
+        if (id.default) |bid| {
+            const name = self.source[bid.span.start..bid.span.end];
+            _ = try self.declareBinding(name, .let_, bid.span);
+        }
+        if (id.namespace) |bid| {
+            const name = self.source[bid.span.start..bid.span.end];
+            _ = try self.declareBinding(name, .let_, bid.span);
+        }
+        for (id.named) |spec| {
+            const name = self.source[spec.local.span.start..spec.local.span.end];
+            _ = try self.declareBinding(name, .let_, spec.local.span);
+        }
+        return;
     }
-    if (id.namespace) |bid| {
-        const name = self.source[bid.span.start..bid.span.end];
-        _ = try self.declareBinding(name, .let_, bid.span);
-    }
-    for (id.named) |spec| {
-        const name = self.source[spec.local.span.start..spec.local.span.end];
-        _ = try self.declareBinding(name, .let_, spec.local.span);
-    }
-
-    if (!self.is_module) return;
 
     // Strip surrounding quotes from the StringLiteral span.
     const raw = self.source[id.source.start..id.source.end];
@@ -3152,25 +3196,53 @@ fn compileImportDecl(self: *Compiler, id: ast.statement.ImportDecl) CompileError
     try self.builder.emitOp(.module_load, id.span);
     try self.builder.emitU16(k_spec);
 
-    const r_ns = try self.reserveTemp();
-    defer self.releaseTemp();
-    try self.builder.emitOp(.star, id.span);
-    try self.builder.emitU8(r_ns);
+    // Reserve a persistent env slot for the namespace — one per
+    // import-decl. All indirect bindings declared by this decl
+    // dereference through this slot. We use an env slot (not a
+    // temp register) so closures created later in the module body
+    // can reach the namespace via `lda_env` — temps are
+    // accumulator-only.
+    const ns_slot = try self.newEnvSlot();
+    try self.builder.emitOp(.sta_env, id.span);
+    try self.builder.emitU8(0);
+    try self.builder.emitU8(ns_slot);
 
+    // §13.3.1 ImportClause — the namespace binding (`import * as
+    // ns from ...`) IS the namespace itself, so model it as a
+    // regular `const` slot pointing at the namespace value. The
+    // module_load above already left the namespace in the
+    // accumulator and we've stored it; create a const binding
+    // that aliases that slot. We can't share `ns_slot` directly
+    // (it's "owned" by the import decl for indirect dereference)
+    // so reload via the existing emit machinery.
     if (id.namespace) |bid| {
-        try self.builder.emitOp(.ldar, bid.span);
-        try self.builder.emitU8(r_ns);
         const name = self.source[bid.span.start..bid.span.end];
-        try self.assignToBinding(name, bid.span);
+        const ns_binding = try self.declareBindingFull(name, .const_, bid.span);
+        // Reload namespace from `ns_slot` into the accumulator,
+        // then store into the const binding's own env slot.
+        try self.builder.emitOp(.lda_env, bid.span);
+        try self.builder.emitU8(0);
+        try self.builder.emitU8(ns_slot);
+        try self.emitStoreBinding(ns_binding, bid.span);
     }
     if (id.default) |bid| {
-        const k_default = try self.internString("default");
-        try self.builder.emitOp(.ldar, bid.span);
-        try self.builder.emitU8(r_ns);
-        try self.builder.emitOp(.lda_property, bid.span);
-        try self.builder.emitU16(k_default);
         const name = self.source[bid.span.start..bid.span.end];
-        try self.assignToBinding(name, bid.span);
+        const binding: Binding = .{
+            .name = name,
+            .env_slot = 0,
+            .env_depth = self.env_depth,
+            .kind = .const_,
+            .span = bid.span,
+            .is_import = true,
+            .import_ns_slot = ns_slot,
+            .import_name = "default",
+        };
+        const target = self.scope.?;
+        if (target.lookupLocal(name)) |_| {
+            try self.report(.unexpected_token, bid.span);
+            return error.DuplicateBinding;
+        }
+        try target.bindings.append(self.allocator, binding);
     }
     for (id.named) |spec| {
         const imported_text = self.source[spec.imported_span.start..spec.imported_span.end];
@@ -3178,13 +3250,23 @@ fn compileImportDecl(self: *Compiler, id: ast.statement.ImportDecl) CompileError
             imported_text[1 .. imported_text.len - 1]
         else
             imported_text;
-        const k_imp = try self.internString(imported_name);
-        try self.builder.emitOp(.ldar, spec.local.span);
-        try self.builder.emitU8(r_ns);
-        try self.builder.emitOp(.lda_property, spec.local.span);
-        try self.builder.emitU16(k_imp);
         const local_name = self.source[spec.local.span.start..spec.local.span.end];
-        try self.assignToBinding(local_name, spec.local.span);
+        const binding: Binding = .{
+            .name = local_name,
+            .env_slot = 0,
+            .env_depth = self.env_depth,
+            .kind = .const_,
+            .span = spec.local.span,
+            .is_import = true,
+            .import_ns_slot = ns_slot,
+            .import_name = imported_name,
+        };
+        const target = self.scope.?;
+        if (target.lookupLocal(local_name)) |_| {
+            try self.report(.unexpected_token, spec.local.span);
+            return error.DuplicateBinding;
+        }
+        try target.bindings.append(self.allocator, binding);
     }
 }
 
@@ -3259,6 +3341,66 @@ fn emitBindingRead(self: *Compiler, name: []const u8, span: Span) CompileError!v
     try self.builder.emitOp(.lda_env, span);
     try self.builder.emitU8(depth);
     try self.builder.emitU8(binding.env_slot);
+}
+
+/// At module instantiation, pre-seed the namespace with `Hole`
+/// for every exported TDZ-tracked binding so an importing module
+/// reading the binding before the source body initialises it
+/// triggers ReferenceError via `throw_if_hole` on the indirect
+/// import read. Spec basis: §8.1.1.5.5 CreateImportBinding's
+/// "the binding is initialized" record interacting with the
+/// importer's GetBindingValue (§8.1.1.1.6) — accessing an
+/// uninitialised binding throws ReferenceError, which we surface
+/// via the Hole sentinel.
+///
+/// Covers: `export let X`, `export const X`, `export class X`,
+/// `export default class { ... }`, `export default <expr>`. The
+/// `default` slot is also seeded — the value lands at body
+/// evaluation, when `module_export "default"` runs. Skipped:
+/// `export function` / `export function*` / `export async fn`
+/// (already initialised by the hoisted function-decl phase
+/// before this seed runs would be observably wrong; they reach
+/// `module_export` via `publishExportedNamesFromDecl` in the
+/// hoist phase), `export var` (initialised to undefined at
+/// hoist), `export { X }` / `export { X } from` / `export *`
+/// (re-exports are resolved indirectly; no own slot).
+fn seedTdzExportHoles(self: *Compiler, body: []ast.statement.Statement, span: Span) CompileError!void {
+    for (body) |s| {
+        switch (s) {
+            .export_decl => |ed| switch (ed.body) {
+                .declaration => |inner| switch (inner.*) {
+                    .lexical => |ld| for (ld.declarators) |d| {
+                        if (identifierName(self.source, d.name)) |name| {
+                            try self.seedExportHole(name, d.span);
+                        }
+                    },
+                    .class_decl => |cd| {
+                        const name = self.source[cd.name.span.start..cd.name.span.end];
+                        try self.seedExportHole(name, cd.name.span);
+                    },
+                    else => {},
+                },
+                .default_value => {
+                    // `export default <expr>` — the consumer
+                    // imports via "default". Seed Hole so an
+                    // importer reading default before the body
+                    // evaluates the expression gets the spec
+                    // ReferenceError.
+                    try self.seedExportHole("default", ed.span);
+                },
+                .named, .all => {},
+            },
+            else => {},
+        }
+    }
+    _ = span;
+}
+
+fn seedExportHole(self: *Compiler, name: []const u8, span: Span) CompileError!void {
+    const k = try self.internString(name);
+    try self.builder.emitOp(.lda_hole, span);
+    try self.builder.emitOp(.module_export, span);
+    try self.builder.emitU16(k);
 }
 
 /// §14.12 SwitchStatement.
@@ -6872,6 +7014,24 @@ pub fn compileModuleAsChunk(
     try c.hoistLetConst(program.body);
     try c.hoistVarAndFunctions(program.body);
     try c.emitVarInits(start_span);
+
+    // §8.1.1.5.5 CreateImportBinding + §15.2.1.16.4 step 12 — at
+    // module instantiation we need every exported TDZ-tracked
+    // binding (`export let`, `export const`, `export class`,
+    // `export default class`, `export default <named-expr>` /
+    // `export default <anonymous-expr>` etc.) to be visible on
+    // the namespace as `Hole`, so an importing module's indirect
+    // read (lda_property + throw_if_hole) gets the spec-mandated
+    // ReferenceError before the source body has run its decl.
+    //
+    // Re-exports (`export { A as B } from './x.js'`) and star
+    // re-exports (`export * from`) DO NOT seed Hole here — they
+    // resolve through their source module at access time and
+    // never bind in the current env. `export var X` also skips
+    // (var is initialised to `undefined` at hoist, no TDZ).
+    // `export function` is already initialised to its closure
+    // value below; seeding Hole would be observably wrong.
+    try c.seedTdzExportHoles(program.body, start_span);
 
     // sec-moduledeclarationinstantiation -- ordered phases before body:
     //   1. FunctionDeclarations + GeneratorDeclarations, including
