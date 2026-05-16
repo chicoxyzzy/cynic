@@ -625,6 +625,11 @@ pub const skip_planned_paths = [_][]const u8{
     // in 0 % noise. Path-skip wholesale until the implementation
     // phase.
     "built-ins/Temporal/",
+    // Stage 3 — `Date.prototype.toTemporalInstant` is part of the
+    // Temporal proposal surface. Cynic doesn't install Temporal,
+    // so this whole subtree fails brand checks. Path-skip until
+    // Temporal lands. ~7 fixtures.
+    "built-ins/Date/prototype/toTemporalInstant/",
     // `Uint8Array.{fromBase64, fromHex, prototype.{setFromBase64,
     // setFromHex, toBase64, toHex}}` — Stage 4 (ES2025 ArrayBuffer
     // ↔ base64/hex). The whole `built-ins/Uint8Array/` tree
