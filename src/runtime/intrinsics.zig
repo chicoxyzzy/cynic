@@ -1187,7 +1187,12 @@ pub fn coerceToNumber(v: Value) Value {
 /// the NumericLiteralSeparator (`1_000`) which the syntactic
 /// numeric literal accepts but the runtime ToNumber does not.
 pub fn stringToNumber(bytes: []const u8) Value {
-    const trimmed = std.mem.trim(u8, bytes, " \t\r\n\u{0009}\u{000B}\u{000C}\u{00A0}\u{FEFF}");
+    // §12.6 StrWhiteSpace covers the full Unicode whitespace set:
+    // ZWNBSP (FEFF), every USP category Zs (space separator)
+    // codepoint, plus LF / CR / LS (2028) / PS (2029). Trim them
+    // by codepoint, not byte, so multibyte ws (NBSP, OGHAM space
+    // mark, EN QUAD…) is handled.
+    const trimmed = trimStrWhiteSpace(bytes);
     if (trimmed.len == 0) return Value.fromInt32(0);
     // Reject any underscore — §12.9.3.1 NumericLiteralSeparator
     // is a syntactic-only feature and not part of StringToNumber.
@@ -1220,10 +1225,68 @@ pub fn stringToNumber(bytes: []const u8) Value {
             }
         }
     }
-    // Empty Infinity short-circuit — parseFloat handles `Infinity`
-    // / `-Infinity` correctly already, so fall through.
+    // §7.1.4.1.1 step 2 — `Infinity` is the only case-sensitive
+    // literal accepted. Zig's `parseFloat` lower-cases `inf` /
+    // `infinity` / `iNf`; reject those manually so
+    // `Number("INFINITY")` is NaN, not Infinity.
+    const inf_body = if (trimmed[0] == '+' or trimmed[0] == '-') trimmed[1..] else trimmed;
+    if (inf_body.len > 0 and (inf_body[0] == 'I' or inf_body[0] == 'i')) {
+        // The literal must be exactly "Infinity" — anything else
+        // (case-shifted variants, `inf`, `INF`, `Inf`) is NaN.
+        if (!std.mem.eql(u8, inf_body, "Infinity")) {
+            return Value.fromDouble(std.math.nan(f64));
+        }
+        return Value.fromDouble(if (trimmed[0] == '-') -std.math.inf(f64) else std.math.inf(f64));
+    }
     const d = std.fmt.parseFloat(f64, trimmed) catch return Value.fromDouble(std.math.nan(f64));
     return Value.fromDouble(d);
+}
+
+/// §12.6 StrWhiteSpace. Trim leading + trailing characters from
+/// `bytes` whose code points are in the Unicode whitespace /
+/// line-terminator set per §12.6 / §12.5 (LineTerminators).
+fn trimStrWhiteSpace(bytes: []const u8) []const u8 {
+    var lo: usize = 0;
+    while (lo < bytes.len) {
+        const cp_len = utf8DecodeLen(bytes[lo..]) catch break;
+        const cp = utf8DecodeCp(bytes[lo .. lo + cp_len]) catch break;
+        if (!isStrWhiteSpace(cp)) break;
+        lo += cp_len;
+    }
+    var hi: usize = bytes.len;
+    while (hi > lo) {
+        // Walk backwards by one UTF-8 codepoint.
+        var start = hi - 1;
+        while (start > lo and (bytes[start] & 0xC0) == 0x80) start -= 1;
+        const cp = utf8DecodeCp(bytes[start..hi]) catch break;
+        if (!isStrWhiteSpace(cp)) break;
+        hi = start;
+    }
+    return bytes[lo..hi];
+}
+
+fn utf8DecodeLen(bytes: []const u8) !usize {
+    const n = try std.unicode.utf8ByteSequenceLength(bytes[0]);
+    return @as(usize, n);
+}
+
+fn utf8DecodeCp(bytes: []const u8) !u21 {
+    return std.unicode.utf8Decode(bytes);
+}
+
+fn isStrWhiteSpace(cp: u21) bool {
+    return switch (cp) {
+        // ASCII whitespace + LF / CR / VT / FF.
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20 => true,
+        // NBSP / OGHAM SPACE MARK / EN QUAD .. HAIR SPACE /
+        // LINE SEPARATOR / PARAGRAPH SEPARATOR /
+        // NARROW NO-BREAK SPACE / MEDIUM MATH SPACE /
+        // IDEOGRAPHIC SPACE / ZWNBSP.
+        0xA0, 0x1680 => true,
+        0x2000...0x200A => true,
+        0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF => true,
+        else => false,
+    };
 }
 
 pub const ToPrimitiveHint = enum { default, number, string };

@@ -110,6 +110,13 @@ fn numberToFixed(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         const s = realm.heap.allocateString(if (x > 0) "Infinity" else "-Infinity") catch return error.OutOfMemory;
         return Value.fromString(s);
     }
+    // §21.1.3.3 step 9 — if |x| ≥ 10^21, return Number::toString(x).
+    // (The fixed-point representation would need more digits than
+    // a Number can resolve; the spec defers to ToString instead.)
+    if (@abs(x) >= 1e21) {
+        const s = try intrinsics.stringifyArg(realm, Value.fromDouble(x));
+        return Value.fromString(s);
+    }
     var buf: [128]u8 = undefined;
     const slice = std.fmt.bufPrint(&buf, "{d:.[1]}", .{ x, @as(usize, @intCast(digits)) }) catch return error.OutOfMemory;
     const s = realm.heap.allocateString(slice) catch return error.OutOfMemory;
@@ -166,9 +173,7 @@ fn numberToPrecision(realm: *Realm, this_value: Value, args: []const Value) Nati
     const prec_arg = argOr(args, 0, Value.undefined_);
     if (prec_arg.isUndefined()) {
         // §21.1.3.5 step 2 — fall back to ToString.
-        var buf: [64]u8 = undefined;
-        const slice = std.fmt.bufPrint(&buf, "{d}", .{x}) catch return error.OutOfMemory;
-        const s = realm.heap.allocateString(slice) catch return error.OutOfMemory;
+        const s = try intrinsics.stringifyArg(realm, Value.fromDouble(x));
         return Value.fromString(s);
     }
     // §21.1.3.5 toPrecision — ToIntegerOrInfinity routes through
@@ -189,13 +194,154 @@ fn numberToPrecision(realm: *Realm, this_value: Value, args: []const Value) Nati
     if (std.math.isNan(pd) or std.math.isInf(pd) or pd < 1 or pd > 100)
         return throwRangeError(realm, "toPrecision precision out of range [1, 100]");
     const prec: i32 = @intFromFloat(@trunc(pd));
-    // For later we approximate via Zig's default formatter
-    // truncated to `prec` digits. Real spec semantics
-    // (§21.1.3.5) round + decide between fixed / exponential
-    // based on the exponent — that's later.
-    var buf: [128]u8 = undefined;
-    const slice = std.fmt.bufPrint(&buf, "{d:.[1]}", .{ x, @as(usize, @intCast(@max(prec - 1, 0))) }) catch return error.OutOfMemory;
-    const s = realm.heap.allocateString(slice) catch return error.OutOfMemory;
+    const p: usize = @intCast(prec);
+
+    // §21.1.3.5 step 6 — `x = 0`: return s + "0" * p with optional
+    // decimal point. e = 0. Special-case before the log10 logic
+    // (which would underflow on zero).
+    if (x == 0) {
+        var buf: [128]u8 = undefined;
+        if (p == 1) {
+            const s = realm.heap.allocateString("0") catch return error.OutOfMemory;
+            return Value.fromString(s);
+        }
+        // "0.0…0" with p-1 trailing zeros after the dot.
+        var n: usize = 0;
+        buf[n] = '0';
+        n += 1;
+        buf[n] = '.';
+        n += 1;
+        var k: usize = 0;
+        while (k < p - 1) : (k += 1) {
+            buf[n] = '0';
+            n += 1;
+        }
+        const s = realm.heap.allocateString(buf[0..n]) catch return error.OutOfMemory;
+        return Value.fromString(s);
+    }
+    // Non-zero, finite x. Round to p significant digits via
+    // Zig's `{e:.[1]}` (which gives `<d>.<d…>e<sign><exp>`), then
+    // unpack to (sign, mantissa-digits, exponent).
+    var ebuf: [256]u8 = undefined;
+    const exp_str = std.fmt.bufPrint(&ebuf, "{e:.[1]}", .{ x, p - 1 }) catch return error.OutOfMemory;
+    // Parse: optional leading '-', then digits, optionally '.digits',
+    // then 'e' sign, then digits.
+    var i: usize = 0;
+    var sign: []const u8 = "";
+    if (exp_str[i] == '-') {
+        sign = "-";
+        i += 1;
+    }
+    // Mantissa digits — collect them with the dot skipped.
+    var m_buf: [128]u8 = undefined;
+    var m_len: usize = 0;
+    while (i < exp_str.len and exp_str[i] != 'e' and exp_str[i] != 'E') : (i += 1) {
+        const c = exp_str[i];
+        if (c == '.') continue;
+        if (c < '0' or c > '9') break;
+        m_buf[m_len] = c;
+        m_len += 1;
+    }
+    // Skip 'e'.
+    if (i >= exp_str.len) {
+        // No exponent — Zig should always emit one with `{e}`,
+        // but guard for safety.
+        const fallback = realm.heap.allocateString(exp_str) catch return error.OutOfMemory;
+        return Value.fromString(fallback);
+    }
+    i += 1; // past 'e'
+    var exp_sign: i32 = 1;
+    if (i < exp_str.len and exp_str[i] == '-') {
+        exp_sign = -1;
+        i += 1;
+    } else if (i < exp_str.len and exp_str[i] == '+') {
+        i += 1;
+    }
+    var exp_v: i32 = 0;
+    while (i < exp_str.len) : (i += 1) {
+        if (exp_str[i] < '0' or exp_str[i] > '9') break;
+        exp_v = exp_v * 10 + @as(i32, exp_str[i] - '0');
+    }
+    const e: i32 = exp_sign * exp_v;
+
+    // §21.1.3.5 step 8 — if e < -6 or e ≥ p, use scientific.
+    var out: [256]u8 = undefined;
+    var ol: usize = 0;
+    if (e < -6 or e >= @as(i32, @intCast(p))) {
+        // s + m[0] + "." + m[1..] + "e" + sign(e) + |e|
+        for (sign) |c| {
+            out[ol] = c;
+            ol += 1;
+        }
+        out[ol] = m_buf[0];
+        ol += 1;
+        if (p > 1) {
+            out[ol] = '.';
+            ol += 1;
+            for (m_buf[1..m_len]) |c| {
+                out[ol] = c;
+                ol += 1;
+            }
+        }
+        out[ol] = 'e';
+        ol += 1;
+        out[ol] = if (e >= 0) '+' else '-';
+        ol += 1;
+        const eabs: i32 = if (e >= 0) e else -e;
+        var ebs: [16]u8 = undefined;
+        const es = std.fmt.bufPrint(&ebs, "{d}", .{eabs}) catch unreachable;
+        for (es) |c| {
+            out[ol] = c;
+            ol += 1;
+        }
+    } else if (e == @as(i32, @intCast(p)) - 1) {
+        // e == p-1 → return s + m
+        for (sign) |c| {
+            out[ol] = c;
+            ol += 1;
+        }
+        for (m_buf[0..m_len]) |c| {
+            out[ol] = c;
+            ol += 1;
+        }
+    } else if (e >= 0) {
+        // s + m[0..e+1] + "." + m[e+1..]
+        for (sign) |c| {
+            out[ol] = c;
+            ol += 1;
+        }
+        const dot_at: usize = @intCast(e + 1);
+        for (m_buf[0..dot_at]) |c| {
+            out[ol] = c;
+            ol += 1;
+        }
+        out[ol] = '.';
+        ol += 1;
+        for (m_buf[dot_at..m_len]) |c| {
+            out[ol] = c;
+            ol += 1;
+        }
+    } else {
+        // e < 0 → s + "0." + ("0" * -(e+1)) + m
+        for (sign) |c| {
+            out[ol] = c;
+            ol += 1;
+        }
+        out[ol] = '0';
+        ol += 1;
+        out[ol] = '.';
+        ol += 1;
+        var zeros: i32 = -(e + 1);
+        while (zeros > 0) : (zeros -= 1) {
+            out[ol] = '0';
+            ol += 1;
+        }
+        for (m_buf[0..m_len]) |c| {
+            out[ol] = c;
+            ol += 1;
+        }
+    }
+    const s = realm.heap.allocateString(out[0..ol]) catch return error.OutOfMemory;
     return Value.fromString(s);
 }
 
