@@ -7127,6 +7127,21 @@ fn runFrames(
                     }
                 }
             },
+            .throw_assign_const => {
+                // §8.1.1.1.4 SetMutableBinding step 9.b — write to
+                // an immutable binding throws TypeError. Currently
+                // emitted only for store-to-import paths the parser
+                // can't reject as `assignment_to_const` (e.g. via
+                // destructuring patterns). `let { foo: imported }
+                // = obj` lands here, as does `[imported] = arr`.
+                const ex = try makeTypeError(realm, "Assignment to constant variable");
+                f.ip = ip;
+                f.accumulator = acc;
+                committed = true;
+                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                    return .{ .thrown = ex };
+                }
+            },
 
             .to_property_key => {
                 // §7.1.19 ToPropertyKey. Primitives that are

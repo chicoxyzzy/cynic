@@ -383,13 +383,19 @@ pub const Compiler = struct {
     /// check — stores are how the Hole gets overwritten.
     fn emitStoreBinding(self: *Compiler, binding: Binding, span: Span) !void {
         if (binding.is_import) {
-            // §8.1.1.5.5 — import bindings are immutable. Writing
-            // to an imported binding is a SyntaxError early error
-            // (§13.15.1 / §14.3.3.1 for destructuring targets). We
-            // surface it via `assignment_to_const` which the same
-            // diagnostic family covers for `const x = 1; x = 2;`.
-            try self.report(.assignment_to_const, span);
-            return error.UnsupportedStatement;
+            // §8.1.1.5.5 — import bindings are immutable; §8.1.1.1.4
+            // SetMutableBinding step 9.b throws TypeError on store
+            // to an immutable record. Direct `x = ...` where `x` is
+            // an imported name is also a SyntaxError under strict-
+            // mode AssignmentTarget static semantics — but real
+            // engines (V8 / JSC) surface it as a *runtime* TypeError
+            // when reached via the assignment expression path. Tests
+            // exercise both: `assert.throws(TypeError, () => { B =
+            // null; })` expects the runtime throw, not a SyntaxError
+            // that prevents the surrounding function from even
+            // being created. Emit the throw at the store site.
+            try self.builder.emitOp(.throw_assign_const, span);
+            return;
         }
         if (binding.is_global) {
             const k = try self.internString(binding.name);
@@ -2713,10 +2719,17 @@ pub const Compiler = struct {
             .span = a.target.span(),
             .is_global = true,
         };
-        if (binding.kind == .const_) {
+        if (binding.kind == .const_ and !binding.is_import) {
             try self.report(.assignment_to_const, a.span);
             return error.AssignmentToConst;
         }
+        // Import bindings carry kind=.const_ for shape reasons,
+        // but per §8.1.1.5.5 the early-error is supposed to be
+        // SyntaxError, not a `const` reassignment. Real engines
+        // (V8 / JSC) surface the error as a *runtime* TypeError
+        // via SetMutableBinding so user code can `assert.throws
+        // (TypeError, () => { imported = 0; })`. `emitStoreBinding`
+        // emits `throw_assign_const` for the import case.
 
         // §13.15.2 step 1.a — for a plain `Identifier = expr`
         // assignment whose LHS doesn't resolve in any user-
@@ -3289,6 +3302,52 @@ fn compileExportDecl(self: *Compiler, ed: ast.statement.ExportDecl) CompileError
         },
         .named => |body| {
             if (!self.is_module) return;
+            if (body.source) |src_span| {
+                // §16.2.3.7 ExportDeclaration : `export NamedExports
+                // FromClause` — re-export from another module. We
+                // load the source namespace and forward each
+                // exported binding's CURRENT value into our
+                // namespace under the renamed key. This is a
+                // value-copy at re-export-evaluation time, not a
+                // live indirection — adequate for the
+                // non-cycle / hoisted-fn-decl cases and for any
+                // re-read after the source module has fully
+                // evaluated. A fully spec-compliant ResolveExport
+                // chain (§15.2.1.16.3) would need the namespace
+                // property to forward through accessors; this
+                // covers the common case.
+                const raw = self.source[src_span.start..src_span.end];
+                if (raw.len < 2) return error.UnsupportedStatement;
+                const spec_text = raw[1 .. raw.len - 1];
+                const k_spec = try self.internString(spec_text);
+                try self.builder.emitOp(.module_load, ed.span);
+                try self.builder.emitU16(k_spec);
+                const r_ns = try self.reserveTemp();
+                defer self.releaseTemp();
+                try self.builder.emitOp(.star, ed.span);
+                try self.builder.emitU8(r_ns);
+                for (body.specifiers) |spec| {
+                    const local_text = self.source[spec.local_span.start..spec.local_span.end];
+                    const local_name = if (local_text.len >= 2 and (local_text[0] == '"' or local_text[0] == '\''))
+                        local_text[1 .. local_text.len - 1]
+                    else
+                        local_text;
+                    const exported_text = self.source[spec.exported_span.start..spec.exported_span.end];
+                    const exported_name = if (exported_text.len >= 2 and (exported_text[0] == '"' or exported_text[0] == '\''))
+                        exported_text[1 .. exported_text.len - 1]
+                    else
+                        exported_text;
+                    const k_local = try self.internString(local_name);
+                    try self.builder.emitOp(.ldar, spec.span);
+                    try self.builder.emitU8(r_ns);
+                    try self.builder.emitOp(.lda_property, spec.span);
+                    try self.builder.emitU16(k_local);
+                    const k_exp = try self.internString(exported_name);
+                    try self.builder.emitOp(.module_export, spec.span);
+                    try self.builder.emitU16(k_exp);
+                }
+                return;
+            }
             for (body.specifiers) |spec| {
                 const local_name = self.source[spec.local_span.start..spec.local_span.end];
                 const exported_name = self.source[spec.exported_span.start..spec.exported_span.end];

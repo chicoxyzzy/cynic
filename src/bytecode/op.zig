@@ -565,6 +565,17 @@ pub const Op = enum(u8) {
     /// `({…} = v)`) before any property reads, so `const {} = null`
     /// throws as the spec requires.
     require_object_coercible,
+    /// Unconditional `TypeError` — emitted at runtime assignment
+    /// targets that are statically known to be immutable. The
+    /// motivating case is `<imported> = ...` where the LHS resolves
+    /// to an import binding: §8.1.1.5.5 CreateImportBinding records
+    /// the binding as immutable, and §8.1.1.1.4 SetMutableBinding
+    /// throws TypeError on an immutable target. `const x = 1; x =
+    /// 2;` in strict mode is the same shape, but we report that as
+    /// a compile-time `assignment_to_const` diagnostic so the
+    /// opcode only fires for import-store paths the parser can't
+    /// reject statically (e.g. via destructuring).
+    throw_assign_const,
     /// §7.1.19 ToPropertyKey applied to `acc`. Runs
     /// ToPrimitive(hint "string") and, for non-Symbol results,
     /// ToString. Emitted right after the key expression of a
@@ -612,6 +623,7 @@ pub const Op = enum(u8) {
             .throw_,
             .throw_if_hole,
             .require_object_coercible,
+            .throw_assign_const,
             .to_property_key,
             .return_,
             .super_get_computed,
@@ -799,6 +811,7 @@ pub const Op = enum(u8) {
             .throw_ => "Throw",
             .throw_if_hole => "ThrowIfHole",
             .require_object_coercible => "RequireObjectCoercible",
+            .throw_assign_const => "ThrowAssignConst",
             .to_property_key => "ToPropertyKey",
             .return_ => "Return",
         };
