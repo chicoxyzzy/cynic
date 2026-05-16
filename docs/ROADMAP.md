@@ -403,6 +403,19 @@ sampling by `/profile`.
   trigger keeps RSS bounded (~255 MB peak across 35 GC cycles)
   but the wall-time cost is real.
 
+  **Test262 score impact (measured):** in addition to the 12
+  CharacterClassEscapes fixtures, the same `buildString +=`
+  pattern in `harness/regExpUtils.js` blocks ~74 fixtures under
+  `built-ins/RegExp/property-escapes/generated/*` from completing.
+  The regex itself works (verified: `re.test(matchSymbols) → true`
+  for the small match set, all property-name aliases parse and
+  resolve, every individual codepoint matches correctly). What
+  hangs is constructing `nonMatchSymbols` — ~1.1M codepoints
+  across the full Unicode space minus the target category. Local
+  repro: `buildString` of that range is still running after 60 s
+  and was killed. Same root cause; both clusters unblock together
+  when ConsString lands.
+
   **Cost re-estimate (after sketching):** a "compiler-only
   `add_inplace`" that only checks closure capture is unsound —
   intra-function aliasing (`let y = x; x = x + 'a';`) would let
