@@ -21,6 +21,28 @@ const Chunk = @import("../bytecode/chunk.zig").Chunk;
 const Environment = @import("environment.zig").Environment;
 const JSObject = @import("object.zig").JSObject;
 
+/// §27.5.3.7 / §15.5.5 — kind of completion the surrounding
+/// generator body should observe when resumed. `yield*` reads
+/// this after every inner-loop `gen_yield` so it can forward
+/// `received` to the inner iterator's `next` / `return` / `throw`
+/// per spec.
+pub const ResumeKind = enum(u8) {
+    /// Plain `.next(v)` — resume the body with `v` in the
+    /// accumulator. Default after a `gen_yield` if nothing else
+    /// was injected.
+    normal,
+    /// `.return(v)` was called while the body was suspended.
+    /// `yield*` forwards via `iterator.return(v)`; outside
+    /// `yield*` the surrounding return-completion drive runs
+    /// finally blocks before the gen settles.
+    return_value,
+    /// `.throw(e)` was called while the body was suspended.
+    /// `yield*` forwards via `iterator.throw(e)`; outside
+    /// `yield*` the spec already injected the throw at the yield
+    /// site via `unwindThrow` before resume.
+    throw_value,
+};
+
 pub const GeneratorState = enum(u8) {
     /// Newly allocated; body hasn't run.
     initial,
@@ -141,6 +163,26 @@ pub const JSGenerator = struct {
     /// `throw`s or `return`s replaces the completion outright
     /// (§14.15.3 step 4).
     pending_return: ?Value = null,
+    /// §27.5.1.4 GeneratorPrototype.throw — when set, the next
+    /// `resumeGenerator` injects a throw-completion at the
+    /// yield site so any surrounding `try { … } catch { … }` /
+    /// `finally { … }` runs. The value is the argument to
+    /// `.throw(e)`. Consumed (cleared) on entry by the resume
+    /// helper.
+    pending_throw: ?Value = null,
+    /// §27.5.3.7 / §15.5.5 — surfaced by the new `gen_resume_kind`
+    /// op to the body after every `gen_yield`. The compiler
+    /// uses it inside `yield*` to forward the right method
+    /// (`next` / `return` / `throw`) to the inner iterator.
+    /// Reset to `.normal` after each read.
+    resume_kind: ResumeKind = .normal,
+    /// Companion to `resume_kind`. For `.return_value` this is the
+    /// `.return(v)` argument; for `.throw_value` it's the
+    /// `.throw(e)` argument. The accumulator on resume already
+    /// holds the same value (so `let x = yield e` still reads
+    /// correctly under normal `.next(v)`), but `yield*` needs it
+    /// in a register independent of acc.
+    resume_value: Value = Value.undefined_,
 
     pub fn init(
         allocator: std.mem.Allocator,

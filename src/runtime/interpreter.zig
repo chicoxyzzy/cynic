@@ -1147,8 +1147,42 @@ fn genReturn(realm: *Realm, this_value: Value, args: []const Value) @import("fun
 
 fn genThrow(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
     if (genBrandCheckTypeError(realm, this_value, "Generator.prototype.throw called on non-generator")) |err| return err;
-    realm.pending_exception = if (args.len > 0) args[0] else Value.undefined_;
-    return error.NativeThrew;
+    const obj = heap_mod.valueAsPlainObject(this_value).?;
+    const gen = obj.generator_ref.?;
+    const arg: Value = if (args.len > 0) args[0] else Value.undefined_;
+    // §27.5.1.4 GeneratorResumeAbrupt(throw). State machine:
+    //   • .initial   → close and rethrow
+    //   • .completed → just rethrow
+    //   • .executing → "Generator is already running"
+    //   • .suspended → inject throw at the yield site so any
+    //     surrounding `try { yield } catch` / `finally` runs.
+    if (gen.state == .initial) {
+        gen.state = .completed;
+        realm.pending_exception = arg;
+        return error.NativeThrew;
+    }
+    if (gen.state == .completed) {
+        realm.pending_exception = arg;
+        return error.NativeThrew;
+    }
+    if (gen.state == .executing) {
+        const ex = makeTypeError(realm, "Generator is already running") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
+    gen.pending_throw = arg;
+    const outcome = resumeGenerator(realm.allocator, realm, gen, Value.undefined_) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    switch (outcome) {
+        .yielded => |v| return genResultObject(realm, v, false) catch return error.OutOfMemory,
+        .value => |v| return genResultObject(realm, v, true) catch return error.OutOfMemory,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    }
 }
 
 fn genSymbolIterator(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
@@ -2425,6 +2459,32 @@ pub fn resumeGenerator(
         .generator = gen,
         .owns_registers = false,
     });
+
+    // §27.5.1.4 GeneratorResumeAbrupt(throw). Mirrors the
+    // async-gen `.throw_value` path: walk `unwindThrow` from the
+    // saved yield site so any surrounding `try { yield } catch`
+    // / `finally` runs. If no handler is in range the body is
+    // unwound to the top and the throw escapes the generator.
+    // Surfaces the kind via `resume_kind` so any `yield*` loop
+    // currently parked at the saved gen_yield observes throw_value
+    // when its resume_kind op fires and can forward to the inner
+    // iterator's `throw` per §15.5.5.
+    if (gen.pending_throw) |ex_val| {
+        gen.pending_throw = null;
+        gen.resume_kind = .throw_value;
+        gen.resume_value = ex_val;
+        if (!try unwindThrow(allocator, realm, &frames, ex_val)) {
+            gen.state = .completed;
+            return .{ .thrown = ex_val };
+        }
+        const result = try runFrames(allocator, realm, &frames);
+        if (result == .yielded) {
+            gen.state = .suspended;
+        } else {
+            gen.state = .completed;
+        }
+        return result;
+    }
 
     // §27.5.1.3 step 3 — return-completion drive. Inject an
     // unwind at the yield site so any `try { yield } finally
