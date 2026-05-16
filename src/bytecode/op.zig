@@ -241,6 +241,17 @@ pub const Op = enum(u8) {
     /// arg per `arr[i]` for `i` in `[0, arr.length)`. The
     /// returned `this` lands in `acc`.
     super_call_spread,
+    /// `[op]` — precondition guard for `super[expr]` / `super[expr] =
+    /// v` / `super[expr]++` / `super[expr] op= v` in derived
+    /// constructors. §13.3.7.1 SuperProperty evaluation step 2
+    /// (`actualThis = ? env.GetThisBinding()`) runs *before*
+    /// Expression evaluation; in a derived ctor before `super(...)`
+    /// `this` is uninitialized and §9.1.1.3.4 throws ReferenceError.
+    /// The compiler emits this op before evaluating the bracket
+    /// expression so the throw is observed in the spec'd order
+    /// (the inner expression doesn't run). A no-op outside derived
+    /// ctor frames and after super has been called.
+    super_check_this,
     /// Run the class instance-field initializers on the current
     /// frame's `this`. Reads the executing function's
     /// `home_object` (which is the class prototype), iterates
@@ -627,6 +638,7 @@ pub const Op = enum(u8) {
             .to_property_key,
             .return_,
             .super_get_computed,
+            .super_check_this,
             .dynamic_import,
             => 0,
             .ldar,
@@ -769,6 +781,7 @@ pub const Op = enum(u8) {
             .super_set => "SuperSet",
             .super_set_computed => "SuperSetComputed",
             .super_call_forward => "SuperCallForward",
+            .super_check_this => "SuperCheckThis",
             .init_instance_fields => "InitInstanceFields",
             .lda_private => "LdaPrivate",
             .sta_private => "StaPrivate",

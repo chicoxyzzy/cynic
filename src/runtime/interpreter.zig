@@ -4718,6 +4718,20 @@ fn runFrames(
                 const key_v = local_chunk.constants[k];
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+                // §13.3.7.3 MakeSuperPropertyReference step 3 —
+                // GetThisBinding precedes any property lookup. In
+                // a derived ctor before `super(...)`, `this` is
+                // uninitialized and §9.1.1.3.4 throws ReferenceError.
+                if (f.is_derived_ctor and !f.super_called) {
+                    const ex = try makeReferenceError(realm, "'this' is not initialized");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                }
                 // §13.3.7 static-method form — home is the class
                 // constructor (a JSFunction); super walks
                 // `ctor.static_parent` which is the parent class.
@@ -4899,6 +4913,19 @@ fn runFrames(
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
                 const value = registers[r_value];
+                // §13.3.7.3 MakeSuperPropertyReference step 3 —
+                // GetThisBinding. In a derived ctor before super()
+                // `this` is uninitialized; throw ReferenceError.
+                if (f.is_derived_ctor and !f.super_called) {
+                    const ex = try makeReferenceError(realm, "'this' is not initialized");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                }
                 // §13.3.7 static-method form — `this` is the
                 // current class; super setter dispatch reads the
                 // parent JSFunction's `accessors` map.
@@ -5058,6 +5085,26 @@ fn runFrames(
                     }
                 }
                 acc = value;
+            },
+
+            .super_check_this => {
+                // §13.3.7.1 SuperProperty evaluation — step 2
+                // (`actualThis = ? env.GetThisBinding()`) runs
+                // *before* Expression evaluation. The compiler
+                // emits this op before `super[expr]` so a derived
+                // ctor before `super(...)` throws ReferenceError
+                // and the inner expression never executes
+                // (§9.1.1.3.4 GetThisBinding).
+                if (f.is_derived_ctor and !f.super_called) {
+                    const ex = try makeReferenceError(realm, "'this' is not initialized");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                }
             },
 
             .init_instance_fields => {

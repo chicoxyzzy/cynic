@@ -798,6 +798,9 @@ pub const Compiler = struct {
     fn compileUpdateMember(self: *Compiler, u: ast.expression.UpdateExpr) CompileError!void {
         const m = u.operand.member;
         if (m.optional) return error.UnsupportedExpression;
+        if (m.object.* == .super_) {
+            return self.compileSuperUpdate(u, m);
+        }
 
         // Evaluate the receiver once → r_obj.
         try self.compileExpression(m.object);
@@ -881,6 +884,177 @@ pub const Compiler = struct {
         // Prefix — acc currently has the bumped value, leave it.
 
         self.releaseTemp(); // r_orig
+        if (mode == .computed) self.releaseTemp(); // r_key
+    }
+
+    /// `super.x++` / `super[expr]--` (prefix or postfix). §13.4.
+    /// `super_get` / `super_get_computed` reads the current value,
+    /// ToNumeric + add 1 / sub 1, then `super_set` / `super_set_computed`
+    /// writes back. Identifier private keys (`super.#x`) aren't a
+    /// thing — private names aren't accessible through super.
+    /// For computed keys, emit `super_check_this` first so a
+    /// derived ctor before `super(...)` throws ReferenceError per
+    /// §13.3.7.1 step 2 before the bracket expression evaluates.
+    fn compileSuperUpdate(
+        self: *Compiler,
+        u: ast.expression.UpdateExpr,
+        m: ast.expression.MemberExpr,
+    ) CompileError!void {
+        const Mode = enum { ident, computed };
+        var mode: Mode = .ident;
+        var k_const: u16 = 0;
+        var r_key: u8 = 0;
+        switch (m.property) {
+            .ident => |span| {
+                const raw = self.source[span.start..span.end];
+                if (raw.len > 0 and raw[0] == '#') return error.UnsupportedExpression;
+                const decoded = try self.decodeIdentifierName(raw);
+                k_const = try self.internString(decoded);
+                mode = .ident;
+            },
+            .computed => |key_expr| {
+                // §13.3.7.1 step 2 — uninit-`this` precedes
+                // Expression evaluation.
+                try self.builder.emitOp(.super_check_this, m.span);
+                try self.compileExpression(key_expr);
+                r_key = try self.reserveTemp();
+                try self.builder.emitOp(.star, u.span);
+                try self.builder.emitU8(r_key);
+                mode = .computed;
+            },
+        }
+
+        // Read current value via super.
+        switch (mode) {
+            .ident => {
+                try self.builder.emitOp(.super_get, m.span);
+                try self.builder.emitU16(k_const);
+            },
+            .computed => {
+                try self.builder.emitOp(.ldar, u.span);
+                try self.builder.emitU8(r_key);
+                try self.builder.emitOp(.super_get_computed, m.span);
+            },
+        }
+        // §13.4.4.1 step 2.b — ToNumeric.
+        try self.builder.emitOp(.to_number, u.span);
+        const r_orig = try self.reserveTemp();
+        try self.builder.emitOp(.star, u.span);
+        try self.builder.emitU8(r_orig);
+
+        // bumped = orig ± 1.
+        try self.builder.emitOp(.lda_smi, u.span);
+        try self.builder.emitI32(1);
+        const op: Op = if (u.op == .increment) .add else .sub;
+        try self.builder.emitOp(op, u.span);
+        try self.builder.emitU8(r_orig);
+
+        // Store via super.<key> = bumped.
+        const r_val = try self.reserveTemp();
+        try self.builder.emitOp(.star, u.span);
+        try self.builder.emitU8(r_val);
+        switch (mode) {
+            .ident => {
+                try self.builder.emitOp(.super_set, m.span);
+                try self.builder.emitU16(k_const);
+                try self.builder.emitU8(r_val);
+            },
+            .computed => {
+                try self.builder.emitOp(.super_set_computed, m.span);
+                try self.builder.emitU8(r_key);
+                try self.builder.emitU8(r_val);
+            },
+        }
+
+        if (!u.prefix) {
+            // Postfix — result is the (coerced) original.
+            try self.builder.emitOp(.ldar, u.span);
+            try self.builder.emitU8(r_orig);
+        }
+        // Prefix — acc holds the bumped value (super_set leaves
+        // it there).
+
+        self.releaseTemp(); // r_val
+        self.releaseTemp(); // r_orig
+        if (mode == .computed) self.releaseTemp(); // r_key
+    }
+
+    /// `super.x op= v` / `super[expr] op= v` — compound assignment.
+    /// §13.15 EvaluateBinaryExpression flow: read LHS, evaluate
+    /// RHS, apply the op, store back through the same access path.
+    /// For computed keys, emit `super_check_this` first (§13.3.7.1
+    /// step 2 — GetThisBinding precedes the bracket expression).
+    fn compileSuperCompoundAssign(
+        self: *Compiler,
+        a: ast.expression.AssignExpr,
+        m: ast.expression.MemberExpr,
+    ) CompileError!void {
+        const bin_op = compoundOp(a.op) orelse return error.UnsupportedExpression;
+
+        const Mode = enum { ident, computed };
+        var mode: Mode = .ident;
+        var k_const: u16 = 0;
+        var r_key: u8 = 0;
+        switch (m.property) {
+            .ident => |span| {
+                const raw = self.source[span.start..span.end];
+                if (raw.len > 0 and raw[0] == '#') return error.UnsupportedExpression;
+                const decoded = try self.decodeIdentifierName(raw);
+                k_const = try self.internString(decoded);
+                mode = .ident;
+            },
+            .computed => |key_expr| {
+                try self.builder.emitOp(.super_check_this, m.span);
+                try self.compileExpression(key_expr);
+                r_key = try self.reserveTemp();
+                try self.builder.emitOp(.star, a.span);
+                try self.builder.emitU8(r_key);
+                mode = .computed;
+            },
+        }
+
+        // Read LHS through super → acc → r_lhs.
+        switch (mode) {
+            .ident => {
+                try self.builder.emitOp(.super_get, m.span);
+                try self.builder.emitU16(k_const);
+            },
+            .computed => {
+                try self.builder.emitOp(.ldar, a.span);
+                try self.builder.emitU8(r_key);
+                try self.builder.emitOp(.super_get_computed, m.span);
+            },
+        }
+        const r_lhs = try self.reserveTemp();
+        try self.builder.emitOp(.star, a.span);
+        try self.builder.emitU8(r_lhs);
+
+        // Evaluate RHS → acc, then `acc = r_lhs <op> acc`.
+        try self.compileExpression(a.value);
+        try self.builder.emitOp(bin_op, a.span);
+        try self.builder.emitU8(r_lhs);
+
+        // Store the result via super.
+        const r_val = try self.reserveTemp();
+        try self.builder.emitOp(.star, a.span);
+        try self.builder.emitU8(r_val);
+        switch (mode) {
+            .ident => {
+                try self.builder.emitOp(.super_set, m.span);
+                try self.builder.emitU16(k_const);
+                try self.builder.emitU8(r_val);
+            },
+            .computed => {
+                try self.builder.emitOp(.super_set_computed, m.span);
+                try self.builder.emitU8(r_key);
+                try self.builder.emitU8(r_val);
+            },
+        }
+        // The expression's value is the stored new value; super_set
+        // leaves it in `acc`.
+
+        self.releaseTemp(); // r_val
+        self.releaseTemp(); // r_lhs
         if (mode == .computed) self.releaseTemp(); // r_key
     }
 
@@ -1567,6 +1741,12 @@ pub const Compiler = struct {
                     return;
                 },
                 .computed => |key_expr| {
+                    // §13.3.7.1 SuperProperty evaluation — step 2
+                    // (GetThisBinding) runs before Expression
+                    // evaluation. Emit the precondition guard so
+                    // a derived ctor before super() throws
+                    // ReferenceError without evaluating the key.
+                    try self.builder.emitOp(.super_check_this, m.span);
                     try self.compileExpression(key_expr);
                     try self.builder.emitOp(.super_get_computed, m.span);
                     return;
@@ -1643,12 +1823,23 @@ pub const Compiler = struct {
         // §13.3.7 — `super.x = v` and `super[expr] = v`. Walks the
         // home object's prototype for a setter; falls back to a
         // plain `this[key] = v` write. Compound forms (`super.x +=
-        // v` etc.) flow through the read-modify-write helper at
-        // the bottom of this function, which doesn't yet handle
-        // super receivers — surface that as an UnsupportedExpression
-        // until the compound form is wired (~handful of fixtures).
+        // v`, `super[expr]++`) route through
+        // `compileSuperCompoundAssign` / `compileSuperUpdate` —
+        // they share the lda / sta dispatch but interleave the
+        // ToNumeric coercion and the binary op per §13.15 /
+        // §13.4.
         if (m.object.* == .super_) {
-            if (a.op != .eq) return error.UnsupportedExpression;
+            if (a.op != .eq) {
+                return self.compileSuperCompoundAssign(a, m);
+            }
+            // §13.3.7.1 step 2 — for `super[expr] = v`, GetThisBinding
+            // precedes Expression evaluation. Emit the guard before
+            // the bracket key compiles so a derived ctor before
+            // super() throws ReferenceError without observing the
+            // RHS side effects.
+            if (m.property == .computed) {
+                try self.builder.emitOp(.super_check_this, m.span);
+            }
             try self.compileExpression(a.value);
             const r_val = try self.reserveTemp();
             defer self.releaseTemp();
