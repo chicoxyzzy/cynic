@@ -5250,10 +5250,19 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
 
             for (al.elements[0..elem_count]) |maybe_elt| {
                 if (maybe_elt) |elt| {
+                    // §13.15.5.4 IteratorDestructuringAssignmentEval
+                    // step 5 — when AssignmentElement.target is not
+                    // an Object/ArrayLiteral, evaluate the LHS
+                    // reference BEFORE pulling the next value from
+                    // the iterator. Mirror of the object-pattern
+                    // pre-eval above.
+                    const leaf_target = destructureLeafTarget(elt);
+                    const prepared = try self.prepareAssignmentLeaf(leaf_target);
                     try self.builder.emitOp(.iter_step, target.span());
                     try self.builder.emitU8(r_iter);
                     try self.builder.emitU8(r_done);
-                    try self.assignAssignmentPatternElem(elt);
+                    try self.assignAssignmentPatternElemPrepared(elt, prepared);
+                    self.releasePreparedLeaf(prepared);
                 } else {
                     // Elision — step and discard.
                     try self.builder.emitOp(.iter_step, target.span());
@@ -5333,18 +5342,43 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
             // member with an identifier_reference argument.
             for (ol.properties) |prop| switch (prop) {
                 .property => |op| {
+                    // §13.15.5.5 AssignmentProperty : PropertyName :
+                    // AssignmentElement — step 1 evaluates PropertyName
+                    // FIRST (so a computed key's side effects fire
+                    // before the AssignmentElement's lref-eval below),
+                    // step 3 forwards to KeyedDestructuringAssignment-
+                    // Evaluation. For a computed key we stash the
+                    // ToPropertyKey'd value into a temp; for a plain
+                    // ident / string / numeric key the key is a
+                    // compile-time string constant.
+                    var src_key_r: ?u8 = null;
                     if (op.key == .computed) {
-                        // §13.15.5.5 AssignmentProperty :
-                        // PropertyName : AssignmentElement (with
-                        // a ComputedPropertyName). Mirrors the
-                        // BindingProperty path in
-                        // `compileDestructure` — ToPropertyKey
-                        // the key, then `lda_computed [r_obj]`.
                         try self.compileExpression(op.key.computed);
                         try self.builder.emitOp(.to_property_key, op.span);
+                        const r = try self.reserveTemp();
+                        try self.builder.emitOp(.star, op.span);
+                        try self.builder.emitU8(r);
+                        src_key_r = r;
+                    }
+                    // §13.15.5.6 KeyedDestructuringAssignmentEval
+                    // step 1 — when the inner DestructuringAssignment-
+                    // Target is neither an Object/ArrayLiteral,
+                    // evaluate its LHS reference BEFORE the source
+                    // `GetV`. For `({a: this.#field} = src)` this
+                    // resolves `this` (throws in a pre-`super()`
+                    // derived ctor) and the private-name slot before
+                    // the `src.a` getter runs.
+                    const leaf_target = destructureLeafTarget(op.value);
+                    const prepared = try self.prepareAssignmentLeaf(leaf_target);
+                    if (src_key_r) |kr| {
+                        // step 2 — GetV(value, propertyName).
+                        try self.builder.emitOp(.ldar, op.span);
+                        try self.builder.emitU8(kr);
                         try self.builder.emitOp(.lda_computed, op.span);
                         try self.builder.emitU8(r_src);
-                        try self.assignAssignmentPatternElem(op.value);
+                        try self.assignAssignmentPatternElemPrepared(op.value, prepared);
+                        self.releasePreparedLeaf(prepared);
+                        self.releaseTemp(); // src_key_r
                         continue;
                     }
                     const key_slice = try self.assignmentPatternKey(op.key);
@@ -5358,8 +5392,9 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
                     // wraps the value as `assignment(eq, identifier_reference, default)`.
                     // `{x: a = 1}` puts the same `assignment(...)` node
                     // under a renamed key. Either shape is handled by
-                    // `assignAssignmentPatternElem`.
-                    try self.assignAssignmentPatternElem(op.value);
+                    // `assignAssignmentPatternElemPrepared`.
+                    try self.assignAssignmentPatternElemPrepared(op.value, prepared);
+                    self.releasePreparedLeaf(prepared);
                 },
                 .spread => |sp| {
                     // §13.15.5 RestElement on object pattern —
@@ -5440,6 +5475,178 @@ fn assignAssignmentPatternElem(self: *Compiler, elt: ast.expression.Expression) 
         return;
     }
     try self.assignAssignmentPatternLeaf(elt);
+}
+
+/// §13.15.5.4 / §13.15.5.6 step 1 — when a DestructuringAssignment
+/// target is neither an ObjectLiteral nor an ArrayLiteral, its LHS
+/// reference must be evaluated BEFORE the source value is read.
+/// For `({a: this.#field} = src)` that resolves the receiver and
+/// the private name first; in a derived ctor before `super()`,
+/// reading `this` throws ReferenceError per §9.1.1.3.4 before the
+/// `src.a` getter ever runs.
+const PreparedMember = struct {
+    span: Span,
+    r_obj: u8,
+    /// `r_key` is set iff `key` is `.computed`; the key was
+    /// evaluated and stored in this temp BEFORE the source read.
+    r_key: ?u8,
+    key: union(enum) {
+        name: u16,
+        private: u16,
+        computed: void,
+    },
+};
+
+const PreparedLeaf = union(enum) {
+    /// Leaf has no observable LHS side effects until store time —
+    /// identifier_reference targets (just a binding write) and
+    /// nested patterns (their own evaluation order is spec-
+    /// correct) fall through to the regular leaf-write path.
+    none,
+    /// Member-target leaf with the receiver (and possibly key)
+    /// already evaluated and stashed in `r_obj` (+ `r_key`).
+    member: PreparedMember,
+};
+
+/// Evaluate the LHS reference of a destructuring leaf eagerly,
+/// stashing the receiver (and key for computed members) in fresh
+/// temps. Returns a `PreparedLeaf` whose temps must be released
+/// by `releasePreparedLeaf` after the matching `storePreparedLeaf`
+/// call. Per §13.15.5.6 step 1.a / §13.15.5.4 step 5 this MUST
+/// run before the source side is touched.
+fn prepareAssignmentLeaf(self: *Compiler, target: ast.expression.Expression) CompileError!PreparedLeaf {
+    var t = target;
+    while (t == .parenthesized) t = t.parenthesized.expression.*;
+    switch (t) {
+        .member => |m| {
+            if (m.optional) return error.UnsupportedExpression;
+            if (m.object.* == .super_) return error.UnsupportedExpression;
+            // §13.3.2 — evaluate the object expression and pin
+            // the receiver before anything else.
+            try self.compileExpression(m.object);
+            const r_obj = try self.reserveTemp();
+            try self.builder.emitOp(.star, m.span);
+            try self.builder.emitU8(r_obj);
+            switch (m.property) {
+                .ident => |kspan| {
+                    const raw = self.source[kspan.start..kspan.end];
+                    if (raw.len > 0 and raw[0] == '#') {
+                        // §13.2.7.3 — mangle the private identifier
+                        // against the current class's private
+                        // prefix at compile time. The brand check
+                        // happens later, at `sta_private` time.
+                        if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
+                        const prefix = self.class_stack.items[self.class_stack.items.len - 1].private_prefix;
+                        const arena = self.realm.classAllocator();
+                        const decoded = try self.decodeIdentifierName(raw[1..]);
+                        const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, decoded }) catch return error.OutOfMemory;
+                        const k = try self.internString(mangled);
+                        return .{ .member = .{ .span = m.span, .r_obj = r_obj, .r_key = null, .key = .{ .private = k } } };
+                    }
+                    const key_slice = try self.decodeIdentifierName(raw);
+                    const k = try self.internString(key_slice);
+                    return .{ .member = .{ .span = m.span, .r_obj = r_obj, .r_key = null, .key = .{ .name = k } } };
+                },
+                .computed => |key_expr| {
+                    // §13.3.3 — the computed-key expression is
+                    // part of the LHS reference and is evaluated
+                    // as part of step 1. Stash before source read.
+                    try self.compileExpression(key_expr);
+                    const r_key = try self.reserveTemp();
+                    try self.builder.emitOp(.star, m.span);
+                    try self.builder.emitU8(r_key);
+                    return .{ .member = .{ .span = m.span, .r_obj = r_obj, .r_key = r_key, .key = .computed } };
+                },
+            }
+        },
+        else => return .none,
+    }
+}
+
+/// Emit the store half of a prepared leaf: `acc` holds the final
+/// value (post-default-application). For `.none` leaves we route
+/// back through the regular leaf-write helper.
+fn storePreparedLeaf(self: *Compiler, target: ast.expression.Expression, prepared: PreparedLeaf) CompileError!void {
+    switch (prepared) {
+        .none => try self.assignAssignmentPatternLeaf(target),
+        .member => |pm| {
+            // `acc` = value. Stash, then re-load to feed the
+            // store op (the named/private/computed store ops take
+            // value in `acc`).
+            const r_value = try self.reserveTemp();
+            defer self.releaseTemp();
+            try self.builder.emitOp(.star, pm.span);
+            try self.builder.emitU8(r_value);
+            try self.builder.emitOp(.ldar, pm.span);
+            try self.builder.emitU8(r_value);
+            switch (pm.key) {
+                .name => |k| {
+                    try self.builder.emitOp(.sta_property, pm.span);
+                    try self.builder.emitU16(k);
+                    try self.builder.emitU8(pm.r_obj);
+                },
+                .private => |k| {
+                    try self.builder.emitOp(.sta_private, pm.span);
+                    try self.builder.emitU16(k);
+                    try self.builder.emitU8(pm.r_obj);
+                },
+                .computed => {
+                    try self.builder.emitOp(.sta_computed, pm.span);
+                    try self.builder.emitU8(pm.r_obj);
+                    try self.builder.emitU8(pm.r_key.?);
+                },
+            }
+        },
+    }
+}
+
+/// Release the temps reserved by `prepareAssignmentLeaf`, in
+/// reverse order. Must be called after the matching
+/// `storePreparedLeaf`.
+fn releasePreparedLeaf(self: *Compiler, prepared: PreparedLeaf) void {
+    switch (prepared) {
+        .none => {},
+        .member => |pm| {
+            if (pm.r_key != null) self.releaseTemp();
+            self.releaseTemp();
+        },
+    }
+}
+
+/// Variant of `assignAssignmentPatternElem` that integrates with
+/// a pre-evaluated LHS reference. `acc` holds the property value
+/// read from the source; apply any default, then store into the
+/// prepared ref.
+fn assignAssignmentPatternElemPrepared(
+    self: *Compiler,
+    elt: ast.expression.Expression,
+    prepared: PreparedLeaf,
+) CompileError!void {
+    if (elt == .assignment and elt.assignment.op == .eq) {
+        const named_target: ?[]const u8 = blk: {
+            var t = elt.assignment.target;
+            while (t.* == .parenthesized) t = t.parenthesized.expression;
+            if (t.* == .identifier_reference) {
+                break :blk self.source[t.identifier_reference.span.start..t.identifier_reference.span.end];
+            }
+            break :blk null;
+        };
+        try self.applyDefaultExprNamed(elt.assignment.value, elt.assignment.span, named_target);
+        try self.storePreparedLeaf(elt.assignment.target.*, prepared);
+        return;
+    }
+    try self.storePreparedLeaf(elt, prepared);
+}
+
+/// Extract the underlying assignment-target from an element node.
+/// The parser wraps `{x: target = default}` as
+/// `assignment(eq, target, default)`; the LHS-eval-order rule
+/// applies to `target`, not to the synthetic assignment node.
+fn destructureLeafTarget(elt: ast.expression.Expression) ast.expression.Expression {
+    if (elt == .assignment and elt.assignment.op == .eq) {
+        return elt.assignment.target.*;
+    }
+    return elt;
 }
 
 /// Assign `acc` to the LHS-shaped Expression. Leaves may be
