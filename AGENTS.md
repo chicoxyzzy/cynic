@@ -360,6 +360,29 @@ Rule of thumb: if you'd reach for it from inside the opcode dispatch,
 it's `runtime/`. If it's only invoked because user JS called a built-in,
 it's `builtins/`.
 
+## Upstream-gap log
+
+When a fix lands for a bug that **no existing test262 fixture catches**
+— either because the bug surfaces in a path the spec covers but
+the corpus doesn't exercise, or because it's an engine-shape bug
+(crash, memory safety, observable side effect ordering) outside
+the corpus's reach — add an entry to
+[docs/test262-upstream-gaps.md](docs/test262-upstream-gaps.md).
+
+The log exists so we can later contribute fixture(s) back to
+[`tc39/test262`](https://github.com/tc39/test262) covering each
+gap. Every entry should include:
+
+- the commit SHA that fixed the bug in Cynic;
+- the ECMA-262 section the bug touched (cite `§X.Y.Z`);
+- a minimal JS reproducer (8-15 lines);
+- the expected vs. observed behaviour pre-fix;
+- a one-line note on what shape the test262 fixture would take
+  (positive / negative, runtime / parser, async-flagged, …).
+
+Bugs that *are* covered by an existing test262 fixture don't go
+in the log — the harness already exercises them.
+
 ## Repeatable workflows
 
 For Claude Code users these are slash commands under
