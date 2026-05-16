@@ -760,9 +760,33 @@ fn stringEndsWith(realm: *Realm, this_value: Value, args: []const Value) NativeE
     return Value.fromBool(std.mem.eql(u8, s.bytes[start..end], needle.bytes));
 }
 
+/// Allocate a JSString from a `utf16.Slice` — the byte slice
+/// plus any orphan-surrogate halves from a mid-pair endpoint.
+/// The surrogate halves are encoded as 3-byte WTF-8 sequences
+/// (CESU-8) so the result is still WTF-8-valid.
+fn jsStringFromUtf16Slice(realm: *Realm, sl: utf16.Slice) NativeError!*JSString {
+    if (sl.head_surrogate == 0 and sl.tail_surrogate == 0) {
+        return realm.heap.allocateString(sl.bytes) catch return error.OutOfMemory;
+    }
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(realm.allocator);
+    if (sl.head_surrogate != 0) {
+        utf16.appendCodeUnitAsWtf8(realm.allocator, &buf, sl.head_surrogate) catch return error.OutOfMemory;
+    }
+    buf.appendSlice(realm.allocator, sl.bytes) catch return error.OutOfMemory;
+    if (sl.tail_surrogate != 0) {
+        utf16.appendCodeUnitAsWtf8(realm.allocator, &buf, sl.tail_surrogate) catch return error.OutOfMemory;
+    }
+    return realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
+}
+
+/// §22.1.3.20 String.prototype.slice(start, end). Code-unit
+/// indexing with negative offsets normalised against the
+/// code-unit length. Result is the substring covering the
+/// code-unit range `[start, end)` (clamped to `[0, len]`).
 fn stringSlice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
-    const len: i64 = @intCast(s.bytes.len);
+    const len: i64 = @intCast(utf16.lengthInCodeUnits(s.bytes));
     const start_num = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
     var start: i64 = intrinsics.toInt(start_num);
     var end: i64 = len;
@@ -770,18 +794,24 @@ fn stringSlice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
         const end_num = try intrinsics.toNumber(realm, args[1]);
         end = intrinsics.toInt(end_num);
     }
+    // §22.1.3.20 step 6-9 — negative offsets count from the end.
     if (start < 0) start = @max(len + start, 0);
     if (end < 0) end = @max(len + end, 0);
     start = @min(start, len);
     end = @min(end, len);
     if (end < start) end = start;
-    const out = realm.heap.allocateString(s.bytes[@intCast(start)..@intCast(end)]) catch return error.OutOfMemory;
+    const sl = utf16.sliceCodeUnits(s.bytes, @intCast(start), @intCast(end));
+    const out = try jsStringFromUtf16Slice(realm, sl);
     return Value.fromString(out);
 }
 
+/// §22.1.3.24 String.prototype.substring(start, end). Like
+/// `slice` but negatives clamp to 0 instead of wrapping, and the
+/// two endpoints are swapped (lower precedes higher) when out of
+/// order. Indexed in UTF-16 code units.
 fn stringSubstring(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
-    const len: i64 = @intCast(s.bytes.len);
+    const len: i64 = @intCast(utf16.lengthInCodeUnits(s.bytes));
     const start_num = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
     var start: i64 = intrinsics.toInt(start_num);
     var end: i64 = len;
@@ -789,6 +819,8 @@ fn stringSubstring(realm: *Realm, this_value: Value, args: []const Value) Native
         const end_num = try intrinsics.toNumber(realm, args[1]);
         end = intrinsics.toInt(end_num);
     }
+    // §22.1.3.24 step 6-9 — negatives clamp to 0, then swap if
+    // start > end.
     start = @max(0, @min(start, len));
     end = @max(0, @min(end, len));
     if (start > end) {
@@ -796,7 +828,8 @@ fn stringSubstring(realm: *Realm, this_value: Value, args: []const Value) Native
         start = end;
         end = t;
     }
-    const out = realm.heap.allocateString(s.bytes[@intCast(start)..@intCast(end)]) catch return error.OutOfMemory;
+    const sl = utf16.sliceCodeUnits(s.bytes, @intCast(start), @intCast(end));
+    const out = try jsStringFromUtf16Slice(realm, sl);
     return Value.fromString(out);
 }
 

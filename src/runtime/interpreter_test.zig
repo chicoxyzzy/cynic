@@ -4339,3 +4339,49 @@ test "String.prototype.at: out of range returns undefined" {
     };
     try testing.expect(v.isUndefined());
 }
+
+// ── §22.1.3.20 slice / §22.1.3.24 substring — code-unit ranges ─────────────
+
+test "String.prototype.slice: ASCII range" {
+    try expectScriptStringWithBuiltins("\"abcdef\".slice(1, 4);", "bcd");
+}
+
+test "String.prototype.slice: BMP non-ASCII range" {
+    // "a\xFFc" — slice(0,2) yields "a\xFF" (2 code units, 3 bytes).
+    try expectScriptStringWithBuiltins("\"a\\xFFc\".slice(0, 2);", "a\xC3\xBF");
+}
+
+test "String.prototype.slice: supplementary fully-included" {
+    // slice(0,4) of "a\u{1F600}c" returns the whole string.
+    try expectScriptStringWithBuiltins("\"a\\u{1F600}c\".slice(0, 4);", "a\xF0\x9F\x98\x80c");
+}
+
+test "String.prototype.slice: end mid-surrogate emits lead surrogate" {
+    // slice(0,2) ends at the trail half — the included unit is
+    // the lone lead surrogate (3-byte CESU-8 escape).
+    try expectScriptStringWithBuiltins("\"a\\u{1F600}c\".slice(0, 2);", "a\xED\xA0\xBD");
+}
+
+test "String.prototype.slice: start mid-surrogate emits trail surrogate" {
+    try expectScriptStringWithBuiltins("\"a\\u{1F600}c\".slice(2, 4);", "\xED\xB8\x80c");
+}
+
+test "String.prototype.slice: negative wraps from end" {
+    try expectScriptStringWithBuiltins("\"a\\u{1F600}c\".slice(-1);", "c");
+}
+
+test "String.prototype.substring: ASCII range" {
+    try expectScriptStringWithBuiltins("\"abcdef\".substring(2, 5);", "cde");
+}
+
+test "String.prototype.substring: negative clamps to 0" {
+    try expectScriptStringWithBuiltins("\"abc\".substring(-5, 2);", "ab");
+}
+
+test "String.prototype.substring: out of order swaps" {
+    try expectScriptStringWithBuiltins("\"abcdef\".substring(4, 1);", "bcd");
+}
+
+test "String.prototype.substring: supplementary mid-pair end" {
+    try expectScriptStringWithBuiltins("\"a\\u{1F600}c\".substring(0, 2);", "a\xED\xA0\xBD");
+}
