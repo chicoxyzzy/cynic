@@ -253,6 +253,16 @@ Revisit this list each TC39 meeting cycle. If a proposal stalls,
 demotes, or its semantics flip, follow the comment trail in the
 installer and either back the change out or update.
 
+*TODO:* render a per-feature pass / fail / skip / spec% /
+attempted% table in `test262-results.md` (one row per entry
+above) sourced from the test262 fixtures whose `features:`
+frontmatter names the proposal. Lets a future spec shift surface
+the broken-implementation signal at the dashboard level. Wiring
+through the harness's per-fixture loop (a `PreStage4Stats`
+counter on `WorkerCtx` + `recordOutcome` + the per-worker merge
+plus the renderer next to `writeScoreboard`) is straightforward
+but cross-cuts ~6 functions; deferred to a focused session.
+
 **Caveats / planned.**
 
 - `Date` is UTC-only — `getTimezoneOffset` returns 0; locale

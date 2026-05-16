@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 85.60 % | 92.08 % | 35071 / 40969 | 35071 / 38088 |
+| **runtime** | 85.65 % | 92.13 % | 35090 / 40969 | 35090 / 38088 |
 
 
 ## Where the runtime stands, by area
@@ -30,13 +30,13 @@ browser-era built-ins …).
 | `built-ins/RegExp` | 1358 | 252 | 161 | 77 % | 84 % |
 | `built-ins/TypedArray` | 1276 | 147 | 8 | 89 % | 90 % |
 | `built-ins/TypedArrayConstructors` | 546 | 114 | 16 | 81 % | 83 % |
-| `language/expressions` | 9300 | 669 | 979 | 85 % | 93 % |
-| `language/module-code` | 461 | 121 | 14 | 77 % | 79 % |
+| `language/expressions` | 9302 | 667 | 979 | 85 % | 93 % |
+| `language/module-code` | 462 | 120 | 14 | 78 % | 79 % |
 | `language/statements` | 8150 | 338 | 672 | 89 % | 96 % |
 | **_10–99 fails_** | | | | | |
 | `built-ins/ArrayBuffer` | 166 | 25 | 4 | 85 % | 87 % |
-| `built-ins/AsyncFromSyncIteratorPrototype` | 11 | 27 | 0 | 29 % | 29 % |
-| `built-ins/AsyncGeneratorPrototype` | 22 | 26 | 0 | 46 % | 46 % |
+| `built-ins/AsyncFromSyncIteratorPrototype` | 12 | 26 | 0 | 32 % | 32 % |
+| `built-ins/AsyncGeneratorPrototype` | 37 | 11 | 0 | 77 % | 77 % |
 | `built-ins/Date` | 527 | 64 | 0 | 89 % | 89 % |
 | `built-ins/GeneratorPrototype` | 36 | 25 | 0 | 59 % | 59 % |
 | `built-ins/Iterator` | 443 | 60 | 6 | 87 % | 88 % |
@@ -134,18 +134,18 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-16 — cynic `5ec9b4c`, test262 `d0c1b455`
+### 2026-05-16 — cynic `45d3f4d`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 85.60 % | 92.08 % | 35071 / 40969 | 35071 / 38088 | +199 | 1m 37s |
+| **runtime** | 85.65 % | 92.13 % | 35090 / 40969 | 35090 / 38088 | +218 | 1m 36s |
 
 Biggest movers (runtime):
 
-- `built-ins/String` +56
-- `built-ins/RegExp` +8
-- `language/expressions` -1
-- `language/module-code` -1
+- `built-ins/AsyncGeneratorPrototype` +15
+- `language/expressions` +2
+- `built-ins/AsyncFromSyncIteratorPrototype` +1
+- `language/module-code` +1
 
 ### 2026-05-15 — cynic `2b05c51`, test262 `d0c1b455`
 
