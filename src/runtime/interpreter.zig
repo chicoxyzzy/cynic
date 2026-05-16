@@ -5554,13 +5554,27 @@ fn runFrames(
                 // own-property check leaves them alone.
                 if (std.mem.eql(u8, name_s.bytes, "default")) {
                     if (heap_mod.valueAsFunction(acc)) |fn_obj| {
+                        // §16.2.3.7 step 3 — `If hasNameProperty is
+                        // false, perform SetFunctionName(value,
+                        // "default")`. Spec uses HasOwnProperty,
+                        // but Cynic auto-installs `name = ""` on
+                        // every freshly-allocated JSFunction (so
+                        // `Object.getOwnPropertyDescriptor(fn,
+                        // "name")` returns a real descriptor for
+                        // anonymous fns), which makes a literal
+                        // hasOwn check trivially true. Treat
+                        // "empty-string name" as the auto-install
+                        // marker and overwrite it; any other own
+                        // value (`static name() { … }`, an explicit
+                        // name from a NamedEvaluation, …) skips
+                        // the rename per spec.
                         const cur = fn_obj.get("name");
-                        const has_nonempty_name = blk: {
+                        const looks_anonymous = blk: {
                             if (!cur.isString()) break :blk false;
                             const cs: *JSString = @ptrCast(@alignCast(cur.asString()));
-                            break :blk cs.bytes.len != 0;
+                            break :blk cs.bytes.len == 0;
                         };
-                        if (!has_nonempty_name) {
+                        if (looks_anonymous) {
                             const owned = realm.heap.allocateString("default") catch return error.OutOfMemory;
                             fn_obj.set(realm.allocator, "name", Value.fromString(owned)) catch return error.OutOfMemory;
                             fn_obj.name_string = owned;
