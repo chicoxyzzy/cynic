@@ -664,16 +664,15 @@ fn coerceSearchString(realm: *Realm, v: Value, method_name: []const u8) NativeEr
     return stringifyArg(realm, v);
 }
 
-/// §7.2.8 IsRegExp(arg) — Object check, then @@match access, with
-/// fallback to the [[RegExpMatcher]] slot (Cynic's typed
-/// `regexp_source` field). Cynic encodes well-known symbols via
-/// their `@@<name>` internal property-key, so a plain
-/// `obj.get("@@match")` honours @@-keyed accessor/data descriptors
-/// the same way `obj[Symbol.match]` would.
+/// §7.2.8 IsRegExp(arg) — Object check, then `Get(arg, @@match)`,
+/// with fallback to the [[RegExpMatcher]] slot (Cynic's typed
+/// `regexp_source` field). The @@match read MUST go through the
+/// accessor-aware property chain so a user-installed getter
+/// (`get [Symbol.match]() { throw ... }`) fires and propagates,
+/// per the `searchValue-isRegExp-abrupt` fixture family.
 fn isRegExp(realm: *Realm, v: Value) NativeError!bool {
-    _ = realm;
     const obj = heap_mod.valueAsPlainObject(v) orelse return false;
-    const matcher = obj.get("@@match");
+    const matcher = try intrinsics.getPropertyChain(realm, obj, "@@match");
     if (!matcher.isUndefined()) return matcher.toBooleanPrimitive();
     return obj.regexp_source != null;
 }
@@ -1440,27 +1439,35 @@ pub fn stringReplace(realm: *Realm, this_value: Value, args: []const Value) Nati
     const s = try coerceThisToJSString(realm, this_value);
     const pat_v = argOr(args, 0, Value.undefined_);
     const repl_v = argOr(args, 1, Value.undefined_);
-    // §22.1.3.18 — when the pattern is a regex, dispatch through
+    // §22.1.3.19 — when the pattern is a regex, dispatch through
     // its `exec`. Global flag → iterate all matches; otherwise
     // replace just the first.
     if (isRegexLike(pat_v)) |regex_obj| {
         return regexReplace(realm, s, regex_obj, repl_v, false);
     }
+    // §22.1.3.19 step 4 — searchString = ToString(searchValue).
     const pat = if (pat_v.isString())
         @as(*JSString, @ptrCast(@alignCast(pat_v.asString())))
     else
         try intrinsics.stringifyArg(realm, pat_v);
-    if (std.mem.indexOf(u8, s.bytes, pat.bytes)) |pos| {
-        const replacement = try resolveReplacer(realm, s, pat, pos, repl_v);
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(realm.allocator);
-        buf.appendSlice(realm.allocator, s.bytes[0..pos]) catch return error.OutOfMemory;
-        buf.appendSlice(realm.allocator, replacement) catch return error.OutOfMemory;
-        buf.appendSlice(realm.allocator, s.bytes[pos + pat.bytes.len ..]) catch return error.OutOfMemory;
-        const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
+    // step 5-6 — IsCallable(replaceValue); else ToString-coerce
+    // eagerly. The ToString runs *before* the StringIndexOf scan
+    // so a throwing replacement-toString surfaces even on a
+    // no-match input (fixture `replaceValue-evaluation-order`).
+    const functional = heap_mod.valueAsFunction(repl_v) != null;
+    const repl_s: ?*JSString = if (functional) null else try intrinsics.stringifyArg(realm, repl_v);
+    // step 8-10 — first-match position lookup; on miss return the
+    // unchanged source.
+    const pos = std.mem.indexOf(u8, s.bytes, pat.bytes) orelse {
+        const out = realm.heap.allocateString(s.bytes) catch return error.OutOfMemory;
         return Value.fromString(out);
-    }
-    const out = realm.heap.allocateString(s.bytes) catch return error.OutOfMemory;
+    };
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(realm.allocator);
+    buf.appendSlice(realm.allocator, s.bytes[0..pos]) catch return error.OutOfMemory;
+    try appendStringPatternReplacement(realm, &buf, s, pat, pos, repl_v, functional, repl_s);
+    buf.appendSlice(realm.allocator, s.bytes[pos + pat.bytes.len ..]) catch return error.OutOfMemory;
+    const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
     return Value.fromString(out);
 }
 
@@ -1692,6 +1699,14 @@ fn appendRegexReplacement(
     try expandSubstitutionInto(realm, out, repl_s.bytes, source, match_arr, whole, byte_pos);
 }
 
+/// §22.1.3.19.1 GetSubstitution ( matched, str, position, captures,
+/// namedCaptures, replacementTemplate ). Append the resolved
+/// replacement bytes for the regex-match path: `match_arr` is the
+/// `exec` result, so `captureLen = match_arr.length - 1` (the
+/// 0th element is the whole match), and `namedCaptures =
+/// match_arr.groups` (Object or undefined). The walk is per-spec:
+/// every `$`-prefixed escape consumes its full `ref` (and only its
+/// ref) before advancing.
 fn expandSubstitutionInto(
     realm: *Realm,
     out: *std.ArrayListUnmanaged(u8),
@@ -1701,80 +1716,95 @@ fn expandSubstitutionInto(
     whole: *JSString,
     pos: usize,
 ) NativeError!void {
+    // captureLen = length(match_arr) - 1, clamped to 0.
+    const len_v = match_arr.get("length");
+    const arr_len: usize = if (len_v.isInt32() and len_v.asInt32() > 0) @intCast(len_v.asInt32()) else 1;
+    const capture_len: usize = if (arr_len > 0) arr_len - 1 else 0;
+    const groups_v = match_arr.get("groups");
     var i: usize = 0;
-    while (i < template.len) : (i += 1) {
+    while (i < template.len) {
         const c = template[i];
         if (c != '$' or i + 1 >= template.len) {
             out.append(realm.allocator, c) catch return error.OutOfMemory;
+            i += 1;
             continue;
         }
         const n = template[i + 1];
         switch (n) {
             '$' => {
                 out.append(realm.allocator, '$') catch return error.OutOfMemory;
-                i += 1;
+                i += 2;
             },
             '&' => {
                 out.appendSlice(realm.allocator, whole.bytes) catch return error.OutOfMemory;
-                i += 1;
+                i += 2;
             },
             '`' => {
                 out.appendSlice(realm.allocator, source.bytes[0..pos]) catch return error.OutOfMemory;
-                i += 1;
+                i += 2;
             },
             '\'' => {
                 const tail_start = pos + whole.bytes.len;
-                if (tail_start < source.bytes.len) out.appendSlice(realm.allocator, source.bytes[tail_start..]) catch return error.OutOfMemory;
-                i += 1;
+                if (tail_start < source.bytes.len)
+                    out.appendSlice(realm.allocator, source.bytes[tail_start..]) catch return error.OutOfMemory;
+                i += 2;
             },
             '0'...'9' => {
-                var idx: usize = n - '0';
-                var consumed: usize = 1;
+                // §22.1.3.19.1 — `$N` / `$NN` decimal-capture
+                // dispatch. digitCount = 2 only if the *second*
+                // char is also a digit. If the two-digit index
+                // exceeds captureLen, fall back to one digit.
+                var digit_count: usize = 1;
+                var index: usize = n - '0';
                 if (i + 2 < template.len and template[i + 2] >= '0' and template[i + 2] <= '9') {
-                    const idx2 = idx * 10 + (template[i + 2] - '0');
-                    const len_v = match_arr.get("length");
-                    const arr_len: i32 = if (len_v.isInt32()) len_v.asInt32() else 1;
-                    if (idx2 < @as(usize, @intCast(arr_len))) {
-                        idx = idx2;
-                        consumed = 2;
+                    digit_count = 2;
+                    index = index * 10 + (template[i + 2] - '0');
+                    if (index > capture_len) {
+                        digit_count = 1;
+                        index = n - '0';
                     }
                 }
-                if (idx == 0) {
-                    out.appendSlice(realm.allocator, whole.bytes) catch return error.OutOfMemory;
-                } else {
+                if (index >= 1 and index <= capture_len) {
                     var ibuf: [16]u8 = undefined;
-                    const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
+                    const islice = std.fmt.bufPrint(&ibuf, "{d}", .{index}) catch unreachable;
                     const cap_v = match_arr.get(islice);
+                    // §22.1.3.19.1 — undefined capture expands to
+                    // empty; string capture expands verbatim.
                     if (cap_v.isString()) {
                         const cs: *JSString = @ptrCast(@alignCast(cap_v.asString()));
                         out.appendSlice(realm.allocator, cs.bytes) catch return error.OutOfMemory;
+                    } else if (!cap_v.isUndefined()) {
+                        const cs = try intrinsics.stringifyArg(realm, cap_v);
+                        out.appendSlice(realm.allocator, cs.bytes) catch return error.OutOfMemory;
                     }
+                    i += 1 + digit_count;
+                } else {
+                    // index = 0 or index > captureLen — ref stays
+                    // literal. Advance by ref length (1 + digit_count).
+                    out.appendSlice(realm.allocator, template[i .. i + 1 + digit_count]) catch return error.OutOfMemory;
+                    i += 1 + digit_count;
                 }
-                i += consumed;
             },
             '<' => {
-                // §22.1.3.18.1 GetSubstitution — `$<groupName>`.
-                // When `namedCaptures` is undefined, `$<` is a
-                // literal pair. Otherwise scan for the closing
-                // `>`; if missing, also literal. If found, look
-                // up the enclosed name on the groups object: a
-                // missing / undefined capture expands to empty,
-                // a string capture expands to its value.
-                const groups_v = match_arr.get("groups");
+                // §22.1.3.19.1 — `$<name>`. Locate the closing `>`
+                // from i + 2. If not found OR namedCaptures is
+                // undefined, the ref is just `$<` (length 2) and
+                // we keep it literal. Otherwise look up the name.
                 if (groups_v.isUndefined()) {
-                    out.append(realm.allocator, c) catch return error.OutOfMemory;
+                    out.appendSlice(realm.allocator, "$<") catch return error.OutOfMemory;
+                    i += 2;
                     continue;
                 }
-                // Find the closing '>' starting at i + 2.
                 var j: usize = i + 2;
                 while (j < template.len and template[j] != '>') : (j += 1) {}
                 if (j >= template.len) {
-                    out.append(realm.allocator, c) catch return error.OutOfMemory;
+                    out.appendSlice(realm.allocator, "$<") catch return error.OutOfMemory;
+                    i += 2;
                     continue;
                 }
                 const name = template[i + 2 .. j];
                 const groups_obj = heap_mod.valueAsPlainObject(groups_v) orelse {
-                    i = j;
+                    i = j + 1;
                     continue;
                 };
                 const cap_v = groups_obj.get(name);
@@ -1782,36 +1812,141 @@ fn expandSubstitutionInto(
                     const cs: *JSString = @ptrCast(@alignCast(cap_v.asString()));
                     out.appendSlice(realm.allocator, cs.bytes) catch return error.OutOfMemory;
                 } else if (!cap_v.isUndefined()) {
-                    // Coerce non-string / non-undefined captures.
                     const cs = try intrinsics.stringifyArg(realm, cap_v);
                     out.appendSlice(realm.allocator, cs.bytes) catch return error.OutOfMemory;
                 }
-                i = j;
+                i = j + 1;
             },
             else => {
-                out.append(realm.allocator, c) catch return error.OutOfMemory;
+                // Bare `$X` where X is none of the special chars —
+                // keep both chars literal.
+                out.append(realm.allocator, '$') catch return error.OutOfMemory;
+                i += 1;
             },
         }
     }
 }
 
-/// §22.1.3.18 — produce the replacement bytes for a single
-/// match. When `repl` is callable, `Call(repl, undefined,
-/// «match, position, source»)` runs and the result is
-/// stringified. Otherwise `repl` is coerced to string with no
-/// `$&` / `$1` substitution (later will add full
-/// GetSubstitution semantics).
-fn resolveReplacer(
+/// §22.1.3.20 String.prototype.replaceAll ( searchValue, replaceValue ).
+/// Implements the Object-gated dispatch + the string-pattern core
+/// (steps 3-22). The @@replace dispatch forwards the *uncoerced*
+/// thisValue / replaceValue so a poisoned `toString` on either
+/// never fires (fixtures: `searchValue-replacer-before-tostring`,
+/// `searchValue-replacer-call`).
+fn stringReplaceAllDispatched(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (this_value.isNull() or this_value.isUndefined())
+        return throwTypeError(realm, "String.prototype.replaceAll called on null or undefined");
+    const pat_v = argOr(args, 0, Value.undefined_);
+    const repl_v = argOr(args, 1, Value.undefined_);
+    // §22.1.3.20 step 3 — "If searchValue is an Object, then".
+    // Primitives skip the entire IsRegExp + @@replace block.
+    if (heap_mod.valueAsPlainObject(pat_v)) |pat_obj| {
+        // step 3.a-b — IsRegExp + global-flag check; throws on a
+        // non-global RegExp *before* GetMethod runs.
+        if (try isRegExp(realm, pat_v)) {
+            const flags_v = try intrinsics.getPropertyChain(realm, pat_obj, "flags");
+            if (flags_v.isUndefined() or flags_v.isNull())
+                return throwTypeError(realm, "String.prototype.replaceAll: regex has no flags");
+            const flags_s = try intrinsics.stringifyArg(realm, flags_v);
+            if (std.mem.indexOfScalar(u8, flags_s.bytes, 'g') == null)
+                return throwTypeError(realm, "String.prototype.replaceAll requires a global regex");
+        }
+        // step 3.c-d — GetMethod + dispatch. The receiver passed to
+        // the matcher is the uncoerced `thisValue`; coercing here
+        // would surface a poisoned `toString` on a wrapper that the
+        // spec never reaches.
+        if (try getSymbolMethod(realm, pat_v, "@@replace")) |replacer| {
+            return invokeSymbolMethod(realm, replacer, pat_v, this_value, repl_v);
+        }
+    }
+    return stringReplaceAllCore(realm, this_value, pat_v, repl_v);
+}
+
+/// §22.1.3.20 String.prototype.replaceAll fallback core — steps
+/// 4-22 of the spec. `pat_v` and `repl_v` are pre-extracted and
+/// already passed the Object dispatch in step 3. ToString(this) +
+/// ToString(searchValue) run here (in spec order), then the
+/// GetSubstitution loop slices over `string`.
+fn stringReplaceAllCore(realm: *Realm, this_value: Value, pat_v: Value, repl_v_in: Value) NativeError!Value {
+    // step 4 — string = ? ToString(thisValue).
+    const s = try coerceThisToJSString(realm, this_value);
+    // step 5 — searchString = ? ToString(searchValue).
+    const pat = if (pat_v.isString())
+        @as(*JSString, @ptrCast(@alignCast(pat_v.asString())))
+    else
+        try intrinsics.stringifyArg(realm, pat_v);
+    // step 6-7 — functionalReplace = IsCallable(replaceValue); else
+    // ToString-coerce. Run the coercion eagerly so a throwing
+    // toString surfaces before the match scan begins (fixture
+    // `replaceValue-value-tostring`).
+    const functional = heap_mod.valueAsFunction(repl_v_in) != null;
+    const repl_s: ?*JSString = if (functional)
+        null
+    else
+        try intrinsics.stringifyArg(realm, repl_v_in);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(realm.allocator);
+    if (pat.bytes.len == 0) {
+        // step 9 — advanceBy = max(1, searchLength). Empty pattern
+        // → interleave the replacement between every code unit.
+        // §22.1.3.20.1 GetSubstitution with empty captures: any
+        // `$N` in the template stays literal (no captures).
+        var cursor: usize = 0;
+        while (cursor <= s.bytes.len) : (cursor += 1) {
+            try appendStringPatternReplacement(realm, &buf, s, pat, cursor, repl_v_in, functional, repl_s);
+            if (cursor < s.bytes.len) buf.append(realm.allocator, s.bytes[cursor]) catch return error.OutOfMemory;
+        }
+        const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
+        return Value.fromString(out);
+    }
+    // step 10-17 — find all non-overlapping match positions and
+    // splice. Operating on byte indices works because the pattern
+    // (a UTF-8 byte sequence) is matched verbatim; UTF-16 code-unit
+    // identities for callable-replacer args are computed in
+    // `appendStringPatternReplacement`.
+    var cursor: usize = 0;
+    while (cursor <= s.bytes.len) {
+        const remaining = s.bytes[cursor..];
+        if (std.mem.indexOf(u8, remaining, pat.bytes)) |pos| {
+            buf.appendSlice(realm.allocator, remaining[0..pos]) catch return error.OutOfMemory;
+            try appendStringPatternReplacement(realm, &buf, s, pat, cursor + pos, repl_v_in, functional, repl_s);
+            cursor += pos + pat.bytes.len;
+        } else {
+            buf.appendSlice(realm.allocator, remaining) catch return error.OutOfMemory;
+            break;
+        }
+    }
+    const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
+    return Value.fromString(out);
+}
+
+/// Per-match replacement append for the string-pattern path of
+/// `replace` / `replaceAll`. When `functional` is true, call the
+/// user replacer with `(matched, byteOffsetAsUnitOffset, source)`
+/// and ToString the result. Otherwise expand `$$` / `$&` / `$``
+/// / `$'` / `$<name>` against `replacementTemplate` per
+/// §22.1.3.19.1 GetSubstitution with an empty captures list (so
+/// `$N` and `$NN` stay literal).
+fn appendStringPatternReplacement(
     realm: *Realm,
+    out: *std.ArrayListUnmanaged(u8),
     source: *JSString,
     matched: *JSString,
-    pos: usize,
+    byte_pos: usize,
     repl_v: Value,
-) NativeError![]const u8 {
-    if (heap_mod.valueAsFunction(repl_v)) |fn_obj| {
+    functional: bool,
+    repl_template: ?*JSString,
+) NativeError!void {
+    if (functional) {
+        // §22.1.3.20 step 17.b — Call(replaceValue, undefined,
+        // « searchString, 𝔽(matchPosition), string »). The
+        // position is a code-unit index, not a byte offset; compute
+        // it from byte_pos via the UTF-16 view of `source.bytes`.
+        const unit_pos = utf16.codeUnitIndexForByte(source.bytes, byte_pos);
+        const fn_obj = heap_mod.valueAsFunction(repl_v).?;
         const args = [_]Value{
             Value.fromString(matched),
-            Value.fromInt32(@intCast(pos)),
+            Value.fromInt32(@intCast(unit_pos)),
             Value.fromString(source),
         };
         const outcome = interpreter.callJSFunction(realm.allocator, realm, fn_obj, Value.undefined_, &args) catch |err| switch (err) {
@@ -1826,92 +1961,69 @@ fn resolveReplacer(
             },
         };
         const ret_s = try intrinsics.stringifyArg(realm, ret);
-        return ret_s.bytes;
+        out.appendSlice(realm.allocator, ret_s.bytes) catch return error.OutOfMemory;
+        return;
     }
-    const repl_s = try intrinsics.stringifyArg(realm, repl_v);
-    return repl_s.bytes;
+    const tpl = repl_template orelse return;
+    try expandSubstitutionEmptyCaptures(realm, out, tpl.bytes, source, matched, byte_pos);
 }
 
-/// §22.1.3.19 entry that runs the IsRegExp-global check + the
-/// Symbol.replace dispatch. Wired as `String.prototype.replaceAll`.
-fn stringReplaceAllDispatched(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (this_value.isNull() or this_value.isUndefined())
-        return throwTypeError(realm, "String.prototype.replaceAll called on null or undefined");
-    const pat_v = argOr(args, 0, Value.undefined_);
-    const repl_v = argOr(args, 1, Value.undefined_);
-    // §22.1.3.19 step 2.a-b — IsRegExp(searchValue) → flags must
-    // contain 'g'. Runs *before* @@replace dispatch so a non-global
-    // regex with a user-installed @@replace still throws (per the
-    // test262 `replaceAll-flag-*` fixtures).
-    if (try isRegExp(realm, pat_v)) {
-        if (heap_mod.valueAsPlainObject(pat_v)) |regex_like_obj| {
-            const flags_v = try intrinsics.getPropertyChain(realm, regex_like_obj, "flags");
-            if (flags_v.isUndefined() or flags_v.isNull())
-                return throwTypeError(realm, "String.prototype.replaceAll: regex has no flags");
-            const flags_s = try intrinsics.stringifyArg(realm, flags_v);
-            if (std.mem.indexOfScalar(u8, flags_s.bytes, 'g') == null)
-                return throwTypeError(realm, "String.prototype.replaceAll requires a global regex");
+/// §22.1.3.19.1 GetSubstitution with `captures` = empty list and
+/// `namedCaptures` = undefined. Used by both `stringReplace` and
+/// `stringReplaceAll` when the search is a String primitive (and
+/// the replacement is a String, not a function). With no captures,
+/// `$N` / `$NN` / `$<name>` always stay literal (because no
+/// `1 ≤ index ≤ captureLen` ever holds and the `$<` branch sees
+/// undefined namedCaptures).
+fn expandSubstitutionEmptyCaptures(
+    realm: *Realm,
+    out: *std.ArrayListUnmanaged(u8),
+    template: []const u8,
+    source: *JSString,
+    matched: *JSString,
+    byte_pos: usize,
+) NativeError!void {
+    var i: usize = 0;
+    while (i < template.len) {
+        const c = template[i];
+        if (c != '$' or i + 1 >= template.len) {
+            out.append(realm.allocator, c) catch return error.OutOfMemory;
+            i += 1;
+            continue;
+        }
+        const n = template[i + 1];
+        switch (n) {
+            '$' => {
+                out.append(realm.allocator, '$') catch return error.OutOfMemory;
+                i += 2;
+            },
+            '&' => {
+                out.appendSlice(realm.allocator, matched.bytes) catch return error.OutOfMemory;
+                i += 2;
+            },
+            '`' => {
+                out.appendSlice(realm.allocator, source.bytes[0..byte_pos]) catch return error.OutOfMemory;
+                i += 2;
+            },
+            '\'' => {
+                const tail_start = byte_pos + matched.bytes.len;
+                if (tail_start < source.bytes.len)
+                    out.appendSlice(realm.allocator, source.bytes[tail_start..]) catch return error.OutOfMemory;
+                i += 2;
+            },
+            else => {
+                // §22.1.3.19.1 — `$N`, `$NN`, `$<...>` with empty
+                // captures / undefined namedCaptures all keep the
+                // leading `$` and the next character literal, then
+                // continue parsing from the char after. So output
+                // just `$` and advance by one; the next iteration
+                // re-parses the second char (which may itself start
+                // another `$`-sequence).
+                out.append(realm.allocator, '$') catch return error.OutOfMemory;
+                i += 1;
+            },
         }
     }
-    // §22.1.3.19 step 2.c — GetMethod(searchValue, Symbol.replace).
-    if (try getSymbolMethod(realm, pat_v, "@@replace")) |replacer| {
-        const recv_s = try coerceThisToJSString(realm, this_value);
-        return invokeSymbolMethod(realm, replacer, pat_v, Value.fromString(recv_s), repl_v);
-    }
-    return stringReplaceAll(realm, this_value, args);
-}
-
-fn stringReplaceAll(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
-    const pat_v = argOr(args, 0, Value.undefined_);
-    const repl_v = argOr(args, 1, Value.undefined_);
-    if (isRegexLike(pat_v)) |regex_obj| {
-        // §22.1.3.19 step 4 — `Get(regex, "flags")` must contain
-        // 'g'. The spec routes through the flags accessor (or a
-        // shadowed own property), not the internal slot.
-        if (!flagsHas(realm, regex_obj, 'g')) {
-            return throwTypeError(realm, "String.prototype.replaceAll requires a global regex");
-        }
-        return regexReplace(realm, s, regex_obj, repl_v, true);
-    }
-    const pat = if (pat_v.isString())
-        @as(*JSString, @ptrCast(@alignCast(pat_v.asString())))
-    else
-        try intrinsics.stringifyArg(realm, pat_v);
-    if (pat.bytes.len == 0) {
-        // Empty pattern — interleave the replacement between every
-        // character. The replacer fires once per insertion point;
-        // for callable replacers each call gets the empty string,
-        // pos = byte offset, and the source.
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(realm.allocator);
-        const empty = realm.heap.allocateString("") catch return error.OutOfMemory;
-        var cursor: usize = 0;
-        while (cursor <= s.bytes.len) : (cursor += 1) {
-            const replacement = try resolveReplacer(realm, s, empty, cursor, repl_v);
-            buf.appendSlice(realm.allocator, replacement) catch return error.OutOfMemory;
-            if (cursor < s.bytes.len) buf.append(realm.allocator, s.bytes[cursor]) catch return error.OutOfMemory;
-        }
-        const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
-        return Value.fromString(out);
-    }
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(realm.allocator);
-    var cursor: usize = 0;
-    while (cursor <= s.bytes.len) {
-        const remaining = s.bytes[cursor..];
-        if (std.mem.indexOf(u8, remaining, pat.bytes)) |pos| {
-            buf.appendSlice(realm.allocator, remaining[0..pos]) catch return error.OutOfMemory;
-            const replacement = try resolveReplacer(realm, s, pat, cursor + pos, repl_v);
-            buf.appendSlice(realm.allocator, replacement) catch return error.OutOfMemory;
-            cursor += pos + pat.bytes.len;
-        } else {
-            buf.appendSlice(realm.allocator, remaining) catch return error.OutOfMemory;
-            break;
-        }
-    }
-    const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
-    return Value.fromString(out);
 }
 
 fn stringTrimStart(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
