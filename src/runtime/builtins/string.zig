@@ -15,6 +15,7 @@ const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
 const interpreter = @import("../interpreter.zig");
+const utf16 = @import("../utf16.zig");
 
 const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
 const argOr = intrinsics.argOr;
@@ -562,6 +563,11 @@ fn coerceThisToJSString(realm: *Realm, this_value: Value) NativeError!*JSString 
     return stringifyArg(realm, this_value);
 }
 
+/// §22.1.3.1 String.prototype.charAt(pos). Returns the single-
+/// code-unit String at position `pos` (1-based on the code-unit
+/// view), or the empty String if `pos` is out of range. The unit
+/// is re-encoded as WTF-8 — a surrogate half from a supplementary
+/// pair is emitted as the matching 3-byte CESU-8 escape.
 fn stringCharAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const idx_v = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
@@ -573,15 +579,24 @@ fn stringCharAt(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         if (std.math.isInf(d)) break :blk if (d > 0) std.math.maxInt(i32) else -1;
         break :blk @intFromFloat(@trunc(d));
     };
-    if (idx < 0 or @as(usize, @intCast(idx)) >= s.bytes.len) {
+    if (idx < 0) {
         const empty = realm.heap.allocateString("") catch return error.OutOfMemory;
         return Value.fromString(empty);
     }
-    const i: usize = @intCast(idx);
-    const ch = realm.heap.allocateString(s.bytes[i .. i + 1]) catch return error.OutOfMemory;
+    const cu = utf16.codeUnitAt(s.bytes, @intCast(idx)) orelse {
+        const empty = realm.heap.allocateString("") catch return error.OutOfMemory;
+        return Value.fromString(empty);
+    };
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(realm.allocator);
+    utf16.appendCodeUnitAsWtf8(realm.allocator, &buf, cu) catch return error.OutOfMemory;
+    const ch = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
     return Value.fromString(ch);
 }
 
+/// §22.1.3.2 String.prototype.charCodeAt(pos). Returns the
+/// numeric value (an integer in 0..0xFFFF) of the code unit at
+/// `pos`, or NaN if `pos` is out of range.
 fn stringCharCodeAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const idx_v = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
@@ -592,10 +607,9 @@ fn stringCharCodeAt(realm: *Realm, this_value: Value, args: []const Value) Nativ
         if (std.math.isInf(d)) break :blk if (d > 0) std.math.maxInt(i32) else -1;
         break :blk @intFromFloat(@trunc(d));
     };
-    if (idx < 0 or @as(usize, @intCast(idx)) >= s.bytes.len) {
-        return Value.fromDouble(std.math.nan(f64));
-    }
-    return Value.fromInt32(@intCast(s.bytes[@intCast(idx)]));
+    if (idx < 0) return Value.fromDouble(std.math.nan(f64));
+    const cu = utf16.codeUnitAt(s.bytes, @intCast(idx)) orelse return Value.fromDouble(std.math.nan(f64));
+    return Value.fromInt32(@intCast(cu));
 }
 
 fn stringIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -1100,14 +1114,22 @@ fn stringPad(realm: *Realm, this_value: Value, args: []const Value, start: bool)
     return Value.fromString(out);
 }
 
+/// §22.1.3.0 String.prototype.at(index). Like charAt but
+/// negative indices wrap from the end (`s.at(-1)` is the last
+/// code unit) and out-of-range returns `undefined` rather than
+/// the empty String. Indexing is in UTF-16 code units (§6.1.4).
 fn stringAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const idx_num = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
     var idx: i64 = intrinsics.toInt(idx_num);
-    if (idx < 0) idx += @as(i64, @intCast(s.bytes.len));
-    if (idx < 0 or idx >= @as(i64, @intCast(s.bytes.len))) return Value.undefined_;
-    const i: usize = @intCast(idx);
-    const out = realm.heap.allocateString(s.bytes[i .. i + 1]) catch return error.OutOfMemory;
+    const cu_len: i64 = @intCast(utf16.lengthInCodeUnits(s.bytes));
+    if (idx < 0) idx += cu_len;
+    if (idx < 0 or idx >= cu_len) return Value.undefined_;
+    const cu = utf16.codeUnitAt(s.bytes, @intCast(idx)) orelse return Value.undefined_;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(realm.allocator);
+    utf16.appendCodeUnitAsWtf8(realm.allocator, &buf, cu) catch return error.OutOfMemory;
+    const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
     return Value.fromString(out);
 }
 

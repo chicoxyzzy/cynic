@@ -4281,3 +4281,61 @@ test "String.prototype.length: indexed access splits surrogate pair" {
     try expectScriptStringWithBuiltins("\"a\\u{1F600}c\"[2];", "\xED\xB8\x80");
     try expectScriptStringWithBuiltins("\"a\\u{1F600}c\"[3];", "c");
 }
+
+// ── §22.1.3.1 charAt / §22.1.3.2 charCodeAt / §22.1.3.0 at ─────────────────
+
+test "String.prototype.charAt: ASCII index" {
+    try expectScriptStringWithBuiltins("\"abc\".charAt(1);", "b");
+}
+
+test "String.prototype.charAt: BMP non-ASCII at non-byte index" {
+    // `\xFF` is 2 WTF-8 bytes; old byte-index code returned
+    // garbage. charAt(1) is the U+00FF code unit.
+    try expectScriptStringWithBuiltins("\"a\\xFFc\".charAt(1);", "\xC3\xBF");
+    try expectScriptStringWithBuiltins("\"a\\xFFc\".charAt(2);", "c");
+}
+
+test "String.prototype.charAt: surrogate halves at supplementary" {
+    try expectScriptStringWithBuiltins("\"a\\u{1F600}c\".charAt(1);", "\xED\xA0\xBD");
+    try expectScriptStringWithBuiltins("\"a\\u{1F600}c\".charAt(2);", "\xED\xB8\x80");
+}
+
+test "String.prototype.charAt: out of range returns empty string" {
+    try expectScriptStringWithBuiltins("\"abc\".charAt(99);", "");
+    try expectScriptStringWithBuiltins("\"abc\".charAt(-1);", "");
+}
+
+test "String.prototype.charCodeAt: ASCII" {
+    try expectScriptIntWithBuiltins("\"abc\".charCodeAt(1);", 'b');
+}
+
+test "String.prototype.charCodeAt: BMP non-ASCII returns 0xFF" {
+    try expectScriptIntWithBuiltins("\"a\\xFFc\".charCodeAt(1);", 0xFF);
+}
+
+test "String.prototype.charCodeAt: surrogate halves at supplementary" {
+    try expectScriptIntWithBuiltins("\"a\\u{1F600}c\".charCodeAt(1);", 0xD83D);
+    try expectScriptIntWithBuiltins("\"a\\u{1F600}c\".charCodeAt(2);", 0xDE00);
+}
+
+test "String.prototype.charCodeAt: lone surrogate round-trip" {
+    try expectScriptIntWithBuiltins("\"a\\uD83Dc\".charCodeAt(1);", 0xD83D);
+}
+
+test "String.prototype.at: negative wraps from end (supplementary)" {
+    // `at(-1)` is the last code unit which for "a\u{1F600}c" is
+    // the literal `c`.
+    try expectScriptStringWithBuiltins("\"a\\u{1F600}c\".at(-1);", "c");
+    try expectScriptStringWithBuiltins("\"a\\u{1F600}c\".at(-2);", "\xED\xB8\x80");
+}
+
+test "String.prototype.at: out of range returns undefined" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    const v = switch (try evaluateScriptResult(&realm, "\"abc\".at(99);")) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isUndefined());
+}
