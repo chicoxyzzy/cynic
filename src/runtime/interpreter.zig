@@ -7311,7 +7311,10 @@ fn runFrames(
                                 const buf = live_tv.viewed.array_buffer.?;
                                 const elem_size = live_tv.kind.elementSize();
                                 const idx: usize = @intFromFloat(num);
-                                intrinsics_mod.writeTypedElement(buf, live_tv.kind, live_tv.byte_offset + idx * elem_size, coerced);
+                                // Name-aware dispatch keeps Uint8ClampedArray
+                                // on the ToUint8Clamp path (§7.1.11) rather
+                                // than modular ToUint8 (§7.1.6).
+                                intrinsics_mod.writeTypedElementForView(buf, live_tv, live_tv.byte_offset + idx * elem_size, coerced);
                             }
                             continue;
                         }

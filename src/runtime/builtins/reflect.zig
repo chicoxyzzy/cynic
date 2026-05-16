@@ -326,25 +326,25 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
                     const buf = live_tv.viewed.array_buffer.?;
                     const elem_size = live_tv.kind.elementSize();
                     const idx: usize = @intFromFloat(num);
-                    @import("../intrinsics.zig").writeTypedElement(buf, live_tv.kind, live_tv.byte_offset + idx * elem_size, coerced);
+                    // Name-aware dispatch keeps Uint8ClampedArray on
+                    // the ToUint8Clamp path (§7.1.11) rather than
+                    // modular ToUint8 (§7.1.6).
+                    @import("../intrinsics.zig").writeTypedElementForView(buf, live_tv, live_tv.byte_offset + idx * elem_size, coerced);
                 }
                 return Value.true_;
             }
-            // Different-receiver path: spec step 2.b.ii — when the
-            // numeric index is invalid against the typed array, [[Set]]
-            // returns true *without* doing anything (no ToNumber).
-            if (!ta_mod.isValidIntegerIndexPub(tv, num)) return Value.true_;
-            // Different-receiver, in-bounds: spec step 3 — fall
-            // through to OrdinarySet(O, P, V, Receiver), which lands
-            // on the receiver. Cynic doesn't yet wire a full
-            // receiver-aware OrdinarySet through reflectSet; the
-            // residual fixtures gated on this behaviour
-            // (`Set/key-is-valid-index-reflect-set.js`) need a
-            // dedicated OrdinarySet helper to land. Returning true
-            // here keeps the spec-mandated boolean while leaving the
-            // receiver mutation as a known gap.
+            // Receiver != target: spec step 2.b.ii — return true
+            // without ToNumber when the index is invalid; step 3
+            // would fall through to OrdinarySet on the receiver,
+            // but Cynic doesn't yet wire a full receiver-aware
+            // OrdinarySet through reflectSet, so return true and
+            // leave the receiver mutation as a known gap
+            // (`Set/key-is-valid-index-reflect-set.js`).
             return Value.true_;
         }
+        // Non-canonical key — fall through to the regular target.set
+        // path below so an ordinary writable property can still land
+        // on the typed array (matches `key-is-not-canonical-index.js`).
     }
     // §10.4.2.1 Array exotic [[DefineOwnProperty]] — when writing
     // `length` on an Array, [[Set]] composes through ArraySetLength.

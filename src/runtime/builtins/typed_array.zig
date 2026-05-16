@@ -724,9 +724,19 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                     buf_obj.array_buffer = buf_bytes;
                 buf_obj.has_array_buffer_data = true;
                     inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name };
+                    // §23.2.6.4 / §7.1.11 — Uint8ClampedArray's
+                    // [[ContentType]] is still Number but writes
+                    // route through ToUint8Clamp instead of modular
+                    // ToUint8. The view stores its name explicitly
+                    // so the dispatch is name-aware.
+                    const clamped = std.mem.eql(u8, ta_name, "Uint8ClampedArray");
                     var idx: usize = 0;
                     while (idx < length) : (idx += 1) {
-                        writeTypedElement(buf_bytes, kind, idx * elem_size, collected.items[idx]);
+                        if (clamped) {
+                            writeUint8Clamped(buf_bytes, idx * elem_size, collected.items[idx]);
+                        } else {
+                            writeTypedElement(buf_bytes, kind, idx * elem_size, collected.items[idx]);
+                        }
                     }
                     return this_value;
                 }
@@ -752,6 +762,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                 inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name };
                 // Copy each element via Get + ToNumber/ToBigInt.
                 const bigint_mod = @import("bigint.zig");
+                const clamped_al = std.mem.eql(u8, ta_name, "Uint8ClampedArray");
                 var i: usize = 0;
                 while (i < length) : (i += 1) {
                     var ibuf: [16]u8 = undefined;
@@ -767,7 +778,11 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                         },
                         else => try intrinsics.toNumber(realm, src_v),
                     };
-                    writeTypedElement(buf_bytes, kind, i * elem_size, coerced);
+                    if (clamped_al) {
+                        writeUint8Clamped(buf_bytes, i * elem_size, coerced);
+                    } else {
+                        writeTypedElement(buf_bytes, kind, i * elem_size, coerced);
+                    }
                 }
                 return this_value;
             }
@@ -830,7 +845,7 @@ fn typedArrayWriteIndex(realm: *Realm, target: *JSObject, idx: usize, v: Value) 
     const buf = tv.viewed.array_buffer orelse return throwTypeError(realm, "TypedArray write on detached buffer");
     const byte_pos = tv.byte_offset + idx * elem_size;
     if (byte_pos + elem_size > buf.len) return;
-    writeTypedElement(buf, tv.kind, byte_pos, coerced);
+    writeTypedElementForView(buf, tv, byte_pos, coerced);
 }
 
 /// §23.2.2.1 %TypedArray%.from ( source [ , mapfn [ , thisArg ] ] ).
@@ -1126,7 +1141,7 @@ fn typedArrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeE
 
     var i: i64 = start;
     while (i < end_clamped) : (i += 1) {
-        writeTypedElement(buf, tv.kind, tv.byte_offset + @as(usize, @intCast(i)) * elem_size, value_coerced);
+        writeTypedElementForView(buf, tv, tv.byte_offset + @as(usize, @intCast(i)) * elem_size, value_coerced);
     }
     return this_value;
 }
@@ -1162,14 +1177,28 @@ fn typedArraySet(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     }
 
     const source_arg = argOr(args, 0, Value.undefined_);
-    const src_obj = heap_mod.valueAsPlainObject(source_arg) orelse {
-        return throwTypeError(realm, "TypedArray.prototype.set: source is not an object");
-    };
-
-    if (src_obj.typed_view != null) {
-        return try taSetFromTypedArray(realm, obj, tv, src_obj, target_offset);
+    // §23.2.3.27 step 8/9 — branch on whether `array` already
+    // has a [[TypedArrayName]] internal slot.
+    //   - Object path: SetTypedArrayFromTypedArray.
+    //   - Non-object / non-TA path: SetTypedArrayFromArrayLike,
+    //     after ? ToObject(source).
+    //
+    // ToObject is what makes `ta.set(\"678\", 1)` valid:
+    // the string is boxed → an arraylike with indexed slots +
+    // \`length\`.  Numbers / booleans box to {} (length undefined
+    // → 0), so \`ta.set(0)\` becomes a no-op.  Symbols / null /
+    // undefined throw TypeError per ToObject.
+    if (heap_mod.valueAsPlainObject(source_arg)) |po| {
+        if (po.typed_view != null) {
+            return try taSetFromTypedArray(realm, obj, tv, po, target_offset);
+        }
+        return try taSetFromArrayLike(realm, obj, tv, po, target_offset);
     }
-    return try taSetFromArrayLike(realm, obj, tv, src_obj, target_offset);
+    // §23.2.3.27 step 14 — `src = ? ToObject(array)`. ToObject
+    // on Symbol / null / undefined throws TypeError; on
+    // string / number / boolean it boxes.
+    const boxed = try intrinsics.toObjectThis(realm, source_arg);
+    return try taSetFromArrayLike(realm, obj, tv, boxed, target_offset);
 }
 
 /// §7.1.5 ToIntegerOrInfinity. Routes through ToNumber so a
@@ -1258,7 +1287,7 @@ fn taSetFromTypedArray(
         var i: usize = 0;
         while (i < src_length) : (i += 1) {
             const v = readTypedElement(realm, tmp, src_tv.kind, i * src_size);
-            writeTypedElement(dst_buf, tv.kind, dst_base + i * elem_size, v);
+            writeTypedElementForView(dst_buf, tv, dst_base + i * elem_size, v);
         }
         return Value.undefined_;
     }
@@ -1266,7 +1295,7 @@ fn taSetFromTypedArray(
     var i: usize = 0;
     while (i < src_length) : (i += 1) {
         const v = readTypedElement(realm, src_buf, src_tv.kind, src_base + i * src_size);
-        writeTypedElement(dst_buf, tv.kind, dst_base + i * elem_size, v);
+        writeTypedElementForView(dst_buf, tv, dst_base + i * elem_size, v);
     }
     return Value.undefined_;
 }
@@ -1326,7 +1355,7 @@ fn taSetFromArrayLike(
         const cur_buf = cur_tv.viewed.array_buffer orelse return Value.undefined_;
         const slot = dst_base + k * elem_size;
         if (slot + elem_size > cur_buf.len) continue;
-        writeTypedElement(cur_buf, cur_tv.kind, slot, converted);
+        writeTypedElementForView(cur_buf, cur_tv, slot, converted);
     }
     return Value.undefined_;
 }
@@ -2290,13 +2319,17 @@ fn typedArrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const ctx = try taCallbackPreamble(realm, this_value, args);
     // §23.2.3.19 step 6 — TypedArraySpeciesCreate(O, « len »).
     const out = try taSpeciesCreate(realm, ctx.self_obj, ctx.tv.kind, ctx.len);
-    const out_buf = out.typed_view.?.viewed.array_buffer.?;
-    const elem_size = ctx.tv.kind.elementSize();
+    // §23.2.3.20 map writes through the species result's
+    // [[ElementType]], which may differ from `O.[[ContentType]]`
+    // when a custom @@species returns a different-kind TA.
+    const out_tv = out.typed_view.?;
+    const out_buf = out_tv.viewed.array_buffer.?;
+    const out_elem_size = out_tv.kind.elementSize();
     var i: usize = 0;
     while (i < ctx.len) : (i += 1) {
         const v = taSafeRead(realm, ctx.tv, @intCast(i));
         const mapped = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
-        writeTypedElement(out_buf, ctx.tv.kind, i * elem_size, mapped);
+        writeTypedElementForView(out_buf, out_tv, i * out_elem_size, mapped);
     }
     return heap_mod.taggedObject(out);
 }
@@ -2944,7 +2977,9 @@ fn typedArrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeE
     if (copy_len > 0) {
         @memcpy(out_buf[0..copy_len], buf_now[tv.byte_offset .. tv.byte_offset + copy_len]);
     }
-    writeTypedElement(out_buf, tv.kind, @as(usize, @intCast(actual_index)) * elem_size, numeric_value);
+    // `out` preserves [[TypedArrayName]] via taMakeNewNamed, so
+    // a clamped exemplar writes through ToUint8Clamp.
+    writeTypedElementForView(out_buf, out.typed_view.?, @as(usize, @intCast(actual_index)) * elem_size, numeric_value);
     return heap_mod.taggedObject(out);
 }
 
@@ -2959,6 +2994,57 @@ fn toUintMod(d: f64, m: f64) u64 {
     const adjusted = if (reduced < 0) reduced + m else reduced;
     // `adjusted` is now in [0, m); m ≤ 2^32 here so the u64 cast is safe.
     return @intFromFloat(adjusted);
+}
+
+/// §7.1.11 ToUint8Clamp — IEEE 754 round-to-nearest-ties-to-even,
+/// then clamp to [0, 255]. NaN → 0. Used only by Uint8ClampedArray.
+pub fn toUint8Clamp(d: f64) u8 {
+    if (std.math.isNan(d)) return 0;
+    if (d <= 0) return 0;
+    if (d >= 255) return 255;
+    // §7.1.11 — round-half-to-even (banker's rounding).
+    const fl = @floor(d);
+    const frac = d - fl;
+    var rounded: f64 = fl;
+    if (frac > 0.5) {
+        rounded = fl + 1.0;
+    } else if (frac < 0.5) {
+        rounded = fl;
+    } else {
+        // Tie: round to even.
+        const fl_u: u64 = @intFromFloat(fl);
+        rounded = if (fl_u % 2 == 0) fl else fl + 1.0;
+    }
+    return @intFromFloat(rounded);
+}
+
+/// `writeTypedElement` for a `Uint8ClampedArray`. Cynic shares
+/// `kind = .uint8` between Uint8Array and Uint8ClampedArray;
+/// regular `writeTypedElement(.uint8, …)` does modular ToUint8.
+/// Callers that know they're writing a clamped slot route here
+/// instead.
+pub fn writeUint8Clamped(buf: []u8, byte_pos: usize, value: Value) void {
+    if (byte_pos + 1 > buf.len) return;
+    const v = coerceToNumber(value);
+    const d: f64 = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
+    buf[byte_pos] = toUint8Clamp(d);
+}
+
+/// True when this TypedView is a `Uint8ClampedArray`. The kind
+/// alone can't tell — clamped shares `kind = .uint8` — so we
+/// compare [[TypedArrayName]] (stored on the view).
+pub fn isClampedView(tv: ObjMod.TypedView) bool {
+    return std.mem.eql(u8, tv.name, "Uint8ClampedArray");
+}
+
+/// Dispatch helper: clamped writes go through ToUint8Clamp,
+/// every other kind goes through `writeTypedElement`.
+pub fn writeTypedElementForView(buf: []u8, tv: ObjMod.TypedView, byte_pos: usize, value: Value) void {
+    if (isClampedView(tv)) {
+        writeUint8Clamped(buf, byte_pos, value);
+    } else {
+        writeTypedElement(buf, tv.kind, byte_pos, value);
+    }
 }
 
 /// Write `value` (Number or BigInt) into `buf` at byte offset

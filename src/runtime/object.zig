@@ -703,7 +703,11 @@ pub const JSObject = struct {
                     const elem_size = tv.kind.elementSize();
                     const idx: usize = @intFromFloat(num);
                     const intrinsics_mod = @import("intrinsics.zig");
-                    intrinsics_mod.writeTypedElement(buf, tv.kind, tv.byte_offset + idx * elem_size, v);
+                    // Route through the name-aware dispatcher so
+                    // Uint8ClampedArray uses ToUint8Clamp (§7.1.11),
+                    // not modular ToUint8 (§7.1.6) — both share
+                    // `kind = .uint8` in Cynic.
+                    intrinsics_mod.writeTypedElementForView(buf, tv, tv.byte_offset + idx * elem_size, v);
                 }
                 // CanonicalNumericIndex keys (whether valid or OOB)
                 // never land in the ordinary property bag — that's

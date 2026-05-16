@@ -1687,6 +1687,12 @@ pub fn stringifyArg(realm: *Realm, v: Value) NativeError!*JSString {
 
 pub const readTypedElement = @import("builtins/typed_array.zig").readTypedElement;
 pub const writeTypedElement = @import("builtins/typed_array.zig").writeTypedElement;
+/// Name-aware write: dispatches to ToUint8Clamp for
+/// Uint8ClampedArray, regular ToInt*/ToUint*/IEEE writes otherwise.
+/// Use this from any [[Set]] / IntegerIndexedElementSet path —
+/// `writeTypedElement` on its own treats kind=.uint8 as Uint8Array
+/// (modular ToUint8) and would silently corrupt clamped arrays.
+pub const writeTypedElementForView = @import("builtins/typed_array.zig").writeTypedElementForView;
 
 // Iterator factory methods live in `builtins/collections.zig` —
 // re-export so `builtins/typed_array.zig` and other call sites
