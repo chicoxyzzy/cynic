@@ -6783,27 +6783,127 @@ fn runFrames(
                         // value (§6.1.4), not the WTF-8 byte length.
                         acc = Value.fromInt32(@intCast(utf16.lengthInCodeUnits(recv.bytes)));
                     } else if (realm.intrinsics.string_prototype) |sp| {
-                        acc = sp.get(key_s.bytes);
+                        // §10.1.8.1 OrdinaryGet — walk the prototype
+                        // chain looking for an accessor first; an
+                        // accessor anywhere on the chain wins over
+                        // an inherited data property. Strict-mode
+                        // primitive receivers forward the primitive
+                        // as `this` to the getter (§10.2.1.2
+                        // OrdinaryCallBindThis — no boxing).
+                        if (lookupAccessor(sp, key_s.bytes)) |acc_pair| {
+                            if (acc_pair.getter) |getter| {
+                                const recv_v = acc;
+                                const outcome = try callJSFunction(allocator, realm, getter, recv_v, &.{});
+                                switch (outcome) {
+                                    .value, .yielded => |v| acc = v,
+                                    .thrown => |ex| {
+                                        f.ip = ip;
+                                        f.accumulator = acc;
+                                        committed = true;
+                                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                            return .{ .thrown = ex };
+                                        }
+                                        continue;
+                                    },
+                                }
+                            } else {
+                                acc = Value.undefined_;
+                            }
+                        } else {
+                            acc = sp.get(key_s.bytes);
+                        }
                     } else acc = Value.undefined_;
                 } else if (acc.isInt32() or acc.isDouble()) {
                     // §7.1.1 ToObject(Number) — primitive number
                     // methods (`.toFixed`, `.toString`) resolve via
-                    // %Number.prototype%.
+                    // %Number.prototype%. An accessor inherited
+                    // from `Object.prototype` (e.g. user code added
+                    // `Object.defineProperty(Object.prototype, "x",
+                    // { get })`) wins over the data-property fast
+                    // path (§10.1.8.1); the getter is called with
+                    // `this = <number primitive>` in strict mode.
                     if (heap_mod.valueAsFunction(realm.globals.get("Number") orelse Value.undefined_)) |num_ctor| {
                         if (num_ctor.prototype) |np| {
-                            acc = np.get(key_s.bytes);
+                            if (lookupAccessor(np, key_s.bytes)) |acc_pair| {
+                                if (acc_pair.getter) |getter| {
+                                    const recv_v = acc;
+                                    const outcome = try callJSFunction(allocator, realm, getter, recv_v, &.{});
+                                    switch (outcome) {
+                                        .value, .yielded => |v| acc = v,
+                                        .thrown => |ex| {
+                                            f.ip = ip;
+                                            f.accumulator = acc;
+                                            committed = true;
+                                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                                return .{ .thrown = ex };
+                                            }
+                                            continue;
+                                        },
+                                    }
+                                } else {
+                                    acc = Value.undefined_;
+                                }
+                            } else {
+                                acc = np.get(key_s.bytes);
+                            }
                         } else acc = Value.undefined_;
                     } else acc = Value.undefined_;
                 } else if (acc.isBool()) {
+                    // §7.1.1 ToObject(Boolean). Same accessor-aware
+                    // chain walk as the Number arm above.
                     if (heap_mod.valueAsFunction(realm.globals.get("Boolean") orelse Value.undefined_)) |bool_ctor| {
                         if (bool_ctor.prototype) |bp| {
-                            acc = bp.get(key_s.bytes);
+                            if (lookupAccessor(bp, key_s.bytes)) |acc_pair| {
+                                if (acc_pair.getter) |getter| {
+                                    const recv_v = acc;
+                                    const outcome = try callJSFunction(allocator, realm, getter, recv_v, &.{});
+                                    switch (outcome) {
+                                        .value, .yielded => |v| acc = v,
+                                        .thrown => |ex| {
+                                            f.ip = ip;
+                                            f.accumulator = acc;
+                                            committed = true;
+                                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                                return .{ .thrown = ex };
+                                            }
+                                            continue;
+                                        },
+                                    }
+                                } else {
+                                    acc = Value.undefined_;
+                                }
+                            } else {
+                                acc = bp.get(key_s.bytes);
+                            }
                         } else acc = Value.undefined_;
                     } else acc = Value.undefined_;
                 } else if (heap_mod.isBigInt(acc)) {
+                    // §7.1.1 ToObject(BigInt). Same accessor-aware
+                    // chain walk as the Number arm above.
                     if (heap_mod.valueAsFunction(realm.globals.get("BigInt") orelse Value.undefined_)) |bi_ctor| {
                         if (bi_ctor.prototype) |bp| {
-                            acc = bp.get(key_s.bytes);
+                            if (lookupAccessor(bp, key_s.bytes)) |acc_pair| {
+                                if (acc_pair.getter) |getter| {
+                                    const recv_v = acc;
+                                    const outcome = try callJSFunction(allocator, realm, getter, recv_v, &.{});
+                                    switch (outcome) {
+                                        .value, .yielded => |v| acc = v,
+                                        .thrown => |ex| {
+                                            f.ip = ip;
+                                            f.accumulator = acc;
+                                            committed = true;
+                                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                                return .{ .thrown = ex };
+                                            }
+                                            continue;
+                                        },
+                                    }
+                                } else {
+                                    acc = Value.undefined_;
+                                }
+                            } else {
+                                acc = bp.get(key_s.bytes);
+                            }
                         } else acc = Value.undefined_;
                     } else acc = Value.undefined_;
                 } else if (heap_mod.isSymbol(acc)) {
@@ -7030,7 +7130,31 @@ fn runFrames(
                         }
                     } else |_| {
                         if (realm.intrinsics.string_prototype) |sp| {
-                            acc = sp.get(key_slice);
+                            // §10.1.8.1 OrdinaryGet — accessor on
+                            // the proto chain wins over inherited
+                            // data; primitive `this` is forwarded
+                            // unboxed in strict mode (§10.2.1.2).
+                            if (lookupAccessor(sp, key_slice)) |acc_pair| {
+                                if (acc_pair.getter) |getter| {
+                                    const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
+                                    switch (outcome) {
+                                        .value, .yielded => |v| acc = v,
+                                        .thrown => |ex| {
+                                            f.ip = ip;
+                                            f.accumulator = acc;
+                                            committed = true;
+                                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                                return .{ .thrown = ex };
+                                            }
+                                            continue;
+                                        },
+                                    }
+                                } else {
+                                    acc = Value.undefined_;
+                                }
+                            } else {
+                                acc = sp.get(key_slice);
+                            }
                         } else acc = Value.undefined_;
                     }
                 } else {
@@ -7039,9 +7163,33 @@ fn runFrames(
                     // receiver, so property reads find the inherited
                     // prototype methods. Walk straight to the boxed
                     // proto chain without materialising a wrapper.
+                    // §10.1.8.1 OrdinaryGet — an accessor descriptor
+                    // anywhere on the proto chain wins over a data
+                    // property. Strict-mode primitive receivers
+                    // forward `this = <primitive>` to the getter.
                     const proto_opt: ?*JSObject = intrinsics_mod.lookupPrimitivePrototype(realm, recv);
                     if (proto_opt) |proto| {
-                        acc = proto.get(key_slice);
+                        if (lookupAccessor(proto, key_slice)) |acc_pair| {
+                            if (acc_pair.getter) |getter| {
+                                const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
+                                switch (outcome) {
+                                    .value, .yielded => |v| acc = v,
+                                    .thrown => |ex| {
+                                        f.ip = ip;
+                                        f.accumulator = acc;
+                                        committed = true;
+                                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                            return .{ .thrown = ex };
+                                        }
+                                        continue;
+                                    },
+                                }
+                            } else {
+                                acc = Value.undefined_;
+                            }
+                        } else {
+                            acc = proto.get(key_slice);
+                        }
                     } else {
                         const ex = try makeTypeError(realm, "Cannot read properties of non-object");
                         f.ip = ip;

@@ -76,6 +76,17 @@ pub const Binding = struct {
     /// the importer sees post-init state of the source module's
     /// binding without any explicit refresh.
     is_import: bool = false,
+    /// True when this binding is a formal parameter (created in
+    /// §10.2.11 FunctionDeclarationInstantiation step 22 via
+    /// IteratorBindingInitialization). Stored at `BindingKind.let_`
+    /// so the lexical environment carries the right shape, but
+    /// `var` redeclaration must NOT error against it — §10.2.11
+    /// step 27.b silently skips a varName when the same identifier
+    /// is already a parameter. Without this flag, `function f(x) {
+    /// var x; }` raised DuplicateBinding even though the spec lets
+    /// the parameter binding stand and the redundant var is
+    /// dropped.
+    is_param: bool = false,
     /// Env slot holding the loaded module's namespace object —
     /// `compileImportDecl` allocates one persistent slot per
     /// `import` declaration and seeds it with the result of

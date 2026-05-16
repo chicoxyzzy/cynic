@@ -262,6 +262,30 @@ pub const Compiler = struct {
         return b.env_slot;
     }
 
+    /// Declare a formal parameter. Same shape as `declareBinding`
+    /// with `kind = .let_` (params share lexical-env mechanics)
+    /// but the resulting `Binding` is flagged `is_param` so a
+    /// subsequent `var <same-name>` in the body silently no-ops
+    /// per §10.2.11 step 27.b (FunctionDeclarationInstantiation).
+    /// Returns the env slot. Caller still emits the `ldar`/store
+    /// pair to seed the slot from the call-site register.
+    fn declareParam(
+        self: *Compiler,
+        name: []const u8,
+        span: Span,
+    ) CompileError!u8 {
+        const slot = try self.declareBinding(name, .let_, span);
+        const scope = self.scope orelse return slot;
+        // The binding we just added is the last entry on the
+        // active scope's list — flip its `is_param` flag.
+        var bindings = &scope.bindings;
+        if (bindings.items.len > 0) {
+            const last = &bindings.items[bindings.items.len - 1];
+            if (std.mem.eql(u8, last.name, name)) last.is_param = true;
+        }
+        return slot;
+    }
+
     /// Declare a binding and return the full `Binding` record —
     /// the call site can hand this directly to `emitStoreBinding`
     /// without re-resolving by name. Used by declarations that
@@ -278,7 +302,15 @@ pub const Compiler = struct {
             switch (kind) {
                 .var_ => switch (existing.kind) {
                     .var_ => return existing, // §13.3.2 merge
-                    .let_, .const_ => {
+                    // §10.2.11 FunctionDeclarationInstantiation
+                    // step 27.b — a `var` whose name matches an
+                    // existing parameter is silently skipped (the
+                    // parameter's binding stands; the var is a
+                    // no-op). Parameters are stored as `.let_` for
+                    // env-shape symmetry but flagged `is_param`.
+                    .let_, .const_ => if (existing.is_param) {
+                        return existing;
+                    } else {
                         try self.report(.unexpected_token, span);
                         return error.DuplicateBinding;
                     },
@@ -6698,7 +6730,7 @@ fn applyDefaultExprNamed(self: *Compiler, default_expr: *const ast.expression.Ex
 fn emitRestParamPrologue(self: *Compiler, rp: *const ast.statement.RestParam, start_index: u8) CompileError!void {
     if (rp.target == .identifier) {
         const param_name = self.source[rp.target.identifier.span.start..rp.target.identifier.span.end];
-        const slot = try self.declareBinding(param_name, .let_, rp.span);
+        const slot = try self.declareParam(param_name, rp.span);
         try self.builder.emitOp(.rest_args_from, rp.span);
         try self.builder.emitU8(start_index);
         try self.builder.emitOp(.sta_env, rp.span);
@@ -6721,7 +6753,7 @@ fn emitRestParamPrologue(self: *Compiler, rp: *const ast.statement.RestParam, st
 fn emitParamPrologue(self: *Compiler, sp: *const ast.statement.SimpleParam, i: u8) CompileError!void {
     if (sp.target == .identifier) {
         const param_name = self.source[sp.target.identifier.span.start..sp.target.identifier.span.end];
-        const slot = try self.declareBinding(param_name, .let_, sp.span);
+        const slot = try self.declareParam(param_name, sp.span);
         // Load the caller-supplied register into acc.
         try self.builder.emitOp(.ldar, sp.span);
         try self.builder.emitU8(i);
