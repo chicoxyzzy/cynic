@@ -197,6 +197,18 @@ pub const skip_ses_substrings = [_][]const u8{
     "Function/prototype/call/S15.3.4.4_A5_T7.js",
     "Function/prototype/call/S15.3.4.4_A5_T8.js",
     "Function/prototype/call/S15.3.4.4_A7_T6.js",
+
+    // `language/statementList/eval-*.js` — every fixture in this
+    // generated batch wraps a `StatementList` start in
+    // `var result = eval('function fn() {}<production>;')` to
+    // verify the parsing reach of the `Statement` / `Declaration`
+    // alternatives. The body itself is parser-shaped, but Cynic's
+    // permanent SES carve-out excludes runtime `eval()` (AGENTS.md
+    // "eval and runtime code construction"), so these false-reject
+    // for an out-of-scope reason rather than a real engine bug. All
+    // 40 fixtures share the `eval-` prefix; the rest of the
+    // `statementList/` tree (positive parsing tests) stays attempted.
+    "language/statementList/eval-",
 };
 
 /// AND-pair filters — both substrings must appear in the path. Used
