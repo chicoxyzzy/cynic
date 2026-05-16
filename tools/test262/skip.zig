@@ -256,6 +256,36 @@ pub const skip_ses_substrings = [_][]const u8{
     "language/statements/function/13.2-19-s.js",
     "language/statements/function/name-unicode.js",
     "language/statements/function/S13.2.2_A8_T3.js",
+
+    // `language/function-code/10.4.3-1-{13,15,17,19,63,64,65}-s.js`
+    // and the matching `-gs.js` siblings — Sputnik-era strict-mode
+    // `this`-binding tests that wrap the function body in
+    // `Function("…")` / `new Function("…")` / `eval("…")` to verify
+    // strict-mode reachability. All three mechanisms are the permanent
+    // SES carve-out per AGENTS.md ("eval and runtime code
+    // construction"): §15.3.2 (Function constructor), §19.2.1 (eval).
+    // The other failing fixtures in `language/function-code/` exercise
+    // real engine concerns (primitive-receiver accessor `this`,
+    // var/parameter redeclaration, strict-mode FunctionDeclaration
+    // hoisting) and stay attempted. 14 fixtures, listed by basename
+    // for clarity — the surrounding `10.4.3-1-1XX.js` etc. fixtures
+    // that don't use Function/eval stay attempted, as do the 14
+    // `-noStrict`-flagged siblings (`10.4.3-1-{14,16,18,82,83,84}-s.js`
+    // / `gs.js`) which Cynic's strict-only mode drops before run.
+    "language/function-code/10.4.3-1-13-s.js",
+    "language/function-code/10.4.3-1-13gs.js",
+    "language/function-code/10.4.3-1-15-s.js",
+    "language/function-code/10.4.3-1-15gs.js",
+    "language/function-code/10.4.3-1-17-s.js",
+    "language/function-code/10.4.3-1-17gs.js",
+    "language/function-code/10.4.3-1-19-s.js",
+    "language/function-code/10.4.3-1-19gs.js",
+    "language/function-code/10.4.3-1-63-s.js",
+    "language/function-code/10.4.3-1-63gs.js",
+    "language/function-code/10.4.3-1-64-s.js",
+    "language/function-code/10.4.3-1-64gs.js",
+    "language/function-code/10.4.3-1-65-s.js",
+    "language/function-code/10.4.3-1-65gs.js",
 };
 
 /// AND-pair filters — both substrings must appear in the path. Used
@@ -568,6 +598,16 @@ test "skip: SES out of scope" {
     // Non-eval class/elements fixtures stay in scope.
     try testing.expect(!pathIsCynicOutOfScope("language/expressions/class/elements/evaluation-error/computed-name-toprimitive-returns-nonobject.js"));
     try testing.expect(!pathIsCynicOutOfScope("language/statements/class/elements/private-class-field-initialization-is-visible-to-proxy.js"));
+    // `language/function-code/10.4.3-1-{13,…,65}-s.js` and `gs.js`
+    // — strict-mode `this`-binding via Function(string) / eval(string).
+    try testing.expect(pathIsCynicOutOfScope("language/function-code/10.4.3-1-13-s.js"));
+    try testing.expect(pathIsCynicOutOfScope("language/function-code/10.4.3-1-19-s.js"));
+    try testing.expect(pathIsCynicOutOfScope("language/function-code/10.4.3-1-65gs.js"));
+    // Non-Function/eval siblings in the same bucket stay attempted.
+    try testing.expect(!pathIsCynicOutOfScope("language/function-code/10.4.3-1-103.js"));
+    try testing.expect(!pathIsCynicOutOfScope("language/function-code/10.4.3-1-106.js"));
+    try testing.expect(!pathIsCynicOutOfScope("language/function-code/S10.2.1_A5.2_T1.js"));
+    try testing.expect(!pathIsCynicOutOfScope("language/function-code/block-decl-onlystrict.js"));
     // `Promise.<m>.call(eval)` ctx-non-ctor cluster — all SES.
     try testing.expect(pathIsCynicOutOfScope("built-ins/Promise/resolve/ctx-non-ctor.js"));
     try testing.expect(pathIsCynicOutOfScope("built-ins/Promise/all/ctx-non-ctor.js"));
