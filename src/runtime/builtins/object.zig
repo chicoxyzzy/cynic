@@ -1371,7 +1371,12 @@ fn isSymbolKey(key: []const u8) bool {
 fn objectGetOwnPropertySymbols(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.getOwnPropertySymbols target is not an object");
-    const keys = try ownPropertyKeysOrdered(realm, obj);
+    // §20.1.2.11 step 2 — `keys be ? O.[[OwnPropertyKeys]]()`. For
+    // a Proxy receiver this MUST go through the `ownKeys` trap so
+    // the invariants (target keys + reported keys must agree on
+    // configurable+non-extensible) fire before we filter to
+    // symbols. Mirrors `objectGetOwnPropertyNames` line 381.
+    const keys = if (try proxyOwnKeysOrNull(realm, obj)) |k| k else try ownPropertyKeysOrdered(realm, obj);
     defer realm.allocator.free(keys);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
@@ -1474,10 +1479,108 @@ fn objectAssign(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     return heap_mod.taggedObject(target);
 }
 
+/// §7.3.20 SetIntegrityLevel(O, level) driven through the public
+/// [[X]] methods so a Proxy receiver observes every operation
+/// (`preventExtensions`, `ownKeys`, `getOwnPropertyDescriptor`,
+/// `defineProperty`) via its handler traps. The fast inline path
+/// in `objectFreeze` / `objectSeal` bypasses this entirely for
+/// plain objects — only Proxies pay the dispatch cost.
+fn setIntegrityLevelViaProxy(realm: *Realm, target_v: Value, target: *JSObject, frozen: bool) NativeError!Value {
+    // §7.3.20 step 2 — `status = ? O.[[PreventExtensions]]()`.
+    const status = try proxyPreventExtensionsBool(realm, target);
+    if (!status) {
+        // §20.1.2.5 / §20.1.2.20 — SetIntegrityLevel returning false
+        // from the wrapped operation surfaces as TypeError on the
+        // public Object.{freeze,seal} call.
+        return throwTypeError(realm, if (frozen) "Object.freeze: Proxy preventExtensions returned false" else "Object.seal: Proxy preventExtensions returned false");
+    }
+    // §7.3.20 step 4 — `keys = ? O.[[OwnPropertyKeys]]()`.
+    const keys = (try proxyOwnKeysOrNull(realm, target)) orelse try ownPropertyKeysOrdered(realm, target);
+    defer realm.allocator.free(keys);
+
+    for (keys) |key| {
+        // Build the descriptor we want to install. For sealed: just
+        // configurable=false. For frozen: configurable=false +
+        // writable=false on data properties; configurable=false
+        // alone on accessors (writable is N/A there).
+        var is_accessor: bool = false;
+        if (frozen) {
+            // §7.3.20 step 6.b — `currentDesc = ? O.[[GetOwnProperty]](k)`.
+            // The Proxy trap dispatch lives inside `objectGetOwnPropertyDescriptor`.
+            const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+            const cd_args = [_]Value{ target_v, Value.fromString(key_str) };
+            const cur_desc_v = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &cd_args);
+            // §7.3.20 step 6.b.i — only act if currentDesc is not undefined.
+            if (cur_desc_v.isUndefined()) continue;
+            const cur_desc = heap_mod.valueAsPlainObject(cur_desc_v) orelse continue;
+            // Accessor descriptor iff `get` or `set` are set.
+            is_accessor = cur_desc.hasOwn("get") or cur_desc.hasOwn("set");
+        }
+        const desc_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+        desc_obj.prototype = realm.intrinsics.object_prototype;
+        desc_obj.set(realm.allocator, "configurable", Value.false_) catch return error.OutOfMemory;
+        if (frozen and !is_accessor) {
+            desc_obj.set(realm.allocator, "writable", Value.false_) catch return error.OutOfMemory;
+        }
+        // §7.3.20 step 6.b.iv — DefinePropertyOrThrow. Routed through
+        // the Proxy's `defineProperty` trap inside `objectDefineProperty`.
+        const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+        const dp_args = [_]Value{ target_v, Value.fromString(key_str), heap_mod.taggedObject(desc_obj) };
+        _ = try objectDefineProperty(realm, Value.undefined_, &dp_args);
+    }
+    return target_v;
+}
+
+/// §7.3.21 TestIntegrityLevel(O, level) driven through the public
+/// [[IsExtensible]] / [[OwnPropertyKeys]] / [[GetOwnProperty]]
+/// methods so a Proxy receiver observes every operation via its
+/// handler traps. Plain-object callers use the inline fast path
+/// in `objectIsFrozen` / `objectIsSealed`.
+fn testIntegrityLevelViaProxy(realm: *Realm, target_v: Value, target: *JSObject, frozen: bool) NativeError!Value {
+    _ = target;
+    // §7.3.21 step 2 — `extensible = ? O.[[IsExtensible]]()`.
+    const ext_args = [_]Value{target_v};
+    const ext_v = try objectIsExtensible(realm, Value.undefined_, &ext_args);
+    if (intrinsics.toBoolean(ext_v)) return Value.false_;
+    // §7.3.21 step 4 — `keys = ? O.[[OwnPropertyKeys]]()`. Read
+    // through the trap so the invariants fire.
+    const target_obj = heap_mod.valueAsPlainObject(target_v) orelse return Value.true_;
+    const keys = (try proxyOwnKeysOrNull(realm, target_obj)) orelse try ownPropertyKeysOrdered(realm, target_obj);
+    defer realm.allocator.free(keys);
+    for (keys) |key| {
+        const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+        const cd_args = [_]Value{ target_v, Value.fromString(key_str) };
+        const cur_desc_v = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &cd_args);
+        // §7.3.21 step 5.a — only inspect when currentDesc is not undefined.
+        if (cur_desc_v.isUndefined()) continue;
+        const cur_desc = heap_mod.valueAsPlainObject(cur_desc_v) orelse continue;
+        // Configurable must be false. For frozen data descriptors,
+        // writable must also be false. Accessor descriptors (`get` /
+        // `set` set) skip the writable check — §7.3.21 step 5.a.ii.
+        const cfg_v = cur_desc.get("configurable");
+        if (intrinsics.toBoolean(cfg_v)) return Value.false_;
+        if (frozen) {
+            const is_accessor = cur_desc.hasOwn("get") or cur_desc.hasOwn("set");
+            if (!is_accessor) {
+                const w_v = cur_desc.get("writable");
+                if (intrinsics.toBoolean(w_v)) return Value.false_;
+            }
+        }
+    }
+    return Value.true_;
+}
+
 fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
     const obj = heap_mod.valueAsPlainObject(arg) orelse return arg; // §20.1.2.5 — primitives pass through
+    // §10.5 Proxy receivers — every integrity-level effect MUST be
+    // observable through the handler traps. Drive SetIntegrityLevel
+    // via the public [[X]] methods instead of mutating the proxy's
+    // own slots directly.
+    if (obj.proxy_target != null or obj.proxy_revoked) {
+        return setIntegrityLevelViaProxy(realm, arg, obj, true);
+    }
     // §10.4.5.4 IntegerIndexedExoticObject [[PreventExtensions]] —
     // returns false when IsTypedArrayFixedLength(O) is false, which
     // covers every length-tracking view AND every fixed-length
@@ -1518,10 +1621,26 @@ fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 }
 
 fn objectIsFrozen(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
+    // Function objects are Objects too (§10.2) — they have own
+    // properties (`name`, `length`, `prototype`, user-set) and are
+    // extensible by default. Cynic doesn't yet plumb an
+    // `extensible` flag through `JSFunction`, so a freshly-built
+    // built-in is never frozen. Return false so
+    // `Object.isFrozen(TypeError)` doesn't lie. The one exception
+    // is `%ThrowTypeError%` (§10.2.4) which the spec mandates is
+    // frozen — we hard-code that singleton match here.
+    if (heap_mod.valueAsFunction(arg)) |fn_obj| {
+        if (realm.intrinsics.throw_type_error) |tt| {
+            if (fn_obj == tt) return Value.true_;
+        }
+        return Value.false_;
+    }
     const obj = heap_mod.valueAsPlainObject(arg) orelse return Value.true_; // primitives are frozen
+    if (obj.proxy_target != null or obj.proxy_revoked) {
+        return testIntegrityLevelViaProxy(realm, arg, obj, true);
+    }
     if (obj.extensible) return Value.false_;
     var it = obj.properties.iterator();
     while (it.next()) |entry| {
@@ -1542,6 +1661,9 @@ fn objectSeal(realm: *Realm, this_value: Value, args: []const Value) NativeError
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
     const obj = heap_mod.valueAsPlainObject(arg) orelse return arg;
+    if (obj.proxy_target != null or obj.proxy_revoked) {
+        return setIntegrityLevelViaProxy(realm, arg, obj, false);
+    }
     obj.extensible = false;
     // §10.1.4.1 SetIntegrityLevel(O, sealed) — every own property
     // (data + accessor) loses configurability; writable bits
@@ -1570,10 +1692,22 @@ fn objectSeal(realm: *Realm, this_value: Value, args: []const Value) NativeError
 }
 
 fn objectIsSealed(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
+    // Same Function-as-Object carve-out as `objectIsFrozen` — a
+    // built-in / user-declared function is extensible and has
+    // mutable own properties. `%ThrowTypeError%` is the one
+    // pre-sealed singleton.
+    if (heap_mod.valueAsFunction(arg)) |fn_obj| {
+        if (realm.intrinsics.throw_type_error) |tt| {
+            if (fn_obj == tt) return Value.true_;
+        }
+        return Value.false_;
+    }
     const obj = heap_mod.valueAsPlainObject(arg) orelse return Value.true_;
+    if (obj.proxy_target != null or obj.proxy_revoked) {
+        return testIntegrityLevelViaProxy(realm, arg, obj, false);
+    }
     if (obj.extensible) return Value.false_;
     var it = obj.properties.iterator();
     while (it.next()) |entry| {
