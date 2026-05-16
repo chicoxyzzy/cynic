@@ -86,6 +86,23 @@ const cynic_assert_js: []const u8 =
 /// recovering ~166 fixtures of genuine resizable-buffer signal.
 const resizable_array_buffer_utils_stub: []const u8 = @embedFile("stubs/resizableArrayBufferUtils.js");
 
+/// Cynic-shipped stub for `harness/fnGlobalObject.js`. Upstream is:
+///
+///     var __globalObject = Function("return this;")();
+///     function fnGlobalObject() { return __globalObject; }
+///
+/// which exercises Cynic's permanently-banned `Function(string)`
+/// constructor (AGENTS.md: SES-aligned "eval / runtime code
+/// construction — out permanently"). Substituting `globalThis`
+/// (ES2020 §19.4) is observably equivalent for every fixture
+/// except the one literally testing `Function("return this")`.
+const fn_global_object_stub: []const u8 =
+    \\function fnGlobalObject() {
+    \\  return globalThis;
+    \\}
+    \\
+;
+
 /// Preloaded harness sources. `sta` and `assert_js` are
 /// always evaluated (in that order) before the test source;
 /// `includes` is a name→source map covering every `.js` file
@@ -189,6 +206,17 @@ fn populateIncludes(
         // runnable. See `stubs/resizableArrayBufferUtils.js`.
         if (std.mem.eql(u8, entry.name, "resizableArrayBufferUtils.js")) {
             const owned_source = try allocator.dupe(u8, resizable_array_buffer_utils_stub);
+            errdefer allocator.free(owned_source);
+            try out.put(allocator, owned_name, owned_source);
+            continue;
+        }
+
+        // Cynic-shipped substitute: upstream `fnGlobalObject.js`
+        // uses `Function("return this;")()` to recover the global,
+        // which Cynic permanently bans. `globalThis` (ES2020 §19.4)
+        // is the observably-equivalent replacement.
+        if (std.mem.eql(u8, entry.name, "fnGlobalObject.js")) {
+            const owned_source = try allocator.dupe(u8, fn_global_object_stub);
             errdefer allocator.free(owned_source);
             try out.put(allocator, owned_name, owned_source);
             continue;
