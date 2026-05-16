@@ -670,7 +670,10 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                     };
                     const iter = switch (iter_outcome) {
                         .value, .yielded => |v| v,
-                        .thrown => return error.NativeThrew,
+                        .thrown => |ex| {
+                            realm.pending_exception = ex;
+                            return error.NativeThrew;
+                        },
                     };
                     const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return throwTypeError(realm, "TypedArray: @@iterator did not return an iterator object");
                     const next_v = intrinsics.getPropertyChain(realm, iter_obj, "next") catch |err| switch (err) {
@@ -697,7 +700,10 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                         };
                         const result = switch (result_outcome) {
                             .value, .yielded => |v| v,
-                            .thrown => return error.NativeThrew,
+                            .thrown => |ex| {
+                            realm.pending_exception = ex;
+                            return error.NativeThrew;
+                        },
                         };
                         const result_obj = heap_mod.valueAsPlainObject(result) orelse return throwTypeError(realm, "TypedArray: iterator next() did not return an object");
                         // §7.4.7 IteratorComplete / IteratorValue invoke
@@ -1045,30 +1051,29 @@ fn typedArrayBuffer(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
 
 fn typedArrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const bigint_mod = @import("bigint.zig");
     const tv = try taValidatedView(realm, this_value, "fill");
-    const buf = tv.viewed.array_buffer orelse return throwTypeError(realm, "Cannot perform 'fill' on a detached buffer");
-    const elem_size = tv.kind.elementSize();
-    // §23.2.3.10 — TypedArrayLength is taken against the buffer
-    // witness; for a length-tracking view this is the live count.
+    // §23.2.3.11 step 3 — snapshot len. We re-read length /
+    // buffer AFTER the coercions; spec step 10 (IsDetachedBuffer)
+    // is checked there.
     const len_i: i64 = @intCast(taCurrentLength(tv));
-    // §23.2.3.10 step 3 — `ToNumber(value)` (or ToBigInt for
-    // BigInt typed arrays) runs ONCE up front, before the start/
-    // end coercions. Test262 fixtures pass side-effecting
-    // `valueOf`/`toString` to verify the once-only semantics.
-    // Route through realm-aware `toNumber` so user valueOf
-    // throws propagate; non-BigInt typed arrays accept the
-    // returned Value as-is. BigInt typed arrays follow a
-    // separate ToBigInt path that's handled inside
-    // `writeTypedElement` for now.
-    const value_arg = argOr(args, 0, Value.undefined_);
-    const value_coerced = if (tv.kind.isBigInt())
-        value_arg
-    else
-        try intrinsics.toNumber(realm, value_arg);
 
-    // §23.2.3.10 step 4-9 — start / end via ToIntegerOrInfinity,
-    // clamped to [0, len]. Route through `toNumber` for the
-    // same ToPrimitive ordering / Symbol-throw semantics.
+    // §23.2.3.11 step 4 — coerce value first. ToBigInt for
+    // BigInt typed arrays (must throw on undefined/null/string/
+    // boolean), ToNumber otherwise. Both can fire side-effecting
+    // valueOf / toString hooks; the coercion's normal completion
+    // is reused per spec (once only).
+    const value_arg = argOr(args, 0, Value.undefined_);
+    const value_coerced: Value = switch (tv.kind) {
+        .bigint64, .biguint64 => bigint_mod.toBigIntValue(realm, value_arg) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        },
+        else => try intrinsics.toNumber(realm, value_arg),
+    };
+
+    // §23.2.3.11 step 5-9 — start / end via ToIntegerOrInfinity,
+    // clamped to [0, len]. ±Infinity / NaN handled inline.
     var start: i64 = 0;
     if (args.len > 1 and !args[1].isUndefined()) {
         const sv = try intrinsics.toNumber(realm, args[1]);
@@ -1100,8 +1105,27 @@ fn typedArrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeE
         }
     }
 
+    // §23.2.3.11 step 10 — `If IsDetachedBuffer(O.[[ViewedArrayBuffer]])
+    // is true, throw a TypeError exception`. The coercions above
+    // may have run a user `valueOf` that detached the buffer (or
+    // resized a RAB to put the view OOB); fault HERE, before the
+    // fill loop, per the spec's deferred detach check.
+    const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray.prototype.fill: buffer detached during coercion");
+    if (taIsOutOfBounds(tv)) {
+        return throwTypeError(realm, "TypedArray.prototype.fill: TypedArray went out-of-bounds during coercion");
+    }
+    // Re-snapshot length: a RAB grow during coercion is observed
+    // by the loop; a shrink that left us in-bounds is honored by
+    // clamping `end` to the new length. (Spec §23.2.3.11 step 11
+    // says: "Set endIndex to min(endIndex, len)" after the detach
+    // check — Cynic took `end` against pre-coercion `len_i` so
+    // re-clamp now.)
+    const live_len: i64 = @intCast(taCurrentLength(tv));
+    const end_clamped: i64 = @min(end, live_len);
+    const elem_size = tv.kind.elementSize();
+
     var i: i64 = start;
-    while (i < end) : (i += 1) {
+    while (i < end_clamped) : (i += 1) {
         writeTypedElement(buf, tv.kind, tv.byte_offset + @as(usize, @intCast(i)) * elem_size, value_coerced);
     }
     return this_value;
@@ -1971,7 +1995,10 @@ fn typedArrayToLocaleString(realm: *Realm, this_value: Value, args: []const Valu
             };
             switch (outcome) {
                 .value, .yielded => |x| str_v = x,
-                .thrown => return error.NativeThrew,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
             }
         } else {
             str_v = v;
@@ -2008,7 +2035,10 @@ fn typedArrayReduce(realm: *Realm, this_value: Value, args: []const Value) Nativ
         };
         switch (outcome) {
             .value, .yielded => |x| acc = x,
-            .thrown => return error.NativeThrew,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
         }
     }
     return acc;
@@ -2040,7 +2070,10 @@ fn typedArrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) 
         };
         switch (outcome) {
             .value, .yielded => |x| acc = x,
-            .thrown => return error.NativeThrew,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
         }
     }
     return acc;
@@ -2777,7 +2810,10 @@ fn taSortInPlace(realm: *Realm, tv: ObjMod.TypedView, buf_in: []u8, comparator: 
                             if (std.math.isNan(d) or d == 0) break :blk 0;
                             break :blk if (d < 0) -1 else 1;
                         },
-                        .thrown => return error.NativeThrew,
+                        .thrown => |ex| {
+                            realm.pending_exception = ex;
+                            return error.NativeThrew;
+                        },
                     }
                 }
                 break :blk taCompareNumeric(prev, cur);
