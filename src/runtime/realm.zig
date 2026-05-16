@@ -349,6 +349,17 @@ pub const Realm = struct {
     /// feature is invisible at the property-lookup level rather
     /// than just throwing at call time.
     feature_flags: FeatureSet = FeatureSet.initEmpty(),
+    /// Heap-allocated bool cells tracking `[[ThisBindingStatus]]`
+    /// for derived-class constructors that have outlived their
+    /// frame's call site. Allocated on entry to a derived-ctor
+    /// frame, shared with any arrows that frame creates, and
+    /// flipped by `super(...)` from those arrows — including when
+    /// the arrow runs in a fresh `runFrames` re-entry (e.g.
+    /// iterator `return()` during for-of close). The slice is
+    /// freed on realm tear-down rather than per-ctor — small
+    /// volume, simpler than threading lifetime through every
+    /// `super_call` site. Each entry is a single `*bool`.
+    derived_ctor_cells: std.ArrayListUnmanaged(*bool) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Realm {
         const heap_ptr = allocator.create(Heap) catch unreachable;
@@ -438,6 +449,13 @@ pub const Realm = struct {
         }
         self.script_chunks.deinit(self.allocator);
         self.frame_stacks.deinit(self.allocator);
+        // Free the derived-ctor `super_called` cells handed out
+        // across this realm's lifetime. JSFunctions holding cell
+        // pointers are about to be torn down with the heap.
+        for (self.derived_ctor_cells.items) |cell| {
+            self.allocator.destroy(cell);
+        }
+        self.derived_ctor_cells.deinit(self.allocator);
         // Tear down child realms (created via $262.createRealm)
         // BEFORE the heap, so their globals/intrinsics maps free
         // through allocator paths that don't depend on heap state.

@@ -22,6 +22,9 @@ const std = @import("std");
 const Value = @import("value.zig").Value;
 const JSObject = @import("object.zig").JSObject;
 const Chunk = @import("../bytecode/chunk.zig").Chunk;
+const Realm = @import("realm.zig").Realm;
+const heap_mod = @import("heap.zig");
+const PropertyFlags = @import("object.zig").PropertyFlags;
 
 pub const ModuleState = enum(u8) {
     /// Module hasn't started evaluating — entry just allocated.
@@ -56,6 +59,13 @@ pub const ModuleRecord = struct {
     /// If `state ==.errored`, the thrown value is stashed
     /// here so subsequent imports can re-throw it.
     error_value: Value = Value.undefined_,
+    /// `true` once `getModuleNamespace` has installed the §9.4.6
+    /// Module Namespace exotic brand on `exports` — clears the
+    /// prototype chain, flips `extensible = false`, sets
+    /// `@@toStringTag = "Module"`, and lowers the descriptor flags
+    /// on every exported binding to `{w:true, e:true, c:false}`.
+    /// Idempotent: callers safely re-enter for cycles.
+    namespace_finalized: bool = false,
     /// Mark-sweep bit, written by `Heap.markValue`.
     marked: bool = false,
 
@@ -70,3 +80,69 @@ pub const ModuleRecord = struct {
         allocator.destroy(self);
     }
 };
+
+/// §9.4.6.13 GetModuleNamespace — return the Module Namespace
+/// exotic object for `mr`, finalising it on first call. Spec
+/// shape:
+///   • `[[Prototype]]` = null  (§9.4.6.1)
+///   • `[[Extensible]]` = false (§9.4.6.2 — set after init)
+///   • `@@toStringTag` = "Module" {w:false, e:false, c:false}
+///     (§9.4.6.16 / §28.3.5)
+///   • Each exported binding: `{w:true, e:true, c:false}`
+///     (§9.4.6.5 — exported bindings are live data descriptors)
+///
+/// Repeat calls are idempotent: the brand is installed once;
+/// subsequent calls just return the cached namespace. Cycles
+/// during evaluation receive the partial namespace from
+/// `mr.exports` — the `is_module_namespace` brand is still set,
+/// but `extensible` remains `true` until the cycle's outer module
+/// finishes evaluating (matches §16.2.1.5.4 step on InnerModuleEvaluation).
+pub fn getModuleNamespace(realm: *Realm, mr: *ModuleRecord) !*JSObject {
+    const ns = mr.exports;
+
+    // Brand-on-allocation so the property-write opcodes route
+    // through the namespace-aware path even while the body is
+    // evaluating (a cycle that re-enters this MR sees a partial
+    // namespace, but it's a namespace — `Symbol.toStringTag` and
+    // proto:null are visible before finalisation).
+    ns.is_module_namespace = true;
+    ns.prototype = null;
+
+    if (mr.namespace_finalized) return ns;
+
+    // Only finalise after the module body has returned. While the
+    // body is still running (state == .evaluating from a cycle),
+    // we leave the namespace mutable so `module_export` opcodes
+    // can keep publishing bindings.
+    switch (mr.state) {
+        .evaluated, .errored => {},
+        else => return ns,
+    }
+
+    // §9.4.6.5 — exported bindings: {w:true, e:true, c:false}.
+    // Iterate `properties` and lower each entry's flags.
+    var it = ns.properties.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        // Skip the @@toStringTag we install below — it has
+        // different flags.
+        if (std.mem.eql(u8, key, "@@toStringTag")) continue;
+        try ns.property_flags.put(realm.allocator, key, .{
+            .writable = true,
+            .enumerable = true,
+            .configurable = false,
+        });
+    }
+
+    // §28.3.5 — `@@toStringTag` is "Module" with all-false flags.
+    const tag = try realm.heap.allocateString("Module");
+    try ns.setWithFlags(realm.allocator, "@@toStringTag", Value.fromString(tag), .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = false,
+    });
+
+    ns.extensible = false;
+    mr.namespace_finalized = true;
+    return ns;
+}

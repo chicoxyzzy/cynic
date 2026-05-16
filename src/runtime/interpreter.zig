@@ -113,6 +113,16 @@ pub const CallFrame = struct {
     /// undefined) with this still false, a ReferenceError is
     /// thrown per §10.2.1.4 step 5 / §10.2.1.3 step 11.
     super_called: bool = false,
+    /// Heap cell mirroring `super_called`, allocated lazily on the
+    /// first arrow `make_function` inside a derived-ctor frame and
+    /// shared with every arrow made thereafter. A `super(...)`
+    /// performed via the arrow — including from a fresh
+    /// `runFrames` re-entry where the outer ctor frame isn't
+    /// reachable on the stack — flips this cell. The Return-from-
+    /// ctor gate ORs `super_called` with `super_called_cell.*`.
+    /// `null` for non-derived-ctor frames and ctor bodies that
+    /// never create an arrow.
+    super_called_cell: ?*bool = null,
     /// `[[HomeObject]]` (§10.2.5) of the function executing in
     /// this frame. Set on entry from the callee's
     /// `JSFunction.home_object`. `super_get` / `super_call`
@@ -1577,7 +1587,8 @@ pub fn loadModule(
     specifier: []const u8,
     base_url: ?[]const u8,
 ) RunError!LoadModuleOutcome {
-    const ModuleRecord = @import("module.zig").ModuleRecord;
+    const module_mod = @import("module.zig");
+    const ModuleRecord = module_mod.ModuleRecord;
     const loader = realm.module_loader orelse {
         const ex = try makeTypeError(realm, "no module loader installed");
         return .{ .value = ex, .threw = true };
@@ -1592,16 +1603,31 @@ pub fn loadModule(
     // Cache lookup.
     if (realm.modules.get(result.url)) |mr| {
         switch (mr.state) {
-            .uninstantiated, .evaluated => return .{ .value = heap_mod.taggedObject(mr.exports), .threw = false },
-            .evaluating => return .{ .value = heap_mod.taggedObject(mr.exports), .threw = false }, // cycle: partial ns
+            .uninstantiated, .evaluated => {
+                const ns = module_mod.getModuleNamespace(realm, mr) catch return error.OutOfMemory;
+                return .{ .value = heap_mod.taggedObject(ns), .threw = false };
+            },
+            .evaluating => {
+                // §16.2.1.5.4 cycle — the in-progress namespace
+                // exists; brand it as the Module Namespace exotic
+                // (proto:null, is_module_namespace=true) but leave
+                // it extensible so the outer evaluation can keep
+                // publishing exports.
+                const ns = module_mod.getModuleNamespace(realm, mr) catch return error.OutOfMemory;
+                return .{ .value = heap_mod.taggedObject(ns), .threw = false };
+            },
             .errored => return .{ .value = mr.error_value, .threw = true },
         }
     }
 
     // Allocate the record + namespace BEFORE running the body
-    // so cycles can find the in-progress namespace.
+    // so cycles can find the in-progress namespace. The §9.4.6
+    // Module Namespace exotic brand (proto:null, is_module_namespace=true)
+    // is applied immediately; the `extensible = false` flip waits
+    // until the body returns so module_export can still publish.
     const ns = realm.heap.allocateObject() catch return error.OutOfMemory;
-    ns.prototype = realm.intrinsics.object_prototype;
+    ns.prototype = null;
+    ns.is_module_namespace = true;
     const mr = ModuleRecord.init(realm.allocator, result.url, ns) catch return error.OutOfMemory;
     mr.state = .evaluating;
     realm.modules.put(realm.allocator, result.url, mr) catch return error.OutOfMemory;
@@ -1639,7 +1665,8 @@ pub fn loadModule(
     switch (outcome) {
         .value, .yielded => {
             mr.state = .evaluated;
-            return .{ .value = heap_mod.taggedObject(mr.exports), .threw = false };
+            const final_ns = module_mod.getModuleNamespace(realm, mr) catch return error.OutOfMemory;
+            return .{ .value = heap_mod.taggedObject(final_ns), .threw = false };
         },
         .thrown => |ex| {
             mr.state = .errored;
@@ -2658,6 +2685,11 @@ pub fn callJSFunction(
         regs[i] = args[i];
     }
     const callee_this: Value = if (callee.is_arrow) callee.captured_this else this_value;
+    // §13.3.12 — arrows inherit `new.target` from their creation
+    // site (captured at MakeFunction time). Non-arrow indirect
+    // calls land here without a `[[Construct]]` context, so
+    // NewTarget is undefined.
+    const callee_new_target: Value = if (callee.is_arrow) callee.captured_new_target else Value.undefined_;
     try frames.append(allocator, .{
         .chunk = callee_chunk,
         .ip = 0,
@@ -2665,8 +2697,10 @@ pub fn callJSFunction(
         .registers = regs,
         .env = callee.captured_env,
         .this_value = callee_this,
+        .new_target = callee_new_target,
         .home_object = callee.home_object,
         .home_function = callee.home_function,
+        .super_called_cell = callee.super_called_cell,
         .argc = @intCast(@min(args.len, std.math.maxInt(u8))),
         .wrap_return_in_promise = false,
     });
@@ -3265,7 +3299,45 @@ fn runFrames(
                 // §15.3 Arrow functions capture lexical `this` at
                 // creation. Non-arrow `make_function` ignores this
                 // slot — `this` comes from the call site.
-                if (tmpl.is_arrow) fn_obj.captured_this = f.this_value;
+                if (tmpl.is_arrow) {
+                    fn_obj.captured_this = f.this_value;
+                    // §13.3.12 NewTarget / §10.2.5 [[HomeObject]] /
+                    // §13.3.7 super — arrows inherit all three from
+                    // the enclosing function. The arrow has no
+                    // execution-context binding of its own; `super`
+                    // inside an arrow body resolves against the
+                    // home of the nearest enclosing non-arrow
+                    // function (which `f`'s slots already encode,
+                    // because a nested arrow's frame also inherits
+                    // its parent arrow's captures via this same op).
+                    fn_obj.captured_new_target = f.new_target;
+                    fn_obj.home_object = f.home_object;
+                    fn_obj.home_function = f.home_function;
+                    // §10.2.1.4 / §13.3.7 — an arrow inside a
+                    // derived-class constructor (or transitively
+                    // inside a nested arrow) shares the outer
+                    // ctor's `[[ThisBindingStatus]]` cell. Lazy-
+                    // allocate on first need. The cell lives until
+                    // the realm tears down (see Realm.derived_ctor_cells).
+                    if (f.is_derived_ctor) {
+                        if (f.super_called_cell == null) {
+                            const cell = realm.allocator.create(bool) catch return error.OutOfMemory;
+                            cell.* = f.super_called;
+                            realm.derived_ctor_cells.append(realm.allocator, cell) catch {
+                                realm.allocator.destroy(cell);
+                                return error.OutOfMemory;
+                            };
+                            f.super_called_cell = cell;
+                        }
+                        fn_obj.super_called_cell = f.super_called_cell;
+                    } else if (f.super_called_cell) |cell| {
+                        // Nested arrow inside a non-ctor frame
+                        // that itself inherited a cell — propagate
+                        // through (lexical chain of arrows back to
+                        // the derived ctor).
+                        fn_obj.super_called_cell = cell;
+                    }
+                }
                 fn_obj.is_generator = tmpl.is_generator;
                 fn_obj.is_async = tmpl.is_async;
                 // §27.3.5 / §27.4.5 — `function*(){}.prototype` /
@@ -3515,6 +3587,14 @@ fn runFrames(
                     callee_fn.captured_this
                 else
                     Value.undefined_;
+                // §13.3.12 — arrows have no NewTarget of their own;
+                // a `new.target` read inside the arrow body must
+                // see the enclosing function's. Captured at
+                // MakeFunction time alongside `captured_this`.
+                const callee_new_target: Value = if (callee_fn.is_arrow)
+                    callee_fn.captured_new_target
+                else
+                    Value.undefined_;
 
                 frames.append(allocator, .{
                     .chunk = callee_chunk,
@@ -3523,8 +3603,10 @@ fn runFrames(
                     .registers = callee_regs,
                     .env = callee_fn.captured_env,
                     .this_value = callee_this,
+                    .new_target = callee_new_target,
                     .home_object = callee_fn.home_object,
                     .home_function = callee_fn.home_function,
+                    .super_called_cell = callee_fn.super_called_cell,
                     .argc = argc,
                     .wrap_return_in_promise = false,
                 }) catch {
@@ -3709,6 +3791,12 @@ fn runFrames(
                     callee_fn.captured_this
                 else
                     recv;
+                // §13.3.12 — arrows have no NewTarget of their own;
+                // see `.call` above.
+                const callee_new_target: Value = if (callee_fn.is_arrow)
+                    callee_fn.captured_new_target
+                else
+                    Value.undefined_;
 
                 frames.append(allocator, .{
                     .chunk = callee_chunk,
@@ -3717,8 +3805,10 @@ fn runFrames(
                     .registers = callee_regs,
                     .env = callee_fn.captured_env,
                     .this_value = callee_this,
+                    .new_target = callee_new_target,
                     .home_object = callee_fn.home_object,
                     .home_function = callee_fn.home_function,
+                    .super_called_cell = callee_fn.super_called_cell,
                     .argc = argc,
                     .wrap_return_in_promise = false,
                 }) catch {
@@ -5299,19 +5389,33 @@ fn runFrames(
                 // still goes through the microtask queue via `.then`
                 // / `await`, so async semantics are preserved at
                 // the observation layer.
+                //
+                // Spec algorithm (§13.3.10.1 / §16.2.1.10
+                // EvaluateImportCall):
+                //   5. Let promiseCapability be ! NewPromiseCapability(%Promise%).
+                //   6. Let specifierString be Completion(ToString(specifier)).
+                //   7. IfAbruptRejectPromise(specifierString, promiseCapability).
+                //   8. Perform HostImportModuleDynamically(...).
+                //   9. Return promiseCapability.[[Promise]].
                 const promise_mod = @import("builtins/promise.zig");
-                if (!acc.isString()) {
-                    // §13.3.10.1 step 6 calls ToString(specifier),
-                    // but the failure case (Symbol / object with
-                    // throwing toString) becomes a rejected
-                    // Promise per "any abrupt completion → reject"
-                    // (step 9). For now we reject on non-string
-                    // outright; ToString refinement is a follow-up.
-                    const ex = try makeTypeError(realm, "import specifier must be a string");
-                    acc = try promise_mod.allocatePromiseFor(realm, null, .rejected, ex);
-                } else {
-                    const spec_s: *JSString = @ptrCast(@alignCast(acc.asString()));
-                    const outcome = loadModule(allocator, realm, spec_s.bytes, local_chunk.base_url) catch |err| switch (err) {
+
+                // §13.3.10.1 step 6 — ToString(specifier). For
+                // primitives this is the trivial branch; for objects
+                // it dispatches into `Symbol.toPrimitive` / `toString`
+                // / `valueOf` and may throw (Symbol, user toString
+                // throwing). Any abrupt completion routes to a
+                // rejected Promise per IfAbruptRejectPromise.
+                const di_spec_string: ?*JSString = intrinsics_mod.stringifyArg(realm, acc) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NativeThrew => di_blk: {
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "import specifier coercion failed");
+                        realm.pending_exception = null;
+                        acc = try promise_mod.allocatePromiseFor(realm, null, .rejected, ex);
+                        break :di_blk null;
+                    },
+                };
+                if (di_spec_string) |spec_string| {
+                    const outcome = loadModule(allocator, realm, spec_string.bytes, local_chunk.base_url) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => return error.InvalidOpcode,
                     };
@@ -5763,6 +5867,38 @@ fn runFrames(
                 // `return undefined` is fine; without this flag, falling
                 // off the end throws ReferenceError.
                 f.super_called = true;
+                // §15.3 / §13.3.7 — `super(...)` from inside an arrow
+                // body resolves against the lexically enclosing
+                // derived constructor, and flips THAT frame's
+                // `[[ThisBindingStatus]]`. Two propagation paths:
+                //   1. The outer ctor frame is still on this
+                //      `frames` stack (the common case — arrow
+                //      called synchronously from inside the ctor
+                //      body). Walk back to find it and flip
+                //      directly.
+                //   2. The arrow is invoked from a fresh
+                //      `runFrames` re-entry (e.g. iterator
+                //      `return()` during a for-of close, an
+                //      async callback). The outer ctor isn't on
+                //      this stack — but it shares a heap cell
+                //      with us via `super_called_cell`, populated
+                //      at `make_function` time. Flip the cell.
+                // The cell-write covers both cases; the frame
+                // walk is a small redundancy that keeps semantics
+                // working for any future code that reads
+                // `super_called` directly off a still-live frame.
+                if (f.super_called_cell) |cell| cell.* = true;
+                if (frames.items.len >= 2) {
+                    var idx: usize = frames.items.len - 1;
+                    while (idx > 0) {
+                        idx -= 1;
+                        const outer = &frames.items[idx];
+                        if (outer.is_derived_ctor) {
+                            outer.super_called = true;
+                            break;
+                        }
+                    }
+                }
             },
 
             // ── Globals ─────────────────────────────────────────────────
@@ -6892,6 +7028,16 @@ fn runFrames(
                     const returned_object =
                         heap_mod.valueAsPlainObject(acc) != null or
                         heap_mod.valueAsFunction(acc) != null;
+                    // Merge any cross-`runFrames` super-call flip
+                    // tracked through `super_called_cell` (e.g. an
+                    // arrow performed `super(...)` from inside
+                    // iterator close `return()` during the for-of
+                    // unwind — that call ran in a separate
+                    // `runFrames` invocation so the direct frame
+                    // walk in `.super_call` couldn't see us).
+                    if (f.super_called_cell) |cell| {
+                        if (cell.*) f.super_called = true;
+                    }
                     if (!returned_object) {
                         if (f.is_derived_ctor and !acc.isUndefined()) {
                             // §10.2.2 step 7c — derived ctors must
@@ -7342,6 +7488,16 @@ fn strictSetPropertyAnchored(
     value: Value,
 ) RunError!SetOutcome {
     if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
+        // §9.4.6.4 Module Namespace exotic [[Set]] — always
+        // returns false, which under strict-mode assignment
+        // becomes a TypeError. The brand wins before any
+        // proxy / accessor / descriptor logic so that
+        // `Reflect.set(ns, ...)` reads false and `ns.x = v`
+        // throws.
+        if (obj_in.is_module_namespace) {
+            const ex = try makeTypeError(realm, "Cannot assign to read-only module namespace property");
+            return throwInSetter(realm, frames, f, ip, value, ex);
+        }
         // §10.5 Proxy [[Set]] — if `recv` is a proxy exotic,
         // dispatch through `handler.set` before falling back to
         // the target's default setter logic. Loops so that a

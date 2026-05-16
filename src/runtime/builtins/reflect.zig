@@ -25,6 +25,7 @@ const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
 const installToStringTag = intrinsics.installToStringTag;
 const argOr = intrinsics.argOr;
 const throwTypeError = intrinsics.throwTypeError;
+const throwRangeError = intrinsics.throwRangeError;
 const lengthOfArray = intrinsics.lengthOfArray;
 const clampArrayLength = intrinsics.clampArrayLength;
 const objectGetPrototypeOf = intrinsics.objectGetPrototypeOf;
@@ -266,6 +267,11 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         return Value.fromBool(ok);
     }
     const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.set target must be an object");
+    // §9.4.6.4 Module Namespace exotic [[Set]] — always returns
+    // false. Reflect.set surfaces that as the literal boolean
+    // `false`; the strict-mode bytecode path translates it to
+    // TypeError elsewhere.
+    if (target.is_module_namespace) return Value.false_;
     // §10.5.6 Proxy [[Set]] dispatch. Reflect.set returns the
     // trap's boolean — it never throws on a falsy return, unlike
     // strict-mode bytecode assignment.
@@ -347,6 +353,34 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
                 return Value.true_;
             }
         }
+    }
+    // §10.4.2.1 Array exotic [[DefineOwnProperty]] — when writing
+    // `length` on an Array, [[Set]] composes through ArraySetLength.
+    // The TWO ToNumber calls (sec-10.4.2.4 steps 3-4) must fire so
+    // any user-side `Symbol.toPrimitive` / `valueOf` observes both
+    // invocations, and the writability gate runs against the
+    // descriptor as it stands AFTER those side effects. Reflect.set
+    // returns false here instead of throwing on a non-writable
+    // length (the strict-mode bytecode path throws TypeError).
+    if (target.is_array_exotic and std.mem.eql(u8, key_slice, "length")) {
+        const interpreter = @import("../interpreter.zig");
+        if (target.property_flags.get("length")) |flags| {
+            if (!flags.writable) return Value.false_;
+        }
+        const new_len = (try interpreter.arrayLengthCoerceSpec(realm, v)) orelse {
+            return throwRangeError(realm, "Invalid array length");
+        };
+        // Re-check writability after the spec-mandated coercions —
+        // a user-side toPrimitive can flip `length: { writable: false }`
+        // mid-flight; per sec-10.4.2.4 step 12 the set then returns
+        // false (not throws) when reached via [[Set]].
+        if (target.property_flags.get("length")) |flags| {
+            if (!flags.writable) return Value.false_;
+        }
+        const tr = interpreter.truncateArrayAtLength(realm.allocator, target, new_len);
+        target.setArrayLength(realm.allocator, tr.final_length) catch return error.OutOfMemory;
+        if (tr.blocked) return Value.false_;
+        return Value.true_;
     }
     // §10.1.9.1 [[Set]] step 5.a — return false when the own
     // data property exists with `writable: false`. Cynic was
@@ -734,6 +768,12 @@ fn computedKeyForReflect(v: Value, scratch: *[64]u8) []const u8 {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
         return s.bytes;
     }
+    // §7.1.19 ToPropertyKey — Symbol primitives become their
+    // canonical property-key string. Cynic flattens well-known
+    // symbols to their `@@name` prop_key and user symbols to
+    // `<sym:N>`. Without this, `Reflect.has(ns, Symbol.toStringTag)`
+    // saw `"[object]"` and missed the actual slot.
+    if (heap_mod.valueAsSymbol(v)) |sym| return sym.prop_key;
     if (v.isInt32()) return std.fmt.bufPrint(scratch, "{d}", .{v.asInt32()}) catch unreachable;
     if (v.isDouble()) {
         const d = v.asDouble();

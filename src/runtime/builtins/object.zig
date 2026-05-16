@@ -219,6 +219,42 @@ pub fn ownPropertyKeysOrdered(
         }
     }.lessThan);
 
+    // §9.4.6.12 Module Namespace [[OwnPropertyKeys]] — the spec
+    // returns `sortedExports ++ symbolKeys` where `sortedExports`
+    // is the export list ordered as if sorted via
+    // `Array.prototype.sort(undefined)`, i.e. lexicographic by
+    // UTF-16 code unit. The `@@toStringTag` symbol-keyed entry
+    // (Cynic's flattened `@@toStringTag` key) follows the
+    // exports. We sort the *string* portion here; symbol keys
+    // (`@@*` / `<sym:*>`) get partitioned out by the callers
+    // (getOwnPropertyNames vs getOwnPropertySymbols) and the
+    // symbol slot naturally lands last in the combined slice.
+    if (obj.is_module_namespace) {
+        const Lt = struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        };
+        // Split string_keys into "real" exports vs symbol keys so
+        // sort doesn't put `@@toStringTag` between two letters.
+        var real_keys: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer real_keys.deinit(realm.allocator);
+        var sym_keys: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer sym_keys.deinit(realm.allocator);
+        for (string_keys.items) |k| {
+            if (std.mem.startsWith(u8, k, "@@") or std.mem.startsWith(u8, k, "<sym:")) {
+                sym_keys.append(realm.allocator, k) catch return error.OutOfMemory;
+            } else {
+                real_keys.append(realm.allocator, k) catch return error.OutOfMemory;
+            }
+        }
+        std.mem.sort([]const u8, real_keys.items, {}, Lt.lessThan);
+        // Re-merge: exports (sorted) first, then symbol keys.
+        string_keys.clearRetainingCapacity();
+        for (real_keys.items) |k| string_keys.append(realm.allocator, k) catch return error.OutOfMemory;
+        for (sym_keys.items) |k| string_keys.append(realm.allocator, k) catch return error.OutOfMemory;
+    }
+
     const total = integer_keys.items.len + string_keys.items.len;
     const out = realm.allocator.alloc([]const u8, total) catch return error.OutOfMemory;
     var i: usize = 0;
@@ -617,6 +653,55 @@ const ParsedDescriptor = struct {
     }
 };
 
+/// §9.4.6.8 Module Namespace Exotic [[DefineOwnProperty]] —
+/// return `true` only if the new descriptor SameValue-matches the
+/// existing exported binding (incl. the `@@toStringTag` slot).
+/// Spec steps:
+///   1. If Type(P) is Symbol — handled by OrdinaryDefineOwnProperty.
+///      For Cynic the `@@toStringTag` flattened-symbol path falls
+///      through here too.
+///   2. current = O.[[GetOwnProperty]](P). If undefined, return false.
+///   3. If Desc.[[Configurable]] present and true, return false.
+///   4. If Desc.[[Enumerable]] present and false, return false.
+///   5. If Desc is accessor descriptor, return false.
+///   6. If Desc.[[Writable]] present and false, return false.
+///   7. If Desc.[[Value]] present, return SameValue(Desc.[[Value]],
+///      current.[[Value]]).
+///   8. Return true.
+fn moduleNamespaceDefineOwnProperty(
+    target: *@import("../object.zig").JSObject,
+    key: []const u8,
+    parsed: ParsedDescriptor,
+) bool {
+    // Symbol-keyed properties: the only ones present on a module
+    // namespace are the `@@toStringTag` slot (and any well-known
+    // symbol caller may try to add — those land here too). The
+    // existing-property check below handles them.
+    const had_own = target.properties.contains(key);
+    if (!had_own) return false;
+    // Accessor descriptor against a data slot → reject.
+    if (parsed.isAccessor()) return false;
+    const cur_flags = target.flagsFor(key);
+    if (parsed.has_configurable and parsed.configurable != cur_flags.configurable) {
+        // exported bindings are c:false; toString tag too. Any
+        // attempt to set c:true is a reject (cur is false).
+        if (parsed.configurable) return false;
+    }
+    if (parsed.has_enumerable and parsed.enumerable != cur_flags.enumerable) {
+        // exported bindings are e:true; toString tag is e:false.
+        return false;
+    }
+    if (parsed.has_writable and parsed.writable != cur_flags.writable) {
+        // exported bindings are w:true; toString tag is w:false.
+        return false;
+    }
+    if (parsed.has_value) {
+        const cur_value = target.properties.get(key) orelse return false;
+        if (!@import("../intrinsics.zig").sameValue(parsed.value, cur_value)) return false;
+    }
+    return true;
+}
+
 /// §6.2.5.5 ToPropertyDescriptor. Throws TypeError if:
 /// • `get` is present and not callable / undefined.
 /// • `set` is present and not callable / undefined.
@@ -822,6 +907,21 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
     var parsed = try parseDescriptor(realm, desc);
 
     if (heap_mod.valueAsPlainObject(target_v)) |target| {
+        // §9.4.6.8 Module Namespace Exotic [[DefineOwnProperty]] —
+        // succeed only if the new descriptor matches the existing
+        // one byte-for-byte (per spec: not configurable, not
+        // enumerable false, not accessor, not writable false,
+        // value SameValue with current). Reject otherwise.
+        // Object.defineProperty translates the reject into TypeError;
+        // Reflect.defineProperty surfaces the boolean.
+        if (target.is_module_namespace) {
+            const ns_ok = moduleNamespaceDefineOwnProperty(target, key, parsed);
+            if (!ns_ok) {
+                realm.define_own_property_rejected = true;
+                return throwTypeError(realm, "Cannot redefine property of module namespace");
+            }
+            return target_v;
+        }
         // §10.4.5.3 Integer-Indexed Exotic Object [[DefineOwnProperty]]
         if (target.typed_view != null) {
             const ta = @import("typed_array.zig");
@@ -1987,6 +2087,18 @@ pub fn objectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
         if (obj == realm.intrinsics.object_prototype.?) {
             if (new_proto != obj.prototype) {
                 return throwTypeError(realm, "Immutable prototype object cannot have its prototype set");
+            }
+            return target_v;
+        }
+        // §10.1.2.1 OrdinarySetPrototypeOf step 3 — when
+        // `extensible` is false the new prototype MUST SameValue
+        // the current one; otherwise return false and let
+        // Object.setPrototypeOf rethrow. Module Namespace exotics
+        // are always non-extensible with `prototype === null`,
+        // so any non-null target is rejected.
+        if (!obj.extensible) {
+            if (new_proto != obj.prototype) {
+                return throwTypeError(realm, "Cannot set prototype on non-extensible object");
             }
             return target_v;
         }

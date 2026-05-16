@@ -571,6 +571,13 @@ pub const Heap = struct {
                     if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
                 }
                 if (f.prototype) |p| self.markValue(taggedObject(p));
+                // §15.3 ArrowFunction lexical captures — `this` and
+                // `new.target` are stamped at MakeFunction time and
+                // may be the only roots holding their referents
+                // alive. Without these the captured instance can be
+                // swept while the arrow is still callable.
+                self.markValue(f.captured_this);
+                self.markValue(f.captured_new_target);
                 // §10.4.1 BoundFunction state — keep target +
                 // bound this + bound args alive.
                 if (f.bound_target) |bt| self.markValue(taggedFunction(bt));

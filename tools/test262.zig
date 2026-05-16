@@ -1891,7 +1891,12 @@ fn classifyAndRun(
             // `interpreter.loadModule` does for every other module.
             const ModuleRecord = @import("cynic").runtime.module.ModuleRecord;
             const entry_ns = realm.heap.allocateObject() catch return error.OutOfMemory;
-            entry_ns.prototype = realm.intrinsics.object_prototype;
+            // §9.4.6 Module Namespace exotic — brand-on-allocation
+            // so re-imports through `import()` / `import * as ns`
+            // see the right shape even during a cycle through the
+            // entry module.
+            entry_ns.prototype = null;
+            entry_ns.is_module_namespace = true;
             const entry_mod = ModuleRecord.init(realm.allocator, rel, entry_ns) catch return error.OutOfMemory;
             entry_mod.state = .evaluating;
             realm.modules.put(realm.allocator, rel, entry_mod) catch return error.OutOfMemory;
@@ -1907,6 +1912,12 @@ fn classifyAndRun(
                 .value, .yielded => .evaluated,
                 .thrown => .errored,
             };
+            // §9.4.6 — finalise the namespace exotic on the entry
+            // module so subsequent `import()`s targeting the entry
+            // path see the spec-shaped namespace.
+            if (entry_mod.state == .evaluated) {
+                _ = @import("cynic").runtime.module.getModuleNamespace(&realm, entry_mod) catch return error.OutOfMemory;
+            }
             break :blk mod_outcome;
         }
         // Plain script — go through evaluateScript so chunk

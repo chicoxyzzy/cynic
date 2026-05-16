@@ -118,6 +118,15 @@ pub const JSFunction = struct {
     /// Non-arrow functions ignore this slot — they receive `this`
     /// from the call site.
     captured_this: Value = Value.undefined_,
+    /// Lexical `new.target` capture for arrow functions (§13.3.12 /
+    /// §15.3.4 ArrowFunction.[[ThisMode]] = lexical). An arrow
+    /// inherits its enclosing function's `new.target` so
+    /// `new.target` inside an arrow body reads correctly when the
+    /// outer function was invoked with `new`. Also used as the
+    /// implicit NewTarget for a `super(...)` call performed from
+    /// inside an arrow lexically enclosed by a derived-class
+    /// constructor. Non-arrow functions ignore this slot.
+    captured_new_target: Value = Value.undefined_,
     /// Method `[[HomeObject]]` (§10.2.5). Set on functions
     /// emitted as class methods, points at the prototype object
     /// that owns this method. `super.method()` reads this slot
@@ -132,6 +141,19 @@ pub const JSFunction = struct {
     /// (the parent constructor) when this is set. Only one of
     /// `home_object` / `home_function` is set on any given fn.
     home_function: ?*@This() = null,
+    /// Shared cell tracking `[[ThisBindingStatus]]` for an arrow's
+    /// lexically enclosing derived-class constructor (§10.2.1.4 /
+    /// §13.3.7). Set on arrows created inside a derived ctor body
+    /// so a `super(...)` performed via the arrow — including from
+    /// a fresh `runFrames` re-entry such as iterator `return()`
+    /// during for-of close — can mark the outer ctor's super-
+    /// called flag. `null` for arrows outside derived ctors and
+    /// non-arrow functions. Lifetime: allocated on derived-ctor
+    /// frame entry using the realm allocator, kept alive by the
+    /// realm's `derived_ctor_cells` arena (cells live as long as
+    /// the realm — small leak budget, simpler than GC tracking
+    /// since both endpoints are short-lived in practice).
+    super_called_cell: ?*bool = null,
     /// `[[ConstructorKind]]` (§10.2.1) — `base` (default) or
     /// `derived` (constructor of `class C extends …`). later
     /// treats both identically at the call site; the precise

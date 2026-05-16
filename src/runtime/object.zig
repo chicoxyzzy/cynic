@@ -482,6 +482,19 @@ pub const JSObject = struct {
     /// `Object.getOwnPropertyDescriptor(arr, "length")` returns a
     /// data descriptor as the spec demands.
     is_array_exotic: bool = false,
+    /// §9.4.6 Module Namespace exotic object — set when this object
+    /// is a Module Namespace produced by `import(spec)` / `import * as
+    /// ns from "…"`. The flag flips on `[[Set]]` / `[[Delete]]` /
+    /// `[[DefineOwnProperty]]` paths so user writes silently fail
+    /// (always return `false`) per §9.4.6.4 / 9.4.6.7 / 9.4.6.8. The
+    /// `extensible` slot is also flipped `false` and the `prototype`
+    /// slot is cleared to `null` at finalisation; this flag is the
+    /// brand that distinguishes "module namespace with `null`
+    /// proto + non-extensible" from "user object frozen via
+    /// `Object.preventExtensions(Object.create(null))`" which has
+    /// different `[[Set]]` semantics (writes are silently dropped
+    /// vs. always-`false`).
+    is_module_namespace: bool = false,
     /// §20.5.1.1 [[ErrorData]] — set when this object is an Error
     /// (or NativeError) instance produced via `new <X>Error(...)`
     /// / `<X>Error(...)`. Object.prototype.toString uses this to
