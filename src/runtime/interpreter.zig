@@ -1725,16 +1725,41 @@ pub fn loadModule(
     defer arena_state.deinit();
     const parse_arena = arena_state.allocator();
 
-    const program = parser_mod.parseModule(parse_arena, result.source, null) catch {
+    // §16.2.1.7 ParseModule — parse errors surface as
+    // SyntaxError. Likewise §16.2.1.5 InnerModuleEvaluation +
+    // §16.2.1.5.2 InitializeEnvironment: any compile-time
+    // resolution failure (unresolved import binding, ambiguous
+    // indirect re-export, circular ResolveExport) is a
+    // SyntaxError exception thrown during instantiation. The
+    // dynamic-import path (§13.3.10) routes that exception
+    // through IfAbruptRejectPromise to the import() Promise
+    // capability's [[Reject]], so user code sees an error
+    // whose `.name` is "SyntaxError".
+    //
+    // Parser surface: parseModule may either throw
+    // `error.ParseError` *or* return a partial Program with
+    // error-severity diagnostics on the side. Both shapes are
+    // SyntaxError per spec — collect diagnostics and treat any
+    // `severity == .err` entry as a parse failure.
+    var diags: @import("../diagnostic.zig").Diagnostics = .empty;
+    const program = parser_mod.parseModule(parse_arena, result.source, &diags) catch {
         mr.state = .errored;
-        const ex = makeTypeError(realm, "module parse error") catch return error.OutOfMemory;
+        const ex = makeSyntaxError(realm, "module parse error") catch return error.OutOfMemory;
         mr.error_value = ex;
         return .{ .value = ex, .threw = true };
     };
+    for (diags.items) |d| {
+        if (d.severity == .err) {
+            mr.state = .errored;
+            const ex = makeSyntaxError(realm, "module parse error") catch return error.OutOfMemory;
+            mr.error_value = ex;
+            return .{ .value = ex, .threw = true };
+        }
+    }
 
     mr.chunk = compiler_mod.compileModuleAsChunk(realm.allocator, realm, &program, result.source, null, result.url) catch {
         mr.state = .errored;
-        const ex = makeTypeError(realm, "module compile error") catch return error.OutOfMemory;
+        const ex = makeSyntaxError(realm, "module compile error") catch return error.OutOfMemory;
         mr.error_value = ex;
         return .{ .value = ex, .threw = true };
     };
@@ -8403,6 +8428,10 @@ pub fn makeTypeError(realm: *Realm, msg: []const u8) RunError!Value {
 
 pub fn makeRangeError(realm: *Realm, msg: []const u8) RunError!Value {
     return intrinsics_mod.newRangeError(realm, msg) catch return error.OutOfMemory;
+}
+
+pub fn makeSyntaxError(realm: *Realm, msg: []const u8) RunError!Value {
+    return intrinsics_mod.newSyntaxError(realm, msg) catch return error.OutOfMemory;
 }
 
 // ── Operand decoders ────────────────────────────────────────────────────
