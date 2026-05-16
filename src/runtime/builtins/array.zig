@@ -163,12 +163,16 @@ fn getFunctionMember(realm: *Realm, fn_obj: *JSFunction, key: []const u8) Native
 ///
 /// Returns the freshly created array-shaped object.
 pub fn arraySpeciesCreate(realm: *Realm, original: *JSObject, length: i64) NativeError!Value {
-    // Fast path — non-array original. Step 2: if isArray is false,
-    // return ArrayCreate(length).
-    if (!original.is_array_exotic) return defaultArrayCreate(realm, length);
-    // Step 3 — Get(originalArray, "constructor"). Use the full
-    // accessor-aware path so a poisoned getter propagates per spec.
-    const ctor_v = try intrinsics.getPropertyChain(realm, original, "constructor");
+    // Step 2 — IsArray(originalArray). Per §7.2.2 step 3, a Proxy
+    // unwraps to its target; a revoked proxy throws. Non-array
+    // receivers fall through to ArrayCreate (Step 2 → ArrayCreate
+    // with the default %Array% intrinsic).
+    const is_arr = try isArrayProxyAware(realm, heap_mod.taggedObject(original));
+    if (!is_arr) return defaultArrayCreate(realm, length);
+    // Step 3 — Get(originalArray, "constructor"). Use the Proxy-
+    // and accessor-aware path so a poisoned getter or proxy `get`
+    // trap propagates per spec (create-proxy.js et al.).
+    const ctor_v = try getPropertyAny(realm, heap_mod.taggedObject(original), "constructor");
     // Step 4 — if IsConstructor(C) true and cross-realm %Array%, set
     // to undefined. Cynic is single-realm by default, so the
     // cross-realm carve-out is currently a no-op.
@@ -243,15 +247,29 @@ fn defaultArrayCreate(realm: *Realm, length: i64) NativeError!Value {
 /// allocated `this`; we hand it back populated. Plain-call
 /// allocates a fresh array.
 fn arrayConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const out = if (heap_mod.valueAsPlainObject(this_value)) |obj| obj else blk: {
+    // §22.1.1 — Array(...) called as a function (no NewTarget)
+    // always creates a fresh Array regardless of `this`. Cynic's
+    // native_callback signature doesn't carry new.target, so we
+    // recognise the construct path by `this_value.prototype ==
+    // %Array.prototype%` (set by `constructValue` after
+    // OrdinaryCreateFromConstructor). Any other `this` — including
+    // a user object passed via `Array.apply(nonArrayInstance, …)`
+    // — must NOT have `is_array_exotic` punched onto it, else
+    // subsequent IsArray / IsConcatSpreadable checks lie. See
+    // built-ins/Array/prototype/concat/Array.prototype.concat_non-array.js.
+    const reuse_this: bool = blk: {
+        const obj = heap_mod.valueAsPlainObject(this_value) orelse break :blk false;
+        if (obj.is_array_exotic) break :blk true;
+        if (obj.prototype != null and obj.prototype == realm.intrinsics.array_prototype) break :blk true;
+        break :blk false;
+    };
+    const out = if (reuse_this)
+        heap_mod.valueAsPlainObject(this_value).?
+    else blk: {
         const fresh = realm.heap.allocateObject() catch return error.OutOfMemory;
         fresh.prototype = realm.intrinsics.array_prototype;
         break :blk fresh;
     };
-    // `new Array(...)` arrives with `this` already allocated by
-    // OrdinaryCreateFromConstructor — it inherits Array.prototype
-    // but doesn't carry our exotic flag, so flag it here. Plain-call
-    // path needs the same flip; doing it unconditionally is cheap.
     if (!out.is_array_exotic) out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
 
     if (args.len == 1 and (args[0].isInt32() or args[0].isDouble())) {
@@ -735,15 +753,13 @@ fn concatAppend(realm: *Realm, out: *JSObject, value: Value, write_idx: *i64) Na
     const spreadable = try isConcatSpreadable(realm, value);
     const safe_max: i64 = (1 << 53) - 1;
     if (spreadable) {
-        const arr = heap_mod.valueAsPlainObject(value) orelse {
-            try concatWriteOne(realm, out, value, write_idx);
-            return;
-        };
-        // §23.1.3.2 step 8.d.iii — ? LengthOfArrayLike(E). Must
-        // propagate ToLength throws (e.g. poisoned `length.toString`
-        // on an opted-in non-array spreadable). Cap at 2^53-1 per
-        // §7.1.20 ToLength.
-        var len = try intrinsics.toLengthOf(realm, arr);
+        // §23.1.3.2 step 8.d.iii — ? LengthOfArrayLike(E). Use
+        // the Proxy-aware accessor so a `get` trap on "length"
+        // fires and a revoked proxy throws. Functions are
+        // Objects in JS too; their indexed slots are read via
+        // `getPropertyAny` below.
+        const len_v = try getPropertyAny(realm, value, "length");
+        var len = try intrinsics.toLengthValue(realm, len_v);
         if (len > safe_max) len = safe_max;
         // §23.1.3.2 step 8.d.ii — `n + len > 2^53 - 1` throws.
         if (write_idx.* + len > safe_max) {
@@ -754,11 +770,11 @@ fn concatAppend(realm: *Realm, out: *JSObject, value: Value, write_idx: *i64) Na
             var rbuf: [24]u8 = undefined;
             const rslice = std.fmt.bufPrint(&rbuf, "{d}", .{i}) catch unreachable;
             // HasProperty walks the proto chain; if absent, hole — skip.
-            if (!hasPropertyChain(arr, rslice)) {
+            if (!hasPropertyAny(value, rslice)) {
                 write_idx.* += 1;
                 continue;
             }
-            const v = try getPropertyChain(realm, arr, rslice);
+            const v = try getPropertyAny(realm, value, rslice);
             try concatWriteOne(realm, out, v, write_idx);
         }
     } else {
@@ -786,16 +802,122 @@ fn concatWriteOne(realm: *Realm, out: *JSObject, v: Value, write_idx: *i64) Nati
 }
 
 /// §23.1.3.2.1 IsConcatSpreadable. `@@isConcatSpreadable` is the
-/// override hook; absent it, IsArray decides.
+/// override hook; absent it, §7.2.2 IsArray decides. Per §7.2.2
+/// step 3 a Proxy unwraps to its target before the IsArray check,
+/// and a revoked Proxy throws TypeError. Per §7.1.2 step 4 a
+/// non-undefined spreadable value coerces via ToBoolean — including
+/// primitives like `7` or `"string"`.
 fn isConcatSpreadable(realm: *Realm, v: Value) NativeError!bool {
-    const obj = heap_mod.valueAsPlainObject(v) orelse return false;
-    const spreadable_v = try getPropertyChain(realm, obj, "@@isConcatSpreadable");
+    if (!isObjectLike(v)) return false;
+    const spreadable_v = try getPropertyAny(realm, v, "@@isConcatSpreadable");
     if (!spreadable_v.isUndefined()) return toBoolean(spreadable_v);
-    return obj.is_array_exotic;
+    // §7.2.2 IsArray — for a Proxy, recurse into the target;
+    // revoked proxy throws.
+    return try isArrayProxyAware(realm, v);
 }
 
-fn hasPropertyChain(obj: *JSObject, key: []const u8) bool {
-    return obj.hasProperty(key);
+/// §7.2.2 IsArray with Proxy unwrap. Walks the proxy target chain
+/// (§7.2.2 step 3.b); a revoked proxy on the chain raises TypeError
+/// per §7.2.2 step 3.a. Returns false for non-Object values.
+fn isArrayProxyAware(realm: *Realm, v: Value) NativeError!bool {
+    var cur_obj = heap_mod.valueAsPlainObject(v) orelse return false;
+    while (true) {
+        if (cur_obj.proxy_revoked) {
+            return throwTypeError(realm, "Cannot perform 'IsArray' on a proxy that has been revoked");
+        }
+        if (cur_obj.proxy_target) |t| {
+            cur_obj = t;
+            continue;
+        }
+        return cur_obj.is_array_exotic;
+    }
+}
+
+/// True for Object-typed values per §6.1.7 — plain objects,
+/// arrays, proxies, AND functions (Cynic tags functions
+/// separately from plain objects on the value side).
+fn isObjectLike(v: Value) bool {
+    return heap_mod.valueAsPlainObject(v) != null or heap_mod.valueAsFunction(v) != null;
+}
+
+/// Proxy- and function-aware Get. For a Proxy target, dispatches
+/// through `nativeProxyGet` so the `get` trap fires and a revoked
+/// proxy throws (§10.5.5). For a JSFunction, reads from the
+/// function's own property/accessor bag (§10.2 ordinary function
+/// internal methods). Otherwise delegates to `getPropertyChain`.
+fn getPropertyAny(realm: *Realm, v: Value, key: []const u8) NativeError!Value {
+    if (heap_mod.valueAsPlainObject(v)) |obj| {
+        if (obj.proxy_target != null or obj.proxy_revoked) {
+            return getOnProxyChain(realm, obj, key, v);
+        }
+        return getPropertyChain(realm, obj, key);
+    }
+    if (heap_mod.valueAsFunction(v)) |fn_obj| {
+        // §10.2 ordinary [[Get]] — own props, then accessor, then
+        // walk the function's `[[Prototype]]` chain. JSFunction
+        // already encapsulates the lookup order (own / prototype /
+        // static_parent / proto) for data slots.
+        if (fn_obj.ownAccessor(key)) |acc| {
+            if (acc.getter) |getter| {
+                const outcome = interpreter.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(fn_obj), &[_]Value{}) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (outcome) {
+                    .value, .yielded => |out_v| return out_v,
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                }
+            }
+            return Value.undefined_;
+        }
+        return fn_obj.get(key);
+    }
+    return Value.undefined_;
+}
+
+/// Walk a Proxy target chain, invoking `nativeProxyGet` at each
+/// hop. A revoked proxy anywhere on the chain throws TypeError.
+/// A trap-free proxy falls through to `getPropertyChain` on the
+/// (possibly nested) plain-object target.
+fn getOnProxyChain(realm: *Realm, proxy: *JSObject, key: []const u8, receiver: Value) NativeError!Value {
+    const proxy_mod = @import("proxy.zig");
+    var cur = proxy;
+    while (true) {
+        const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, receiver);
+        switch (outcome) {
+            .value => |v| return v,
+            .fallthrough => |t| {
+                if (t == cur) {
+                    // proxy with no target slot — bail out as undefined.
+                    return Value.undefined_;
+                }
+                if (t.proxy_target != null or t.proxy_revoked) {
+                    cur = t;
+                    continue;
+                }
+                return getPropertyChain(realm, t, key);
+            },
+        }
+    }
+}
+
+/// HasProperty across plain objects + functions. Used by
+/// concat's spread loop to skip holes. Proxies are conservatively
+/// treated as "has" — the subsequent Get will surface a trap
+/// throw or undefined.
+fn hasPropertyAny(v: Value, key: []const u8) bool {
+    if (heap_mod.valueAsPlainObject(v)) |obj| {
+        if (obj.proxy_target != null or obj.proxy_revoked) return true;
+        return obj.hasProperty(key);
+    }
+    if (heap_mod.valueAsFunction(v)) |fn_obj| {
+        if (fn_obj.hasOwn(key)) return true;
+        if (fn_obj.proto) |p| return p.hasProperty(key);
+    }
+    return false;
 }
 
 // ── Additional Array methods ────────────────────────────────────────────────
