@@ -1971,8 +1971,15 @@ pub fn getPrototypeFromConstructor(
         // Write-only accessor: getter is undefined → ToObject fails → use default.
         return .{ .proto = intrinsic_default };
     }
-    // Data property — read the dedicated slot first (mirrors
-    // `JSFunction.get("prototype")`).
+    // §10.1.14 step 3 — `Get(constructor, "prototype")`. The
+    // property bag wins over the dedicated slot so a user
+    // assignment of `f.prototype = null` (or any non-Object) is
+    // observed — spec says fall back to the intrinsic default
+    // when the value isn't an Object.
+    if (new_target.properties.get("prototype")) |v| {
+        if (heap_mod.valueAsPlainObject(v)) |po| return .{ .proto = po };
+        return .{ .proto = intrinsic_default };
+    }
     if (new_target.prototype) |p| return .{ .proto = p };
     // No `prototype` at all (arrow, bound without override) — fall back.
     return .{ .proto = intrinsic_default };

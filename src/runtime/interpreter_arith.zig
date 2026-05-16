@@ -29,10 +29,12 @@ pub fn toBoolean(v: Value) bool {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
         return !s.isEmpty();
     }
-    // §7.1.2 — every Object is truthy, EXCEPT a `new Boolean(false)`
-    // wrapper. Per spec all wrappers are still truthy as objects;
-    // tests check this — `if (new Boolean(false))` runs the
-    // consequent. We follow spec: object always truthy.
+    // §7.1.2 ToBoolean — BigInts are stored as Object-tagged
+    // values in Cynic; the spec treats 0n as falsy and every
+    // other BigInt as truthy. Symbols are always truthy. Plain
+    // objects (including wrappers like `new Boolean(false)`) are
+    // truthy per spec.
+    if (heap_mod.valueAsBigInt(v)) |bi| return bi.value != 0;
     if (v.isObject()) return true;
     return v.toBooleanPrimitive();
 }
