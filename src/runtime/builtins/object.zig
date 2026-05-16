@@ -336,7 +336,7 @@ pub fn ownPropertyKeysOrdered(
 /// owns the slice and frees it via `realm.allocator`. Returns
 /// `null` when no trap fires; the caller falls back to walking
 /// the target's own keys directly.
-fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []const u8 {
+pub fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []const u8 {
     if (obj.proxy_target == null and !obj.proxy_revoked) return null;
     // §10.5.11 step 2 — revoked proxy throws TypeError.
     if (obj.proxy_revoked) return throwTypeError(realm, "Cannot perform 'ownKeys' on a revoked proxy");
