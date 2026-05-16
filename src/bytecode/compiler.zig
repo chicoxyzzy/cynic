@@ -321,13 +321,35 @@ pub const Compiler = struct {
             // cross-script `var` re-declaration semantics);
             // `let` / `const` get the TDZ Hole that the
             // initializer's `sta_global` will overwrite.
-            const init_value: Value = switch (kind) {
-                .var_ => Value.undefined_,
-                .let_, .const_ => Value.hole_,
-            };
-            const gop = try self.realm.globals.getOrPut(self.realm.allocator, name);
-            if (!gop.found_existing or kind != .var_) {
-                gop.value_ptr.* = init_value;
+            //
+            // §16.1.7 GlobalDeclarationInstantiation step 18 +
+            // §9.1.1.4.18 CreateGlobalVarBinding — top-level
+            // `var` / `function` declarations materialise on the
+            // global object with `{[[Writable]]:true,
+            // [[Enumerable]]:true, [[Configurable]]:D}` where
+            // `D` is the "deletable" flag (false for source-text
+            // scripts; `eval` would set true but Cynic doesn't
+            // ship `eval`). Route through `installScriptVarBinding`
+            // so the descriptor is stamped non-configurable. By
+            // contrast `let` / `const` go into the declarative
+            // GlobalEnvironment record — not on the global object
+            // — so they keep the legacy realm-table install path
+            // (the property bag they happen to share with the
+            // global object is an implementation detail; `let`-on-
+            // globalThis isn't a real property and Cynic's lookup
+            // routes through it regardless).
+            if (kind == .var_) {
+                try self.realm.globals.installScriptVarBinding(
+                    self.realm.allocator,
+                    name,
+                    Value.undefined_,
+                );
+            } else {
+                const init_value: Value = Value.hole_;
+                const gop = try self.realm.globals.getOrPut(self.realm.allocator, name);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = init_value;
+                }
             }
         }
         return binding;

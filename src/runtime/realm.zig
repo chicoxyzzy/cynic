@@ -181,6 +181,49 @@ pub const GlobalBindings = struct {
     ) !std.StringArrayHashMapUnmanaged(Value).GetOrPutResult {
         return self.map().getOrPut(allocator, key);
     }
+
+    /// §16.1.7 GlobalDeclarationInstantiation step 18 — top-level
+    /// `var` / `function` declarations route through §9.1.1.4.18
+    /// CreateGlobalVarBinding / §9.1.1.4.19 CreateGlobalFunctionBinding.
+    /// Both create the property on the global object with
+    /// `{[[Writable]]:true, [[Enumerable]]:true, [[Configurable]]:D}`
+    /// where `D` is the "deletable" flag. For source-text scripts
+    /// `D` is false — Cynic doesn't ship `eval` so script-source
+    /// is the only path that can reach this. Distinguishes top-
+    /// level `var x` (non-configurable, enumerable) from a direct
+    /// `globalThis.x = 1` (the regular `put` path — configurable,
+    /// non-enumerable to match host built-in shape).
+    ///
+    /// Idempotent for an existing key: §9.1.1.4.18 step 2 / step 6
+    /// say "if hasProperty is true … return NormalCompletion" —
+    /// the property descriptor (e.g. one previously stamped by
+    /// `Object.defineProperty`) is preserved.
+    pub fn installScriptVarBinding(
+        self: *GlobalBindings,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        value: Value,
+    ) !void {
+        if (self.target) |t| {
+            const gop = try t.properties.getOrPut(allocator, key);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = value;
+                try t.property_flags.put(allocator, key, .{
+                    .writable = true,
+                    .enumerable = true,
+                    .configurable = false,
+                });
+            }
+            return;
+        }
+        // Pre-`bindToObject` bootstrap path. No flags map exists
+        // yet; `bindToObject` copies entries straight onto
+        // `gt.properties`. The script-var hoist only runs from
+        // user code, which is always after bootstrap, so this
+        // branch is defensive — fall back to the fallback map
+        // and let the migrating copy do the right thing.
+        _ = try self.fallback.getOrPut(allocator, key);
+    }
     pub fn deinit(self: *GlobalBindings, allocator: std.mem.Allocator) void {
         // The `target`'s properties map is owned by the JSObject
         // (and freed by the heap sweep). We only ever own the
