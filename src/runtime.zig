@@ -11,6 +11,8 @@ pub const Value = value.Value;
 pub const string = @import("runtime/string.zig");
 pub const JSString = string.JSString;
 
+pub const utf16 = @import("runtime/utf16.zig");
+
 pub const function = @import("runtime/function.zig");
 pub const JSFunction = function.JSFunction;
 

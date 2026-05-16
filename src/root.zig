@@ -49,6 +49,7 @@ test {
     _ = @import("parser/parser_test.zig");
     _ = @import("runtime/value.zig");
     _ = @import("runtime/string.zig");
+    _ = @import("runtime/utf16.zig");
     _ = @import("runtime/function.zig");
     _ = @import("runtime/environment.zig");
     _ = @import("runtime/object.zig");
