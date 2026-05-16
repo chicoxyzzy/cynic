@@ -18,6 +18,9 @@ zig-out/
 # Throwaway worktrees spawned by Claude Code agents.
 .claude/worktrees/
 
+# Per-user Claude Code allow/deny rules — agent-local, per-machine.
+.claude/settings.local.json
+
 # Scheduler lock file written by Claude Code's /loop machinery.
 .claude/scheduled_tasks.lock
 
