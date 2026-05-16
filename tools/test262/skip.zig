@@ -198,6 +198,15 @@ pub const skip_stage_maturity_features = [_][]const u8{
     "explicit-resource-management", // Stage 3 — `using` / `await using`.
     "import-defer", // Stage 3 — `import defer * as ns from "…"`.
     "source-phase-imports", // Stage 3 — `import source x from "…"`.
+    // Stage 3 `import-bytes` — `import data from "./x.png" with {
+    // type: "bytes" }` returns a (frozen) Uint8Array. Needs the
+    // immutable-arraybuffer (Stage 2.7) substrate too.
+    "import-bytes",
+    // Stage 2.7 — `new ArrayBuffer(len, { maxByteLength, immutable: true })`.
+    // Substrate for `import-bytes` (frozen Uint8Array) and the
+    // structured-clone / postMessage-zero-copy story; no proposal-
+    // text-faithful runtime path yet.
+    "immutable-arraybuffer",
     // Stage 2 `await-dictionary` — `Promise.allKeyed` /
     // `Promise.allSettledKeyed` (dictionary-shaped aggregators).
     "await-dictionary",
@@ -235,11 +244,6 @@ pub const skip_planned_features = [_][]const u8{
     // attribute syntax + the JSON / text resolution back-ends yet.
     "import-attributes",
     "json-modules",
-    // Stage 3 `import-bytes` — `import data from "./x.png" with {
-    // type: "bytes" }` returns a (frozen) Uint8Array. Needs the
-    // immutable-arraybuffer (Stage 2.7) substrate too.
-    "import-bytes",
-    "immutable-arraybuffer",
 };
 
 pub const skip_planned_paths = [_][]const u8{
