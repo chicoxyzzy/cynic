@@ -1005,7 +1005,33 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
                 return throwRangeError(realm, "Invalid array length");
             }
             array_length_new = new_len;
-            parsed.value = Value.fromInt32(@intCast(new_len));
+            // 0..2^31-1 fits in the int32 NaN-boxed tag; anything
+            // larger (including the §10.4.2.4 step 3.c boundary
+            // values 2^32 - 2 and 2^32 - 1) MUST land as a double,
+            // otherwise the `@intCast(i32)` traps.
+            parsed.value = if (new_len <= std.math.maxInt(i32))
+                Value.fromInt32(@intCast(new_len))
+            else
+                Value.fromDouble(@floatFromInt(new_len));
+        }
+        // §10.4.2.1 Array exotic [[DefineOwnProperty]] step 4 —
+        // when the key is an integer index P and P ≥ length and
+        // length is non-writable, return false (→ TypeError under
+        // Object.defineProperty). This guards both shrinking
+        // (forbidden) and growing (also forbidden) when length
+        // has been frozen via
+        // `Object.defineProperty(arr, "length", {writable:false})`.
+        if (target.is_array_exotic and !std.mem.eql(u8, key, "length")) {
+            if (ObjMod.JSObject.canonicalIntegerIndex(key)) |idx| {
+                const len_flags = target.flagsFor("length");
+                if (!len_flags.writable) {
+                    const cur_len: u64 = target.arrayLength();
+                    if (@as(u64, idx) >= cur_len) {
+                        realm.define_own_property_rejected = true;
+                        return throwTypeError(realm, "Cannot define index past the length of a non-writable-length array");
+                    }
+                }
+            }
         }
 
         // Snapshot the current descriptor (or `null` if absent).
@@ -1112,10 +1138,13 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             // shrink truncates indexed slots ≥ newLen. Walks
             // descending; a non-configurable element stops the
             // walk and sets length to that index + 1, returning
-            // false (→ TypeError in strict mode). All indexed
-            // slots are configurable today, so the loop is a
-            // single resize. Done AFTER the property update so
-            // the length property already reads as `newLen`.
+            // false (→ TypeError per §10.4.2.4 step 17.b.ii).
+            // `truncateArrayAtLength` folds promoted-into-
+            // `properties` indices into the descending walk so a
+            // `Object.defineProperty(arr, "<idx>", {configurable:false})`
+            // earlier in the script blocks the truncation here.
+            // Done AFTER the property update so the length
+            // property already reads as `newLen`.
             if (array_length_new) |new_len| {
                 const interpreter = @import("../interpreter.zig");
                 const trunc = interpreter.truncateArrayAtLength(realm.allocator, target, new_len);

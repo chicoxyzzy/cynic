@@ -8530,14 +8530,75 @@ pub const TruncateResult = struct {
 /// On a non-configurable element, stop and return its index + 1
 /// as the floor.
 pub fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, target_len: u32) TruncateResult {
-    // §10.4.2.4 — Array exotic: truncate the packed `elements`
-    // vector. Indexed slots are configurable today (Cynic doesn't
-    // yet support `Object.defineProperty(arr, "0", {configurable:false})`
-    // promoting a slot into the named-property bag), so the
-    // walk is a single resize.
+    // §10.4.2.4 — Array exotic: walk the packed `elements`
+    // vector AND any promoted-into-`properties` indexed keys
+    // (slots that became non-default via
+    // `Object.defineProperty(arr, "<idx>", {configurable:false, …})`
+    // get demoted to the named-property bag — see
+    // `JSObject.setWithFlags`). The spec descends from the
+    // highest index ≥ target_len; the first non-configurable
+    // stops the walk and sets length to that index + 1.
     if (obj.is_array_exotic) {
-        _ = obj.truncateIndexed(allocator, target_len) catch return .{ .final_length = target_len, .blocked = false };
-        return .{ .final_length = target_len, .blocked = false };
+        // Collect promoted integer-indexed keys ≥ target_len so
+        // we can fold them into the descending walk. Without
+        // this, a non-configurable promoted index (e.g. via
+        // `Object.defineProperty(arr, "1", {configurable:false})`)
+        // would be silently bypassed and the truncate would
+        // succeed instead of throwing. Accessor descriptors live
+        // in a separate map (`accessors`), so walk that too —
+        // a non-configurable accessor at index N still blocks
+        // truncation per §10.4.2.4 step 17.b.ii.
+        var promoted: std.ArrayListUnmanaged(u32) = .empty;
+        defer promoted.deinit(allocator);
+        {
+            var it = obj.properties.iterator();
+            while (it.next()) |entry| {
+                const k = entry.key_ptr.*;
+                if (canonicalIntegerIndexInterp(k)) |idx| {
+                    if (idx >= target_len) {
+                        promoted.append(allocator, idx) catch return .{ .final_length = target_len, .blocked = false };
+                    }
+                }
+            }
+        }
+        {
+            var it = obj.accessors.iterator();
+            while (it.next()) |entry| {
+                const k = entry.key_ptr.*;
+                if (canonicalIntegerIndexInterp(k)) |idx| {
+                    if (idx >= target_len) {
+                        promoted.append(allocator, idx) catch return .{ .final_length = target_len, .blocked = false };
+                    }
+                }
+            }
+        }
+        std.mem.sort(u32, promoted.items, {}, std.sort.desc(u32));
+
+        // Find the highest non-configurable promoted index ≥
+        // target_len. Everything strictly above it can be
+        // deleted (promoted slots are explicitly configurable
+        // when their flags say so; packed `elements` slots are
+        // always configurable today). That gives us the floor.
+        var floor: ?u32 = null;
+        var buf: [16]u8 = undefined;
+        for (promoted.items) |idx| {
+            const key = std.fmt.bufPrint(&buf, "{d}", .{idx}) catch continue;
+            const flags = obj.property_flags.get(key) orelse @import("object.zig").PropertyFlags.default;
+            if (!flags.configurable) {
+                floor = idx + 1;
+                break;
+            }
+            // Configurable promoted index above any non-conf
+            // floor — delete it from the bag. The packed
+            // `elements` slot at this index is already a hole
+            // (`setWithFlags` calls `holeIndexed` when demoting).
+            _ = obj.properties.swapRemove(key);
+            _ = obj.accessors.swapRemove(key);
+            _ = obj.property_flags.swapRemove(key);
+        }
+        const final_len = floor orelse target_len;
+        _ = obj.truncateIndexed(allocator, final_len) catch return .{ .final_length = final_len, .blocked = floor != null };
+        return .{ .final_length = final_len, .blocked = floor != null };
     }
     // Pre-array-exotic fallback for any object (e.g. an array-
     // like with stringified-index own properties) that ended up
