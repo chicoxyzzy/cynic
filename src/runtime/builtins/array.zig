@@ -1581,15 +1581,42 @@ fn arrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
 fn arrayFlat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const depth_v = argOr(args, 0, Value.fromInt32(1));
-    // Infinity / very-large depth → effectively-unbounded; we cap
-    // with a recursion sentinel inside `flattenInto`.
-    const depth: i64 = if (depth_v.isInt32()) depth_v.asInt32() else if (depth_v.isDouble()) blk: {
-        const d = depth_v.asDouble();
-        if (std.math.isNan(d) or d < 0) break :blk 0;
-        if (std.math.isInf(d)) break :blk std.math.maxInt(i32);
-        break :blk @intFromFloat(@trunc(d));
-    } else 1;
+    // §23.1.3.10 step 3 — `depth = ? ToIntegerOrInfinity(args[0])`.
+    // Undefined defaults to 1 BEFORE the coercion (so a missing
+    // arg flattens one level). For an explicit `undefined` or
+    // `null`, ToIntegerOrInfinity → 0; for a string "TestString"
+    // or an object, ToNumber → NaN → 0.
+    var depth: i64 = 1;
+    if (args.len > 0 and !args[0].isUndefined()) {
+        const depth_v = args[0];
+        if (depth_v.isInt32()) {
+            depth = depth_v.asInt32();
+            if (depth < 0) depth = 0;
+        } else if (depth_v.isDouble()) {
+            const d = depth_v.asDouble();
+            if (std.math.isNan(d) or d < 0) {
+                depth = 0;
+            } else if (std.math.isInf(d)) {
+                depth = std.math.maxInt(i32);
+            } else {
+                depth = @intFromFloat(@trunc(d));
+            }
+        } else {
+            // §7.1.5 ToIntegerOrInfinity = ToNumber → trunc.
+            // ToNumber of a Symbol throws; ToNumber of an Object
+            // runs ToPrimitive → valueOf/toString; both routed via
+            // `intrinsics.toNumber`.
+            const nv = try intrinsics.toNumber(realm, depth_v);
+            const d: f64 = if (nv.isInt32()) @floatFromInt(nv.asInt32()) else nv.asDouble();
+            if (std.math.isNan(d) or d < 0) {
+                depth = 0;
+            } else if (std.math.isInf(d)) {
+                depth = std.math.maxInt(i32);
+            } else {
+                depth = @intFromFloat(@trunc(d));
+            }
+        }
+    }
     // §23.1.3.10 step 4 — ArraySpeciesCreate(O, 0).
     const out_v = try arraySpeciesCreate(realm, obj, 0);
     const out = heap_mod.valueAsPlainObject(out_v) orelse return throwTypeError(realm, "ArraySpeciesCreate did not return an object");
@@ -1612,10 +1639,14 @@ fn flattenInto(realm: *Realm, source: *JSObject, depth: i64, target: *JSObject, 
             const inner = heap_mod.valueAsPlainObject(elem).?;
             try flattenInto(realm, inner, depth - 1, target, write_idx);
         } else {
+            // §23.1.3.10.1 FlattenIntoArray step 9.c.vi.2 —
+            // CreateDataPropertyOrThrow. Non-writable own slot on
+            // the target is configurable-redefined back to the
+            // all-true default; non-extensible target throws.
             var wbuf: [24]u8 = undefined;
             const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{write_idx.*}) catch unreachable;
             const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-            target.set(realm.allocator, owned.bytes, elem) catch return error.OutOfMemory;
+            try createDataPropertyOrThrowGeneric(realm, target, owned.bytes, elem);
             write_idx.* += 1;
         }
     }
@@ -1669,14 +1700,19 @@ fn arrayFlatMap(realm: *Realm, this_value: Value, args: []const Value) NativeErr
                 var wbuf: [24]u8 = undefined;
                 const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{write_idx}) catch unreachable;
                 const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-                out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+                // §23.1.3.11.1 FlattenIntoArray step 9.c.vi.2 —
+                // CreateDataPropertyOrThrow on the result, not
+                // [[Set]]. Non-extensible target throws; non-
+                // configurable own slot throws; non-writable own
+                // slot is configurable-redefined.
+                try createDataPropertyOrThrowGeneric(realm, out, owned.bytes, v);
                 write_idx += 1;
             }
         } else {
             var wbuf: [24]u8 = undefined;
             const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{write_idx}) catch unreachable;
             const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-            out.set(realm.allocator, owned.bytes, mapped) catch return error.OutOfMemory;
+            try createDataPropertyOrThrowGeneric(realm, out, owned.bytes, mapped);
             write_idx += 1;
         }
     }
