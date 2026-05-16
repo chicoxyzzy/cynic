@@ -57,6 +57,25 @@ pub fn lengthInCodeUnits(bytes: []const u8) usize {
     return units;
 }
 
+/// Return the UTF-16 code-unit offset that corresponds to byte
+/// offset `byte_idx`. The byte offset must land on a leading
+/// byte of a WTF-8 sequence (i.e. an offset previously
+/// produced by `byteIndexForCodeUnit` or `std.mem.indexOf` over
+/// the bytes); otherwise the result counts to the nearest
+/// preceding leading byte. Used by `indexOf` / `lastIndexOf` to
+/// translate a byte-level `std.mem.indexOf` hit back to the
+/// spec's code-unit index.
+pub fn codeUnitIndexForByte(bytes: []const u8, byte_idx: usize) usize {
+    var units: usize = 0;
+    var i: usize = 0;
+    while (i < bytes.len and i < byte_idx) {
+        const seq_len = utf8SeqLen(bytes[i]);
+        units += if (seq_len == 4) 2 else 1;
+        i += seq_len;
+    }
+    return units;
+}
+
 /// Return the byte offset where UTF-16 code unit `cu_idx` starts.
 ///
 /// For a 4-byte UTF-8 sequence at code-unit positions `(i, i+1)`,
@@ -330,6 +349,15 @@ test "utf16: byteIndexForCodeUnit — ASCII is identity" {
     try testing.expectEqual(@as(usize, 0), byteIndexForCodeUnit(ascii_bytes, 0).?);
     try testing.expectEqual(@as(usize, 2), byteIndexForCodeUnit(ascii_bytes, 2).?);
     try testing.expectEqual(@as(usize, 3), byteIndexForCodeUnit(ascii_bytes, 3).?);
+}
+
+test "utf16: codeUnitIndexForByte — inverse of byteIndexForCodeUnit" {
+    // byte 0 → unit 0; byte 1 (start of 4-byte) → unit 1;
+    // byte 5 (after astral) → unit 3 (one BMP + supplementary pair).
+    try testing.expectEqual(@as(usize, 0), codeUnitIndexForByte(astral_bytes, 0));
+    try testing.expectEqual(@as(usize, 1), codeUnitIndexForByte(astral_bytes, 1));
+    try testing.expectEqual(@as(usize, 3), codeUnitIndexForByte(astral_bytes, 5));
+    try testing.expectEqual(@as(usize, 4), codeUnitIndexForByte(astral_bytes, 6));
 }
 
 test "utf16: byteIndexForCodeUnit — supplementary trail returns same start" {

@@ -612,20 +612,29 @@ fn stringCharCodeAt(realm: *Realm, this_value: Value, args: []const Value) Nativ
     return Value.fromInt32(@intCast(cu));
 }
 
+/// §22.1.3.8 String.prototype.indexOf(searchString, position).
+/// `position` is a UTF-16 code-unit index; the return value is the
+/// code-unit index where `searchString`'s WTF-8 byte sequence
+/// first appears at or after `position` in the receiver, or -1.
+/// Empty `searchString` returns the clamped `position`.
 fn stringIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const needle = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
     const pos_v = argOr(args, 1, Value.undefined_);
-    var start: usize = 0;
+    // Receiver length in code units, used for clamping `position`
+    // (§22.1.3.8 step 5 — Min(Max(intPosition, 0), len)).
+    const cu_len = utf16.lengthInCodeUnits(s.bytes);
+    var start_cu: usize = 0;
     if (!pos_v.isUndefined()) {
         const n = try intrinsics.toNumber(realm, pos_v);
-        start = clampPos(intrinsics.toInt(n), s.bytes.len);
+        start_cu = clampPos(intrinsics.toInt(n), cu_len);
     }
-    if (needle.bytes.len == 0) return Value.fromInt32(@intCast(start));
-    if (start > s.bytes.len) start = s.bytes.len;
-    const slice = s.bytes[start..];
-    if (std.mem.indexOf(u8, slice, needle.bytes)) |pos| {
-        return Value.fromInt32(@intCast(pos + start));
+    if (needle.bytes.len == 0) return Value.fromInt32(@intCast(start_cu));
+    const start_byte = utf16.byteIndexForCodeUnit(s.bytes, start_cu) orelse s.bytes.len;
+    if (start_byte >= s.bytes.len) return Value.fromInt32(-1);
+    if (std.mem.indexOf(u8, s.bytes[start_byte..], needle.bytes)) |off| {
+        const abs_byte = off + start_byte;
+        return Value.fromInt32(@intCast(utf16.codeUnitIndexForByte(s.bytes, abs_byte)));
     }
     return Value.fromInt32(-1);
 }
@@ -1166,29 +1175,44 @@ fn stringAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
     return Value.fromString(out);
 }
 
+/// §22.1.3.9 String.prototype.lastIndexOf(searchString, position).
+/// `position` is a UTF-16 code-unit index; the return value is the
+/// largest code-unit index ≤ `position` at which `searchString`
+/// appears in the receiver, or -1 if there is no such index.
+/// `position = NaN` is treated as +Infinity (search the whole
+/// string).
 fn stringLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const needle = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
-    // §22.1.3.10 step 4 — `position` is ToNumber, NaN ⇒ +Inf so
+    // §22.1.3.9 step 4-6 — `position` is ToNumber, NaN ⇒ +Inf so
     // the search starts from the end. Anything else is
-    // ToIntegerOrInfinity, then clamped to [0, len].
+    // ToIntegerOrInfinity, then clamped to [0, len]. Indexing is
+    // in UTF-16 code units.
     const pos_v = argOr(args, 1, Value.undefined_);
-    var search_end: usize = s.bytes.len;
+    const cu_len = utf16.lengthInCodeUnits(s.bytes);
+    var search_end_cu: usize = cu_len;
     if (!pos_v.isUndefined()) {
         const n = try intrinsics.toNumber(realm, pos_v);
         const is_nan = n.isDouble() and std.math.isNan(n.asDouble());
         if (!is_nan) {
             const pos_i = intrinsics.toInt(n);
-            search_end = clampPos(pos_i, s.bytes.len);
+            search_end_cu = clampPos(pos_i, cu_len);
         }
     }
-    if (needle.bytes.len == 0) return Value.fromInt32(@intCast(search_end));
+    if (needle.bytes.len == 0) return Value.fromInt32(@intCast(search_end_cu));
     if (needle.bytes.len > s.bytes.len) return Value.fromInt32(-1);
-    // Search within `s.bytes[0 .. min(search_end + needle.len, s.len)]`
-    // since matches starting at `search_end` are still valid.
-    const upper = @min(search_end + needle.bytes.len, s.bytes.len);
+    // Convert the code-unit upper bound to a byte upper bound,
+    // padded by needle.bytes.len so a match starting at
+    // `search_end_cu` (whose byte offset + needle.bytes.len would
+    // overshoot) is still considered. Then walk the byte-level
+    // lastIndexOf result back to a code-unit index.
+    const search_end_byte = utf16.byteIndexForCodeUnit(s.bytes, search_end_cu) orelse s.bytes.len;
+    const upper = @min(search_end_byte + needle.bytes.len, s.bytes.len);
     if (std.mem.lastIndexOf(u8, s.bytes[0..upper], needle.bytes)) |pos| {
-        return Value.fromInt32(@intCast(pos));
+        const cu_idx = utf16.codeUnitIndexForByte(s.bytes, pos);
+        // The found byte offset must correspond to a code-unit
+        // index ≤ search_end_cu — clamp defensively.
+        if (cu_idx <= search_end_cu) return Value.fromInt32(@intCast(cu_idx));
     }
     return Value.fromInt32(-1);
 }

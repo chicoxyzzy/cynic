@@ -4385,3 +4385,49 @@ test "String.prototype.substring: out of order swaps" {
 test "String.prototype.substring: supplementary mid-pair end" {
     try expectScriptStringWithBuiltins("\"a\\u{1F600}c\".substring(0, 2);", "a\xED\xA0\xBD");
 }
+
+// ── §22.1.3.8 indexOf / §22.1.3.9 lastIndexOf — code-unit indices ─────────
+
+test "String.prototype.indexOf: ASCII" {
+    try expectScriptIntWithBuiltins("\"abcabc\".indexOf(\"b\");", 1);
+    try expectScriptIntWithBuiltins("\"abcabc\".indexOf(\"b\", 2);", 4);
+    try expectScriptIntWithBuiltins("\"abc\".indexOf(\"x\");", -1);
+}
+
+test "String.prototype.indexOf: needle after BMP non-ASCII reports code-unit index" {
+    // "a\xFFcb" — code units (a, \xFF, c, b); byte offsets
+    // (0, 1, 3, 4). indexOf("b") must return 3 (code units), not
+    // 4 (the byte offset).
+    try expectScriptIntWithBuiltins("\"a\\xFFcb\".indexOf(\"b\");", 3);
+}
+
+test "String.prototype.indexOf: needle after supplementary code point" {
+    // "a\u{1F600}c" — code units (a, lead, trail, c); indexOf("c")
+    // = 3 (code units), not 5 (the byte offset post-4-byte UTF-8).
+    try expectScriptIntWithBuiltins("\"a\\u{1F600}c\".indexOf(\"c\");", 3);
+}
+
+test "String.prototype.indexOf: position is code-unit indexed" {
+    // Same string; position=2 means start at the trail surrogate
+    // (which is at byte offset 1). "c" is at code-unit index 3,
+    // so a code-unit-aware search returns 3.
+    try expectScriptIntWithBuiltins("\"a\\u{1F600}c\".indexOf(\"c\", 2);", 3);
+}
+
+test "String.prototype.indexOf: empty needle returns clamped position" {
+    try expectScriptIntWithBuiltins("\"a\\u{1F600}c\".indexOf(\"\", 2);", 2);
+}
+
+test "String.prototype.lastIndexOf: ASCII" {
+    try expectScriptIntWithBuiltins("\"abcabc\".lastIndexOf(\"b\");", 4);
+}
+
+test "String.prototype.lastIndexOf: code-unit index after supplementary" {
+    try expectScriptIntWithBuiltins("\"a\\u{1F600}c\".lastIndexOf(\"c\");", 3);
+}
+
+test "String.prototype.lastIndexOf: lone surrogate haystack" {
+    // "a\uD83Dc" — the lone surrogate is one code unit, c is at
+    // code-unit index 2.
+    try expectScriptIntWithBuiltins("\"a\\uD83Dc\".lastIndexOf(\"c\");", 2);
+}
