@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 85.32 % | 91.77 % | 34955 / 40969 | 34955 / 38088 |
+| **runtime** | 85.42 % | 91.88 % | 34996 / 40969 | 34996 / 38088 |
 
 
 ## Where the runtime stands, by area
@@ -28,11 +28,11 @@ browser-era built-ins …).
 | `built-ins/Function` | 265 | 103 | 84 | 59 % | 72 % |
 | `built-ins/Object` | 3088 | 242 | 80 | 91 % | 93 % |
 | `built-ins/RegExp` | 1349 | 261 | 161 | 76 % | 84 % |
-| `built-ins/String` | 1045 | 172 | 5 | 86 % | 86 % |
+| `built-ins/String` | 1083 | 134 | 5 | 89 % | 89 % |
 | `built-ins/TypedArray` | 1276 | 147 | 8 | 89 % | 90 % |
 | `built-ins/TypedArrayConstructors` | 546 | 114 | 16 | 81 % | 83 % |
-| `language/expressions` | 9301 | 668 | 979 | 85 % | 93 % |
-| `language/module-code` | 460 | 122 | 14 | 77 % | 79 % |
+| `language/expressions` | 9302 | 667 | 979 | 85 % | 93 % |
+| `language/module-code` | 462 | 120 | 14 | 78 % | 79 % |
 | `language/statements` | 8150 | 338 | 672 | 89 % | 96 % |
 | **_10–99 fails_** | | | | | |
 | `built-ins/ArrayBuffer` | 166 | 25 | 4 | 85 % | 87 % |
@@ -134,19 +134,17 @@ browser-era built-ins …).
 
 ## History
 
-### 2026-05-16 — cynic `e444df4`, test262 `unknown`
+### 2026-05-16 — cynic `a2e60f8`, test262 `unknown`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 85.32 % | 91.77 % | 34955 / 40969 | 34955 / 38088 | +83 | 1m 42s |
+| **runtime** | 85.42 % | 91.88 % | 34996 / 40969 | 34996 / 38088 | +124 | 1m 44s |
 
 Biggest movers (runtime):
 
-- `built-ins/Proxy` +29
-- `built-ins/BigInt` +19
-- `built-ins/TypedArrayConstructors` +12
-- `built-ins/Number` +8
-- `built-ins/DataView` +3
+- `built-ins/String` +38
+- `language/module-code` +2
+- `language/expressions` +1
 
 ### 2026-05-15 — cynic `2b05c51`, test262 `d0c1b455`
 
