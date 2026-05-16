@@ -730,12 +730,29 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                     // ToUint8. The view stores its name explicitly
                     // so the dispatch is name-aware.
                     const clamped = std.mem.eql(u8, ta_name, "Uint8ClampedArray");
+                    // §23.2.5.1.5 InitializeTypedArrayFromList step 4 —
+                    // the spec calls IntegerIndexedElementSet(O, F(k),
+                    // value) per item, which is ? ToBigInt / ToNumber.
+                    // `writeTypedElement` only knows about primitives
+                    // (its inner `coerceToNumber` collapses objects to
+                    // NaN → 0), so a Number / String wrapper item
+                    // ends up zeroed.  Coerce up front through the
+                    // realm-aware path.
+                    const bigint_mod = @import("bigint.zig");
                     var idx: usize = 0;
                     while (idx < length) : (idx += 1) {
+                        const raw_item = collected.items[idx];
+                        const coerced_item: Value = switch (kind) {
+                            .bigint64, .biguint64 => bigint_mod.toBigIntValue(realm, raw_item) catch |err| switch (err) {
+                                error.OutOfMemory => return error.OutOfMemory,
+                                else => return error.NativeThrew,
+                            },
+                            else => try intrinsics.toNumber(realm, raw_item),
+                        };
                         if (clamped) {
-                            writeUint8Clamped(buf_bytes, idx * elem_size, collected.items[idx]);
+                            writeUint8Clamped(buf_bytes, idx * elem_size, coerced_item);
                         } else {
-                            writeTypedElement(buf_bytes, kind, idx * elem_size, collected.items[idx]);
+                            writeTypedElement(buf_bytes, kind, idx * elem_size, coerced_item);
                         }
                     }
                     return this_value;
@@ -1753,18 +1770,40 @@ fn typedArrayAt(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 }
 
 fn typedArrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.2.3.6 step 1-2 — ValidateTypedArray + snapshot len.
     const tv = try taValidatedView(realm, this_value, "copyWithin");
-    const buf = tv.viewed.array_buffer orelse return error.NativeThrew;
     const len: i64 = @intCast(taCurrentLength(tv));
+    // §23.2.3.6 step 3-8 — coerce target / start / end FIRST.
+    // The valueOf hooks may detach the buffer (or resize a RAB
+    // to leave the view OOB); both are checked at step 9 below.
     const target = try taResolveIndex(realm, argOr(args, 0, Value.fromInt32(0)), len, 0);
     const start = try taResolveIndex(realm, argOr(args, 1, Value.fromInt32(0)), len, 0);
     const end = try taResolveIndex(realm, argOr(args, 2, Value.undefined_), len, len);
-    const count = @min(end - start, len - target);
+    // §23.2.3.6 step 9 — re-validate after coercions. A user
+    // valueOf may have detached `O.[[ViewedArrayBuffer]]`; the
+    // spec calls IsDetachedBuffer here (effectively the same
+    // ValidateTypedArray check) and only proceeds with the
+    // memmove when the buffer is still live.
+    const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray.prototype.copyWithin: buffer detached during coercion");
+    if (taIsOutOfBounds(tv)) {
+        return throwTypeError(realm, "TypedArray.prototype.copyWithin: TypedArray went out-of-bounds during coercion");
+    }
+    // §23.2.3.6 step 10 — recompute len against the post-coercion
+    // buffer (a RAB shrink reduces the count; a grow leaves the
+    // original count intact since we capture it pre-coercion).
+    const live_len: i64 = @intCast(taCurrentLength(tv));
+    const eff_target = @min(target, live_len);
+    const eff_start = @min(start, live_len);
+    const eff_end = @min(end, live_len);
+    const count = @min(eff_end - eff_start, live_len - eff_target);
     if (count <= 0) return this_value;
     const elem_size = tv.kind.elementSize();
     const byte_count: usize = @as(usize, @intCast(count)) * elem_size;
-    const src_off = tv.byte_offset + @as(usize, @intCast(start)) * elem_size;
-    const dst_off = tv.byte_offset + @as(usize, @intCast(target)) * elem_size;
+    const src_off = tv.byte_offset + @as(usize, @intCast(eff_start)) * elem_size;
+    const dst_off = tv.byte_offset + @as(usize, @intCast(eff_target)) * elem_size;
+    if (src_off + byte_count > buf.len or dst_off + byte_count > buf.len) {
+        return this_value; // clamped to whatever's available
+    }
     // §23.2.3.6 copyWithin uses memmove-style overlap-safe copy.
     // Zig's `@memcpy` panics on aliased ranges, so dispatch into
     // the std forward / backward variants based on the copy
@@ -1961,6 +2000,12 @@ fn typedArrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // each stringifies to the empty string per step 7.c, and
     // the join completes producing only the separators.
     const tv = try taValidatedView(realm, this_value, "join");
+    // §23.2.3.15 step 3 — `Let len be TypedArrayLength(taRecord)`.
+    // Capture BEFORE coercing `separator`; per
+    // detached-buffer-during-fromIndex-returns-single-comma.js
+    // the original len is iterated even if separator.toString
+    // detaches the buffer mid-call.
+    const join_len = taCurrentLength(tv);
     const sep_v = argOr(args, 0, Value.undefined_);
     const sep_s: []const u8 = if (sep_v.isUndefined()) "," else blk: {
         const s = try stringifyArg(realm, sep_v);
@@ -1968,7 +2013,6 @@ fn typedArrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeE
     };
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
-    const join_len = taCurrentLength(tv);
     var i: usize = 0;
     while (i < join_len) : (i += 1) {
         if (i > 0) out.appendSlice(realm.allocator, sep_s) catch return error.OutOfMemory;
@@ -2265,7 +2309,13 @@ fn taSpeciesCreateSubarray(
         const elem_size = kind.elementSize();
         if (byte_offset > buf_bytes.len) return throwRangeError(realm, "subarray: byteOffset exceeds buffer");
         if (!length_tracking and byte_offset + length * elem_size > buf_bytes.len) return throwRangeError(realm, "subarray: view exceeds buffer");
-        const ctor = heap_mod.valueAsFunction(realm.globals.get(nameForTypedKind(kind)) orelse Value.undefined_) orelse return throwTypeError(realm, "TypedArray constructor not found");
+        // Preserve [[TypedArrayName]] across the default-species
+        // fallback so a Uint8ClampedArray subarray stays clamped.
+        const ctor_name: []const u8 = if (exemplar.typed_view) |etv|
+            (if (etv.name.len != 0) etv.name else nameForTypedKind(kind))
+        else
+            nameForTypedKind(kind);
+        const ctor = heap_mod.valueAsFunction(realm.globals.get(ctor_name) orelse Value.undefined_) orelse return throwTypeError(realm, "TypedArray constructor not found");
         const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
         inst.prototype = ctor.prototype;
         inst.typed_view = .{
@@ -2273,12 +2323,22 @@ fn taSpeciesCreateSubarray(
             .viewed = buffer,
             .byte_offset = byte_offset,
             .length = length,
-            .name = nameForTypedKind(kind),
+            .name = ctor_name,
             .length_tracking = length_tracking,
         };
         return inst;
     }
     const species_fn = heap_mod.valueAsFunction(species_v) orelse return throwTypeError(realm, "TypedArray @@species is not a constructor");
+    // §23.2.5.1.4 NewTypedArrayFromArrayBuffer step 11 — even
+    // the user-overridden species ctor receives a detached
+    // buffer and will throw inside its TA constructor. Throw
+    // earlier so we don't re-enter for nothing; this also
+    // sidesteps engines that short-circuit the construct
+    // when buffer is null. (The construct path below would
+    // throw anyway via the inner ArrayBuffer-detached check
+    // inside `typedArrayConstructorBuilder`, but failing fast
+    // matches V8 / JSC.)
+    if (buffer.array_buffer == null) return throwTypeError(realm, "TypedArray: ArrayBuffer is detached");
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
     // §23.2.3.31 steps 15-16 — argument list shape depends on
@@ -2311,7 +2371,10 @@ fn taSpeciesCreateSubarray(
     };
     const result_obj = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "TypedArray species ctor returned non-object");
     const result_tv = result_obj.typed_view orelse return throwTypeError(realm, "TypedArray species ctor returned non-TypedArray");
-    if (result_tv.kind != kind) return throwTypeError(realm, "TypedArray species ctor returned wrong content type");
+    // §23.2.4.4 TypedArrayCreate — content-type parity only
+    // (BigInt vs Number); kind itself can differ across the
+    // Uint8Array / Uint8ClampedArray boundary.
+    if (result_tv.kind.isBigInt() != kind.isBigInt()) return throwTypeError(realm, "TypedArray species ctor returned wrong content type");
     return result_obj;
 }
 

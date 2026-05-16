@@ -37,6 +37,14 @@ pub fn install(realm: *Realm) !void {
             try installNativeMethodOnProto(realm, np, "toPrecision", numberToPrecision, 1);
             try installNativeMethodOnProto(realm, np, "toExponential", numberToExponential, 1);
             try installNativeMethodOnProto(realm, np, "toString", numberToString, 1);
+            // §21.1.3.4 Number.prototype.toLocaleString — Intl-aware
+            // engines surface locale-specific digit separators and
+            // grouping. Cynic doesn't ship Intl; the spec allows the
+            // implementation-defined fallback to be ToString. Install
+            // a thin shim that just calls `numberToString` so call
+            // sites like `%TypedArray%.prototype.toLocaleString` and
+            // user code expecting the method to exist see a callable.
+            try installNativeMethodOnProto(realm, np, "toLocaleString", numberToLocaleString, 0);
             try installNativeMethodOnProto(realm, np, "valueOf", numberValueOf, 0);
             // §21.1.3 — `%Number.prototype%` itself has
             // `[[NumberData]]: +0`. Calling
@@ -411,6 +419,17 @@ fn numberToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const slice = std.fmt.bufPrint(&buf, "{d}", .{x}) catch return error.OutOfMemory;
     const s = realm.heap.allocateString(slice) catch return error.OutOfMemory;
     return Value.fromString(s);
+}
+
+/// §21.1.3.4 Number.prototype.toLocaleString ( [ reserves ] ).
+/// Without Intl (out of scope per AGENTS.md) the spec permits
+/// ToString as the implementation-defined fallback; that's also
+/// what V8 does in builds without ICU (`-no-icu`). Delegate to
+/// `numberToString` without honoring any reserved args (radix
+/// only applies to `toString`).
+fn numberToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    return numberToString(realm, this_value, &.{});
 }
 
 fn numberValueOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

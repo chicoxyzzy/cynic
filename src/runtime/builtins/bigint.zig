@@ -40,6 +40,9 @@ pub fn install(realm: *Realm) !void {
     const proto = r.proto;
 
     try installNativeMethodOnProto(realm, proto, "toString", bigintToString, 0);
+    // §21.2.3.3 BigInt.prototype.toLocaleString — like Number's,
+    // Intl-less builds fall back to ToString.
+    try installNativeMethodOnProto(realm, proto, "toLocaleString", bigintToLocaleString, 0);
     try installNativeMethodOnProto(realm, proto, "valueOf", bigintValueOf, 0);
 
     try installNativeMethod(realm, fn_obj, "asIntN", bigintAsIntN, 2);
@@ -225,6 +228,15 @@ fn bigintToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
     }
     const s = realm.heap.allocateString(buf[0..n]) catch return error.OutOfMemory;
     return Value.fromString(s);
+}
+
+/// §21.2.3.3 BigInt.prototype.toLocaleString. Intl-less builds
+/// permit ToString as the implementation-defined fallback (V8
+/// builds with `-no-icu` do the same). Delegate to
+/// `bigintToString` ignoring reserved args.
+fn bigintToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    return bigintToString(realm, this_value, &.{});
 }
 
 fn bigintValueOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
