@@ -269,6 +269,13 @@ pub const JSFunction = struct {
     /// `fn.bind` resolve through inheritance instead of being
     /// duplicated onto every function instance.
     proto: ?*JSObject = null,
+    /// §10.2 Function objects are ordinary objects (§6.1.7) and
+    /// participate in `Object.preventExtensions` / `Object.seal` /
+    /// `Object.freeze`. Flipping this to `false` makes
+    /// PrivateFieldAdd (§7.3.32 step 1) throw on `static #x = …`
+    /// targeting this ctor, mirrors JSObject.extensible. Defaults
+    /// to `true` — every function starts out extensible.
+    extensible: bool = true,
     /// Mark-sweep bit, written by the heap during a collection
     /// cycle and reset to `false` after the sweep.
     marked: bool = false,

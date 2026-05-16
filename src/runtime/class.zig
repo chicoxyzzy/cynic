@@ -590,6 +590,16 @@ pub fn buildClass(
             // constructor's private slot, not the regular
             // property bag. §15.7.14 step 31 — key by the
             // per-evaluation brand prefix.
+            //
+            // §7.3.32 PrivateFieldAdd step 1 — the initializer
+            // may have run `Object.preventExtensions(C)` mid-
+            // evaluation (the static-private case of the
+            // `nonextensible-applies-to-private` ES2022 fixture).
+            // Check before installing.
+            if (!ctor.extensible) {
+                realm.pending_exception = try @import("intrinsics.zig").newTypeError(realm, "Cannot add private static field to non-extensible class");
+                return error.Propagated;
+            }
             const slot_name = try brandMangle(realm, template.private_prefix, brand_prefix, runtime_name);
             try ctor.private_properties.put(realm.allocator, slot_name, v);
         } else {

@@ -1976,6 +1976,13 @@ pub fn objectPreventExtensions(realm: *Realm, this_value: Value, args: []const V
             return arg;
         }
         obj.extensible = false;
+    } else if (heap_mod.valueAsFunction(arg)) |fn_obj| {
+        // §6.1.7 — function objects are ordinary objects, so
+        // preventExtensions applies. Needed for the
+        // `nonextensible-applies-to-private` (ES2022) static-private
+        // case: `Object.preventExtensions(Ctor)` followed by
+        // `static #x = …` must trip §7.3.32 PrivateFieldAdd step 1.
+        fn_obj.extensible = false;
     }
     return arg;
 }
@@ -1984,10 +1991,10 @@ pub fn objectIsExtensible(realm: *Realm, this_value: Value, args: []const Value)
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
     // §20.1.2.16 — when the receiver is not an Object, return
-    // `false`. Functions ARE objects (§6.1.7); they're always
-    // extensible (Cynic doesn't yet model `Object.preventExtensions`
-    // on a JSFunction receiver). Return `true` unconditionally.
-    if (heap_mod.valueAsFunction(arg) != null) return Value.true_;
+    // `false`. Functions ARE objects (§6.1.7) — return their
+    // `extensible` slot (default `true`, flipped by
+    // `Object.preventExtensions(fn)`).
+    if (heap_mod.valueAsFunction(arg)) |fn_obj| return if (fn_obj.extensible) Value.true_ else Value.false_;
     const obj = heap_mod.valueAsPlainObject(arg) orelse return Value.false_;
     // §10.5.3 Proxy [[IsExtensible]] — trap dispatch with the
     // invariant that the result must match the target's actual

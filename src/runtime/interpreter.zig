@@ -5019,8 +5019,30 @@ fn runFrames(
                 const home = f.home_object orelse return error.InvalidOpcode;
                 if (home.private_method_inits) |inits| {
                     if (heap_mod.valueAsPlainObject(f.this_value)) |inst| {
+                        var thrown_method: bool = false;
                         for (inits) |entry| {
                             if (entry.init_fn) |fn_obj| {
+                                // §7.3.32 PrivateFieldAdd step 1 (and the
+                                // §7.3.33 PrivateMethodOrAccessorAdd
+                                // counterpart) — installing a private
+                                // element on a non-extensible receiver
+                                // throws TypeError. Hit by the
+                                // `nonextensible-applies-to-private`
+                                // (ES2022) fixtures where a derived
+                                // ctor's `super(seal)` calls
+                                // `Object.preventExtensions(this)`
+                                // before instance elements install.
+                                if (!inst.extensible) {
+                                    const ex = try makeTypeError(realm, "Cannot install private element on non-extensible object");
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    thrown_method = true;
+                                    break;
+                                }
                                 switch (entry.accessor_kind) {
                                     .none => {
                                         inst.private_properties.put(allocator, entry.name, heap_mod.taggedFunction(fn_obj)) catch return error.OutOfMemory;
@@ -5040,6 +5062,7 @@ fn runFrames(
                                 }
                             }
                         }
+                        if (thrown_method) continue;
                     }
                 }
                 if (home.instance_field_inits) |inits| {
@@ -5062,6 +5085,21 @@ fn runFrames(
                         }
                         if (heap_mod.valueAsPlainObject(f.this_value)) |inst| {
                             if (entry.is_private) {
+                                // §7.3.32 PrivateFieldAdd step 1 —
+                                // the initializer may have just run
+                                // `Object.preventExtensions(this)`
+                                // (base-class `#g = (prevent(this), …)`),
+                                // so re-check before each put.
+                                if (!inst.extensible) {
+                                    const ex = try makeTypeError(realm, "Cannot add private field to non-extensible object");
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    break;
+                                }
                                 inst.private_properties.put(allocator, entry.name, v) catch return error.OutOfMemory;
                             } else {
                                 inst.set(allocator, entry.name, v) catch return error.OutOfMemory;
