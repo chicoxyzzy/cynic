@@ -668,12 +668,14 @@ fn asyncGeneratorResumeNext(
                 _ = gen.queue.orderedRemove(0);
                 gen.async_state = .suspended_await;
                 if (isSyncRejectedPromise(raw)) {
-                    // Yield of an already-rejected Promise:
-                    // §27.6.3.6 with Await rejecting. Closes
-                    // the gen and rejects the cap with the
-                    // promise's reason. (State stays
-                    // suspended_await — the microtask will move
-                    // it to completed.)
+                    // §27.6.3.6 with Await rejecting → the
+                    // throw propagates as an uncaught
+                    // exception inside the body, closing the
+                    // gen. Pre-close here so the drain's
+                    // follow-on iteration sees state ==
+                    // completed and serves remaining requests
+                    // with `done:true`.
+                    gen.state = .completed;
                     try realm.enqueueAsyncGenYield(
                         gen,
                         req.capability_promise,
@@ -2147,9 +2149,12 @@ pub fn resumeAsyncGeneratorOnSettle(
     const req = gen.queue.orderedRemove(0);
     switch (result) {
         .yielded => |v| {
-            gen.state = .suspended;
             gen.async_state = .suspended_await;
             if (isSyncRejectedPromise(v)) {
+                // Same yield-of-rejected close as the synchronous
+                // drain path — pre-close so the next drain step
+                // serves the buffered tail with done:true.
+                gen.state = .completed;
                 try realm.enqueueAsyncGenYield(
                     gen,
                     req.capability_promise,
@@ -2158,6 +2163,7 @@ pub fn resumeAsyncGeneratorOnSettle(
                     true,
                 );
             } else {
+                gen.state = .suspended;
                 try realm.enqueueAsyncGenYield(
                     gen,
                     req.capability_promise,
