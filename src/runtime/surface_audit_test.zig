@@ -152,9 +152,7 @@ const expect_array_prototype = [_][]const u8{
     "values",
     "with",
     "@@iterator",
-    // TODO(spec): Array.prototype[@@unscopables] (§22.1.3.32) not
-    // installed yet — needed for `with`-statement parity, but
-    // strict-only Cynic doesn't accept `with`, so low priority.
+    "@@unscopables",
 };
 
 // TODO(spec): String.prototype.length is the receiver's length on
