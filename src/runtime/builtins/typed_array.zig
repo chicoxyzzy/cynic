@@ -1368,8 +1368,14 @@ fn taSetFromArrayLike(
             .bigint64, .biguint64 => try toBigIntValue(realm, raw),
             else => try intrinsics.toNumber(realm, raw),
         };
-        const cur_tv = target.typed_view orelse return Value.undefined_;
-        const cur_buf = cur_tv.viewed.array_buffer orelse return Value.undefined_;
+        // §23.2.3.27.1 step 22 — the per-element loop continues
+        // even after a user `Get` accessor detaches the buffer or
+        // shrinks the RAB so the view becomes OOB.  Writes to a
+        // detached / OOB slot silently no-op (per
+        // IntegerIndexedElementSet's IsValidIntegerIndex gate),
+        // but ToNumber on the remaining source items still fires.
+        const cur_tv = target.typed_view orelse continue;
+        const cur_buf = cur_tv.viewed.array_buffer orelse continue;
         const slot = dst_base + k * elem_size;
         if (slot + elem_size > cur_buf.len) continue;
         writeTypedElementForView(cur_buf, cur_tv, slot, converted);
@@ -1951,7 +1957,11 @@ fn typedArrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) 
     if (len == 0) return Value.fromInt32(-1);
     const target = argOr(args, 0, Value.undefined_);
     var from: i64 = len - 1;
-    if (args.len > 1 and !args[1].isUndefined()) {
+    // §23.2.3.18 step 4 — "If fromIndex is present" means present
+    // as an argument; passing `undefined` explicitly still triggers
+    // the ToIntegerOrInfinity branch (which yields 0).  Only an
+    // omitted second arg falls back to `len - 1`.
+    if (args.len > 1) {
         // §23.2.3.18 step 5 — ToIntegerOrInfinity(fromIndex).
         // Use taResolveIndex which routes through `toNumber` so
         // user `valueOf` fires + throws propagate.
@@ -2863,6 +2873,19 @@ fn taCompareNumeric(a: Value, b: Value) i32 {
     if (std.math.isNan(bv)) return -1;
     if (av < bv) return -1;
     if (av > bv) return 1;
+    // §23.2.3.32 SortCompare — when av equals bv but they're
+    // not the same number, treat -0 as less than +0. The IEEE
+    // `==` collapses both to "equal"; check the sign bit to
+    // disambiguate. (Spec wording: "If x is -0𝔽 and y is +0𝔽,
+    // return -1. If x is +0𝔽 and y is -0𝔽, return 1.")
+    if (av == 0.0 and bv == 0.0) {
+        const a_bits: u64 = @bitCast(av);
+        const b_bits: u64 = @bitCast(bv);
+        const a_neg = (a_bits >> 63) == 1;
+        const b_neg = (b_bits >> 63) == 1;
+        if (a_neg and !b_neg) return -1;
+        if (!a_neg and b_neg) return 1;
+    }
     return 0;
 }
 

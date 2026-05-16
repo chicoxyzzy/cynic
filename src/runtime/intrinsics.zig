@@ -1502,38 +1502,26 @@ pub fn strictEqualsLite(a: Value, b: Value) bool {
     return false;
 }
 
+/// §7.2.11 SameValueZero — like StrictEquality except both NaNs
+/// are equal and +0 / -0 are equal (the distinguishing pair
+/// vs §7.2.10 SameValue).  Used by Array / TypedArray `includes`,
+/// Set / Map key lookup, and a handful of other spots.
 pub fn sameValueZero(a: Value, b: Value) bool {
-    // §7.2.11 SameValueZero — NaN compares equal to NaN (unlike
-    // strict equality), and +0/-0 are treated as equal. Used by
-    // `Array.prototype.includes`, `Map`/`Set` keys, etc.
-    if (a.isDouble() and b.isDouble()) {
-        const da = a.asDouble();
-        const db = b.asDouble();
+    // Number-vs-Number rule: collapse +0 and -0; equate NaN
+    // with NaN. Mixed int / double routes through the float
+    // comparison so the IEEE rule applies uniformly. Non-numeric
+    // cases fall through to strictEqualsLite, which already handles
+    // strings / BigInts / by-identity equality (and was hardened in
+    // commit 6517db4 so NaN never equals itself there).
+    const a_d: ?f64 = if (a.isInt32()) @floatFromInt(a.asInt32()) else if (a.isDouble()) a.asDouble() else null;
+    const b_d: ?f64 = if (b.isInt32()) @floatFromInt(b.asInt32()) else if (b.isDouble()) b.asDouble() else null;
+    if (a_d != null and b_d != null) {
+        const da = a_d.?;
+        const db = b_d.?;
         if (std.math.isNan(da) and std.math.isNan(db)) return true;
         return da == db;
     }
-    if (a.isInt32() and b.isDouble()) {
-        const db = b.asDouble();
-        if (std.math.isNan(db)) return false;
-        return @as(f64, @floatFromInt(a.asInt32())) == db;
-    }
-    if (a.isDouble() and b.isInt32()) {
-        const da = a.asDouble();
-        if (std.math.isNan(da)) return false;
-        return da == @as(f64, @floatFromInt(b.asInt32()));
-    }
-    if (a.bits == b.bits) return true;
-    if (a.isString() and b.isString()) {
-        const sa: *JSString = @ptrCast(@alignCast(a.asString()));
-        const sb: *JSString = @ptrCast(@alignCast(b.asString()));
-        return std.mem.eql(u8, sa.bytes, sb.bytes);
-    }
-    if (heap_mod.valueAsBigInt(a)) |ba| {
-        if (heap_mod.valueAsBigInt(b)) |bb| {
-            return ba.value == bb.value;
-        }
-    }
-    return false;
+    return strictEqualsLite(a, b);
 }
 
 /// §7.2.10 SameValue — like SameValueZero but distinguishes
