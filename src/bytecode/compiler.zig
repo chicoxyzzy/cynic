@@ -3313,7 +3313,26 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
                 },
             }
         },
-        .expression => |e| switch (e) {
+        .expression => |e| {
+            // §14.7.5.1 / §13.15.3 — when the LHS is a
+            // ParenthesizedExpression and its inner refines to a
+            // valid AssignmentTarget (IdentifierReference or
+            // MemberExpression), the spec re-parses it under the
+            // refined grammar. Peel transparent paren wrappers so
+            // `for ((async) of …)` and `for ((x.y) of …)` reach the
+            // same code paths as their unparenthesised forms. Note
+            // we do NOT peel parens around array / object literals
+            // — `([a]) ` does not refine to AssignmentPattern per
+            // §13.15.5.1.
+            var lhs = e;
+            while (lhs == .parenthesized) {
+                const inner = lhs.parenthesized.expression.*;
+                switch (inner) {
+                    .identifier_reference, .member, .parenthesized => lhs = inner,
+                    else => break,
+                }
+            }
+            switch (lhs) {
             .identifier_reference => |ir| {
                 bind_name = self.source[ir.span.start..ir.span.end];
                 bind_span = ir.span;
@@ -3340,8 +3359,8 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
             // see the `of`); we route them through
             // `compileAssignmentPattern`.
             .array_literal, .object_literal => {
-                assignment_pattern_target = e;
-                bind_span = switch (e) {
+                assignment_pattern_target = lhs;
+                bind_span = switch (lhs) {
                     .array_literal => |al| al.span,
                     .object_literal => |ol| ol.span,
                     else => unreachable,
@@ -3349,6 +3368,7 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
                 bind_target_kind = .assignment_pattern;
             },
             else => return error.UnsupportedStatement,
+            }
         },
     }
 
