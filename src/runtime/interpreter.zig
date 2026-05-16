@@ -6971,6 +6971,40 @@ fn runFrames(
                     }
                 }
             },
+            .def_property => {
+                // §7.3.7 CreateDataPropertyOrThrow — used by Array /
+                // Object literal init. Bypasses [[Set]] (so inherited
+                // accessors on `Array.prototype.0` / `Object.prototype.x`
+                // don't fire) and lands the value as an own data slot
+                // with `{w:T,e:T,c:T}`. The receiver is always a fresh
+                // object we just made via `make_array` / `make_object`,
+                // so it's extensible and has no preexisting own slot at
+                // this key — the throws below are defensive.
+                const k = readU16(code, ip);
+                const r_obj = code[ip + 2];
+                ip += 3;
+                if (k >= local_chunk.constants.len) return error.InvalidOpcode;
+                const key_v = local_chunk.constants[k];
+                if (!key_v.isString()) return error.InvalidOpcode;
+                const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+                const recv = registers[r_obj];
+                const obj = heap_mod.valueAsPlainObject(recv) orelse return error.InvalidOpcode;
+                const had_own = obj.hasOwn(key_s.bytes);
+                if (!had_own and !obj.extensible) {
+                    const ex = try makeTypeError(realm, "Cannot define property on non-extensible object");
+                    return .{ .thrown = ex };
+                }
+                if (had_own) {
+                    const cur = obj.flagsFor(key_s.bytes);
+                    if (!cur.configurable) {
+                        const ex = try makeTypeError(realm, "Cannot redefine non-configurable property");
+                        return .{ .thrown = ex };
+                    }
+                    _ = obj.properties.swapRemove(key_s.bytes);
+                    _ = obj.property_flags.swapRemove(key_s.bytes);
+                }
+                obj.setWithFlags(allocator, key_s.bytes, acc, object_mod.PropertyFlags.default) catch return error.OutOfMemory;
+            },
             .lda_computed => {
                 const r_obj = code[ip];
                 ip += 1;
@@ -7351,6 +7385,45 @@ fn runFrames(
                         .uncaught => |ex| return .{ .thrown = ex },
                     }
                 }
+            },
+            .def_computed => {
+                // §7.3.7 CreateDataPropertyOrThrow with a computed
+                // key — used by object literals with `[expr]: value`
+                // shorthand. The key in `r_key` has already been
+                // run through ToPropertyKey by the compiler.
+                const r_obj = code[ip];
+                const r_key = code[ip + 1];
+                ip += 2;
+                const recv = registers[r_obj];
+                const key_v = registers[r_key];
+                // Need a stable, GC-anchored key slice. For a String
+                // key, use the JSString bytes directly and anchor on
+                // the receiver via `key_anchors`. For other primitives,
+                // intern a JSString first.
+                const obj = heap_mod.valueAsPlainObject(recv) orelse return error.InvalidOpcode;
+                const key_js: *JSString = blk: {
+                    if (key_v.isString()) break :blk @ptrCast(@alignCast(key_v.asString()));
+                    var key_buf: [64]u8 = undefined;
+                    const tmp = computedKeyToString(key_v, &key_buf);
+                    break :blk realm.heap.allocateString(tmp) catch return error.OutOfMemory;
+                };
+                const key_slice = key_js.bytes;
+                const had_own = obj.hasOwn(key_slice);
+                if (!had_own and !obj.extensible) {
+                    const ex = try makeTypeError(realm, "Cannot define property on non-extensible object");
+                    return .{ .thrown = ex };
+                }
+                if (had_own) {
+                    const cur = obj.flagsFor(key_slice);
+                    if (!cur.configurable) {
+                        const ex = try makeTypeError(realm, "Cannot redefine non-configurable property");
+                        return .{ .thrown = ex };
+                    }
+                    _ = obj.properties.swapRemove(key_slice);
+                    _ = obj.property_flags.swapRemove(key_slice);
+                }
+                obj.setWithFlags(allocator, key_slice, acc, object_mod.PropertyFlags.default) catch return error.OutOfMemory;
+                obj.key_anchors.append(allocator, key_js) catch return error.OutOfMemory;
             },
             .del_named_property => {
                 const k = readU16(code, ip);

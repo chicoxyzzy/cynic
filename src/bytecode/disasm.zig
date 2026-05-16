@@ -138,7 +138,7 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
                 const k = readU16(chunk.code, i + 1);
                 try buf.print(allocator, " k{d}", .{k});
             },
-            .sta_property => {
+            .sta_property, .def_property => {
                 const k = readU16(chunk.code, i + 1);
                 const r = chunk.code[i + 3];
                 try buf.print(allocator, " k{d} r{d}", .{ k, r });
@@ -147,7 +147,7 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
                 const r = chunk.code[i + 1];
                 try buf.print(allocator, " r{d}", .{r});
             },
-            .sta_computed => {
+            .sta_computed, .def_computed => {
                 const r_obj = chunk.code[i + 1];
                 const r_key = chunk.code[i + 2];
                 try buf.print(allocator, " r{d}[r{d}]", .{ r_obj, r_key });

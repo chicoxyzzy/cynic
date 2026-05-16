@@ -1693,7 +1693,11 @@ pub const Compiler = struct {
                     const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch unreachable;
                     const k = try self.internString(idx_slice);
                     try self.compileExpression(&elem);
-                    try self.builder.emitOp(.sta_property, lit.span);
+                    // §13.2.4.1 ArrayAccumulation — element init is
+                    // CreateDataPropertyOrThrow, NOT [[Set]]. An
+                    // inherited accessor on `Array.prototype.<idx>`
+                    // must not fire.
+                    try self.builder.emitOp(.def_property, lit.span);
                     try self.builder.emitU16(k);
                     try self.builder.emitU8(r_arr);
                 }
@@ -1748,10 +1752,12 @@ pub const Compiler = struct {
                         const r_idx = try self.reserveTemp();
                         try self.builder.emitOp(.star, lit.span);
                         try self.builder.emitU8(r_idx);
-                        // r_arr[r_idx] = r_val
+                        // r_arr[r_idx] = r_val — §13.2.4.1 element
+                        // init is CreateDataPropertyOrThrow (own data
+                        // slot), not [[Set]] with proto walk.
                         try self.builder.emitOp(.ldar, lit.span);
                         try self.builder.emitU8(r_val);
-                        try self.builder.emitOp(.sta_computed, lit.span);
+                        try self.builder.emitOp(.def_computed, lit.span);
                         try self.builder.emitU8(r_arr);
                         try self.builder.emitU8(r_idx);
                         // length += 1
@@ -1828,7 +1834,11 @@ pub const Compiler = struct {
                         try self.builder.emitU8(r_key);
                         try self.builder.emitU8(0); // no prefix
                     }
-                    try self.builder.emitOp(.sta_computed, p.span);
+                    // §13.2.5.5 step 8.e — PropertyDefinitionEvaluation
+                    // for a property assignment is CreateDataPropertyOrThrow,
+                    // NOT [[Set]]. Inherited accessors on
+                    // `Object.prototype.<k>` must not fire.
+                    try self.builder.emitOp(.def_computed, p.span);
                     try self.builder.emitU8(r_obj);
                     try self.builder.emitU8(r_key);
                     continue;
@@ -1857,7 +1867,10 @@ pub const Compiler = struct {
                 // §13.2.5.5 step 7 — anonymous function-likes
                 // adopt the property key as their `.name`.
                 try self.compileNamedValue(&p.value, key_slice);
-                try self.builder.emitOp(.sta_property, p.span);
+                // §13.2.5.5 step 8.e — CreateDataPropertyOrThrow,
+                // NOT [[Set]]; an inherited accessor on
+                // `Object.prototype.<k>` must not fire.
+                try self.builder.emitOp(.def_property, p.span);
                 try self.builder.emitU16(k);
                 try self.builder.emitU8(r_obj);
             },
@@ -1907,7 +1920,9 @@ pub const Compiler = struct {
                     try self.builder.emitU8(prefix_kind);
                     switch (m.kind) {
                         .method => {
-                            try self.builder.emitOp(.sta_computed, m.span);
+                            // §13.2.5.5 method definition is also
+                            // CreateDataPropertyOrThrow.
+                            try self.builder.emitOp(.def_computed, m.span);
                             try self.builder.emitU8(r_obj);
                             try self.builder.emitU8(r_key);
                         },
@@ -1969,7 +1984,9 @@ pub const Compiler = struct {
                 try self.builder.emitU8(r_obj);
                 switch (m.kind) {
                     .method => {
-                        try self.builder.emitOp(.sta_property, m.span);
+                        // §13.2.5.5 method definition is also
+                        // CreateDataPropertyOrThrow.
+                        try self.builder.emitOp(.def_property, m.span);
                         try self.builder.emitU16(k);
                         try self.builder.emitU8(r_obj);
                     },

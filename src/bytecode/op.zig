@@ -522,6 +522,17 @@ pub const Op = enum(u8) {
     /// the object held in register `r_obj`. The compiler arranges
     /// for `obj.x = v` to leave `obj` in `r_obj` and `v` in acc.
     sta_property,
+    /// `[op] [k:u16] [r_obj:u8]` — §7.3.7 CreateDataPropertyOrThrow.
+    /// Define an own data property on `r_obj` with the key `JSString`
+    /// at `Chunk.constants[k]` and the value in `acc`, all attributes
+    /// `{writable, enumerable, configurable} = true`. Does NOT walk
+    /// the prototype chain (so inherited accessors don't fire) and
+    /// does NOT respect `writable: false` on an existing slot. Throws
+    /// TypeError if the receiver is non-extensible and the key isn't
+    /// already own, or if an existing own slot is non-configurable.
+    /// Drives ArrayLiteral element init (§13.2.4) and ObjectLiteral
+    /// PropertyDefinitionEvaluation (§13.2.5).
+    def_property,
     /// `[op] [r_obj:u8]` — `acc = obj[acc]` (computed property
     /// read). Coerces the key to a string at runtime; non-string
     /// keys go through ToPropertyKey (§7.1.19). Walks the
@@ -531,6 +542,12 @@ pub const Op = enum(u8) {
     /// property write). Stores acc; the result of the expression
     /// is the assigned value (still in acc).
     sta_computed,
+    /// `[op] [r_obj:u8] [r_key:u8]` — §7.3.7 CreateDataPropertyOrThrow
+    /// with a computed key. The key is in `r_key` (already
+    /// ToPropertyKey'd by the emitting compiler), the value in `acc`.
+    /// Same semantics as `def_property` (own-data-prop, no proto
+    /// walk). Drives ObjectLiteral `[expr]: value` definitions.
+    def_computed,
     /// `[op] [k:u16] [r_obj:u8]` — `delete obj.x` (named delete).
     /// §13.5.1.2 — removes the own property whose key is the
     /// `JSString` at `Chunk.constants[k]` from the object in
@@ -706,11 +723,11 @@ pub const Op = enum(u8) {
             .lda_env,
             .sta_env,
             => 2, // u8 + u8
-            .sta_property, .sta_private, .super_set => 3, // k:u16 + r_obj:u8
+            .sta_property, .sta_private, .super_set, .def_property => 3, // k:u16 + r_obj:u8
             .def_accessor => 4, // k:u16 + r_obj:u8 + is_setter:u8
             .def_computed_accessor => 3, // r_obj:u8 + r_key:u8 + is_setter:u8
             .lda_computed => 1, // r_obj:u8 (key in acc)
-            .sta_computed, .super_set_computed => 2, // r_obj:u8 + r_key:u8
+            .sta_computed, .super_set_computed, .def_computed => 2, // r_obj:u8 + r_key:u8
             .del_named_property => 3, // k:u16 + r_obj:u8
             .del_computed_property => 2, // r_obj:u8 + r_key:u8
             .call_method => 3, // r_recv:u8 + r_callee:u8 + argc:u8
@@ -812,8 +829,10 @@ pub const Op = enum(u8) {
             .object_spread => "ObjectSpread",
             .lda_property => "LdaProperty",
             .sta_property => "StaProperty",
+            .def_property => "DefProperty",
             .lda_computed => "LdaComputed",
             .sta_computed => "StaComputed",
+            .def_computed => "DefComputed",
             .del_named_property => "DelNamedProperty",
             .del_computed_property => "DelComputedProperty",
             .lda_global => "LdaGlobal",
