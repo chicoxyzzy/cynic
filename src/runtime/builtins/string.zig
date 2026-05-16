@@ -727,46 +727,69 @@ fn clampPos(p: i64, len: usize) usize {
     return @min(lp, len);
 }
 
+/// §22.1.3.7 String.prototype.includes(searchString, position).
+/// `position` is a UTF-16 code-unit index; the search is a
+/// code-unit subsequence match (which on identical WTF-8 bytes
+/// reduces to a byte-level search after converting `position`
+/// from code units to bytes).
 fn stringIncludes(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const needle = try coerceSearchString(realm, argOr(args, 0, Value.undefined_), "includes");
     const pos_v = argOr(args, 1, Value.undefined_);
-    var start: usize = 0;
+    const cu_len = utf16.lengthInCodeUnits(s.bytes);
+    var start_cu: usize = 0;
     if (!pos_v.isUndefined()) {
         const n = try intrinsics.toNumber(realm, pos_v);
-        start = clampPos(intrinsics.toInt(n), s.bytes.len);
+        start_cu = clampPos(intrinsics.toInt(n), cu_len);
     }
-    if (start >= s.bytes.len) {
+    if (start_cu >= cu_len) {
         return Value.fromBool(needle.bytes.len == 0);
     }
-    return Value.fromBool(std.mem.indexOf(u8, s.bytes[start..], needle.bytes) != null);
+    const start_byte = utf16.byteIndexForCodeUnit(s.bytes, start_cu) orelse s.bytes.len;
+    return Value.fromBool(std.mem.indexOf(u8, s.bytes[start_byte..], needle.bytes) != null);
 }
 
+/// §22.1.3.21 String.prototype.startsWith(searchString, position).
+/// `position` is a UTF-16 code-unit index — the test is whether
+/// the code units of the receiver starting at `position` are
+/// identical to the code units of `searchString`. Reduces to a
+/// byte prefix-test after converting `position` from code units
+/// to bytes.
 fn stringStartsWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const needle = try coerceSearchString(realm, argOr(args, 0, Value.undefined_), "startsWith");
     const pos_v = argOr(args, 1, Value.undefined_);
-    var start: usize = 0;
+    const cu_len = utf16.lengthInCodeUnits(s.bytes);
+    var start_cu: usize = 0;
     if (!pos_v.isUndefined()) {
         const n = try intrinsics.toNumber(realm, pos_v);
-        start = clampPos(intrinsics.toInt(n), s.bytes.len);
+        start_cu = clampPos(intrinsics.toInt(n), cu_len);
     }
-    if (start + needle.bytes.len > s.bytes.len) return Value.false_;
-    return Value.fromBool(std.mem.startsWith(u8, s.bytes[start..], needle.bytes));
+    const start_byte = utf16.byteIndexForCodeUnit(s.bytes, start_cu) orelse s.bytes.len;
+    if (start_byte + needle.bytes.len > s.bytes.len) return Value.false_;
+    return Value.fromBool(std.mem.startsWith(u8, s.bytes[start_byte..], needle.bytes));
 }
 
+/// §22.1.3.6 String.prototype.endsWith(searchString, endPosition).
+/// `endPosition` is a UTF-16 code-unit index; the test is whether
+/// the code units of the receiver ending at `endPosition` are
+/// identical to the code units of `searchString`. Reduces to a
+/// byte suffix-of-prefix test after converting `endPosition` from
+/// code units to bytes.
 fn stringEndsWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const needle = try coerceSearchString(realm, argOr(args, 0, Value.undefined_), "endsWith");
     const end_pos_v = argOr(args, 1, Value.undefined_);
-    var end: usize = s.bytes.len;
+    const cu_len = utf16.lengthInCodeUnits(s.bytes);
+    var end_cu: usize = cu_len;
     if (!end_pos_v.isUndefined()) {
         const n = try intrinsics.toNumber(realm, end_pos_v);
-        end = clampPos(intrinsics.toInt(n), s.bytes.len);
+        end_cu = clampPos(intrinsics.toInt(n), cu_len);
     }
-    if (needle.bytes.len > end) return Value.false_;
-    const start = end - needle.bytes.len;
-    return Value.fromBool(std.mem.eql(u8, s.bytes[start..end], needle.bytes));
+    const end_byte = utf16.byteIndexForCodeUnit(s.bytes, end_cu) orelse s.bytes.len;
+    if (needle.bytes.len > end_byte) return Value.false_;
+    const start = end_byte - needle.bytes.len;
+    return Value.fromBool(std.mem.eql(u8, s.bytes[start..end_byte], needle.bytes));
 }
 
 /// Allocate a JSString from a `utf16.Slice` — the byte slice

@@ -4431,3 +4431,76 @@ test "String.prototype.lastIndexOf: lone surrogate haystack" {
     // code-unit index 2.
     try expectScriptIntWithBuiltins("\"a\\uD83Dc\".lastIndexOf(\"c\");", 2);
 }
+
+// ── §22.1.3.7 includes / §22.1.3.21 startsWith / §22.1.3.6 endsWith ────────
+
+test "String.prototype.startsWith: ASCII" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    const v = switch (try evaluateScriptResult(&realm, "\"abc\".startsWith(\"ab\");")) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isBool() and v.asBool());
+}
+
+test "String.prototype.startsWith: position is code-unit indexed (supplementary)" {
+    // "a\u{1F600}c".startsWith("c", 3) — code-unit index 3 is
+    // the byte offset 5 (post-4-byte UTF-8). A byte-counting
+    // implementation that converted 3 → byte 3 would land
+    // mid-supplementary and return false.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    const v = switch (try evaluateScriptResult(&realm, "\"a\\u{1F600}c\".startsWith(\"c\", 3);")) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isBool() and v.asBool());
+}
+
+test "String.prototype.endsWith: ASCII" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    const v = switch (try evaluateScriptResult(&realm, "\"abc\".endsWith(\"bc\");")) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isBool() and v.asBool());
+}
+
+test "String.prototype.endsWith: endPosition is code-unit indexed" {
+    // "a\u{1F600}c".endsWith("\u{1F600}", 3) — the substring of
+    // length 2 ending at unit 3 is exactly the supplementary pair.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    const v = switch (try evaluateScriptResult(&realm, "\"a\\u{1F600}c\".endsWith(\"\\u{1F600}\", 3);")) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isBool() and v.asBool());
+}
+
+test "String.prototype.includes: position is code-unit indexed" {
+    // "a\u{1F600}c".includes("c", 3) — should find c at code-unit
+    // index 3. A byte-counting impl would translate pos=3 → byte=3,
+    // which is mid-4-byte sequence; std.mem.indexOf would still
+    // find c (by lucky offset) but the test for pos=4 catches the
+    // off-by-one.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    const v = switch (try evaluateScriptResult(&realm, "\"a\\u{1F600}c\".includes(\"c\", 3);")) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isBool() and v.asBool());
+    const v2 = switch (try evaluateScriptResult(&realm, "\"a\\u{1F600}c\".includes(\"c\", 4);")) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v2.isBool() and !v2.asBool());
+}
