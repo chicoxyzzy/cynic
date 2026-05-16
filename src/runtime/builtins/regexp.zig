@@ -191,12 +191,421 @@ fn regexpProtoSearch(realm: *Realm, this_value: Value, args: []const Value) Nati
     return string_mod.stringSearch(realm, argOr(args, 0, Value.undefined_), &inner);
 }
 
-/// §22.2.6.13 RegExp.prototype [ @@split ] ( string, limit ).
+/// §22.2.5.13 RegExp.prototype [ @@split ] ( string, limit ). A
+/// step-by-step traversal of the spec algorithm so each observable
+/// side effect (`Get(rx, "constructor")`, `Get(rx, "flags")`,
+/// `Construct(C, «rx, newFlags»)`, the per-iteration
+/// `Set(splitter, "lastIndex", q)` / `Get(splitter, "lastIndex")`,
+/// the result-array capture-property reads) lines up with the
+/// fixtures under `built-ins/RegExp/prototype/Symbol.split/`.
+///
+/// We can't just delegate to `string.zig:stringSplit` (the old
+/// implementation): that path hard-uses `%RegExp%` to build the
+/// splitter and shortcuts the per-step `Set` / `Get` calls, so the
+/// species-ctor and abrupt-completion fixtures all see fast-path
+/// behaviour rather than spec behaviour.
 fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (heap_mod.valueAsPlainObject(this_value) == null) return throwTypeError(realm, "RegExp.prototype[Symbol.split] called on non-object");
-    const string_mod = @import("string.zig");
-    const inner = [_]Value{ this_value, argOr(args, 1, Value.undefined_) };
-    return string_mod.stringSplit(realm, argOr(args, 0, Value.undefined_), &inner);
+    // §22.2.5.13 step 1 — `Let rx be the this value`. step 2 —
+    // `If rx is not an Object, throw a TypeError`.
+    const rx = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.split] called on non-object");
+
+    // step 3 — `Let S be ? ToString(string)`.
+    const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
+
+    // step 4 — `Let C be ? SpeciesConstructor(rx, %RegExp%)`.
+    const builtin_regexp = blk: {
+        const ctor_v = realm.globals.get("RegExp") orelse return throwTypeError(realm, "RegExp.prototype[Symbol.split]: %RegExp% missing");
+        break :blk heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.split]: %RegExp% is not callable");
+    };
+    const c_fn = try speciesConstructor(realm, rx, builtin_regexp);
+
+    // steps 5-6 — `Let flags be ? ToString(? Get(rx, "flags"))`.
+    const flags_v = try intrinsics.getPropertyChain(realm, rx, "flags");
+    const flags_s = try intrinsics.stringifyArg(realm, flags_v);
+
+    // step 7 — `If flags contains "u" or flags contains "v", let
+    // unicodeMatching be true; else false`.
+    const unicode_matching = std.mem.indexOfScalar(u8, flags_s.bytes, 'u') != null or
+        std.mem.indexOfScalar(u8, flags_s.bytes, 'v') != null;
+
+    // steps 8-9 — `If flags contains "y", let newFlags be flags;
+    // else newFlags be the string-concatenation of flags and "y"`.
+    const has_y = std.mem.indexOfScalar(u8, flags_s.bytes, 'y') != null;
+    const new_flags_js: *JSString = if (has_y) flags_s else nf: {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(realm.allocator);
+        buf.appendSlice(realm.allocator, flags_s.bytes) catch return error.OutOfMemory;
+        buf.append(realm.allocator, 'y') catch return error.OutOfMemory;
+        break :nf realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
+    };
+
+    // step 10 — `Let splitter be ? Construct(C, « rx, newFlags »)`.
+    const splitter_args = [_]Value{ heap_mod.taggedObject(rx), Value.fromString(new_flags_js) };
+    const interp = @import("../interpreter.zig");
+    const ctor_v = heap_mod.taggedFunction(c_fn);
+    const ctor_outcome = interp.constructValue(realm.allocator, realm, ctor_v, &splitter_args, ctor_v) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const splitter_v: Value = switch (ctor_outcome) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+    // step 10 implies the result of Construct must be an Object —
+    // §10.5.14 [[Construct]] already enforces it for built-in
+    // constructors, but a user-supplied species constructor that
+    // returns a primitive would land here. Be defensive.
+    const splitter = heap_mod.valueAsPlainObject(splitter_v) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.split]: species constructor returned non-Object");
+
+    // step 11 — `Let A be ! ArrayCreate(0)`. Allocate an array-
+    // exotic JSObject so `Array.isArray(result)` is true.
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    out.prototype = realm.intrinsics.array_prototype;
+    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+
+    // step 12 — `Let lengthA be 0`.
+    var length_a: i32 = 0;
+
+    // step 13 — `If limit is undefined, let lim be 2^32 - 1; else
+    // lim be ! ToUint32(limit)`.
+    const limit_v = argOr(args, 1, Value.undefined_);
+    const lim: u32 = if (limit_v.isUndefined())
+        std.math.maxInt(u32)
+    else lim: {
+        const num_v = try intrinsics.toNumber(realm, limit_v);
+        break :lim arithToUint32(num_v);
+    };
+
+    // step 14 — `If lim is 0, return A`.
+    if (lim == 0) {
+        intrinsics.setLength(realm, out, 0) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(out);
+    }
+
+    // step 15 — `Let size be the length of S`. ECMA-262 indices are
+    // UTF-16 code units. Cynic stores WTF-8; `utf16.lengthInCodeUnits`
+    // converts.
+    const utf16 = @import("../utf16.zig");
+    const size_usize = utf16.lengthInCodeUnits(s.bytes);
+    const size: i64 = @intCast(size_usize);
+
+    // step 16 — `If size = 0, then
+    //   a. Let z be ? RegExpExec(splitter, S).
+    //   b. If z is not null, return A.
+    //   c. Perform ! CreateDataPropertyOrThrow(A, "0", S).
+    //   d. Return A.`.
+    if (size == 0) {
+        const z = try regExpExecGeneric(realm, splitter, s);
+        if (!z.isNull()) {
+            intrinsics.setLength(realm, out, 0) catch return error.OutOfMemory;
+            return heap_mod.taggedObject(out);
+        }
+        out.set(realm.allocator, "0", Value.fromString(s)) catch return error.OutOfMemory;
+        intrinsics.setLength(realm, out, 1) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(out);
+    }
+
+    // step 17 — `Let p be 0`. step 18 — `Let q be p`. Both indices
+    // are in UTF-16 code units.
+    var p: i64 = 0;
+    var q: i64 = 0;
+
+    // step 19 — `Repeat, while q < size`.
+    var ibuf: [24]u8 = undefined;
+    while (q < size) {
+        // step 19.a — `Perform ? Set(splitter, "lastIndex", q, true)`.
+        try setPropertyChainOrThrow(realm, splitter, "lastIndex", Value.fromInt32(@intCast(q)));
+        // step 19.b-c — `Let z be ? RegExpExec(splitter, S)`.
+        const z = try regExpExecGeneric(realm, splitter, s);
+        if (z.isNull()) {
+            // step 19.d — `If z is null, set q to
+            // AdvanceStringIndex(S, q, unicodeMatching)`.
+            q = advanceStringIndex(s.bytes, q, unicode_matching);
+            continue;
+        }
+        const z_obj = heap_mod.valueAsPlainObject(z) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.split]: RegExpExec returned non-Object");
+        // step 19.e.i — `Let e be ? ToLength(? Get(splitter,
+        // "lastIndex"))`. Then `e = min(e, size)`.
+        const li_v = try intrinsics.getPropertyChain(realm, splitter, "lastIndex");
+        const e_raw = try intrinsics.toLengthValue(realm, li_v);
+        const e: i64 = @min(e_raw, size);
+        // step 19.e.iii — `If e = p, set q to
+        // AdvanceStringIndex(S, q, unicodeMatching)`.
+        if (e == p) {
+            q = advanceStringIndex(s.bytes, q, unicode_matching);
+            continue;
+        }
+        // step 19.e.iv — `Else,
+        //   1. Let T be the substring of S from p to q.`.
+        // Substring is in code-unit space. Convert UTF-16 indices
+        // to byte offsets through the WTF-8 buffer.
+        const t_slice = utf16.sliceCodeUnits(s.bytes, @intCast(p), @intCast(q));
+        const t_str = try jsStringFromUtf16Slice(realm, t_slice);
+        //   2. Perform ! CreateDataPropertyOrThrow(A, ToString(lengthA), T).
+        var name_slice = std.fmt.bufPrint(&ibuf, "{d}", .{length_a}) catch unreachable;
+        const t_key = realm.heap.allocateString(name_slice) catch return error.OutOfMemory;
+        out.set(realm.allocator, t_key.bytes, Value.fromString(t_str)) catch return error.OutOfMemory;
+        //   3. Set lengthA to lengthA + 1.
+        length_a += 1;
+        //   4. If lengthA = lim, return A.
+        if (@as(u32, @intCast(length_a)) == lim) {
+            intrinsics.setLength(realm, out, length_a) catch return error.OutOfMemory;
+            return heap_mod.taggedObject(out);
+        }
+        //   5. Set p to e.
+        p = e;
+        //   6. Let numberOfCaptures be ? LengthOfArrayLike(z) − 1.
+        //      (LengthOfArrayLike: ToLength(? Get(z, "length"))).
+        const len_v = try intrinsics.getPropertyChain(realm, z_obj, "length");
+        const len_raw = try intrinsics.toLengthValue(realm, len_v);
+        const ncap: i64 = if (len_raw > 0) len_raw - 1 else 0;
+        //   8. Let i be 1.
+        var i: i64 = 1;
+        //   9. Repeat, while i ≤ numberOfCaptures.
+        while (i <= ncap) : (i += 1) {
+            //  9.a — Let nextCapture be ? Get(z, ! ToString(i)).
+            var cap_key_buf: [24]u8 = undefined;
+            const cap_key = std.fmt.bufPrint(&cap_key_buf, "{d}", .{i}) catch unreachable;
+            const next_capture = try intrinsics.getPropertyChain(realm, z_obj, cap_key);
+            //  9.c — Perform ! CreateDataPropertyOrThrow(A,
+            //         ToString(lengthA), nextCapture).
+            name_slice = std.fmt.bufPrint(&ibuf, "{d}", .{length_a}) catch unreachable;
+            const cap_idx_key = realm.heap.allocateString(name_slice) catch return error.OutOfMemory;
+            out.set(realm.allocator, cap_idx_key.bytes, next_capture) catch return error.OutOfMemory;
+            length_a += 1;
+            //  9.e — If lengthA = lim, return A.
+            if (@as(u32, @intCast(length_a)) == lim) {
+                intrinsics.setLength(realm, out, length_a) catch return error.OutOfMemory;
+                return heap_mod.taggedObject(out);
+            }
+        }
+        // step 19.e.iv.7 — `Set q to p`.
+        q = p;
+    }
+
+    // step 20 — `Let T be the substring of S from p to size`.
+    const tail_slice = utf16.sliceCodeUnits(s.bytes, @intCast(p), size_usize);
+    const tail_str = try jsStringFromUtf16Slice(realm, tail_slice);
+    // step 21 — `Perform ! CreateDataPropertyOrThrow(A,
+    // ToString(lengthA), T)`.
+    const tail_key_slice = std.fmt.bufPrint(&ibuf, "{d}", .{length_a}) catch unreachable;
+    const tail_key = realm.heap.allocateString(tail_key_slice) catch return error.OutOfMemory;
+    out.set(realm.allocator, tail_key.bytes, Value.fromString(tail_str)) catch return error.OutOfMemory;
+    length_a += 1;
+    intrinsics.setLength(realm, out, length_a) catch return error.OutOfMemory;
+    // step 22 — `Return A`.
+    return heap_mod.taggedObject(out);
+}
+
+/// §7.3.22 SpeciesConstructor ( O, defaultConstructor ).
+///   1. Let C be ? Get(O, "constructor").
+///   2. If C is undefined, return defaultConstructor.
+///   3. If C is not an Object, throw a TypeError.
+///   4. Let S be ? Get(C, @@species).
+///   5. If S is undefined or null, return defaultConstructor.
+///   6. If IsConstructor(S) is true, return S.
+///   7. Throw a TypeError.
+fn speciesConstructor(realm: *Realm, source: *JSObject, default_ctor: *JSFunction) NativeError!*JSFunction {
+    const ctor_v = try intrinsics.getPropertyChain(realm, source, "constructor");
+    if (ctor_v.isUndefined()) return default_ctor;
+    // step 3 — non-Object → TypeError. A function value is an
+    // Object per §7.2.5; that's the typical RegExp.constructor case.
+    var ctor_fn: ?*JSFunction = null;
+    var ctor_obj: ?*JSObject = null;
+    if (heap_mod.valueAsFunction(ctor_v)) |f| {
+        ctor_fn = f;
+    } else if (heap_mod.valueAsPlainObject(ctor_v)) |o| {
+        ctor_obj = o;
+    } else {
+        return throwTypeError(realm, "constructor is not an Object");
+    }
+    // step 4 — `Get(C, @@species)`. For a function-valued ctor,
+    // walk function-side properties; for a plain-object ctor, walk
+    // the property chain.
+    const species_v: Value = if (ctor_fn) |f| blk: {
+        // Function objects store own properties on the JSFunction —
+        // surface `@@species` via its `.get` (which doesn't fire
+        // accessors). For accessor support route through a getter
+        // walk on the function's accessors table.
+        if (f.accessors.get("@@species")) |acc| {
+            if (acc.getter) |getter| {
+                const interp = @import("../interpreter.zig");
+                const outcome = interp.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(f), &.{}) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                break :blk switch (outcome) {
+                    .value, .yielded => |vv| vv,
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                };
+            }
+            break :blk Value.undefined_;
+        }
+        break :blk f.get("@@species");
+    } else blk: {
+        break :blk try intrinsics.getPropertyChain(realm, ctor_obj.?, "@@species");
+    };
+    // step 5 — undefined / null → default.
+    if (species_v.isUndefined() or species_v.isNull()) return default_ctor;
+    // step 6 — IsConstructor.
+    const species_fn = heap_mod.valueAsFunction(species_v) orelse return throwTypeError(realm, "Symbol.species value is not a constructor");
+    if (!species_fn.has_construct or species_fn.is_arrow) return throwTypeError(realm, "Symbol.species value is not a constructor");
+    return species_fn;
+}
+
+/// §22.2.7.1 RegExpExec ( R, S ).
+///   1. Let exec be ? Get(R, "exec").
+///   2. If IsCallable(exec), let result be ? Call(exec, R, « S »).
+///      Result must be Object or null, else TypeError.
+///   3. Else, if R has [[RegExpMatcher]] internal slot, run the
+///      built-in RegExpBuiltinExec.
+///   4. Else, throw TypeError.
+///
+/// `regexpProtoSplit`'s receivers are arbitrary objects (the
+/// fixtures pass plain `{ exec: function() { ... } }` shells), so
+/// we always go through the user-`exec` path when one is callable.
+/// When it's not, we fall through to `regexExec` on the JSObject's
+/// own `[[RegExpMatcher]]` (Cynic stores this as `regex_bytecode`).
+fn regExpExecGeneric(realm: *Realm, r: *JSObject, s: *JSString) NativeError!Value {
+    const exec_v = try intrinsics.getPropertyChain(realm, r, "exec");
+    if (heap_mod.valueAsFunction(exec_v)) |exec_fn| {
+        const interp = @import("../interpreter.zig");
+        const call_args = [_]Value{Value.fromString(s)};
+        const outcome = interp.callJSFunction(realm.allocator, realm, exec_fn, heap_mod.taggedObject(r), &call_args) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        const v: Value = switch (outcome) {
+            .value, .yielded => |x| x,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        };
+        if (!v.isNull() and heap_mod.valueAsPlainObject(v) == null) {
+            return throwTypeError(realm, "RegExpExec: exec must return Object or null");
+        }
+        return v;
+    }
+    // No callable `exec` — require a [[RegExpMatcher]]-bearing object.
+    if (r.regex_bytecode == null and r.regexp_source == null) {
+        return throwTypeError(realm, "RegExpExec: receiver lacks [[RegExpMatcher]]");
+    }
+    // Fall through to the built-in exec by re-routing through the
+    // intrinsic %RegExp.prototype.exec%. This mirrors §22.2.7.2
+    // RegExpBuiltinExec without re-implementing it inline.
+    const proto = realm.intrinsics.regexp_prototype orelse return throwTypeError(realm, "RegExpExec: %RegExp.prototype% missing");
+    const proto_exec = proto.get("exec");
+    const exec_proto_fn = heap_mod.valueAsFunction(proto_exec) orelse return throwTypeError(realm, "RegExpExec: %RegExp.prototype.exec% missing");
+    const interp = @import("../interpreter.zig");
+    const call_args = [_]Value{Value.fromString(s)};
+    const outcome = interp.callJSFunction(realm.allocator, realm, exec_proto_fn, heap_mod.taggedObject(r), &call_args) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    return switch (outcome) {
+        .value, .yielded => |x| x,
+        .thrown => |ex| blk: {
+            realm.pending_exception = ex;
+            break :blk error.NativeThrew;
+        },
+    };
+}
+
+/// `Set(O, P, V, Throw)` — accessor-chain-aware write. The setter,
+/// if any, fires with `this = O`; absent that, the property is
+/// written as a data property on `O`. Spec §7.3.4: a thrown
+/// completion from the setter propagates.
+fn setPropertyChainOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, value: Value) NativeError!void {
+    // Walk the prototype chain looking for an accessor with a
+    // setter. If found, invoke it with `this = obj`.
+    var cur: ?*JSObject = obj;
+    while (cur) |o| {
+        if (o.accessors.get(key)) |acc| {
+            if (acc.setter) |setter| {
+                const interp = @import("../interpreter.zig");
+                const args_one = [_]Value{value};
+                const outcome = interp.callJSFunction(realm.allocator, realm, setter, heap_mod.taggedObject(obj), &args_one) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (outcome) {
+                    .value, .yielded => return,
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                }
+            }
+            // Getter-only accessor — §10.1.9 [[Set]] step 6.c
+            // returns false. With Throw=true (the case here) we
+            // raise TypeError.
+            return throwTypeError(realm, "Cannot set property: accessor has no setter");
+        }
+        cur = o.prototype;
+    }
+    obj.set(realm.allocator, key, value) catch return error.OutOfMemory;
+}
+
+/// AdvanceStringIndex(S, index, unicode) — §22.2.7.3. When the
+/// `unicode` flag is set and the current code unit starts a high
+/// surrogate followed by a low surrogate, the cursor steps two
+/// units. Otherwise it always steps one code unit.
+fn advanceStringIndex(s_bytes: []const u8, index: i64, unicode: bool) i64 {
+    if (!unicode) return index + 1;
+    const utf16 = @import("../utf16.zig");
+    const cu_len: i64 = @intCast(utf16.lengthInCodeUnits(s_bytes));
+    if (index + 1 >= cu_len) return index + 1;
+    const cu_hi = utf16.codeUnitAt(s_bytes, @intCast(index)) orelse return index + 1;
+    if (cu_hi < 0xD800 or cu_hi > 0xDBFF) return index + 1;
+    const cu_lo = utf16.codeUnitAt(s_bytes, @intCast(index + 1)) orelse return index + 1;
+    if (cu_lo < 0xDC00 or cu_lo > 0xDFFF) return index + 1;
+    return index + 2;
+}
+
+/// Materialize a UTF-16 code-unit substring (held in `utf16.Slice`
+/// form) as a JSString with WTF-8 storage. Mirrors the helper in
+/// `string.zig` (private there) so split's substring extraction
+/// handles mid-surrogate cuts identically.
+fn jsStringFromUtf16Slice(realm: *Realm, sl: @import("../utf16.zig").Slice) NativeError!*JSString {
+    const utf16 = @import("../utf16.zig");
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(realm.allocator);
+    if (sl.head_surrogate != 0)
+        utf16.appendCodeUnitAsWtf8(realm.allocator, &buf, sl.head_surrogate) catch return error.OutOfMemory;
+    buf.appendSlice(realm.allocator, sl.bytes) catch return error.OutOfMemory;
+    if (sl.tail_surrogate != 0)
+        utf16.appendCodeUnitAsWtf8(realm.allocator, &buf, sl.tail_surrogate) catch return error.OutOfMemory;
+    return realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
+}
+
+/// §7.1.7 ToUint32 — the limit argument is coerced through ToNumber
+/// (which `regexpProtoSplit` does up-front) and then ToUint32. This
+/// is a value-level form mirroring `arith_toUint32` in `string.zig`.
+fn arithToUint32(v: Value) u32 {
+    if (v.isInt32()) {
+        const i = v.asInt32();
+        return @bitCast(i);
+    }
+    if (v.isDouble()) {
+        const d = v.asDouble();
+        if (std.math.isNan(d) or !std.math.isFinite(d) or d == 0) return 0;
+        const sign: f64 = if (d < 0) -1 else 1;
+        const abs_d = @abs(d);
+        const trunc_d = @trunc(abs_d);
+        const reduced = @mod(trunc_d, 4294967296.0);
+        const signed = sign * reduced;
+        const final = @mod(signed + 4294967296.0, 4294967296.0);
+        return @intFromFloat(final);
+    }
+    if (v.isBool()) return if (v.asBool()) 1 else 0;
+    return 0;
 }
 
 /// §22.2.6.5 RegExp.prototype [ @@matchAll ] ( S ). Allocates a
@@ -221,14 +630,26 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "RegExp constructor requires 'new'");
     const pattern_v = argOr(args, 0, Value.undefined_);
     const flags_v = argOr(args, 1, Value.undefined_);
+    // §22.2.4.1 step 4 — if pattern is a RegExp (has [[OriginalSource]] /
+    // [[OriginalFlags]] slots), reuse its source and (when flags is
+    // undefined) its flags string rather than stringifying the whole
+    // regex via `RegExp.prototype.toString`. This is the path
+    // SpeciesConstructor in `@@split` / `@@matchAll` takes when it
+    // hands `rx` back to `new C(rx, newFlags)`.
+    const pattern_is_regex: ?*JSObject = if (heap_mod.valueAsPlainObject(pattern_v)) |po|
+        if (po.regexp_source != null) po else null
+    else
+        null;
     const pat_s = if (pattern_v.isUndefined())
         realm.heap.allocateString("") catch return error.OutOfMemory
+    else if (pattern_is_regex) |po|
+        po.regexp_source.?
     else
         try stringifyArg(realm, pattern_v);
-    const flag_s = if (flags_v.isUndefined())
-        realm.heap.allocateString("") catch return error.OutOfMemory
-    else
-        try stringifyArg(realm, flags_v);
+    const flag_s = if (flags_v.isUndefined()) blk: {
+        if (pattern_is_regex) |po| if (po.regexp_flags) |f| break :blk f;
+        break :blk realm.heap.allocateString("") catch return error.OutOfMemory;
+    } else try stringifyArg(realm, flags_v);
     // §22.2.4 `[[OriginalSource]]` / `[[OriginalFlags]]` — typed
     // JSObject slots, not properties. Surfaced to JS only through
     // the accessors on `RegExp.prototype`.
