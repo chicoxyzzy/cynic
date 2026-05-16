@@ -147,6 +147,15 @@ pub const skip_ses_substrings = [_][]const u8{
     "-brand-check-multiple-evaluations-of-class-realm-function-ctor",
     "-brand-check-multiple-evaluations-of-class-eval-indirect",
 
+    // `language/statements/class/elements/private-*-visible-to-direct-eval*.js`
+    // — every fixture invokes `eval("this.#x")` (direct eval inside a
+    // class body) to verify the private-name binding leaks into the
+    // eval scope. Without `eval()` the private name lookup fails as
+    // a ReferenceError instead of being resolved against the class
+    // scope. Same permanent SES carve-out as the eval-indirect /
+    // function-ctor fixtures above. 12 fixtures across field /
+    // method / getter / setter and their static counterparts.
+    "-visible-to-direct-eval",
 };
 
 /// AND-pair filters — both substrings must appear in the path. Used
