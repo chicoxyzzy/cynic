@@ -4022,6 +4022,29 @@ test "later: for-await-of unwraps Promise-of-value yields" {
     , "xyz");
 }
 
+// ── §27.6.3.4 / §27.6.3.5 — AsyncGeneratorQueue ordering ────────────────────
+
+// Three back-to-back `.next()` calls before any microtask drain must settle
+// their capability promises in spec order: the first call's promise reaches
+// its `.then` callback first, second next, third last. The fixture mirrors
+// the test262 `built-ins/AsyncGeneratorPrototype/next/request-queue-order.js`
+// pattern (registered `.then`s read against an `order` counter).
+test "asyncgen: three .next() calls settle in spec order" {
+    try expectScriptStringWithBuiltins(
+        \\let log = "";
+        \\async function* g() { yield "a"; yield "b"; }
+        \\let iter = g();
+        \\let item1 = iter.next();
+        \\let item2 = iter.next();
+        \\let item3 = iter.next();
+        \\item3.then(r => log += "3:" + r.value + ":" + r.done + ";");
+        \\item2.then(r => log += "2:" + r.value + ":" + r.done + ";");
+        \\item1.then(r => log += "1:" + r.value + ":" + r.done + ";");
+        \\__drainMicrotasks();
+        \\log;
+    , "1:a:false;2:b:false;3:undefined:true;");
+}
+
 // ── §13.3.7 — super.x = v, super(...spread), super in static methods ───────
 
 test "later: super.method() chain works" {

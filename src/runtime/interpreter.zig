@@ -165,6 +165,11 @@ pub const RunResult = union(enum) {
     /// (typically `gen.next()`) reads the yielded value, then
     /// either returns `{value, done: false}` to its own caller
     /// or — on `await` — schedules a microtask to resume.
+    /// The await path also funnels through this variant with
+    /// `Value.undefined_`; the async-gen drain distinguishes
+    /// the two by inspecting the gen's `async_state` (an await
+    /// path transitions it to `.suspended_await` before
+    /// unwinding; a real yield leaves it as `.executing`).
     yielded: Value,
 };
 
@@ -347,6 +352,10 @@ pub fn wrapAsyncGenerator(
         this_value,
     ) catch return error.OutOfMemory;
     gen.is_async = true;
+    // §27.6.3 — this generator backs an `async function*`, so its
+    // `.next` / `.return` / `.throw` go through the queue-based
+    // drain. `async_state` defaults to `.suspended_start`.
+    gen.is_async_generator = true;
     var i: usize = 0;
     while (i < args.len and i < gen.registers.len) : (i += 1) {
         gen.registers[i] = args[i];
@@ -516,29 +525,324 @@ fn asyncGenNext(realm: *Realm, this_value: Value, args: []const Value) @import("
     const obj = heap_mod.valueAsPlainObject(this_value).?;
     const gen = obj.generator_ref.?;
     const sent: Value = if (args.len > 0) args[0] else Value.undefined_;
-    const outcome = resumeGenerator(realm.allocator, realm, gen, sent) catch |err| switch (err) {
+    return asyncGenDispatch(realm, gen, .{ .normal = sent });
+}
+
+/// §27.6.3.5 AsyncGeneratorEnqueue + §27.6.3.4
+/// AsyncGeneratorResumeNext — common path for `.next` / `.return`
+/// / `.throw`. Builds the capability Promise, enqueues the
+/// request, kicks the drain (only when the gen is currently
+/// idle — `suspended_start` or `suspended_yield`), and returns
+/// the capability Promise synchronously. The caller (asyncGenNext
+/// / asyncGenReturn / asyncGenThrow) hands it back to user JS.
+fn asyncGenDispatch(
+    realm: *Realm,
+    gen: *@import("generator.zig").JSGenerator,
+    completion: @import("generator.zig").Completion,
+) @import("function.zig").NativeError!Value {
+    const cap_promise_v = intrinsics_mod.allocatePromiseFor(realm, null, .pending, Value.undefined_) catch return error.OutOfMemory;
+    const cap_promise_obj = heap_mod.valueAsPlainObject(cap_promise_v).?;
+    // Pin the capability across any allocations the drain may
+    // perform before it lands in the queue. `enqueue` itself
+    // allocates one ArrayList slot, but a `resumeNext` triggered
+    // by the very first request can allocate the world.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(cap_promise_v) catch return error.OutOfMemory;
+
+    asyncGeneratorEnqueue(realm, gen, completion, cap_promise_obj) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
-    switch (outcome) {
-        .yielded => |raw| {
-            // §27.6.3.6 AsyncGeneratorYield — `yield X` does
-            // `Await(X)` first; if Await rejects, the rejection
-            // propagates inside the gen body as a throw, which
-            // (uncaught) closes the gen. Approximate the closed
-            // tail by transitioning state to .completed when the
-            // yielded value is a synchronously-rejected promise.
-            // Subsequent `.next()` calls then return
-            // `{done: true, value: undefined}` per §27.6.3.2
-            // step 5. The full Await-propagation rework (so
-            // try/catch around yield observes the rejection)
-            // is deferred.
-            if (isSyncRejectedPromise(raw)) gen.state = .completed;
-            return wrapAsyncGenResult(realm, raw, false);
+    return cap_promise_v;
+}
+
+/// §27.6.3.5 AsyncGeneratorEnqueue. Append the request to the
+/// gen's queue; kick `asyncGeneratorResumeNext` only when the
+/// gen is idle (suspended_start / suspended_yield). When the
+/// state is executing or suspended_await, the drain will pick
+/// the request up the next time the body reaches a safe point
+/// (yield / return / throw / await-settle).
+fn asyncGeneratorEnqueue(
+    realm: *Realm,
+    gen: *@import("generator.zig").JSGenerator,
+    completion: @import("generator.zig").Completion,
+    cap_promise: *JSObject,
+) RunError!void {
+    try gen.queue.append(realm.allocator, .{
+        .completion = completion,
+        .capability_promise = cap_promise,
+    });
+    switch (gen.async_state) {
+        .suspended_start, .suspended_yield => {
+            try asyncGeneratorResumeNext(realm.allocator, realm, gen);
         },
-        .value => |raw| return wrapAsyncGenResult(realm, raw, true),
-        .thrown => |ex| return intrinsics_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory,
+        .executing, .suspended_await, .completed => {
+            // executing — re-entrant call from inside the body
+            //   (the request-queue-order-state-executing fixture);
+            //   body will reach a yield/return/throw and drain
+            //   will pick this up.
+            // suspended_await — body is parked on a pending
+            //   Promise; the resume-microtask will resume the
+            //   body and re-enter the drain.
+            // completed — a synchronous drain call below settles
+            //   the request immediately; but we route through
+            //   resumeNext on the next idle tick so we don't
+            //   re-enter the JS world from inside an opcode
+            //   committee. Spec §27.6.3.4 step 10 covers this:
+            //   "If state is completed, Return ! AsyncGenerator
+            //   ResumeNext(generator)."
+            if (gen.async_state == .completed) {
+                try asyncGeneratorResumeNext(realm.allocator, realm, gen);
+            }
+        },
     }
+}
+
+/// §27.6.3.4 AsyncGeneratorResumeNext. The drain: pulls the
+/// head request, transitions state, runs the body to its next
+/// safe point, settles the request, and loops to the next.
+/// Stops when (a) the queue is empty, (b) the body suspended on
+/// an await (the resume-microtask continues the drain), or
+/// (c) the gen is currently executing (which only happens if
+/// the body re-entered via `.next()` inside itself — handled by
+/// the outer drain).
+fn asyncGeneratorResumeNext(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    gen: *@import("generator.zig").JSGenerator,
+) RunError!void {
+    while (gen.queue.items.len > 0) {
+        // Re-entrancy / await guard: if the body is currently
+        // running on behalf of an earlier request, stop. The
+        // body itself will continue the drain when it reaches a
+        // safe point.
+        if (gen.async_state == .executing) return;
+        if (gen.async_state == .suspended_await) return;
+
+        const req = gen.queue.items[0];
+
+        // §27.6.3.4 steps 8-10: completed generator. Settle the
+        // head with done=true (normal/return) or reject (throw).
+        if (gen.async_state == .completed) {
+            _ = gen.queue.orderedRemove(0);
+            switch (req.completion) {
+                .normal => {
+                    try settleAsyncGenRequest(realm, req.capability_promise, Value.undefined_, true);
+                },
+                .return_value => |v| {
+                    try settleAsyncGenRequest(realm, req.capability_promise, v, true);
+                },
+                .throw_value => |ex| {
+                    try rejectAsyncGenRequest(realm, req.capability_promise, ex);
+                },
+            }
+            continue;
+        }
+
+        gen.async_state = .executing;
+        const outcome = try resumeAsyncGenBody(allocator, realm, gen, req.completion);
+
+        // The body either yielded (normal value out), returned
+        // (completion), threw (rejection), or suspended on an
+        // await (async_state was set to .suspended_await by the
+        // await opcode itself — leave the request at the head
+        // and exit the drain).
+        if (gen.async_state == .suspended_await) {
+            // Don't pop; don't change state again.
+            return;
+        }
+
+        switch (outcome) {
+            .yielded => |raw| {
+                // §27.6.3.6 AsyncGeneratorYield — the syntactic
+                // `yield X` is `Await(X); AsyncGeneratorYield(X)`.
+                // The Await defers one microtask, so the user
+                // can register `.then(cb)` on the capability
+                // BEFORE it settles. Pop the head request,
+                // park the gen in `suspended_await` (the body
+                // is logically mid-step, blocking a subsequent
+                // `.next()` from re-kicking the drain), and
+                // enqueue a microtask that settles the cap and
+                // continues the drain.
+                _ = gen.queue.orderedRemove(0);
+                gen.async_state = .suspended_await;
+                if (isSyncRejectedPromise(raw)) {
+                    // Yield of an already-rejected Promise:
+                    // §27.6.3.6 with Await rejecting. Closes
+                    // the gen and rejects the cap with the
+                    // promise's reason. (State stays
+                    // suspended_await — the microtask will move
+                    // it to completed.)
+                    try realm.enqueueAsyncGenYield(
+                        gen,
+                        req.capability_promise,
+                        heap_mod.valueAsPlainObject(raw).?.promise_value,
+                        false,
+                        true,
+                    );
+                } else {
+                    try realm.enqueueAsyncGenYield(
+                        gen,
+                        req.capability_promise,
+                        raw,
+                        false,
+                        false,
+                    );
+                }
+                // Stop the drain — the microtask will resume it
+                // after settling. Without this, item2/item3
+                // would be processed synchronously and their
+                // caps would settle before user `.then`
+                // registrations had a chance to register.
+                return;
+            },
+            .value => |v| {
+                // §27.6.3.1 step 4.g + AsyncGeneratorDrainQueue:
+                // body's normal completion → CompleteStep with
+                // the request, then DrainQueue. Defer settlement
+                // (matches the spec's microtask discipline: the
+                // body's return ran inside a microtask
+                // continuation; the cap settle for the head
+                // request happens in that same task, but
+                // subsequent buffered requests settle in their
+                // own DrainQueue steps).
+                _ = gen.queue.orderedRemove(0);
+                gen.async_state = .suspended_await;
+                try realm.enqueueAsyncGenYield(
+                    gen,
+                    req.capability_promise,
+                    v,
+                    true,
+                    false,
+                );
+                return;
+            },
+            .thrown => |ex| {
+                _ = gen.queue.orderedRemove(0);
+                gen.async_state = .suspended_await;
+                try realm.enqueueAsyncGenYield(
+                    gen,
+                    req.capability_promise,
+                    ex,
+                    false,
+                    true,
+                );
+                return;
+            },
+        }
+    }
+}
+
+/// Drive the gen body for one step of the drain. Branches on
+/// the request's completion kind: normal → resume with sent
+/// value; return → drive a return-completion through any
+/// surrounding `try { … } finally`; throw → land an exception
+/// at the saved yield site.
+fn resumeAsyncGenBody(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    gen: *@import("generator.zig").JSGenerator,
+    completion: @import("generator.zig").Completion,
+) RunError!RunResult {
+    switch (completion) {
+        .normal => |v| {
+            // resumeGenerator handles state == initial (initial
+            // suspend) and state == suspended (yield resume).
+            return resumeGenerator(allocator, realm, gen, v);
+        },
+        .return_value => |v| {
+            // §27.6.3.3 step 4: if the gen is in suspended_start
+            // (never resumed), the body's try/finally machinery
+            // hasn't seen any yield yet; just close.
+            if (gen.state == .initial) {
+                gen.state = .completed;
+                return .{ .value = v };
+            }
+            // Reuse the existing return-completion drive (used
+            // by Generator.prototype.return for sync gens).
+            gen.pending_return = v;
+            return resumeGenerator(allocator, realm, gen, Value.undefined_);
+        },
+        .throw_value => |v| {
+            // §27.6.3.2 — pre-start throw closes the gen and
+            // surfaces as a rejection.
+            if (gen.state == .initial) {
+                gen.state = .completed;
+                return .{ .thrown = v };
+            }
+            // Already-completed gen: just propagate.
+            if (gen.state == .completed) {
+                return .{ .thrown = v };
+            }
+            // Inject the throw at the suspended yield site. We
+            // build a one-frame stack mirroring `resumeGenerator`
+            // and walk `unwindThrow` from `gen.ip` — that lands
+            // in any surrounding try/catch (or unwinds the whole
+            // body if there isn't one).
+            if (gen.state == .executing) {
+                const ex = try makeTypeError(realm, "Generator is already running");
+                return .{ .thrown = ex };
+            }
+            gen.state = .executing;
+
+            var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
+            defer {
+                for (frames.items) |*f| if (f.owns_registers) allocator.free(f.registers);
+                frames.deinit(allocator);
+            }
+
+            try frames.append(allocator, .{
+                .chunk = gen.chunk,
+                .ip = gen.ip,
+                .accumulator = Value.undefined_,
+                .registers = gen.registers,
+                .env = gen.env,
+                .this_value = gen.this_value,
+                .home_object = gen.home_object,
+                .home_function = gen.home_function,
+                .argc = gen.argc,
+                .generator = gen,
+                .owns_registers = false,
+            });
+
+            if (!try unwindThrow(allocator, realm, &frames, v)) {
+                gen.state = .completed;
+                return .{ .thrown = v };
+            }
+            const result = try runFrames(allocator, realm, &frames);
+            if (result == .yielded) {
+                gen.state = .suspended;
+            } else {
+                gen.state = .completed;
+            }
+            return result;
+        },
+    }
+}
+
+/// Settle an AsyncGeneratorRequest's capability with
+/// `{value, done}` — fulfilled completion. Per AGENTS.md
+/// "Microtasks are spec-conformant", `settlePromiseInternal`
+/// fires reactions via `enqueuePromiseReaction` (deferred);
+/// no user code runs synchronously from here.
+fn settleAsyncGenRequest(
+    realm: *Realm,
+    cap_promise: *JSObject,
+    value: Value,
+    done: bool,
+) RunError!void {
+    const result = genResultObject(realm, value, done) catch return error.OutOfMemory;
+    try settlePromiseInternal(realm, cap_promise, .fulfilled, result);
+}
+
+/// Settle an AsyncGeneratorRequest's capability with rejection.
+fn rejectAsyncGenRequest(
+    realm: *Realm,
+    cap_promise: *JSObject,
+    reason: Value,
+) RunError!void {
+    try settlePromiseInternal(realm, cap_promise, .rejected, reason);
 }
 
 /// True iff `v` is a Promise object already in the `rejected`
@@ -644,10 +948,8 @@ fn asyncGenReturn(realm: *Realm, this_value: Value, args: []const Value) @import
     }
     const obj = heap_mod.valueAsPlainObject(this_value).?;
     const gen = obj.generator_ref.?;
-    gen.state = .completed;
     const ret_v: Value = if (args.len > 0) args[0] else Value.undefined_;
-    const result = genResultObject(realm, ret_v, true) catch return error.OutOfMemory;
-    return intrinsics_mod.allocatePromiseFor(realm, null, .fulfilled, result) catch return error.OutOfMemory;
+    return asyncGenDispatch(realm, gen, .{ .return_value = ret_v });
 }
 
 fn asyncGenThrow(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
@@ -655,8 +957,10 @@ fn asyncGenThrow(realm: *Realm, this_value: Value, args: []const Value) @import(
     if (asyncGenBrandCheck(realm, this_value, "AsyncGenerator.prototype.throw called on non-async-generator")) |ex| {
         return intrinsics_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
     }
-    const ex: Value = if (args.len > 0) args[0] else Value.undefined_;
-    return intrinsics_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
+    const obj = heap_mod.valueAsPlainObject(this_value).?;
+    const gen = obj.generator_ref.?;
+    const ex_v: Value = if (args.len > 0) args[0] else Value.undefined_;
+    return asyncGenDispatch(realm, gen, .{ .throw_value = ex_v });
 }
 
 /// §27.5.1 — Generator.prototype.{next,return,throw} require
@@ -1383,7 +1687,86 @@ pub fn drainMicrotasks(allocator: std.mem.Allocator, realm: *Realm) RunError!voi
             },
             .async_resume => {
                 const gen = task.async_gen orelse continue;
-                try resumeAsyncFunction(allocator, realm, gen, task.arg, task.async_throws);
+                if (gen.is_async_generator) {
+                    // §27.6.3.4 — body suspended on an await for
+                    // the head request. Resume the body with the
+                    // settled value (or throw), then continue the
+                    // drain so the next request (if any) gets
+                    // picked up after the body yields / returns
+                    // / throws.
+                    try resumeAsyncGeneratorOnSettle(allocator, realm, gen, task.arg, task.async_throws);
+                } else {
+                    try resumeAsyncFunction(allocator, realm, gen, task.arg, task.async_throws);
+                }
+            },
+            .async_gen_yield => {
+                // §27.6.3.6 AsyncGeneratorYield — the deferred
+                // half of `Await(value); CompleteStep(...)`.
+                // Settle the capability and continue the drain.
+                // If the body had completed (.value / .thrown
+                // outcome) we left state at suspended_await so
+                // the drain wouldn't run early; flip to
+                // completed before resuming so the drain
+                // settles any buffered follow-on requests with
+                // `done: true`.
+                const gen = task.async_gen orelse continue;
+                const cap = task.agy_cap_promise orelse continue;
+                // §27.7.5.3 Await — if the yielded value is a
+                // settled Promise, unwrap synchronously. A
+                // pending Promise needs reaction-chaining; for
+                // stage 1 we punt and surface the Promise as the
+                // iterator value (legacy behaviour). The
+                // `wrapAsyncGenResult` shim handled this for the
+                // pre-queue path; here we replicate the
+                // synchronous-settled subset to keep the
+                // `yield Promise.resolve(v)` style tests
+                // passing.
+                var settle_value = task.arg;
+                var settle_reject = task.agy_reject;
+                if (!settle_reject) {
+                    const settled = unwrapSettledPromise(task.arg);
+                    switch (settled) {
+                        .fulfilled => |v| settle_value = v,
+                        .rejected => |ex| {
+                            settle_value = ex;
+                            settle_reject = true;
+                            // §27.6.3.6 with Await rejecting →
+                            // close the gen so subsequent
+                            // requests see done:true.
+                            if (gen.state != .completed) {
+                                gen.state = .completed;
+                                gen.async_state = .completed;
+                            }
+                        },
+                        .pending, .none => {
+                            // Pending Promise yield: stage 1 leaves the
+                            // Promise as the iterator value. Spec
+                            // would Await it (chain reactions onto
+                            // the inner Promise then settle the
+                            // cap when it resolves); that's a
+                            // later stage of the rework.
+                        },
+                    }
+                }
+                if (settle_reject) {
+                    settlePromiseInternal(realm, cap, .rejected, settle_value) catch return error.OutOfMemory;
+                } else {
+                    const result = genResultObject(realm, settle_value, task.agy_done) catch return error.OutOfMemory;
+                    settlePromiseInternal(realm, cap, .fulfilled, result) catch return error.OutOfMemory;
+                }
+                // §27.6.3 — body's GeneratorState reflects
+                // completion; sync async_state if the underlying
+                // generator already moved on.
+                if (gen.state == .completed) {
+                    gen.async_state = .completed;
+                } else if (gen.async_state == .suspended_await) {
+                    // Yield-Await fired; resume the drain with
+                    // a logical `suspended_yield` (the body is
+                    // parked at the yield, ready for the next
+                    // request).
+                    gen.async_state = .suspended_yield;
+                }
+                try asyncGeneratorResumeNext(allocator, realm, gen);
             },
             .promise_reaction => {
                 try runPromiseReaction(allocator, realm, task.reaction_handler, task.arg, task.reaction_result, task.reaction_was_rejected);
@@ -1671,6 +2054,140 @@ pub fn resumeAsyncFunction(
                 }
             }
             gen.state = .completed;
+        },
+    }
+}
+
+/// Async-generator counterpart to `resumeAsyncFunction`. The body
+/// was suspended on an `await`; the settled value is delivered
+/// either as the awaited value (normal) or thrown at the await
+/// point (rejected). On the body's next safe point (yield /
+/// return / throw / re-await), the head request is settled and
+/// the drain continues to any queued follow-ups.
+pub fn resumeAsyncGeneratorOnSettle(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    gen: *@import("generator.zig").JSGenerator,
+    sent_value: Value,
+    throws_in: bool,
+) RunError!void {
+    // Defensive: if the gen completed while the microtask was
+    // queued (unlikely but possible if a user-installed reaction
+    // closed it), there's nothing to resume — but the queue may
+    // still have follow-on requests to settle.
+    if (gen.state == .completed) {
+        gen.async_state = .completed;
+        try asyncGeneratorResumeNext(allocator, realm, gen);
+        return;
+    }
+    if (gen.state == .executing) return; // re-entrancy guard
+
+    // The drain previously parked us in `suspended_await`; now
+    // we're running again.
+    gen.async_state = .executing;
+    gen.state = .executing;
+
+    var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
+    defer {
+        for (frames.items) |*f| if (f.owns_registers) allocator.free(f.registers);
+        frames.deinit(allocator);
+    }
+
+    try frames.append(allocator, .{
+        .chunk = gen.chunk,
+        .ip = gen.ip,
+        .accumulator = sent_value,
+        .registers = gen.registers,
+        .env = gen.env,
+        .this_value = gen.this_value,
+        .home_object = gen.home_object,
+        .home_function = gen.home_function,
+        .argc = gen.argc,
+        .generator = gen,
+        .owns_registers = false,
+    });
+
+    if (throws_in) {
+        if (!try unwindThrow(allocator, realm, &frames, sent_value)) {
+            // No handler — body unwinds; settle head request as
+            // rejected and continue drain.
+            gen.state = .completed;
+            gen.async_state = .completed;
+            if (gen.queue.items.len > 0) {
+                const req = gen.queue.orderedRemove(0);
+                try rejectAsyncGenRequest(realm, req.capability_promise, sent_value);
+            }
+            try asyncGeneratorResumeNext(allocator, realm, gen);
+            return;
+        }
+    }
+
+    const result = try runFrames(allocator, realm, &frames);
+
+    // Re-suspend on another await — the await opcode set
+    // async_state = .suspended_await for us; just sync state.
+    if (gen.async_state == .suspended_await) {
+        gen.state = .suspended;
+        return;
+    }
+
+    if (gen.queue.items.len == 0) {
+        // Shouldn't happen — if we were running, there was a head
+        // request. Defensive: just record state and return.
+        if (result == .yielded) {
+            gen.state = .suspended;
+            gen.async_state = .suspended_yield;
+        } else {
+            gen.state = .completed;
+            gen.async_state = .completed;
+        }
+        return;
+    }
+
+    const req = gen.queue.orderedRemove(0);
+    switch (result) {
+        .yielded => |v| {
+            gen.state = .suspended;
+            gen.async_state = .suspended_await;
+            if (isSyncRejectedPromise(v)) {
+                try realm.enqueueAsyncGenYield(
+                    gen,
+                    req.capability_promise,
+                    heap_mod.valueAsPlainObject(v).?.promise_value,
+                    false,
+                    true,
+                );
+            } else {
+                try realm.enqueueAsyncGenYield(
+                    gen,
+                    req.capability_promise,
+                    v,
+                    false,
+                    false,
+                );
+            }
+        },
+        .value => |v| {
+            gen.state = .completed;
+            gen.async_state = .suspended_await;
+            try realm.enqueueAsyncGenYield(
+                gen,
+                req.capability_promise,
+                v,
+                true,
+                false,
+            );
+        },
+        .thrown => |ex| {
+            gen.state = .completed;
+            gen.async_state = .suspended_await;
+            try realm.enqueueAsyncGenYield(
+                gen,
+                req.capability_promise,
+                ex,
+                false,
+                true,
+            );
         },
     }
 }
@@ -4508,6 +5025,14 @@ fn runFrames(
                                     f.accumulator = Value.undefined_;
                                     committed = true;
                                     obj.promise_waiters.append(realm.allocator, gen) catch return error.OutOfMemory;
+                                    // §27.6.3.4 — mark the async-gen state so the
+                                    // queue drain (asyncGeneratorResumeNext) knows
+                                    // not to pop the head request: the body went
+                                    // into await, not into yield. Plain async
+                                    // functions ignore this flag.
+                                    if (gen.is_async_generator) {
+                                        gen.async_state = .suspended_await;
+                                    }
                                     return .{ .yielded = Value.undefined_ };
                                 }
                             }

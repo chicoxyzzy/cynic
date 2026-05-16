@@ -757,6 +757,19 @@ pub const Heap = struct {
         self.markValue(gen.this_value);
         if (gen.env) |e| self.markEnvironment(e);
         if (gen.home_object) |ho| self.markValue(taggedObject(ho));
+        // §27.6.3.4 — every buffered AsyncGeneratorRequest holds
+        // both a completion value (the `.next(v)` / `.return(v)` /
+        // `.throw(v)` arg) and the capability Promise we'll later
+        // settle. Both must stay reachable for as long as the
+        // request is queued.
+        for (gen.queue.items) |req| {
+            switch (req.completion) {
+                .normal => |v| self.markValue(v),
+                .return_value => |v| self.markValue(v),
+                .throw_value => |v| self.markValue(v),
+            }
+            self.markValue(taggedObject(req.capability_promise));
+        }
     }
 
     /// Run a full mark-sweep cycle. `roots` is every live value the

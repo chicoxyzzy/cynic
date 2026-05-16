@@ -33,6 +33,45 @@ pub const GeneratorState = enum(u8) {
     completed,
 };
 
+/// §27.6.3 [[AsyncGeneratorState]]. Distinct from `GeneratorState`
+/// because async generators have extra transitions (queue-drain
+/// entry/exit, await-suspend). Only meaningful when both
+/// `is_async = true` and `is_async_generator = true`.
+///   • `suspended_start` — fresh, body never resumed
+///   • `suspended_yield` — paused on yield, awaiting next request
+///   • `suspended_await` — paused on await, microtask will resume
+///   • `executing`       — body actively running on behalf of the
+///     queue head
+///   • `completed`       — body returned / threw uncaught
+pub const AsyncGeneratorState = enum(u8) {
+    suspended_start,
+    suspended_yield,
+    suspended_await,
+    executing,
+    completed,
+};
+
+/// §27.6.3.5 AsyncGeneratorRequest [[Completion]] — the kind of
+/// completion to inject when the drain resumes the body for this
+/// request. `.normal` is `.next(v)`; `.return_value` is `.return(v)`
+/// (becomes a return-completion at the yield site); `.throw_value`
+/// is `.throw(v)` (becomes a throw-completion at the yield site).
+pub const Completion = union(enum) {
+    normal: Value,
+    return_value: Value,
+    throw_value: Value,
+};
+
+/// §27.6.3.5 AsyncGeneratorRequest. Each pending `.next` /
+/// `.return` / `.throw` call sits here until the drain pops it.
+/// `capability_promise` is the [[Capability]].[[Promise]] returned
+/// synchronously to user JS; the drain settles it when the body
+/// reaches the matching yield / return / throw.
+pub const AsyncGeneratorRequest = struct {
+    completion: Completion,
+    capability_promise: *JSObject,
+};
+
 /// Per-generator saved frame. Allocated by the runtime when a
 /// `function*` instance is called; freed by mark-sweep when no
 /// longer reachable.
@@ -68,6 +107,24 @@ pub const JSGenerator = struct {
     /// return / throw paths to settle `result_promise` instead
     /// of yielding `{value, done}` records.
     is_async: bool = false,
+    /// True when this generator backs an `async function*`
+    /// (not a plain `async function`). Drives the §27.6.3
+    /// queue-based drain: each `.next` / `.return` / `.throw`
+    /// is buffered into `queue` and processed one at a time by
+    /// `asyncGeneratorResumeNext`. Plain async functions
+    /// (`is_async = true`, `is_async_generator = false`) settle
+    /// `result_promise` directly with no queue.
+    is_async_generator: bool = false,
+    /// §27.6.3 [[AsyncGeneratorState]]. Only meaningful when
+    /// `is_async_generator = true`; the sync-gen / plain-async-fn
+    /// paths still drive `state` (above).
+    async_state: AsyncGeneratorState = .suspended_start,
+    /// §27.6.3.4 [[AsyncGeneratorQueue]]. Buffered requests
+    /// drained one at a time by `asyncGeneratorResumeNext`.
+    /// The head (index 0) is the request currently being
+    /// processed when `async_state` is `.executing` or
+    /// `.suspended_await`.
+    queue: std.ArrayListUnmanaged(AsyncGeneratorRequest) = .empty,
     /// For async functions only: the Promise the function
     /// returned to its caller. Settled fulfilled when the body
     /// returns normally, rejected when it throws uncaught. The
@@ -106,6 +163,7 @@ pub const JSGenerator = struct {
 
     pub fn deinit(self: *JSGenerator, allocator: std.mem.Allocator) void {
         allocator.free(self.registers);
+        self.queue.deinit(allocator);
         allocator.destroy(self);
     }
 };

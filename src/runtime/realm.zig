@@ -40,11 +40,32 @@ const Intrinsics = intrinsics_mod.Intrinsics;
 /// the settlement unchanged. A Promise-returning handler
 /// chains.
 pub const Microtask = struct {
-    kind: enum { callback, async_resume, promise_reaction, thenable_job } = .callback,
+    kind: enum {
+        callback,
+        async_resume,
+        promise_reaction,
+        thenable_job,
+        /// §27.6.3.6 AsyncGeneratorYield-as-Await. The body
+        /// yielded `value`; per spec the syntactic `yield` is
+        /// `Await(value); AsyncGeneratorYield(value)`, so the
+        /// settlement of the capability defers a microtask.
+        /// This kind both settles `agy_cap_promise` with
+        /// `{arg, agy_done}` AND continues the drain.
+        async_gen_yield,
+    } = .callback,
     callback: Value = Value.undefined_,
     arg: Value = Value.undefined_,
     async_gen: ?*@import("generator.zig").JSGenerator = null,
     async_throws: bool = false,
+    /// For `.async_gen_yield` — the AsyncGeneratorRequest's
+    /// capability Promise to settle.
+    agy_cap_promise: ?*@import("object.zig").JSObject = null,
+    /// For `.async_gen_yield` — the `done` flag for the
+    /// iterator result. Yield → false; return-after-queue → true.
+    agy_done: bool = false,
+    /// For `.async_gen_yield` — true when the capability should
+    /// reject (used by the legacy yield-of-rejected-Promise quirk).
+    agy_reject: bool = false,
     /// For `.promise_reaction` — the handler for the settled
     /// state (`Value.undefined_` if absent → propagate).
     /// For `.thenable_job` — the `then` callable to invoke.
@@ -458,6 +479,33 @@ pub const Realm = struct {
         });
     }
 
+    /// §27.6.3.6 AsyncGeneratorYield (the syntactic `yield X` in
+    /// an async generator is `Await(X); AsyncGeneratorYield(X)`).
+    /// Defers settlement of `cap_promise` with `{value, done}`
+    /// (or rejection with `value` when `reject = true`) until
+    /// the microtask drain — observably, that means the user's
+    /// `.then(cb)` registered AFTER `iter.next()` returns sees a
+    /// pending promise and queues its reaction in the same tick.
+    /// After settlement, continues the drain so any buffered
+    /// follow-on requests get processed.
+    pub fn enqueueAsyncGenYield(
+        self: *Realm,
+        gen: *@import("generator.zig").JSGenerator,
+        cap_promise: *@import("object.zig").JSObject,
+        value: Value,
+        done: bool,
+        reject: bool,
+    ) !void {
+        try self.microtask_queue.append(self.allocator, .{
+            .kind = .async_gen_yield,
+            .arg = value,
+            .async_gen = gen,
+            .agy_cap_promise = cap_promise,
+            .agy_done = done,
+            .agy_reject = reject,
+        });
+    }
+
     /// Schedule a `.then` reaction. `handler` is the callback
     /// for the settled state (or `Value.undefined_` if the
     /// reaction has no handler for this state — propagate).
@@ -559,6 +607,7 @@ pub const Realm = struct {
             self.heap.markValue(mt.callback);
             self.heap.markValue(mt.arg);
             if (mt.async_gen) |g| self.heap.markGenerator(g);
+            if (mt.agy_cap_promise) |cap| self.heap.markValue(heap_mod.taggedObject(cap));
             self.heap.markValue(mt.reaction_handler);
             self.heap.markValue(mt.reaction_result);
         }
