@@ -468,6 +468,33 @@ pub const Op = enum(u8) {
     /// and the importer's body runs only after every async dep
     /// settles. No-op outside module context.
     module_link_complete,
+    /// `[op]` — §16.2.3.7 ExportDeclaration : `export * from
+    /// "src"` (no namespace binding). Reads the source-module
+    /// namespace from `acc` (left there by the immediately-preceding
+    /// `module_load`) and merges every own string-keyed export
+    /// EXCEPT `"default"` (§16.2.3.7 step 8 of GetExportedNames
+    /// skips the default export when traversing star-export
+    /// entries) onto the executing module's
+    /// `realm.current_module.exports` namespace. Keys already
+    /// present on the importer's namespace win (matches the
+    /// ResolveExport precedence between local / indirect entries
+    /// and star entries — a star entry never overwrites a binding
+    /// the module already exports under the same name). The
+    /// `@@toStringTag` slot installed by §28.3.5 is also skipped,
+    /// since it's a Module Namespace brand property rather than
+    /// an export.
+    ///
+    /// This is a value-copy at re-export-evaluation time. A
+    /// fully-spec ResolveExport chain (§15.2.1.16.3 step 10)
+    /// would resolve lazily through the source's bindings on
+    /// every read; copying at body time is observably equivalent
+    /// for the non-mutation case the corpus exercises (the
+    /// fixtures only check `name in ns`, presence semantics).
+    /// Hole sentinels (TDZ) are forwarded verbatim so the
+    /// importer's `lda_property + throw_if_hole` sequence still
+    /// raises the spec ReferenceError when the source binding
+    /// hasn't initialised yet.
+    module_reexport_star,
 
     // ── Globals ─────────────────────────────────────────────────
     /// `[op] [k:u16]` — load a global by name. The name is the
@@ -715,6 +742,7 @@ pub const Op = enum(u8) {
             .super_check_this,
             .dynamic_import,
             .module_link_complete,
+            .module_reexport_star,
             => 0,
             .ldar,
             .star,
@@ -883,6 +911,7 @@ pub const Op = enum(u8) {
             .dynamic_import => "DynamicImport",
             .module_export => "ModuleExport",
             .module_link_complete => "ModuleLinkComplete",
+            .module_reexport_star => "ModuleReexportStar",
             .make_environment => "MakeEnvironment",
             .lda_env => "LdaEnv",
             .sta_env => "StaEnv",

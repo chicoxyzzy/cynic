@@ -4143,12 +4143,10 @@ fn compileExportDecl(self: *Compiler, ed: ast.statement.ExportDecl) CompileError
             //
             // `export * from "src"` (no `as`) is the namespace-
             // merge form — every non-`default` export from `src`
-            // is forwarded onto our own namespace. The runtime
-            // already has the loaded namespace under each module's
-            // record; we lower this to a single
-            // `module_reexport_star` op consuming the namespace
-            // in the accumulator. Until that lands, the no-`as`
-            // form stays as a no-op (covered separately).
+            // is forwarded onto our own namespace. Lower this to
+            // `module_load <k_spec>; module_reexport_star` so the
+            // runtime grabs the source namespace and copies its
+            // exported keys onto the executing module's namespace.
             const src_span = all_body.source;
             const raw = self.source[src_span.start..src_span.end];
             if (raw.len < 2) return;
@@ -4165,6 +4163,10 @@ fn compileExportDecl(self: *Compiler, ed: ast.statement.ExportDecl) CompileError
                 const k_ns = try self.internString(ns_name);
                 try self.builder.emitOp(.module_export, ed.span);
                 try self.builder.emitU16(k_ns);
+            } else {
+                try self.builder.emitOp(.module_load, ed.span);
+                try self.builder.emitU16(k_spec);
+                try self.builder.emitOp(.module_reexport_star, ed.span);
             }
         },
     }

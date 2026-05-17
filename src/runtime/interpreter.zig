@@ -6165,6 +6165,45 @@ fn runFrames(
                 // module-shaped code as a script for tests).
             },
 
+            .module_reexport_star => {
+                // §16.2.3.7 ExportDeclaration step 8 (no `as`) —
+                // merge every non-`default` own export from the
+                // source namespace (in `acc`) onto the executing
+                // module's namespace. Keys already present win
+                // (matches the ResolveExport precedence between
+                // local / indirect entries and `*` entries: a
+                // star entry never overwrites a binding the
+                // module already exports under the same name).
+                //
+                // No-op outside module context.
+                if (realm.current_module) |mr| {
+                    const src_obj = heap_mod.valueAsPlainObject(acc) orelse {
+                        // Source wasn't an object — `module_load`
+                        // must have left a namespace here; bail
+                        // silently rather than crashing.
+                        continue;
+                    };
+                    var it = src_obj.properties.iterator();
+                    while (it.next()) |entry| {
+                        const key = entry.key_ptr.*;
+                        // §16.2.3.7 step 8 — skip `default` per
+                        // GetExportedNames. Also skip the
+                        // `@@toStringTag` Module Namespace brand
+                        // installed in §28.3.5 — it's a brand
+                        // property, not an exported binding.
+                        if (std.mem.eql(u8, key, "default")) continue;
+                        if (std.mem.eql(u8, key, "@@toStringTag")) continue;
+                        // Importer's own export precedence: skip
+                        // when the key is already on our
+                        // namespace (a local export, a
+                        // previously-merged star entry, or a
+                        // seeded TDZ Hole).
+                        if (mr.exports.properties.contains(key)) continue;
+                        mr.exports.set(realm.allocator, key, entry.value_ptr.*) catch return error.OutOfMemory;
+                    }
+                }
+            },
+
             .module_link_complete => {
                 // §16.2.1.5 InnerModuleEvaluation — emitted by
                 // the compiler after the importer's hoisted
