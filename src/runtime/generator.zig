@@ -183,6 +183,15 @@ pub const JSGenerator = struct {
     /// (`next` / `return` / `throw`) to the inner iterator.
     /// Reset to `.normal` after each read.
     resume_kind: ResumeKind = .normal,
+    /// §27.6.3.7 step 8.b — when the gen is suspended waiting
+    /// for an `Await(resumptionValue.[[Value]])` to settle for
+    /// a return-completion, this flag is set. The
+    /// `settlePromiseInternal` waiter walk then routes the
+    /// resume through `async_gen_return_after_await` instead of
+    /// the normal `async_resume` microtask — the body's finally
+    /// machinery sees a return-completion with the awaited
+    /// value rather than treating it as a plain yield-resume.
+    awaiting_return_completion: bool = false,
     /// Companion to `resume_kind`. For `.return_value` this is the
     /// `.return(v)` argument; for `.throw_value` it's the
     /// `.throw(e)` argument. The accumulator on resume already

@@ -784,14 +784,20 @@ fn asyncGeneratorResumeNext(
             continue;
         }
 
-        // §27.6.3.7 step 8.b — when the body is suspended at a
-        // yield and a `.return(v)` request is being processed,
-        // the spec runs `Let awaited be Await(resumptionValue.
-        // [[Value]])` BEFORE propagating the return-completion
-        // through the body's finally machinery. Initial-state
-        // gens skip this (no yield site to resume from);
-        // `resumeAsyncGenBody` short-circuits them to `.value`.
-        if (req.completion == .return_value and gen.state != .initial) {
+        // §27.6.3.7 step 8.b / §27.6.3.4 AsyncGeneratorResumeNext
+        // — when a `.return(v)` request is being processed the
+        // spec runs `Let awaited be Await(resumptionValue.
+        // [[Value]])` BEFORE propagating the return. This
+        // applies to BOTH the initial-state path (gen never
+        // entered the body) and the suspended-yield path:
+        // §27.6.3.6 unwraps the value through Await even when
+        // closing the gen without resuming, so
+        // `it.return(Promise.resolve('x'))` settles the cap
+        // with `{value: 'x', done: true}` rather than the raw
+        // Promise (see
+        // `built-ins/AsyncGeneratorPrototype/return/
+        // return-suspendedStart-promise.js`).
+        if (req.completion == .return_value) {
             const v = req.completion.return_value;
             gen.async_state = .suspended_await;
             try awaitForReturnCompletion(realm, gen, v);
@@ -1059,16 +1065,15 @@ fn awaitForReturnCompletion(realm: *Realm, gen: *@import("generator.zig").JSGene
     if (heap_mod.valueAsPlainObject(v)) |obj| {
         if (obj.isPromise()) {
             if (obj.promise_state == .pending) {
-                // For pending Promises, register a reaction that
-                // resolves to our follow-up microtask. We can't
-                // call a callback closure from the reaction
-                // (PromiseReaction expects a real JSFunction), so
-                // we approximate with the simpler approach:
-                // enqueue the microtask now; the microtask
-                // checks pending status and re-enqueues itself
-                // until the Promise settles. Pending awaits are
-                // not exercised by the targeted fixtures.
-                try realm.enqueueAsyncGenReturnAfterAwait(gen, v, false);
+                // Register the gen as a waiter on the Promise,
+                // flagging it so `settlePromiseInternal` routes
+                // the resume through
+                // `async_gen_return_after_await` (which drives
+                // the body's return-completion) rather than the
+                // normal `async_resume` (which drives a normal
+                // yield-resume).
+                gen.awaiting_return_completion = true;
+                try obj.promise_waiters.append(realm.allocator, gen);
                 return;
             }
             try realm.enqueueAsyncGenReturnAfterAwait(gen, obj.promise_value, obj.promise_state == .rejected);
@@ -1077,10 +1082,8 @@ fn awaitForReturnCompletion(realm: *Realm, gen: *@import("generator.zig").JSGene
         // Thenable check — §27.7.5.3 step 1 routes through
         // §27.2.1.3.2 Promise Resolve Functions 9.b: read the
         // `.then` property. The `get then` accessor in the
-        // targeted fixture surfaces here. Whether `.then` is
-        // callable or not, we then defer one microtask before
-        // propagating the return (the spec's outer await).
-        _ = intrinsics_mod.getPropertyChain(realm, obj, "then") catch |err| switch (err) {
+        // targeted fixture surfaces here.
+        const then_v = intrinsics_mod.getPropertyChain(realm, obj, "then") catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
                 const ex = realm.pending_exception orelse Value.undefined_;
@@ -1089,14 +1092,24 @@ fn awaitForReturnCompletion(realm: *Realm, gen: *@import("generator.zig").JSGene
                 return;
             },
         };
-        // Even when `.then` is callable, the targeted fixtures
-        // (`yield-return-then-getter-ticks.js`,
-        // `yield-star-return-then-getter-ticks.js`) only have a
-        // getter that pushes a log entry and returns undefined
-        // — i.e. `.then` is the accessor's return value
-        // (undefined / non-callable). We've already triggered
-        // the `get then` read above; defer one tick and
-        // propagate the original thenable as the return value.
+        if (heap_mod.valueAsFunction(then_v) != null) {
+            // Callable thenable: §27.2.1.3.2 step 12 enqueues
+            // PromiseResolveThenableJob; we then register the
+            // gen as a waiter on the synthesised Promise.
+            const promise_v = @import("builtins/promise.zig").allocatePromise(realm, .pending, Value.undefined_) catch return error.OutOfMemory;
+            const promise_obj = heap_mod.valueAsPlainObject(promise_v) orelse return error.OutOfMemory;
+            try realm.enqueueThenableJob(promise_v, v, then_v);
+            gen.awaiting_return_completion = true;
+            try promise_obj.promise_waiters.append(realm.allocator, gen);
+            return;
+        }
+        // Non-callable `.then` (or thenable with falsy `.then`):
+        // §27.2.1.3.2 step 9-10 fall through to FulfillPromise
+        // with the resolution as-is. The targeted
+        // `yield-return-then-getter-ticks.js` fixture exercises
+        // this — we've fired the `get then` accessor above; now
+        // defer one tick and propagate the thenable as the
+        // return value.
         try realm.enqueueAsyncGenReturnAfterAwait(gen, v, false);
         return;
     }
@@ -2744,7 +2757,18 @@ pub fn settlePromiseInternal(
     var w_iter = waiters;
     defer w_iter.deinit(realm.allocator);
     for (w_iter.items) |w_gen| {
-        try realm.enqueueAsyncResume(w_gen, value, state == .rejected);
+        // §27.6.3.7 step 8.b — when the gen was suspended on
+        // an Await driving a `.return(v)` completion (rather
+        // than the usual await of a yielded value), the resume
+        // must propagate as a return-completion at the saved
+        // yield site, NOT as a normal yield-resume. Consume
+        // the flag and route through the dedicated microtask.
+        if (w_gen.awaiting_return_completion) {
+            w_gen.awaiting_return_completion = false;
+            try realm.enqueueAsyncGenReturnAfterAwait(w_gen, value, state == .rejected);
+        } else {
+            try realm.enqueueAsyncResume(w_gen, value, state == .rejected);
+        }
     }
 
     // Fire user-level `.then` reactions.
