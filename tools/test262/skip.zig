@@ -751,6 +751,12 @@ pub const skip_planned_features = [_][]const u8{
     // attribute syntax + the JSON / text resolution back-ends yet.
     "import-attributes",
     "json-modules",
+    // ES2024 — `Float16Array` + `Math.f16round` + `DataView` half
+    // float accessors. Cynic doesn't ship the f16 numeric path
+    // yet (would need IEEE 754 binary16 conversion alongside the
+    // existing f32 / f64 helpers); path-skip the dedicated
+    // `Float16Array` corpus and tag the f16round bucket.
+    "Float16Array",
 };
 
 pub const skip_planned_paths = [_][]const u8{
