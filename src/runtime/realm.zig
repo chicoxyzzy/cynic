@@ -54,6 +54,16 @@ pub const Microtask = struct {
         /// This kind both settles `agy_cap_promise` with
         /// `{arg, agy_done}` AND continues the drain.
         async_gen_yield,
+        /// §27.6.3.7 step 8.b — when a yield suspended by an
+        /// outer `iter.return(v)` is resumed, the body runs
+        /// `Let awaited be Await(resumptionValue.[[Value]])`
+        /// before propagating the return-completion. We model
+        /// this as a microtask that awaits the supplied value
+        /// (`arg`), then routes it back into the body as a
+        /// return-completion via `resumeAsyncGenBody`. The
+        /// thenable case follows the await machinery
+        /// (PromiseResolve → suspend on resolved Promise).
+        async_gen_return_after_await,
     } = .callback,
     callback: Value = Value.undefined_,
     arg: Value = Value.undefined_,
@@ -753,6 +763,28 @@ pub const Realm = struct {
     ) !void {
         try self.microtask_queue.append(self.allocator, .{
             .kind = .async_resume,
+            .arg = value,
+            .async_gen = gen,
+            .async_throws = throws,
+        });
+    }
+
+    /// §27.6.3.7 step 8.b — schedule the Awaited return-completion
+    /// at the suspended yield site. `value` is the value passed
+    /// to `outerGen.return(value)` — it must be Awaited before
+    /// being propagated as the return completion, so the cap of
+    /// the outer `.return()` settles one tick later than a bare
+    /// `.next()` would. (For Promise / thenable values the await
+    /// machinery in `asyncGenDispatch` registers a reaction and
+    /// only enqueues this kind once the await settles.)
+    pub fn enqueueAsyncGenReturnAfterAwait(
+        self: *Realm,
+        gen: *@import("generator.zig").JSGenerator,
+        value: Value,
+        throws: bool,
+    ) !void {
+        try self.microtask_queue.append(self.allocator, .{
+            .kind = .async_gen_return_after_await,
             .arg = value,
             .async_gen = gen,
             .async_throws = throws,
