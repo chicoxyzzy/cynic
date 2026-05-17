@@ -122,7 +122,7 @@ fn afsiNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
         .value, .yielded => |v| v,
         .thrown => |ex| return rejectedPromise(realm, ex),
     };
-    return processIterResult(realm, result_v);
+    return processIterResult(realm, result_v, sync_iter_obj, sync_iter_v, true);
 }
 
 /// §27.6.1.3 %AsyncFromSyncIteratorPrototype%.return ( value )
@@ -162,7 +162,10 @@ fn afsiReturn(realm: *Realm, this_value: Value, args: []const Value) NativeError
         const ex = intrinsics_mod.newTypeError(realm, "iterator .return() result is not an object") catch return error.OutOfMemory;
         return rejectedPromise(realm, ex);
     }
-    return processIterResult(realm, result_v);
+    // `return` itself passes closeOnRejection=false per §27.6.1.3
+    // step 12 — the iterator is already being closed; don't
+    // double-close.
+    return processIterResult(realm, result_v, sync_iter_obj, sync_iter_v, false);
 }
 
 /// §27.6.1.4 %AsyncFromSyncIteratorPrototype%.throw ( value )
@@ -214,13 +217,24 @@ fn afsiThrow(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         const ex = intrinsics_mod.newTypeError(realm, "iterator .throw() result is not an object") catch return error.OutOfMemory;
         return rejectedPromise(realm, ex);
     }
-    return processIterResult(realm, result_v);
+    // §27.6.1.4 step 12 — `throw` passes closeOnRejection=true so
+    // a rejected `value` Promise still triggers an iterator close
+    // (the underlying iter wants to release resources).
+    return processIterResult(realm, result_v, sync_iter_obj, sync_iter_v, true);
 }
 
-/// §27.6.1.{2,3,4} steps 7–14 — read `done` then `value` (in
-/// that order so a poisoned-`done` getter fires before
-/// `value`), build the unwrap Promise.
-fn processIterResult(realm: *Realm, result_v: Value) NativeError!Value {
+/// §27.6.1.{2,3,4} steps 7–14 + §27.6.1.6 AsyncFromSyncIteratorContinuation
+/// — read `done` then `value` (in that order so a poisoned-`done`
+/// getter fires before `value`), build the unwrap Promise, and
+/// when `closeOnRejection` is true and `done` is false, close the
+/// sync iterator on a rejected inner Promise.
+fn processIterResult(
+    realm: *Realm,
+    result_v: Value,
+    sync_iter_obj: *JSObject,
+    sync_iter_v: Value,
+    close_on_rejection: bool,
+) NativeError!Value {
     const result_obj = heap_mod.valueAsPlainObject(result_v) orelse {
         const ex = intrinsics_mod.newTypeError(realm, "iterator result is not an object") catch return error.OutOfMemory;
         return rejectedPromise(realm, ex);
@@ -238,12 +252,133 @@ fn processIterResult(realm: *Realm, result_v: Value) NativeError!Value {
             (intrinsics_mod.newTypeError(realm, "iterator result .value read failed") catch return error.OutOfMemory);
         return rejectedPromise(realm, ex);
     };
-    // §27.6.1.5 Async-from-Sync Iterator Value Unwrap —
-    // PromiseResolve(value) then re-wrap as `{value, done}`.
-    // `wrapAsyncGenResult` already implements exactly this:
-    // fulfilled → fresh `{value, done}` Promise; rejected →
-    // propagate rejection; pending → register reaction.
+    // §27.6.1.6 step 5 — PromiseResolve(%Promise%, value). In Cynic
+    // this is the `value.constructor` read (used by `Promise.resolve`
+    // species lookup when value is a thenable). If reading
+    // `constructor` throws, step 6 closes the iterator when
+    // closeOnRejection && !done, then rejects the outer Promise.
+    if (close_on_rejection and !done and heap_mod.valueAsPlainObject(value_v) != null) {
+        const v_obj = heap_mod.valueAsPlainObject(value_v).?;
+        // Probe for poisoned `constructor` accessor — mirrors
+        // §27.6.1.6 step 5 PromiseResolve which reads
+        // `value.constructor` to honour species. A throw here
+        // surfaces as IteratorClose then reject.
+        const ctor_v = intrinsics_mod.getPropertyChain(realm, v_obj, "constructor") catch {
+            const ex = interpreter.consumePendingException(realm) orelse Value.undefined_;
+            return closeAndReject(realm, sync_iter_obj, sync_iter_v, ex);
+        };
+        _ = ctor_v;
+    }
+    // §27.6.1.6 step 14 — PerformPromiseThen(valueWrapper,
+    // onFulfilled, onRejected, promiseCapability). When `done` is
+    // false and `closeOnRejection` is true, `onRejected` closes
+    // the iterator before propagating the rejection (step 13.a).
+    if (close_on_rejection and !done) {
+        const wrapped = try wrapAsyncGenResultWithClose(realm, value_v, done, sync_iter_obj, sync_iter_v);
+        return wrapped;
+    }
     return interpreter.wrapAsyncGenResult(realm, value_v, done);
+}
+
+/// §27.6.1.6 step 13.a — close iterator on rejection then reject
+/// outer Promise. Builds the rejected outer Promise directly when
+/// `value_v` is already a settled rejected Promise.
+fn wrapAsyncGenResultWithClose(
+    realm: *Realm,
+    raw: Value,
+    done: bool,
+    sync_iter_obj: *JSObject,
+    sync_iter_v: Value,
+) NativeError!Value {
+    // Fast path: settled rejected Promise → IteratorClose then
+    // surface the rejection on the outer Promise.
+    if (heap_mod.valueAsPlainObject(raw)) |p| {
+        if (p.promise_state == .rejected) {
+            return closeAndReject(realm, sync_iter_obj, sync_iter_v, p.promise_value);
+        }
+        if (p.promise_state == .pending) {
+            // Register on-fulfilled + on-rejected reactions. The
+            // rejection reaction calls IteratorClose before
+            // rejecting the outer Promise (§27.6.1.6 step 13).
+            const outer = intrinsics_mod.allocatePromiseFor(realm, null, .pending, Value.undefined_) catch return error.OutOfMemory;
+            const fulfill_fn = realm.heap.allocateFunctionNative(if (done) iterResultDoneTrue else iterResultDoneFalse, 1, "asyncGenYield") catch return error.OutOfMemory;
+            fulfill_fn.has_construct = false;
+            const reject_fn = realm.heap.allocateFunctionNative(closeIteratorOnReject, 1, "closeIterator") catch return error.OutOfMemory;
+            reject_fn.has_construct = false;
+            reject_fn.properties.put(realm.allocator, "__cynic_sync_iter__", sync_iter_v) catch return error.OutOfMemory;
+            p.promise_reactions.append(realm.allocator, .{
+                .on_fulfilled = heap_mod.taggedFunction(fulfill_fn),
+                .on_rejected = heap_mod.taggedFunction(reject_fn),
+                .result_promise = outer,
+            }) catch return error.OutOfMemory;
+            return outer;
+        }
+    }
+    // Non-Promise / fulfilled-Promise / settled-fulfilled: no
+    // rejection branch needed — defer to the ordinary wrap.
+    return interpreter.wrapAsyncGenResult(realm, raw, done);
+}
+
+/// §7.4.7 IteratorClose — invoke `iterator.return()` and swallow
+/// any abrupt completion from the close itself; the original
+/// rejection is what surfaces.
+fn closeAndReject(
+    realm: *Realm,
+    sync_iter_obj: *JSObject,
+    sync_iter_v: Value,
+    reject_value: Value,
+) NativeError!Value {
+    const ret_v = intrinsics_mod.getPropertyChain(realm, sync_iter_obj, "return") catch {
+        _ = interpreter.consumePendingException(realm);
+        return rejectedPromise(realm, reject_value);
+    };
+    if (!ret_v.isUndefined() and !ret_v.isNull()) {
+        if (heap_mod.valueAsFunction(ret_v)) |ret_fn| {
+            const close_outcome = interpreter.callJSFunction(realm.allocator, realm, ret_fn, sync_iter_v, &.{}) catch
+                return rejectedPromise(realm, reject_value);
+            _ = close_outcome; // §7.4.7 step 6 — discard close result.
+        }
+    }
+    return rejectedPromise(realm, reject_value);
+}
+
+fn iterResultDoneFalse(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const v = if (args.len > 0) args[0] else Value.undefined_;
+    return genResult(realm, v, false);
+}
+
+fn iterResultDoneTrue(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const v = if (args.len > 0) args[0] else Value.undefined_;
+    return genResult(realm, v, true);
+}
+
+fn closeIteratorOnReject(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const ex = if (args.len > 0) args[0] else Value.undefined_;
+    // Recover the sync iter from the function's stash. The
+    // closure was tagged with `__cynic_sync_iter__` at creation.
+    if (heap_mod.valueAsFunction(this_value)) |fn_obj| {
+        if (fn_obj.properties.get("__cynic_sync_iter__")) |sync_iter_v| {
+            if (heap_mod.valueAsPlainObject(sync_iter_v)) |sync_iter_obj| {
+                // Call iterator.return(); swallow any thrown
+                // result — the original rejection is what we
+                // re-throw.
+                const ret_v = intrinsics_mod.getPropertyChain(realm, sync_iter_obj, "return") catch {
+                    _ = interpreter.consumePendingException(realm);
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                };
+                if (!ret_v.isUndefined() and !ret_v.isNull()) {
+                    if (heap_mod.valueAsFunction(ret_v)) |ret_fn| {
+                        _ = interpreter.callJSFunction(realm.allocator, realm, ret_fn, sync_iter_v, &.{}) catch {};
+                    }
+                }
+            }
+        }
+    }
+    realm.pending_exception = ex;
+    return error.NativeThrew;
 }
 
 fn genResult(realm: *Realm, value: Value, done: bool) NativeError!Value {
