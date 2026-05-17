@@ -263,6 +263,19 @@ pub const skip_ses_substrings = [_][]const u8{
     "Function/prototype/call/S15.3.4.4_A5_T8.js",
     "Function/prototype/call/S15.3.4.4_A7_T6.js",
 
+    // `built-ins/Function/prototype/toString/{AsyncFunction,
+    // AsyncGenerator,GeneratorFunction}.js` — each fixture invokes
+    // the source-string constructor (`AsyncFunction("…")` /
+    // `AsyncGeneratorFunction("…")` / `GeneratorFunction("…")`) to
+    // build the function whose `.toString()` is then asserted.
+    // Permanent SES carve-out per AGENTS.md (§15.3.2 / §27.3.2 /
+    // §27.4.2 / §27.7.2 dynamic-code constructors). The plain
+    // `Function.prototype.toString` family (non-`-builtin` /
+    // non-`{Async,Generator}Function`) stays attempted. 3 fixtures.
+    "/Function/prototype/toString/AsyncFunction.",
+    "/Function/prototype/toString/AsyncGenerator.",
+    "/Function/prototype/toString/GeneratorFunction.",
+
     // `language/expressions/compound-assignment/11.13.2-*-s.js` —
     // Sputnik strict-mode shape tests. Every fixture wraps the
     // operator under test in `assert.throws(ReferenceError, () =>
