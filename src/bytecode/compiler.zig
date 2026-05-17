@@ -1,4 +1,4 @@
-//! AST → bytecode compiler statements + lexical scope.
+//! AST → bytecode compiler statements + lexical scope. EDIT_MARKER
 //!
 //! Walks `Statement` and `Expression` AST and emits Ignition-style
 //! bytecode into a `Builder`. The result of every expression
@@ -6711,6 +6711,11 @@ fn collectScriptDeclNamesOne(
             for (sw.cases) |case| for (case.body) |*inner|
                 try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, true);
         },
+        // §14.13 LabelledStatement — transparent to declaration
+        // collection; recurse into the wrapped body so a `var`
+        // inside `lbl: do { … } while (0)` still reaches the
+        // global-decl tally.
+        .labeled => |lb| try collectScriptDeclNamesOne(self, lb.body, lex_names, var_names, fn_names, true),
         else => {},
     }
 }
@@ -6876,12 +6881,21 @@ fn hoistStatement(self: *Compiler, s: *ast.statement.Statement, inside_nested_bl
         .switch_ => |sw| {
             for (sw.cases) |case| for (case.body) |*inner| try self.hoistStatement(inner, true);
         },
+        // §14.13 LabelledStatement — `LABEL : Statement` is
+        // transparent to var-hoisting; the wrapped iteration /
+        // block / etc. still contributes its `var` and function
+        // declarations to the enclosing function / script scope.
+        // Without this recursion, `lbl: do { var x; } while (0)`
+        // would fail compileLexicalDecl's resolve() lookup with
+        // UnresolvedReference because hoistStatement skipped the
+        // body.
+        .labeled => |lb| try self.hoistStatement(lb.body, true),
         // Nested function / class / arrow bodies have their own
         // function-like scope and are handled by their own
         // `hoistVarAndFunctions` call. Other statement shapes
         // (expression, return, throw, break, continue, debugger,
-        // import / export, labeled — n/a) carry no `var` /
-        // function-decl children we need to walk.
+        // import / export) carry no `var` / function-decl
+        // children we need to walk.
         else => {},
     }
 }
@@ -7015,6 +7029,7 @@ fn compileLexicalDecl(self: *Compiler, ld: ast.statement.LexicalDecl) CompileErr
                                     .is_global = true,
                                 };
                             }
+                            std.debug.print("DEBUG: UnresolvedReference for var '{s}'\n", .{name});
                             return error.UnresolvedReference;
                         };
                         try self.emitStoreBinding(binding, d.span);
