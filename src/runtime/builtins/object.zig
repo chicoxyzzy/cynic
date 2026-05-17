@@ -1446,14 +1446,29 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
     const key = try descriptorKey(realm, argOr(args, 1, Value.undefined_));
 
     // §10.5.5 Proxy [[GetOwnProperty]] — when target is a proxy,
-    // dispatch through `handler.getOwnPropertyDescriptor`.
-    if (heap_mod.valueAsPlainObject(target)) |obj_in| {
-        if (obj_in.proxy_target != null or obj_in.proxy_revoked) {
-            if (obj_in.proxy_revoked) return throwTypeError(realm, "Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");
-            const proxy_target = obj_in.proxy_target.?;
-            const handler = obj_in.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'getOwnPropertyDescriptor' on a proxy with null handler");
+    // dispatch through `handler.getOwnPropertyDescriptor`. Walks
+    // the chain so a trapless outer proxy whose target is itself
+    // a proxy forwards to the inner proxy's trap (§10.5.5 step 7.a
+    // recurses into target.[[GetOwnProperty]]).
+    if (heap_mod.valueAsPlainObject(target)) |obj_chain_root| {
+        var cursor = obj_chain_root;
+        while (cursor.proxy_target != null or cursor.proxy_revoked) {
+            if (cursor.proxy_revoked) return throwTypeError(realm, "Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");
+            const proxy_target = cursor.proxy_target.?;
+            const handler = cursor.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'getOwnPropertyDescriptor' on a proxy with null handler");
             const trap_v = handler.get("getOwnPropertyDescriptor");
-            if (!trap_v.isUndefined() and !trap_v.isNull()) {
+            if (trap_v.isUndefined() or trap_v.isNull()) {
+                // §10.5.5 step 7.a — fall through to target.
+                // [[GetOwnProperty]]. If target itself is a proxy,
+                // loop; otherwise recurse to the non-proxy path.
+                if (proxy_target.proxy_target != null or proxy_target.proxy_revoked) {
+                    cursor = proxy_target;
+                    continue;
+                }
+                const inner_args = [_]Value{ heap_mod.taggedObject(proxy_target), argOr(args, 1, Value.undefined_) };
+                return objectGetOwnPropertyDescriptor(realm, Value.undefined_, &inner_args);
+            }
+            {
                 const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'getOwnPropertyDescriptor' trap is not callable");
                 const interpreter = @import("../interpreter.zig");
                 const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
@@ -1516,9 +1531,6 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
                 }
                 return result_v;
             }
-            // Trap absent — recurse on the target.
-            const inner_args = [_]Value{ heap_mod.taggedObject(proxy_target), argOr(args, 1, Value.undefined_) };
-            return objectGetOwnPropertyDescriptor(realm, Value.undefined_, &inner_args);
         }
     }
 
@@ -2616,7 +2628,10 @@ pub fn proxySetPrototypeOfBool(realm: *Realm, obj: *JSObject, proto_v: Value) Na
     if (obj.proxy_revoked) return throwTypeError(realm, "Cannot perform 'setPrototypeOf' on a revoked proxy");
     const proxy_target = obj.proxy_target.?;
     const handler = obj.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'setPrototypeOf' on a proxy with null handler");
-    const trap_v = handler.get("setPrototypeOf");
+    // §7.3.11 GetMethod — uses [[Get]] which fires accessors. A
+    // handler installed with `Object.defineProperty(h, "trapName",
+    // {get})` must run that getter (which may throw).
+    const trap_v = try intrinsics.getPropertyChain(realm, handler, "setPrototypeOf");
     // §10.5.2 step 6 — GetMethod: undefined/null falls through.
     if (trap_v.isUndefined() or trap_v.isNull()) {
         // Recurse on the target as if [[SetPrototypeOf]] called directly.
@@ -2844,6 +2859,15 @@ fn objectHasOwnProperty(realm: *Realm, this_value: Value, args: []const Value) N
         // for the in-namespace exported string keys.
         if (obj.is_module_namespace and obj.hasOwn(key) and !std.mem.startsWith(u8, key, "@@") and !std.mem.startsWith(u8, key, "<sym:")) {
             _ = try @import("../module.zig").namespaceGetThrowingOnHole(realm, obj, key);
+        }
+        // §7.3.13 HasOwnProperty composes [[GetOwnProperty]]. For a
+        // Proxy that dispatches the `getOwnPropertyDescriptor` trap
+        // (§10.5.5); we reuse Object.getOwnPropertyDescriptor which
+        // already walks the proxy chain and enforces the invariants.
+        if (obj.proxy_target != null or obj.proxy_revoked) {
+            const probe_args = [_]Value{ this_value, argOr(args, 0, Value.undefined_) };
+            const desc_v = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &probe_args);
+            return Value.fromBool(!desc_v.isUndefined());
         }
         return Value.fromBool(obj.hasOwn(key));
     }

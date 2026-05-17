@@ -8027,6 +8027,22 @@ fn runFrames(
                             },
                         };
                         acc = v_ns;
+                    } else if (chainHasProxy(obj)) {
+                        // §10.1.8 OrdinaryGet — when any ancestor in
+                        // the prototype chain is a Proxy exotic, walk
+                        // explicitly so that the proxy's [[Get]] fires
+                        // with the original receiver (§10.1.8.1 step
+                        // 4.b passes Receiver unchanged). Without this
+                        // an inherited proxy accessor / trap silently
+                        // bypasses.
+                        switch (try getThroughChain(allocator, realm, frames, f, ip, obj, key_s.bytes, acc)) {
+                            .value => |v| acc = v,
+                            .handled => {
+                                committed = true;
+                                continue;
+                            },
+                            .uncaught => |ex| return .{ .thrown = ex },
+                        }
                     } else if (lookupAccessor(obj, key_s.bytes)) |acc_pair| {
                         // §10.1.8 — accessor descriptor wins over
                         // data property. Walk the prototype chain
@@ -8420,6 +8436,17 @@ fn runFrames(
                     // Mirror the `lda_property` handling so
                     // `obj[expr]` and `obj.x` behave identically
                     // when `x` resolves to a getter on the chain.
+                    if (chainHasProxy(obj)) {
+                        switch (try getThroughChain(allocator, realm, frames, f, ip, obj, key_slice, recv)) {
+                            .value => |v| acc = v,
+                            .handled => {
+                                committed = true;
+                                continue;
+                            },
+                            .uncaught => |ex| return .{ .thrown = ex },
+                        }
+                        continue;
+                    }
                     if (lookupAccessor(obj, key_slice)) |acc_pair| {
                         if (acc_pair.getter) |getter| {
                             const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
@@ -9708,6 +9735,121 @@ fn throwInSetter(
     return .handled;
 }
 
+/// True iff any ancestor of `obj` on its prototype chain is a
+/// Proxy exotic (including a revoked proxy). Used by `lda_property`
+/// and `lda_computed_property` to detect when a normal proto-chain
+/// walk would silently bypass a Proxy `get` trap installed on an
+/// ancestor.
+fn chainHasProxy(obj: *JSObject) bool {
+    var cursor: ?*JSObject = obj;
+    while (cursor) |c| : (cursor = c.prototype) {
+        if (c.proxy_target != null or c.proxy_revoked) return true;
+    }
+    return false;
+}
+
+const GetChainOutcome = union(enum) {
+    value: Value,
+    handled,
+    uncaught: Value,
+};
+
+/// §10.1.8 OrdinaryGet over a prototype chain that includes at
+/// least one Proxy ancestor. Walks the chain rung by rung: on a
+/// proxy ancestor dispatches `[[Get]]` with `receiver` unchanged
+/// (per §10.1.8.1 step 4.b); on an ordinary ancestor looks up own
+/// accessor / data slot, returning early on a hit. Returning
+/// `undefined` matches the spec's "no descriptor found" terminus.
+fn getThroughChain(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    frames: *std.ArrayListUnmanaged(CallFrame),
+    f: *CallFrame,
+    ip: usize,
+    obj: *JSObject,
+    key: []const u8,
+    receiver: Value,
+) RunError!GetChainOutcome {
+    var cursor: ?*JSObject = obj;
+    while (cursor) |c| : (cursor = c.prototype) {
+        if (c.proxy_target != null or c.proxy_revoked) {
+            // §10.5.5 Proxy [[Get]] — dispatch with `receiver`,
+            // not the proxy itself. The trap helper already
+            // recurses through proxy-target-is-proxy chains.
+            switch (try proxyGetTrap(allocator, realm, frames, f, ip, c, key, receiver)) {
+                .value => |v| return .{ .value = v },
+                .fallthrough => |t| {
+                    // Trapless proxy whose target is non-proxy —
+                    // continue the OrdinaryGet walk starting at
+                    // the target (step 7.a's recursion).
+                    cursor = t;
+                    // Pretend the loop just moved to `t`; the
+                    // `for-step`-style increment would advance us
+                    // past it, so handle the visit inline.
+                    while (cursor) |t2| {
+                        if (t2.proxy_target != null or t2.proxy_revoked) {
+                            switch (try proxyGetTrap(allocator, realm, frames, f, ip, t2, key, receiver)) {
+                                .value => |v2| return .{ .value = v2 },
+                                .fallthrough => |t3| {
+                                    cursor = t3;
+                                    continue;
+                                },
+                                .handled => return .handled,
+                                .uncaught => |ex| return .{ .uncaught = ex },
+                            }
+                        }
+                        if (t2.accessors.get(key)) |acc| {
+                            if (acc.getter) |getter| {
+                                const out = try callJSFunction(allocator, realm, getter, receiver, &.{});
+                                switch (out) {
+                                    .value, .yielded => |v| return .{ .value = v },
+                                    .thrown => |ex| {
+                                        f.ip = ip;
+                                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                                        return .handled;
+                                    },
+                                }
+                            }
+                            return .{ .value = Value.undefined_ };
+                        }
+                        if (t2.is_array_exotic) {
+                            if (@import("object.zig").JSObject.canonicalIntegerIndex(key)) |idx| {
+                                if (t2.tryGetIndexedOwn(idx)) |v| return .{ .value = v };
+                            }
+                        }
+                        if (t2.properties.get(key)) |v| return .{ .value = v };
+                        cursor = t2.prototype;
+                    }
+                    return .{ .value = Value.undefined_ };
+                },
+                .handled => return .handled,
+                .uncaught => |ex| return .{ .uncaught = ex },
+            }
+        }
+        if (c.accessors.get(key)) |acc| {
+            if (acc.getter) |getter| {
+                const out = try callJSFunction(allocator, realm, getter, receiver, &.{});
+                switch (out) {
+                    .value, .yielded => |v| return .{ .value = v },
+                    .thrown => |ex| {
+                        f.ip = ip;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                        return .handled;
+                    },
+                }
+            }
+            return .{ .value = Value.undefined_ };
+        }
+        if (c.is_array_exotic) {
+            if (@import("object.zig").JSObject.canonicalIntegerIndex(key)) |idx| {
+                if (c.tryGetIndexedOwn(idx)) |v| return .{ .value = v };
+            }
+        }
+        if (c.properties.get(key)) |v| return .{ .value = v };
+    }
+    return .{ .value = Value.undefined_ };
+}
+
 /// Outcome of a §10.5.5 Proxy `get`/`set`/`has`/`deleteProperty`
 /// trap dispatch:
 /// • `.value: Value` — trap returned a primitive/object; use it.
@@ -9741,38 +9883,81 @@ fn proxyGetTrap(
     key: []const u8,
     receiver: Value,
 ) RunError!ProxyOutcome {
-    if (proxy.proxy_revoked) {
-        const ex = try makeTypeError(realm, "Cannot perform 'get' on a proxy that has been revoked");
-        f.ip = ip;
-        if (!try unwindThrow(allocator, realm, frames, ex)) {
-            return .{ .uncaught = ex };
-        }
-        return .handled;
-    }
-    const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
-    const handler = proxy.proxy_handler orelse return .{ .fallthrough = target };
-    const trap_v = handler.get("get");
-    // §7.3.11 GetMethod — undefined/null fall through; any other
-    // non-callable value throws TypeError before the trap runs.
-    if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
-    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
-        const ex = try makeTypeError(realm, "Proxy 'get' trap is not callable");
-        f.ip = ip;
-        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
-        return .handled;
-    };
-    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-    const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str), receiver };
-    const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);
-    switch (outcome) {
-        .value, .yielded => |v| return .{ .value = v },
-        .thrown => |ex| {
+    // §10.5.5 [[Get]] step 7.a — when the trap is missing, the
+    // spec recurses through `target.[[Get]]`. If `target` is itself
+    // a Proxy, that re-invokes Proxy [[Get]] (firing the inner
+    // trap). Walk the chain here so a trapless outer proxy whose
+    // target is another proxy doesn't silently bypass the inner
+    // trap.
+    var cur = proxy;
+    while (true) {
+        if (cur.proxy_revoked) {
+            const ex = try makeTypeError(realm, "Cannot perform 'get' on a proxy that has been revoked");
             f.ip = ip;
             if (!try unwindThrow(allocator, realm, frames, ex)) {
                 return .{ .uncaught = ex };
             }
             return .handled;
-        },
+        }
+        const target = cur.proxy_target orelse return .{ .fallthrough = cur };
+        const handler = cur.proxy_handler orelse return .{ .fallthrough = target };
+        const trap_v = handler.get("get");
+        // §7.3.11 GetMethod — undefined/null fall through; any other
+        // non-callable value throws TypeError before the trap runs.
+        if (trap_v.isUndefined() or trap_v.isNull()) {
+            if (target.proxy_target != null or target.proxy_revoked) {
+                cur = target;
+                continue;
+            }
+            return .{ .fallthrough = target };
+        }
+        const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
+            const ex = try makeTypeError(realm, "Proxy 'get' trap is not callable");
+            f.ip = ip;
+            if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+            return .handled;
+        };
+        const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+        const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str), receiver };
+        const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);
+        const v = switch (outcome) {
+            .value, .yielded => |val| val,
+            .thrown => |ex| {
+                f.ip = ip;
+                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                    return .{ .uncaught = ex };
+                }
+                return .handled;
+            },
+        };
+        // §10.5.5 step 10 — non-configurable non-writable data
+        // property must match.
+        if (target.property_flags.get(key)) |flags| {
+            if (target.properties.get(key)) |target_v| {
+                if (!flags.configurable and !flags.writable) {
+                    if (!intrinsics_mod.sameValue(target_v, v)) {
+                        const ex = try makeTypeError(realm, "proxy 'get' trap returned mismatched value for non-writable non-configurable data property");
+                        f.ip = ip;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                        return .handled;
+                    }
+                }
+            }
+        }
+        // §10.5.5 step 11 — accessor with undefined getter requires
+        // trap result to be undefined.
+        if (target.accessors.get(key)) |acc| {
+            const flags = target.flagsFor(key);
+            if (!flags.configurable and acc.getter == null) {
+                if (!v.isUndefined()) {
+                    const ex = try makeTypeError(realm, "proxy 'get' trap returned non-undefined for non-configurable accessor with no getter");
+                    f.ip = ip;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                    return .handled;
+                }
+            }
+        }
+        return .{ .value = v };
     }
 }
 
@@ -9788,36 +9973,75 @@ fn proxyDeleteTrap(
     proxy: *JSObject,
     key: []const u8,
 ) RunError!ProxyOutcome {
-    if (proxy.proxy_revoked) {
-        const ex = try makeTypeError(realm, "Cannot perform 'deleteProperty' on a proxy that has been revoked");
-        f.ip = ip;
-        if (!try unwindThrow(allocator, realm, frames, ex)) {
-            return .{ .uncaught = ex };
-        }
-        return .handled;
-    }
-    const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
-    const handler = proxy.proxy_handler orelse return .{ .fallthrough = target };
-    const trap_v = handler.get("deleteProperty");
-    if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
-    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
-        const ex = try makeTypeError(realm, "Proxy 'deleteProperty' trap is not callable");
-        f.ip = ip;
-        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
-        return .handled;
-    };
-    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-    const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str) };
-    const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);
-    switch (outcome) {
-        .value, .yielded => |v| return .{ .value = Value.fromBool(arith.toBoolean(v)) },
-        .thrown => |ex| {
+    // §10.5.10 [[Delete]] step 7.a — when the trap is missing,
+    // recurse via `target.[[Delete]]`. If `target` is itself a
+    // Proxy, that re-enters Proxy [[Delete]] dispatch (firing the
+    // inner trap). Walk the chain so a trapless outer proxy
+    // forwards correctly.
+    var cur = proxy;
+    while (true) {
+        if (cur.proxy_revoked) {
+            const ex = try makeTypeError(realm, "Cannot perform 'deleteProperty' on a proxy that has been revoked");
             f.ip = ip;
             if (!try unwindThrow(allocator, realm, frames, ex)) {
                 return .{ .uncaught = ex };
             }
             return .handled;
-        },
+        }
+        const target = cur.proxy_target orelse return .{ .fallthrough = cur };
+        const handler = cur.proxy_handler orelse return .{ .fallthrough = target };
+        const trap_v = handler.get("deleteProperty");
+        if (trap_v.isUndefined() or trap_v.isNull()) {
+            if (target.proxy_target != null or target.proxy_revoked) {
+                cur = target;
+                continue;
+            }
+            return .{ .fallthrough = target };
+        }
+        const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
+            const ex = try makeTypeError(realm, "Proxy 'deleteProperty' trap is not callable");
+            f.ip = ip;
+            if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+            return .handled;
+        };
+        const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+        const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str) };
+        const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);
+        const v = switch (outcome) {
+            .value, .yielded => |val| val,
+            .thrown => |ex| {
+                f.ip = ip;
+                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                    return .{ .uncaught = ex };
+                }
+                return .handled;
+            },
+        };
+        const b = arith.toBoolean(v);
+        if (b) {
+            // §10.5.10 step 10-13 — the trap can't report success
+            // when the target's own property is non-configurable,
+            // and (proxy-missing-checks: §10.5.10 step 14) when
+            // target is non-extensible and the property exists on
+            // target.
+            const has_own = target.property_flags.contains(key) and (target.properties.contains(key) or target.accessors.contains(key));
+            if (has_own) {
+                const flags = target.flagsFor(key);
+                if (!flags.configurable) {
+                    const ex = try makeTypeError(realm, "proxy 'deleteProperty' trap reported success for non-configurable own property");
+                    f.ip = ip;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                    return .handled;
+                }
+                if (!target.extensible) {
+                    const ex = try makeTypeError(realm, "proxy 'deleteProperty' trap reported success for own property of non-extensible target");
+                    f.ip = ip;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                    return .handled;
+                }
+            }
+        }
+        return .{ .value = Value.fromBool(b) };
     }
 }
 
@@ -9834,36 +10058,71 @@ fn proxyHasTrap(
     proxy: *JSObject,
     key: []const u8,
 ) RunError!ProxyOutcome {
-    if (proxy.proxy_revoked) {
-        const ex = try makeTypeError(realm, "Cannot perform 'has' on a proxy that has been revoked");
-        f.ip = ip;
-        if (!try unwindThrow(allocator, realm, frames, ex)) {
-            return .{ .uncaught = ex };
-        }
-        return .handled;
-    }
-    const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
-    const handler = proxy.proxy_handler orelse return .{ .fallthrough = target };
-    const trap_v = handler.get("has");
-    if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
-    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
-        const ex = try makeTypeError(realm, "Proxy 'has' trap is not callable");
-        f.ip = ip;
-        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
-        return .handled;
-    };
-    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-    const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str) };
-    const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);
-    switch (outcome) {
-        .value, .yielded => |v| return .{ .value = Value.fromBool(arith.toBoolean(v)) },
-        .thrown => |ex| {
+    // §10.5.7 [[HasProperty]] step 7.a — trap missing recurses
+    // via `target.[[HasProperty]]`. Walk the chain so a trapless
+    // outer proxy forwards to the inner proxy's has trap.
+    var cur = proxy;
+    while (true) {
+        if (cur.proxy_revoked) {
+            const ex = try makeTypeError(realm, "Cannot perform 'has' on a proxy that has been revoked");
             f.ip = ip;
             if (!try unwindThrow(allocator, realm, frames, ex)) {
                 return .{ .uncaught = ex };
             }
             return .handled;
-        },
+        }
+        const target = cur.proxy_target orelse return .{ .fallthrough = cur };
+        const handler = cur.proxy_handler orelse return .{ .fallthrough = target };
+        const trap_v = handler.get("has");
+        if (trap_v.isUndefined() or trap_v.isNull()) {
+            if (target.proxy_target != null or target.proxy_revoked) {
+                cur = target;
+                continue;
+            }
+            return .{ .fallthrough = target };
+        }
+        const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
+            const ex = try makeTypeError(realm, "Proxy 'has' trap is not callable");
+            f.ip = ip;
+            if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+            return .handled;
+        };
+        const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+        const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str) };
+        const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);
+        const v = switch (outcome) {
+            .value, .yielded => |val| val,
+            .thrown => |ex| {
+                f.ip = ip;
+                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                    return .{ .uncaught = ex };
+                }
+                return .handled;
+            },
+        };
+        const b = arith.toBoolean(v);
+        // §10.5.7 step 9-11 — can't pretend a non-configurable own
+        // property doesn't exist, nor pretend an own property of a
+        // non-extensible target doesn't exist.
+        if (!b) {
+            const has_own = target.property_flags.contains(key) and (target.properties.contains(key) or target.accessors.contains(key));
+            if (has_own) {
+                const flags = target.flagsFor(key);
+                if (!flags.configurable) {
+                    const ex = try makeTypeError(realm, "proxy 'has' trap returned false for non-configurable own property");
+                    f.ip = ip;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                    return .handled;
+                }
+                if (!target.extensible) {
+                    const ex = try makeTypeError(realm, "proxy 'has' trap returned false for own property of non-extensible target");
+                    f.ip = ip;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                    return .handled;
+                }
+            }
+        }
+        return .{ .value = Value.fromBool(b) };
     }
 }
 
@@ -9883,73 +10142,85 @@ fn proxySetTrap(
     value: Value,
     receiver: Value,
 ) RunError!ProxyOutcome {
-    if (proxy.proxy_revoked) {
-        const ex = try makeTypeError(realm, "Cannot perform 'set' on a proxy that has been revoked");
-        f.ip = ip;
-        if (!try unwindThrow(allocator, realm, frames, ex)) {
-            return .{ .uncaught = ex };
-        }
-        return .handled;
-    }
-    const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
-    const handler = proxy.proxy_handler orelse return .{ .fallthrough = target };
-    const trap_v = handler.get("set");
-    if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
-    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
-        const ex = try makeTypeError(realm, "Proxy 'set' trap is not callable");
-        f.ip = ip;
-        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
-        return .handled;
-    };
-    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-    const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str), value, receiver };
-    const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);
-    switch (outcome) {
-        .value, .yielded => |v| {
-            if (!arith.toBoolean(v)) {
-                // §10.5.6 step 9 — strict-mode assignment throws on
-                // a falsy trap return (Cynic is strict-only).
-                const ex = try makeTypeError(realm, "'set' on proxy returned falsy");
-                f.ip = ip;
-                if (!try unwindThrow(allocator, realm, frames, ex)) {
-                    return .{ .uncaught = ex };
-                }
-                return .handled;
-            }
-            // §10.5.6 steps 10–12 — the trap can't claim success on
-            // a non-configurable / non-writable own data descriptor
-            // unless the new value matches, nor on a non-configurable
-            // accessor whose [[Set]] is undefined.
-            if (target.property_flags.get(key)) |flags| {
-                if (target.properties.get(key)) |target_v| {
-                    if (!flags.configurable and !flags.writable) {
-                        if (!intrinsics_mod.sameValue(target_v, value)) {
-                            const ex = try makeTypeError(realm, "proxy 'set' trap reported success for non-writable non-configurable data property");
-                            f.ip = ip;
-                            if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
-                            return .handled;
-                        }
-                    }
-                }
-            }
-            if (target.accessors.get(key)) |acc| {
-                const flags = target.flagsFor(key);
-                if (!flags.configurable and acc.setter == null) {
-                    const ex = try makeTypeError(realm, "proxy 'set' trap reported success for non-configurable accessor with no setter");
-                    f.ip = ip;
-                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
-                    return .handled;
-                }
-            }
-            return .{ .value = Value.undefined_ };
-        },
-        .thrown => |ex| {
+    // §10.5.6 [[Set]] step 7.a — trap missing recurses via
+    // `target.[[Set]]`. Walk the chain so a trapless outer proxy
+    // forwards to the inner proxy's set trap.
+    var cur = proxy;
+    while (true) {
+        if (cur.proxy_revoked) {
+            const ex = try makeTypeError(realm, "Cannot perform 'set' on a proxy that has been revoked");
             f.ip = ip;
             if (!try unwindThrow(allocator, realm, frames, ex)) {
                 return .{ .uncaught = ex };
             }
             return .handled;
-        },
+        }
+        const target = cur.proxy_target orelse return .{ .fallthrough = cur };
+        const handler = cur.proxy_handler orelse return .{ .fallthrough = target };
+        const trap_v = handler.get("set");
+        if (trap_v.isUndefined() or trap_v.isNull()) {
+            if (target.proxy_target != null or target.proxy_revoked) {
+                cur = target;
+                continue;
+            }
+            return .{ .fallthrough = target };
+        }
+        const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
+            const ex = try makeTypeError(realm, "Proxy 'set' trap is not callable");
+            f.ip = ip;
+            if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+            return .handled;
+        };
+        const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+        const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str), value, receiver };
+        const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);
+        switch (outcome) {
+            .value, .yielded => |v| {
+                if (!arith.toBoolean(v)) {
+                    // §10.5.6 step 9 — strict-mode assignment throws on
+                    // a falsy trap return (Cynic is strict-only).
+                    const ex = try makeTypeError(realm, "'set' on proxy returned falsy");
+                    f.ip = ip;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .uncaught = ex };
+                    }
+                    return .handled;
+                }
+                // §10.5.6 steps 10–12 — the trap can't claim success on
+                // a non-configurable / non-writable own data descriptor
+                // unless the new value matches, nor on a non-configurable
+                // accessor whose [[Set]] is undefined.
+                if (target.property_flags.get(key)) |flags| {
+                    if (target.properties.get(key)) |target_v| {
+                        if (!flags.configurable and !flags.writable) {
+                            if (!intrinsics_mod.sameValue(target_v, value)) {
+                                const ex = try makeTypeError(realm, "proxy 'set' trap reported success for non-writable non-configurable data property");
+                                f.ip = ip;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                                return .handled;
+                            }
+                        }
+                    }
+                }
+                if (target.accessors.get(key)) |acc| {
+                    const flags = target.flagsFor(key);
+                    if (!flags.configurable and acc.setter == null) {
+                        const ex = try makeTypeError(realm, "proxy 'set' trap reported success for non-configurable accessor with no setter");
+                        f.ip = ip;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                        return .handled;
+                    }
+                }
+                return .{ .value = Value.undefined_ };
+            },
+            .thrown => |ex| {
+                f.ip = ip;
+                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                    return .{ .uncaught = ex };
+                }
+                return .handled;
+            },
+        }
     }
 }
 
