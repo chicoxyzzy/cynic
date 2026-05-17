@@ -1010,18 +1010,57 @@ fn arrayIsArray(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     return Value.false_;
 }
 
+/// §23.1.2.3 Array.of(...items). Per spec:
+///   1. Let len be the number of arguments.
+///   2. Let C be the `this` value.
+///   3. If IsConstructor(C), let A be ? Construct(C, « 𝔽(len) »).
+///      Else let A be ? ArrayCreate(len).
+///   4. For each item, CreateDataPropertyOrThrow(A, ToString(k), item).
+///   5. ? Set(A, "length", 𝔽(len), true).
+///   6. Return A.
+/// The constructor path is observable via `Array.of.call(Ctor, …)`,
+/// the test262 entry point — `Ctor` receives a single `len` argument
+/// and may install a `length` accessor that the final Set step
+/// invokes (sets-length.js). An abrupt completion from Construct
+/// (return-abrupt-from-contructor.js) must propagate; the
+/// CreateDataPropertyOrThrow / Set abrupts propagate too
+/// (return-abrupt-from-data-property*.js, return-abrupt-from-setting-length.js).
 fn arrayOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value;
-    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
-    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    const len_i64: i64 = @intCast(args.len);
+    const this_ctor: ?*JSFunction = blk: {
+        const f = heap_mod.valueAsFunction(this_value) orelse break :blk null;
+        if (!f.has_construct or f.is_arrow) break :blk null;
+        break :blk f;
+    };
+
+    var out: *JSObject = undefined;
+    if (this_ctor) |c| {
+        // §23.1.2.3 step 3.a — Construct(C, « 𝔽(len) »).
+        const ctor_args = [_]Value{numberFromI64(len_i64)};
+        const ctor_v = try constructForFromAsync(realm, c, &ctor_args);
+        out = heap_mod.valueAsPlainObject(ctor_v) orelse return throwTypeError(realm, "Array.of: constructor did not return an object");
+    } else {
+        out = realm.heap.allocateObject() catch return error.OutOfMemory;
+        out.prototype = realm.intrinsics.array_prototype;
+        out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    }
+    // Pin the receiver across the data-property writes and the
+    // final length set; both re-enter JS (accessor setters from a
+    // user-supplied subclass) and can trigger a GC sweep.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+
     for (args, 0..) |v, idx| {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
-        const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+        const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+        // §23.1.2.3 step 4.c — CreateDataPropertyOrThrow.
+        try createDataPropertyOrThrowGeneric(realm, out, idx_owned.bytes, v);
     }
-    setLength(realm, out, @intCast(args.len)) catch return error.OutOfMemory;
+    // §23.1.2.3 step 5 — Set(A, "length", 𝔽(len), true). Goes
+    // through the user-installed setter on subclass receivers.
+    try setOrThrow(realm, out, "length", numberFromI64(len_i64));
     return heap_mod.taggedObject(out);
 }
 
