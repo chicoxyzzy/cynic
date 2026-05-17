@@ -45,7 +45,11 @@ fn speciesReturnsThis(realm: *Realm, this_value: Value, args: []const Value) Nat
 }
 
 fn installSpeciesGetter(realm: *Realm, ctor: *@import("../function.zig").JSFunction) !void {
-    const getter = try realm.heap.allocateFunctionNative(speciesReturnsThis, 0, "[Symbol.species]");
+    // §24.1.2.2 get Map [ @@species ] — the getter's `.name` is
+    // `"get [Symbol.species]"` per §15.7.4 (well-known-symbol
+    // accessor formatting). Matches what `Symbol.species/symbol-
+    // species-name.js` reads via `Object.getOwnPropertyDescriptor`.
+    const getter = try realm.heap.allocateFunctionNative(speciesReturnsThis, 0, "get [Symbol.species]");
     getter.proto = realm.intrinsics.function_prototype;
     const entry = try ctor.accessors.getOrPut(realm.allocator, "@@species");
     entry.value_ptr.* = .{ .getter = getter };
@@ -56,8 +60,12 @@ fn installSpeciesGetter(realm: *Realm, ctor: *@import("../function.zig").JSFunct
 
 pub fn installMap(realm: *Realm) !void {
     _ = ObjMod;
+    // §24.1.1 — `Map.length` is 0. The `iterable` parameter is
+    // optional, so it doesn't count toward the [[Construct]]
+    // arity per §15.1.3 ("the value of the length property of a
+    // built-in function is the number of REQUIRED parameters").
     const r = try installConstructor(realm, .{
-        .name = "Map", .ctor = mapConstructor, .arity = 1,
+        .name = "Map", .ctor = mapConstructor, .arity = 0,
         .to_string_tag = "Map",
     });
     const ctor = r.ctor;
@@ -93,7 +101,19 @@ pub fn installMap(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, proto, "entries", mapEntries, 0);
     try installNativeMethodOnProto(realm, proto, "keys", mapKeys, 0);
     try installNativeMethodOnProto(realm, proto, "values", mapValues, 0);
-    try installNativeMethodOnProto(realm, proto, "@@iterator", mapEntries, 0);
+    // §24.1.3.12 — `Map.prototype[Symbol.iterator]` is the SAME
+    // function object as `Map.prototype.entries` (the spec text:
+    // "The initial value of the @@iterator property is the same
+    // function object as the initial value of the entries
+    // property"). Install both keys against one allocation
+    // instead of two — `prototype/Symbol.iterator.js` reads
+    // `Map.prototype[Symbol.iterator] === Map.prototype.entries`.
+    const entries_fn_v = proto.properties.get("entries") orelse Value.undefined_;
+    try proto.setWithFlags(realm.allocator, "@@iterator", entries_fn_v, .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    });
 
     // `.size` is an accessor in spec; we expose as a getter so
     // `m.size` evaluates to the live count.
@@ -591,46 +611,167 @@ fn mapConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const data = realm.allocator.create(ObjMod.MapData) catch return error.OutOfMemory;
     data.* = .{};
     inst.map_data = data;
-    // §24.1.1.1 step 9 — drive `@@iterator` properly so a throwing
-    // user iterator propagates and entries are pulled in protocol
-    // order. Falls back to the array-like indexed walk via
-    // `openIterator`'s synth path.
-    if (args.len > 0 and !args[0].isUndefined() and !args[0].isNull()) {
-        const src_v = args[0];
-        const iter_v = interpreter.openIterator(realm.allocator, realm, src_v) catch |err| switch (err) {
+    // §24.1.1.1 Map constructor steps 5-7:
+    //
+    //   5. If iterable is undefined or null, return map.
+    //   6. Else: Let adder be ? Get(map, "set").
+    //              If IsCallable(adder) is false, throw TypeError.
+    //              Return ? AddEntriesFromIterable(map, iterable, adder).
+    //
+    // The `Get(map, "set")` MUST NOT fire when iterable is
+    // absent — `Map/get-set-method-failure.js` poisons the
+    // accessor and asserts `new Map()` does not throw.
+    if (args.len == 0 or args[0].isUndefined() or args[0].isNull()) {
+        return this_value;
+    }
+    const adder_v = intrinsics.getPropertyChain(realm, inst, "set") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const adder = heap_mod.valueAsFunction(adder_v) orelse {
+        // §24.1.1.1 step 7.b — non-callable adder is TypeError.
+        return throwTypeError(realm, "Map: 'set' is not callable");
+    };
+    // §24.1.1.2 AddEntriesFromIterable. Wraps the iteration in
+    // an IteratorClose for every abrupt path:
+    //   - `next()` throws → propagate (no close; the iterator
+    //     itself is the source of the throw and is already
+    //     considered done per §7.4.6 step 6.b).
+    //   - `next` result isn't an Object → TypeError + close.
+    //   - `nextItem` is not Object → TypeError + close.
+    //   - `Get(nextItem, "0")` or `"1"` throws → close + propagate.
+    //   - `adder.call(map, k, v)` throws → close + propagate.
+    const iter_v = interpreter.openIterator(realm.allocator, realm, args[0]) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NotIterable => return throwTypeError(realm, "Map constructor: argument is not iterable"),
+        error.Propagated => return error.NativeThrew,
+        else => return error.NativeThrew,
+    };
+    return mapAddEntriesFromIterable(realm, this_value, iter_v, adder);
+}
+
+/// §24.1.1.2 AddEntriesFromIterable — shared by Map / WeakMap
+/// constructors. Drives the iterator protocol, fetching `[0]`
+/// / `[1]` from each entry and invoking `adder.call(target,
+/// k, v)`. Every abrupt path runs §7.4.6 IteratorClose, which
+/// invokes `iter.return()` if present. A throwing `return`
+/// is suppressed in favor of the original abrupt (spec step
+/// 7 of IteratorClose — "If completion is throw … return
+/// completion (NormalCompletion(result) is discarded)").
+fn mapAddEntriesFromIterable(
+    realm: *Realm,
+    target_v: Value,
+    iter_v: Value,
+    adder: *JSFunction,
+) NativeError!Value {
+    const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse return throwTypeError(realm, "Map iterator did not return an object");
+    const max_iter: usize = 1 << 24;
+    var step: usize = 0;
+    while (step < max_iter) : (step += 1) {
+        const next_v = iter_obj.get("next");
+        const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "Map iterator missing next");
+        const outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.NotIterable => return throwTypeError(realm, "Map constructor: argument is not iterable"),
-            error.Propagated => return error.NativeThrew,
             else => return error.NativeThrew,
         };
-        const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse return throwTypeError(realm, "Map iterator did not return an object");
-        const max_iter: usize = 1 << 24;
-        var step: usize = 0;
-        while (step < max_iter) : (step += 1) {
-            const next_v = iter_obj.get("next");
-            const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "Map iterator missing next");
-            const outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.NativeThrew,
-            };
-            const result_v = switch (outcome) {
-                .value, .yielded => |v| v,
-                .thrown => |ex| {
-                    realm.pending_exception = ex;
-                    return error.NativeThrew;
-                },
-            };
-            const result = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "Map iterator next did not return an object");
-            const done_v = result.get("done");
-            if (done_v.toBooleanPrimitive()) break;
-            const entry_v = result.get("value");
-            const entry = heap_mod.valueAsPlainObject(entry_v) orelse return throwTypeError(realm, "Map entry must be a [key, value] pair");
-            const key = entry.get("0");
-            const val = entry.get("1");
-            try mapSetInternal(realm, inst, key, val);
+        const result_v = switch (outcome) {
+            .value, .yielded => |v| v,
+            .thrown => |ex| {
+                // `next()` throw — the iterator is already
+                // considered "done" per §7.4.6 step 6.b, so we
+                // don't invoke IteratorClose.
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        };
+        const result = heap_mod.valueAsPlainObject(result_v) orelse {
+            return throwTypeError(realm, "Map iterator next did not return an object");
+        };
+        // §7.4.5 IteratorComplete uses `Get(iterResult, "done")`
+        // — fires accessor getters. Routes through
+        // `getPropertyChain` so a throwing `get done()` propagates.
+        const done_v = intrinsics.getPropertyChain(realm, result, "done") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        if (done_v.toBooleanPrimitive()) break;
+        // §7.4.4 IteratorValue uses `Get(iterResult, "value")`,
+        // which must fire user accessors so
+        // `{ get value() { throw } }` propagates
+        // (`iterator-value-failure.js`).
+        const entry_v_raw = intrinsics.getPropertyChain(realm, result, "value") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        // §24.1.1.2 step 1.c — IteratorValue result must be an
+        // Object; otherwise throw TypeError and IteratorClose
+        // (`iterator-items-are-not-object-close-iterator.js`).
+        const entry = heap_mod.valueAsPlainObject(entry_v_raw) orelse {
+            invokeIteratorReturn(realm, iter_obj, iter_v);
+            return throwTypeError(realm, "Map iterator value must be an object");
+        };
+        // §7.3.5 Get — fires accessor getters. A throwing
+        // `get item[0]` / `get item[1]` must close the iterator
+        // (`iterator-item-first-entry-returns-abrupt.js`,
+        //  `iterator-item-second-entry-returns-abrupt.js`).
+        const key = intrinsics.getPropertyChain(realm, entry, "0") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                invokeIteratorReturn(realm, iter_obj, iter_v);
+                return error.NativeThrew;
+            },
+        };
+        const val = intrinsics.getPropertyChain(realm, entry, "1") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                invokeIteratorReturn(realm, iter_obj, iter_v);
+                return error.NativeThrew;
+            },
+        };
+        // §24.1.1.2 step 1.h — `Call(adder, map, « key, value »)`.
+        // Routes through the user-installed `Map.prototype.set`
+        // so an overridden `set` (`iterable-calls-set.js`) sees
+        // every entry; a throwing `set` is closed
+        // (`iterator-close-after-set-failure.js`).
+        const adder_args = [_]Value{ key, val };
+        const set_outcome = interpreter.callJSFunction(realm.allocator, realm, adder, target_v, &adder_args) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                invokeIteratorReturn(realm, iter_obj, iter_v);
+                return error.NativeThrew;
+            },
+        };
+        switch (set_outcome) {
+            .value, .yielded => {},
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                invokeIteratorReturn(realm, iter_obj, iter_v);
+                return error.NativeThrew;
+            },
         }
     }
-    return this_value;
+    return target_v;
+}
+
+/// §7.4.6 IteratorClose — when called with an abrupt completion,
+/// invoke `iter.return()` if present; a throwing `return` is
+/// SUPPRESSED (step 7 of IteratorClose: "If completion is throw,
+/// return completion"). The pre-existing pending exception is
+/// what propagates.
+fn invokeIteratorReturn(realm: *Realm, iter_obj: *@import("../object.zig").JSObject, iter_v: Value) void {
+    const ret_v = intrinsics.getPropertyChain(realm, iter_obj, "return") catch return;
+    if (ret_v.isUndefined() or ret_v.isNull()) return;
+    const ret_fn = heap_mod.valueAsFunction(ret_v) orelse return;
+    // Preserve the abrupt that brought us here; `callJSFunction`
+    // can flip `pending_exception` if `return` itself throws, and
+    // we must drop that throw to keep the original surfacing.
+    const saved_ex = realm.pending_exception;
+    const outcome = interpreter.callJSFunction(realm.allocator, realm, ret_fn, iter_v, &.{}) catch {
+        realm.pending_exception = saved_ex;
+        return;
+    };
+    realm.pending_exception = saved_ex;
+    _ = outcome;
 }
 
 fn mapDataOf(this_value: Value) ?*@import("../object.zig").MapData {
@@ -671,8 +812,13 @@ fn mapSetInternal(realm: *Realm, inst: *@import("../object.zig").JSObject, key: 
 }
 
 fn mapSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Map.prototype.set called on non-Map");
-    if (inst.map_data == null) return throwTypeError(realm, "Map.prototype.set called on non-Map");
+    // §24.1.3.9 step 3 — `RequireInternalSlot(M, [[MapData]])`
+    // rejects a WeakMap (which has [[WeakMapData]] instead).
+    // Cynic stores both under `map_data`, distinguished by
+    // `is_weak`; route through `mapDataOf` so the
+    // `Map.prototype.set.call(new WeakMap(), …)` fixture throws.
+    if (mapDataOf(this_value) == null) return throwTypeError(realm, "Map.prototype.set called on non-Map");
+    const inst = heap_mod.valueAsPlainObject(this_value).?;
     mapSetInternal(realm, inst, canonicalizeKey(argOr(args, 0, Value.undefined_)), argOr(args, 1, Value.undefined_)) catch return error.OutOfMemory;
     return this_value;
 }
@@ -813,8 +959,11 @@ fn mapForEach(realm: *Realm, this_value: Value, args: []const Value) NativeError
 // ── §24.3 WeakMap (strong-ref impl — observable behaviour matches; no GC weakness yet) ──
 
 pub fn installWeakMap(realm: *Realm) !void {
+    // §24.3.1 — `WeakMap.length` is 0 (the iterable arg is
+    // optional and so is excluded from the [[Construct]] arity
+    // per §15.1.3). Matches `WeakMap/length.js`.
     const r = try installConstructor(realm, .{
-        .name = "WeakMap", .ctor = weakMapConstructor, .arity = 1,
+        .name = "WeakMap", .ctor = weakMapConstructor, .arity = 0,
         .to_string_tag = "WeakMap",
     });
     _ = r.ctor;
@@ -917,30 +1066,44 @@ fn weakMapConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
     const data = realm.allocator.create(ObjMod.MapData) catch return error.OutOfMemory;
     data.* = .{ .is_weak = true };
     inst.map_data = data;
-    if (args.len > 0 and !args[0].isUndefined() and !args[0].isNull()) {
-        const src = heap_mod.valueAsPlainObject(args[0]) orelse return throwTypeError(realm, "WeakMap iterable must be an object");
-        const len = lengthOfArray(src);
-        var i: i64 = 0;
-        while (i < len) : (i += 1) {
-            var ibuf: [24]u8 = undefined;
-            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-            const pair_v = src.get(islice);
-            const pair = heap_mod.valueAsPlainObject(pair_v) orelse return throwTypeError(realm, "WeakMap entry must be a [key, value] pair");
-            const key = pair.get("0");
-            const val = pair.get("1");
-            // §24.3 — keys must be Objects (or registered Symbols).
-            if (!key.isObject()) return throwTypeError(realm, "WeakMap key must be an object");
-            try mapSetInternal(realm, inst, key, val);
-        }
+    // §24.3.1.1 WeakMap constructor steps 5-7 — same shape as
+    // Map: `Get(map, "set")` MUST NOT fire when iterable is
+    // absent. `WeakMap/get-set-method-failure.js` poisons the
+    // accessor and asserts `new WeakMap()` / `new WeakMap(null)`
+    // don't throw.
+    if (args.len == 0 or args[0].isUndefined() or args[0].isNull()) {
+        return this_value;
     }
-    return this_value;
+    const adder_v = intrinsics.getPropertyChain(realm, inst, "set") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const adder = heap_mod.valueAsFunction(adder_v) orelse {
+        // §24.3.1.1 step 7.b — non-callable adder is TypeError.
+        return throwTypeError(realm, "WeakMap: 'set' is not callable");
+    };
+    const iter_v = interpreter.openIterator(realm.allocator, realm, args[0]) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NotIterable => return throwTypeError(realm, "WeakMap constructor: argument is not iterable"),
+        error.Propagated => return error.NativeThrew,
+        else => return error.NativeThrew,
+    };
+    return mapAddEntriesFromIterable(realm, this_value, iter_v, adder);
 }
 
 fn weakMapSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "WeakMap.prototype.set called on non-WeakMap");
-    if (inst.map_data == null) return throwTypeError(realm, "WeakMap.prototype.set called on non-WeakMap");
+    // §24.3.3.5 WeakMap.prototype.set step 3 — RequireInternalSlot
+    // rejects a Map (whose `map_data.is_weak` is false). Route
+    // through `weakMapDataOf` so `WeakMap.prototype.set.call(
+    // new Map(), …)` throws TypeError per spec.
+    if (weakMapDataOf(this_value) == null) return throwTypeError(realm, "WeakMap.prototype.set called on non-WeakMap");
+    const inst = heap_mod.valueAsPlainObject(this_value).?;
     const key = argOr(args, 0, Value.undefined_);
-    if (!key.isObject()) return throwTypeError(realm, "WeakMap key must be an object");
+    // §24.3.3.5 step 4 — `If CanBeHeldWeakly(key) is false,
+    // throw a TypeError`. §6.1.5 — Objects pass unconditionally;
+    // non-registered Symbols pass; primitives and registered
+    // Symbols throw.
+    if (!canBeHeldWeakly(key)) return throwTypeError(realm, "WeakMap key cannot be held weakly");
     mapSetInternal(realm, inst, key, argOr(args, 1, Value.undefined_)) catch return error.OutOfMemory;
     return this_value;
 }
