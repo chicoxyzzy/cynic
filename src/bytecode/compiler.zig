@@ -3352,6 +3352,19 @@ pub const Compiler = struct {
         c: ast.expression.CallExpr,
         m: ast.expression.MemberExpr,
     ) CompileError!void {
+        // §13.3.7.1 SuperProperty call — receiver is current `this`,
+        // callee is the method walked off `home_object`'s [[Prototype]].
+        // Spread args route to apply-style lowering (§7.3.18 Invoke
+        // via Function.prototype.apply) with `this = current 'this'`.
+        var has_spread = false;
+        for (c.arguments) |*arg| {
+            if (arg.* == .spread) {
+                has_spread = true;
+                break;
+            }
+        }
+        if (has_spread) return self.compileSuperSpreadMethodCall(c, m);
+
         // Eval super.method via super_get / super_get_computed → r_callee.
         switch (m.property) {
             .ident => |span| {
@@ -3373,7 +3386,6 @@ pub const Compiler = struct {
         // Args at r_callee + 1...
         var reserved: u8 = 0;
         for (c.arguments) |*arg| {
-            if (arg.* == .spread) return error.UnsupportedExpression;
             try self.compileExpression(arg);
             const r = try self.reserveTemp();
             reserved += 1;
@@ -3397,6 +3409,117 @@ pub const Compiler = struct {
         var j: u8 = 0;
         while (j < reserved) : (j += 1) self.releaseTemp();
         self.releaseTemp(); // r_callee
+    }
+
+    /// `super.method(...args)` / `super[expr](a, ...rest)` — apply-style
+    /// lowering of a super-method call with spread args. Builds an args
+    /// array, looks up `.apply` on the resolved super method, then
+    /// invokes with `this = current 'this'` (§13.3.7.1 step 5 — the
+    /// thisValue of the SuperProperty call is the running execution
+    /// context's GetThisBinding(), NOT the home object). Mirrors
+    /// `compileSpreadMethodCall`'s shape for the receiver case.
+    fn compileSuperSpreadMethodCall(
+        self: *Compiler,
+        c: ast.expression.CallExpr,
+        m: ast.expression.MemberExpr,
+    ) CompileError!void {
+        // 1. Resolve the super method → r_callee.
+        switch (m.property) {
+            .ident => |span| {
+                const raw = self.source[span.start..span.end];
+                const key_slice = try self.decodeIdentifierName(raw);
+                const k = try self.internString(key_slice);
+                try self.builder.emitOp(.super_get, m.span);
+                try self.builder.emitU16(k);
+            },
+            .computed => |key_expr| {
+                try self.builder.emitOp(.super_check_this, m.span);
+                try self.compileExpression(key_expr);
+                try self.builder.emitOp(.super_get_computed, m.span);
+            },
+        }
+        const r_callee = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, c.span);
+        try self.builder.emitU8(r_callee);
+
+        // 2. Build the args array (same shape as compileSpreadCall).
+        const r_args = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.make_array, c.span);
+        try self.builder.emitOp(.star, c.span);
+        try self.builder.emitU8(r_args);
+        const k_length = try self.internString("length");
+        try self.builder.emitOp(.lda_smi, c.span);
+        try self.builder.emitI32(0);
+        try self.builder.emitOp(.sta_property, c.span);
+        try self.builder.emitU16(k_length);
+        try self.builder.emitU8(r_args);
+
+        for (c.arguments) |*arg| {
+            if (arg.* == .spread) {
+                try self.compileExpression(arg.spread.argument);
+                try self.builder.emitOp(.array_spread, c.span);
+                try self.builder.emitU8(r_args);
+            } else {
+                try self.compileExpression(arg);
+                const r_val = try self.reserveTemp();
+                try self.builder.emitOp(.star, c.span);
+                try self.builder.emitU8(r_val);
+                try self.builder.emitOp(.ldar, c.span);
+                try self.builder.emitU8(r_args);
+                try self.builder.emitOp(.lda_property, c.span);
+                try self.builder.emitU16(k_length);
+                const r_idx = try self.reserveTemp();
+                try self.builder.emitOp(.star, c.span);
+                try self.builder.emitU8(r_idx);
+                try self.builder.emitOp(.ldar, c.span);
+                try self.builder.emitU8(r_val);
+                try self.builder.emitOp(.sta_computed, c.span);
+                try self.builder.emitU8(r_args);
+                try self.builder.emitU8(r_idx);
+                try self.builder.emitOp(.ldar, c.span);
+                try self.builder.emitU8(r_idx);
+                try self.builder.emitOp(.lda_smi, c.span);
+                try self.builder.emitI32(1);
+                try self.builder.emitOp(.add, c.span);
+                try self.builder.emitU8(r_idx);
+                try self.builder.emitOp(.sta_property, c.span);
+                try self.builder.emitU16(k_length);
+                try self.builder.emitU8(r_args);
+                self.releaseTemp();
+                self.releaseTemp();
+            }
+        }
+
+        // 3. Look up `.apply` on the method → r_apply.
+        const k_apply = try self.internString("apply");
+        try self.builder.emitOp(.ldar, c.span);
+        try self.builder.emitU8(r_callee);
+        try self.builder.emitOp(.lda_property, c.span);
+        try self.builder.emitU16(k_apply);
+        const r_apply = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, c.span);
+        try self.builder.emitU8(r_apply);
+
+        // 4. Stage `this = current this` and `args` at r_apply + 1, +2.
+        const r_this = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.lda_this, c.span);
+        try self.builder.emitOp(.star, c.span);
+        try self.builder.emitU8(r_this);
+        const r_args_pos = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.ldar, c.span);
+        try self.builder.emitU8(r_args);
+        try self.builder.emitOp(.star, c.span);
+        try self.builder.emitU8(r_args_pos);
+
+        try self.builder.emitOp(.call_method, c.span);
+        try self.builder.emitU8(r_callee);
+        try self.builder.emitU8(r_apply);
+        try self.builder.emitU8(2);
     }
 
     /// `new f(args)` (§13.3.5). Identical layout to `Call` — same
