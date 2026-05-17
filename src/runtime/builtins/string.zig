@@ -236,7 +236,11 @@ fn stringFromCharCode(realm: *Realm, this_value: Value, args: []const Value) Nat
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
     for (args) |a| {
-        const nv = coerceToNumber(a);
+        // §7.1.7 ToUint16 step 1 — `Let number be ? ToNumber(argument)`.
+        // Spec ToNumber consults `Symbol.toPrimitive` / `valueOf` on
+        // object operands and throws TypeError for Symbol / BigInt;
+        // the silent `coerceToNumber` short-circuit masked both.
+        const nv = try intrinsics.toNumber(realm, a);
         const n: f64 = if (nv.isInt32()) @floatFromInt(nv.asInt32()) else nv.asDouble();
         const cu: u16 = toUint16(n);
         appendWtf8(realm.allocator, &out, cu) catch return error.OutOfMemory;
