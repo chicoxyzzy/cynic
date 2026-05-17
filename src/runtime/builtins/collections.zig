@@ -1111,8 +1111,11 @@ fn weakMapSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
 // ── §24.4 WeakSet ───────────────────────────────────────────────────────────
 
 pub fn installWeakSet(realm: *Realm) !void {
+    // §24.4.1 — `WeakSet.length` is 0 (the iterable arg is
+    // optional and so is excluded from the [[Construct]] arity
+    // per §15.1.3). Matches `WeakSet/length.js`.
     const r = try installConstructor(realm, .{
-        .name = "WeakSet", .ctor = weakSetConstructor, .arity = 1,
+        .name = "WeakSet", .ctor = weakSetConstructor, .arity = 0,
         .to_string_tag = "WeakSet",
     });
     _ = r.ctor;
@@ -1150,19 +1153,101 @@ fn weakSetConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
     const data = realm.allocator.create(ObjMod.SetData) catch return error.OutOfMemory;
     data.* = .{ .is_weak = true };
     inst.set_data = data;
-    if (args.len > 0 and !args[0].isUndefined() and !args[0].isNull()) {
-        const src = heap_mod.valueAsPlainObject(args[0]) orelse return throwTypeError(realm, "WeakSet iterable must be an object");
-        const len = lengthOfArray(src);
-        var i: i64 = 0;
-        while (i < len) : (i += 1) {
-            var ibuf: [24]u8 = undefined;
-            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-            const v = src.get(islice);
-            if (!v.isObject()) return throwTypeError(realm, "WeakSet value must be an object");
-            try setAddInternal(realm, inst, v);
+    // §24.4.1.1 WeakSet constructor steps 5-7 — same shape as
+    // Map / WeakMap: `Get(set, "add")` MUST NOT fire when iterable
+    // is absent. `WeakSet/get-add-method-failure.js` poisons the
+    // accessor and asserts `new WeakSet()` / `new WeakSet(null)`
+    // don't throw.
+    if (args.len == 0 or args[0].isUndefined() or args[0].isNull()) {
+        return this_value;
+    }
+    const adder_v = intrinsics.getPropertyChain(realm, inst, "add") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const adder = heap_mod.valueAsFunction(adder_v) orelse {
+        // §24.4.1.1 step 7.b — non-callable adder is TypeError.
+        return throwTypeError(realm, "WeakSet: 'add' is not callable");
+    };
+    const iter_v = interpreter.openIterator(realm.allocator, realm, args[0]) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NotIterable => return throwTypeError(realm, "WeakSet constructor: argument is not iterable"),
+        error.Propagated => return error.NativeThrew,
+        else => return error.NativeThrew,
+    };
+    return weakSetAddValuesFromIterable(realm, this_value, iter_v, adder);
+}
+
+/// §24.4.1.1 AddValuesFromIterable (the WeakSet analogue of
+/// §24.1.1.2 AddEntriesFromIterable). Drives the iterator
+/// protocol and invokes `adder.call(target, value)` per item,
+/// closing the iterator on every abrupt path. Same shape as
+/// `mapAddEntriesFromIterable` but each item is a bare value
+/// rather than a [key, value] entry — there's no `Get(item, "0")`.
+fn weakSetAddValuesFromIterable(
+    realm: *Realm,
+    target_v: Value,
+    iter_v: Value,
+    adder: *JSFunction,
+) NativeError!Value {
+    const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse return throwTypeError(realm, "WeakSet iterator did not return an object");
+    const max_iter: usize = 1 << 24;
+    var step: usize = 0;
+    while (step < max_iter) : (step += 1) {
+        const next_v = iter_obj.get("next");
+        const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "WeakSet iterator missing next");
+        const outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        const result_v = switch (outcome) {
+            .value, .yielded => |v| v,
+            .thrown => |ex| {
+                // §7.4.6 step 6.b — a throwing `next()` leaves
+                // the iterator already "done", so we don't
+                // invoke IteratorClose.
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        };
+        const result = heap_mod.valueAsPlainObject(result_v) orelse {
+            return throwTypeError(realm, "WeakSet iterator next did not return an object");
+        };
+        const done_v = intrinsics.getPropertyChain(realm, result, "done") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        if (done_v.toBooleanPrimitive()) break;
+        // §7.4.4 IteratorValue — `Get(iterResult, "value")` fires
+        // user accessors, so `{ get value() { throw } }`
+        // propagates (`iterator-value-failure.js`).
+        const value_v = intrinsics.getPropertyChain(realm, result, "value") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        // §24.4.1.1 step 8.d — `Call(adder, set, « nextValue »)`.
+        // Routes through the user-installed `WeakSet.prototype.add`
+        // so an overridden `add` sees every value, and a throwing
+        // `add` closes the iterator
+        // (`iterator-close-after-add-failure.js`).
+        const adder_args = [_]Value{value_v};
+        const add_outcome = interpreter.callJSFunction(realm.allocator, realm, adder, target_v, &adder_args) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                invokeIteratorReturn(realm, iter_obj, iter_v);
+                return error.NativeThrew;
+            },
+        };
+        switch (add_outcome) {
+            .value, .yielded => {},
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                invokeIteratorReturn(realm, iter_obj, iter_v);
+                return error.NativeThrew;
+            },
         }
     }
-    return this_value;
+    return target_v;
 }
 
 fn weakSetAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -1170,7 +1255,11 @@ fn weakSetAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const d = inst.set_data orelse return throwTypeError(realm, "WeakSet.prototype.add called on non-WeakSet");
     if (!d.is_weak) return throwTypeError(realm, "WeakSet.prototype.add called on non-WeakSet");
     const v = argOr(args, 0, Value.undefined_);
-    if (!v.isObject()) return throwTypeError(realm, "WeakSet value must be an object");
+    // §24.4.3.1 step 3 — `If CanBeHeldWeakly(value) is false,
+    // throw a TypeError`. §6.1.5 — Objects pass unconditionally;
+    // non-registered Symbols pass; primitives and registered
+    // Symbols throw.
+    if (!canBeHeldWeakly(v)) return throwTypeError(realm, "WeakSet value cannot be held weakly");
     setAddInternal(realm, inst, v) catch return error.OutOfMemory;
     return this_value;
 }
