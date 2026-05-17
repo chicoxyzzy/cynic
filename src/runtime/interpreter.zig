@@ -6072,6 +6072,52 @@ fn runFrames(
                                     thrown_method = true;
                                     break;
                                 }
+                                // §7.3.28 PrivateMethodOrAccessorAdd
+                                // step 2-3: `Let entry be ! PrivateElementFind
+                                // (method.[[Key]], O). If entry is not empty,
+                                // throw a TypeError.` A derived class whose
+                                // base `constructor(o){return o}` returns an
+                                // object already populated by an earlier
+                                // construction (`new C(obj); new C(obj)`)
+                                // hits this on every entry. Accessor halves
+                                // declared in the SAME class get paired into
+                                // one private slot — distinguished here by
+                                // matching the existing kind: if there's
+                                // already a private_accessors entry for this
+                                // key and we're installing the OTHER half
+                                // (a getter when only a setter is present,
+                                // or vice versa), allow it. Otherwise the
+                                // key is already taken — throw.
+                                const already_present: bool = switch (entry.accessor_kind) {
+                                    .none => inst.private_properties.contains(entry.name) or inst.private_accessors.contains(entry.name),
+                                    .getter => blk: {
+                                        if (inst.private_properties.contains(entry.name)) break :blk true;
+                                        if (inst.private_accessors.get(entry.name)) |existing| {
+                                            // Existing entry already has a
+                                            // getter slot filled → conflict.
+                                            break :blk existing.getter != null;
+                                        }
+                                        break :blk false;
+                                    },
+                                    .setter => blk: {
+                                        if (inst.private_properties.contains(entry.name)) break :blk true;
+                                        if (inst.private_accessors.get(entry.name)) |existing| {
+                                            break :blk existing.setter != null;
+                                        }
+                                        break :blk false;
+                                    },
+                                };
+                                if (already_present) {
+                                    const ex = try makeTypeError(realm, "Cannot install duplicate private method on object");
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    thrown_method = true;
+                                    break;
+                                }
                                 switch (entry.accessor_kind) {
                                     .none => {
                                         inst.private_properties.put(allocator, entry.name, heap_mod.taggedFunction(fn_obj)) catch return error.OutOfMemory;
@@ -6121,6 +6167,21 @@ fn runFrames(
                                 // so re-check before each put.
                                 if (!inst.extensible) {
                                     const ex = try makeTypeError(realm, "Cannot add private field to non-extensible object");
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    break;
+                                }
+                                // §7.3.32 PrivateFieldAdd steps 3-4:
+                                // PrivateFieldFind(P, O); if entry not
+                                // empty, throw TypeError. Hit by
+                                // `new C(obj); new C(obj)` patterns where
+                                // C's base returns an existing instance.
+                                if (inst.private_properties.contains(entry.name) or inst.private_accessors.contains(entry.name)) {
+                                    const ex = try makeTypeError(realm, "Cannot install duplicate private field on object");
                                     f.ip = ip;
                                     f.accumulator = acc;
                                     committed = true;
