@@ -4129,7 +4129,44 @@ fn compileExportDecl(self: *Compiler, ed: ast.statement.ExportDecl) CompileError
                 try self.builder.emitU16(k);
             }
         },
-        .all => {},
+        .all => |all_body| {
+            if (!self.is_module) return;
+            // §16.2.3.7 ExportDeclaration : `export * as ns from
+            // "src"` — load the source module's namespace and bind
+            // it on our own namespace under `ns`. The
+            // ModuleExportName may be a StringLiteral (§16.2.2);
+            // strip surrounding quotes so the key is the bare code-
+            // point sequence rather than the raw token. Lifetime
+            // of `spec_text` and `ns_name` mirrors every other
+            // module_export key: borrowed from `self.source`, which
+            // outlives the chunk.
+            //
+            // `export * from "src"` (no `as`) is the namespace-
+            // merge form — every non-`default` export from `src`
+            // is forwarded onto our own namespace. The runtime
+            // already has the loaded namespace under each module's
+            // record; we lower this to a single
+            // `module_reexport_star` op consuming the namespace
+            // in the accumulator. Until that lands, the no-`as`
+            // form stays as a no-op (covered separately).
+            const src_span = all_body.source;
+            const raw = self.source[src_span.start..src_span.end];
+            if (raw.len < 2) return;
+            const spec_text = raw[1 .. raw.len - 1];
+            const k_spec = try self.internString(spec_text);
+            if (all_body.namespace_local) |ns_span| {
+                try self.builder.emitOp(.module_load, ed.span);
+                try self.builder.emitU16(k_spec);
+                const ns_text = self.source[ns_span.start..ns_span.end];
+                const ns_name = if (ns_text.len >= 2 and (ns_text[0] == '"' or ns_text[0] == '\''))
+                    ns_text[1 .. ns_text.len - 1]
+                else
+                    ns_text;
+                const k_ns = try self.internString(ns_name);
+                try self.builder.emitOp(.module_export, ed.span);
+                try self.builder.emitU16(k_ns);
+            }
+        },
     }
 }
 
