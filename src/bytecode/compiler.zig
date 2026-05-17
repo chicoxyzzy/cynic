@@ -437,6 +437,18 @@ pub const Compiler = struct {
     /// `emitLoadBinding` for the global vs env-slot fork. No TDZ
     /// check — stores are how the Hole gets overwritten.
     fn emitStoreBinding(self: *Compiler, binding: Binding, span: Span) !void {
+        if (binding.is_fn_expr_name) {
+            // §15.6.5 — the named-function-expression self-binding
+            // is immutable. §8.1.1.1.4 SetMutableBinding step 9.b on
+            // an immutable record throws TypeError. Mirrors the
+            // import-binding path: `assignment_to_const` would be a
+            // compile-time diagnostic, but real engines (V8 / JSC /
+            // SpiderMonkey) surface this as a runtime TypeError so
+            // user code can `try { G = 1; } catch (e) { assert(e
+            // instanceof TypeError) }` from inside the body.
+            try self.builder.emitOp(.throw_assign_const, span);
+            return;
+        }
         if (binding.is_import) {
             // §8.1.1.5.5 — import bindings are immutable; §8.1.1.1.4
             // SetMutableBinding step 9.b throws TypeError on store
@@ -1138,7 +1150,7 @@ pub const Compiler = struct {
             }
             return error.UnresolvedReference;
         };
-        if (binding.kind == .const_) {
+        if (binding.kind == .const_ and !binding.is_fn_expr_name) {
             try self.report(.assignment_to_const, u.span);
             return error.AssignmentToConst;
         }
@@ -2529,14 +2541,26 @@ pub const Compiler = struct {
     fn compileFunctionExpr(self: *Compiler, fe: ast.expression.FunctionExpr) CompileError!void {
         // §12.7 — bind the inner name (recursion target) by StringValue.
         const name_slice = if (fe.name) |n| try self.bindingName(n.span) else null;
-        // §15.2 FunctionExpression — must propagate is_generator /
+        // §15.6.5 InstantiateOrdinaryFunctionExpression — for a NAMED
+        // function expression (incl. generator / async / async-gen
+        // variants) the BindingIdentifier is exposed inside the body
+        // as an immutable self-binding. The spec carves out a
+        // 1-binding declarative env that wraps the function's outer
+        // env; the function captures the wrapper, the binding is
+        // initialised to the function itself. We model it in two
+        // parts: at compile time `compileFunctionTemplateExtNamed`
+        // splices a synthetic 1-binding scope above the body (so
+        // inner references resolve to depth=1 / slot=0, with
+        // `is_fn_expr_name=true` so writes lower to
+        // `throw_assign_const` — TypeError per §8.1.1.1.4 step 9.b);
+        // at runtime `make_named_function_expr` materialises the
+        // wrapper env and seeds slot 0 with the function.
+        //
+        // §15.2 FunctionExpression — also propagates is_generator /
         // is_async into the template so the resulting JSFunction
-        // gets `is_generator=true` (returns an iterator on call)
-        // / `is_async=true` (returns a Promise). The shorthand
-        // `compileFunctionTemplate` hardcodes both to false and
-        // would silently downgrade `function*(){}` to a regular
-        // function.
-        const k = try compileFunctionTemplateExt(
+        // gets the right `is_generator` / `is_async` flag and the
+        // proto/length wiring in `make_function`.
+        const k = try compileFunctionTemplateExtNamed(
             self,
             fe.params,
             FunctionBody{ .block = fe.body.body },
@@ -2545,8 +2569,13 @@ pub const Compiler = struct {
             fe.is_generator,
             fe.is_async,
             fe.span,
+            name_slice != null,
         );
-        try self.builder.emitOp(.make_function, fe.span);
+        if (name_slice != null) {
+            try self.builder.emitOp(.make_named_function_expr, fe.span);
+        } else {
+            try self.builder.emitOp(.make_function, fe.span);
+        }
         try self.builder.emitU16(k);
     }
 
@@ -3327,7 +3356,7 @@ pub const Compiler = struct {
             .span = a.target.span(),
             .is_global = true,
         };
-        if (binding.kind == .const_ and !binding.is_import) {
+        if (binding.kind == .const_ and !binding.is_import and !binding.is_fn_expr_name) {
             try self.report(.assignment_to_const, a.span);
             return error.AssignmentToConst;
         }
@@ -7713,6 +7742,20 @@ fn compileFunctionTemplateExt(
     is_async: bool,
     span: Span,
 ) CompileError!u16 {
+    return compileFunctionTemplateExtNamed(self, params, body, name, is_arrow, is_generator, is_async, span, false);
+}
+
+fn compileFunctionTemplateExtNamed(
+    self: *Compiler,
+    params: []ast.statement.FunctionParam,
+    body: FunctionBody,
+    name: ?[]const u8,
+    is_arrow: bool,
+    is_generator: bool,
+    is_async: bool,
+    span: Span,
+    is_named_fn_expr: bool,
+) CompileError!u16 {
     // Save outer state.
     const saved_builder = self.builder;
     const saved_scope = self.scope;
@@ -7731,11 +7774,36 @@ fn compileFunctionTemplateExt(
 
     // Reset to a fresh inner state.
     self.builder = @import("chunk.zig").Builder.init(self.allocator);
-    var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
+    // §15.6.5 — when this is a NAMED function expression, splice a
+    // synthetic 1-binding scope between the outer scope and the
+    // function body scope. Inner references to the function's own
+    // name resolve to depth=1 / slot=0; writes lower to
+    // `throw_assign_const` via the `is_fn_expr_name` flag. The
+    // wrapper env is materialised at runtime by
+    // `make_named_function_expr`, so the body's env_depth must be
+    // bumped past the synthetic level for outer-scope reads to
+    // index through it correctly.
+    const has_fn_name_env = is_named_fn_expr and name != null;
+    var name_scope: Scope = .{ .parent = self.scope, .kind = .block };
+    if (has_fn_name_env) {
+        name_scope.has_own_env = true;
+        try name_scope.bindings.append(self.allocator, .{
+            .name = name.?,
+            .env_slot = 0,
+            .env_depth = saved_env_depth + 1,
+            .kind = .const_,
+            .span = span,
+            .is_fn_expr_name = true,
+        });
+    }
+    var fn_scope: Scope = .{
+        .parent = if (has_fn_name_env) &name_scope else self.scope,
+        .kind = .function,
+    };
     self.scope = &fn_scope;
     self.env_slot_count = 0;
     self.temps_in_use = 0;
-    self.env_depth = saved_env_depth + 1;
+    self.env_depth = saved_env_depth + 1 + (if (has_fn_name_env) @as(u8, 1) else @as(u8, 0));
     self.current_loop = null;
     self.current_is_async = is_async;
 
@@ -7744,6 +7812,7 @@ fn compileFunctionTemplateExt(
         if (!inner_finished) {
             self.builder.deinit();
             fn_scope.deinit(self.allocator);
+            if (has_fn_name_env) name_scope.deinit(self.allocator);
             self.pending_labels.deinit(self.allocator);
             self.builder = saved_builder;
             self.scope = saved_scope;
@@ -7852,6 +7921,7 @@ fn compileFunctionTemplateExt(
     const inner_chunk = try self.builder.finish();
     inner_finished = true;
     fn_scope.deinit(self.allocator);
+    if (has_fn_name_env) name_scope.deinit(self.allocator);
     self.pending_labels.deinit(self.allocator);
 
     // Restore outer state.

@@ -87,6 +87,14 @@ pub const Binding = struct {
     /// the parameter binding stand and the redundant var is
     /// dropped.
     is_param: bool = false,
+    /// §15.6.5 — true for the self-name slot of a named function
+    /// expression (`let r = function G() { ... }` exposes `G` as an
+    /// immutable binding to its own body). Lives in a one-slot
+    /// declarative env between the function's own env and the
+    /// captured outer env; the slot is initialised at
+    /// `make_named_function_expr` time. User-visible writes lower
+    /// to `throw_assign_const` (TypeError) per §8.1.1.1.4 step 9.b.
+    is_fn_expr_name: bool = false,
     /// Env slot holding the loaded module's namespace object —
     /// `compileImportDecl` allocates one persistent slot per
     /// `import` declaration and seeds it with the result of

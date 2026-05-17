@@ -552,13 +552,13 @@ test "later: missing arguments arrive as undefined" {
 }
 
 test "later: named function expression — recursion via self-binding" {
-    // Per §15.2.4 NamedEvaluation, the `fact` name should be
-    // bound inside the function's own scope. later doesn't yet
-    // emit that self-binding for *expressions* (declarations
-    // work via the outer scope). Use the outer binding `f`
-    // instead — same spec-observable behaviour.
+    // §15.6.5 InstantiateOrdinaryFunctionExpression — for a named
+    // function expression the BindingIdentifier is wired into a
+    // synthetic 1-binding declarative env wrapping the body so the
+    // function can call itself by its given name even when no outer
+    // binding exists (and even when shadowed by the outer let).
     try expectScriptInt(
-        "let f = function(n) { return n <= 1 ? 1 : n * f(n - 1); }; f(5);",
+        "let f = function fact(n) { return n <= 1 ? 1 : n * fact(n - 1); }; f(5);",
         120,
     );
 }

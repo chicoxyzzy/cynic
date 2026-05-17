@@ -129,6 +129,15 @@ pub const Op = enum(u8) {
     /// frame's environment chain. The instance lands in the
     /// accumulator.
     make_function,
+    /// `[op] [k:u16]` — §15.6.5 InstantiateOrdinaryFunctionExpression
+    /// for a NAMED function expression. Allocates a single-slot
+    /// declarative env wrapping the current frame's env, instantiates
+    /// the function with that env as its `[[Environment]]`, then
+    /// stores the function into the env's slot 0 (the self-name
+    /// binding). The binding is immutable: writes from inside the
+    /// body compile to `throw_assign_const` so user-visible writes
+    /// throw a TypeError per §8.1.1.1.4 SetMutableBinding step 9.b.
+    make_named_function_expr,
     /// `[op] [r_callee:u8] [argc:u8]` — invoke the function in
     /// register `r_callee` with `argc` arguments drawn from the
     /// consecutive registers `r_callee+1.. r_callee+argc`. The
@@ -704,6 +713,7 @@ pub const Op = enum(u8) {
             .jmp_if_true,
             .jmp_if_nullish,
             .make_function,
+            .make_named_function_expr,
             .make_class,
             .super_get,
             .lda_property,
@@ -780,6 +790,7 @@ pub const Op = enum(u8) {
             .jmp_if_true => "JmpIfTrue",
             .jmp_if_nullish => "JmpIfNullish",
             .make_function => "MakeFunction",
+            .make_named_function_expr => "MakeNamedFunctionExpr",
             .call => "Call",
             .call_method => "CallMethod",
             .new_call => "NewCall",

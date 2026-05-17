@@ -3460,18 +3460,31 @@ fn runFrames(
             },
 
             // ── Functions / calls ───────────────────────────────────────
-            .make_function => {
+            .make_function, .make_named_function_expr => |op_tag| {
                 const k = readU16(code, ip);
                 ip += 2;
                 if (k >= local_chunk.function_templates.len) return error.InvalidOpcode;
                 const tmpl = &local_chunk.function_templates[k];
+                // §15.6.5 InstantiateOrdinaryFunctionExpression for a
+                // NAMED function expression: allocate a 1-slot wrapper
+                // env, instantiate the function capturing it, seed slot
+                // 0 with the function itself. The binding is immutable
+                // — user-visible writes lower to `throw_assign_const`
+                // at compile time (§8.1.1.1.4 step 9.b TypeError).
+                const captured_env = if (op_tag == .make_named_function_expr)
+                    realm.heap.allocateEnvironment(f.env, 1) catch return error.OutOfMemory
+                else
+                    f.env;
                 const fn_obj = realm.heap.allocateFunction(
                     &tmpl.chunk,
                     tmpl.param_count,
                     tmpl.name,
                     tmpl.is_arrow,
-                    f.env,
+                    captured_env,
                 ) catch return error.OutOfMemory;
+                if (op_tag == .make_named_function_expr) {
+                    captured_env.?.slots[0] = heap_mod.taggedFunction(fn_obj);
+                }
                 // §15.7.7 FunctionLength — override `f.length`
                 // from total-params (what allocateFunction
                 // installed by default) to the spec count
