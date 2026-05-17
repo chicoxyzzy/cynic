@@ -1641,8 +1641,11 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
     _ = this_value;
     const raw = argOr(args, 0, Value.undefined_);
     // §20.1.2.10 step 1 — `Let obj be ? ToObject(O)`. ES2015+
-    // primitive-coerces the arg.
-    const target = if (raw.isInt32() or raw.isDouble() or raw.isString() or raw.isBool())
+    // primitive-coerces the arg. Symbol and BigInt primitives
+    // also coerce to a wrapper with no own string keys, so they
+    // return `[]` (test262 `non-object-argument-valid.js`).
+    // null/undefined still throw via `toObjectThis`.
+    const target = if (raw.isInt32() or raw.isDouble() or raw.isString() or raw.isBool() or heap_mod.isSymbol(raw) or heap_mod.isBigInt(raw))
         heap_mod.taggedObject(try intrinsics.toObjectThis(realm, raw))
     else
         raw;
@@ -1665,6 +1668,20 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
             const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
             const k_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
+            out.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
+            len += 1;
+        }
+        // §10.2.4 — built-in constructors expose `prototype` as
+        // an own property; the slot is dedicated (`fn_obj.prototype`)
+        // and doesn't appear in the property bag iteration above.
+        // Only surface it when the function actually has one AND
+        // the bag hasn't redirected it (a `defineProperty(fn,
+        // "prototype", …)` on a user function lands in the bag).
+        if (fn_obj.prototype != null and !fn_obj.properties.contains("prototype")) {
+            var ibuf: [16]u8 = undefined;
+            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
+            const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+            const k_owned = realm.heap.allocateString("prototype") catch return error.OutOfMemory;
             out.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
             len += 1;
         }
@@ -1711,7 +1728,44 @@ fn isSymbolKey(key: []const u8) bool {
 
 fn objectGetOwnPropertySymbols(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.getOwnPropertySymbols target is not an object");
+    const raw = argOr(args, 0, Value.undefined_);
+    // §20.1.2.11 step 1 — `Let obj be ? ToObject(O)`. ES2015+
+    // primitive-coerces the arg; primitive wrappers expose no
+    // own symbol keys, so they return `[]` (test262
+    // `non-object-argument-valid.js`). Function objects also
+    // satisfy ToObject (they're ordinary objects per §6.1.7);
+    // their property bag is the source of any symbol keys.
+    const target = if (raw.isInt32() or raw.isDouble() or raw.isString() or raw.isBool() or heap_mod.isSymbol(raw) or heap_mod.isBigInt(raw))
+        heap_mod.taggedObject(try intrinsics.toObjectThis(realm, raw))
+    else
+        raw;
+    if (heap_mod.valueAsFunction(target)) |fn_obj| {
+        const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+        out.prototype = realm.intrinsics.array_prototype;
+        out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+        var flen: i32 = 0;
+        var fit = fn_obj.properties.iterator();
+        while (fit.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (!isSymbolKey(key)) continue;
+            var match: ?*@import("../symbol.zig").JSSymbol = null;
+            for (realm.heap.symbols.items) |sym| {
+                if (std.mem.eql(u8, sym.prop_key, key)) {
+                    match = sym;
+                    break;
+                }
+            }
+            const sym = match orelse continue;
+            var ibuf: [16]u8 = undefined;
+            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{flen}) catch unreachable;
+            const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+            out.set(realm.allocator, idx_owned.bytes, heap_mod.taggedSymbol(sym)) catch return error.OutOfMemory;
+            flen += 1;
+        }
+        out.set(realm.allocator, "length", Value.fromInt32(flen)) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(out);
+    }
+    const obj = heap_mod.valueAsPlainObject(target) orelse return throwTypeError(realm, "Object.getOwnPropertySymbols target is not an object");
     // §20.1.2.11 step 2 — `keys be ? O.[[OwnPropertyKeys]]()`. For
     // a Proxy receiver this MUST go through the `ownKeys` trap so
     // the invariants (target keys + reported keys must agree on

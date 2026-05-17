@@ -377,6 +377,11 @@ pub const skip_ses_exact_paths = [_][]const u8{
     // §25.2 SharedArrayBuffer — not shipped. The fixture sets
     // up the SAB then calls `Object.seal` on it.
     "built-ins/Object/seal/seal-sharedarraybuffer.js",
+    // §18.2.1 — global.eval is not shipped (AGENTS.md). The
+    // ES5-era fixture iterates an expected-globals list that
+    // includes `eval` and `Date` (duplicated), failing on a
+    // policy-skipped global.
+    "built-ins/Object/getOwnPropertyNames/15.2.3.4-4-1.js",
     "built-ins/Object/values/tamper-with-global-object.js",
     "built-ins/RegExp/S15.10.4.1_A5_T3.js",
     "built-ins/RegExp/S15.10.4.1_A8_T11.js",
