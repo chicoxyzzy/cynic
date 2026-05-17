@@ -288,6 +288,16 @@ pub const Op = enum(u8) {
     /// `acc` holds the value, `r_obj` the receiver. Throws
     /// TypeError on brand-check miss.
     sta_private,
+    /// `[op] [k:u16]` — `acc = (#name in acc)` for the private
+    /// name at constant index `k`. §13.10.2 `PrivateIdentifier in
+    /// ShiftExpression`: if Type(rval) is not Object, throw a
+    /// TypeError; otherwise return Boolean indicating whether the
+    /// private slot is present (field, method, or accessor).
+    /// Unlike `lda_private`, a brand-check miss is **not** an
+    /// error — it returns `false`. The class-fields-private-in
+    /// proposal (stage 4) defines this; Cynic's `#x in y`
+    /// fixtures rely on it.
+    private_in,
     /// `[op] [k:u16] [r_obj:u8] [is_setter:u8]` — install the
     /// function in `acc` as a getter (`is_setter == 0`) or
     /// setter (`is_setter != 0`) on `r_obj.accessors[key_k]`.
@@ -826,6 +836,7 @@ pub const Op = enum(u8) {
             .super_get,
             .lda_property,
             .lda_private,
+            .private_in,
             .lda_global,
             .lda_global_or_undef,
             .sta_global,
@@ -925,6 +936,7 @@ pub const Op = enum(u8) {
             .init_instance_fields => "InitInstanceFields",
             .lda_private => "LdaPrivate",
             .sta_private => "StaPrivate",
+            .private_in => "PrivateIn",
             .def_accessor => "DefAccessor",
             .def_computed_accessor => "DefComputedAccessor",
             .set_proto_literal => "SetProtoLiteral",

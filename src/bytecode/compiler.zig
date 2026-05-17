@@ -3854,6 +3854,35 @@ pub const Compiler = struct {
     }
 
     fn compileBinary(self: *Compiler, b: ast.expression.BinaryExpr) CompileError!void {
+        // §13.10.2 — `PrivateIdentifier in ShiftExpression` is a
+        // cover form, parsed as `binary { op = in_, lhs =
+        // private_identifier }`. The class-fields-private-in
+        // proposal (stage 4) defines membership as a brand check:
+        // the result is a Boolean indicating whether the receiver
+        // has the private slot the identifier names. We lower to
+        // a dedicated `private_in` opcode keyed by the mangled
+        // (class-prefixed) private name; the RHS lands in `acc`
+        // and the runtime verifies it is an Object before testing
+        // the private slot maps.
+        if (b.op == .in_ and b.lhs.* == .private_identifier) {
+            const priv_span = b.lhs.private_identifier.span;
+            const raw = self.source[priv_span.start..priv_span.end];
+            // `#` prefix is part of the span — strip it before
+            // mangling. The parser guards against a bare `in` LHS
+            // outside a class body via `private_names_validate`,
+            // but compiler-side `class_stack` is the source of
+            // truth at codegen time.
+            if (raw.len < 2 or raw[0] != '#') return error.UnsupportedExpression;
+            if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
+            const decoded = try self.decodeIdentifierName(raw[1..]);
+            const mangled = try self.manglePrivateRef(decoded);
+            const k = try self.internString(mangled);
+            try self.compileExpression(b.rhs);
+            try self.builder.emitOp(.private_in, b.span);
+            try self.builder.emitU16(k);
+            return;
+        }
+
         const op: Op = switch (b.op) {
             .plus => .add,
             .minus => .sub,

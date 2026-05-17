@@ -5835,6 +5835,63 @@ fn runFrames(
                 }
             },
 
+            .private_in => {
+                // §13.10.2 PrivateIdentifier in ShiftExpression
+                // (class-fields-private-in proposal, stage 4).
+                // The RHS landed in `acc`; the compile-time
+                // mangled key is at constants[k]. Unlike
+                // `lda_private` we tolerate a missing slot — a
+                // brand-check miss returns `false` rather than
+                // throwing.
+                const k = readU16(code, ip);
+                ip += 2;
+                if (k >= local_chunk.constants.len) return error.InvalidOpcode;
+                const key_v_const = local_chunk.constants[k];
+                if (!key_v_const.isString()) return error.InvalidOpcode;
+                const key_s: *JSString = @ptrCast(@alignCast(key_v_const.asString()));
+                // §13.10.2 step 4 — Type(rval) must be Object. A
+                // plain primitive (`#x in 1`, `#x in null`, …)
+                // throws TypeError.
+                if (!acc.isObject()) {
+                    const ex = try makeTypeError(realm, "Cannot use 'in' operator to search non-object");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                }
+                // §15.7.14 step 31 — same brand resolution as
+                // `lda_private` / `sta_private`. The runtime key
+                // depends on the executing method's home class,
+                // so a `#field in obj` reference inside class C
+                // resolves against C's private brand, even if the
+                // receiver also belongs to a sibling class with a
+                // colliding identifier.
+                var brand_buf: [128]u8 = undefined;
+                const lookup_key = translatePrivateKey(&brand_buf, key_s.bytes, framePrivateBrand(f, acc, key_s.bytes));
+                // Static private members live on the class
+                // function itself (`#x` declared `static`); instance
+                // private members live on the receiver object.
+                // Mirror the read/write paths that already
+                // distinguish them.
+                if (heap_mod.valueAsFunction(acc)) |fn_recv| {
+                    const present = fn_recv.private_properties.contains(lookup_key) or fn_recv.private_accessors.contains(lookup_key);
+                    acc = Value.fromBool(present);
+                    continue;
+                }
+                if (heap_mod.valueAsPlainObject(acc)) |obj| {
+                    const present = obj.private_properties.contains(lookup_key) or obj.private_accessors.contains(lookup_key);
+                    acc = Value.fromBool(present);
+                    continue;
+                }
+                // Some other object kind (Symbol/BigInt wrapped
+                // primitives etc.) — they can't carry private
+                // slots, so the answer is `false`.
+                acc = Value.fromBool(false);
+            },
+
             .gen_yield => {
                 // §27.5.3.7 GeneratorYield — save the frame
                 // state into the generator and unwind the
