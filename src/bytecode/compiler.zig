@@ -5669,8 +5669,27 @@ fn compileClassTemplate(
                 // at `"16"`, `class C { "a\tb" = 1 }` at `"a<TAB>b"`.
                 break :blk try self.decodePropertyKeyName(fd.key);
             };
+            // §15.7.10 / §IsAnonymousFunctionDefinition — for a
+            // field initializer whose init is an anonymous function
+            // / arrow / anonymous class, SetFunctionName uses the
+            // field's textual key. For `#x` the name is `"#x"`
+            // (the # prefix is part of the user-visible identifier
+            // per §15.7's PrivateName treatment). Computed keys
+            // would need a runtime `set_fn_name_from` — leave them
+            // unnamed for now (this fixture only exercises static
+            // text-keyed fields). The harness sees the spec
+            // function name on `static #field = () => …` etc.
+            const init_name: ?[]const u8 = blk_n: {
+                if (fd.key == .computed) break :blk_n null;
+                if (fd.key == .private) {
+                    const raw = methodKeyName(self.source, fd.key) orelse break :blk_n null;
+                    const decoded = try self.decodeIdentifierName(raw);
+                    break :blk_n std.fmt.allocPrint(arena, "#{s}", .{decoded}) catch break :blk_n null;
+                }
+                break :blk_n try self.decodePropertyKeyName(fd.key);
+            };
             const init_chunk: ?ChunkMod.Chunk = if (fd.init) |*init_expr|
-                try compileFieldInitChunk(self, init_expr, fd.span)
+                try compileFieldInitChunk(self, init_expr, fd.span, init_name)
             else
                 null;
             const tmpl = ChunkMod.FieldTemplate{
@@ -5881,6 +5900,13 @@ fn compileFieldInitChunk(
     self: *Compiler,
     init_expr: *const Expression,
     span: Span,
+    /// §IsAnonymousFunctionDefinition + §15.7.10 DefineField step
+    /// 7 — when supplied, the init expression compiles through
+    /// `compileNamedValue` so an anonymous function / arrow /
+    /// anonymous class adopts the field's name (`#field` /
+    /// `field` / etc.). `null` for computed keys (the runtime
+    /// would need a `set_fn_name_from`-equivalent for those).
+    init_name: ?[]const u8,
 ) CompileError!@import("chunk.zig").Chunk {
     const saved_builder = self.builder;
     const saved_scope = self.scope;
@@ -5913,7 +5939,11 @@ fn compileFieldInitChunk(
 
     try self.builder.emitOp(.make_environment, span);
     try self.builder.emitU8(0);
-    try self.compileExpression(init_expr);
+    if (init_name) |n| {
+        try self.compileNamedValue(init_expr, n);
+    } else {
+        try self.compileExpression(init_expr);
+    }
     try self.builder.emitOp(.return_, span);
 
     self.builder.code.items[1] = self.env_slot_count;
