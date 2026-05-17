@@ -7059,8 +7059,36 @@ fn runFrames(
                     // (compiler-synthesised default-derived ctor).
                     args = registers[0..f.argc];
                 }
-                const home = f.home_object orelse {
-                    const ex = try makeTypeError(realm, "super used outside a method");
+                // §13.3.7.1 step 6 → §10.2.1.4 BindThisValue step 3 —
+                // a derived constructor whose [[ThisBindingStatus]] is
+                // already "initialized" must throw ReferenceError on
+                // any further `super(...)`. The flag is flipped only
+                // after a successful super-call below.
+                if (f.is_derived_ctor and f.super_called) {
+                    const ex = try makeReferenceError(realm, "Super constructor may only be called once");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                }
+                // §13.3.7.2 GetSuperConstructor — the *active*
+                // function's [[Prototype]], not its home-object's
+                // prototype's `constructor` slot. `Object.setPrototypeOf(C,
+                // X)` retargets `super(...)` to X without touching
+                // `C.prototype`; the home-object walk would miss that.
+                //
+                // Cynic stores the parent-class edge on
+                // `home_function.static_parent` (function-typed)
+                // because the `proto` slot is JSObject-typed.
+                // `Object.setPrototypeOf` writes to BOTH slots when
+                // the value is a callable, so `static_parent`
+                // tracks `[[Prototype]]` for active-function-walk
+                // purposes.
+                const home_fn = f.home_function orelse {
+                    const ex = try makeTypeError(realm, "super used outside a constructor");
                     f.ip = ip;
                     f.accumulator = acc;
                     committed = true;
@@ -7069,9 +7097,7 @@ fn runFrames(
                     }
                     continue;
                 };
-                const parent_proto = home.prototype;
-                const parent_ctor_v = if (parent_proto) |p| p.get("constructor") else Value.undefined_;
-                const parent_fn = heap_mod.valueAsFunction(parent_ctor_v) orelse {
+                const parent_fn = home_fn.static_parent orelse {
                     const ex = try makeTypeError(realm, "super(...) requires a constructor in the prototype chain");
                     f.ip = ip;
                     f.accumulator = acc;
@@ -7081,6 +7107,21 @@ fn runFrames(
                     }
                     continue;
                 };
+                // §13.3.7.1 step 5 — `IsConstructor(func)` is checked
+                // *after* ArgumentListEvaluation. The args were just
+                // evaluated above; throw TypeError if the lookup
+                // chain produced a non-constructor (e.g. `parseInt`,
+                // an arrow, a generator, an async fn).
+                if (!parent_fn.has_construct or parent_fn.is_arrow or parent_fn.is_generator or parent_fn.is_async) {
+                    const ex = try makeTypeError(realm, "super(...) requires a constructor in the prototype chain");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                }
                 // §13.3.7 / §10.2.1.4 — `super(...)` invokes the
                 // parent constructor with `[[NewTarget]]` of the
                 // CURRENT frame (i.e. the original `new` site that
@@ -7091,7 +7132,27 @@ fn runFrames(
                 // it stays as the original NewTarget.
                 const outcome = try callJSFunctionAsSuper(allocator, realm, parent_fn, f.this_value, args, f.new_target);
                 switch (outcome) {
-                    .value, .yielded => |v| acc = v,
+                    .value, .yielded => |v| {
+                        // §10.2.1.3 [[Construct]] step 10 — if the
+                        // parent ctor body returned an Object, that
+                        // becomes the Construct result; otherwise the
+                        // pre-allocated `thisArgument` survives. We
+                        // call the parent with `is_construct = false`
+                        // (see `callJSFunctionAsSuper`) so the parent
+                        // hands back its raw body value — apply
+                        // ConstructResult here, then BindThisValue
+                        // (§13.3.7.1 step 8) on the derived frame.
+                        const construct_result: Value = blk: {
+                            if (heap_mod.valueAsPlainObject(v) != null or
+                                heap_mod.valueAsFunction(v) != null)
+                            {
+                                break :blk v;
+                            }
+                            break :blk f.this_value;
+                        };
+                        f.this_value = construct_result;
+                        acc = construct_result;
+                    },
                     .thrown => |ex| {
                         f.ip = ip;
                         f.accumulator = acc;

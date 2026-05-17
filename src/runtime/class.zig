@@ -230,6 +230,15 @@ pub fn buildClass(
     // home object is the prototype object, so `super(...)` /
     // `super.method()` inside the constructor body resolve.
     ctor.home_object = proto;
+    // §13.3.7.2 GetSuperConstructor — `super(...)` from the ctor
+    // body walks `activeFunction.[[Prototype]]`, where the active
+    // function is the constructor itself. Wiring `home_function`
+    // here lets the interpreter route the lookup through the
+    // ctor's own [[Prototype]] slot, so `Object.setPrototypeOf(C,
+    // X)` retargets `super(...)` to `X` — matching V8 / SpiderMonkey
+    // / JSC and unblocking test262
+    // `language/expressions/super/call-proto-not-ctor.js`.
+    ctor.home_function = ctor;
 
     // 4. ctor.prototype = proto, proto.constructor = ctor. The
     // auto-allocated `prototype` from `allocateFunction` would

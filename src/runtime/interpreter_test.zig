@@ -1261,6 +1261,58 @@ test "later: super.method() looks up through home-object proto" {
     , 11);
 }
 
+test "later: super(...) rebinds `this` to the object returned by the parent ctor (§13.3.7.1)" {
+    // §10.2.1.3 step 10.a — `Construct(parent, args, NT)` returns the
+    // parent's returned object if it's an Object. §13.3.7.1 step 8 then
+    // BindThisValue(result) on the derived ctor's environment, so a
+    // subsequent `this` read inside the derived ctor body sees the
+    // parent-supplied object.
+    try expectScriptIntWithBuiltins(
+        \\var supplied = { tag: 17 };
+        \\function Parent() { return supplied; }
+        \\class Child extends Parent {
+        \\  constructor() {
+        \\    super();
+        \\    this.tag;
+        \\  }
+        \\}
+        \\new Child().tag;
+    , 17);
+}
+
+test "later: derived ctor returns the BindThisValue result, not the pre-allocated instance" {
+    // §10.2.2 step 12 — derived ctor's [[Construct]] returns
+    // `GetThisBinding()`, which after super() is whatever the parent
+    // bound. So `new Sub3()` should yield `obj`, not the pre-allocated
+    // derived instance.
+    try expectScriptIntWithBuiltins(
+        \\var obj = { tag: 99 };
+        \\class Base3 { constructor() { return obj; } }
+        \\class Sub3 extends Base3 {}
+        \\new Sub3().tag;
+    , 99);
+}
+
+test "later: calling super() twice in a derived ctor throws ReferenceError (§9.1.1.3.1)" {
+    // §10.2.1.4 BindThisValue step 3 — if the function env-record's
+    // [[ThisBindingStatus]] is "initialized", BindThisValue throws
+    // ReferenceError. So a second `super(...)` in the same derived
+    // ctor body must throw.
+    try expectScriptStringWithBuiltins(
+        \\var caught = "none";
+        \\class A {}
+        \\class B extends A {
+        \\  constructor() {
+        \\    super();
+        \\    try { super(); caught = "no-throw"; }
+        \\    catch (e) { caught = e.constructor.name; }
+        \\  }
+        \\}
+        \\new B();
+        \\caught;
+    , "ReferenceError");
+}
+
 test "later: instance is also instanceof both subclass and parent" {
     try expectScriptStringWithBuiltins(
         \\class A {}
