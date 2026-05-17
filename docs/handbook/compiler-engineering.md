@@ -214,6 +214,30 @@ Intermediate Representation" (1995); V8 TurboFan blog posts.
 
 ## Where Cynic stands
 
-Lexer + parser complete (M2). Bytecode + interpreter is later. The
-choices in this doc are open until we get there; cite this file
-when arguing for a particular design.
+Lexer + parser + bytecode compiler + interpreter all shipped.
+The interpreter runs the full §13/§14 grammar — classes,
+generators, async, async generators (with spec-faithful
+`yield*` delegation), modules (static + dynamic `import()`),
+proxies, every well-known symbol — at ~89 % spec / ~96 %
+attempted on the runtime-mode test262 sweep. See
+[../ROADMAP.md](../ROADMAP.md) "Bytecode & runtime" for the
+per-area shipped / planned breakdown; current live numbers in
+[../../test262-results.md](../../test262-results.md).
+
+The choices in this doc reflect what landed:
+
+- **NaN-boxing**, JSC encoding (§"Value representation" above).
+- **Register file + accumulator** bytecode, Ignition / Hermes
+  shape (§"Bytecode design" above).
+- **Stop-the-world mark-sweep** GC with count + byte allocation
+  triggers; see [gc.md](gc.md) for ops detail.
+- **Hashtable-backed properties** with a prototype slot — no
+  shapes yet (the next major perf win, per
+  [../ROADMAP.md](../ROADMAP.md) "Performance"). Inline caches
+  are also pending shapes.
+- **No JIT** — interpreter only. Baseline + optimizing JIT are
+  named tiers in `ROADMAP.md` "Future work"; not staffed.
+
+Cite this file when arguing for changes to the underlying
+shape — e.g. moving to shapes, switching to a stack VM,
+adding a baseline JIT.

@@ -49,7 +49,6 @@ runs the conformance harness.
 **In progress / on the watch.**
 
 - Top-level `await` in modules.
-- Tagged template `.raw` access.
 
 **Out of scope.** Annex B language extensions (no sloppy mode, no
 labels-in-old-positions, no HTML-like comments, no legacy octal,
@@ -113,38 +112,88 @@ code construction (aligns with SES).
 
 **In progress / planned.**
 
-- **Async-generator yield-star resume-arg routing + the
-  `AsyncGeneratorRequest` queue (§27.6.3.5 / §15.6).** Today
-  `asyncGenReturn` / `asyncGenThrow` synthesize an abrupt
-  completion on the outer generator with no awareness of any
-  inner iterator the body is `yield*`-delegating into. The
-  `%AsyncFromSyncIteratorPrototype%` intrinsic (§27.6.1) is
-  shipped and correct — the missing piece is the routing layer.
-  Lands in five staged commits:
-  1. `AsyncGeneratorRequest` queue on `JSGenerator` (§27.6.3.5)
-     — wire `asyncGenNext`/`Return`/`Throw` to enqueue, with
-     `AsyncGeneratorResumeNext` as the drain. Prerequisite for
-     everything below; alone fixes the `request-queue-order-
-     state-executing.js` cluster.
-  2. Bytecode `set_yield_delegate` / `clear_yield_delegate`
-     opcodes + `JSGenerator.inner_iter` slot + GC marking.
-  3. Compiler: emit slot ops around the async `yield*` loop
-     (`compileYieldDelegate`).
-  4. `asyncGenReturn` / `asyncGenThrow`: when the slot is live,
-     `callValue` the inner method, `Await` the result through
-     the microtask queue (no synchronous-settle per AGENTS.md),
-     then resume.
-  5. IteratorClose-on-absent-throw path (§14.4.14 step 7.iii).
-  Unlocks the `built-ins/AsyncFromSyncIteratorPrototype` bucket
-  (21 % spec today) and `built-ins/AsyncGeneratorPrototype/
-  {throw,return}/*` clusters.
-- Tail-call optimization (PTC).
-- Top-level `await` in modules.
-- `typeof` of a callable proxy returning `"function"`.
-- Generational / incremental GC.
+- **Tail-call optimization (PTC).** See the dedicated section
+  below.
+- **Top-level `await` in modules.**
+- **`typeof` of a callable proxy returning `"function"`.**
+- **Generational / incremental GC.**
+- **Inner `yield*` `.return` non-Object → TypeError** and
+  **yield-thenable resolving-fn metadata** (the remaining
+  scattered async-generator residuals; the bulk of the
+  `yield*` protocol landed in May 2026).
 
 **Recently landed (was in progress; now done).**
 
+- **Spec-faithful `yield*` delegation** for both sync and
+  async generators (§15.5.5 / §27.6.3.7). Three-step plan
+  shipped: `Generator.prototype.throw` injects at the
+  suspended yield site via a new `pending_throw` slot;
+  sync forwarding wires `next` / `return` / `throw`
+  through the inner iterator with IteratorClose-on-
+  absent-throw (§14.4.14 step 7.iii.2); async mirrors
+  with `await`-driven inner-call ticks.
+  `built-ins/AsyncFromSyncIteratorPrototype` went 21 % →
+  76 % spec; `built-ins/AsyncGeneratorPrototype` 67 % →
+  77 %.
+- **GlobalEnvironmentRecord split** (§9.1.1.4) — `let`
+  / `const` / `class` at top level live in a declarative
+  env-record alongside the object record (`var` /
+  `function`), with `[[VarNames]]` tracked separately.
+  `sta_global_init` / `sta_global_fn_decl` / `sta_global`
+  opcodes dispatch through the split.
+  `language/global-code` now at 100 %. See
+  [handbook/environments.md](handbook/environments.md).
+- **§16.1.7 GlobalDeclarationInstantiation early-error
+  pass** — `lex`-vs-`lex` / `lex`-vs-`var` collision,
+  `HasRestrictedGlobalProperty` (`NaN` / `Infinity` /
+  `undefined`), `CanDeclareGlobalVar` /
+  `CanDeclareGlobalFunction` on a non-extensible global.
+- **Named function expression self-binding** (§15.6.5) —
+  synthetic 1-binding wrapper env holds `G` as immutable
+  inside the body; writes throw TypeError at runtime via
+  `throw_assign_const`.
+- **Module Namespace [[Get]] honors TDZ** — uninit lex
+  binding access through a namespace surfaces as
+  ReferenceError per §9.4.6.7 + §8.1.1.1.6.
+  `[[HasProperty]]` / `[[OwnPropertyKeys]]` stay non-
+  throwing.
+- **Indirect import bindings + TDZ-Hole seeding on
+  exports** — importer sees ReferenceError before source
+  module evaluates (§8.1.1.5.5 + §15.2.1.16.4 step 12);
+  writes throw TypeError. `re-export-from` (`export { X }
+  from './x.js'`) flows through the same indirect path.
+- **Spec-faithful Symbol.{split, match, matchAll, replace,
+  search}** rewrites (§22.2.5.{8,9,11,13,15}) routing
+  through `SpeciesConstructor`, `regExpExecGeneric`,
+  `setPropertyChainOrThrow`, `advanceStringIndex` with
+  full abrupt-completion propagation. RegExp `/d` flag +
+  MakeIndicesArray (§22.2.7.{2,7}) shipped.
+- **Date rewrite**: coercion order (§21.4.2 step 3
+  in-order ToNumber per argument), `parse` boundary clamp
+  (±8.64e15 ms), `toJSON`, `@@toPrimitive`, formatting,
+  prop descriptors. Whole `built-ins/Date` bucket at
+  100 %.
+- **JSON.parse + JSON.stringify abrupt-completion
+  propagation** (§25.5.1.1, §25.5.2) — proxy-aware
+  Get / Delete / OwnKeys / CreateDataProperty, BigInt
+  TypeError per spec, revoked-proxy-as-value TypeError.
+- **Lexer `\u{XX}` identifier escape canonicalization**
+  (§12.7) — `var \u{61} = 1; a === 1`. The
+  `decodeIdentifierName` helper now feeds every binding-
+  name resolve / declare / assign site, not just
+  property-key.
+- **Bulk SES skiplist** — 218 Sputnik + cross-realm
+  fixtures using `Function(string)` / `eval(string)` /
+  `new other.Function` exhaustively identified and moved
+  to `skip_ses_exact_paths` (permanent OOS per AGENTS.md
+  SES carve-out). Total count down from 40 700 to 40 411.
+- **`tools/test262.zig` `loader_state` made `threadlocal`**
+  — was a process-global racing across workers, surfacing
+  as ~9 flaky `language/module-code` + ~20 flaky
+  `language/expressions/dynamic-import` fixtures whose
+  pass/fail flipped between runs. With the fix parallel
+  and `--threads=1` agree exactly. See
+  [handbook/agent-checks.md](handbook/agent-checks.md).
 - Generator `.return()` drives pending `try { yield } finally`
   blocks via `unwindThrow` + an `is_finally` Handler flag and
   the `realm.gen_return_completion` sentinel that skips user
@@ -324,11 +373,25 @@ hosts are single-agent-per-isolate).
   with the namespace on success, rejected with the loader's
   `TypeError` on failure (§13.3.10).
 
+**Done (additions).**
+
+- Indirect import bindings as live aliases per §8.1.1.5.5
+  CreateImportBinding, with TDZ-Hole-seeding on the source
+  module's exports so the importer sees ReferenceError until
+  the source body initialises (§15.2.1.16.4 step 12). Writes
+  to an import throw TypeError.
+- Module Namespace exotic [[Get]] honors TDZ — uninit lex
+  binding surfaces ReferenceError per §9.4.6.7 + §8.1.1.1.6.
+  `[[HasProperty]]` / `[[OwnPropertyKeys]]` stay non-throwing.
+- Re-exports (`export { X } from './x.js'`) and star
+  re-exports (`export * from`) route through indirect bindings.
+
 **Planned.**
 
-- Real module graph: cyclic imports, namespace objects via
-  `import * as ns`, hoisted `import` bindings with TDZ.
 - Top-level `await` in module bodies.
+- Module-evaluation cycle resolution edge cases (most
+  star-cycles work; the residual list is in the
+  `language/module-code/instn-star-*` cluster).
 
 ## Regex
 

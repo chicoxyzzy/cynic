@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 89.00 % | 95.82 % | 35964 / 40411 | 35964 / 37534 |
+| **runtime** | 89.02 % | 95.84 % | 35973 / 40411 | 35973 / 37534 |
 
 
 ## Where the runtime stands, by area
@@ -25,7 +25,7 @@ browser-era built-ins …).
 |---|---:|---:|---:|---:|---:|
 | **_100–999 fails_** | | | | | |
 | `built-ins/Object` | 3199 | 127 | 80 | 94 % | 96 % |
-| `built-ins/RegExp` | 1462 | 140 | 161 | 83 % | 91 % |
+| `built-ins/RegExp` | 1471 | 131 | 161 | 83 % | 92 % |
 | `language/expressions` | 9503 | 371 | 975 | 88 % | 96 % |
 | `language/statements` | 8215 | 212 | 672 | 90 % | 97 % |
 | **_10–99 fails_** | | | | | |
@@ -158,16 +158,15 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-17 — cynic `d345b69`, test262 `d0c1b455`
+### 2026-05-17 — cynic `2b9af43`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 89.00 % | 95.82 % | 35964 / 40411 | 35964 / 37534 | +88 | 2m 19s |
+| **runtime** | 89.02 % | 95.84 % | 35973 / 40411 | 35973 / 37534 | +97 | 4m 18s |
 
 Biggest movers (runtime):
 
-- `language/module-code` +3
-- `language/expressions` +1
+- `built-ins/RegExp` +9
 
 ### 2026-05-16 — cynic `452bafa`, test262 `d0c1b455`
 

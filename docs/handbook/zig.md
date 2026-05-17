@@ -1,8 +1,18 @@
 # Zig idioms in Cynic
 
-Pinned to Zig 0.17-dev (master) — the Zig project skipped a stable
-0.16, so CI tracks `master` via `mlugg/setup-zig`. Things that
-surface during contribution.
+Pinned to a specific 0.17-dev SHA — see `.minimum_zig_version`
+in `build.zig.zon` and the matching `version:` in
+`.github/workflows/ci.yml`. [anyzig](https://github.com/marler8997/anyzig)
+(via Homebrew) reads `.minimum_zig_version` to dispatch the
+local `zig` binary to the right compiler, so `which zig` is the
+anyzig shim and `zig version` reports whatever the zon pins.
+Bump both files in lockstep when a Zig parser/codegen change
+forces it — never let local and CI drift onto different
+compilers; the master parser is strict in ways the previous
+release isn't (see "Array repeat" below for an example that
+ate a debug session).
+
+Things that surface during contribution:
 
 ## Allocators
 
@@ -47,6 +57,20 @@ pub fn main(init: std.process.Init) !void {
 - Append: `try list.append(arena, item);` — the arena is the
   allocator, passed per-call.
 - Convert to slice: `try list.toOwnedSlice(arena)`.
+
+## Array repeat
+
+- **`@splat(value)`** to fill a fixed-size array with a single
+  value:
+  ```zig
+  const slots: [N]T = @splat(.{ .name = "" });
+  ```
+  Use this — not the older `[_]T{value} ** N`. The legacy
+  `**` form parses as two `*` tokens in master Zig and the
+  parser rejects `}} ** N` because the whitespace around the
+  first `*` is asymmetric (`}` left, `*` right, no space).
+  `@splat` is the spec-blessed replacement and has none of the
+  parse-edge surprises.
 
 ## Strings
 
