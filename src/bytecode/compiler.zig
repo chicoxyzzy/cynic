@@ -182,6 +182,17 @@ pub const Compiler = struct {
     /// boundaries here.
     pending_labels: std.ArrayListUnmanaged([]const u8) = .empty,
 
+    /// §9.1.1.4.15 CanDeclareGlobalVar / §9.1.1.4.16
+    /// CanDeclareGlobalFunction returned false during
+    /// `validateGlobalDeclarations` — the script is fully parsed
+    /// but its first executable opcode will be a TypeError throw,
+    /// not user code. Set so the hoist + emit passes can skip
+    /// installation entirely (per §16.1.7 step 12 we want NO
+    /// `executed = true;` side effect before the TypeError).
+    /// Null name means the failure isn't tied to a single
+    /// identifier (defensive default).
+    pending_global_decl_error: ?[]const u8 = null,
+
     pub fn init(allocator: std.mem.Allocator, realm: *Realm, source: []const u8) Compiler {
         return .{
             .allocator = allocator,
@@ -327,16 +338,6 @@ pub const Compiler = struct {
         // top-levels stay scope-local — their visibility model is
         // import / export, not the global object.
         const is_global = target.kind == .script and !self.is_module;
-        // §16.1.7 GlobalDeclarationInstantiation step 5.c — a
-        // lexical (`let` / `const` / `class`) declaration at the
-        // script top level cannot shadow a non-configurable global
-        // property: `undefined`, `NaN`, `Infinity`. `var` /
-        // `function` go through the §16.1.7 step 6.b path which
-        // permits the existing binding.
-        if (is_global and kind != .var_ and isRestrictedGlobalName(name)) {
-            try self.report(.duplicate_lexical_binding, span);
-            return error.DuplicateBinding;
-        }
         const slot: u8 = if (is_global) 0 else try self.newEnvSlot();
         const binding: Binding = .{
             .name = name,
@@ -348,28 +349,23 @@ pub const Compiler = struct {
         };
         try target.bindings.append(self.allocator, binding);
         if (is_global) {
-            // Hoist-time install on the realm. `var` / function
-            // get `undefined` (or the existing value, preserving
-            // cross-script `var` re-declaration semantics);
-            // `let` / `const` get the TDZ Hole that the
-            // initializer's `sta_global` will overwrite.
+            // Hoist-time install on the realm. §16.1.7
+            // GlobalDeclarationInstantiation step 5-7 collision
+            // checks (HasLexicalDeclaration vs HasVarDeclaration vs
+            // HasRestrictedGlobalProperty) ran in
+            // `validateGlobalDeclarations` before any hoisting,
+            // so by the time we reach this install path the name
+            // is known to be installable.
             //
-            // §16.1.7 GlobalDeclarationInstantiation step 18 +
-            // §9.1.1.4.18 CreateGlobalVarBinding — top-level
-            // `var` / `function` declarations materialise on the
-            // global object with `{[[Writable]]:true,
-            // [[Enumerable]]:true, [[Configurable]]:D}` where
-            // `D` is the "deletable" flag (false for source-text
-            // scripts; `eval` would set true but Cynic doesn't
-            // ship `eval`). Route through `installScriptVarBinding`
-            // so the descriptor is stamped non-configurable. By
-            // contrast `let` / `const` go into the declarative
-            // GlobalEnvironment record — not on the global object
-            // — so they keep the legacy realm-table install path
-            // (the property bag they happen to share with the
-            // global object is an implementation detail; `let`-on-
-            // globalThis isn't a real property and Cynic's lookup
-            // routes through it regardless).
+            // • `var` / function → §9.1.1.4.18 / .19
+            //   CreateGlobalVar/FunctionBinding — stamp on the
+            //   object env-record (the global object's property
+            //   bag) with non-configurable flags.
+            // • `let` / `const` / `class` → §9.1.1.4.17 step b
+            //   CreateMutable/ImmutableBinding — stamp on the
+            //   declarative env-record (NOT on globalThis) with
+            //   the TDZ Hole. The initialiser's `sta_global`
+            //   overwrites.
             if (kind == .var_) {
                 try self.realm.globals.installScriptVarBinding(
                     self.realm.allocator,
@@ -377,11 +373,11 @@ pub const Compiler = struct {
                     Value.undefined_,
                 );
             } else {
-                const init_value: Value = Value.hole_;
-                const gop = try self.realm.globals.getOrPut(self.realm.allocator, name);
-                if (!gop.found_existing) {
-                    gop.value_ptr.* = init_value;
-                }
+                try self.realm.globals.installScriptLexBinding(
+                    self.realm.allocator,
+                    name,
+                    kind == .const_,
+                );
             }
         }
         return binding;
@@ -437,6 +433,19 @@ pub const Compiler = struct {
     /// `emitLoadBinding` for the global vs env-slot fork. No TDZ
     /// check — stores are how the Hole gets overwritten.
     fn emitStoreBinding(self: *Compiler, binding: Binding, span: Span) !void {
+        return self.emitStoreBindingMode(binding, span, false);
+    }
+
+    /// Same as `emitStoreBinding` but flags the store as an
+    /// initializer — for `is_global` lex bindings this routes
+    /// through `sta_global_init` instead of `sta_global` so the
+    /// initialization isn't rejected as a const re-assignment.
+    /// §9.1.1.4 InitializeBinding vs §9.1.1.4 SetMutableBinding.
+    fn emitStoreBindingInit(self: *Compiler, binding: Binding, span: Span) !void {
+        return self.emitStoreBindingMode(binding, span, true);
+    }
+
+    fn emitStoreBindingMode(self: *Compiler, binding: Binding, span: Span, is_init: bool) !void {
         if (binding.is_fn_expr_name) {
             // §15.6.5 — the named-function-expression self-binding
             // is immutable. §8.1.1.1.4 SetMutableBinding step 9.b on
@@ -466,7 +475,23 @@ pub const Compiler = struct {
         }
         if (binding.is_global) {
             const k = try self.internString(binding.name);
-            try self.builder.emitOp(.sta_global, span);
+            // §9.1.1.4 InitializeBinding (`is_init = true` for
+            // let / const / class declarators + function-decl
+            // hoist) bypasses the const-immutability gate so the
+            // declaration's initial value lands cleanly. A later
+            // re-assignment of the same name routes through the
+            // ordinary `sta_global` path and re-applies the gate.
+            //
+            // §9.1.1.4.19 CreateGlobalFunctionBinding —
+            // function-decl writes overwrite both data slot AND
+            // descriptor flags via `sta_global_fn_decl`.
+            const op: Op = if (is_init and binding.is_function_decl)
+                .sta_global_fn_decl
+            else if (is_init and binding.kind != .var_)
+                .sta_global_init
+            else
+                .sta_global;
+            try self.builder.emitOp(op, span);
             try self.builder.emitU16(k);
         } else {
             const depth = self.env_depth - binding.env_depth;
@@ -1150,7 +1175,11 @@ pub const Compiler = struct {
             }
             return error.UnresolvedReference;
         };
-        if (binding.kind == .const_ and !binding.is_fn_expr_name) {
+        // Global `const` (§9.1.1.4) defers to runtime TypeError; the
+        // named-function-expression self-binding (§15.6.5) is also
+        // const but defers to runtime via throw_assign_const. Both
+        // skip the compile-time SyntaxError diagnostic.
+        if (binding.kind == .const_ and !binding.is_global and !binding.is_fn_expr_name) {
             try self.report(.assignment_to_const, u.span);
             return error.AssignmentToConst;
         }
@@ -3356,7 +3385,18 @@ pub const Compiler = struct {
             .span = a.target.span(),
             .is_global = true,
         };
-        if (binding.kind == .const_ and !binding.is_import and !binding.is_fn_expr_name) {
+        // §13.15.2 — assignment to a `const` binding is a runtime
+        // TypeError per spec, but Cynic upgrades it to a compile-
+        // time SyntaxError for local lex bindings (where the
+        // binding's identity is statically known and unambiguous).
+        // Global lex bindings stay runtime-checked: per §9.1.1.4
+        // SetMutableBinding the type / immutability test lives at
+        // `sta_global` time, which lets fixtures wrap the throw
+        // in `assert.throws(TypeError, () => { c = 1; })` without
+        // the script's outer compile imploding. Named function-
+        // expression self-bindings (§15.6.5) also defer to runtime
+        // via `throw_assign_const`.
+        if (binding.kind == .const_ and !binding.is_import and !binding.is_global and !binding.is_fn_expr_name) {
             try self.report(.assignment_to_const, a.span);
             return error.AssignmentToConst;
         }
@@ -4693,18 +4733,22 @@ fn compileFunctionDecl(self: *Compiler, fd: ast.statement.FunctionDecl) CompileE
     // the body sees `name` at depth=1, slot=this-slot.
     //
     // §14.2.5 / §14.12.4 — in strict mode (Cynic is strict-only)
-    // an async / generator / async-generator declaration sitting
-    // inside a Block or SwitchStatement case body is lex-scoped to
-    // that enclosing block, not hoisted to the surrounding function
-    // / script. The non-async / non-generator form has Annex B web-
-    // compat hoisting which Cynic doesn't ship, but plenty of code
-    // (and test262 fixtures) still relies on the legacy `var`-style
-    // visibility — only tighten the three async/gen forms here, the
-    // shape the failing test262 fixtures specifically pin.
+    // ANY function declaration sitting inside a Block or
+    // SwitchStatement case body is lex-scoped to that enclosing
+    // block, not hoisted to the surrounding function / script.
+    // Annex B B.3.3 web-compat hoisting (which would let plain
+    // `function` leak out) is excluded by the strict-only target.
     const inside_block = self.scope.? != self.functionScope();
-    const block_lex = (fd.is_async or fd.is_generator) and inside_block;
+    const block_lex = inside_block;
     const binding_kind: BindingKind = if (block_lex) .let_ else .var_;
-    const binding = try self.declareBindingFull(name_slice, binding_kind, fd.name.span);
+    var binding = try self.declareBindingFull(name_slice, binding_kind, fd.name.span);
+    // §9.1.1.4.19 — top-level function decls overwrite the
+    // descriptor on emit (data + writable+enumerable+non-
+    // configurable). Block-lex function decls (binding_kind=.let_)
+    // keep the ordinary lex init path.
+    if (binding.is_global and binding_kind == .var_) {
+        binding.is_function_decl = true;
+    }
     const k = try compileFunctionTemplateExt(
         self,
         fd.params,
@@ -4717,7 +4761,14 @@ fn compileFunctionDecl(self: *Compiler, fd: ast.statement.FunctionDecl) CompileE
     );
     try self.builder.emitOp(.make_function, fd.span);
     try self.builder.emitU16(k);
-    try self.emitStoreBinding(binding, fd.span);
+    // §9.1.1.4 InitializeBinding — function-decl hoist is the
+    // initializer for its bound name. For block-lex function
+    // decls (which use `.let_`) at the script top level the
+    // global-init opcode applies; var-style function decls
+    // route to the ordinary store path (they're hoisted as
+    // var, which `emitStoreBindingInit` treats identically to
+    // a regular `sta_global` write).
+    try self.emitStoreBindingInit(binding, fd.span);
 }
 
 fn compileClassDecl(self: *Compiler, cd: ast.statement.ClassDecl) CompileError!void {
@@ -4725,7 +4776,7 @@ fn compileClassDecl(self: *Compiler, cd: ast.statement.ClassDecl) CompileError!v
     const name_slice = try self.bindingName(cd.name.span);
     const binding = try self.declareBindingFull(name_slice, .let_, cd.name.span);
     try self.emitClassBuild(name_slice, if (cd.superclass) |s| &s else null, cd.body, cd.span);
-    try self.emitStoreBinding(binding, cd.span);
+    try self.emitStoreBindingInit(binding, cd.span);
 }
 
 fn compileClassExpr(self: *Compiler, ce: ast.expression.ClassExpr) CompileError!void {
@@ -5647,6 +5698,310 @@ fn hoistVarAndFunctions(self: *Compiler, body: []ast.statement.Statement) Compil
     for (body) |*s| try self.hoistStatement(s, false);
 }
 
+/// §16.1.7 GlobalDeclarationInstantiation step 5-7 +
+/// CanDeclareGlobalVar / CanDeclareGlobalFunction (§9.1.1.4.15 /
+/// .16). Pure-validation walk over a Script body — does NOT
+/// mutate the realm. Reports duplicate / collision via
+/// `duplicate_lexical_binding` (SyntaxError) and sets
+/// `pending_global_decl_error` for canDeclare failures
+/// (deferred TypeError emitted in place of the script body).
+///
+/// Walks the same shape as `hoistStatement` for var collection —
+/// recurses through Block / If / While / DoWhile / For /
+/// ForInOf / Try / Switch / ExportDecl — but doesn't follow into
+/// nested function / class bodies (those have their own scopes).
+fn validateGlobalDeclarations(self: *Compiler, body: []ast.statement.Statement) CompileError!void {
+    if (self.is_module) return;
+
+    // Collected names. Both sets are small in practice (a handful
+    // of decls per script), so a linear-scan ArrayList beats the
+    // bookkeeping cost of a HashSet.
+    var lex_names: std.ArrayListUnmanaged(NameAtSpan) = .empty;
+    defer lex_names.deinit(self.allocator);
+    var var_names: std.ArrayListUnmanaged(NameAtSpan) = .empty;
+    defer var_names.deinit(self.allocator);
+    var fn_names: std.ArrayListUnmanaged(NameAtSpan) = .empty;
+    defer fn_names.deinit(self.allocator);
+
+    try collectScriptDeclNames(self, body, &lex_names, &var_names, &fn_names, false);
+
+    // §16.1.7 step 5.b — lex-vs-lex duplicates. (lex-vs-var
+    // covered by step 5.a below.) Tracked separately so a
+    // pre-existing realm lex binding from a prior `evalScript`
+    // also flags the duplicate per §9.1.1.4.18.
+    for (lex_names.items, 0..) |a, i| {
+        for (lex_names.items[i + 1 ..]) |b| {
+            if (std.mem.eql(u8, a.name, b.name)) {
+                try self.report(.duplicate_lexical_binding, b.span);
+                return error.DuplicateBinding;
+            }
+        }
+    }
+    for (lex_names.items) |ln| {
+        // §16.1.7 step 5.a — HasVarDeclaration: lex vs var on the
+        // realm. The realm only tracks names through the object
+        // env-record, so any prior `var` / `function` collides.
+        if (self.realm.globals.hasVarDeclaration(ln.name)) {
+            try self.report(.duplicate_lexical_binding, ln.span);
+            return error.DuplicateBinding;
+        }
+        // §16.1.7 step 5.b — HasLexicalDeclaration: lex vs prior
+        // lex on the realm.
+        if (self.realm.globals.hasLexicalDeclaration(ln.name)) {
+            try self.report(.duplicate_lexical_binding, ln.span);
+            return error.DuplicateBinding;
+        }
+        // §16.1.7 step 5.c — HasRestrictedGlobalProperty: lex vs
+        // non-configurable global property (e.g. `undefined`,
+        // `NaN`, host-installed `Object.defineProperty(this, …,
+        // {configurable:false})`).
+        if (self.realm.globals.hasRestrictedGlobalProperty(ln.name) or
+            isRestrictedGlobalName(ln.name))
+        {
+            try self.report(.duplicate_lexical_binding, ln.span);
+            return error.DuplicateBinding;
+        }
+        // lex vs same-script var / function.
+        for (var_names.items) |vn| if (std.mem.eql(u8, ln.name, vn.name)) {
+            try self.report(.duplicate_lexical_binding, vn.span);
+            return error.DuplicateBinding;
+        };
+        for (fn_names.items) |fn_n| if (std.mem.eql(u8, ln.name, fn_n.name)) {
+            try self.report(.duplicate_lexical_binding, fn_n.span);
+            return error.DuplicateBinding;
+        };
+    }
+
+    // §16.1.7 step 6.a — vars (and function names) vs realm lex.
+    for (var_names.items) |vn| {
+        if (self.realm.globals.hasLexicalDeclaration(vn.name)) {
+            try self.report(.duplicate_lexical_binding, vn.span);
+            return error.DuplicateBinding;
+        }
+    }
+    for (fn_names.items) |fn_n| {
+        if (self.realm.globals.hasLexicalDeclaration(fn_n.name)) {
+            try self.report(.duplicate_lexical_binding, fn_n.span);
+            return error.DuplicateBinding;
+        }
+    }
+
+    // §9.1.1.4.16 CanDeclareGlobalFunction for every function
+    // declaration. Check this BEFORE the var canDeclare so the
+    // `script-decl-func-err-non-configurable.js` fixture (which
+    // pairs `var x; function data1() {}`) sees the function
+    // failure win — though either order produces TypeError, the
+    // failing-name carried into the error message matches V8's
+    // when functions go first.
+    for (fn_names.items) |fn_n| {
+        if (!self.realm.globals.canDeclareGlobalFunction(fn_n.name)) {
+            self.pending_global_decl_error = fn_n.name;
+            return;
+        }
+    }
+
+    // §9.1.1.4.15 CanDeclareGlobalVar — only meaningful when the
+    // global object is non-extensible AND the name isn't already
+    // a property. Skip names that also appear in `fn_names`: the
+    // function-decl path handles them.
+    for (var_names.items) |vn| {
+        var is_func = false;
+        for (fn_names.items) |fn_n| if (std.mem.eql(u8, vn.name, fn_n.name)) {
+            is_func = true;
+            break;
+        };
+        if (is_func) continue;
+        if (!self.realm.globals.canDeclareGlobalVar(vn.name)) {
+            self.pending_global_decl_error = vn.name;
+            return;
+        }
+    }
+}
+
+const NameAtSpan = struct { name: []const u8, span: Span };
+
+fn collectScriptDeclNames(
+    self: *Compiler,
+    body: []ast.statement.Statement,
+    lex_names: *std.ArrayListUnmanaged(NameAtSpan),
+    var_names: *std.ArrayListUnmanaged(NameAtSpan),
+    fn_names: *std.ArrayListUnmanaged(NameAtSpan),
+    inside_block: bool,
+) CompileError!void {
+    for (body) |*s| try collectScriptDeclNamesOne(self, s, lex_names, var_names, fn_names, inside_block);
+}
+
+fn collectScriptDeclNamesOne(
+    self: *Compiler,
+    s: *ast.statement.Statement,
+    lex_names: *std.ArrayListUnmanaged(NameAtSpan),
+    var_names: *std.ArrayListUnmanaged(NameAtSpan),
+    fn_names: *std.ArrayListUnmanaged(NameAtSpan),
+    inside_block: bool,
+) CompileError!void {
+    switch (s.*) {
+        .lexical => |ld| {
+            if (ld.kind == .var_) {
+                if (inside_block) {
+                    for (ld.declarators) |d|
+                        try appendPatternVarNames(self, d.name, var_names);
+                } else {
+                    for (ld.declarators) |d|
+                        try appendPatternVarNames(self, d.name, var_names);
+                }
+            } else if (!inside_block) {
+                // Only top-level lex binds reach the global lex
+                // record. Block-scoped `let` lives in the
+                // ordinary env and isn't validated here.
+                for (ld.declarators) |d|
+                    try appendPatternLexNames(self, d.name, lex_names);
+            }
+        },
+        .class_decl => |cd| {
+            if (!inside_block) {
+                const name = try self.bindingName(cd.name.span);
+                try lex_names.append(self.allocator, .{ .name = name, .span = cd.name.span });
+            }
+        },
+        .function_decl => |fd| {
+            if (inside_block and (fd.is_async or fd.is_generator)) {
+                // §14.2.5 / §14.12.4 — async/gen function decls in
+                // nested blocks are lex-scoped to the block, not
+                // hoisted. Don't count toward global decls.
+                return;
+            }
+            if (inside_block) {
+                // §B.3.3 — Cynic is strict-only, so block-nested
+                // `function` doesn't hoist either. Skip global-
+                // decl tracking.
+                return;
+            }
+            const name = try self.bindingName(fd.name.span);
+            try fn_names.append(self.allocator, .{ .name = name, .span = fd.name.span });
+        },
+        .export_decl => |ed| switch (ed.body) {
+            .declaration => |inner| try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, inside_block),
+            else => {},
+        },
+        .block => |b| {
+            for (b.body) |*inner|
+                try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, true);
+        },
+        .if_ => |i| {
+            try collectScriptDeclNamesOne(self, i.consequent, lex_names, var_names, fn_names, true);
+            if (i.alternate) |alt|
+                try collectScriptDeclNamesOne(self, alt, lex_names, var_names, fn_names, true);
+        },
+        .while_ => |w| try collectScriptDeclNamesOne(self, w.body, lex_names, var_names, fn_names, true),
+        .do_while => |dw| try collectScriptDeclNamesOne(self, dw.body, lex_names, var_names, fn_names, true),
+        .for_ => |f| {
+            if (f.init) |head| switch (head) {
+                .lexical => |ld| if (ld.kind == .var_) {
+                    for (ld.declarators) |d|
+                        try appendPatternVarNames(self, d.name, var_names);
+                },
+                .expression => {},
+            };
+            try collectScriptDeclNamesOne(self, f.body, lex_names, var_names, fn_names, true);
+        },
+        .for_in_of => |f| {
+            switch (f.left) {
+                .lexical => |ld| if (ld.kind == .var_) {
+                    for (ld.declarators) |d|
+                        try appendPatternVarNames(self, d.name, var_names);
+                },
+                .expression => {},
+            }
+            try collectScriptDeclNamesOne(self, f.body, lex_names, var_names, fn_names, true);
+        },
+        .try_ => |t| {
+            for (t.block.body) |*inner|
+                try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, true);
+            if (t.handler) |h| for (h.body.body) |*inner|
+                try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, true);
+            if (t.finalizer) |fin| for (fin.body) |*inner|
+                try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, true);
+        },
+        .switch_ => |sw| {
+            for (sw.cases) |case| for (case.body) |*inner|
+                try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, true);
+        },
+        else => {},
+    }
+}
+
+fn appendPatternVarNames(
+    self: *Compiler,
+    target: ast.statement.BindingTarget,
+    var_names: *std.ArrayListUnmanaged(NameAtSpan),
+) CompileError!void {
+    switch (target) {
+        .identifier => |id| {
+            const name = try self.bindingName(id.span);
+            try var_names.append(self.allocator, .{ .name = name, .span = id.span });
+        },
+        .array => |arr| {
+            for (arr.elements) |maybe_elem| {
+                if (maybe_elem) |elem| try appendPatternVarNames(self, elem.target, var_names);
+            }
+            if (arr.rest) |rest| try appendPatternVarNames(self, rest.*, var_names);
+        },
+        .object => |obj| {
+            for (obj.properties) |prop| try appendPatternVarNames(self, prop.value.target, var_names);
+            if (obj.rest) |rest_id| {
+                const name = try self.bindingName(rest_id.span);
+                try var_names.append(self.allocator, .{ .name = name, .span = rest_id.span });
+            }
+        },
+    }
+}
+
+fn appendPatternLexNames(
+    self: *Compiler,
+    target: ast.statement.BindingTarget,
+    lex_names: *std.ArrayListUnmanaged(NameAtSpan),
+) CompileError!void {
+    switch (target) {
+        .identifier => |id| {
+            const name = try self.bindingName(id.span);
+            try lex_names.append(self.allocator, .{ .name = name, .span = id.span });
+        },
+        .array => |arr| {
+            for (arr.elements) |maybe_elem| {
+                if (maybe_elem) |elem| try appendPatternLexNames(self, elem.target, lex_names);
+            }
+            if (arr.rest) |rest| try appendPatternLexNames(self, rest.*, lex_names);
+        },
+        .object => |obj| {
+            for (obj.properties) |prop| try appendPatternLexNames(self, prop.value.target, lex_names);
+            if (obj.rest) |rest_id| {
+                const name = try self.bindingName(rest_id.span);
+                try lex_names.append(self.allocator, .{ .name = name, .span = rest_id.span });
+            }
+        },
+    }
+}
+
+/// Emit a runtime `throw new TypeError(message)` sequence — used
+/// when §9.1.1.4.15 / .16 CanDeclareGlobalVar / CanDeclareGlobal
+/// Function returned false during validation. The chunk
+/// otherwise contains no user code, so any reachable observation
+/// from script source is suppressed.
+fn emitGlobalDeclThrow(self: *Compiler, name: []const u8, span: Span) CompileError!void {
+    _ = name;
+    const k_type_error = try self.internString("TypeError");
+    const r_callee = try self.reserveTemp();
+    defer self.releaseTemp();
+    try self.builder.emitOp(.lda_global, span);
+    try self.builder.emitU16(k_type_error);
+    try self.builder.emitOp(.star, span);
+    try self.builder.emitU8(r_callee);
+    try self.builder.emitOp(.new_call, span);
+    try self.builder.emitU8(r_callee);
+    try self.builder.emitU8(0);
+    try self.builder.emitOp(.throw_, span);
+}
+
 /// §9.1.1.4.5 HasRestrictedGlobalProperty — names whose global
 /// binding is created non-configurable by the host (`undefined`,
 /// `NaN`, `Infinity`). A script-mode `let` / `const` / `class`
@@ -5676,8 +6031,14 @@ fn hoistStatement(self: *Compiler, s: *ast.statement.Statement, inside_nested_bl
             }
         },
         .function_decl => |fd| {
-            if (inside_nested_block and (fd.is_async or fd.is_generator)) {
+            if (inside_nested_block) {
                 // §14.2.5 / §14.12.4 strict-mode block scope.
+                // ALL function-decl forms (plain, async, generator,
+                // async-generator) are lex-scoped to the enclosing
+                // block in strict mode — Cynic is strict-only and
+                // doesn't ship Annex B B.3.3 web-compat hoisting,
+                // so a `{ function f() {} }` at script top level
+                // must NOT make `f` visible outside the block.
                 // Leave it to `compileFunctionDecl` (which lex-
                 // binds via the current Scope) to install the
                 // binding at emission time.
@@ -5906,7 +6267,9 @@ fn compileLexicalDecl(self: *Compiler, ld: ast.statement.LexicalDecl) CompileErr
                     // `undefined` once the declaration is reached.
                     try self.builder.emitOp(.lda_undefined, d.span);
                 }
-                try self.emitStoreBinding(binding, d.span);
+                // §9.1.1.4 InitializeBinding — initializer write,
+                // not assignment.
+                try self.emitStoreBindingInit(binding, d.span);
             },
             else => {
                 if (d.init) |*init_expr| {
@@ -7982,21 +8345,40 @@ pub fn compileScriptAsChunk(
     c.env_depth = 0;
     c.env_slot_count = 0;
 
+    // §16.1.7 GlobalDeclarationInstantiation step 5-7 — validate
+    // every top-level lex / var / function name against the
+    // realm's existing global env BEFORE any installation. A
+    // SyntaxError here aborts compilation cleanly: no partial
+    // bindings are stamped on the realm. CanDeclareGlobalVar /
+    // CanDeclareGlobalFunction failures set
+    // `pending_global_decl_error`; the emit path below builds a
+    // chunk whose first opcode is an unconditional TypeError
+    // throw, with NO hoist installation.
+    try c.validateGlobalDeclarations(program.body);
+
     const start_span: Span = .{ .start = 0, .end = 0 };
     try c.builder.emitOp(.make_environment, start_span);
     const slot_count_patch = c.builder.here();
     try c.builder.emitU8(0);
 
-    try c.hoistLetConst(program.body);
-    try c.hoistVarAndFunctions(program.body);
-    try c.emitVarInits(start_span);
+    if (c.pending_global_decl_error) |name| {
+        // §9.1.1.4.15 / .16 step 1.b TypeError. The throw is a
+        // single message-bearing TypeError, then return — the rest
+        // of the script body is dead code that never runs (and is
+        // omitted to keep the chunk small).
+        try c.emitGlobalDeclThrow(name, start_span);
+    } else {
+        try c.hoistLetConst(program.body);
+        try c.hoistVarAndFunctions(program.body);
+        try c.emitVarInits(start_span);
 
-    // §14.1.3 — top-level function declarations are evaluated
-    // before any other statement so forward calls (`f();
-    // function f(){}`) resolve. Block-nested function decls
-    // (strict-mode lexical) stay where they are.
-    for (program.body) |*s| if (s.* == .function_decl) try c.compileStatement(s);
-    for (program.body) |*s| if (s.* != .function_decl) try c.compileStatement(s);
+        // §14.1.3 — top-level function declarations are evaluated
+        // before any other statement so forward calls (`f();
+        // function f(){}`) resolve. Block-nested function decls
+        // (strict-mode lexical) stay where they are.
+        for (program.body) |*s| if (s.* == .function_decl) try c.compileStatement(s);
+        for (program.body) |*s| if (s.* != .function_decl) try c.compileStatement(s);
+    }
 
     const end_span: Span = .{
         .start = if (program.body.len > 0) program.body[program.body.len - 1].span().end else 0,

@@ -6398,6 +6398,12 @@ fn runFrames(
                 const key_v = local_chunk.constants[k];
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+                // §9.1.1.4 GetBindingValue — declarative env-
+                // record first, then object env-record. The
+                // `realm.globals.get` helper does the lookup in
+                // that order; `throw_if_hole` (emitted by the
+                // compiler when the binding is `let`/`const`/
+                // `class`) catches the TDZ case.
                 if (realm.globals.get(key_s.bytes)) |v| {
                     acc = v;
                 } else {
@@ -6425,6 +6431,35 @@ fn runFrames(
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
                 acc = realm.globals.get(key_s.bytes) orelse Value.undefined_;
             },
+            .sta_global_init => {
+                // §9.1.1.4 InitializeBinding for a top-level
+                // `let` / `const` / `class` — write the
+                // initializer's value into the declarative env-
+                // record's slot. No const check (this IS the
+                // initialization step); the slot was seeded
+                // `Hole` at hoist time and the initializer
+                // overwrites here.
+                const k = readU16(code, ip);
+                ip += 2;
+                if (k >= local_chunk.constants.len) return error.InvalidOpcode;
+                const key_v = local_chunk.constants[k];
+                if (!key_v.isString()) return error.InvalidOpcode;
+                const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+                try realm.globals.putDecl(realm.allocator, key_s.bytes, acc);
+            },
+            .sta_global_fn_decl => {
+                // §9.1.1.4.19 CreateGlobalFunctionBinding —
+                // function-decl install onto the global object
+                // overwrites both data and descriptor flags
+                // (writable+enumerable+non-configurable).
+                const k = readU16(code, ip);
+                ip += 2;
+                if (k >= local_chunk.constants.len) return error.InvalidOpcode;
+                const key_v = local_chunk.constants[k];
+                if (!key_v.isString()) return error.InvalidOpcode;
+                const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+                try realm.globals.installScriptFunctionBinding(realm.allocator, key_s.bytes, acc);
+            },
             .sta_global => {
                 const k = readU16(code, ip);
                 ip += 2;
@@ -6450,7 +6485,27 @@ fn runFrames(
                     }
                     continue;
                 }
-                try realm.globals.put(realm.allocator, key_s.bytes, acc);
+                // §9.1.1.4 SetMutableBinding — declarative env-
+                // record first. If the binding is `const`, §13.3.1 /
+                // §13.15.2 step 1.f.iii throws TypeError. Otherwise
+                // overwrite the lex slot. Only fall through to the
+                // object env-record when the name isn't lex-
+                // declared.
+                if (realm.globals.hasLexicalDeclaration(key_s.bytes)) {
+                    if (realm.globals.isLexConst(key_s.bytes)) {
+                        const ex = try makeTypeError(realm, "Assignment to constant variable");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
+                    }
+                    try realm.globals.putDecl(realm.allocator, key_s.bytes, acc);
+                } else {
+                    try realm.globals.put(realm.allocator, key_s.bytes, acc);
+                }
             },
             .capture_unresolved_global => {
                 // §13.15.2 step 1.a — Evaluation of the LHS of
@@ -6508,7 +6563,27 @@ fn runFrames(
                     }
                     continue;
                 }
-                try realm.globals.put(realm.allocator, key_s.bytes, acc);
+                // Same declarative-vs-object env-record dispatch
+                // as `sta_global`. The unresolved-Reference check
+                // above already gated on `contains()` (which spans
+                // both records); a name that was lex-declared
+                // after the capture but before the store still
+                // routes correctly to the declarative record here.
+                if (realm.globals.hasLexicalDeclaration(key_s.bytes)) {
+                    if (realm.globals.isLexConst(key_s.bytes)) {
+                        const ex = try makeTypeError(realm, "Assignment to constant variable");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
+                    }
+                    try realm.globals.putDecl(realm.allocator, key_s.bytes, acc);
+                } else {
+                    try realm.globals.put(realm.allocator, key_s.bytes, acc);
+                }
             },
 
             // ── Objects / properties ────────────────────────────────────

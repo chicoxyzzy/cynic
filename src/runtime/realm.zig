@@ -106,28 +106,69 @@ pub const ModuleLoader = *const fn (
     base_url: ?[]const u8,
 ) ModuleLoaderError!ModuleLoadResult;
 
-/// §19.3 globalThis — live view over the host's global bindings.
+/// §9.1.1.4 GlobalEnvironmentRecord — TWO inner records:
+///
+///   • **ObjectEnvironmentRecord** (`target` / `fallback`) — backed
+///     by the globalThis object. Hosts `print`, `console`, the
+///     intrinsic constructors, and every top-level `var` /
+///     `function` declaration (which stamp non-configurable
+///     properties via `installScriptVarBinding` per §9.1.1.4.18 /
+///     .19). A bare `globalThis.x = 1` also lands here (regular
+///     `put` path).
+///
+///   • **DeclarativeEnvironmentRecord** (`decl_env` / `decl_kinds`)
+///     — pure dictionary, INVISIBLE on globalThis. Top-level `let`
+///     / `const` / `class` (and strict-mode block-`function`
+///     declarations) stamp here per §9.1.1.4.17 step b. `let foo`
+///     does NOT make `'foo' in globalThis` true.
+///
+/// Per §9.1.1.4 GetBindingValue / SetMutableBinding the
+/// declarative record is consulted FIRST; if the name isn't
+/// declared lexically, the object record handles it. The runtime
+/// `lda_global` / `sta_global` / `contains` helpers below
+/// implement that order.
 ///
 /// Before `intrinsics.install` allocates the globalThis JSObject
 /// the host pre-installs a handful of bindings (`print`, `console`,
-/// the typed Error constructors) on a fallback hashmap. Once the
+/// the typed Error constructors) on a `fallback` hashmap. Once the
 /// globalThis object exists, `bindToObject` migrates the fallback
 /// into `gt.properties` and pins the pointer; every subsequent
-/// `get` / `put` / `contains` / `iterator` routes through the
-/// object's own property bag. That means a host- or user-installed
-/// binding lands on `globalThis.<name>` automatically — no
-/// snapshot, no catch-up pass, no hand mirror.
+/// object-env operation routes through the object's own property
+/// bag. The `decl_env` is independent of bootstrap and unaffected
+/// by `bindToObject`.
 pub const GlobalBindings = struct {
-    /// Live target: when set, every operation reads / writes the
-    /// JSObject's `properties` map. The interpreter's
-    /// `lda_global` / `sta_global` paths go through this — so a
-    /// late-installed binding (e.g. test262's `$DONE` / `$262`)
-    /// reaches both bare-identifier and `globalThis.X` lookups.
+    /// Live target for the object env-record: when set, every
+    /// object-env operation reads / writes the JSObject's
+    /// `properties` map. Late-installed host bindings (e.g.
+    /// test262's `$DONE` / `$262`) reach both bare-identifier
+    /// lookups and `globalThis.X` because they're really one
+    /// property bag.
     target: ?*@import("object.zig").JSObject = null,
-    /// Fallback storage — only used during bootstrap before
-    /// `bindToObject` runs. Migrated wholesale into `target`'s
-    /// `properties` map when the globalThis object is allocated.
+    /// Fallback storage for the object env-record — only used
+    /// during bootstrap before `bindToObject` runs. Migrated
+    /// wholesale into `target`'s `properties` map when the
+    /// globalThis object is allocated.
     fallback: std.StringArrayHashMapUnmanaged(Value) = .empty,
+    /// §9.1.1.4 DeclarativeRecord — lexical bindings (`let` /
+    /// `const` / `class` / strict-mode block-`function`). Holds
+    /// values plus the §13.3.1 TDZ Hole until each binding's
+    /// initialiser fires. NOT mirrored on the global object.
+    decl_env: std.StringArrayHashMapUnmanaged(Value) = .empty,
+    /// Per-name const flag for the declarative env. `true` means
+    /// the binding is immutable — `sta_global` raises §13.15.2
+    /// TypeError on write. Keyed by the same string slices as
+    /// `decl_env`; lifetimes are tied to the script chunk.
+    decl_consts: std.StringArrayHashMapUnmanaged(bool) = .empty,
+    /// §9.1.1.4 [[VarNames]] — the set of names that have been
+    /// declared as top-level `var` or `function` in any script
+    /// run against this realm. Distinct from the object env's
+    /// property bag (which also holds host-installed bindings
+    /// like `Array` / `print`). §16.1.7 step 5.a
+    /// HasVarDeclaration consults this set, NOT the property
+    /// bag — otherwise `let Array;` would falsely collide with
+    /// the host `Array` constructor. Entries are added by
+    /// `installScriptVarBinding` / `installScriptFunctionBinding`.
+    var_names: std.StringArrayHashMapUnmanaged(void) = .empty,
 
     fn map(self: *GlobalBindings) *std.StringArrayHashMapUnmanaged(Value) {
         if (self.target) |t| return &t.properties;
@@ -138,20 +179,28 @@ pub const GlobalBindings = struct {
         return &self.fallback;
     }
 
+    /// §9.1.1.4 GetBindingValue — declarative record FIRST, then
+    /// object record. Used by `lda_global` / `lda_global_or_undef`
+    /// and by host code that just wants "whatever binding name
+    /// resolves to".
     pub fn get(self: *const GlobalBindings, key: []const u8) ?Value {
+        if (self.decl_env.get(key)) |v| return v;
         return self.mapConst().get(key);
     }
+    /// Object env-record put (host-style). Hits the global
+    /// object's property bag — does NOT touch the declarative
+    /// record. Used by intrinsics installers, `sta_global` for
+    /// names that aren't lex-declared, and bare `globalThis.x =
+    /// 1` style writes.
+    ///
+    /// §17 — host-installed bindings on the global object
+    /// default to `{ writable: true, enumerable: false,
+    /// configurable: true }`. Existing entries keep whatever flags
+    /// the installer set (handles the §19.1 frozen
+    /// `NaN`/`Infinity`/`undefined` case once those flags are
+    /// stamped).
     pub fn put(self: *GlobalBindings, allocator: std.mem.Allocator, key: []const u8, value: Value) !void {
         if (self.target) |t| {
-            // §17 — host-installed bindings on the global object
-            // default to `{ writable: true, enumerable: false,
-            // configurable: true }`. The old snapshot path stamped
-            // these via `setWithFlags`; we preserve that descriptor
-            // here for new keys so `Object.keys(globalThis)`
-            // doesn't suddenly enumerate every built-in. Existing
-            // entries keep whatever flags the installer set
-            // (handles the §19.1 frozen `NaN`/`Infinity`/`undefined`
-            // case once those flags are stamped).
             const had_key = t.properties.contains(key);
             try t.properties.put(allocator, key, value);
             if (!had_key) {
@@ -165,7 +214,9 @@ pub const GlobalBindings = struct {
         }
         try self.fallback.put(allocator, key, value);
     }
+    /// §9.1.1.4 HasBinding — true if EITHER record has the name.
     pub fn contains(self: *const GlobalBindings, key: []const u8) bool {
+        if (self.decl_env.contains(key)) return true;
         return self.mapConst().contains(key);
     }
     pub fn iterator(self: *const GlobalBindings) std.StringArrayHashMapUnmanaged(Value).Iterator {
@@ -180,6 +231,92 @@ pub const GlobalBindings = struct {
         key: []const u8,
     ) !std.StringArrayHashMapUnmanaged(Value).GetOrPutResult {
         return self.map().getOrPut(allocator, key);
+    }
+
+    /// §9.1.1.4 HasLexicalDeclaration — does the declarative
+    /// record hold this name? Drives §16.1.7 step 5.b / 6.a
+    /// collision detection.
+    pub fn hasLexicalDeclaration(self: *const GlobalBindings, key: []const u8) bool {
+        return self.decl_env.contains(key);
+    }
+
+    /// §9.1.1.4.4 HasVarDeclaration — consults the realm's
+    /// `[[VarNames]]` set. Host-installed properties (e.g.
+    /// `Array`, `Object`) are NOT in `[[VarNames]]`, so
+    /// `let Array;` doesn't collide here (it's gated by
+    /// HasRestrictedGlobalProperty instead, which checks for
+    /// non-configurable bindings).
+    pub fn hasVarDeclaration(self: *const GlobalBindings, key: []const u8) bool {
+        return self.var_names.contains(key);
+    }
+
+    /// §9.1.1.4.5 HasRestrictedGlobalProperty — true if the
+    /// global object has the named property AND it's non-
+    /// configurable. Drives §16.1.7 step 5.c — a script-mode
+    /// `let` / `const` / `class` cannot shadow a non-configurable
+    /// global property.
+    pub fn hasRestrictedGlobalProperty(self: *const GlobalBindings, key: []const u8) bool {
+        const t = self.target orelse return false;
+        if (!t.properties.contains(key)) return false;
+        const flags = t.property_flags.get(key) orelse return false;
+        return !flags.configurable;
+    }
+
+    /// §9.1.1.4.15 CanDeclareGlobalVar — true if `name` can be
+    /// added as a top-level `var` binding.
+    ///   • Property already exists on the global object → OK.
+    ///   • Otherwise → the global object must be extensible.
+    pub fn canDeclareGlobalVar(self: *const GlobalBindings, key: []const u8) bool {
+        if (self.mapConst().contains(key)) return true;
+        const t = self.target orelse return true;
+        return t.extensible;
+    }
+
+    /// §9.1.1.4.16 CanDeclareGlobalFunction — stricter than
+    /// `CanDeclareGlobalVar`. If no property exists yet, the
+    /// global object must be extensible. If one exists, it must
+    /// be configurable, or it must be a writable + enumerable
+    /// data property (accessor descriptors fail outright).
+    pub fn canDeclareGlobalFunction(self: *const GlobalBindings, key: []const u8) bool {
+        const t = self.target orelse return true;
+        const has_data = t.properties.contains(key);
+        const has_accessor = t.accessors.contains(key);
+        if (!has_data and !has_accessor) return t.extensible;
+        if (has_accessor) {
+            const flags = t.property_flags.get(key) orelse @import("object.zig").PropertyFlags.default;
+            return flags.configurable;
+        }
+        const flags = t.property_flags.get(key) orelse {
+            // Default-flagged entry — writable + enumerable +
+            // configurable, so the configurable branch above
+            // already would've returned true. This path is
+            // reached when the property exists with default
+            // flags; permit.
+            return true;
+        };
+        if (flags.configurable) return true;
+        return flags.writable and flags.enumerable;
+    }
+
+    /// §9.1.1.4 GetBindingValue path through the declarative env
+    /// only — used by `lda_global` to surface the TDZ Hole for a
+    /// lex binding that hasn't been initialised yet.
+    pub fn getDecl(self: *const GlobalBindings, key: []const u8) ?Value {
+        return self.decl_env.get(key);
+    }
+
+    /// True iff the named declarative binding is `const`-declared.
+    /// Drives §13.15.2 / §13.3.1 immutability checks at
+    /// `sta_global` time.
+    pub fn isLexConst(self: *const GlobalBindings, key: []const u8) bool {
+        return self.decl_consts.get(key) orelse false;
+    }
+
+    /// §9.1.1.4 SetMutableBinding for the declarative record —
+    /// overwrite the slot. Caller has already verified the binding
+    /// exists; the const check is done at the bytecode site.
+    pub fn putDecl(self: *GlobalBindings, allocator: std.mem.Allocator, key: []const u8, value: Value) !void {
+        try self.decl_env.put(allocator, key, value);
     }
 
     /// §16.1.7 GlobalDeclarationInstantiation step 18 — top-level
@@ -204,6 +341,7 @@ pub const GlobalBindings = struct {
         key: []const u8,
         value: Value,
     ) !void {
+        try self.var_names.put(allocator, key, {});
         if (self.target) |t| {
             const gop = try t.properties.getOrPut(allocator, key);
             if (!gop.found_existing) {
@@ -224,12 +362,72 @@ pub const GlobalBindings = struct {
         // and let the migrating copy do the right thing.
         _ = try self.fallback.getOrPut(allocator, key);
     }
+    /// §9.1.1.4.19 CreateGlobalFunctionBinding — top-level
+    /// `function` declarations. Unlike var bindings (idempotent
+    /// on existing keys) function decls OVERWRITE the data slot
+    /// AND restamp the flags to `{writable:true, enumerable:true,
+    /// configurable:false}` when CanDeclareGlobalFunction has
+    /// already approved. The caller (compiler) is responsible for
+    /// running that approval check; here we just install. Any
+    /// existing accessor descriptor is replaced with a data
+    /// descriptor.
+    pub fn installScriptFunctionBinding(
+        self: *GlobalBindings,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        value: Value,
+    ) !void {
+        try self.var_names.put(allocator, key, {});
+        if (self.target) |t| {
+            _ = t.accessors.swapRemove(key);
+            try t.properties.put(allocator, key, value);
+            try t.property_flags.put(allocator, key, .{
+                .writable = true,
+                .enumerable = true,
+                .configurable = false,
+            });
+            return;
+        }
+        try self.fallback.put(allocator, key, value);
+    }
+
+    /// §16.1.7 GlobalDeclarationInstantiation step 17 — `let` /
+    /// `const` / `class` at script top level get a declarative
+    /// binding initialised to the TDZ Hole (§13.3.1). The
+    /// initializer's `sta_global` overwrites with the actual
+    /// value; `lda_global` raises ReferenceError via the existing
+    /// `throw_if_hole` shape until then.
+    ///
+    /// Caller is responsible for the §16.1.7 step 5.a-d collision
+    /// checks (HasVarDeclaration / HasLexicalDeclaration /
+    /// HasRestrictedGlobalProperty); on reaching this method the
+    /// name is guaranteed to be installable. Idempotent for the
+    /// same `(name, is_const)` pair — re-running a chunk's hoist
+    /// pass (impossible today, defensive) just leaves the slot at
+    /// Hole.
+    pub fn installScriptLexBinding(
+        self: *GlobalBindings,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        is_const: bool,
+    ) !void {
+        const gop = try self.decl_env.getOrPut(allocator, key);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = Value.hole_;
+        }
+        try self.decl_consts.put(allocator, key, is_const);
+    }
+
     pub fn deinit(self: *GlobalBindings, allocator: std.mem.Allocator) void {
         // The `target`'s properties map is owned by the JSObject
         // (and freed by the heap sweep). We only ever own the
         // fallback — which after `bindToObject` is empty, but
-        // still holds its backing array allocation.
+        // still holds its backing array allocation — plus the
+        // independent declarative env-record maps.
         self.fallback.deinit(allocator);
+        self.decl_env.deinit(allocator);
+        self.decl_consts.deinit(allocator);
+        self.var_names.deinit(allocator);
     }
 
     /// Promote the JSObject to the live target. Any bindings the
@@ -662,9 +860,13 @@ pub const Realm = struct {
     /// `heap.allocs_since_gc` crosses `heap.gc_threshold`. The
     /// counter resets to zero at the end of `heap.collect`.
     pub fn collectGarbage(self: *Realm) void {
-        // Globals.
+        // Globals — both the object env-record (live target /
+        // fallback) and the declarative env-record. Lex bindings
+        // (`let x = someObject;`) are GC roots just like var.
         var git = self.globals.iterator();
         while (git.next()) |e| self.heap.markValue(e.value_ptr.*);
+        var dit = self.globals.decl_env.iterator();
+        while (dit.next()) |e| self.heap.markValue(e.value_ptr.*);
 
         // Intrinsics — the struct is a flat list of optional
         // `*JSObject` / `*JSFunction` pointers; iterate fields

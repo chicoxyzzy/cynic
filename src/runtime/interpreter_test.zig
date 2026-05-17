@@ -332,19 +332,35 @@ test "later: compound assignment *=" {
     try expectScriptInt("let x = 4; x *= 5; x;", 20);
 }
 
-test "later: const reassignment is rejected at compile time" {
+test "later: const reassignment in a local scope is rejected at compile time" {
+    // Local `const` is a static binding whose immutability is
+    // statically knowable — Cynic upgrades the spec's runtime
+    // TypeError into a compile-time SyntaxError for the local
+    // case. Global `const`, by contrast, defers to runtime per
+    // §9.1.1.4 SetMutableBinding so fixtures can wrap the throw
+    // in `assert.throws(TypeError, () => { c = 1; })`.
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    const program = try parser_mod.parseScript(arena.allocator(), "const x = 1; x = 2;", null);
+    const src = "{ const x = 1; x = 2; }";
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
 
     var diags: cynic_diag.Diagnostics = .empty;
     defer diags.deinit(testing.allocator);
-    const result = compileScriptAsChunk(testing.allocator, &realm, &program, "const x = 1; x = 2;", &diags);
+    const result = compileScriptAsChunk(testing.allocator, &realm, &program, src, &diags);
     try testing.expectError(error.AssignmentToConst, result);
     try testing.expect(diags.items.len >= 1);
     try testing.expectEqual(cynic_diag.Code.assignment_to_const, diags.items[0].code);
+}
+
+test "later: top-level const reassignment throws TypeError at runtime" {
+    // §9.1.1.4 SetMutableBinding — global `const` reassignment
+    // is a runtime TypeError so `assert.throws(TypeError, () =>
+    // { c = 1; })` works at script top level. The compiler emits
+    // `sta_global` and the runtime checks the lex-record's
+    // const flag.
+    try expectScriptThrows("const x = 1; x = 2;");
 }
 
 test "later: TDZ — reading let before declaration throws ReferenceError" {

@@ -491,6 +491,29 @@ pub const Op = enum(u8) {
     /// Emitted in place of `sta_global` whenever the LHS of an
     /// assignment failed to resolve at compile time.
     sta_global_strict,
+    /// `[op] [k:u16]` — initializer-only store for a top-level
+    /// `let` / `const` / `class` binding. Writes `acc` into the
+    /// realm's declarative env-record (§9.1.1.4 DeclarativeRecord)
+    /// for the name held in `Chunk.constants[k]`. Bypasses the
+    /// const-immutability check that `sta_global` applies — this
+    /// IS the InitializeBinding step (§9.1.1.4 InitializeBinding /
+    /// §13.3.1) that seeds the slot in the first place. Subsequent
+    /// `sta_global` writes for the same name (re-assignment) still
+    /// take the const-check path and throw TypeError when the
+    /// binding is `const`.
+    sta_global_init,
+    /// `[op] [k:u16]` — store-and-stamp variant for top-level
+    /// `function` declarations. §9.1.1.4.19
+    /// CreateGlobalFunctionBinding: overwrites both the data
+    /// slot AND the property flags on the global object with
+    /// `{[[Writable]]:true, [[Enumerable]]:true,
+    /// [[Configurable]]:false}`. Distinct from `sta_global`
+    /// (which preserves existing flags) so a script like
+    /// `Object.defineProperty(this, "x", {configurable:true,
+    /// value:0}); function x(){}` ends with `x`'s descriptor
+    /// matching the function-decl shape rather than the prior
+    /// `defineProperty` shape.
+    sta_global_fn_decl,
 
     // ── Objects / properties ────────────────────────────────────
     /// Allocate a fresh empty `JSObject` whose `[[Prototype]]` is
@@ -721,6 +744,8 @@ pub const Op = enum(u8) {
             .lda_global,
             .lda_global_or_undef,
             .sta_global,
+            .sta_global_init,
+            .sta_global_fn_decl,
             .module_load,
             .module_export,
             => 2, // u16 / i16
@@ -849,6 +874,8 @@ pub const Op = enum(u8) {
             .lda_global => "LdaGlobal",
             .lda_global_or_undef => "LdaGlobalOrUndef",
             .sta_global => "StaGlobal",
+            .sta_global_init => "StaGlobalInit",
+            .sta_global_fn_decl => "StaGlobalFnDecl",
             .capture_unresolved_global => "CaptureUnresolvedGlobal",
             .sta_global_strict => "StaGlobalStrict",
             .throw_ => "Throw",

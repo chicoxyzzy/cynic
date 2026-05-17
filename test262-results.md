@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 88.78 % | 95.58 % | 35876 / 40411 | 35876 / 37534 |
+| **runtime** | 88.91 % | 95.73 % | 35930 / 40411 | 35930 / 37534 |
 
 
 ## Where the runtime stands, by area
@@ -25,21 +25,21 @@ browser-era built-ins …).
 |---|---:|---:|---:|---:|---:|
 | **_100–999 fails_** | | | | | |
 | `built-ins/Object` | 3199 | 127 | 80 | 94 % | 96 % |
-| `built-ins/RegExp` | 1437 | 165 | 161 | 82 % | 90 % |
-| `language/expressions` | 9482 | 392 | 975 | 87 % | 96 % |
-| `language/statements` | 8208 | 219 | 672 | 90 % | 97 % |
+| `built-ins/RegExp` | 1462 | 140 | 161 | 83 % | 91 % |
+| `language/expressions` | 9494 | 380 | 975 | 88 % | 96 % |
+| `language/statements` | 8210 | 217 | 672 | 90 % | 97 % |
 | **_10–99 fails_** | | | | | |
 | `built-ins/Array` | 2969 | 71 | 36 | 97 % | 98 % |
 | `built-ins/ArrayBuffer` | 166 | 25 | 4 | 85 % | 87 % |
 | `built-ins/AsyncGeneratorPrototype` | 37 | 11 | 0 | 77 % | 77 % |
-| `built-ins/Function` | 266 | 32 | 84 | 70 % | 89 % |
+| `built-ins/Function` | 267 | 31 | 84 | 70 % | 90 % |
 | `built-ins/GeneratorPrototype` | 51 | 10 | 0 | 84 % | 84 % |
 | `built-ins/Iterator` | 391 | 34 | 6 | 91 % | 92 % |
-| `built-ins/JSON` | 128 | 37 | 0 | 78 % | 78 % |
+| `built-ins/JSON` | 141 | 24 | 0 | 85 % | 85 % |
 | `built-ins/Map` | 155 | 14 | 1 | 91 % | 92 % |
 | `built-ins/Math` | 311 | 16 | 0 | 95 % | 95 % |
 | `built-ins/Promise` | 605 | 23 | 38 | 91 % | 96 % |
-| `built-ins/Proxy` | 243 | 55 | 13 | 78 % | 82 % |
+| `built-ins/Proxy` | 244 | 54 | 13 | 78 % | 82 % |
 | `built-ins/Reflect` | 129 | 24 | 0 | 84 % | 84 % |
 | `built-ins/Set` | 347 | 34 | 1 | 91 % | 91 % |
 | `built-ins/String` | 1151 | 54 | 5 | 95 % | 96 % |
@@ -50,7 +50,7 @@ browser-era built-ins …).
 | `built-ins/WeakSet` | 74 | 10 | 0 | 88 % | 88 % |
 | `built-ins/global` | 17 | 12 | 0 | 59 % | 59 % |
 | `language/global-code` | 22 | 14 | 5 | 54 % | 61 % |
-| `language/module-code` | 510 | 72 | 14 | 86 % | 88 % |
+| `language/module-code` | 508 | 74 | 14 | 85 % | 87 % |
 | **_1–9 fails_** | | | | | |
 | `built-ins/AggregateError` | 19 | 5 | 0 | 79 % | 79 % |
 | `built-ins/ArrayIteratorPrototype` | 12 | 7 | 8 | 44 % | 63 % |
@@ -64,7 +64,7 @@ browser-era built-ins …).
 | `built-ins/GeneratorFunction` | 7 | 2 | 0 | 78 % | 78 % |
 | `built-ins/NativeErrors` | 82 | 6 | 0 | 93 % | 93 % |
 | `built-ins/Number` | 332 | 7 | 0 | 98 % | 98 % |
-| `built-ins/RegExpStringIteratorPrototype` | 9 | 8 | 0 | 53 % | 53 % |
+| `built-ins/RegExpStringIteratorPrototype` | 11 | 6 | 0 | 65 % | 65 % |
 | `built-ins/StringIteratorPrototype` | 2 | 5 | 0 | 29 % | 29 % |
 | `built-ins/ThrowTypeError` | 12 | 1 | 0 | 92 % | 92 % |
 | `built-ins/decodeURI` | 53 | 2 | 0 | 96 % | 96 % |
@@ -158,19 +158,25 @@ features ship in mainline ECMA-262.
 
 ## History
 
+### 2026-05-17 — cynic `ea22606`, test262 `d0c1b455`
+
+|         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
+|---|---|---|---|---|---:|---:|
+| **runtime** | 88.91 % | 95.73 % | 35930 / 40411 | 35930 / 37534 | +54 | 2m 47s |
+
+Biggest movers (runtime):
+
+- `built-ins/RegExp` +25
+- `built-ins/JSON` +13
+- `language/expressions` +12
+- `built-ins/RegExpStringIteratorPrototype` +2
+- `language/module-code` -2
+
 ### 2026-05-16 — cynic `452bafa`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 88.78 % | 95.58 % | 35876 / 40411 | 35876 / 37534 | +1004 | 2m 28s |
-
-Biggest movers (runtime):
-
-- `built-ins/Date` +56
-- `language/identifiers` +16
-- `built-ins/JSON` +13
-- `language/module-code` +9
-- `language/statements` +4
+| **runtime** | 88.78 % | 95.58 % | 35876 / 40411 | 35876 / 37535 | +1004 |  |
 
 ### 2026-05-15 — cynic `2b05c51`, test262 `d0c1b455`
 

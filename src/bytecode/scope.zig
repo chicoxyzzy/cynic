@@ -95,6 +95,17 @@ pub const Binding = struct {
     /// `make_named_function_expr` time. User-visible writes lower
     /// to `throw_assign_const` (TypeError) per §8.1.1.1.4 step 9.b.
     is_fn_expr_name: bool = false,
+    /// §9.1.1.4.19 CreateGlobalFunctionBinding — true when this
+    /// binding was created by a top-level `function` / generator
+    /// / async-function declaration (NOT by `var`). The store-
+    /// site uses this to emit `sta_global_fn_decl` instead of
+    /// the ordinary `sta_global`, which overwrites both the
+    /// data slot AND the descriptor flags on the global object
+    /// (matching the spec's OrdinaryDefineOwnProperty
+    /// `{[[Configurable]]:false, [[Enumerable]]:true,
+    /// [[Writable]]:true}` shape). `var` bindings preserve
+    /// existing flags by contrast.
+    is_function_decl: bool = false,
     /// Env slot holding the loaded module's namespace object —
     /// `compileImportDecl` allocates one persistent slot per
     /// `import` declaration and seeds it with the result of
