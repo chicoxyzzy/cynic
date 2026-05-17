@@ -362,6 +362,21 @@ pub const skip_ses_exact_paths = [_][]const u8{
     "built-ins/Object/getOwnPropertyDescriptor/15.2.3.3-4-4.js",
     "built-ins/Object/getOwnPropertyDescriptor/15.2.3.3-4-187.js",
     "built-ins/Object/getOwnPropertyDescriptor/15.2.3.3-4-188.js",
+    // §27.3.2 / §27.4.2 / §27.7.2 — these `Object.seal` fixtures
+    // build the receiver via `new (Object.getPrototypeOf(asyncFn).
+    // constructor)()` which lands on AsyncFunction / Generator
+    // Function / AsyncGeneratorFunction. Cynic doesn't ship the
+    // string-source constructors for those (permanent SES carve-
+    // out, see AGENTS.md). Sealing itself works (covered by
+    // `object-seal-o-is-a-function-object.js`); the construction
+    // is the OOS step.
+    "built-ins/Object/seal/seal-asyncfunction.js",
+    "built-ins/Object/seal/seal-asyncarrowfunction.js",
+    "built-ins/Object/seal/seal-asyncgeneratorfunction.js",
+    "built-ins/Object/seal/seal-generatorfunction.js",
+    // §25.2 SharedArrayBuffer — not shipped. The fixture sets
+    // up the SAB then calls `Object.seal` on it.
+    "built-ins/Object/seal/seal-sharedarraybuffer.js",
     "built-ins/Object/values/tamper-with-global-object.js",
     "built-ins/RegExp/S15.10.4.1_A5_T3.js",
     "built-ins/RegExp/S15.10.4.1_A8_T11.js",

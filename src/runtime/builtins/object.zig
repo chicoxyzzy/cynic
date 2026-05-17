@@ -1987,6 +1987,34 @@ fn testIntegrityLevelViaProxy(realm: *Realm, target_v: Value, target: *JSObject,
 fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
+    // §20.1.2.5 step 1 — If Type(O) is not Object, return O. The
+    // Function-object path (§6.1.7) mirrors the JSObject path
+    // below: drop `extensible` and stamp w=false/c=false on every
+    // own property.
+    if (heap_mod.valueAsFunction(arg)) |fn_obj| {
+        fn_obj.extensible = false;
+        var fit = fn_obj.properties.iterator();
+        while (fit.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const cur = fn_obj.flagsForOwn(key);
+            fn_obj.property_flags.put(realm.allocator, key, .{
+                .writable = false,
+                .enumerable = cur.enumerable,
+                .configurable = false,
+            }) catch return error.OutOfMemory;
+        }
+        var fait = fn_obj.accessors.iterator();
+        while (fait.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const cur = fn_obj.flagsForOwn(key);
+            fn_obj.property_flags.put(realm.allocator, key, .{
+                .writable = false,
+                .enumerable = cur.enumerable,
+                .configurable = false,
+            }) catch return error.OutOfMemory;
+        }
+        return arg;
+    }
     const obj = heap_mod.valueAsPlainObject(arg) orelse return arg; // §20.1.2.5 — primitives pass through
     // §10.5 Proxy receivers — every integrity-level effect MUST be
     // observable through the handler traps. Drive SetIntegrityLevel
@@ -2008,6 +2036,15 @@ fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         }
     }
     obj.extensible = false;
+    // §10.4.2 — for Array exotic objects, indexed elements live
+    // in `obj.elements` (or `sparse_elements`) and default to
+    // `{w:true, e:true, c:true}`. SetIntegrityLevel(O, frozen)
+    // must lower them to `{w:false, e:true, c:false}`; promote
+    // each present indexed slot into `property_flags` keyed by
+    // the canonical index string so subsequent `flagsFor` reads
+    // see the override. Same dance for `seal` (configurable
+    // only).
+    try freezeArrayIndexedSlots(realm, obj);
     // §10.1.4.1 SetIntegrityLevel(O, frozen) — mark every own
     // data property `{ writable: false, configurable: false }`
     // and every accessor `{ configurable: false }`.
@@ -2034,28 +2071,91 @@ fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     return arg;
 }
 
+/// Promote Array-exotic indexed elements to the named-property
+/// bag with `{w:false, e:true, c:false}` (frozen) or
+/// `{w:true, e:true, c:false}` (sealed). Required because
+/// indexed slots default to `{w,e,c}=true` and the spec wants
+/// per-index descriptor overrides after SetIntegrityLevel. The
+/// `is_sealed` flag selects between the two patterns.
+fn lowerArrayIndexedFlags(realm: *Realm, obj: *JSObject, sealed_only: bool) NativeError!void {
+    if (!obj.is_array_exotic) return;
+    const flags: ObjMod.PropertyFlags = .{
+        .writable = sealed_only,
+        .enumerable = true,
+        .configurable = false,
+    };
+    // §10.4.2 — `setWithFlags` with a non-default descriptor
+    // demotes the indexed slot to the property bag (and holes
+    // the original `elements[idx]`) so the override flags
+    // survive lookups via `flagsFor`. Snapshot the indices first
+    // so we don't iterate while mutating.
+    var indices: std.ArrayListUnmanaged(u32) = .empty;
+    defer indices.deinit(realm.allocator);
+    if (obj.is_sparse) {
+        var sit = obj.sparse_elements.iterator();
+        while (sit.next()) |entry| {
+            if (JSObject.isElementHole(entry.value_ptr.*)) continue;
+            try indices.append(realm.allocator, entry.key_ptr.*);
+        }
+    } else {
+        var i: u32 = 0;
+        while (i < obj.elements.items.len) : (i += 1) {
+            if (JSObject.isElementHole(obj.elements.items[i])) continue;
+            try indices.append(realm.allocator, i);
+        }
+    }
+    for (indices.items) |idx| {
+        var ibuf: [16]u8 = undefined;
+        const ks = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch continue;
+        const ks_owned = realm.heap.allocateString(ks) catch return error.OutOfMemory;
+        // Read the current value via the public getter so we
+        // pull from either the packed elements or a previously-
+        // bag-promoted slot.
+        const v = obj.getIndexed(idx);
+        obj.setWithFlags(realm.allocator, ks_owned.bytes, v, flags) catch return error.OutOfMemory;
+    }
+}
+
+fn freezeArrayIndexedSlots(realm: *Realm, obj: *JSObject) NativeError!void {
+    try lowerArrayIndexedFlags(realm, obj, false);
+}
+
+fn sealArrayIndexedSlots(realm: *Realm, obj: *JSObject) NativeError!void {
+    try lowerArrayIndexedFlags(realm, obj, true);
+}
+
 fn objectIsFrozen(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
-    // Function objects are Objects too (§10.2) — they have own
-    // properties (`name`, `length`, `prototype`, user-set) and are
-    // extensible by default. Cynic doesn't yet plumb an
-    // `extensible` flag through `JSFunction`, so a freshly-built
-    // built-in is never frozen. Return false so
-    // `Object.isFrozen(TypeError)` doesn't lie. The one exception
-    // is `%ThrowTypeError%` (§10.2.4) which the spec mandates is
-    // frozen — we hard-code that singleton match here.
+    // §6.1.7 — function objects are ordinary objects. After
+    // `Object.freeze(fn)` they must report `isFrozen === true`.
+    // `%ThrowTypeError%` ships pre-frozen (§10.2.4).
     if (heap_mod.valueAsFunction(arg)) |fn_obj| {
         if (realm.intrinsics.throw_type_error) |tt| {
             if (fn_obj == tt) return Value.true_;
         }
-        return Value.false_;
+        if (fn_obj.extensible) return Value.false_;
+        var fit = fn_obj.properties.iterator();
+        while (fit.next()) |entry| {
+            const flags = fn_obj.flagsForOwn(entry.key_ptr.*);
+            if (flags.writable or flags.configurable) return Value.false_;
+        }
+        var fait = fn_obj.accessors.iterator();
+        while (fait.next()) |entry| {
+            if (fn_obj.flagsForOwn(entry.key_ptr.*).configurable) return Value.false_;
+        }
+        return Value.true_;
     }
     const obj = heap_mod.valueAsPlainObject(arg) orelse return Value.true_; // primitives are frozen
     if (obj.proxy_target != null or obj.proxy_revoked) {
         return testIntegrityLevelViaProxy(realm, arg, obj, true);
     }
     if (obj.extensible) return Value.false_;
+    // §10.4.2 — Array exotic indexed elements default to all-
+    // true. A present indexed slot that's NOT been lowered into
+    // the property bag is still writable+configurable, so the
+    // array can't be frozen.
+    if (hasUnlockedIndexedElements(obj)) return Value.false_;
     var it = obj.properties.iterator();
     while (it.next()) |entry| {
         const flags = obj.flagsFor(entry.key_ptr.*);
@@ -2074,11 +2174,42 @@ fn objectIsFrozen(realm: *Realm, this_value: Value, args: []const Value) NativeE
 fn objectSeal(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
+    // §20.1.2.20 step 1 — If Type(O) is not Object, return O. For
+    // Function objects (§6.1.7) we have to seal too: drop
+    // `extensible` and loop the own properties stamping
+    // configurable=false. Mirrors the JSObject path below.
+    if (heap_mod.valueAsFunction(arg)) |fn_obj| {
+        fn_obj.extensible = false;
+        var fit = fn_obj.properties.iterator();
+        while (fit.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const cur = fn_obj.flagsForOwn(key);
+            fn_obj.property_flags.put(realm.allocator, key, .{
+                .writable = cur.writable,
+                .enumerable = cur.enumerable,
+                .configurable = false,
+            }) catch return error.OutOfMemory;
+        }
+        var fait = fn_obj.accessors.iterator();
+        while (fait.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const cur = fn_obj.flagsForOwn(key);
+            fn_obj.property_flags.put(realm.allocator, key, .{
+                .writable = cur.writable,
+                .enumerable = cur.enumerable,
+                .configurable = false,
+            }) catch return error.OutOfMemory;
+        }
+        return arg;
+    }
     const obj = heap_mod.valueAsPlainObject(arg) orelse return arg;
     if (obj.proxy_target != null or obj.proxy_revoked) {
         return setIntegrityLevelViaProxy(realm, arg, obj, false);
     }
     obj.extensible = false;
+    // §10.4.2 — Array exotic indexed elements default to all-
+    // true; lower to `{w:true, e:true, c:false}` for sealed.
+    try sealArrayIndexedSlots(realm, obj);
     // §10.1.4.1 SetIntegrityLevel(O, sealed) — every own property
     // (data + accessor) loses configurability; writable bits
     // stay.
@@ -2108,21 +2239,32 @@ fn objectSeal(realm: *Realm, this_value: Value, args: []const Value) NativeError
 fn objectIsSealed(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
-    // Same Function-as-Object carve-out as `objectIsFrozen` — a
-    // built-in / user-declared function is extensible and has
-    // mutable own properties. `%ThrowTypeError%` is the one
-    // pre-sealed singleton.
+    // §6.1.7 — function objects are ordinary objects. After
+    // `Object.seal(fn)` they must report `isSealed === true`.
+    // `%ThrowTypeError%` ships pre-sealed (§10.2.4).
     if (heap_mod.valueAsFunction(arg)) |fn_obj| {
         if (realm.intrinsics.throw_type_error) |tt| {
             if (fn_obj == tt) return Value.true_;
         }
-        return Value.false_;
+        if (fn_obj.extensible) return Value.false_;
+        var fit = fn_obj.properties.iterator();
+        while (fit.next()) |entry| {
+            if (fn_obj.flagsForOwn(entry.key_ptr.*).configurable) return Value.false_;
+        }
+        var fait = fn_obj.accessors.iterator();
+        while (fait.next()) |entry| {
+            if (fn_obj.flagsForOwn(entry.key_ptr.*).configurable) return Value.false_;
+        }
+        return Value.true_;
     }
     const obj = heap_mod.valueAsPlainObject(arg) orelse return Value.true_;
     if (obj.proxy_target != null or obj.proxy_revoked) {
         return testIntegrityLevelViaProxy(realm, arg, obj, false);
     }
     if (obj.extensible) return Value.false_;
+    // §10.4.2 — Array exotic indexed slots default to all-true;
+    // an array with raw indexed elements isn't sealed.
+    if (hasUnlockedIndexedElements(obj)) return Value.false_;
     var it = obj.properties.iterator();
     while (it.next()) |entry| {
         if (obj.flagsFor(entry.key_ptr.*).configurable) return Value.false_;
@@ -2132,6 +2274,35 @@ fn objectIsSealed(realm: *Realm, this_value: Value, args: []const Value) NativeE
         if (obj.flagsFor(entry.key_ptr.*).configurable) return Value.false_;
     }
     return Value.true_;
+}
+
+/// `true` iff `obj` is an Array exotic with at least one
+/// present indexed slot whose descriptor hasn't been lowered
+/// into the property bag. Indexed slots in `obj.elements` /
+/// `obj.sparse_elements` default to `{w,e,c} = true` (per
+/// §10.4.2) — `isSealed` / `isFrozen` must observe that as
+/// "not sealed" until SetIntegrityLevel promotes the slots.
+fn hasUnlockedIndexedElements(obj: *JSObject) bool {
+    if (!obj.is_array_exotic) return false;
+    if (obj.is_sparse) {
+        var sit = obj.sparse_elements.iterator();
+        while (sit.next()) |entry| {
+            if (JSObject.isElementHole(entry.value_ptr.*)) continue;
+            var ibuf: [16]u8 = undefined;
+            const ks = std.fmt.bufPrint(&ibuf, "{d}", .{entry.key_ptr.*}) catch return true;
+            // Slot present and not yet promoted into the bag.
+            if (!obj.properties.contains(ks)) return true;
+        }
+        return false;
+    }
+    var i: u32 = 0;
+    while (i < obj.elements.items.len) : (i += 1) {
+        if (JSObject.isElementHole(obj.elements.items[i])) continue;
+        var ibuf: [16]u8 = undefined;
+        const ks = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch return true;
+        if (!obj.properties.contains(ks)) return true;
+    }
+    return false;
 }
 
 /// §10.5.4 Proxy [[PreventExtensions]] — shared bool helper.
