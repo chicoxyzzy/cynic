@@ -710,6 +710,15 @@ pub const Op = enum(u8) {
     /// opcode only fires for import-store paths the parser can't
     /// reject statically (e.g. via destructuring).
     throw_assign_const,
+    /// If `acc` is not an Object (per §7.2.5 IsObject — Object or
+    /// callable Function), raise a `TypeError`. Otherwise no-op.
+    /// Emitted after each `await_` inside async `yield*` to enforce
+    /// §27.6.3.7 step 7.b.iv ("If Type(innerResult) is not Object,
+    /// throw a TypeError exception") — a manually implemented async
+    /// iterator can return a primitive (e.g. `42`) from `.next()` /
+    /// `.return()` / `.throw()`; the await fulfils with that
+    /// primitive, and we then reject the outer step.
+    throw_if_not_object,
     /// §7.1.19 ToPropertyKey applied to `acc`. Runs
     /// ToPrimitive(hint "string") and, for non-Symbol results,
     /// ToString. Emitted right after the key expression of a
@@ -758,6 +767,7 @@ pub const Op = enum(u8) {
             .throw_if_hole,
             .require_object_coercible,
             .throw_assign_const,
+            .throw_if_not_object,
             .to_property_key,
             .return_,
             .super_get_computed,
@@ -962,6 +972,7 @@ pub const Op = enum(u8) {
             .throw_if_hole => "ThrowIfHole",
             .require_object_coercible => "RequireObjectCoercible",
             .throw_assign_const => "ThrowAssignConst",
+            .throw_if_not_object => "ThrowIfNotObject",
             .to_property_key => "ToPropertyKey",
             .return_ => "Return",
         };

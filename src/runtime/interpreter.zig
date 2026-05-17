@@ -2079,43 +2079,22 @@ pub fn drainMicrotasks(allocator: std.mem.Allocator, realm: *Realm) RunError!voi
                 // `done: true`.
                 const gen = task.async_gen orelse continue;
                 const cap = task.agy_cap_promise orelse continue;
-                // §27.7.5.3 Await — if the yielded value is a
-                // settled Promise, unwrap synchronously. A
-                // pending Promise needs reaction-chaining; for
-                // stage 1 we punt and surface the Promise as the
-                // iterator value (legacy behaviour). The
-                // `wrapAsyncGenResult` shim handled this for the
-                // pre-queue path; here we replicate the
-                // synchronous-settled subset to keep the
-                // `yield Promise.resolve(v)` style tests
-                // passing.
-                var settle_value = task.arg;
-                var settle_reject = task.agy_reject;
-                if (!settle_reject) {
-                    const settled = unwrapSettledPromise(task.arg);
-                    switch (settled) {
-                        .fulfilled => |v| settle_value = v,
-                        .rejected => |ex| {
-                            settle_value = ex;
-                            settle_reject = true;
-                            // §27.6.3.6 with Await rejecting →
-                            // close the gen so subsequent
-                            // requests see done:true.
-                            if (gen.state != .completed) {
-                                gen.state = .completed;
-                                gen.async_state = .completed;
-                            }
-                        },
-                        .pending, .none => {
-                            // Pending Promise yield: stage 1 leaves the
-                            // Promise as the iterator value. Spec
-                            // would Await it (chain reactions onto
-                            // the inner Promise then settle the
-                            // cap when it resolves); that's a
-                            // later stage of the rework.
-                        },
-                    }
-                }
+                // §27.6.3.7 step 7.b.vi (`yield*` delegation) and
+                // §27.6.3.6 AsyncGeneratorYield — the spec settles
+                // the request capability with `{value, done}` where
+                // `value` is whatever the body passed to Yield.
+                // `Yield` itself does NOT Await — for plain
+                // `yield X` in an async gen the compiler emits an
+                // explicit `Await(X)` before `gen_yield` (§27.6.3.6
+                // Promise-of-Promise unwrap lives in that step's
+                // microtask, not here), and for `yield* iter` the
+                // value comes from the inner iter's already-Awaited
+                // step result, which intentionally surfaces a
+                // Promise as the consumer-facing `.value` (see
+                // yield-star-promise-not-unwrapped.js). So we
+                // settle the capability with `task.arg` as-is.
+                const settle_value = task.arg;
+                const settle_reject = task.agy_reject;
                 if (settle_reject) {
                     settlePromiseInternal(realm, cap, .rejected, settle_value) catch return error.OutOfMemory;
                 } else {
@@ -5790,8 +5769,37 @@ fn runFrames(
                         } else {
                             // Thenable check — §27.7.5.3 step 1
                             // through §27.2.1.3.2 Promise Resolve
-                            // Functions steps 7-11.
-                            const then_v = obj.get("then");
+                            // Functions steps 7-11. `.then` may be
+                            // an accessor whose getter throws (e.g.
+                            // yield-star-next-then-get-abrupt.js);
+                            // route through the prototype-walking
+                            // path so accessors fire and any abrupt
+                            // completion becomes a rejected Promise
+                            // we suspend on.
+                            const then_v = intrinsics_mod.getPropertyChain(realm, obj, "then") catch |err| switch (err) {
+                                error.OutOfMemory => return error.OutOfMemory,
+                                else => blk: {
+                                    // Getter threw — §27.2.1.3.2
+                                    // Promise Resolve Functions step
+                                    // 9.b catches the abrupt and
+                                    // rejects the synthesised Promise
+                                    // with it. We then suspend on
+                                    // that rejected Promise so the
+                                    // gen body's await resumes with
+                                    // a throw. The microtask-deferred
+                                    // path (resume_throws = true)
+                                    // is observationally identical
+                                    // — one tick of latency, then
+                                    // the body lands at the next
+                                    // exception handler.
+                                    const ex = realm.pending_exception orelse Value.undefined_;
+                                    realm.pending_exception = null;
+                                    resume_value = ex;
+                                    resume_throws = true;
+                                    use_microtask = true;
+                                    break :blk Value.undefined_;
+                                },
+                            };
                             if (heap_mod.valueAsFunction(then_v) != null) {
                                 const promise_v = @import("builtins/promise.zig").allocatePromise(realm, .pending, Value.undefined_) catch return error.OutOfMemory;
                                 const promise_obj = heap_mod.valueAsPlainObject(promise_v) orelse return error.OutOfMemory;
@@ -8282,6 +8290,32 @@ fn runFrames(
                 committed = true;
                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                     return .{ .thrown = ex };
+                }
+            },
+            .throw_if_not_object => {
+                // §7.2.5 IsObject — pass plain objects and callable
+                // Functions; reject every primitive. Emitted after
+                // each `await_` inside async `yield*` to enforce
+                // §27.6.3.7 step 7.b.iv: after Awaiting the inner
+                // iter-step result, if its Type is not Object then
+                // throw a TypeError. A manually implemented async
+                // iterator that returns `42` from `.next()` fulfils
+                // the await with `42`; we then reject the outer step
+                // (Number.prototype.then must NOT be consulted —
+                // §27.7.5.3 PromiseResolve step 7 short-circuits
+                // for non-Object resolutions before the `Get(.then)`
+                // lookup in step 8).
+                const is_object =
+                    heap_mod.valueAsPlainObject(acc) != null or
+                    heap_mod.valueAsFunction(acc) != null;
+                if (!is_object) {
+                    const ex = try makeTypeError(realm, "iterator result is not an object");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
                 }
             },
 

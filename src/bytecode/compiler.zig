@@ -802,6 +802,13 @@ pub const Compiler = struct {
             try self.builder.emitU8(r_callee);
             try self.builder.emitU8(1);
             try self.builder.emitOp(.await_, y.span);
+            // §27.6.3.7 step 7.b.iv — after Awaiting the inner step
+            // result, if its Type is not Object, throw a TypeError.
+            // A manually implemented async iterator can fulfil its
+            // step Promise with a primitive; we must reject the
+            // outer step rather than reading `.done` / `.value` off
+            // the primitive's prototype chain.
+            try self.builder.emitOp(.throw_if_not_object, y.span);
             // ── Shared body — acc holds the awaited result ──
             const body_after_call = self.builder.here();
             try self.builder.emitOp(.star, y.span);
@@ -901,6 +908,12 @@ pub const Compiler = struct {
             try self.builder.emitU8(r_callee);
             try self.builder.emitU8(1);
             try self.builder.emitOp(.await_, y.span);
+            // §27.6.3.7 step 7.c.viii — after Awaiting the inner
+            // `.return()` result, if its Type is not Object, throw
+            // a TypeError. (The throw-handler path jumps back to
+            // body_after_call which already has its own check;
+            // this branch ends in `return_` so we check here.)
+            try self.builder.emitOp(.throw_if_not_object, y.span);
             try self.builder.emitOp(.star, y.span);
             try self.builder.emitU8(r_result);
             try self.builder.emitOp(.ldar, y.span);
@@ -927,6 +940,14 @@ pub const Compiler = struct {
             try self.builder.patchI16(no_return_patch, no_return_target);
             try self.builder.emitOp(.ldar, y.span);
             try self.builder.emitU8(r_received);
+            // §27.6.3.7 step 7.c.iii.1 — when the inner iterator has
+            // no `return` method and generatorKind is async, the
+            // received completion's value is Awaited before being
+            // forwarded as the return completion. A user can call
+            // `outerGen.return(promise)`; the spec unwraps that
+            // Promise once so the outer .return() result is
+            // `{value: resolvedV, done: true}`.
+            try self.builder.emitOp(.await_, y.span);
             try self.builder.emitOp(.return_, y.span);
 
             // ── Exit ──
