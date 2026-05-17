@@ -1241,7 +1241,17 @@ fn genNext(realm: *Realm, this_value: Value, args: []const Value) @import("funct
         else => return error.NativeThrew,
     };
     switch (outcome) {
-        .yielded => |v| return genResultObject(realm, v, false) catch return error.OutOfMemory,
+        .yielded => |v| {
+            // §15.5.5 step 7.a.iv — when sync `yield*` parked
+            // via `gen_yield_iter_result`, the inner iterator's
+            // result object is yielded out verbatim. Otherwise
+            // wrap as CreateIterResultObject(value, false).
+            if (gen.yielded_iter_result) {
+                gen.yielded_iter_result = false;
+                return v;
+            }
+            return genResultObject(realm, v, false) catch return error.OutOfMemory;
+        },
         .value => |v| return genResultObject(realm, v, true) catch return error.OutOfMemory,
         .thrown => |ex| {
             realm.pending_exception = ex;
@@ -1282,8 +1292,16 @@ fn genReturn(realm: *Realm, this_value: Value, args: []const Value) @import("fun
             },
             // Finally body yielded again (e.g. `try { yield }
             // finally { yield }`). Spec allows it; surface as
-            // `{value, done:false}`.
-            .yielded => |v| return genResultObject(realm, v, false) catch return error.OutOfMemory,
+            // `{value, done:false}`. If the inner `yield*`
+            // delegated via `gen_yield_iter_result`, pass the
+            // iter result through unchanged (§15.5.5 7.a.iv).
+            .yielded => |v| {
+                if (gen.yielded_iter_result) {
+                    gen.yielded_iter_result = false;
+                    return v;
+                }
+                return genResultObject(realm, v, false) catch return error.OutOfMemory;
+            },
         }
     }
     gen.state = .completed;
@@ -1321,7 +1339,14 @@ fn genThrow(realm: *Realm, this_value: Value, args: []const Value) @import("func
         else => return error.NativeThrew,
     };
     switch (outcome) {
-        .yielded => |v| return genResultObject(realm, v, false) catch return error.OutOfMemory,
+        .yielded => |v| {
+            // §15.5.5 7.a.iv inner-iter result pass-through.
+            if (gen.yielded_iter_result) {
+                gen.yielded_iter_result = false;
+                return v;
+            }
+            return genResultObject(realm, v, false) catch return error.OutOfMemory;
+        },
         .value => |v| return genResultObject(realm, v, true) catch return error.OutOfMemory,
         .thrown => |ex| {
             realm.pending_exception = ex;
@@ -6447,6 +6472,29 @@ fn runFrames(
                 gen.home_object = f.home_object;
                 gen.home_function = f.home_function;
                 gen.argc = f.argc;
+                gen.yielded_iter_result = false;
+                f.ip = ip;
+                f.accumulator = acc;
+                committed = true;
+                return .{ .yielded = acc };
+            },
+
+            .gen_yield_iter_result => {
+                // §15.5.5 step 7.a.iv — sync `yield*` passes
+                // the inner iterator's IteratorResult through
+                // verbatim. Same save/unwind shape as
+                // `gen_yield`, but sets the `yielded_iter_result`
+                // flag so `genNext` returns acc as-is instead of
+                // wrapping in a fresh CreateIterResultObject.
+                const gen = f.generator orelse return error.InvalidOpcode;
+                gen.ip = ip;
+                gen.accumulator = Value.undefined_;
+                gen.env = f.env;
+                gen.this_value = f.this_value;
+                gen.home_object = f.home_object;
+                gen.home_function = f.home_function;
+                gen.argc = f.argc;
+                gen.yielded_iter_result = true;
                 f.ip = ip;
                 f.accumulator = acc;
                 committed = true;

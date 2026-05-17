@@ -199,6 +199,12 @@ pub const JSGenerator = struct {
     /// correctly under normal `.next(v)`), but `yield*` needs it
     /// in a register independent of acc.
     resume_value: Value = Value.undefined_,
+    /// §15.5.5 step 7.a.iv — when the body suspended via
+    /// `gen_yield_iter_result`, the accumulator already holds a
+    /// spec-shaped IteratorResult object. `gen.next()` returns
+    /// it verbatim instead of wrapping in a fresh
+    /// CreateIterResultObject. Reset to false on each resume.
+    yielded_iter_result: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,

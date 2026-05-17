@@ -1089,17 +1089,20 @@ pub const Compiler = struct {
         try self.builder.emitOp(.jmp_if_true, y.span);
         const exit_patch = self.builder.here();
         try self.builder.emitI16(0);
+        // §15.5.5 step 7.a.iv — `Set received to GeneratorYield(
+        // innerResult)`. The inner iterator's result OBJECT is
+        // surfaced verbatim out of the outer `.next()`, so we
+        // (a) don't pre-read `.value` here (the spec only reads
+        // it on the done-true exit branch — `value` accessors
+        // on non-final results must not fire), and (b) yield via
+        // `gen_yield_iter_result` to suppress the outer
+        // CreateIterResultObject wrap that `gen_yield` would
+        // trigger.
         try self.builder.emitOp(.ldar, y.span);
         try self.builder.emitU8(r_result);
-        try self.builder.emitOp(.lda_property, y.span);
-        try self.builder.emitU16(k_value);
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_val);
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_val);
         // Synthetic-handler-covered yield.
         const yield_start_pc = self.builder.here();
-        try self.builder.emitOp(.gen_yield, y.span);
+        try self.builder.emitOp(.gen_yield_iter_result, y.span);
         const yield_end_pc = self.builder.here();
         // Normal resume — save sent value, loop.
         try self.builder.emitOp(.star, y.span);
@@ -1202,10 +1205,25 @@ pub const Compiler = struct {
         const return_not_done_patch = self.builder.here();
         try self.builder.emitI16(0);
         // Done — return result.value from the surrounding gen.
+        // §15.5.5 7.c.vii.2: return-completion with value =
+        // IteratorValue(innerReturnResult). A return-completion
+        // here must run every active try/finally in the body
+        // BEFORE settling the outer generator (§14.15) — bare
+        // `return_` would pop the frame without that. Stash the
+        // value, walk the finally chain, restore, return.
         try self.builder.emitOp(.ldar, y.span);
         try self.builder.emitU8(r_result);
         try self.builder.emitOp(.lda_property, y.span);
         try self.builder.emitU16(k_value);
+        if (self.finally_chain != null) {
+            const r_save = try self.reserveTemp();
+            defer self.releaseTemp();
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_save);
+            try self.emitFinalliesUntil(null, y.span);
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_save);
+        }
         try self.builder.emitOp(.return_, y.span);
         // Not done — loop back to body.
         const return_not_done_target = self.builder.here();
@@ -1217,10 +1235,21 @@ pub const Compiler = struct {
         try self.builder.emitI16(0);
         try self.builder.patchI16(return_to_body_patch, body_after_call);
         // No return method — propagate the return completion.
+        // §15.5.5 7.c.iii: `Return Completion(received)` — same
+        // finally-walk requirement as the done-branch above.
         const no_return_target = self.builder.here();
         try self.builder.patchI16(no_return_patch, no_return_target);
         try self.builder.emitOp(.ldar, y.span);
         try self.builder.emitU8(r_received);
+        if (self.finally_chain != null) {
+            const r_save = try self.reserveTemp();
+            defer self.releaseTemp();
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_save);
+            try self.emitFinalliesUntil(null, y.span);
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_save);
+        }
         try self.builder.emitOp(.return_, y.span);
 
         // ── Exit — `yield*` evaluates to inner's final value ──

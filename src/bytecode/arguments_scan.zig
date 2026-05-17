@@ -147,6 +147,17 @@ pub fn expressionReferencesArguments(source: []const u8, e: *const Expression) b
         },
         .update => |u| expressionReferencesArguments(source, u.operand),
         .spread => |s| expressionReferencesArguments(source, s.argument),
+        // §15.5 / §15.8 — yield / await operands are evaluated in
+        // the same scope as the enclosing function body, so an
+        // `arguments` reference inside them still binds to the
+        // host non-arrow function's implicit arguments object.
+        .yield => |y| if (y.argument) |a| expressionReferencesArguments(source, a) else false,
+        .await_ => |a| expressionReferencesArguments(source, a.argument),
+        // Optional-chain wrapper — recurse into the chain body.
+        .chain => |c| expressionReferencesArguments(source, c.expression),
+        // Tagged template — tag is an expression, quasi may have
+        // interpolation expressions (already covered by .template_literal).
+        .tagged_template => |t| expressionReferencesArguments(source, t.tag) or expressionReferencesArguments(source, t.quasi),
         // Function / arrow / class expressions have their own scope.
         .function_expr, .arrow_function, .class_expr => false,
         else => false,

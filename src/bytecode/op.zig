@@ -368,6 +368,16 @@ pub const Op = enum(u8) {
     /// expression `let x = yield e` reads the sent value.
     /// §27.5.3.7 GeneratorYield.
     gen_yield,
+    /// Like `gen_yield`, but the value in `acc` is already a
+    /// spec-shaped IteratorResult object and must be returned
+    /// from the outer `.next()` / `.return()` / `.throw()`
+    /// unchanged — no fresh `CreateIterResultObject` wrap.
+    /// Emitted by sync `yield*` per §15.5.5 step 7.a.iv — the
+    /// inner iterator's result is yielded through verbatim so
+    /// observers see `done` exactly as the inner produced it
+    /// (e.g. `done: undefined` propagates instead of being
+    /// coerced to `false`), and `value` is not eagerly read.
+    gen_yield_iter_result,
     /// Initial suspension marker emitted between the param
     /// prologue and the body of every `function*` / `async function*`.
     /// `wrapGenerator` / `wrapAsyncGenerator` drive the chunk
@@ -762,6 +772,7 @@ pub const Op = enum(u8) {
             .init_instance_fields,
             .lda_arguments,
             .gen_yield,
+            .gen_yield_iter_result,
             .gen_initial_suspend,
             .await_,
             .iter_open,
@@ -945,6 +956,7 @@ pub const Op = enum(u8) {
             .lda_arguments => "LdaArguments",
             .rest_args_from => "RestArgsFrom",
             .gen_yield => "GenYield",
+            .gen_yield_iter_result => "GenYieldIterResult",
             .gen_initial_suspend => "GenInitialSuspend",
             .await_ => "Await",
             .iter_open => "IterOpen",
