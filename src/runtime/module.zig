@@ -197,6 +197,74 @@ pub fn getModuleNamespace(realm: *Realm, mr: *ModuleRecord) !*JSObject {
     return ns;
 }
 
+/// §15.2.1.16.3 ResolveExport walk — given an entry on
+/// `ns.namespace_redirects[key]` (installed by
+/// `module_reexport_named` / `module_reexport_star`), follow the
+/// redirect chain to land on a terminal owning namespace + key.
+///
+/// Cycle detection: a small fixed-size visited buffer trips when
+/// a `(ns, key)` pair repeats. Per §15.2.1.16.3 step 2 a circular
+/// resolution returns null; we surface that to the caller as
+/// `error.AmbiguousOrCircularExport` so the read-site can decide
+/// (throw vs `'name' in ns` → false). Real chains are short (the
+/// corpus's longest is ~13 hops); we cap at 32 to bound worst-case.
+///
+/// Skips over redirects whose terminal target_key isn't present on
+/// `target_ns` — that pattern surfaces during a cycle when the
+/// source module hasn't published the binding yet. The caller can
+/// treat the result as "binding not (yet) bound" and fall back to
+/// whatever the importer's local entry says (typically a Hole or
+/// "key not present").
+pub const NamespaceResolution = struct {
+    ns: *JSObject,
+    key: []const u8,
+};
+
+pub const ResolveError = error{
+    /// §15.2.1.16.3 step 2 — `(module, exportName)` already on
+    /// the resolveSet. Caller decides how to surface (a strict
+    /// `lda_property` throws ReferenceError on the missing
+    /// binding; `'name' in ns` returns false).
+    AmbiguousOrCircularExport,
+};
+
+pub fn resolveRedirectChain(
+    ns: *JSObject,
+    key: []const u8,
+) ResolveError!NamespaceResolution {
+    // Stack-allocated visited list — chains in the corpus top out
+    // at ~13 hops (instn-iee-bndng / instn-named-iee-cycle); 32
+    // is generous without heap allocation.
+    var visited_ns: [32]*JSObject = undefined;
+    var visited_key: [32][]const u8 = undefined;
+    var len: usize = 0;
+
+    var cur_ns: *JSObject = ns;
+    var cur_key: []const u8 = key;
+    while (true) {
+        // Cycle check.
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            if (visited_ns[i] == cur_ns and std.mem.eql(u8, visited_key[i], cur_key)) {
+                return error.AmbiguousOrCircularExport;
+            }
+        }
+        if (len >= visited_ns.len) {
+            return error.AmbiguousOrCircularExport;
+        }
+        visited_ns[len] = cur_ns;
+        visited_key[len] = cur_key;
+        len += 1;
+
+        if (cur_ns.namespace_redirects.get(cur_key)) |r| {
+            cur_ns = r.target_ns;
+            cur_key = r.target_key;
+            continue;
+        }
+        return .{ .ns = cur_ns, .key = cur_key };
+    }
+}
+
 /// §9.4.6.7 Module Namespace [[Get]] (P, Receiver), data-property
 /// path (steps 8-13). After the exotic dispatch resolves a string
 /// key to a bound export, the spec routes the read through
@@ -226,12 +294,33 @@ pub fn namespaceGetThrowingOnHole(
     ns: *JSObject,
     key: []const u8,
 ) NativeError!Value {
-    const v = ns.get(key);
+    // §15.2.1.16.3 — consult `namespace_redirects` first: if the
+    // binding came in via `export { X as Y } from "src"` (or was
+    // propagated by `export * from`), the live value lives on the
+    // source module. Walk the chain with cycle detection; if the
+    // chain bottoms out at a non-redirected slot, read it; if the
+    // chain is circular and never reaches a concrete binding,
+    // throw ReferenceError (matches the §8.1.1.1.6
+    // GetBindingValue throw for an uninitialised binding —
+    // observable as `'X' in ns` working but a read raising).
+    var owner_ns: *JSObject = ns;
+    var owner_key: []const u8 = key;
+    if (ns.namespace_redirects.contains(key)) {
+        const resolved = resolveRedirectChain(ns, key) catch {
+            const ex = @import("builtins/error.zig").newReferenceError(realm, key) catch return error.OutOfMemory;
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        };
+        owner_ns = resolved.ns;
+        owner_key = resolved.key;
+    }
+    const v = owner_ns.get(owner_key);
     if (v.isHole()) {
         // Match V8 / JSC's wording so user code matching the
         // message via `e.message.includes(name)` continues to
         // work; the binding name is the most useful diagnostic
-        // we can surface here.
+        // we can surface here. Use the original (importer-side)
+        // key so the message reflects what user code asked for.
         const ex = @import("builtins/error.zig").newReferenceError(realm, key) catch return error.OutOfMemory;
         realm.pending_exception = ex;
         return error.NativeThrew;

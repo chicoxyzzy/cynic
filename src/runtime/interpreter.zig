@@ -6179,12 +6179,31 @@ fn runFrames(
                 const exp_s: *JSString = @ptrCast(@alignCast(exp_v.asString()));
                 if (realm.current_module) |mr| {
                     if (heap_mod.valueAsPlainObject(acc)) |src_obj| {
-                        // Raw `get` — propagates Hole verbatim so
-                        // the throw deferred to the importer's
-                        // read site (§9.4.6.7 routing through
-                        // `lda_property + throw_if_hole`).
-                        const v = src_obj.get(local_s.bytes);
-                        mr.exports.set(realm.allocator, exp_s.bytes, v) catch return error.OutOfMemory;
+                        // §15.2.1.16.3 ResolveExport — install a
+                        // live redirect entry so reads through
+                        // `mr.exports[exp_s]` walk to
+                        // `src_obj[local_s]` at access time.
+                        // Resolving lazily lets the chain pick up
+                        // bindings that the source module only
+                        // publishes after a cycle returns (cf.
+                        // `instn-named-iee-cycle` — long chains of
+                        // re-exports terminating at a `var`).
+                        //
+                        // We still pre-clear any pre-seeded Hole on
+                        // the importer's exports map so the
+                        // namespace doesn't carry a stale Hole
+                        // value alongside the redirect (the
+                        // redirect-first lookup path skips the
+                        // local map when a redirect is present).
+                        mr.exports.namespace_redirects.put(realm.allocator, exp_s.bytes, .{
+                            .target_ns = src_obj,
+                            .target_key = local_s.bytes,
+                        }) catch return error.OutOfMemory;
+                        // Drop the placeholder so `'X' in ns`
+                        // still resolves through the redirect
+                        // walk without an empty data slot getting
+                        // in the way.
+                        _ = mr.exports.properties.swapRemove(exp_s.bytes);
                     }
                 }
             },
@@ -6193,37 +6212,47 @@ fn runFrames(
                 // §16.2.3.7 ExportDeclaration step 8 (no `as`) —
                 // merge every non-`default` own export from the
                 // source namespace (in `acc`) onto the executing
-                // module's namespace. Keys already present win
-                // (matches the ResolveExport precedence between
-                // local / indirect entries and `*` entries: a
-                // star entry never overwrites a binding the
-                // module already exports under the same name).
+                // module's namespace. Keys already present on
+                // the importer win (matches the ResolveExport
+                // precedence between local / indirect entries
+                // and `*` entries: a star entry never overwrites
+                // a binding the module already exports under the
+                // same name).
+                //
+                // The source's `namespace_redirects` map is also
+                // walked — re-exports installed under a prior
+                // `export { X as Y } from "…"` need to propagate
+                // to the importer's namespace too. We copy the
+                // redirect entry verbatim (same `target_ns` /
+                // `target_key`), so a chained read walks back
+                // through the same source redirect path. Cycle
+                // detection in `resolveRedirectChain` keeps the
+                // walk bounded.
                 //
                 // No-op outside module context.
                 if (realm.current_module) |mr| {
                     const src_obj = heap_mod.valueAsPlainObject(acc) orelse {
-                        // Source wasn't an object — `module_load`
-                        // must have left a namespace here; bail
-                        // silently rather than crashing.
                         continue;
                     };
                     var it = src_obj.properties.iterator();
                     while (it.next()) |entry| {
                         const key = entry.key_ptr.*;
-                        // §16.2.3.7 step 8 — skip `default` per
-                        // GetExportedNames. Also skip the
-                        // `@@toStringTag` Module Namespace brand
-                        // installed in §28.3.5 — it's a brand
-                        // property, not an exported binding.
                         if (std.mem.eql(u8, key, "default")) continue;
                         if (std.mem.eql(u8, key, "@@toStringTag")) continue;
-                        // Importer's own export precedence: skip
-                        // when the key is already on our
-                        // namespace (a local export, a
-                        // previously-merged star entry, or a
-                        // seeded TDZ Hole).
                         if (mr.exports.properties.contains(key)) continue;
+                        if (mr.exports.namespace_redirects.contains(key)) continue;
                         mr.exports.set(realm.allocator, key, entry.value_ptr.*) catch return error.OutOfMemory;
+                    }
+                    // Source redirects propagate as redirects on
+                    // the importer — chain resolution walks back
+                    // through them at read time.
+                    var rit = src_obj.namespace_redirects.iterator();
+                    while (rit.next()) |entry| {
+                        const key = entry.key_ptr.*;
+                        if (std.mem.eql(u8, key, "default")) continue;
+                        if (mr.exports.properties.contains(key)) continue;
+                        if (mr.exports.namespace_redirects.contains(key)) continue;
+                        mr.exports.namespace_redirects.put(realm.allocator, key, entry.value_ptr.*) catch return error.OutOfMemory;
                     }
                 }
             },

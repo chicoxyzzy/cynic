@@ -608,6 +608,17 @@ pub const Heap = struct {
                     if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
                     if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
                 }
+                // §15.2.1.16.3 ResolveExport chain — re-export
+                // redirects pin their target namespace alive so a
+                // module that's only reachable via another
+                // module's `export { X as Y } from "src"` survives
+                // GC for as long as the importer's namespace does.
+                // `target_key` is a chunk-constant slice (pinned
+                // at chunk-finalise time) — no anchor needed.
+                var nrit = o.namespace_redirects.iterator();
+                while (nrit.next()) |entry| {
+                    self.markValue(taggedObject(entry.value_ptr.target_ns));
+                }
                 if (o.boxed_primitive) |bp| self.markValue(bp);
                 if (o.map_data) |md| {
                     for (md.entries.items) |entry| {

@@ -52,6 +52,23 @@ pub const AccessorKind = enum(u8) {
     setter,
 };
 
+/// §15.2.1.16.3 ResolveExport — a `export { X as Y } from "src"`
+/// re-export records an indirect entry that resolves to `X` on
+/// the source module's namespace. Cynic stores these on the
+/// importer's namespace under `namespace_redirects[Y]`; reads
+/// walk the chain at access time with a visited-set so a
+/// cyclic chain terminates instead of recursing forever.
+///
+/// `target_key` is borrowed from the chunk constant pool (a
+/// `JSString.bytes` slice pinned for the realm's lifetime); the
+/// target namespace is heap-owned by `target_ns`'s module
+/// record, which itself outlives every namespace it could be
+/// reached from (modules live for the realm).
+pub const NamespaceRedirect = struct {
+    target_ns: *JSObject,
+    target_key: []const u8,
+};
+
 /// §27.2.6 PromiseState — internal slot, never surfaced to JS.
 /// `.none` is Cynic's sentinel for "not a Promise"; the value /
 /// reactions / waiters slots are unread in that state.
@@ -513,6 +530,25 @@ pub const JSObject = struct {
     /// different `[[Set]]` semantics (writes are silently dropped
     /// vs. always-`false`).
     is_module_namespace: bool = false,
+    /// §15.2.1.16.3 ResolveExport chain — when this namespace is a
+    /// Module Namespace exotic (`is_module_namespace == true`) AND
+    /// the binding originated from a `export { X as Y } from "src"`
+    /// re-export, the indirect entry is recorded here as
+    /// `Y -> (src_ns, "X")`. Reads through §9.4.6.7 [[Get]]
+    /// (`namespaceGetThrowingOnHole`) consult `namespace_redirects`
+    /// first; the redirected entry is resolved by walking
+    /// `target_ns` for `target_key`, following further redirects
+    /// transitively with a visited-set so a cycle returns the
+    /// resolved binding (or stops without recursing infinitely
+    /// when a cycle has no terminating local definition).
+    ///
+    /// Distinct from `properties` because the namespace's value
+    /// for `Y` lives on the *source* module, not here — copying
+    /// at re-export-evaluation time would freeze the binding at
+    /// the partial-namespace state during a cycle and miss the
+    /// final value the source module published after the cycle
+    /// returned. The redirect resolves every read at access time.
+    namespace_redirects: std.StringArrayHashMapUnmanaged(NamespaceRedirect) = .empty,
     /// §20.5.1.1 [[ErrorData]] — set when this object is an Error
     /// (or NativeError) instance produced via `new <X>Error(...)`
     /// / `<X>Error(...)`. Object.prototype.toString uses this to
@@ -556,6 +592,7 @@ pub const JSObject = struct {
         self.private_methods.deinit(allocator);
         self.private_accessors.deinit(allocator);
         self.accessors.deinit(allocator);
+        self.namespace_redirects.deinit(allocator);
         if (self.map_data) |m| m.deinit(allocator);
         if (self.set_data) |s| s.deinit(allocator);
         if (self.array_like_iter) |s| s.deinit(allocator);
@@ -778,6 +815,12 @@ pub const JSObject = struct {
     /// (§7.3.13 HasOwnProperty: any descriptor counts).
     pub fn hasOwn(self: *const JSObject, key: []const u8) bool {
         if (self.properties.contains(key) or self.accessors.contains(key)) return true;
+        // §15.2.1.16.3 ResolveExport — re-export redirects make
+        // the binding "own" on the Module Namespace exotic even
+        // though the value lives elsewhere. `'X' in ns` /
+        // `Object.keys(ns)` / `Reflect.has(ns, 'X')` must
+        // include them.
+        if (self.is_module_namespace and self.namespace_redirects.contains(key)) return true;
         if (self.is_array_exotic) {
             if (canonicalIntegerIndex(key)) |idx| {
                 return self.hasOwnIndexedSlot(idx);
@@ -794,6 +837,9 @@ pub const JSObject = struct {
     pub fn hasProperty(self: *const JSObject, key: []const u8) bool {
         if (self.properties.contains(key)) return true;
         if (self.accessors.contains(key)) return true;
+        // §15.2.1.16.3 ResolveExport — re-export redirects appear
+        // as own properties on a Module Namespace exotic.
+        if (self.is_module_namespace and self.namespace_redirects.contains(key)) return true;
         if (self.is_array_exotic) {
             if (canonicalIntegerIndex(key)) |idx| {
                 if (self.hasOwnIndexedSlot(idx)) return true;
