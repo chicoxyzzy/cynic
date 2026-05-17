@@ -1311,6 +1311,15 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
         if (pattern_is_regex) |po| if (po.regexp_flags) |f| break :blk f;
         break :blk realm.heap.allocateString("") catch return error.OutOfMemory;
     } else try stringifyArg(realm, flags_v);
+    // §22.2.3.4 RegExpInitialize step 1 — reject unknown / duplicate
+    // / mutually-exclusive flags at construction time with a
+    // SyntaxError, before any bytecode work. The Sputnik
+    // `S15.10.4.1_A5_T*` and `S15.10.4.1_A2_T2` fixtures observe
+    // this — `new RegExp(".", null)` (flags = "null"), `new
+    // RegExp(undefined, "ii")` (dup), `new RegExp("a|b", "z")`,
+    // `new RegExp(/1?1/mig, {})` (flags = "[object Object]") all
+    // must throw.
+    _ = try parseFlagsStrict(realm, flag_s.bytes);
     // §22.2.4 `[[OriginalSource]]` / `[[OriginalFlags]]` — typed
     // JSObject slots, not properties. Surfaced to JS only through
     // the accessors on `RegExp.prototype`.
@@ -1333,6 +1342,64 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
 
 // ── Pattern compile cache ───────────────────────────────────────────────────
 
+/// §22.2.3.4 RegExpInitialize step 1.b — validate the flags
+/// string strictly: every code unit must be one of
+/// `d`, `g`, `i`, `m`, `s`, `u`, `v`, `y`, and no code unit
+/// may appear more than once. `u` and `v` are mutually
+/// exclusive (step 1.c). Any violation throws SyntaxError.
+///
+/// Used by the constructor (eagerly, so a bad flag rejects at
+/// construction time) and by `ensureBytecode` (defensive — by
+/// the time we get there `regexp_flags` has already been
+/// vetted, but the bits are recomputed from the stored string).
+fn parseFlagsStrict(realm: *Realm, s: []const u8) NativeError!c_int {
+    var f: c_int = 0;
+    for (s) |ch| {
+        const bit: c_int = switch (ch) {
+            'g' => LRE_FLAG_GLOBAL,
+            'i' => LRE_FLAG_IGNORECASE,
+            'm' => LRE_FLAG_MULTILINE,
+            's' => LRE_FLAG_DOTALL,
+            'u' => LRE_FLAG_UNICODE,
+            'y' => LRE_FLAG_STICKY,
+            'd' => LRE_FLAG_INDICES,
+            'v' => LRE_FLAG_UNICODE_SETS,
+            else => {
+                const ex = intrinsics.newSyntaxError(realm, "Invalid flags supplied to RegExp constructor") catch return error.OutOfMemory;
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        };
+        if ((f & bit) != 0) {
+            const ex = intrinsics.newSyntaxError(realm, "Duplicate RegExp flag") catch return error.OutOfMemory;
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        }
+        f |= bit;
+    }
+    // §22.2.3.4 step 1.c — `u` and `v` cannot both be set.
+    if ((f & LRE_FLAG_UNICODE) != 0 and (f & LRE_FLAG_UNICODE_SETS) != 0) {
+        const ex = intrinsics.newSyntaxError(realm, "RegExp flags 'u' and 'v' are mutually exclusive") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
+    // §22.2.1.5 — `/v` (UnicodeSetsMode) is a Unicode mode: the
+    // pattern is interpreted as a sequence of Unicode code points,
+    // and matching is surrogate-pair-aware. libregexp gates both
+    // of those behaviours on its internal `is_unicode` flag (driven
+    // by `LRE_FLAG_UNICODE`), so pair `/v` with `/u` when handing
+    // flags to lre_compile / lre_exec — otherwise `new RegExp('𠮷',
+    // 'v')` rejects the non-BMP code point at parse time, and even
+    // when the pattern is purely BMP the matcher walks the UTF-16
+    // input as if non-Unicode, surfacing surrogate halves.
+    if ((f & LRE_FLAG_UNICODE_SETS) != 0) f |= LRE_FLAG_UNICODE;
+    return f;
+}
+
+/// Permissive fallback used after the strict validator has
+/// already run on the same string. Same flag-to-bit mapping,
+/// no error reporting, no duplicate / unknown check (won't
+/// trip — the caller validated already).
 fn parseFlags(s: []const u8) c_int {
     var f: c_int = 0;
     for (s) |ch| switch (ch) {
@@ -1346,15 +1413,6 @@ fn parseFlags(s: []const u8) c_int {
         'v' => f |= LRE_FLAG_UNICODE_SETS,
         else => {},
     };
-    // §22.2.1.5 — `/v` (UnicodeSetsMode) is a Unicode mode: the
-    // pattern is interpreted as a sequence of Unicode code points,
-    // and matching is surrogate-pair-aware. libregexp gates both
-    // of those behaviours on its internal `is_unicode` flag (driven
-    // by `LRE_FLAG_UNICODE`), so pair `/v` with `/u` when handing
-    // flags to lre_compile / lre_exec — otherwise `new RegExp('𠮷',
-    // 'v')` rejects the non-BMP code point at parse time, and even
-    // when the pattern is purely BMP the matcher walks the UTF-16
-    // input as if non-Unicode, surfacing surrogate halves.
     if ((f & LRE_FLAG_UNICODE_SETS) != 0) f |= LRE_FLAG_UNICODE;
     return f;
 }
