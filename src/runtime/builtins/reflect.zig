@@ -256,17 +256,30 @@ fn reflectGet(realm: *Realm, this_value: Value, args: []const Value) NativeError
 
 fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
+    // §28.1.12 Reflect.set step 1 — target must be Object.
     const arg = argOr(args, 0, Value.undefined_);
+    if (heap_mod.valueAsPlainObject(arg) == null and heap_mod.valueAsFunction(arg) == null) {
+        return throwTypeError(realm, "Reflect.set target must be an object");
+    }
+    // §28.1.12 step 2 — `key = ? ToPropertyKey(propertyKey)`.
+    // Runs BEFORE the value coercions; a user-side throwing
+    // `toString` must propagate (return-abrupt-from-property-key.js).
     const key_v = argOr(args, 1, Value.undefined_);
-    var key_buf: [64]u8 = undefined;
-    const key_slice = computedKeyForReflect(key_v, &key_buf);
-    const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
+    const key_slice = try toPropertyKeySpec(realm, key_v);
     const v = argOr(args, 2, Value.undefined_);
+    // §28.1.12 step 3-4 — default receiver = target.
+    const receiver_v: Value = if (args.len >= 4) args[3] else arg;
     if (heap_mod.valueAsFunction(arg)) |fn_obj| {
+        // Function-typed target: today functions don't carry the
+        // proxy / typed-array / array-exotic shapes; defer to the
+        // existing writability-only path. Receiver-aware routing
+        // for function targets isn't surfaced by any failing
+        // fixture in our scope today.
+        const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
         const ok = fn_obj.setIfWritable(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
         return Value.fromBool(ok);
     }
-    const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.set target must be an object");
+    const target = heap_mod.valueAsPlainObject(arg).?;
     // §9.4.6.4 Module Namespace exotic [[Set]] — always returns
     // false. Reflect.set surfaces that as the literal boolean
     // `false`; the strict-mode bytecode path translates it to
@@ -278,7 +291,6 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     {
         var proxy_cur = target;
         while (proxy_cur.proxy_target != null or proxy_cur.proxy_revoked) {
-            const receiver_v: Value = if (args.len >= 4) args[3] else heap_mod.taggedObject(proxy_cur);
             const r = try proxy_mod.nativeProxySet(realm, proxy_cur, key_slice, v, receiver_v);
             switch (r) {
                 .boolean => |b| return Value.fromBool(b),
@@ -301,10 +313,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // [[Set]] always returns `true` in both branches.
     if (target.typed_view) |tv| {
         const ta_mod = @import("typed_array.zig");
-        const has_receiver = args.len >= 4;
         const same_receiver = blk: {
-            if (!has_receiver) break :blk true;
-            const receiver_v: Value = args[3];
             if (heap_mod.valueAsPlainObject(receiver_v)) |r_obj| break :blk r_obj == target;
             break :blk false;
         };
@@ -374,36 +383,114 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         if (tr.blocked) return Value.false_;
         return Value.true_;
     }
-    // §10.1.9.1 [[Set]] step 5.a — return false when the own
-    // data property exists with `writable: false`. Cynic was
-    // using the bypass-set path which silently overwrites.
-    const had_own = target.properties.contains(key_slice);
-    if (had_own) {
-        const flags = target.flagsFor(key_slice);
-        if (!flags.writable) return Value.false_;
-    }
-    // Accessor descriptor — call the setter if present.
-    if (target.accessors.get(key_slice)) |acc| {
-        if (acc.setter) |setter| {
-            const interp = @import("../interpreter.zig");
-            const setter_args = [_]Value{v};
-            const outcome = interp.callJSFunction(realm.allocator, realm, setter, heap_mod.taggedObject(target), &setter_args) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.NativeThrew,
-            };
-            switch (outcome) {
-                .value, .yielded => return Value.true_,
-                .thrown => |ex| {
-                    realm.pending_exception = ex;
-                    return error.NativeThrew;
-                },
+    // §10.1.9.1 [[Set]] → §10.1.9.2 OrdinarySetWithOwnDescriptor.
+    // Walk the prototype chain to locate the first own descriptor
+    // for `key`. If we find an accessor, the setter fires with
+    // `Receiver` as `this`. If we find a writable data descriptor
+    // (or no descriptor at all, defaulted to writable / enumerable
+    // / configurable), the write lands on `Receiver`, NOT `target`.
+    var cursor: ?*@import("../object.zig").JSObject = target;
+    while (cursor) |o| : (cursor = o.prototype) {
+        // Accessor descriptor — fire the setter with `Receiver`
+        // as `this` per §10.1.9.2 step 4 (Reflect.set
+        // call-prototype-property-set.js / set-value-on-accessor-
+        // descriptor-with-receiver.js).
+        if (o.accessors.get(key_slice)) |acc| {
+            if (acc.setter) |setter| {
+                const interp = @import("../interpreter.zig");
+                const setter_args = [_]Value{v};
+                const outcome = interp.callJSFunction(realm.allocator, realm, setter, receiver_v, &setter_args) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (outcome) {
+                    .value, .yielded => return Value.true_,
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                }
             }
+            // Getter-only accessor — return false.
+            return Value.false_;
         }
-        // Getter-only accessor — Reflect.set returns false.
+        const has_own_data = blk: {
+            if (o.properties.contains(key_slice)) break :blk true;
+            if (o.is_array_exotic) {
+                if (@import("../object.zig").JSObject.canonicalIntegerIndex(key_slice)) |idx| {
+                    if (o.tryGetIndexedOwn(idx) != null) break :blk true;
+                }
+            }
+            break :blk false;
+        };
+        if (has_own_data) {
+            // §10.1.9.2 step 3.a — writable: false short-circuits to
+            // `false` without touching `Receiver`.
+            const flags = o.flagsFor(key_slice);
+            if (!flags.writable) return Value.false_;
+            break;
+        }
+        // No own descriptor on this rung — keep climbing.
+    }
+    // Reached step 3.b / 3.f territory — either an inherited
+    // writable data descriptor was found OR the chain ran out
+    // (default `{writable, enumerable, configurable}: true`).
+    // Either way the write targets `Receiver`.
+    // §10.1.9.2 step 3.b — Receiver must be an Object; primitives
+    // return false (receiver-is-not-object.js).
+    const receiver_obj = heap_mod.valueAsPlainObject(receiver_v) orelse {
+        // Functions are objects too; allow that path.
+        if (heap_mod.valueAsFunction(receiver_v)) |fn_recv| {
+            const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
+            const ok = fn_recv.setIfWritable(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+            return Value.fromBool(ok);
+        }
+        return Value.false_;
+    };
+    // §10.1.9.2 step 3.c-e — existing descriptor on Receiver.
+    if (receiver_obj.accessors.contains(key_slice)) {
+        // IsAccessorDescriptor(existingDescriptor) → return false
+        // (different-property-descriptors.js).
         return Value.false_;
     }
-    target.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+    if (receiver_obj.properties.contains(key_slice)) {
+        // Existing data descriptor on Receiver — writability of
+        // the receiver's slot gates the write (§10.1.9.2 step
+        // 3.e.ii). On success the receiver's value is replaced;
+        // its other flags stay put.
+        const flags = receiver_obj.flagsFor(key_slice);
+        if (!flags.writable) return Value.false_;
+        receiver_obj.properties.put(realm.allocator, key_slice, v) catch return error.OutOfMemory;
+        return Value.true_;
+    }
+    // §10.1.9.2 step 3.f — CreateDataProperty(Receiver, P, V).
+    // Receiver doesn't have the property; create it with the
+    // default `{writable, enumerable, configurable}: true` flags.
+    if (!receiver_obj.extensible) return Value.false_;
+    const owned_k = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
+    receiver_obj.set(realm.allocator, owned_k.bytes, v) catch return error.OutOfMemory;
     return Value.true_;
+}
+
+/// §7.1.19 ToPropertyKey — fail-loud version for Reflect.* call
+/// sites. Object keys run through `toPrimitive(string)`; a user-
+/// side throwing `toString` / `valueOf` / `@@toPrimitive`
+/// propagates as `error.NativeThrew` so `return-abrupt-from-
+/// property-key.js` sees the Test262Error.
+fn toPropertyKeySpec(realm: *Realm, v: Value) NativeError![]const u8 {
+    if (v.isString()) {
+        const s: *JSString = @ptrCast(@alignCast(v.asString()));
+        return s.bytes;
+    }
+    if (heap_mod.valueAsSymbol(v)) |sym| return sym.prop_key;
+    if (heap_mod.valueAsPlainObject(v) != null or heap_mod.valueAsFunction(v) != null) {
+        const prim = try intrinsics.toPrimitive(realm, v, .string);
+        if (heap_mod.valueAsSymbol(prim)) |sym| return sym.prop_key;
+        const s = try intrinsics.stringifyArg(realm, prim);
+        return s.bytes;
+    }
+    const s = try intrinsics.stringifyArg(realm, v);
+    return s.bytes;
 }
 
 fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -556,6 +643,16 @@ fn reflectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) 
     if (target == realm.intrinsics.object_prototype.?) {
         return Value.fromBool(new_proto == target.prototype);
     }
+    // §10.1.2.1 OrdinarySetPrototypeOf step 3 — if the proto is
+    // already the requested value, return true without touching
+    // the slot (cheap SameValue short-circuit).
+    if (new_proto == target.prototype) return Value.true_;
+    // §10.1.2.1 OrdinarySetPrototypeOf step 5 — non-extensible
+    // targets reject any prototype CHANGE; same-value writes are
+    // covered by the SameValue short-circuit above. The fixture
+    // `Reflect/setPrototypeOf/return-false-if-target-is-not-
+    // extensible.js` checks this branch.
+    if (!target.extensible) return Value.false_;
     // §10.1.2.1 OrdinarySetPrototypeOf step 8 — cycle detection.
     var cursor: ?*@import("../object.zig").JSObject = new_proto;
     while (cursor) |node| {
