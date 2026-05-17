@@ -6448,6 +6448,22 @@ fn runFrames(
                         .configurable = false,
                     }) catch return error.OutOfMemory;
                 }
+                // §10.4.4.7 step 7 — DefinePropertyOrThrow on
+                // @@iterator pointing at %Array.prototype.values%.
+                // Without this, `[...arguments]` and
+                // `for (const x of arguments)` fall through the
+                // GetIterator path with a TypeError. Resolve the
+                // function via Array.prototype.values (its identity
+                // is intentional — `arguments[@@iterator] ===
+                // Array.prototype.values` per §10.4.4.7 step 7).
+                if (realm.intrinsics.array_prototype) |arr_proto| {
+                    const values_v = arr_proto.get("values");
+                    if (heap_mod.valueAsFunction(values_v) != null) {
+                        obj.setWithFlags(allocator, "@@iterator", values_v, .{
+                            .writable = true, .enumerable = false, .configurable = true,
+                        }) catch return error.OutOfMemory;
+                    }
+                }
                 acc = heap_mod.taggedObject(obj);
             },
 
