@@ -1099,30 +1099,35 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     // Iterable path — preferred when present per §23.1.2.1 step 4.
     // GetMethod(items, @@iterator) walks the prototype chain; if
     // it resolves to a callable, take the iterator-protocol path.
+    // A throwing accessor on `@@iterator` propagates via `try`.
     const iter_method_v = try getPropertyChain(realm, src, "@@iterator");
     if (heap_mod.valueAsFunction(iter_method_v)) |iter_method| {
         // §23.1.2.1 step 5.a — `If IsConstructor(C) is true, let A
-        // be ? Construct(C)`. Replace the default Array receiver
-        // with the constructed object; element writes below land
-        // on it instead.
+        // be ? Construct(C)`. Construct runs BEFORE GetIterator so
+        // a throwing constructor (iter-cstm-ctor-err) propagates
+        // without ever calling `@@iterator`.
         if (this_ctor) |c| {
-            const ctor_v = constructForFromAsync(realm, c, &.{}) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.NativeThrew,
-            };
+            const ctor_v = try constructForFromAsync(realm, c, &.{});
             const ctor_obj = heap_mod.valueAsPlainObject(ctor_v) orelse return throwTypeError(realm, "Array.from: constructor did not return an object");
             out = ctor_obj;
             scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
         }
+        // §7.4.2 GetIterator(items, sync) — `Call(@@iterator, items)`.
+        // A throw from the iterator factory (iter-get-iter-err) must
+        // propagate as the user's exception, NOT a generic TypeError.
         const iter_outcome = interpreter.callJSFunction(realm.allocator, realm, iter_method, items, &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
         const iter = switch (iter_outcome) {
             .value, .yielded => |v| v,
-            .thrown => return error.NativeThrew,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
         };
         const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return throwTypeError(realm, "Array.from: @@iterator did not return an iterator object");
+        scope.push(iter) catch return error.OutOfMemory;
         const next_v = try getPropertyChain(realm, iter_obj, "next");
         const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "Array.from: iterator missing callable 'next'");
 
@@ -1130,56 +1135,85 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         const max_iter: usize = 1 << 24;
         var step: usize = 0;
         while (step < max_iter) : (step += 1) {
+            // §7.4.6 IteratorStep — `IteratorNext` then `IteratorComplete`.
+            // A throw from `next()` (iter-adv-err) is *not* closed: the
+            // iterator's `return` is only invoked when the failure comes
+            // from steps *after* a successful `next` per §7.4.10.
             const result_outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };
             const result = switch (result_outcome) {
                 .value, .yielded => |v| v,
-                .thrown => return error.NativeThrew,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
             };
             const result_obj = heap_mod.valueAsPlainObject(result) orelse return throwTypeError(realm, "Array.from: iterator next() did not return an object");
             // §7.4.7 IteratorComplete / IteratorValue go through
             // ordinary [[Get]] — accessor descriptors on `done` /
             // `value` (poisoned-iterator fixtures) must invoke the
-            // getter and propagate any throw. Plain `obj.get` is
-            // accessor-blind and would silently keep iterating.
+            // getter and propagate any throw.
             if (intrinsics.toBoolean(try getPropertyChain(realm, result_obj, "done"))) break;
             const raw_v = try getPropertyChain(realm, result_obj, "value");
+            // §23.1.2.1 step 5.g.vii — if mapping, `Call(mapfn, T,
+            // « value, k »)`. Abrupt → IteratorClose(iterator, abrupt)
+            // (iter-map-fn-err).
             const elem: Value = blk: {
                 if (mapfn) |mf| {
                     const cb_args = [_]Value{ raw_v, numberFromI64(k) };
                     const outcome = interpreter.callJSFunction(realm.allocator, realm, mf, this_arg, &cb_args) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
-                        else => return error.NativeThrew,
+                        else => {
+                            closeIterOnAbrupt(realm, iter_obj, iter);
+                            return error.NativeThrew;
+                        },
                     };
                     switch (outcome) {
                         .value, .yielded => |v| break :blk v,
-                        .thrown => return error.NativeThrew,
+                        .thrown => |ex| {
+                            realm.pending_exception = ex;
+                            closeIterOnAbrupt(realm, iter_obj, iter);
+                            return error.NativeThrew;
+                        },
                     }
                 } else break :blk raw_v;
             };
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{k}) catch unreachable;
+            // The receiver stores property names by reference; the
+            // stack-scoped `ibuf` would dangle. Mint a heap-owned
+            // JSString and use its persistent bytes.
             const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-            out.set(realm.allocator, idx_owned.bytes, elem) catch return error.OutOfMemory;
+            // §23.1.2.1 step 5.g.viii — `CreateDataPropertyOrThrow(A,
+            // Pk, mappedValue)`. Failure → IteratorClose(iterator)
+            // then propagate (iter-set-elem-prop-err).
+            createDataPropertyOrThrowGeneric(realm, out, idx_owned.bytes, elem) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    closeIterOnAbrupt(realm, iter_obj, iter);
+                    return error.NativeThrew;
+                },
+            };
             k += 1;
         }
-        setLength(realm, out, k) catch return error.OutOfMemory;
+        // §23.1.2.1 step 5.g.iv.1 — `Set(A, "length", 𝔽(k), true)`.
+        // Use the spec-faithful Set so a prototype-chain `length`
+        // setter fires (iter-set-length-err). No iterator close —
+        // we exited via `done: true`, the iterator is already done.
+        try setOrThrow(realm, out, "length", numberFromI64(k));
         return heap_mod.taggedObject(out);
     }
 
     // Array-like fallback (`length` + indexed get).
     const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(src));
-    // §23.1.2.1 step 6.a — `If IsConstructor(C) is true, let A be
+    // §23.1.2.1 step 7.a — `If IsConstructor(C) is true, let A be
     // ? Construct(C, « 𝔽(len) »)`. Replace the default Array
     // receiver with the constructed object.
     if (this_ctor) |c| {
         const ctor_args = [_]Value{numberFromI64(len)};
-        const ctor_v = constructForFromAsync(realm, c, &ctor_args) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.NativeThrew,
-        };
+        const ctor_v = try constructForFromAsync(realm, c, &ctor_args);
         const ctor_obj = heap_mod.valueAsPlainObject(ctor_v) orelse return throwTypeError(realm, "Array.from: constructor did not return an object");
         out = ctor_obj;
         scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
@@ -1188,23 +1222,65 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        const raw_v = src.get(islice);
+        // §23.1.2.1 step 7.e.ii — `Get(arrayLike, Pk)`. Use the
+        // accessor-aware chain so a throwing indexed getter
+        // propagates rather than being silently coerced.
+        const raw_v = try getPropertyChain(realm, src, islice);
+        // §23.1.2.1 step 7.e.iv — optional `Call(mapfn, T,
+        // « kValue, k »)`. No iterator to close on this path.
         const elem: Value = blk: {
             if (mapfn) |mf| {
                 const cb_args = [_]Value{ raw_v, numberFromI64(i) };
-
-                const outcome = interpreter.callJSFunction(realm.allocator, realm, mf, this_arg, &cb_args) catch return error.NativeThrew;
+                const outcome = interpreter.callJSFunction(realm.allocator, realm, mf, this_arg, &cb_args) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
                 switch (outcome) {
                     .value, .yielded => |v| break :blk v,
-                    .thrown => return error.NativeThrew,
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
                 }
             } else break :blk raw_v;
         };
+        // Receiver stores keys by reference — see iterator path.
         const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        out.set(realm.allocator, idx_owned.bytes, elem) catch return error.OutOfMemory;
+        // §23.1.2.1 step 7.e.v — `CreateDataPropertyOrThrow(A, Pk,
+        // mappedValue)`. Honours non-extensible / non-configurable
+        // (source-object-length-set-elem-prop-err) and overwrites
+        // a configurable-but-non-writable own slot back to the
+        // {w,e,c}-true default (source-object-length-set-elem-
+        // prop-non-writable).
+        try createDataPropertyOrThrowGeneric(realm, out, idx_owned.bytes, elem);
     }
-    setLength(realm, out, len) catch return error.OutOfMemory;
+    // §23.1.2.1 step 7.f — `Set(A, "length", 𝔽(len), true)`. Spec-
+    // faithful Set so a prototype-chain `length` setter fires.
+    try setOrThrow(realm, out, "length", numberFromI64(len));
     return heap_mod.taggedObject(out);
+}
+
+/// §7.4.10 IteratorClose — invoke `iter.return()` if present, used
+/// when Array.from aborts mid-iteration. Caller has already stashed
+/// the abrupt completion in `realm.pending_exception`; per spec, an
+/// abrupt from `return` is suppressed in favour of the pre-existing
+/// abrupt (§7.4.10 step 5). No-op if `return` is missing / not
+/// callable.
+fn closeIterOnAbrupt(realm: *Realm, iter_obj: *JSObject, iter_v: Value) void {
+    const saved = realm.pending_exception;
+    const ret_v = getPropertyChain(realm, iter_obj, "return") catch {
+        realm.pending_exception = saved;
+        return;
+    };
+    if (ret_v.isUndefined() or ret_v.isNull()) return;
+    const ret_fn = heap_mod.valueAsFunction(ret_v) orelse return;
+    const outcome = interpreter.callJSFunction(realm.allocator, realm, ret_fn, iter_v, &.{}) catch {
+        realm.pending_exception = saved;
+        return;
+    };
+    _ = outcome;
+    // Discard any throw from `return`; original abrupt wins.
+    realm.pending_exception = saved;
 }
 
 fn arrayAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
