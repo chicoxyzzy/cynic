@@ -1572,8 +1572,17 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
             {
                 const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'getOwnPropertyDescriptor' trap is not callable");
                 const interpreter = @import("../interpreter.zig");
-                const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                const trap_args = [_]Value{ target_value, Value.fromString(key_str) };
+                // §10.5.5 step 7 — invoke trap with the original
+                // property key. Symbol-keyed properties must be
+                // passed back as the Symbol primitive (not the
+                // flattened `<sym:N>` string the prop bag uses
+                // internally), so user traps see the same value
+                // they were given via `ownKeys`.
+                const key_value: Value = if (isSymbolKey(key))
+                    if (realm.heap.symbolForKey(key)) |sym| heap_mod.taggedSymbol(sym) else Value.fromString(realm.heap.allocateString(key) catch return error.OutOfMemory)
+                else
+                    Value.fromString(realm.heap.allocateString(key) catch return error.OutOfMemory);
+                const trap_args = [_]Value{ target_value, key_value };
                 const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
@@ -2037,8 +2046,8 @@ fn objectAssign(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const src_v = args[i];
-        // Step 5.a — `if nextSource is undefined or null, skip`. All
-        // other primitives (and Functions) ToObject and contribute
+        // §20.1.2.1 step 4.a — `if nextSource is undefined or null, skip`.
+        // All other primitives (and Functions) ToObject and contribute
         // their enumerable own keys.
         if (src_v.isUndefined() or src_v.isNull()) continue;
         const src = heap_mod.valueAsPlainObject(src_v) orelse blk_src: {
@@ -2049,22 +2058,37 @@ fn objectAssign(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             const o = intrinsics.toObjectThis(realm, src_v) catch continue;
             break :blk_src o;
         };
-        // §20.1.2.1 step 5 — `OwnPropertyKeys(from)` includes the
-        // Array exotic's packed indexed slots; `ownPropertyKeysOrdered`
-        // surfaces them ahead of string keys.
-        const keys = try ownPropertyKeysOrdered(realm, src);
+        // §20.1.2.1 step 4.a.ii — `keys = ? from.[[OwnPropertyKeys]]()`.
+        // Route through `proxyOwnKeysOrNull` so a Proxy's `ownKeys`
+        // trap fires with the §10.5.11 invariants enforced. Falls
+        // back to the ordinary keys when `src` isn't a proxy.
+        const keys = if (try proxyOwnKeysOrNull(realm, src)) |k| k else try ownPropertyKeysOrdered(realm, src);
         defer realm.allocator.free(keys);
+        const src_value: Value = heap_mod.taggedObject(src);
         for (keys) |key| {
             if (std.mem.startsWith(u8, key, "__cynic_")) continue;
-            if (!src.flagsFor(key).enumerable) continue;
-            // §20.1.2.1 step 5.c.iv — Get(from, nextKey) so accessor
-            // getters on the source fire instead of being read past.
+            // §20.1.2.1 step 4.a.iii.1 — `desc = ? from.[[GetOwnProperty]](nextKey)`.
+            // For a Proxy this fires `getOwnPropertyDescriptor`; for
+            // a plain object it returns the own descriptor (or
+            // undefined when the key vanished between OwnPropertyKeys
+            // and now). Use objectGetOwnPropertyDescriptor so the
+            // Proxy invariants and abrupt completions propagate.
+            const key_string = realm.heap.allocateString(key) catch return error.OutOfMemory;
+            const desc_args = [_]Value{ src_value, Value.fromString(key_string) };
+            const desc_v = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &desc_args);
+            // §20.1.2.1 step 4.a.iii.2 — only act when `desc` is not
+            // undefined AND `desc.[[Enumerable]]` is true.
+            if (desc_v.isUndefined()) continue;
+            const desc_obj = heap_mod.valueAsPlainObject(desc_v) orelse continue;
+            const enum_v = desc_obj.get("enumerable");
+            if (!intrinsics.toBoolean(enum_v)) continue;
+            // §20.1.2.1 step 4.a.iii.2.a — `propValue = ? Get(from, nextKey)`.
+            // This fires accessor getters AND Proxy `get` traps.
             const v = try getPropertyChain(realm, src, key);
-            // §20.1.2.1 step 5.c.iv.2.b — `Set(to, nextKey, propValue, true)`.
+            // §20.1.2.1 step 4.a.iii.2.b — `Set(to, nextKey, propValue, true)`.
             // Strict-mode Set per §10.1.9 throws TypeError on any
             // failure (non-extensible + new key, non-writable own
             // data, getter-only accessor, setter throw).
-            const key_string = realm.heap.allocateString(key) catch return error.OutOfMemory;
             try assignSetOrThrow(realm, target, key_string, v);
         }
     }
