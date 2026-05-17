@@ -1589,6 +1589,63 @@ pub fn openForInIterator(
     } else if (heap_mod.valueAsPlainObject(obj_v)) |start_obj| {
         var current: ?*JSObject = start_obj;
         while (current) |cur| {
+            // §14.7.5.6 EnumerateObjectProperties — for a Proxy
+            // exotic, call `[[OwnPropertyKeys]]` (which dispatches
+            // the `ownKeys` trap or falls through to the target)
+            // and filter by `[[GetOwnProperty]].[[Enumerable]]`
+            // (which dispatches the `getOwnPropertyDescriptor`
+            // trap). We materialise both via the helpers in
+            // builtins/object.zig.
+            if (cur.proxy_target != null or cur.proxy_target_fn != null or cur.proxy_revoked) {
+                const obj_mod = @import("builtins/object.zig");
+                if (obj_mod.proxyOwnKeysOrNull(realm, cur)) |maybe_keys| {
+                    if (maybe_keys) |keys| {
+                        defer realm.allocator.free(keys);
+                        for (keys) |k| {
+                            // Skip Symbol keys — for-in is string-keyed only.
+                            if (std.mem.startsWith(u8, k, "@@") or std.mem.startsWith(u8, k, "<sym:")) continue;
+                            if (seen.contains(k)) continue;
+                            // Probe enumerability via Object.getOwnPropertyDescriptor.
+                            const key_str = realm.heap.allocateString(k) catch return error.OutOfMemory;
+                            const probe_args = [_]Value{ heap_mod.taggedObject(cur), Value.fromString(key_str) };
+                            const desc_v = obj_mod.objectGetOwnPropertyDescriptor(realm, Value.undefined_, &probe_args) catch |err| switch (err) {
+                                error.OutOfMemory => return error.OutOfMemory,
+                                error.NativeThrew => {
+                                    realm.pending_exception = null;
+                                    continue;
+                                },
+                            };
+                            const enum_ok = blk: {
+                                if (desc_v.isUndefined()) break :blk false;
+                                if (heap_mod.valueAsPlainObject(desc_v)) |desc_obj| {
+                                    const arith_mod = @import("interpreter_arith.zig");
+                                    break :blk arith_mod.toBoolean(desc_obj.get("enumerable"));
+                                }
+                                break :blk false;
+                            };
+                            const gop = seen.getOrPut(realm.allocator, k) catch return error.OutOfMemory;
+                            if (gop.found_existing) continue;
+                            if (!enum_ok) continue;
+                            var ibuf: [16]u8 = undefined;
+                            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
+                            const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+                            const k_owned = realm.heap.allocateString(k) catch return error.OutOfMemory;
+                            arr.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
+                            len += 1;
+                        }
+                    }
+                } else |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NativeThrew => {
+                        realm.pending_exception = null;
+                    },
+                }
+                // Walk to the prototype (§14.7.5.6 step 6) — the
+                // proxy's `getPrototypeOf` trap would intervene but
+                // for now we just read `cur.prototype`.
+                current = cur.prototype;
+                continue;
+            }
             // §10.1.11 — within each level, integer-indexed
             // keys come first in ascending numeric order, then
             // string keys in insertion order. Symbol keys
@@ -9868,6 +9925,40 @@ fn getThroughChain(
                 },
                 .handled => return .handled,
                 .uncaught => |ex| return .{ .uncaught = ex },
+            }
+        }
+        // Callable proxy (target is a function held in
+        // `proxy_target_fn`) — trapless reads forward to the
+        // function target. We don't have a trap-dispatch entry
+        // point for this case yet (the helper would need to
+        // operate over Values not *JSObject), so apply the §10.5.5
+        // step 7.a fallthrough directly when no handler.get is
+        // installed.
+        if (c.proxy_target_fn) |target_fn| {
+            const handler_opt = c.proxy_handler;
+            const trap_v = if (handler_opt) |h| h.get("get") else Value.undefined_;
+            if (trap_v.isUndefined() or trap_v.isNull()) {
+                // Forward to the function target's own get.
+                return .{ .value = target_fn.get(key) };
+            }
+            // Trap installed — dispatch with `target_fn` as the
+            // first arg (proxy target value).
+            const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
+                const ex = try makeTypeError(realm, "Proxy 'get' trap is not callable");
+                f.ip = ip;
+                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                return .handled;
+            };
+            const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+            const args = [_]Value{ heap_mod.taggedFunction(target_fn), Value.fromString(key_str), receiver };
+            const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler_opt.?), &args);
+            switch (outcome) {
+                .value, .yielded => |v| return .{ .value = v },
+                .thrown => |ex| {
+                    f.ip = ip;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                    return .handled;
+                },
             }
         }
         if (c.accessors.get(key)) |acc| {

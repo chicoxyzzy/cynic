@@ -1452,27 +1452,37 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
     // recurses into target.[[GetOwnProperty]]).
     if (heap_mod.valueAsPlainObject(target)) |obj_chain_root| {
         var cursor = obj_chain_root;
-        while (cursor.proxy_target != null or cursor.proxy_revoked) {
+        while (cursor.proxy_target != null or cursor.proxy_target_fn != null or cursor.proxy_revoked) {
             if (cursor.proxy_revoked) return throwTypeError(realm, "Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");
-            const proxy_target = cursor.proxy_target.?;
             const handler = cursor.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'getOwnPropertyDescriptor' on a proxy with null handler");
-            const trap_v = handler.get("getOwnPropertyDescriptor");
+            // Build a Value for the proxy target — plain-object
+            // target lives in `proxy_target`, callable target in
+            // `proxy_target_fn`.
+            const target_value: Value = if (cursor.proxy_target) |t|
+                heap_mod.taggedObject(t)
+            else if (cursor.proxy_target_fn) |tfn|
+                heap_mod.taggedFunction(tfn)
+            else
+                unreachable;
+            const trap_v = try intrinsics.getPropertyChain(realm, handler, "getOwnPropertyDescriptor");
             if (trap_v.isUndefined() or trap_v.isNull()) {
                 // §10.5.5 step 7.a — fall through to target.
                 // [[GetOwnProperty]]. If target itself is a proxy,
                 // loop; otherwise recurse to the non-proxy path.
-                if (proxy_target.proxy_target != null or proxy_target.proxy_revoked) {
-                    cursor = proxy_target;
-                    continue;
+                if (cursor.proxy_target) |proxy_target| {
+                    if (proxy_target.proxy_target != null or proxy_target.proxy_target_fn != null or proxy_target.proxy_revoked) {
+                        cursor = proxy_target;
+                        continue;
+                    }
                 }
-                const inner_args = [_]Value{ heap_mod.taggedObject(proxy_target), argOr(args, 1, Value.undefined_) };
+                const inner_args = [_]Value{ target_value, argOr(args, 1, Value.undefined_) };
                 return objectGetOwnPropertyDescriptor(realm, Value.undefined_, &inner_args);
             }
             {
                 const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'getOwnPropertyDescriptor' trap is not callable");
                 const interpreter = @import("../interpreter.zig");
                 const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                const trap_args = [_]Value{ heap_mod.taggedObject(proxy_target), Value.fromString(key_str) };
+                const trap_args = [_]Value{ target_value, Value.fromString(key_str) };
                 const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
@@ -1489,43 +1499,47 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
                 if (!result_v.isUndefined() and heap_mod.valueAsPlainObject(result_v) == null) {
                     return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy must return an Object or undefined");
                 }
-                // §10.5.5 step 9-17 — invariants.
-                const target_had = proxy_target.hasOwn(key) or proxy_target.accessors.contains(key);
-                if (result_v.isUndefined()) {
-                    // Trap reports "absent". The target's own
-                    // non-configurable property MUST also be
-                    // absent; otherwise the trap lied.
-                    if (target_had) {
+                // §10.5.5 step 9-17 — invariants only fire when the
+                // target is a plain object (callable-target invariants
+                // are subsumed by JSFunction's own ordinary [[GetOwnProperty]]).
+                if (cursor.proxy_target) |proxy_target| {
+                    const target_had = proxy_target.hasOwn(key) or proxy_target.accessors.contains(key);
+                    if (result_v.isUndefined()) {
+                        // Trap reports "absent". The target's own
+                        // non-configurable property MUST also be
+                        // absent; otherwise the trap lied.
+                        if (target_had) {
+                            const tflags = proxy_target.flagsFor(key);
+                            if (!tflags.configurable) {
+                                return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy reported undefined for a non-configurable target property");
+                            }
+                            if (!proxy_target.extensible) {
+                                return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy reported undefined for a present property of a non-extensible target");
+                            }
+                        }
+                        return result_v;
+                    }
+                    // Trap returned a descriptor. If it claims
+                    // non-configurable, the target's current
+                    // descriptor must (a) exist, and (b) also be
+                    // non-configurable.
+                    const result_obj = heap_mod.valueAsPlainObject(result_v).?;
+                    const parsed_inv = parseDescriptor(realm, result_obj) catch return result_v;
+                    if (parsed_inv.has_configurable and !parsed_inv.configurable) {
+                        if (!target_had) {
+                            return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy reported non-configurable for an absent target property");
+                        }
                         const tflags = proxy_target.flagsFor(key);
-                        if (!tflags.configurable) {
-                            return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy reported undefined for a non-configurable target property");
+                        if (tflags.configurable) {
+                            return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy flipped a configurable target property to non-configurable");
                         }
-                        if (!proxy_target.extensible) {
-                            return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy reported undefined for a present property of a non-extensible target");
-                        }
-                    }
-                    return result_v;
-                }
-                // Trap returned a descriptor. If it claims
-                // non-configurable, the target's current
-                // descriptor must (a) exist, and (b) also be
-                // non-configurable.
-                const result_obj = heap_mod.valueAsPlainObject(result_v).?;
-                const parsed_inv = parseDescriptor(realm, result_obj) catch return result_v;
-                if (parsed_inv.has_configurable and !parsed_inv.configurable) {
-                    if (!target_had) {
-                        return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy reported non-configurable for an absent target property");
-                    }
-                    const tflags = proxy_target.flagsFor(key);
-                    if (tflags.configurable) {
-                        return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy flipped a configurable target property to non-configurable");
-                    }
-                    // If the trap reported non-configurable +
-                    // non-writable data, target's matching field
-                    // must agree.
-                    if (parsed_inv.isData() and parsed_inv.has_writable and !parsed_inv.writable) {
-                        if (tflags.writable) {
-                            return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy reported non-writable for a writable target property");
+                        // If the trap reported non-configurable +
+                        // non-writable data, target's matching field
+                        // must agree.
+                        if (parsed_inv.isData() and parsed_inv.has_writable and !parsed_inv.writable) {
+                            if (tflags.writable) {
+                                return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy reported non-writable for a writable target property");
+                            }
                         }
                     }
                 }

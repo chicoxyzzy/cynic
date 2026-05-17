@@ -32,6 +32,14 @@ pub fn install(realm: *Realm) !void {
         .name = "Proxy", .ctor = proxyConstructor, .arity = 2,
         .set_home_object = false,
     });
+    // §28.2 — the Proxy constructor does NOT have a `prototype`
+    // property. Proxy exotic objects don't have a [[Prototype]]
+    // internal slot that requires initialization (the [[Prototype]]
+    // is dictated by the wrapped target). Drop the prototype the
+    // generic `installConstructor` set so
+    // `'prototype' in Proxy` / `Object.getOwnPropertyDescriptor(Proxy,
+    // 'prototype')` match V8 / JSC / SpiderMonkey.
+    installed.ctor.prototype = null;
     // §28.2.2.1 Proxy.revocable — static method, length 2.
     try installNativeMethod(realm, installed.ctor, "revocable", proxyRevocable, 2);
 }
