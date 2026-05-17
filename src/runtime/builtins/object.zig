@@ -121,9 +121,13 @@ pub fn install(realm: *Realm) !void {
     if (realm.intrinsics.object_prototype) |obj_proto| {
         try installNativeMethodOnProto(realm, obj_proto, "hasOwnProperty", objectHasOwnProperty, 1);
         try installNativeMethodOnProto(realm, obj_proto, "toString", objectProtoToString, 0);
-        // §20.1.3.5 — `toLocaleString` shipped with arity 0;
-        // the two reserved parameters are vestigial host hooks
-        // for Intl and don't count toward `.length`.
+        // §20.1.3.5 — Object.prototype.toLocaleString( reserved1,
+        // reserved2 ). The two reserved params are vestigial host
+        // hooks for Intl and don't count toward `.length`, so arity
+        // is 0. Per spec the entire body is `Return ? Invoke(O,
+        // "toString")` — dispatch back through the receiver's
+        // `toString` so subclasses overriding `toString` also
+        // override `toLocaleString`.
         try installNativeMethodOnProto(realm, obj_proto, "toLocaleString", objectProtoToLocaleString, 0);
         try installNativeMethodOnProto(realm, obj_proto, "valueOf", objectProtoValueOf, 0);
         try installNativeMethodOnProto(realm, obj_proto, "propertyIsEnumerable", objectProtoPropertyIsEnumerable, 1);
@@ -534,6 +538,11 @@ fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError
         if (obj.is_module_namespace and !std.mem.startsWith(u8, key, "@@") and !std.mem.startsWith(u8, key, "<sym:")) {
             _ = try @import("../module.zig").namespaceGetThrowingOnHole(realm, obj, key);
         }
+        // §20.1.2.18 / §7.3.21 — `kind = "key"` filters to string
+        // keys (Symbol keys live in `Object.getOwnPropertySymbols`).
+        // Cynic flattens symbols into `@@<name>` / `<sym:N>`; filter
+        // both forms so neither leaks into `Object.keys`.
+        if (isSymbolKey(key)) continue;
         if (!obj.flagsFor(key).enumerable) continue;
         const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
         var ibuf: [16]u8 = undefined;
@@ -562,6 +571,10 @@ fn objectValues(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     var idx: usize = 0;
     for (keys) |key| {
+        // §20.1.2.21 / §7.3.21 — `kind = "value"` filters to
+        // string keys (symbol keys belong to
+        // getOwnPropertySymbols, not Object.values).
+        if (isSymbolKey(key)) continue;
         if (!obj.flagsFor(key).enumerable) continue;
         var ibuf: [16]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
@@ -589,6 +602,10 @@ fn objectEntries(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     var idx: usize = 0;
     for (keys) |key| {
+        // §20.1.2.5 / §7.3.21 — `kind = "key+value"` filters to
+        // string keys; symbol keys belong to
+        // getOwnPropertySymbols.
+        if (isSymbolKey(key)) continue;
         if (!obj.flagsFor(key).enumerable) continue;
         const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
         pair.prototype = realm.intrinsics.array_prototype;
@@ -2934,6 +2951,54 @@ fn lookupToStringTag(realm: *Realm, this_value: Value) NativeError!?Value {
         if (v.isString()) return v;
     }
     return null;
+}
+
+/// §20.1.3.5 Object.prototype.toLocaleString ( [ reserved1 [ ,
+/// reserved2 ] ] ). Per spec the body is `Return ? Invoke(O,
+/// "toString")` — dispatch back through the receiver's
+/// `toString` so subclasses overriding `toString` also override
+/// `toLocaleString`. The reserved parameters are vestigial host
+/// hooks (kept for Intl-extended overrides) and don't count
+/// toward `.length`.
+fn objectProtoToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    // §7.3.18 Invoke(V, P) — `func = ? GetV(V, P)`. ToObject
+    // primitives so the prototype-installed `toString` resolves,
+    // but keep the original receiver for the call.
+    const obj_v = if (heap_mod.valueAsPlainObject(this_value) != null or heap_mod.valueAsFunction(this_value) != null)
+        this_value
+    else
+        heap_mod.taggedObject(try intrinsics.toObjectThis(realm, this_value));
+    const obj = heap_mod.valueAsPlainObject(obj_v) orelse {
+        // The receiver was a callable; functions have their own
+        // chain. Resolve via JSFunction's own `get`.
+        if (heap_mod.valueAsFunction(obj_v)) |fn_obj| {
+            const func_v = fn_obj.get("toString");
+            const callee = heap_mod.valueAsFunction(func_v) orelse
+                return throwTypeError(realm, "Object.prototype.toLocaleString: toString is not callable");
+            return callAndUnwrap(realm, callee, this_value);
+        }
+        return throwTypeError(realm, "Object.prototype.toLocaleString: receiver is not an object");
+    };
+    const func_v = try intrinsics.getPropertyChain(realm, obj, "toString");
+    const callee = heap_mod.valueAsFunction(func_v) orelse
+        return throwTypeError(realm, "Object.prototype.toLocaleString: toString is not callable");
+    return callAndUnwrap(realm, callee, this_value);
+}
+
+fn callAndUnwrap(realm: *Realm, callee: *JSFunction, this_value: Value) NativeError!Value {
+    const interp = @import("../interpreter.zig");
+    const outcome = interp.callJSFunction(realm.allocator, realm, callee, this_value, &[_]Value{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    return switch (outcome) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| blk: {
+            realm.pending_exception = ex;
+            break :blk error.NativeThrew;
+        },
+    };
 }
 
 fn objectProtoValueOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

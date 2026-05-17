@@ -356,6 +356,10 @@ pub const skip_ses_exact_paths = [_][]const u8{
     "built-ins/Function/prototype/S15.3.5.2_A1_T1.js",
     "built-ins/Function/prototype/toString/Function.js",
     "built-ins/Object/entries/tamper-with-global-object.js",
+    // §18.2.1 — `eval` is not shipped (AGENTS.md strict-only
+    // policy). Sputnik fixture probes `global.eval`'s own
+    // descriptor; without eval the test can't be evaluated.
+    "built-ins/Object/getOwnPropertyDescriptor/15.2.3.3-4-4.js",
     "built-ins/Object/getOwnPropertyDescriptor/15.2.3.3-4-187.js",
     "built-ins/Object/getOwnPropertyDescriptor/15.2.3.3-4-188.js",
     "built-ins/Object/values/tamper-with-global-object.js",

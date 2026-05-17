@@ -119,6 +119,14 @@ fn installAggregateError(realm: *Realm, parent_proto: *JSObject) !*JSFunction {
     const empty = try realm.heap.allocateString("");
     try setNonEnumerable(proto, realm.allocator, "message", Value.fromString(empty));
     fn_obj.prototype = proto;
+    // §20.5.7.2.1 — AggregateError.prototype is `{ writable:
+    // false, enumerable: false, configurable: false }` (same
+    // shape as other NativeError prototypes). Override the
+    // default `{w:true, e:false, c:false}` from
+    // `JSFunction.flagsForOwn`.
+    try fn_obj.property_flags.put(realm.allocator, "prototype", .{
+        .writable = false, .enumerable = false, .configurable = false,
+    });
     try realm.globals.put(realm.allocator, "AggregateError", heap_mod.taggedFunction(fn_obj));
     return fn_obj;
 }
@@ -270,6 +278,15 @@ pub fn installError(
     const name_str = try realm.heap.allocateString(name);
     try setNonEnumerable(proto, realm.allocator, "name", Value.fromString(name_str));
     fn_obj.prototype = proto;
+    // §20.5.5.1 / §20.5.6.2.1 — Error.prototype and
+    // NativeError.prototype are `{ writable: false, enumerable:
+    // false, configurable: false }`. `JSFunction.flagsForOwn`
+    // defaults to `{w:true, e:false, c:false}` for non-class
+    // constructors; install an override so test262 sees the
+    // spec-mandated frozen shape.
+    try fn_obj.property_flags.put(realm.allocator, "prototype", .{
+        .writable = false, .enumerable = false, .configurable = false,
+    });
     try realm.globals.put(realm.allocator, name, heap_mod.taggedFunction(fn_obj));
     return fn_obj;
 }
