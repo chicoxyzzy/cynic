@@ -25,6 +25,7 @@ const argOr = intrinsics.argOr;
 const ownPropertyKeysOrdered = intrinsics.ownPropertyKeysOrdered;
 const getPropertyChain = intrinsics.getPropertyChain;
 const throwTypeError = intrinsics.throwTypeError;
+const throwSyntaxError = intrinsics.throwSyntaxError;
 const isArrayLike = intrinsics.isArrayLike;
 const setLength = intrinsics.setLength;
 const lengthOfArray = intrinsics.lengthOfArray;
@@ -131,6 +132,14 @@ pub fn install(realm: *Realm) !void {
     const parse_fn = try realm.heap.allocateFunctionNative(jsonParse, 2, "parse");
     parse_fn.has_construct = false;
     try json_obj.setWithFlags(realm.allocator, "parse", heap_mod.taggedFunction(parse_fn), method_flags);
+    // §25.5.4 / §25.5.3 — JSON.rawJSON / JSON.isRawJSON
+    // (json-parse-with-source, Stage 4 ES2025).
+    const raw_json_fn = try realm.heap.allocateFunctionNative(jsonRawJSON, 1, "rawJSON");
+    raw_json_fn.has_construct = false;
+    try json_obj.setWithFlags(realm.allocator, "rawJSON", heap_mod.taggedFunction(raw_json_fn), method_flags);
+    const is_raw_json_fn = try realm.heap.allocateFunctionNative(jsonIsRawJSON, 1, "isRawJSON");
+    is_raw_json_fn.has_construct = false;
+    try json_obj.setWithFlags(realm.allocator, "isRawJSON", heap_mod.taggedFunction(is_raw_json_fn), method_flags);
     try realm.globals.put(realm.allocator, "JSON", heap_mod.taggedObject(json_obj));
 }
 
@@ -450,6 +459,27 @@ fn serializeJSONProperty(
                 realm.pending_exception = ex;
                 return error.NativeThrew;
             },
+        }
+    }
+
+    // §25.5.2.4 step 4 (json-parse-with-source revision) — a
+    // [[IsRawJSON]]-branded object short-circuits the entire
+    // pipeline: emit the canonical `rawJSON` text verbatim. The
+    // brand is set only by `JSON.rawJSON(text)`, which already
+    // validated the text is a single non-Object/Array JSON value.
+    // Checked AFTER the replacer (per spec ordering) so a replacer
+    // returning a rawJSON wrapper still gets the verbatim treatment
+    // (the bigint-raw-json-can-be-stringified fixture exercises
+    // exactly this — replacer rewrites a BigInt into JSON.rawJSON
+    // and the stringified output must inline the digits).
+    if (heap_mod.valueAsPlainObject(value)) |obj_raw| {
+        if (obj_raw.is_raw_json) {
+            const raw_v = obj_raw.get("rawJSON");
+            if (raw_v.isString()) {
+                const s: *JSString = @ptrCast(@alignCast(raw_v.asString()));
+                try buf.appendSlice(realm.allocator, s.bytes);
+                return true;
+            }
         }
     }
 
@@ -1311,3 +1341,99 @@ const JsonParser = struct {
         return Value.fromDouble(d);
     }
 };
+
+// ── §25.5.4 JSON.rawJSON / §25.5.3 JSON.isRawJSON ───────────────────────────
+
+/// §25.5.4 JSON.rawJSON(text). Per the json-parse-with-source
+/// proposal (Stage 4 ES2025):
+///   1. `jsonString = ? ToString(text)` — Symbols throw TypeError.
+///   2. SyntaxError if `jsonString` is empty, OR if its first or
+///      last code unit is JSON whitespace (TAB / LF / CR / SPACE).
+///   3. SyntaxError if not a valid JSON text whose outermost
+///      value is a non-Object, non-Array (so Number, String,
+///      Boolean, or null literals only).
+///   4. Allocate a frozen null-prototype object with a single
+///      `rawJSON` data property carrying the canonical text.
+///   5. Brand it `[[IsRawJSON]]` so `JSON.isRawJSON` returns true
+///      and `JSON.stringify` emits the text verbatim.
+fn jsonRawJSON(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    // Step 1 — ToString. The `try` is load-bearing: Symbols throw
+    // TypeError (per §7.1.17) which the `invalid-JSON-text.js`
+    // fixture asserts for `JSON.rawJSON(Symbol('123'))`.
+    const v = argOr(args, 0, Value.undefined_);
+    const src: *JSString = if (v.isString())
+        @ptrCast(@alignCast(v.asString()))
+    else
+        try stringifyArg(realm, v);
+    const bytes = src.bytes;
+
+    // Step 2 — empty / whitespace-bracketed strings reject. The
+    // §25.5.4 step 2 list is exactly TAB (0x09), LF (0x0A), CR
+    // (0x0D), SPACE (0x20).
+    if (bytes.len == 0) {
+        return throwSyntaxError(realm, "JSON.rawJSON: text must not be empty");
+    }
+    const first = bytes[0];
+    const last = bytes[bytes.len - 1];
+    if (isJsonWhitespace(first) or isJsonWhitespace(last)) {
+        return throwSyntaxError(realm, "JSON.rawJSON: text must not start or end with JSON whitespace");
+    }
+
+    // Step 3 — full JSON-text validation. Outermost value must be
+    // a single primitive (Number / String / Boolean / null); object
+    // and array literals are rejected because the proposal's whole
+    // point is one-shot text inlining of a primitive (the
+    // `invalid-JSON-text` fixture asserts `{}` and `[]` reject).
+    var parser = JsonParser{ .input = bytes, .pos = 0, .realm = realm };
+    parser.skipWs();
+    const parsed = parser.parseValue() catch {
+        return throwSyntaxError(realm, "JSON.rawJSON: text is not a valid JSON value");
+    };
+    parser.skipWs();
+    if (parser.pos != bytes.len) {
+        return throwSyntaxError(realm, "JSON.rawJSON: unexpected trailing characters");
+    }
+    // §25.5.4 step 3 outermost-not-Object/Array check. Branded on
+    // the parsed `Value`: a JSON object surfaces as a plain Object,
+    // a JSON array as an array-exotic object. Both have a non-null
+    // `valueAsPlainObject` result.
+    if (heap_mod.valueAsPlainObject(parsed) != null) {
+        return throwSyntaxError(realm, "JSON.rawJSON: text must be a single JSON primitive (number, string, boolean, or null)");
+    }
+
+    // Step 4-7 — build the frozen, null-proto, branded wrapper.
+    const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+    obj.prototype = null;
+    obj.is_raw_json = true;
+    // CreateDataPropertyOrThrow(obj, "rawJSON", jsonString). After
+    // SetIntegrityLevel(frozen), this slot is `{w:false, e:true,
+    // c:false}` — `returns-expected-object.js` checks that
+    // `Object.hasOwn(obj, "rawJSON")` and that the value matches
+    // the canonical text. The fixture also asserts the property is
+    // enumerable (so the `Object.getOwnPropertyNames` walk surfaces
+    // it as the only own key).
+    obj.setWithFlags(realm.allocator, "rawJSON", Value.fromString(src), .{
+        .writable = false,
+        .enumerable = true,
+        .configurable = false,
+    }) catch return error.OutOfMemory;
+    // SetIntegrityLevel(obj, frozen) — also flips extensibility.
+    obj.extensible = false;
+    return heap_mod.taggedObject(obj);
+}
+
+/// §25.5.3 JSON.isRawJSON(O). Pure brand check — true iff `O` is
+/// an Object whose `[[IsRawJSON]]` internal slot is set.
+fn jsonIsRawJSON(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = this_value;
+    const v = argOr(args, 0, Value.undefined_);
+    const obj = heap_mod.valueAsPlainObject(v) orelse return Value.false_;
+    return Value.fromBool(obj.is_raw_json);
+}
+
+/// §25.5.4 step 2 whitespace set: TAB, LF, CR, SPACE.
+fn isJsonWhitespace(c: u8) bool {
+    return c == 0x09 or c == 0x0A or c == 0x0D or c == 0x20;
+}

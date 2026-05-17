@@ -517,6 +517,13 @@ pub const JSObject = struct {
     /// presence). Cynic's `lda_arguments` opcode sets this when it
     /// synthesises the strict-mode unmapped arguments object.
     is_arguments_exotic: bool = false,
+    /// §25.5.4 `[[IsRawJSON]]` internal slot. Set on the frozen
+    /// null-prototype objects produced by `JSON.rawJSON(text)`.
+    /// `JSON.isRawJSON` brand-tests against it; `JSON.stringify`
+    /// reads the `rawJSON` data property on a branded object and
+    /// emits its bytes verbatim instead of re-serialising. The
+    /// json-parse-with-source proposal (Stage 4 ES2025) covers this.
+    is_raw_json: bool = false,
     /// §9.4.6 Module Namespace exotic object — set when this object
     /// is a Module Namespace produced by `import(spec)` / `import * as
     /// ns from "…"`. The flag flips on `[[Set]]` / `[[Delete]]` /
