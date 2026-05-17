@@ -467,6 +467,20 @@ pub const Compiler = struct {
             try self.builder.emitOp(.throw_assign_const, span);
             return;
         }
+        // §9.1.1.1.4 SetMutableBinding step 9.b — assignment to a
+        // const captured from an outer function-like scope is the
+        // spec's *runtime* TypeError, not an early error. The
+        // `compileAssignment` / `compileUpdate` paths defer to us
+        // for cross-function const writes (see `cross_fn_capture`);
+        // emit the runtime throw so `assert.throws(TypeError, () =>
+        // { c = 1; })` from a nested function rounds-trips per spec.
+        // `is_init` writes (declarator initializers, named-fn-expr
+        // self-bindings, etc.) are NOT assignments and must stay on
+        // the regular `sta_env` / `sta_global_init` path.
+        if (!is_init and binding.kind == .const_ and !binding.is_global and !binding.is_import and binding.env_depth < self.env_depth) {
+            try self.builder.emitOp(.throw_assign_const, span);
+            return;
+        }
         if (binding.is_import) {
             // §8.1.1.5.5 — import bindings are immutable; §8.1.1.1.4
             // SetMutableBinding step 9.b throws TypeError on store
@@ -1214,8 +1228,11 @@ pub const Compiler = struct {
         // Global `const` (§9.1.1.4) defers to runtime TypeError; the
         // named-function-expression self-binding (§15.6.5) is also
         // const but defers to runtime via throw_assign_const. Both
-        // skip the compile-time SyntaxError diagnostic.
-        if (binding.kind == .const_ and !binding.is_global and !binding.is_fn_expr_name) {
+        // skip the compile-time SyntaxError diagnostic. Cross-function
+        // captures (the binding lives in an outer function-like scope)
+        // also defer — see compileAssignment for the parallel rationale.
+        const cross_fn_capture = binding.env_depth < self.env_depth;
+        if (binding.kind == .const_ and !binding.is_global and !binding.is_fn_expr_name and !cross_fn_capture) {
             try self.report(.assignment_to_const, u.span);
             return error.AssignmentToConst;
         }
@@ -3451,8 +3468,15 @@ pub const Compiler = struct {
         // in `assert.throws(TypeError, () => { c = 1; })` without
         // the script's outer compile imploding. Named function-
         // expression self-bindings (§15.6.5) also defer to runtime
-        // via `throw_assign_const`.
-        if (binding.kind == .const_ and !binding.is_import and !binding.is_global and !binding.is_fn_expr_name) {
+        // via `throw_assign_const`. Cross-function captures (the
+        // binding lives in an outer function-like scope, e.g. a
+        // module-top `const` written from inside a nested function)
+        // also defer to runtime: the assignment only executes when
+        // the inner function runs, so the spec's runtime TypeError
+        // is the right shape and lets `assert.throws(TypeError, ()
+        // => { c = 1; })` round-trip — matches V8 / JSC / SM.
+        const cross_fn_capture = binding.env_depth < self.env_depth;
+        if (binding.kind == .const_ and !binding.is_import and !binding.is_global and !binding.is_fn_expr_name and !cross_fn_capture) {
             try self.report(.assignment_to_const, a.span);
             return error.AssignmentToConst;
         }

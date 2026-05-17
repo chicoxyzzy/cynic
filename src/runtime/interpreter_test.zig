@@ -363,6 +363,20 @@ test "later: top-level const reassignment throws TypeError at runtime" {
     try expectScriptThrows("const x = 1; x = 2;");
 }
 
+test "later: cross-function const write defers to runtime TypeError" {
+    // §9.1.1.1.4 SetMutableBinding step 9.b — writing to an
+    // outer-scope `const` from inside a nested function is a
+    // *runtime* TypeError, not an early SyntaxError. The
+    // assignment site is only reachable when the inner function
+    // runs, so the fixture pattern `assert.throws(TypeError, ()
+    // => { c = 1; })` from test262 needs the throw deferred. Same
+    // reasoning as the named-fn-expr self-binding and import-
+    // binding paths — Cynic's compile-time const-reject only
+    // fires when the assignment is statically in the same
+    // function-like scope as the binding.
+    try expectScriptThrows("const x = 1; (function() { x = 2; })();");
+}
+
 test "later: TDZ — reading let before declaration throws ReferenceError" {
     // The Hole sentinel sits in the let's slot from block entry
     // until the declaration runs. Reading it via `Ldar` +
