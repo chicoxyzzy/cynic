@@ -9547,6 +9547,22 @@ fn strictSetPropertyAnchored(
                 .uncaught => |ex| return .{ .uncaught = ex },
             }
         }
+        // §10.1.9.2 OrdinarySetWithOwnDescriptor step 2 — if no own
+        // descriptor exists, recurse into `parent.[[Set]](P, V,
+        // Receiver)`. When a parent is a Proxy, that fires its set
+        // trap (or recurses again per §10.5.6 step 7.a). Check the
+        // chain for a proxy ancestor and route through it,
+        // preserving the original `recv` as Receiver.
+        if (obj.proxy_target == null and !obj.proxy_revoked and chainHasProxy(obj)) {
+            switch (try setThroughChain(allocator, realm, frames, f, ip, obj, key, value, recv)) {
+                .handled_set => |ok| {
+                    if (ok) return .ok;
+                    // Walk consumed the proxies; fall through to
+                    // ordinary set on `recv` for receiver-side write.
+                },
+                .handled_or_uncaught => |out| return out,
+            }
+        }
         if (lookupAccessor(obj, key)) |acc_pair| {
             if (acc_pair.setter) |setter| {
                 const args = [_]Value{value};
@@ -9736,14 +9752,15 @@ fn throwInSetter(
 }
 
 /// True iff any ancestor of `obj` on its prototype chain is a
-/// Proxy exotic (including a revoked proxy). Used by `lda_property`
+/// Proxy exotic (including a revoked proxy or a callable proxy
+/// whose target lives in `proxy_target_fn`). Used by `lda_property`
 /// and `lda_computed_property` to detect when a normal proto-chain
 /// walk would silently bypass a Proxy `get` trap installed on an
 /// ancestor.
 fn chainHasProxy(obj: *JSObject) bool {
     var cursor: ?*JSObject = obj;
     while (cursor) |c| : (cursor = c.prototype) {
-        if (c.proxy_target != null or c.proxy_revoked) return true;
+        if (c.proxy_target != null or c.proxy_target_fn != null or c.proxy_revoked) return true;
     }
     return false;
 }
@@ -9848,6 +9865,105 @@ fn getThroughChain(
         if (c.properties.get(key)) |v| return .{ .value = v };
     }
     return .{ .value = Value.undefined_ };
+}
+
+/// Outcome of `setThroughChain` — either the chain dispatched the
+/// write and we should bypass the ordinary trailing path, or the
+/// helper found nothing on the chain and the caller should fall
+/// through to the receiver-side write.
+const SetChainOutcome = union(enum) {
+    /// `true` — chain handled the write (returned ok); caller stops.
+    /// `false` — chain walked clean past every proxy with no
+    /// descriptor; caller falls through to ordinary set on `recv`.
+    handled_set: bool,
+    /// Caller propagates the outcome (trap threw / unhandled).
+    handled_or_uncaught: SetOutcome,
+};
+
+/// §10.1.9.2 OrdinarySetWithOwnDescriptor — walks the prototype
+/// chain of `obj` (which is itself not a Proxy) looking for the
+/// first own descriptor for `key`. When a Proxy ancestor is hit,
+/// dispatches its `[[Set]]` with `recv` as Receiver; an ordinary
+/// own data / accessor descriptor on a non-proxy ancestor is
+/// handled inline. The trailing "create or update on receiver"
+/// step is left to the caller (signalled via `.handled_set =
+/// false`).
+fn setThroughChain(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    frames: *std.ArrayListUnmanaged(CallFrame),
+    f: *CallFrame,
+    ip: usize,
+    obj: *JSObject,
+    key: []const u8,
+    value: Value,
+    recv: Value,
+) RunError!SetChainOutcome {
+    var cursor: ?*JSObject = obj;
+    while (cursor) |c| : (cursor = c.prototype) {
+        if (c.proxy_target != null or c.proxy_revoked) {
+            switch (try proxySetTrap(allocator, realm, frames, f, ip, c, key, value, recv)) {
+                .value => return .{ .handled_set = true },
+                .fallthrough => |t| {
+                    // The proxy is trapless and target is non-proxy.
+                    // Continue OrdinaryGet-style walk from `t`.
+                    cursor = t;
+                    continue;
+                },
+                .handled => return .{ .handled_or_uncaught = .handled },
+                .uncaught => |ex| return .{ .handled_or_uncaught = .{ .uncaught = ex } },
+            }
+        }
+        // §10.1.9.2 — own accessor wins.
+        if (c.accessors.get(key)) |acc| {
+            if (acc.setter) |setter| {
+                const args = [_]Value{value};
+                const outcome = try callJSFunction(allocator, realm, setter, recv, &args);
+                switch (outcome) {
+                    .value, .yielded => return .{ .handled_set = true },
+                    .thrown => |ex| {
+                        f.ip = ip;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .handled_or_uncaught = .{ .uncaught = ex } };
+                        }
+                        return .{ .handled_or_uncaught = .handled };
+                    },
+                }
+            }
+            // Getter-only accessor — strict-mode throws.
+            const ex = try makeTypeError(realm, "Cannot set property which has only a getter");
+            f.ip = ip;
+            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                return .{ .handled_or_uncaught = .{ .uncaught = ex } };
+            }
+            return .{ .handled_or_uncaught = .handled };
+        }
+        // Own data prop with writable: false — §10.1.9.2 step 3.a
+        // short-circuits to "set returns false" / strict throws.
+        if (c.properties.contains(key)) {
+            const flags = c.flagsFor(key);
+            if (!flags.writable) {
+                const ex = try makeTypeError(realm, "Cannot assign to read-only property");
+                f.ip = ip;
+                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                    return .{ .handled_or_uncaught = .{ .uncaught = ex } };
+                }
+                return .{ .handled_or_uncaught = .handled };
+            }
+            // Writable own data — break out; caller writes on recv.
+            return .{ .handled_set = false };
+        }
+        if (c.is_array_exotic) {
+            if (@import("object.zig").JSObject.canonicalIntegerIndex(key)) |idx| {
+                if (c.tryGetIndexedOwn(idx) != null) {
+                    // Writable by default; let caller handle the
+                    // receiver-side write.
+                    return .{ .handled_set = false };
+                }
+            }
+        }
+    }
+    return .{ .handled_set = false };
 }
 
 /// Outcome of a §10.5.5 Proxy `get`/`set`/`has`/`deleteProperty`
