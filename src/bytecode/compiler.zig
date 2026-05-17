@@ -2745,6 +2745,11 @@ pub const Compiler = struct {
                     // binding to publish (sentinel 0xFF).
                     const reserved = try self.emitMakeClass(k, ce.superclass, ce.body, ce.span, 0xFF);
                     self.releaseMakeClassTemps(reserved);
+                    // §15.7.14 step 16 — pop the class_stack frame
+                    // left live by `compileClassTemplate` so the
+                    // computed-key walk inside `emitMakeClass` could
+                    // resolve this class's `#name` references.
+                    _ = self.class_stack.pop();
                     return;
                 }
             },
@@ -5364,6 +5369,11 @@ fn emitClassBuild(
         const k = try compileClassTemplate(self, name_slice, superclass, body, span);
         const reserved = try self.emitMakeClass(k, superclass, body, span, 0xFF);
         self.releaseMakeClassTemps(reserved);
+        // §15.7.14 step 16 — the class's PrivateEnvironment spans
+        // the full ClassTail eval; `compileClassTemplate` pushed
+        // the class_stack frame and left it live for the computed-
+        // key walk in `emitMakeClass`. Pop here.
+        _ = self.class_stack.pop();
         return;
     }
     const name = name_slice.?;
@@ -5417,6 +5427,9 @@ fn emitClassBuild(
     const reserved = try self.emitMakeClass(k, superclass, body, span, inner_slot);
     const build_end_pc = self.builder.here();
     self.releaseMakeClassTemps(reserved);
+    // §15.7.14 step 16 — pop the class_stack frame left live by
+    // `compileClassTemplate` for the computed-key walk above.
+    _ = self.class_stack.pop();
     // The inner `C` slot was already published by make_class
     // (step 27.b) BEFORE static fields ran. The trailing
     // `sta_env` here is a no-op rewrite of the same slot to
@@ -5519,14 +5532,25 @@ fn compileClassTemplate(
     };
     const private_names_slice = arena.dupe([]const u8, private_names_buf.items) catch return error.OutOfMemory;
 
-    // Push onto the class stack so method bodies / field
-    // initializers can mangle private names.
+    // §15.7.14 step 16 — push onto the class stack so method
+    // bodies / field initializers AND any `[expr]` computed keys
+    // emitted by the caller's later `emitMakeClass` can resolve
+    // `#name` references via `manglePrivateRef`. The compile-time
+    // ClassPrivateEnvironment spans the whole ClassTail evaluation
+    // — including the computed-key expressions that emit in the
+    // enclosing function's bytecode (see emitMakeClass). The
+    // caller is responsible for popping after make_class has been
+    // emitted; we leave the frame live across `compileClassTemplate`'s
+    // return so the computed-key walk in `emitMakeClass` still sees
+    // this class's `#name` declarations. Without the spanning push,
+    // a `[self.#f]` computed key would bail at `manglePrivateRef`'s
+    // `class_stack.items.len > 0` assertion (empty stack) and the
+    // surrounding `compileExpression` would return UnsupportedExpression.
     self.class_stack.append(self.allocator, .{
         .private_prefix = private_prefix,
         .is_derived = is_derived,
         .private_names = private_names_slice,
     }) catch return error.OutOfMemory;
-    defer _ = self.class_stack.pop();
 
     // Extract constructor + bucket the rest.
     var ctor_def: ?ast.statement.MethodDef = null;
