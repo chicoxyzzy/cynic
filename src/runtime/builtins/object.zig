@@ -394,6 +394,11 @@ pub fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []
     const result = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "'ownKeys' on proxy must return an array-like");
     const len = lengthOfArrayLocal(result);
     var out: std.ArrayListUnmanaged([]const u8) = .empty;
+    // `out`'s backing buffer is freed on every error path via this
+    // `errdefer`; the success path calls `toOwnedSlice` below which
+    // transfers ownership and zeroes the list, so the deferred deinit
+    // is a no-op.
+    errdefer out.deinit(realm.allocator);
     var seen: std.StringArrayHashMapUnmanaged(void) = .empty;
     defer seen.deinit(realm.allocator);
     var i: i64 = 0;
@@ -404,33 +409,43 @@ pub fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []
         // §10.5.11 step 8 — CreateListFromArrayLike rejects any
         // entry that isn't a String or Symbol. Numbers / booleans /
         // null / undefined → TypeError.
-        if (!k_v.isString()) {
-            // Cynic symbols are represented as JSSymbol values;
-            // for the purpose of these tests anything not a
-            // string is rejected. (Cross-realm symbols are out
-            // of scope.)
-            const sym = heap_mod.valueAsSymbol(k_v);
-            if (sym == null) return throwTypeError(realm, "'ownKeys' on proxy returned a non-String, non-Symbol entry");
-        }
         const key_str = if (k_v.isString())
             (@as(*JSString, @ptrCast(@alignCast(k_v.asString())))).bytes
-        else blk: {
-            const s = try stringifyArg(realm, k_v);
-            break :blk s.bytes;
-        };
+        else if (heap_mod.valueAsSymbol(k_v)) |sym|
+            // Cynic flattens symbol property keys into the
+            // sym.prop_key string (`@@<wellknown>` / `<sym:N>`).
+            // The caller (Reflect.ownKeys / getOwnPropertySymbols)
+            // re-resolves a JSSymbol from that key via
+            // `heap.symbolForKey`, so the round-trip is lossless.
+            sym.prop_key
+        else
+            return throwTypeError(realm, "'ownKeys' on proxy returned a non-String, non-Symbol entry");
         // §10.5.11 step 9 — duplicate keys → TypeError.
         const entry = seen.getOrPut(realm.allocator, key_str) catch return error.OutOfMemory;
         if (entry.found_existing) return throwTypeError(realm, "'ownKeys' on proxy returned duplicate entries");
         out.append(realm.allocator, key_str) catch return error.OutOfMemory;
     }
-    // §10.5.11 step 17-24 — non-extensible target invariants.
-    // Every non-configurable own key on the target must appear
-    // in the result, and the result must not introduce keys
-    // that don't exist on a non-extensible target.
+    // §10.5.11 — trap-result invariants.
+    //
+    // Step 17 (always applies, regardless of extensibility): every
+    // non-configurable own key of the target must appear in the
+    // trap's result. Drop one and the proxy is lying about what's
+    // permanently there.
+    //
+    // Steps 19-21 (non-extensible target only): the trap result
+    // must list every target own key AND nothing else. A
+    // non-extensible target's key set is frozen, so the proxy
+    // can't add or remove from it.
+    const target_keys = try ownPropertyKeysOrdered(realm, proxy_target);
+    defer realm.allocator.free(target_keys);
+    for (target_keys) |tk| {
+        if (!proxy_target.flagsFor(tk).configurable) {
+            if (!seen.contains(tk)) {
+                return throwTypeError(realm, "'ownKeys' on proxy omitted a non-configurable target key");
+            }
+        }
+    }
     if (!proxy_target.extensible) {
-        // Build a set of target's own keys for invariant checks.
-        const target_keys = try ownPropertyKeysOrdered(realm, proxy_target);
-        defer realm.allocator.free(target_keys);
         // (a) every target own key must be present in result.
         for (target_keys) |tk| {
             if (!seen.contains(tk)) {
@@ -1640,7 +1655,12 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
         return heap_mod.taggedObject(out);
     }
     const obj = heap_mod.valueAsPlainObject(target) orelse return throwTypeError(realm, "Object.getOwnPropertyNames target is not an object");
-    const keys = try ownPropertyKeysOrdered(realm, obj);
+    // §20.1.2.10 step 2 — `keys be ? O.[[OwnPropertyKeys]]()`. For
+    // a Proxy receiver this MUST go through the `ownKeys` trap so
+    // the §10.5.11 invariants (target keys + reported keys must
+    // agree on configurable + non-extensible) fire before we
+    // filter to strings. Mirrors `objectGetOwnPropertySymbols`.
+    const keys = if (try proxyOwnKeysOrNull(realm, obj)) |k| k else try ownPropertyKeysOrdered(realm, obj);
     defer realm.allocator.free(keys);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;

@@ -573,15 +573,17 @@ fn reflectOwnKeys(realm: *Realm, this_value: Value, args: []const Value) NativeE
     }
 
     const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.ownKeys target must be an object");
-    // §28.1.11 step 2 — call `target.[[OwnPropertyKeys]]()`. The
-    // canonical implementation lives in `ownPropertyKeysOrdered`
+    // §28.1.11 step 2 — call `target.[[OwnPropertyKeys]]()`. For
+    // a Proxy receiver this MUST route through the `ownKeys` trap
+    // (§10.5.11) so the configurable + non-extensible invariants
+    // fire. Otherwise fall through to `ownPropertyKeysOrdered`
     // (§10.1.11 OrdinaryOwnPropertyKeys): integer-indexed first in
     // ascending numeric order, then string keys in insertion order,
     // then symbol keys. Without this, Reflect.ownKeys missed every
     // packed-array element and reordered objects with a mix of
     // integer-like and string keys.
     const obj_mod = @import("object.zig");
-    const keys = try obj_mod.ownPropertyKeysOrdered(realm, target);
+    const keys = if (try obj_mod.proxyOwnKeysOrNull(realm, target)) |k| k else try obj_mod.ownPropertyKeysOrdered(realm, target);
     defer realm.allocator.free(keys);
     for (keys) |k| {
         // Symbol keys stored as `@@<name>` or `<sym:N>` need to surface
