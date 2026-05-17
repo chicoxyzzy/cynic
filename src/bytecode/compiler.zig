@@ -3606,14 +3606,21 @@ pub const Compiler = struct {
         if (a.op == .eq) {
             // §13.15.2 — for plain `x = e` where `e` is an
             // anonymous function-like, the binding identifier
-            // becomes the function's `.name`. Compound forms
-            // (`x += e`) and logical forms (`x ||= e`) don't
-            // qualify per spec.
+            // becomes the function's `.name`.
             try self.compileNamedValue(a.value, name);
         } else if (a.op == .amp_amp_eq or a.op == .pipe_pipe_eq or a.op == .question_question_eq) {
             // §13.15.4 Logical assignment — `x &&= y`, `x ||= y`,
             // `x ??= y`. Reads `x` once; if the gate fails, leaves
             // `x` unchanged (skipping the rhs and the store).
+            // Per §13.15.2 step 1.d, when `IsAnonymousFunction
+            // Definition(AssignmentExpression)` and `IsIdentifier
+            // Ref(LeftHandSideExpression)` are both true, the
+            // RHS undergoes NamedEvaluation with the binding's
+            // name. So `value &&= function () {}` produces a
+            // function whose `.name` is `"value"`. Plain compound
+            // (`+=`, `-=`, …) does NOT qualify — it always
+            // applies the binary operator, so an anonymous
+            // function literal there is illegal anyway.
             try self.emitLoadBinding(binding, a.target.span());
             const gate: Op = switch (a.op) {
                 .amp_amp_eq => .jmp_if_false,
@@ -3639,7 +3646,7 @@ pub const Compiler = struct {
                 try self.builder.emitI16(0);
                 const rhs_target = self.builder.here();
                 try self.builder.patchI16(to_rhs, rhs_target);
-                try self.compileExpression(a.value);
+                try self.compileNamedValue(a.value, name);
                 try self.emitStoreBinding(binding, a.span);
                 const end_target = self.builder.here();
                 try self.builder.patchI16(skip_rhs, end_target);
@@ -3650,7 +3657,7 @@ pub const Compiler = struct {
             try self.builder.emitOp(gate, a.span);
             const skip_patch = self.builder.here();
             try self.builder.emitI16(0);
-            try self.compileExpression(a.value);
+            try self.compileNamedValue(a.value, name);
             try self.emitStoreBinding(binding, a.span);
             const skip_target = self.builder.here();
             try self.builder.patchI16(skip_patch, skip_target);
