@@ -16,10 +16,13 @@ const NativeError = @import("../function.zig").NativeError;
 const NativeFn = @import("../function.zig").NativeFn;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
+const interpreter = @import("../interpreter.zig");
 
 const argOr = intrinsics.argOr;
 const coerceToNumber = intrinsics.coerceToNumber;
 const installToStringTag = intrinsics.installToStringTag;
+const throwTypeError = intrinsics.throwTypeError;
+const getPropertyChain = intrinsics.getPropertyChain;
 
 // ── Math object ─────────────────────────────────────────────────────────────
 
@@ -81,6 +84,9 @@ pub fn install(realm: *Realm) !void {
         .{ .name = "clz32", .fn_ptr = mathClz32, .params = 1 },
         .{ .name = "fround", .fn_ptr = mathFround, .params = 1 },
         .{ .name = "imul", .fn_ptr = mathImul, .params = 2 },
+        // §21.3.2.21 Math.sumPrecise — reproducible Shewchuk
+        // summation over an iterable of Numbers.
+        .{ .name = "sumPrecise", .fn_ptr = mathSumPrecise, .params = 1 },
     };
     // §17 — built-in methods are `[[Writable]]: true`,
     // `[[Enumerable]]: false`, `[[Configurable]]: true`.
@@ -407,5 +413,379 @@ fn mathRandom(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const u = (x >> 11) | 0; // 53-bit mantissa
     const d: f64 = @as(f64, @floatFromInt(@as(u53, @truncate(u)))) / 9007199254740992.0;
     return mathDouble(d);
+}
+
+// ── §21.3.2.21 Math.sumPrecise ──────────────────────────────────────────────
+
+/// §21.3.2.21 Math.sumPrecise(items). Reproducible summation:
+/// every conforming implementation returns the same Number for
+/// the same finite-Number input sequence (modulo iteration order
+/// over user-supplied iterables). Backed by Shewchuk's
+/// exact-floating-sum (the algorithm Python's `math.fsum`
+/// references): maintain a list of non-overlapping doubles whose
+/// exact sum equals the running total; absorb each new term via
+/// FastTwoSum sweeps; final round-to-nearest folds the partials.
+///
+/// State machine for non-finite inputs (§21.3.2.21 step 4):
+///   minus-zero (initial) → finite (any finite) →
+///     plus-infinity (after +∞ seen) /
+///     minus-infinity (after -∞ seen) /
+///     not-a-number (mixed infinities, or any NaN).
+/// Once `not-a-number` is reached, remaining numeric inputs are
+/// still consumed (so valueOf side effects on later items don't
+/// happen — but elements must still be Number-typed; the
+/// "throws-on-non-number with NaN-poisoned state" fixture
+/// asserts this).
+fn mathSumPrecise(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+
+    // §21.3.2.21 step 1 — RequireObjectCoercible(items). undefined
+    // / null produce the "Cannot convert ... to object" TypeError;
+    // primitives that are not coercible (none, in current spec) too.
+    // The fixture `Math.sumPrecise()` exercises the undefined path.
+    const items = if (args.len == 0) Value.undefined_ else args[0];
+    if (items.isUndefined() or items.isNull()) {
+        return throwTypeError(realm, "Math.sumPrecise: items is not iterable");
+    }
+
+    // §21.3.2.21 step 2 — `iteratorRecord = ? GetIterator(items, sync)`.
+    // Pin the iterable across the iteration loop because user code
+    // (`next`, `return`) re-enters JS and may trigger a GC sweep.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(items) catch return error.OutOfMemory;
+
+    const iter = interpreter.openIterator(realm.allocator, realm, items) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NotIterable => return throwTypeError(realm, "Math.sumPrecise: items is not iterable"),
+        error.Propagated => return error.NativeThrew,
+        error.InvalidOpcode => return error.NativeThrew,
+    };
+    scope.push(iter) catch return error.OutOfMemory;
+    const iter_obj = heap_mod.valueAsPlainObject(iter) orelse {
+        return throwTypeError(realm, "Math.sumPrecise: iterator method did not return an object");
+    };
+    const next_v = try getPropertyChain(realm, iter_obj, "next");
+    const next_fn = heap_mod.valueAsFunction(next_v) orelse {
+        return throwTypeError(realm, "Math.sumPrecise: iterator missing callable 'next'");
+    };
+
+    // §21.3.2.21 step 3 — `state` starts at "minus-zero".
+    var state: SumState = .minus_zero;
+    // Shewchuk's exact-floating-point summation (Robust Arithmetic,
+    // CMU 1996), adapted to handle overflow per the TC39 reference
+    // polyfill: an `overflow` counter tracks excess 2^1024 multiples
+    // that the cascade couldn't accommodate. Final rounding folds
+    // the partials + the biased overflow into a single Number,
+    // breaking ties to even.
+    var partials: std.ArrayListUnmanaged(f64) = .empty;
+    defer partials.deinit(realm.allocator);
+    // `overflow` records signed multiples of 2^1024 — when a
+    // FastTwoSum step would have landed at ±Inf, we bias `x` by
+    // ∓2^1024 and bump this counter accordingly. The final step
+    // unbiases. |overflow| > 2^53 is unrecoverable → ±Inf.
+    var overflow: f64 = 0;
+
+    const max_iter: usize = 1 << 24;
+    var step: usize = 0;
+    while (step < max_iter) : (step += 1) {
+        const result_outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        const result = switch (result_outcome) {
+            .value, .yielded => |v| v,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        };
+        const result_obj = heap_mod.valueAsPlainObject(result) orelse {
+            return throwTypeError(realm, "Math.sumPrecise: iterator next() did not return an object");
+        };
+        const done_v = try getPropertyChain(realm, result_obj, "done");
+        if (intrinsics.toBoolean(done_v)) break;
+        const value = try getPropertyChain(realm, result_obj, "value");
+
+        // §21.3.2.21 step 4.b — type check WITHOUT coercion. If
+        // not a Number, IteratorClose the source and throw
+        // TypeError. The fixture asserts `valueOf` is NOT called —
+        // so check the type tag directly, no `coerceToNumber`.
+        if (!(value.isInt32() or value.isDouble())) {
+            // §7.4.11 IteratorClose — call iter.return(); ignore
+            // any throw from return() (original abrupt wins).
+            closeIteratorSwallow(realm, iter);
+            return throwTypeError(realm, "Math.sumPrecise: every element must be a Number");
+        }
+        const x: f64 = if (value.isInt32()) @floatFromInt(value.asInt32()) else value.asDouble();
+
+        // Update infinite / NaN state per §21.3.2.21 step 4.c.
+        if (std.math.isNan(x)) {
+            state = .not_a_number;
+        } else if (std.math.isInf(x)) {
+            if (x > 0) {
+                switch (state) {
+                    .minus_infinity, .not_a_number => state = .not_a_number,
+                    else => state = .plus_infinity,
+                }
+            } else {
+                switch (state) {
+                    .plus_infinity, .not_a_number => state = .not_a_number,
+                    else => state = .minus_infinity,
+                }
+            }
+        } else {
+            // Finite — feed the Shewchuk accumulator. The state
+            // bumps from `minus-zero` to `finite` on the first
+            // non-zero or +0 input; -0 alone stays minus-zero.
+            if (state == .minus_zero) {
+                // Pre-step: any finite +/- non-zero or +0 promotes
+                // to `finite`. A bare -0 leaves state alone.
+                if (!(x == 0 and std.math.signbit(x))) state = .finite;
+            }
+            const ov_delta = try shewchukAdd(realm.allocator, &partials, x);
+            overflow += ov_delta;
+            // |overflow| ≥ 2^53 means cumulative excess beyond what
+            // the Number range can recover from — clamp to ±Inf via
+            // the state machine immediately.
+            if (@abs(overflow) >= 0x1.0p53) {
+                state = if (overflow > 0) .plus_infinity else .minus_infinity;
+            }
+        }
+    }
+
+    // §21.3.2.21 step 5 — terminal state dispatch.
+    return switch (state) {
+        .not_a_number => mathDouble(std.math.nan(f64)),
+        .plus_infinity => mathDouble(std.math.inf(f64)),
+        .minus_infinity => mathDouble(-std.math.inf(f64)),
+        // `minus-zero` means we never saw a +0 or any non-zero
+        // finite; the partials list is empty.
+        .minus_zero => mathDouble(-0.0),
+        .finite => mathDouble(shewchukRound(partials.items, overflow)),
+    };
+}
+
+const SumState = enum { minus_zero, finite, plus_infinity, minus_infinity, not_a_number };
+
+/// Close the source iterator on an abrupt completion. Mirrors
+/// `iterator.closeIteratorSwallow`: any throw from `return()`
+/// itself is dropped (per §7.4.11 IteratorClose — the original
+/// abrupt wins). Used by Math.sumPrecise's type-check path.
+fn closeIteratorSwallow(realm: *Realm, iter: Value) void {
+    const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return;
+    const ret_v = iter_obj.get("return");
+    if (ret_v.isUndefined() or ret_v.isNull()) return;
+    const ret_fn = heap_mod.valueAsFunction(ret_v) orelse return;
+    const saved = realm.pending_exception;
+    const result = interpreter.callJSFunction(realm.allocator, realm, ret_fn, iter, &.{}) catch {
+        realm.pending_exception = saved;
+        return;
+    };
+    _ = result;
+    realm.pending_exception = saved;
+}
+
+/// Shewchuk-Hickey exact-sum step. Walk `partials` swapping each
+/// entry with `x` via FastTwoSum; the residual (`lo`) becomes the
+/// new `x`. Zeros falling out compact the list. The final residual
+/// `x` is appended. After N additions, the partials list holds at
+/// most O(log(max/min)) entries; for IEEE-754 doubles this is
+/// bounded by ~2046.
+/// Mirrors `twosum(x, y)` from the TC39 polyfill. Precondition:
+/// |x| ≥ |y|. Returns `(hi, lo)` where `hi + lo == x + y` exactly
+/// (in real arithmetic) and `hi = roundToNearest(x + y)`.
+fn twosum(x: f64, y: f64) struct { hi: f64, lo: f64 } {
+    const hi = x + y;
+    const lo = y - (hi - x);
+    return .{ .hi = hi, .lo = lo };
+}
+
+/// Cascade `x_in` through the partials list. Returns the change to
+/// the overflow counter (±1 per overflow recovery, 0 otherwise).
+/// On overflow, biases x by ∓2^1024 (exactly representable as two
+/// 2^1023 subtractions) and continues — preserving the exact sum
+/// modulo the recorded overflow multiples.
+fn shewchukAdd(allocator: std.mem.Allocator, partials: *std.ArrayListUnmanaged(f64), x_in: f64) std.mem.Allocator.Error!f64 {
+    var x = x_in;
+    var overflow_delta: f64 = 0;
+    var write: usize = 0;
+    var i: usize = 0;
+    while (i < partials.items.len) : (i += 1) {
+        var y = partials.items[i];
+        if (@abs(x) < @abs(y)) {
+            const tmp = x;
+            x = y;
+            y = tmp;
+        }
+        var ts = twosum(x, y);
+        if (std.math.isInf(ts.hi)) {
+            // Overflow recovery (TC39 polyfill §main-loop): bias
+            // `x` by ∓2^1024 so the cascade can continue. The
+            // 2^1024 value isn't representable in f64, so subtract
+            // 2^1023 twice; both subtractions are exact (the
+            // affected bits are below the operand magnitudes).
+            const sign: f64 = if (ts.hi == std.math.inf(f64)) 1.0 else -1.0;
+            overflow_delta += sign;
+            const big: f64 = 0x1.0p1023;
+            x = (x - sign * big) - sign * big;
+            if (@abs(x) < @abs(y)) {
+                const tmp = x;
+                x = y;
+                y = tmp;
+            }
+            ts = twosum(x, y);
+        }
+        if (ts.lo != 0) {
+            partials.items[write] = ts.lo;
+            write += 1;
+        }
+        x = ts.hi;
+    }
+    partials.shrinkRetainingCapacity(write);
+    if (x != 0) {
+        try partials.append(allocator, x);
+    }
+    return overflow_delta;
+}
+
+/// Round the (partials, overflow) state to a single f64. Mirrors
+/// the final-rounding section of the TC39 reference polyfill. The
+/// `overflow` is a signed integer counting biased 2^1024 multiples
+/// (each one was recorded when the cascade had to subtract a 2^1024
+/// to avoid landing at ±Inf). The MAX_DOUBLE rounding boundary is
+/// hand-coded because the generic round-to-nearest-even would
+/// over-step it under ties.
+fn shewchukRound(partials_const: []const f64, overflow: f64) f64 {
+    if (partials_const.len == 0 and overflow == 0) return 0.0;
+    // Partials list is in *insertion* order (smallest magnitudes
+    // were recorded as cascade residuals first, larger sums tacked
+    // on at the end). We walk from the largest partial (index
+    // `len - 1`) down to the smallest.
+    var n: isize = @as(isize, @intCast(partials_const.len)) - 1;
+    var hi: f64 = 0;
+    var lo: f64 = 0;
+
+    if (overflow != 0) {
+        const next: f64 = if (n >= 0) partials_const[@intCast(n)] else 0;
+        n -= 1;
+        // If |overflow| > 1, or |overflow| == 1 with `next` of the
+        // same sign, the magnitude is irrecoverably outside Number
+        // range. Saturate to ±Inf.
+        if (@abs(overflow) > 1 or (overflow > 0 and next > 0) or (overflow < 0 and next < 0)) {
+            return if (overflow > 0) std.math.inf(f64) else -std.math.inf(f64);
+        }
+        // |overflow| == 1 and `next` is opposite-signed (or zero).
+        // Drop a factor of 2 from both arms so the FastTwoSum
+        // can run without overflowing.
+        const big: f64 = 0x1.0p1023;
+        const ts = twosum(overflow * big, next / 2.0);
+        hi = ts.hi;
+        lo = ts.lo * 2.0;
+        // Edge case: `2 * hi` overflows. The TC39 polyfill notes
+        // MAX_DOUBLE has a 1 in the last significand bit — exactly
+        // half a ULP below 2^1024 rounds AWAY from MAX_DOUBLE
+        // (toward +Inf) under tie-to-even. But when the residual
+        // disagrees in sign, the correct rounding direction lands
+        // back on ±MAX_DOUBLE.
+        if (std.math.isInf(2.0 * hi)) {
+            const MAX_DOUBLE: f64 = 1.7976931348623157e+308;
+            // 2^(1023 - 52) — the ULP at MAX_DOUBLE magnitude.
+            const MAX_ULP: f64 = 1.99584030953471981166e+292;
+            if (hi > 0) {
+                if (hi == big and lo == -(MAX_ULP / 2.0) and n >= 0 and partials_const[@intCast(n)] < 0) {
+                    return MAX_DOUBLE;
+                }
+                return std.math.inf(f64);
+            } else {
+                if (hi == -big and lo == (MAX_ULP / 2.0) and n >= 0 and partials_const[@intCast(n)] > 0) {
+                    return -MAX_DOUBLE;
+                }
+                return -std.math.inf(f64);
+            }
+        }
+        if (lo != 0) {
+            // We've consumed `next` from the list but still owe one
+            // more partial below the current `hi`. The polyfill
+            // pushes `lo` back into the partials slot we just read;
+            // we mirror that with a local re-cast (avoid mutating
+            // the const slice — copy `next` slot into a scratch
+            // we own).
+            // To keep things simple we just remember `lo` for the
+            // tie-rounding step below; treat `partials[n + 1]` as if
+            // it were `lo`. The polyfill restores partials[n+1] = lo
+            // and bumps n; we do the equivalent by entering the
+            // cascade-down loop with `lo` injected.
+            // Inject via a synthesised one-slot extension below.
+            return cascadeDownWithInject(partials_const, n, hi * 2.0, lo, true);
+        }
+        hi *= 2.0;
+        return cascadeDownPure(partials_const, n, hi);
+    }
+
+    return cascadeDownPure(partials_const, n, 0);
+}
+
+/// Walk partials from index `n` down to 0 accumulating into `hi`
+/// via FastTwoSum, stopping at the first non-zero residual. Apply
+/// the round-half-to-even tie-break using the next-lower partial.
+fn cascadeDownPure(partials: []const f64, n_in: isize, hi_in: f64) f64 {
+    var hi = hi_in;
+    var lo: f64 = 0;
+    var n = n_in;
+    while (n >= 0) {
+        const x = hi;
+        const y = partials[@intCast(n)];
+        n -= 1;
+        const ts = twosum(x, y);
+        hi = ts.hi;
+        lo = ts.lo;
+        if (lo != 0) break;
+    }
+    // Round-half-to-even tie correction. When `lo` is half a ULP of
+    // `hi` and the next-lower partial agrees in sign, bump `hi` away
+    // from zero by one ULP.
+    if (n >= 0 and ((lo < 0 and partials[@intCast(n)] < 0) or (lo > 0 and partials[@intCast(n)] > 0))) {
+        const y = lo * 2.0;
+        const x = hi + y;
+        const yr = x - hi;
+        if (y == yr) hi = x;
+    }
+    return hi;
+}
+
+/// Variant of `cascadeDownPure` that prepends an injected partial
+/// (the polyfill's `partials[n+1] = lo; ++n;` trick) before the
+/// down-cascade. Used by the overflow-recovery branch to feed the
+/// residual from the biased twosum back in without mutating the
+/// const slice.
+fn cascadeDownWithInject(partials: []const f64, n_in: isize, hi_in: f64, injected: f64, has_inject: bool) f64 {
+    var hi = hi_in;
+    var lo: f64 = 0;
+    var n = n_in;
+    var injected_pending = has_inject;
+    var inject_val = injected;
+
+    while (injected_pending or n >= 0) {
+        const x = hi;
+        const y: f64 = if (injected_pending) inject_val else partials[@intCast(n)];
+        if (injected_pending) {
+            injected_pending = false;
+            inject_val = 0;
+        } else {
+            n -= 1;
+        }
+        const ts = twosum(x, y);
+        hi = ts.hi;
+        lo = ts.lo;
+        if (lo != 0) break;
+    }
+    if (n >= 0 and ((lo < 0 and partials[@intCast(n)] < 0) or (lo > 0 and partials[@intCast(n)] > 0))) {
+        const y = lo * 2.0;
+        const x = hi + y;
+        const yr = x - hi;
+        if (y == yr) hi = x;
+    }
+    return hi;
 }
 
