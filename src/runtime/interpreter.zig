@@ -3045,6 +3045,68 @@ pub const ProtoLookup = union(enum) {
     thrown: Value,
 };
 
+/// Outcome of a single proxy [[Get]] dispatch — either a value
+/// (from the trap or the fallthrough read on the target) or a
+/// thrown exception value the caller propagates.
+const ProxyGetResult = union(enum) {
+    value: Value,
+    thrown: Value,
+};
+
+/// §10.5.5 Proxy [[Get]] (P, Receiver) — minimal dispatcher
+/// callable from RunError contexts. Used by constructValue when
+/// new_target is itself a proxy: §10.1.14 GetPrototypeFromConstructor
+/// step 3 calls `Get(constructor, "prototype")` which must fire
+/// the proxy's get trap (a user-installed get trap can revoke the
+/// proxy mid-flight, which §10.1.14 step 4.a then observes via
+/// GetFunctionRealm). Does NOT enforce the §10.5.5 non-configurable
+/// data/accessor invariants — `proxy.nativeProxyGet` carries those
+/// for the regular property-opcode dispatch.
+fn invokeProxyGetTrap(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    proxy: *JSObject,
+    key: []const u8,
+    receiver: Value,
+) RunError!ProxyGetResult {
+    if (proxy.proxy_revoked) {
+        return .{ .thrown = try makeTypeError(realm, "Cannot perform 'get' on a proxy that has been revoked") };
+    }
+    const handler = proxy.proxy_handler orelse {
+        return .{ .thrown = try makeTypeError(realm, "proxy handler slot is null") };
+    };
+    const target_v: Value = if (proxy.proxy_target_fn) |tfn|
+        heap_mod.taggedFunction(tfn)
+    else if (proxy.proxy_target) |t|
+        heap_mod.taggedObject(t)
+    else
+        return .{ .thrown = try makeTypeError(realm, "proxy target slot is null") };
+    const trap_v = handler.get("get");
+    if (trap_v.isUndefined() or trap_v.isNull()) {
+        // §10.5.5 step 6 — trap missing, recurse on the target.
+        if (heap_mod.valueAsPlainObject(target_v)) |t_obj| {
+            if (t_obj.proxy_target_fn != null or t_obj.proxy_target != null or t_obj.proxy_revoked) {
+                return try invokeProxyGetTrap(allocator, realm, t_obj, key, receiver);
+            }
+            return .{ .value = t_obj.get(key) };
+        }
+        if (heap_mod.valueAsFunction(target_v)) |t_fn| {
+            return .{ .value = t_fn.get(key) };
+        }
+        return .{ .value = Value.undefined_ };
+    }
+    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
+        return .{ .thrown = try makeTypeError(realm, "proxy 'get' trap is not callable") };
+    };
+    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+    const args = [_]Value{ target_v, Value.fromString(key_str), receiver };
+    const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);
+    switch (outcome) {
+        .value, .yielded => |v| return .{ .value = v },
+        .thrown => |ex| return .{ .thrown = ex },
+    }
+}
+
 pub fn getPrototypeFromConstructor(
     allocator: std.mem.Allocator,
     realm: *Realm,
@@ -3141,18 +3203,50 @@ pub fn constructValue(
     if (!target.has_construct or target.is_arrow) {
         return .{ .thrown = try makeTypeError(realm, "value is not a constructor") };
     }
-    const new_target_fn: *JSFunction = if (heap_mod.valueAsFunction(new_target)) |nt| nt else target;
-    // §10.1.14 GetPrototypeFromConstructor — Get(new_target,
-    // "prototype") so user-installed accessors on a NewTarget
-    // (e.g. `Object.defineProperty(boundFn, "prototype", {get})`)
-    // fire. Falls back to the target's own `.prototype` slot when
-    // the resolved value isn't an Object (Cynic's analogue of the
-    // spec's intrinsicDefaultProto).
-    const proto_lookup = try getPrototypeFromConstructor(allocator, realm, new_target_fn, target.prototype);
-    const resolved_proto: ?*JSObject = switch (proto_lookup) {
-        .proto => |p| p,
-        .thrown => |ex| return .{ .thrown = ex },
-    };
+    // §10.1.14 GetPrototypeFromConstructor on new_target. When
+    // new_target is a callable Proxy (not a plain function), the
+    // spec's Get(new_target, "prototype") fires the proxy's [[Get]]
+    // which dispatches through the handler's `get` trap. If that
+    // trap revokes the proxy mid-flight, the subsequent
+    // GetFunctionRealm(new_target) sees a revoked handler and
+    // throws TypeError (§10.5.2 step 1).
+    var resolved_proto: ?*JSObject = undefined;
+    if (heap_mod.valueAsFunction(new_target)) |new_target_fn| {
+        const proto_lookup = try getPrototypeFromConstructor(allocator, realm, new_target_fn, target.prototype);
+        resolved_proto = switch (proto_lookup) {
+            .proto => |p| p,
+            .thrown => |ex| return .{ .thrown = ex },
+        };
+    } else if (heap_mod.valueAsPlainObject(new_target)) |nt_proxy| {
+        if (nt_proxy.proxy_target_fn != null or nt_proxy.proxy_target != null or nt_proxy.proxy_revoked) {
+            // §10.5.5 Proxy [[Get]] on `prototype`. Run the trap (or
+            // fall through to target.prototype). If a user-installed
+            // get trap revokes the proxy here, the subsequent
+            // GetFunctionRealm(new_target) at step 4.a hits a null
+            // handler and throws.
+            const get_v = try invokeProxyGetTrap(allocator, realm, nt_proxy, "prototype", new_target);
+            switch (get_v) {
+                .thrown => |ex| return .{ .thrown = ex },
+                .value => |v| {
+                    if (heap_mod.valueAsPlainObject(v)) |po| {
+                        resolved_proto = po;
+                    } else {
+                        // §10.1.14 step 4 — proto not an Object; the
+                        // spec then calls GetFunctionRealm(new_target).
+                        // If the proxy is now revoked, that throws.
+                        if (nt_proxy.proxy_revoked or nt_proxy.proxy_handler == null) {
+                            return .{ .thrown = try makeTypeError(realm, "Cannot retrieve realm from a revoked Proxy") };
+                        }
+                        resolved_proto = target.prototype;
+                    }
+                },
+            }
+        } else {
+            resolved_proto = target.prototype;
+        }
+    } else {
+        resolved_proto = target.prototype;
+    }
     const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
     instance.prototype = resolved_proto;
     const this_arg = heap_mod.taggedObject(instance);

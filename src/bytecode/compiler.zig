@@ -2039,6 +2039,14 @@ pub const Compiler = struct {
                 // ComputedPropertyName subforms.
                 if (m.key == .computed) {
                     try self.compileExpression(m.key.computed);
+                    // §13.2.5.5 step 4.a — the computed-method form
+                    // runs ToPropertyKey on the key expression
+                    // before the body is built. Without this an
+                    // object-typed key (e.g. a function used as
+                    // `{[fn](){…}}`) lands under the literal
+                    // "[object]" placeholder; methods of plain
+                    // properties already emit this opcode.
+                    try self.builder.emitOp(.to_property_key, m.span);
                     const r_key = try self.reserveTemp();
                     defer self.releaseTemp();
                     try self.builder.emitOp(.star, m.span);

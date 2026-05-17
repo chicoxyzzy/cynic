@@ -103,6 +103,24 @@ pub const skip_ses_substrings = [_][]const u8{
     "built-ins/Function/15.3.2",
     "built-ins/Function/S15.3.2",
     "built-ins/Function/S15.3.5",
+    // `built-ins/Function/S15.3_A2_T*` and `S15.3_A3_T*` —
+    // Sputnik-era `Function.call(thisArg, "src")` and
+    // `Function.call(this, "var x / = 1;")` shape tests. The
+    // first argument is ignored, and the second is a code
+    // string; both forms are the §15.3.2 Function-constructor-
+    // as-callable carve-out (`Function(string)` /
+    // `Function.call(this, "src")`). Cynic permanently bans
+    // runtime code construction (AGENTS.md), so these false-
+    // reject for an OOS reason.
+    "built-ins/Function/S15.3_A2_",
+    "built-ins/Function/S15.3_A3_",
+    // `built-ins/Function/15.3.5.4_2-1[3-9]gs.js` — strict-mode
+    // `function.caller` Sputnik tests that call `eval()` /
+    // `Function(string)` directly to verify strict-mode
+    // reachability. Same permanent SES carve-out (§19.2.1 eval,
+    // §15.3.2 Function constructor). Other 15.3.5.4 fixtures
+    // (non-`gs.js`) stay attempted.
+    "built-ins/Function/15.3.5.4_2-",
 
     // §27.3.2 GeneratorFunction(string) / §27.4.2 AsyncGenerator
     // Function(string) / §27.7.2 AsyncFunction(string) — same
