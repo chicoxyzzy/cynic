@@ -1543,27 +1543,15 @@ fn validateSetLike(realm: *Realm, op: []const u8, value: Value) NativeError!SetL
         const msg = std.fmt.bufPrint(&buf, "Set.prototype.{s}: argument must be a set-like object", .{op}) catch op;
         return throwTypeError(realm, msg);
     };
-    // Per spec we'd validate size, but Cynic skips that — has + keys are what
-    // we actually use, and forcing a numeric size on real Sets isn't observable.
-    const has_v = obj.get("has");
-    const has_fn = heap_mod.valueAsFunction(has_v) orelse {
-        var buf: [128]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "Set.prototype.{s}: argument is not set-like (no callable 'has')", .{op}) catch op;
-        return throwTypeError(realm, msg);
-    };
-    const keys_v = obj.get("keys");
-    const keys_fn = heap_mod.valueAsFunction(keys_v) orelse {
-        var buf: [128]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "Set.prototype.{s}: argument is not set-like (no callable 'keys')", .{op}) catch op;
-        return throwTypeError(realm, msg);
-    };
     // §24.2.1.2 GetSetRecord step 6 — ToIntegerOrInfinity(size).
-    // Used by the spec to branch on which side to iterate
-    // during intersection / difference / etc. Route through
-    // the accessor chain so `get size() { return 2; }` getters
-    // fire instead of the bare data-slot lookup returning
+    // Route through the accessor chain so `get size() { return 2; }`
+    // getters fire instead of the bare data-slot lookup returning
     // undefined → 0. ToNumber must propagate throws (Symbol etc.)
     // AND NaN must surface as a TypeError per §24.2.1.2 step 5.
+    // Spec order is: Get(size) → ToNumber(size) → Get(has) → Get(keys).
+    // Test fixtures (`set-like-class-order.js`) assert that observation
+    // order down to "getting size" before "ToNumber(size)" before
+    // "getting has" before "getting keys".
     const size_v = try intrinsics.getPropertyChain(realm, obj, "size");
     const size_n = try intrinsics.toNumber(realm, size_v);
     const size_d: f64 = if (size_n.isInt32())
@@ -1583,6 +1571,21 @@ fn validateSetLike(realm: *Realm, op: []const u8, value: Value) NativeError!SetL
         std.math.maxInt(usize)
     else
         @intFromFloat(@trunc(size_d));
+    // §24.2.1.2 step 7-8 — `Get(obj, "has")`. Accessor-aware so
+    // `get has() {…}` on a class instance fires.
+    const has_v = try intrinsics.getPropertyChain(realm, obj, "has");
+    const has_fn = heap_mod.valueAsFunction(has_v) orelse {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Set.prototype.{s}: argument is not set-like (no callable 'has')", .{op}) catch op;
+        return throwTypeError(realm, msg);
+    };
+    // §24.2.1.2 step 9-10 — `Get(obj, "keys")`. Accessor-aware.
+    const keys_v = try intrinsics.getPropertyChain(realm, obj, "keys");
+    const keys_fn = heap_mod.valueAsFunction(keys_v) orelse {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Set.prototype.{s}: argument is not set-like (no callable 'keys')", .{op}) catch op;
+        return throwTypeError(realm, msg);
+    };
     return .{ .has = has_fn, .keys = keys_fn, .obj = value, .size = size_usize };
 }
 
@@ -1637,9 +1640,12 @@ fn forEachSetLikeKey(
         .thrown => return error.NativeThrew,
     };
     const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return throwTypeError(realm, "set-like keys() did not return an iterator");
-    const next_v = iter_obj.get("next");
+    // §7.4.1 GetIteratorFromMethod step 4 — `next` is cached on
+    // the IteratorRecord at open time, not refetched every step.
+    // Routed through the accessor chain so `get next() {…}` fires
+    // exactly once (`set-like-class-order.js` asserts this).
+    const next_v = try intrinsics.getPropertyChain(realm, iter_obj, "next");
     const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "set-like keys() iterator missing callable 'next'");
-
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
     while (step < max_iter) : (step += 1) {
@@ -1814,28 +1820,62 @@ fn setSymmetricDifference(realm: *Realm, this_value: Value, args: []const Value)
     const this_d = setDataOf(this_value) orelse return throwTypeError(realm, "Set.prototype.symmetricDifference called on non-Set");
     const sl = try validateSetLike(realm, "symmetricDifference", argOr(args, 0, Value.undefined_));
 
+    // §24.2.4.10 — `Set.prototype.symmetricDifference` MUST NOT
+    // invoke `has` on the set-like. The spec algorithm:
+    //   5. Let resultSetData be a copy of O.[[SetData]].
+    //   7. For each value yielded by other.keys():
+    //      a. canonicalize -0𝔽 → +0𝔽 (step 7.b.i),
+    //      b. let inResult = SetDataHas(resultSetData, next),
+    //      c. if SetDataHas(O.[[SetData]], next):
+    //           if inResult: remove next from resultSetData,
+    //         else:
+    //           if !inResult: append next to resultSetData.
+    // Note: `O.[[SetData]]` is the receiver's LIVE slot, not a
+    // snapshot — `set-like-class-mutation.js` mutates `this`
+    // mid-iteration and asserts the toggle reads the post-
+    // mutation membership.
     const out = try allocateEmptySet(realm);
-    // First pass: this \ other.
-    var i: usize = 0;
-    while (i < this_d.entries.items.len) : (i += 1) {
-        const e = this_d.entries.items[i];
-        if (e.deleted) continue;
-        if (!try setLikeHas(realm, sl, e.value)) {
+    {
+        var i: usize = 0;
+        while (i < this_d.entries.items.len) : (i += 1) {
+            const e = this_d.entries.items[i];
+            if (e.deleted) continue;
             setAddInternal(realm, out, e.value) catch return error.OutOfMemory;
         }
     }
-    // Second pass: other \ this — iterate other's keys, add ones
-    // missing from this.
-    const Ctx = struct { realm: *Realm, this_set: Value, out: *JSObject };
+
+    const out_d = out.set_data.?;
+    const Ctx = struct {
+        realm: *Realm,
+        this_d: *ObjMod.SetData,
+        out_d: *ObjMod.SetData,
+        out: *JSObject,
+    };
     const each = struct {
-        fn fn_(c: Ctx, v: Value) (NativeError || IterStop)!void {
-            const td = setDataOf(c.this_set).?;
-            if (setIndex(td, v) == null) {
-                setAddInternal(c.realm, c.out, v) catch return error.OutOfMemory;
+        fn fn_(c: Ctx, raw: Value) (NativeError || IterStop)!void {
+            // §24.2.4.10 step 7.b.i — `-0𝔽 → +0𝔽` before
+            // membership tests so `converts-negative-zero.js`
+            // shows the iterated key normalized.
+            const v = canonicalizeKey(raw);
+            const in_result = setIndex(c.out_d, v) != null;
+            if (setIndex(c.this_d, v) != null) {
+                // §24.2.4.10 step 7.b.iii — present in live
+                // `O.[[SetData]]`: drop from result if there.
+                if (in_result) {
+                    const i = setIndex(c.out_d, v).?;
+                    c.out_d.entries.items[i].deleted = true;
+                }
+            } else {
+                // §24.2.4.10 step 7.b.iv — absent from live
+                // `O.[[SetData]]`: append to result if not already
+                // there.
+                if (!in_result) {
+                    setAddInternal(c.realm, c.out, v) catch return error.OutOfMemory;
+                }
             }
         }
     }.fn_;
-    try forEachSetLikeKey(realm, sl, Ctx{ .realm = realm, .this_set = this_value, .out = out }, each);
+    try forEachSetLikeKey(realm, sl, Ctx{ .realm = realm, .this_d = this_d, .out_d = out_d, .out = out }, each);
     return heap_mod.taggedObject(out);
 }
 
