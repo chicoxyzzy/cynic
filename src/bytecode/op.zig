@@ -495,6 +495,28 @@ pub const Op = enum(u8) {
     /// raises the spec ReferenceError when the source binding
     /// hasn't initialised yet.
     module_reexport_star,
+    /// `[op] [local_k:u16] [exported_k:u16]` — §16.2.3.7
+    /// ExportDeclaration : `export { local as exported } from
+    /// "src"`. Reads the source-module namespace from `acc`
+    /// (left there by the immediately-preceding `module_load`),
+    /// fetches the raw value under `constants[local_k]`
+    /// **WITHOUT** the §9.4.6.7 GetBindingValue Hole-throw
+    /// dispatch — Hole sentinels are forwarded verbatim into
+    /// the importer's namespace under `constants[exported_k]`.
+    /// That preserves spec semantics: an importer reading
+    /// `exported` before the source-module body has run its
+    /// declaration site gets the ReferenceError on the
+    /// downstream `lda_property + throw_if_hole` sequence,
+    /// not at re-export-evaluation time (which would throw
+    /// the moment the FROM-side body ran, even if the importer
+    /// never observes the binding).
+    ///
+    /// Distinct from a generic `lda_property` + `module_export`
+    /// pair specifically because `lda_property` on a module
+    /// namespace promotes Hole into a runtime ReferenceError
+    /// per §9.4.6.7 — the wrong policy at re-export time.
+    /// No-op outside module context.
+    module_reexport_named,
 
     // ── Globals ─────────────────────────────────────────────────
     /// `[op] [k:u16]` — load a global by name. The name is the
@@ -802,6 +824,7 @@ pub const Op = enum(u8) {
             .module_load,
             .module_export,
             => 2, // u16 / i16
+            .module_reexport_named => 4, // local_k:u16 + exported_k:u16
             .capture_unresolved_global,
             .sta_global_strict,
             .make_class,
@@ -912,6 +935,7 @@ pub const Op = enum(u8) {
             .module_export => "ModuleExport",
             .module_link_complete => "ModuleLinkComplete",
             .module_reexport_star => "ModuleReexportStar",
+            .module_reexport_named => "ModuleReexportNamed",
             .make_environment => "MakeEnvironment",
             .lda_env => "LdaEnv",
             .sta_env => "StaEnv",

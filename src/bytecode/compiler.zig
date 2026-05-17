@@ -4062,28 +4062,27 @@ fn compileExportDecl(self: *Compiler, ed: ast.statement.ExportDecl) CompileError
             if (!self.is_module) return;
             if (body.source) |src_span| {
                 // §16.2.3.7 ExportDeclaration : `export NamedExports
-                // FromClause` — re-export from another module. We
-                // load the source namespace and forward each
-                // exported binding's CURRENT value into our
-                // namespace under the renamed key. This is a
-                // value-copy at re-export-evaluation time, not a
-                // live indirection — adequate for the
-                // non-cycle / hoisted-fn-decl cases and for any
-                // re-read after the source module has fully
-                // evaluated. A fully spec-compliant ResolveExport
-                // chain (§15.2.1.16.3) would need the namespace
-                // property to forward through accessors; this
-                // covers the common case.
+                // FromClause` — re-export from another module.
+                // Lower to `module_load <spec>` (which leaves the
+                // source namespace in `acc`) followed by a
+                // `module_reexport_named` per specifier. The
+                // single-purpose op forwards the source key's raw
+                // value — Hole included — to the importer's
+                // namespace under the renamed key, sidestepping
+                // the §9.4.6.7 GetBindingValue Hole-throw that
+                // `lda_property` applies to module namespaces.
+                // Throwing at re-export time would surface a
+                // ReferenceError when the source body is mid-cycle
+                // even if the importer never reads the binding
+                // (e.g. `instn-iee-bndng-*`); forwarding the Hole
+                // defers the throw to the importer's read site,
+                // matching spec semantics.
                 const raw = self.source[src_span.start..src_span.end];
                 if (raw.len < 2) return error.UnsupportedStatement;
                 const spec_text = raw[1 .. raw.len - 1];
                 const k_spec = try self.internString(spec_text);
                 try self.builder.emitOp(.module_load, ed.span);
                 try self.builder.emitU16(k_spec);
-                const r_ns = try self.reserveTemp();
-                defer self.releaseTemp();
-                try self.builder.emitOp(.star, ed.span);
-                try self.builder.emitU8(r_ns);
                 for (body.specifiers) |spec| {
                     const local_text = self.source[spec.local_span.start..spec.local_span.end];
                     const local_name = if (local_text.len >= 2 and (local_text[0] == '"' or local_text[0] == '\''))
@@ -4096,12 +4095,9 @@ fn compileExportDecl(self: *Compiler, ed: ast.statement.ExportDecl) CompileError
                     else
                         exported_text;
                     const k_local = try self.internString(local_name);
-                    try self.builder.emitOp(.ldar, spec.span);
-                    try self.builder.emitU8(r_ns);
-                    try self.builder.emitOp(.lda_property, spec.span);
-                    try self.builder.emitU16(k_local);
                     const k_exp = try self.internString(exported_name);
-                    try self.builder.emitOp(.module_export, spec.span);
+                    try self.builder.emitOp(.module_reexport_named, spec.span);
+                    try self.builder.emitU16(k_local);
                     try self.builder.emitU16(k_exp);
                 }
                 return;

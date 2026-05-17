@@ -6165,6 +6165,30 @@ fn runFrames(
                 // module-shaped code as a script for tests).
             },
 
+            .module_reexport_named => {
+                const k_local = readU16(code, ip);
+                ip += 2;
+                const k_exported = readU16(code, ip);
+                ip += 2;
+                if (k_local >= local_chunk.constants.len) return error.InvalidOpcode;
+                if (k_exported >= local_chunk.constants.len) return error.InvalidOpcode;
+                const local_v = local_chunk.constants[k_local];
+                const exp_v = local_chunk.constants[k_exported];
+                if (!local_v.isString() or !exp_v.isString()) return error.InvalidOpcode;
+                const local_s: *JSString = @ptrCast(@alignCast(local_v.asString()));
+                const exp_s: *JSString = @ptrCast(@alignCast(exp_v.asString()));
+                if (realm.current_module) |mr| {
+                    if (heap_mod.valueAsPlainObject(acc)) |src_obj| {
+                        // Raw `get` — propagates Hole verbatim so
+                        // the throw deferred to the importer's
+                        // read site (§9.4.6.7 routing through
+                        // `lda_property + throw_if_hole`).
+                        const v = src_obj.get(local_s.bytes);
+                        mr.exports.set(realm.allocator, exp_s.bytes, v) catch return error.OutOfMemory;
+                    }
+                }
+            },
+
             .module_reexport_star => {
                 // §16.2.3.7 ExportDeclaration step 8 (no `as`) —
                 // merge every non-`default` own export from the
