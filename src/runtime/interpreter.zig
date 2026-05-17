@@ -5225,7 +5225,13 @@ fn runFrames(
                 // §13.3.7 static-method form — home is the class
                 // constructor (a JSFunction); super walks
                 // `ctor.static_parent` which is the parent class.
-                if (f.home_function) |hf| {
+                // Gate on `home_object == null` so the instance-
+                // ctor frames (which carry both home_function = ctor
+                // for super-call dispatch and home_object = proto
+                // for the property walk) take the prototype path
+                // below.
+                if (f.home_object == null) {
+                    if (f.home_function) |hf| {
                     if (hf.static_parent) |parent_fn| {
                         // §10.1.8.1 OrdinaryGet — accessor descriptor
                         // wins; getter fires with `this` =
@@ -5255,6 +5261,7 @@ fn runFrames(
                         acc = Value.undefined_;
                     }
                     continue;
+                    }
                 }
                 const home = f.home_object orelse {
                     const ex = try makeTypeError(realm, "super used outside a method");
@@ -5310,7 +5317,11 @@ fn runFrames(
             },
 
             .super_get_computed => {
-                if (f.home_function) |hf| {
+                // Same gate as `.super_get`: only treat as the
+                // static-method form when no instance home_object
+                // is in scope (a class ctor frame carries both).
+                if (f.home_object == null) {
+                    if (f.home_function) |hf| {
                     const key_v_static = switch (try coerceToPropertyKey(allocator, realm, frames, f, ip, acc)) {
                         .ok => |v| v,
                         .handled => {
@@ -5322,11 +5333,39 @@ fn runFrames(
                     var key_buf_s: [64]u8 = undefined;
                     const key_slice_s = computedKeyToString(key_v_static, &key_buf_s);
                     if (hf.static_parent) |parent_fn| {
+                        // §10.1.8.1 OrdinaryGet step 4 — accessor
+                        // dispatch runs through the getter, not the
+                        // data slot. `JSFunction.get` only resolves
+                        // data; honour an own accessor on the parent
+                        // function before falling back so e.g.
+                        // `static get K() { ... }` on B reads via the
+                        // getter when `super[K]` walks up.
+                        if (parent_fn.ownAccessor(key_slice_s)) |acc_pair| {
+                            if (acc_pair.getter) |getter| {
+                                const outcome = try callJSFunction(allocator, realm, getter, f.this_value, &.{});
+                                switch (outcome) {
+                                    .value, .yielded => |v| acc = v,
+                                    .thrown => |ex| {
+                                        f.ip = ip;
+                                        f.accumulator = acc;
+                                        committed = true;
+                                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                            return .{ .thrown = ex };
+                                        }
+                                        continue;
+                                    },
+                                }
+                            } else {
+                                acc = Value.undefined_;
+                            }
+                            continue;
+                        }
                         acc = parent_fn.get(key_slice_s);
                     } else {
                         acc = Value.undefined_;
                     }
                     continue;
+                    }
                 }
                 const home = f.home_object orelse {
                     const ex = try makeTypeError(realm, "super used outside a method");
@@ -5418,8 +5457,12 @@ fn runFrames(
                 }
                 // §13.3.7 static-method form — `this` is the
                 // current class; super setter dispatch reads the
-                // parent JSFunction's `accessors` map.
-                if (f.home_function) |hf| {
+                // parent JSFunction's `accessors` map. Same
+                // home_object-null gate as the read paths so a
+                // class ctor body falls through to the prototype
+                // walk instead.
+                if (f.home_object == null) {
+                    if (f.home_function) |hf| {
                     if (hf.static_parent) |parent_fn| {
                         if (parent_fn.accessors.get(key_s.bytes)) |acc_pair| {
                             if (acc_pair.setter) |setter| {
@@ -5451,6 +5494,7 @@ fn runFrames(
                     }
                     acc = value;
                     continue;
+                    }
                 }
                 const home = f.home_object orelse {
                     const ex = try makeTypeError(realm, "super used outside a method");

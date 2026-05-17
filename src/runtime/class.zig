@@ -324,16 +324,27 @@ pub fn buildClass(
             false,
             captured_env,
         );
-        // §15.5.6.4 / §10.2.10 — getter/setter functions are
-        // allocated via OrdinaryFunctionCreate with FunctionKind
-        // = method, which produces a function WITHOUT a
-        // \`prototype\` own slot (\`MakeMethod\` only sets
-        // [[HomeObject]]). Drop the auto-allocated prototype that
-        // allocateFunction installs for non-arrow functions, so
-        // \`'prototype' in classProto.x.get\` is false per spec.
-        if (m.kind != .method) {
+        // §15.4.4 MethodDefinitionEvaluation → §10.2.10
+        // OrdinaryFunctionCreate with FunctionKind = method (or
+        // generator-method / async-method / accessor) — none of
+        // these install a `prototype` own slot. `MakeMethod` only
+        // wires [[HomeObject]]. Drop the auto-allocated prototype
+        // that `allocateFunction` installs for non-arrow functions,
+        // and turn off [[Construct]] so `new obj.method()` throws
+        // (methods are non-constructors per §15.4 step 2).
+        // Generator / async methods aren't constructors either —
+        // §15.5 / §15.7 / §15.8 share the same MethodDefinition
+        // gate. Class constructors take a separate path below
+        // (§15.7.10 ClassDefinitionEvaluation) so this drop never
+        // touches them.
+        if (!m.is_generator and !m.is_async) {
+            // Generators / async methods set `prototype` to a
+            // %GeneratorPrototype% / %AsyncGeneratorPrototype% by
+            // their own intrinsics path further down; ordinary
+            // and accessor methods don't.
             fn_obj.prototype = null;
         }
+        fn_obj.has_construct = false;
         if (m.spec_length != m.param_count) {
             try fn_obj.properties.put(realm.allocator, "length", @import("value.zig").Value.fromInt32(m.spec_length));
         }
@@ -484,11 +495,20 @@ pub fn buildClass(
             false,
             captured_env,
         );
-        // §15.5.6.4 — static getter/setter functions also lack a
-        // \`prototype\` own slot (same shape as instance accessors).
-        if (m.kind != .method) {
+        // §15.4.4 MethodDefinitionEvaluation — static methods
+        // (including their generator / async variants and the
+        // accessor halves) all run through OrdinaryFunctionCreate
+        // with FunctionKind = method / accessor, which produces a
+        // non-constructor function with NO own `prototype` slot.
+        // Drop the auto-allocated prototype that `allocateFunction`
+        // installs for non-arrow functions; only the generator /
+        // async forms re-install a %GeneratorPrototype%-shaped
+        // `prototype` below via their `proto` wiring. Also turn
+        // off [[Construct]] so `new C.staticMethod()` throws.
+        if (!m.is_generator and !m.is_async) {
             fn_obj.prototype = null;
         }
+        fn_obj.has_construct = false;
         if (m.spec_length != m.param_count) {
             try fn_obj.properties.put(realm.allocator, "length", @import("value.zig").Value.fromInt32(m.spec_length));
         }
