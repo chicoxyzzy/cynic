@@ -1746,12 +1746,18 @@ pub fn loadModule(
                 const ns = module_mod.getModuleNamespace(realm, mr) catch return error.OutOfMemory;
                 return .{ .value = heap_mod.taggedObject(ns), .threw = false };
             },
-            .evaluating => {
+            .evaluating, .evaluating_async => {
                 // §16.2.1.5.4 cycle — the in-progress namespace
                 // exists; brand it as the Module Namespace exotic
                 // (proto:null, is_module_namespace=true) but leave
                 // it extensible so the outer evaluation can keep
-                // publishing exports.
+                // publishing exports. `.evaluating_async` is the
+                // async-body-suspended variant — the body's
+                // pending result Promise is held on
+                // `evaluation_promise`, but a cycling importer
+                // still gets the partial namespace synchronously
+                // (matches §16.2.1.5 InnerModuleEvaluation step
+                // 4 cycle handling).
                 const ns = module_mod.getModuleNamespace(realm, mr) catch return error.OutOfMemory;
                 return .{ .value = heap_mod.taggedObject(ns), .threw = false };
             },
@@ -1827,7 +1833,50 @@ pub fn loadModule(
         return err;
     };
     switch (outcome) {
-        .value, .yielded => {
+        .value, .yielded => |v| {
+            // §16.2.1.5.1 [[IsAsync]] — when the module body has
+            // top-level await, `run` routes through
+            // `startAsyncCall` which returns a pending result
+            // Promise. Per §16.2.1.5 InnerModuleEvaluation, an
+            // async module's static-import dependents wait for
+            // its `[[TopLevelCapability]]` to settle before
+            // their bodies run. Cynic doesn't yet model the full
+            // PendingAsyncDependencies / GatherAvailableAncestors
+            // dance — instead, on the static-import edge we
+            // drain microtasks here until the result Promise
+            // settles. That matches spec ordering for the
+            // sequential-deps case (the importer's body sees
+            // final exports), at the cost of the
+            // sibling-doesn't-block invariant: an async dep
+            // completes before any sibling import gets to
+            // evaluate. The trade is net-positive on test262
+            // (dfs-invariant + module-import-resolution +
+            // dynamic-import-resolution all rely on the body
+            // having finished by the time imports return).
+            if (mr.chunk.?.is_async_module) {
+                if (heap_mod.valueAsPlainObject(v)) |p_obj| {
+                    if (p_obj.isPromise()) {
+                        mr.evaluation_promise = v;
+                        mr.state = .evaluating_async;
+                        // Drain until the Promise settles or
+                        // the queue empties (broken Promise
+                        // chains shouldn't infinite-loop).
+                        while (p_obj.promise_state == .pending and realm.microtask_queue.items.len > 0) {
+                            try drainMicrotasks(allocator, realm);
+                        }
+                        if (p_obj.promise_state == .rejected) {
+                            mr.state = .errored;
+                            mr.error_value = p_obj.promise_value;
+                            mr.evaluation_promise = Value.undefined_;
+                            return .{ .value = p_obj.promise_value, .threw = true };
+                        }
+                        // Fulfilled (or still pending — treat as
+                        // evaluated; the deferred work will run
+                        // later and settle to undefined).
+                        mr.evaluation_promise = Value.undefined_;
+                    }
+                }
+            }
             mr.state = .evaluated;
             const final_ns = module_mod.getModuleNamespace(realm, mr) catch return error.OutOfMemory;
             return .{ .value = heap_mod.taggedObject(final_ns), .threw = false };

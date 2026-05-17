@@ -34,6 +34,12 @@ pub const ModuleState = enum(u8) {
     /// Module body is currently running; cycles route here and
     /// receive the in-progress exports namespace.
     evaluating,
+    /// §16.2.1.5.1 Async Module Records — the body started and
+    /// is currently suspended on a top-level `await`. The
+    /// `evaluation_promise` slot carries the AsyncFunctionStart
+    /// result Promise; consumers (static-import drains, dynamic
+    /// `import()`) chain settlement off of it.
+    evaluating_async,
     /// Module body returned successfully; `exports` is final.
     evaluated,
     /// Module body threw — `exports` is whatever was populated
@@ -61,6 +67,22 @@ pub const ModuleRecord = struct {
     /// If `state ==.errored`, the thrown value is stashed
     /// here so subsequent imports can re-throw it.
     error_value: Value = Value.undefined_,
+    /// §16.2.1.5.1 [[TopLevelCapability]] / [[AsyncEvaluation]] —
+    /// the result Promise of an async module body (the one
+    /// `startAsyncCall` returned). Pending while the body is
+    /// suspended on a top-level `await`, fulfilled with
+    /// undefined when the body returns normally, rejected with
+    /// the thrown value otherwise. Set together with
+    /// `state = .evaluating_async`; cleared back to
+    /// `Value.undefined_` when the module finalises to
+    /// `.evaluated` / `.errored`. Consumers:
+    /// • `loadModule` static-import path drains microtasks
+    ///   against this Promise so the importer's body sees
+    ///   final exports.
+    /// • `dynamic_import` opcode reads this so the
+    ///   import()-Promise settles in lockstep with the
+    ///   module's evaluation Promise.
+    evaluation_promise: Value = Value.undefined_,
     /// `true` once `getModuleNamespace` has installed the §9.4.6
     /// Module Namespace exotic brand on `exports` — clears the
     /// prototype chain, flips `extensible = false`, sets
