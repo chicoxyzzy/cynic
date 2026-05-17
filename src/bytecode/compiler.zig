@@ -154,6 +154,15 @@ pub const Compiler = struct {
     /// `false` for scripts and inline-test compiles, where
     /// import/export still parse but compile as no-ops.
     is_module: bool = false,
+    /// Sticky flag set by `compileAwait` whenever an `await`
+    /// emits at module top level (lexically outside any function /
+    /// arrow / method body — i.e. the enclosing function-like
+    /// scope is `.script` and `is_module` is true). Drives the
+    /// `Chunk.is_async_module` flag set in `compileModuleAsChunk`,
+    /// which tells `interpreter.run` to wrap the body via
+    /// `startAsyncCall` so the `await_` opcode can suspend onto a
+    /// JSGenerator-backed frame.
+    module_has_top_level_await: bool = false,
     /// §13.5.5 Optional-chain context — patch sites for
     /// `jmp_if_nullish` instructions emitted at `?.` boundaries.
     /// Non-null only while compiling inside a `chain` AST node;
@@ -1160,6 +1169,18 @@ pub const Compiler = struct {
     fn compileAwait(self: *Compiler, a: ast.expression.AwaitExpr) CompileError!void {
         try self.compileExpression(a.argument);
         try self.builder.emitOp(.await_, a.span);
+        // §16.2.1.5.1 — flag any module-top-level await so the
+        // module's chunk gets `is_async_module = true`. The
+        // enclosing function-like scope is `.script` for module
+        // top and `.function` for any nested function body; the
+        // is_module guard excludes scripts (where TLA is a parse
+        // error anyway).
+        if (self.is_module) {
+            const fn_scope = self.functionScope();
+            if (fn_scope.kind == .script) {
+                self.module_has_top_level_await = true;
+            }
+        }
     }
 
     /// `++x` / `--x` (prefix), `x++` / `x--` (postfix). §13.4.
@@ -8506,6 +8527,10 @@ pub fn compileModuleAsChunk(
     try c.builder.emitOp(.return_, end_span);
 
     c.builder.code.items[slot_count_patch] = c.env_slot_count;
+    // §16.2.1.5.1 [[IsAsync]] — surface the top-level-await flag
+    // accumulated by `compileAwait` so the runtime knows to wrap
+    // this module's evaluation as an async function call.
+    c.builder.is_async_module = c.module_has_top_level_await;
     var chunk = try c.finish();
     chunk.base_url = base_url;
     realm.heap.pinChunk(&chunk);

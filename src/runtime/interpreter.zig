@@ -314,6 +314,23 @@ pub fn evaluateScript(
 /// files; the host's `allocator` owns them and they're freed on
 /// each `Return` (or on overall run shutdown).
 pub fn run(allocator: std.mem.Allocator, realm: *Realm, chunk: *const Chunk) RunError!RunResult {
+    // §16.2.1.5.1 [[IsAsync]] — a module body with top-level
+    // `await` runs as if wrapped in an async function. Route
+    // through `startAsyncCall` so the body's `await_` opcode
+    // suspends onto a JSGenerator-backed frame (and so the
+    // surrounding expression doesn't get corrupted by the
+    // current "passthrough" fall-through when `f.generator` is
+    // null). The wrapper allocates a result Promise that
+    // settles when the body completes; the harness drains
+    // microtasks after this call returns and observes the
+    // settlement via `$DONE` for async-flagged fixtures or via
+    // the Promise itself for non-async modules. Plain scripts
+    // and non-async modules keep the synchronous top-level
+    // frame.
+    if (chunk.is_async_module) {
+        return startAsyncCall(allocator, realm, chunk, null, Value.undefined_, &.{}, null, null);
+    }
+
     var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
     defer {
         for (frames.items) |*f| if (f.owns_registers) allocator.free(f.registers);

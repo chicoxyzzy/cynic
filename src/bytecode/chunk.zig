@@ -248,6 +248,15 @@ pub const Chunk = struct {
     /// in the module's top-level env that gets snapshotted into
     /// the module's exports namespace at body completion.
     exported_names: []const []const u8 = &.{},
+    /// §16.2.1.5.1 [[IsAsync]] — true for a module whose body
+    /// contains a *top-level* `await` (lexically outside any
+    /// function or arrow). Drives `interpreter.run` to route the
+    /// chunk through `startAsyncCall` so the body runs as a
+    /// JSGenerator-backed async frame and the `await_` opcode has
+    /// a place to suspend. Always false for scripts and for
+    /// function-body chunks (their `await` is inside an async
+    /// function, which is handled separately).
+    is_async_module: bool = false,
 
     pub fn deinit(self: *Chunk, allocator: std.mem.Allocator) void {
         allocator.free(self.code);
@@ -273,6 +282,11 @@ pub const Builder = struct {
     function_templates: std.ArrayListUnmanaged(FunctionTemplate) = .empty,
     class_templates: std.ArrayListUnmanaged(ClassTemplate) = .empty,
     register_count: u8 = 0,
+    /// Surfaced on the finished `Chunk` as `.is_async_module`.
+    /// Set by `compileModuleAsChunk` after walking the body's
+    /// top-level emit for any `.await_` opcode (tracked via the
+    /// compiler's `module_has_top_level_await` flag).
+    is_async_module: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) Builder {
         return .{ .allocator = allocator };
@@ -399,6 +413,7 @@ pub const Builder = struct {
             .function_templates = try self.function_templates.toOwnedSlice(self.allocator),
             .class_templates = try self.class_templates.toOwnedSlice(self.allocator),
             .register_count = self.register_count,
+            .is_async_module = self.is_async_module,
         };
     }
 };
