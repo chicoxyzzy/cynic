@@ -5629,7 +5629,7 @@ fn runFrames(
                 const r_key = code[ip];
                 const r_value = code[ip + 1];
                 ip += 2;
-                const key_v = registers[r_key];
+                const key_v_raw = registers[r_key];
                 const value = registers[r_value];
                 const home = f.home_object orelse {
                     const ex = try makeTypeError(realm, "super used outside a method");
@@ -5645,6 +5645,12 @@ fn runFrames(
                 // RequireObjectCoercible on the home object's
                 // `[[Prototype]]`. A null prototype throws TypeError
                 // before the bracket-key conversion or [[Set]] runs.
+                // The proto is captured HERE — §6.2.5.6 PutValue
+                // step 3.c (ToPropertyKey) runs after this, so a
+                // user `key.toString()` that mutates `home`'s
+                // prototype must observe the captured value, not the
+                // post-mutation one (see test262
+                // `prop-expr-getsuperbase-before-topropertykey-putvalue`).
                 const parent_proto = home.prototype orelse {
                     const ex = try makeTypeError(realm, "Cannot set properties of null (super)");
                     f.ip = ip;
@@ -5654,6 +5660,18 @@ fn runFrames(
                         return .{ .thrown = ex };
                     }
                     continue;
+                };
+                // §6.2.5.6 PutValue step 3.c.i — ToPropertyKey now
+                // (after baseValue captured above). A user
+                // `toString` running here can mutate the proto chain
+                // but the captured `parent_proto` survives.
+                const key_v = switch (try coerceToPropertyKey(allocator, realm, frames, f, ip, key_v_raw)) {
+                    .ok => |v| v,
+                    .handled => {
+                        committed = true;
+                        continue;
+                    },
+                    .uncaught => |ex| return .{ .thrown = ex },
                 };
                 var key_buf: [64]u8 = undefined;
                 const key_slice = computedKeyToString(key_v, &key_buf);
@@ -7174,21 +7192,17 @@ fn runFrames(
                     // (compiler-synthesised default-derived ctor).
                     args = registers[0..f.argc];
                 }
-                // §13.3.7.1 step 6 → §10.2.1.4 BindThisValue step 3 —
-                // a derived constructor whose [[ThisBindingStatus]] is
-                // already "initialized" must throw ReferenceError on
-                // any further `super(...)`. The flag is flipped only
-                // after a successful super-call below.
-                if (f.is_derived_ctor and f.super_called) {
-                    const ex = try makeReferenceError(realm, "Super constructor may only be called once");
-                    f.ip = ip;
-                    f.accumulator = acc;
-                    committed = true;
-                    if (!try unwindThrow(allocator, realm, frames, ex)) {
-                        return .{ .thrown = ex };
-                    }
-                    continue;
-                }
+                // §13.3.7.1 SuperCall — the double-call gate is at
+                // step 8 (BindThisValue), which fires AFTER args are
+                // evaluated and AFTER `Construct(parent, args, NT)`
+                // runs. So the parent constructor IS invoked even on
+                // a re-entrant super(...), and side effects in arg
+                // expressions / the parent body are observable —
+                // see test262 `definition/this-check-ordering.js`.
+                // The flag is checked post-call below; here we just
+                // remember the pre-call state so the BindThisValue
+                // gate can fire correctly.
+                const second_super_call = f.is_derived_ctor and f.super_called;
                 // §13.3.7.2 GetSuperConstructor — the *active*
                 // function's [[Prototype]], not its home-object's
                 // prototype's `constructor` slot. `Object.setPrototypeOf(C,
@@ -7248,6 +7262,24 @@ fn runFrames(
                 const outcome = try callJSFunctionAsSuper(allocator, realm, parent_fn, f.this_value, args, f.new_target);
                 switch (outcome) {
                     .value, .yielded => |v| {
+                        // §10.2.1.4 BindThisValue step 3 — if the
+                        // function env-record's [[ThisBindingStatus]]
+                        // is already "initialized", BindThisValue
+                        // throws ReferenceError. The throw must fire
+                        // AFTER the call so the parent's side effects
+                        // (and the ArgumentListEvaluation side effects
+                        // above) are observable per
+                        // test262 `this-check-ordering.js`.
+                        if (second_super_call) {
+                            const ex = try makeReferenceError(realm, "Super constructor may only be called once");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue;
+                        }
                         // §10.2.1.3 [[Construct]] step 10 — if the
                         // parent ctor body returned an Object, that
                         // becomes the Construct result; otherwise the

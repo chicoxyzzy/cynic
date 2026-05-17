@@ -2374,6 +2374,29 @@ pub fn objectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
             cursor = node.prototype;
         }
         obj.prototype = new_proto;
+    } else if (heap_mod.valueAsFunction(target_v)) |target_fn| {
+        // §10.1.2.1 OrdinarySetPrototypeOf on a JSFunction target.
+        // Cynic stores the function's [[Prototype]] edge on
+        // `static_parent` (function-typed) and `proto`
+        // (JSObject-typed) — write to both so subsequent walks via
+        // either slot pick up the new value. This unblocks
+        // `Object.setPrototypeOf(C, X)` retargeting `super(...)`
+        // from inside a class extending C (the GetSuperConstructor
+        // walk reads `static_parent`).
+        const new_static_parent: ?*@import("../function.zig").JSFunction =
+            heap_mod.valueAsFunction(proto_v);
+        const new_proto_obj: ?*@import("../object.zig").JSObject = blk: {
+            if (proto_v.isNull()) break :blk null;
+            if (heap_mod.valueAsPlainObject(proto_v)) |p| break :blk p;
+            // For a function-typed proto, point `proto` at the
+            // parent function's own prototype object so property
+            // lookups through the proto chain still resolve. The
+            // function identity itself lives on `static_parent`.
+            if (heap_mod.valueAsFunction(proto_v)) |fn_obj| break :blk fn_obj.prototype;
+            break :blk null;
+        };
+        target_fn.static_parent = new_static_parent;
+        target_fn.proto = new_proto_obj;
     }
     return target_v;
 }
