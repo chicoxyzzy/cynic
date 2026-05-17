@@ -176,6 +176,7 @@ pub fn buildClass(
     // private key into the runtime slot key when the executing
     // method's `home_object` is this prototype.
     proto.private_brand = brand_prefix;
+    proto.private_compile_prefix = template.private_prefix;
     // §15.7.14 step 6 — `proto.[[Prototype]]` is:
     //   • parent.prototype, if `extends X`
     //   • null, if `extends null`
@@ -212,6 +213,7 @@ pub fn buildClass(
     // static-private accesses (which route via `home_function`)
     // route to the same per-evaluation identity.
     ctor.private_brand = brand_prefix;
+    ctor.private_compile_prefix = template.private_prefix;
     if (parent_ctor != null) ctor.constructor_kind = .derived;
     // Wire the ctor's [[Prototype]] for `Function.prototype.call`/`apply`/`bind`.
     ctor.proto = realm.intrinsics.function_prototype;

@@ -2250,13 +2250,9 @@ pub const Compiler = struct {
                     // `obj.#name` — mangle with the current class's
                     // private prefix and emit `lda_private`.
                     if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
-                    const prefix = self.class_stack.items[self.class_stack.items.len - 1].private_prefix;
-                    const arena = self.realm.classAllocator();
-                    // §12.7.1 — `\uXXXX` escapes in IdentifierName
-                    // decode to the source character. `#\u{6F}` and
-                    // `#o` must hash to the same slot.
+                    // §15.7.14 step 11 — lexical lookup; §12.7.1 decode escapes.
                     const decoded = try self.decodeIdentifierName(raw_slice[1..]);
-                    const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, decoded }) catch return error.OutOfMemory;
+                    const mangled = try self.manglePrivateRef(decoded);
                     const k = try self.internString(mangled);
                     try self.compileExpression(m.object);
                     if (m.optional) try self.emitOptionalShortCircuit(m.span);
@@ -2295,6 +2291,32 @@ pub const Compiler = struct {
     fn internString(self: *Compiler, slice: []const u8) CompileError!u16 {
         const s = self.realm.heap.allocateString(slice) catch return error.OutOfMemory;
         return try self.builder.addConstant(Value.fromString(s));
+    }
+
+    /// §15.7.14 step 11 PrivateBoundIdentifiers — resolve `#name`
+    /// (decoded) to the `private_prefix` of the innermost enclosing
+    /// class that declares it. Falls back to the innermost class's
+    /// prefix when nothing matches, so the bytecode still emits
+    /// and the runtime brand check raises the TypeError the spec
+    /// mandates.
+    fn manglePrivateRef(self: *Compiler, decoded_name: []const u8) CompileError![]const u8 {
+        std.debug.assert(self.class_stack.items.len > 0);
+        const arena = self.realm.classAllocator();
+        var prefix: []const u8 = self.class_stack.items[self.class_stack.items.len - 1].private_prefix;
+        var i = self.class_stack.items.len;
+        while (i > 0) {
+            i -= 1;
+            const ctx = &self.class_stack.items[i];
+            for (ctx.private_names) |n| {
+                if (std.mem.eql(u8, n, decoded_name)) {
+                    prefix = ctx.private_prefix;
+                    i = 0; // break outer
+                    break;
+                }
+            }
+            if (i == 0) break;
+        }
+        return std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, decoded_name }) catch return error.OutOfMemory;
     }
 
     /// `obj.x = v` and compound forms (`obj.x += 1`, `obj.x ??= y`).
@@ -2375,13 +2397,9 @@ pub const Compiler = struct {
                 const raw_slice = self.source[span.start..span.end];
                 if (raw_slice.len > 0 and raw_slice[0] == '#') {
                     if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
-                    const prefix = self.class_stack.items[self.class_stack.items.len - 1].private_prefix;
-                    const arena = self.realm.classAllocator();
-                    // §12.7.1 — `\uXXXX` escapes in IdentifierName
-                    // decode to the source character. `#\u{6F}` and
-                    // `#o` must hash to the same slot.
+                    // §15.7.14 step 11 — lexical lookup; §12.7.1 decode escapes.
                     const decoded = try self.decodeIdentifierName(raw_slice[1..]);
-                    const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, decoded }) catch return error.OutOfMemory;
+                    const mangled = try self.manglePrivateRef(decoded);
                     private_k = try self.internString(mangled);
                 } else {
                     const key_slice = try self.decodeIdentifierName(raw_slice);
@@ -2971,12 +2989,9 @@ pub const Compiler = struct {
                 const key_slice = self.source[span.start..span.end];
                 if (key_slice.len > 0 and key_slice[0] == '#') {
                     if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
-                    const prefix = self.class_stack.items[self.class_stack.items.len - 1].private_prefix;
-                    const arena = self.realm.classAllocator();
-                    // §12.7.1 — decode escapes so `obj.#\u{6F}()`
-                    // and `obj.#o()` find the same private slot.
+                    // §15.7.14 step 11 — lexical lookup; §12.7.1 decode escapes.
                     const decoded = try self.decodeIdentifierName(key_slice[1..]);
-                    const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, decoded }) catch return error.OutOfMemory;
+                    const mangled = try self.manglePrivateRef(decoded);
                     const k = try self.internString(mangled);
                     try self.builder.emitOp(.ldar, c.span);
                     try self.builder.emitU8(r_recv);
@@ -3055,12 +3070,9 @@ pub const Compiler = struct {
                 const key_slice = self.source[span.start..span.end];
                 if (key_slice.len > 0 and key_slice[0] == '#') {
                     if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
-                    const prefix = self.class_stack.items[self.class_stack.items.len - 1].private_prefix;
-                    const arena = self.realm.classAllocator();
-                    // §12.7.1 — decode escapes so `obj.#\u{6F}()`
-                    // and `obj.#o()` find the same private slot.
+                    // §15.7.14 step 11 — lexical lookup; §12.7.1 decode escapes.
                     const decoded = try self.decodeIdentifierName(key_slice[1..]);
-                    const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, decoded }) catch return error.OutOfMemory;
+                    const mangled = try self.manglePrivateRef(decoded);
                     const k = try self.internString(mangled);
                     try self.builder.emitOp(.ldar, c.span);
                     try self.builder.emitU8(r_recv);
@@ -5001,11 +5013,54 @@ fn compileClassTemplate(
     const arena = self.realm.classAllocator();
     const private_prefix = std.fmt.allocPrint(arena, "P{d}#", .{class_uid}) catch return error.OutOfMemory;
 
+    // §15.7.14 step 11 — gather decoded `#name`s declared by this
+    // class so private-name refs inside nested classes can walk
+    // outward and find the *declaring* class's prefix.
+    var private_names_buf: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer private_names_buf.deinit(self.allocator);
+    for (body) |member| switch (member) {
+        .method => |m| {
+            const raw = switch (m.key) {
+                .private => |s| self.source[s.start..s.end],
+                .ident => |s| self.source[s.start..s.end],
+                else => continue,
+            };
+            if (raw.len == 0 or raw[0] != '#') continue;
+            const decoded = try self.decodeIdentifierName(raw[1..]);
+            var dup = false;
+            for (private_names_buf.items) |n| if (std.mem.eql(u8, n, decoded)) {
+                dup = true;
+                break;
+            };
+            if (!dup) {
+                const owned = arena.dupe(u8, decoded) catch return error.OutOfMemory;
+                try private_names_buf.append(self.allocator, owned);
+            }
+        },
+        .field => |fd| {
+            if (fd.key != .private) continue;
+            const raw = methodKeyName(self.source, fd.key) orelse continue;
+            const decoded = try self.decodeIdentifierName(raw);
+            var dup = false;
+            for (private_names_buf.items) |n| if (std.mem.eql(u8, n, decoded)) {
+                dup = true;
+                break;
+            };
+            if (!dup) {
+                const owned = arena.dupe(u8, decoded) catch return error.OutOfMemory;
+                try private_names_buf.append(self.allocator, owned);
+            }
+        },
+        .static_block => {},
+    };
+    const private_names_slice = arena.dupe([]const u8, private_names_buf.items) catch return error.OutOfMemory;
+
     // Push onto the class stack so method bodies / field
     // initializers can mangle private names.
     self.class_stack.append(self.allocator, .{
         .private_prefix = private_prefix,
         .is_derived = is_derived,
+        .private_names = private_names_slice,
     }) catch return error.OutOfMemory;
     defer _ = self.class_stack.pop();
 
@@ -7060,10 +7115,9 @@ fn prepareAssignmentLeaf(self: *Compiler, target: ast.expression.Expression) Com
                         // prefix at compile time. The brand check
                         // happens later, at `sta_private` time.
                         if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
-                        const prefix = self.class_stack.items[self.class_stack.items.len - 1].private_prefix;
-                        const arena = self.realm.classAllocator();
+                        // §15.7.14 step 11 — lexical lookup.
                         const decoded = try self.decodeIdentifierName(raw[1..]);
-                        const mangled = std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, decoded }) catch return error.OutOfMemory;
+                        const mangled = try self.manglePrivateRef(decoded);
                         const k = try self.internString(mangled);
                         return .{ .member = .{ .span = m.span, .r_obj = r_obj, .r_key = null, .key = .{ .private = k } } };
                     }
@@ -7452,6 +7506,13 @@ fn compileIf(self: *Compiler, s: ast.statement.IfStmt) CompileError!void {
 const ClassContext = struct {
     private_prefix: []const u8,
     is_derived: bool,
+    /// §15.7.14 step 11 — the *decoded* `#name`s declared by this
+    /// class (instance + static, fields + methods + accessors).
+    /// Walked outward from `class_stack` at every private-name
+    /// reference site so the mangle prefix is the *declaring*
+    /// class's, not just the innermost. Allocated in the realm's
+    /// class arena.
+    private_names: []const []const u8 = &.{},
 };
 
 /// §14.15 active try-finally context. Linked list, innermost

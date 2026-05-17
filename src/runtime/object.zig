@@ -298,6 +298,7 @@ pub const JSObject = struct {
     /// Empty on non-class-related JSObjects. Borrowed from the
     /// realm's class arena (realm-lifetime).
     private_brand: []const u8 = "",
+    private_compile_prefix: []const u8 = "",
     /// Prototype object for prototype-chain lookups. later
     /// resolves member access through `[[Get]]` (§10.1.8) which
     /// walks this chain when the own property is absent.

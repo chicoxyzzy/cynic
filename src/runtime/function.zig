@@ -256,6 +256,8 @@ pub const JSFunction = struct {
     /// static method body. Empty on non-class-related functions.
     /// Borrowed from the realm's class arena.
     private_brand: []const u8 = "",
+    /// §15.7.14 step 11 PrivateBoundIdentifiers — compile-time prefix.
+    private_compile_prefix: []const u8 = "",
     /// `Function.prototype` — the object that becomes the
     /// `[[Prototype]]` of instances created by `new f(…)`. Auto-
     /// allocated for non-arrow functions at construction time

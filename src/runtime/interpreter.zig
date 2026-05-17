@@ -243,17 +243,45 @@ fn translatePrivateKey(buf: []u8, key: []const u8, brand: []const u8) []const u8
 /// Returns "" when nothing matches — `translatePrivateKey` then
 /// falls through to the compile-time key and the lookup fails
 /// with the spec-mandated brand-check TypeError.
-fn framePrivateBrand(f: anytype, recv_hint: Value) []const u8 {
+fn framePrivateBrand(f: anytype, recv_hint: Value, key: []const u8) []const u8 {
+    // §15.7.14 step 11 — the key has shape `"P{n}#name"`. Match
+    // the `"P{n}#"` prefix against `private_compile_prefix` on
+    // each candidate so we route to the brand for the *declaring*
+    // class, not just any brand in scope. This is what makes a
+    // nested-class method that references the outer class's `#x`
+    // resolve correctly — the receiver's proto chain reaches the
+    // outer prototype where compile_prefix matches.
+    const hash_idx = std.mem.indexOfScalar(u8, key, '#');
+    const key_prefix: []const u8 = if (hash_idx) |hi| key[0 .. hi + 1] else "";
+    if (key_prefix.len > 0) {
+        if (f.home_object) |home| {
+            if (std.mem.eql(u8, home.private_compile_prefix, key_prefix) and home.private_brand.len > 0) return home.private_brand;
+        }
+        if (f.home_function) |home_fn| {
+            if (std.mem.eql(u8, home_fn.private_compile_prefix, key_prefix) and home_fn.private_brand.len > 0) return home_fn.private_brand;
+        }
+        if (heap_mod.valueAsPlainObject(recv_hint)) |obj| {
+            var cur: ?*JSObject = obj.prototype;
+            while (cur) |c| {
+                if (std.mem.eql(u8, c.private_compile_prefix, key_prefix) and c.private_brand.len > 0) return c.private_brand;
+                cur = c.prototype;
+            }
+        }
+        if (heap_mod.valueAsFunction(recv_hint)) |fn_obj| {
+            if (std.mem.eql(u8, fn_obj.private_compile_prefix, key_prefix) and fn_obj.private_brand.len > 0) return fn_obj.private_brand;
+        }
+    }
+    // Legacy fallback: first brand found anywhere — preserves the
+    // pre-§15.7.14-step-11 behavior for keys with no `#` and for
+    // brand-check-failure paths where no compile_prefix matches.
+    // The brand lookup is best-effort; the slot lookup will throw
+    // the spec-mandated TypeError if no match exists.
     if (f.home_object) |home| {
         if (home.private_brand.len > 0) return home.private_brand;
     }
     if (f.home_function) |home_fn| {
         if (home_fn.private_brand.len > 0) return home_fn.private_brand;
     }
-    // §15.7.14 — the brand is observable through the receiver's
-    // prototype chain (every instance proto carries its class's
-    // brand). This handles inner-function accesses that don't have
-    // a `home_*` slot set.
     if (heap_mod.valueAsPlainObject(recv_hint)) |obj| {
         var cur: ?*JSObject = obj.prototype;
         while (cur) |c| {
@@ -5437,7 +5465,7 @@ fn runFrames(
                 // lives on the method's home_object / home_function
                 // — both set by `class.zig` at ClassTail evaluation.
                 var brand_buf: [128]u8 = undefined;
-                const lookup_key = translatePrivateKey(&brand_buf, key_s.bytes, framePrivateBrand(f, acc));
+                const lookup_key = translatePrivateKey(&brand_buf, key_s.bytes, framePrivateBrand(f, acc, key_s.bytes));
                 // §15.7 — `class C { static #x = …; static M() { return C.#x; } }`
                 // routes the read through the constructor's
                 // private slots when the receiver is the class
@@ -6380,7 +6408,10 @@ fn runFrames(
                 // shared compile-time prefix and let two unrelated
                 // ClassTail evaluations share storage.
                 var brand_buf: [128]u8 = undefined;
-                const lookup_key = translatePrivateKey(&brand_buf, key_s.bytes, framePrivateBrand(f, acc));
+                // §15.7.14 step 11 — pass the receiver (in r_obj),
+                // NOT `acc` (which holds the value being stored).
+                // The brand walk needs the target object's chain.
+                const lookup_key = translatePrivateKey(&brand_buf, key_s.bytes, framePrivateBrand(f, registers[r_obj], key_s.bytes));
                 // §15.7 static private — receiver is the class
                 // constructor function. Mirror the JSObject path
                 // (accessor wins, then data, then brand-check
