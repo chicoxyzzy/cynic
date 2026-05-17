@@ -95,17 +95,17 @@ fn diffAndReport(label: []const u8, actual: []const []const u8, expected: []cons
 // the current stand-in for well-known symbol keys (see TODO above).
 // =====================================================================
 
-// TODO(spec): Object.prototype.toLocaleString (§20.1.3.4) is not
-// installed yet. The Annex-B `__proto__`, `__defineGetter__`,
-// `__defineSetter__`, `__lookupGetter__`, `__lookupSetter__` are
-// kept (per AGENTS.md — Annex-B normative aliases are in scope);
-// none are wired today and need to land when sloppy-mode subset
-// is filled in. Add to this set as each lands.
+// The Annex-B `__proto__`, `__defineGetter__`, `__defineSetter__`,
+// `__lookupGetter__`, `__lookupSetter__` are kept (per AGENTS.md —
+// Annex-B normative aliases are in scope); none are wired today
+// and need to land when sloppy-mode subset is filled in. Add to
+// this set as each lands.
 const expect_object_prototype = [_][]const u8{
     "constructor",
     "hasOwnProperty",
     "isPrototypeOf",
     "propertyIsEnumerable",
+    "toLocaleString",
     "toString",
     "valueOf",
 };

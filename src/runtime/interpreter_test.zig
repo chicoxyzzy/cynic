@@ -4584,6 +4584,64 @@ test "String.prototype.padEnd: maxLength counted in code units" {
     try expectScriptStringWithBuiltins("\"\\u{1F600}\".padEnd(4, \".\");", "\xF0\x9F\x98\x80..");
 }
 
+// ---------------------------------------------------------------------------
+// §20.1.3.5 Object.prototype.toLocaleString
+// §20.1.3.6 Object.prototype.toString
+// ---------------------------------------------------------------------------
+
+test "Object.prototype.toString: revoked Proxy throws TypeError" {
+    // §20.1.3.6 step 4 + §7.2.2 IsArray — the IsArray walk on a
+    // revoked proxy throws before the @@toStringTag step.
+    try expectScriptThrowsWithBuiltins(
+        \\const h = Proxy.revocable([], {});
+        \\h.revoke();
+        \\Object.prototype.toString.call(h.proxy);
+    );
+}
+
+test "Object.prototype.toString: callable Proxy reports [object Function]" {
+    // §10.5 ProxyCreate sets [[Call]] from a callable target;
+    // toString's builtinTag is "Function".
+    try expectScriptStringWithBuiltins(
+        \\Object.prototype.toString.call(new Proxy(function() {}, {}));
+    , "[object Function]");
+}
+
+test "Object.prototype.toString: @@toStringTag getter throw propagates" {
+    // §20.1.3.6 step 15 — Get(O, @@toStringTag) can throw.
+    try expectScriptThrowsWithBuiltins(
+        \\const o = Object.defineProperty({}, Symbol.toStringTag, {
+        \\  get: function() { throw new Error("boom"); }
+        \\});
+        \\o.toString();
+    );
+}
+
+test "Object.prototype.toString: @@toStringTag on Boolean.prototype overrides primitive" {
+    // §20.1.3.6 step 15 — user tag string on Boolean.prototype
+    // wins over the builtin "Boolean" tag.
+    try expectScriptStringWithBuiltins(
+        \\Boolean.prototype[Symbol.toStringTag] = 'test262';
+        \\Object.prototype.toString.call(true);
+    , "[object test262]");
+}
+
+test "Object.prototype.toLocaleString invokes the receiver's toString" {
+    // §20.1.3.5 — `Return ? Invoke(O, "toString")`.
+    try expectScriptStringWithBuiltins(
+        \\({}).toLocaleString();
+    , "[object Object]");
+}
+
+test "Object.prototype.toLocaleString: primitive 'this' reaches Boolean.prototype.toString" {
+    // §20.1.3.5 GetV(true, "toString") finds the toString on
+    // Boolean.prototype and invokes it with `true` as receiver.
+    try expectScriptStringWithBuiltins(
+        \\Boolean.prototype.toString = function() { return typeof this; };
+        \\true.toLocaleString();
+    , "boolean");
+}
+
 test "String.prototype.includes: position is code-unit indexed" {
     // "a\u{1F600}c".includes("c", 3) — should find c at code-unit
     // index 3. A byte-counting impl would translate pos=3 → byte=3,

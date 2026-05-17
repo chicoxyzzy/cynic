@@ -121,6 +121,10 @@ pub fn install(realm: *Realm) !void {
     if (realm.intrinsics.object_prototype) |obj_proto| {
         try installNativeMethodOnProto(realm, obj_proto, "hasOwnProperty", objectHasOwnProperty, 1);
         try installNativeMethodOnProto(realm, obj_proto, "toString", objectProtoToString, 0);
+        // §20.1.3.5 — `toLocaleString` shipped with arity 0;
+        // the two reserved parameters are vestigial host hooks
+        // for Intl and don't count toward `.length`.
+        try installNativeMethodOnProto(realm, obj_proto, "toLocaleString", objectProtoToLocaleString, 0);
         try installNativeMethodOnProto(realm, obj_proto, "valueOf", objectProtoValueOf, 0);
         try installNativeMethodOnProto(realm, obj_proto, "propertyIsEnumerable", objectProtoPropertyIsEnumerable, 1);
         try installNativeMethodOnProto(realm, obj_proto, "isPrototypeOf", objectProtoIsPrototypeOf, 1);
@@ -2537,16 +2541,23 @@ fn objectProtoIsPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
     return Value.false_;
 }
 
-/// §22.1.3.5 Object.prototype.toString. Spec walk:
+/// §20.1.3.6 Object.prototype.toString. Spec walk:
 /// 1. If receiver is `undefined` → `"[object Undefined]"`.
 /// 2. If receiver is `null` → `"[object Null]"`.
-/// 3. ToObject the receiver.
-/// 4. Pick a built-in tag based on the internal-slot family
-/// (`isArray`, `Map`-with-mapdata, `arguments`, etc.).
-/// 5. If the receiver has a `Symbol.toStringTag` own- or
-/// inherited-string property, override the built-in tag
-/// with that string.
-/// 6. Format `"[object " + tag + "]"`.
+/// 3. Let O be ! ToObject(this value).
+/// 4. Let isArray be ? IsArray(O).
+/// 5-14. Pick `builtinTag` based on the receiver's internal-
+/// slot family (`isArray`, `[[Call]]`, `[[ErrorData]]`, …) or
+/// `"Object"`.
+/// 15. Let tag be ? Get(O, @@toStringTag).
+/// 16. If Type(tag) is not String, set tag to builtinTag.
+/// 17. Return the string-concatenation of "[object ", tag, "]".
+///
+/// Two spec details that matter for §7.2.2 IsArray and
+/// §10.5 Proxy: a revoked Proxy on the IsArray chain throws
+/// TypeError before step 5 (test262 `proxy-revoked.js`), and a
+/// Proxy whose target is callable carries `[[Call]]` so the
+/// builtinTag is `"Function"` (test262 `proxy-function.js`).
 pub fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     if (this_value.isUndefined()) {
@@ -2558,32 +2569,43 @@ pub fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value
         return Value.fromString(s);
     }
 
-    // Step 4 — built-in default tag. Per §20.1.3.6 the spec
-    // ToObject's `this value` first, then picks the tag from
-    // the wrapper's internal slot. Cynic short-circuits the
-    // wrapping for String / Number / Boolean primitives (their
-    // wrappers carry [[StringData]] / [[NumberData]] /
-    // [[BooleanData]] — so the slot wins step 4 and short-
-    // circuiting is observably equivalent for the default case).
-    // Symbol and BigInt primitives are different: their wrappers
-    // have NO listed internal slot, so step 4 produces "Object"
-    // and the final tag is determined by step 5's @@toStringTag
-    // walk on Symbol.prototype / BigInt.prototype. User code that
-    // deletes the @@toStringTag must see "[object Object]" — short-
-    // circuiting them here breaks that observability.
+    // Step 4 + builtinTag — per §20.1.3.6 the spec ToObject's
+    // `this value` first, then picks the tag from the wrapper's
+    // internal slot. Cynic short-circuits the wrapping for
+    // String / Number / Boolean primitives (their wrappers carry
+    // [[StringData]] / [[NumberData]] / [[BooleanData]] — so the
+    // slot wins step 4 and short-circuiting is observably
+    // equivalent for the default case). Symbol and BigInt
+    // primitives are different: their wrappers have NO listed
+    // internal slot, so step 4 produces "Object" and the final
+    // tag is determined by step 15's @@toStringTag walk on
+    // Symbol.prototype / BigInt.prototype. User code that
+    // deletes the @@toStringTag must see "[object Object]" —
+    // short-circuiting them here breaks that observability.
     const builtin_tag: []const u8 = blk: {
         if (heap_mod.isFunction(this_value)) break :blk "Function";
         if (this_value.isString()) break :blk "String";
         if (this_value.isNumber()) break :blk "Number";
         if (this_value.isBool()) break :blk "Boolean";
         if (heap_mod.valueAsPlainObject(this_value)) |obj| {
+            // §7.2.2 IsArray with Proxy unwrap (step 4 of the
+            // toString algorithm). A revoked Proxy on the walk
+            // throws TypeError; a Proxy wrapping an Array Exotic
+            // reports `true`. Done first so the throw fires
+            // before any other slot probe.
+            if (try isArrayWithProxyUnwrap(realm, obj)) break :blk "Array";
             // §22.1.3.6 step 4 — pick the built-in tag from the
             // internal slot present on the receiver. Order
             // matters per the spec table.
-            if (obj.is_array_exotic) break :blk "Array";
             if (obj.prototype != null and obj.prototype == realm.intrinsics.array_prototype) break :blk "Array";
             // §10.4.4 / §22.1.3.6 step 4 "Arguments" case.
             if (obj.is_arguments_exotic) break :blk "Arguments";
+            // §10.5 Proxy — when the wrapped target is callable
+            // the spec sets `[[Call]]` on the proxy itself
+            // (§10.5.1 ProxyCreate). Test262 expects
+            // `Object.prototype.toString.call(new Proxy(fn, {}))`
+            // → `"[object Function]"`.
+            if (isCallableProxy(obj)) break :blk "Function";
             if (obj.regex_bytecode != null) break :blk "RegExp";
             if (obj.array_buffer != null) break :blk "Object"; // ArrayBuffer uses @@toStringTag
             if (obj.boxed_primitive) |bp| {
@@ -2598,18 +2620,17 @@ pub fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value
             // so the bare prototype falls through to "Object".
             if (obj.has_error_data) break :blk "Error";
             // Date / arguments: rely on @@toStringTag walked in
-            // step 5 below. Default falls through.
+            // step 15 below. Default falls through.
             break :blk "Object";
         }
         break :blk "Object";
     };
 
-    // Step 5 — Symbol.toStringTag override. Looked up under the
-    // synthetic `@@toStringTag` key (well-known-Symbol property
-    // identity, later wiring). Prototype chain walked because
-    // built-in installations live on the prototype, not the
-    // instance.
-    const tag_v = lookupToStringTag(realm, this_value);
+    // Step 15 — `Let tag be ? Get(O, @@toStringTag)`. The lookup
+    // can run user-installed accessors (test262
+    // `get-symbol-tag-err.js` throws from the getter); use the
+    // accessor-aware path so the exception propagates.
+    const tag_v = try lookupToStringTag(realm, this_value);
     var tag_slice: []const u8 = builtin_tag;
     if (tag_v) |v| {
         if (v.isString()) {
@@ -2627,13 +2648,196 @@ pub fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value
     return Value.fromString(s);
 }
 
+/// §20.1.3.5 Object.prototype.toLocaleString ( [ reserved1 [ ,
+/// reserved2 ] ] ). Per spec the entire body is
+/// `Return ? Invoke(O, "toString")` — dispatch back through the
+/// receiver's `toString` so subclasses overriding `toString`
+/// also override `toLocaleString`. The receiver is forwarded as
+/// the `this` value; for primitive thisValues the spec wraps
+/// only as part of the inner `Get` so user-installed accessors
+/// see the primitive directly.
+pub fn objectProtoToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    // §7.3.18 Invoke step 2 — `func = ? GetV(V, P)`. GetV
+    // ToObject's primitives so the prototype-installed
+    // `toString` resolves, but the receiver remains the
+    // primitive.
+    const func = try getVProperty(realm, this_value, "toString");
+    const fn_obj = heap_mod.valueAsFunction(func) orelse
+        return throwTypeError(realm, "Object.prototype.toLocaleString: toString is not callable");
+    const interp = @import("../interpreter.zig");
+    const outcome = interp.callJSFunction(realm.allocator, realm, fn_obj, this_value, &[_]Value{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    switch (outcome) {
+        .value, .yielded => |v| return v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    }
+}
+
+/// §7.3.3 GetV(V, P) — `Let O be ? ToObject(V); return ? O.
+/// [[Get]](P, V)`. Used here so a primitive receiver resolves
+/// its prototype-installed `toString` (or a user-defined
+/// accessor on `<Wrapper>.prototype`) with the primitive as
+/// receiver — per spec the third arg to [[Get]] is `V` (the
+/// original primitive), so a getter in strict mode sees
+/// `typeof this === "boolean"`, not `"object"` (test262
+/// `primitive_this_value_getter.js`).
+fn getVProperty(realm: *Realm, v: Value, key: []const u8) NativeError!Value {
+    if (heap_mod.valueAsPlainObject(v)) |obj| return getPropertyWithReceiver(realm, obj, key, v);
+    if (heap_mod.valueAsFunction(v)) |fn_obj| {
+        if (fn_obj.ownAccessor(key)) |acc| {
+            if (acc.getter) |getter| {
+                const interp = @import("../interpreter.zig");
+                const outcome = interp.callJSFunction(realm.allocator, realm, getter, v, &[_]Value{}) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (outcome) {
+                    .value, .yielded => |rv| return rv,
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                }
+            }
+            return Value.undefined_;
+        }
+        return fn_obj.get(key);
+    }
+    // Primitives — ToObject reaches `<Type>.prototype` via the
+    // matching global constructor. Use the prototype as the
+    // starting point of the chain walk but keep the primitive
+    // as the accessor receiver so user `get`-functions in
+    // strict mode observe the primitive's type.
+    const proto: ?*JSObject = blk: {
+        if (v.isString()) {
+            const ctor_v = realm.globals.get("String") orelse break :blk null;
+            const ctor = heap_mod.valueAsFunction(ctor_v) orelse break :blk null;
+            break :blk ctor.prototype;
+        }
+        if (v.isNumber()) {
+            const ctor_v = realm.globals.get("Number") orelse break :blk null;
+            const ctor = heap_mod.valueAsFunction(ctor_v) orelse break :blk null;
+            break :blk ctor.prototype;
+        }
+        if (v.isBool()) {
+            const ctor_v = realm.globals.get("Boolean") orelse break :blk null;
+            const ctor = heap_mod.valueAsFunction(ctor_v) orelse break :blk null;
+            break :blk ctor.prototype;
+        }
+        if (heap_mod.valueAsSymbol(v)) |_| {
+            const ctor_v = realm.globals.get("Symbol") orelse break :blk null;
+            const ctor = heap_mod.valueAsFunction(ctor_v) orelse break :blk null;
+            break :blk ctor.prototype;
+        }
+        if (heap_mod.valueAsBigInt(v)) |_| {
+            const ctor_v = realm.globals.get("BigInt") orelse break :blk null;
+            const ctor = heap_mod.valueAsFunction(ctor_v) orelse break :blk null;
+            break :blk ctor.prototype;
+        }
+        break :blk null;
+    };
+    if (proto) |p| return getPropertyWithReceiver(realm, p, key, v);
+    return Value.undefined_;
+}
+
+/// §10.1.8 OrdinaryGet(O, P, Receiver) — like `getPropertyChain`
+/// but passes a caller-supplied receiver into accessor `get`
+/// invocations. Used by `getVProperty` so primitive receivers
+/// can read inherited accessors with the primitive (not its
+/// wrapper) as `this`.
+fn getPropertyWithReceiver(realm: *Realm, obj: *JSObject, key: []const u8, receiver: Value) NativeError!Value {
+    var cur: ?*JSObject = obj;
+    while (cur) |o| {
+        if (o.accessors.get(key)) |acc| {
+            if (acc.getter) |getter| {
+                const interp = @import("../interpreter.zig");
+                const outcome = interp.callJSFunction(realm.allocator, realm, getter, receiver, &[_]Value{}) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (outcome) {
+                    .value, .yielded => |rv| return rv,
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                }
+            }
+            return Value.undefined_;
+        }
+        if (o.properties.get(key)) |val| return val;
+        cur = o.prototype;
+    }
+    return Value.undefined_;
+}
+
+/// §7.2.2 IsArray with Proxy unwrap (mirror of the helper in
+/// `builtins/array.zig`). Walks `proxy_target` until a non-
+/// proxy is reached; a revoked proxy on the walk throws
+/// TypeError per §7.2.2 step 3.a.
+fn isArrayWithProxyUnwrap(realm: *Realm, obj: *JSObject) NativeError!bool {
+    var cur = obj;
+    while (true) {
+        if (cur.proxy_revoked) {
+            return throwTypeError(realm, "Cannot perform 'IsArray' on a proxy that has been revoked");
+        }
+        if (cur.proxy_target) |t| {
+            cur = t;
+            continue;
+        }
+        return cur.is_array_exotic;
+    }
+}
+
+/// §10.5 Proxy — `[[Call]]` is exposed iff the wrapped target
+/// was callable at ProxyCreate (§10.5.1 step 7). `proxy_callable`
+/// records that decision and is preserved across proxy-over-
+/// proxy wrapping plus revocation, so the toString builtinTag
+/// stays "Function" even after a revoke.
+fn isCallableProxy(obj: *JSObject) bool {
+    return obj.proxy_callable;
+}
+
 /// Walk the receiver's prototype chain looking for a string
 /// `Symbol.toStringTag` slot (under the synthetic `@@toStringTag`
 /// key). Plain objects, functions, and primitive wrappers all
 /// route here. `null` means "no override; use built-in tag."
-fn lookupToStringTag(realm: *Realm, this_value: Value) ?Value {
+/// Uses `getPropertyChain` so accessor `@@toStringTag` getters
+/// fire (per test262 `get-symbol-tag-err.js`); an exception
+/// thrown by the getter propagates via `error.NativeThrew`.
+fn lookupToStringTag(realm: *Realm, this_value: Value) NativeError!?Value {
     if (heap_mod.valueAsPlainObject(this_value)) |obj| {
-        const v = obj.get("@@toStringTag");
+        // §10.5.5 [[Get]] on a Proxy forwards to the target's
+        // [[Get]] when no `get` trap is installed; Cynic only
+        // stamps the wrapped function's `proto` into the proxy
+        // at construction time, so walk the proxy chain to find
+        // the most concrete target's @@toStringTag (e.g. for a
+        // Proxy-over-Proxy-over-`function*`, the inner-most
+        // generator-function's prototype carries the
+        // "GeneratorFunction" tag).
+        var cur = obj;
+        while (true) {
+            if (cur.proxy_revoked) {
+                return throwTypeError(realm, "Cannot perform '[[Get]]' on a proxy that has been revoked");
+            }
+            if (cur.proxy_target) |t| {
+                cur = t;
+                continue;
+            }
+            if (cur.proxy_target_fn) |fn_target| {
+                const v = fn_target.get("@@toStringTag");
+                if (v.isString()) return v;
+                return null;
+            }
+            break;
+        }
+        const v = try getPropertyChain(realm, cur, "@@toStringTag");
         if (v.isString()) return v;
         return null;
     }
@@ -2642,17 +2846,34 @@ fn lookupToStringTag(realm: *Realm, this_value: Value) ?Value {
         if (v.isString()) return v;
         return null;
     }
-    // §20.1.3.6 step 3 + step 14 — primitive receivers `ToObject`
+    // §20.1.3.6 step 3 + step 15 — primitive receivers `ToObject`
     // to their wrapper whose [[Prototype]] is the matching
-    // constructor's `.prototype`. Symbol / BigInt wrappers have no
-    // dedicated builtinTag slot, so the spec's "[object Symbol]" /
-    // "[object BigInt]" rendering comes from `@@toStringTag` on
-    // Symbol.prototype / BigInt.prototype. Mirror that here so a
-    // user-side `delete Symbol.prototype[Symbol.toStringTag]` is
-    // observable as "[object Object]". Reach the prototype via
-    // the global constructor since `realm.intrinsics` doesn't
-    // pin Symbol / BigInt protos directly.
+    // constructor's `.prototype`. Boolean / Number / String
+    // wrappers have a default builtinTag from the boxed-slot
+    // check, but user code can install a `@@toStringTag` on
+    // `Boolean.prototype` / `Number.prototype` / `String.prototype`
+    // and that string must override the builtinTag
+    // (test262 `symbol-tag-override-primitives.js`). Symbol /
+    // BigInt wrappers have NO listed internal slot, so the
+    // builtinTag is "Object" and the @@toStringTag walk on
+    // Symbol.prototype / BigInt.prototype produces the
+    // "[object Symbol]" / "[object BigInt]" rendering.
     const proto_for_primitive: ?*JSObject = blk: {
+        if (this_value.isString()) {
+            const ctor_v = realm.globals.get("String") orelse break :blk null;
+            const ctor = heap_mod.valueAsFunction(ctor_v) orelse break :blk null;
+            break :blk ctor.prototype;
+        }
+        if (this_value.isNumber()) {
+            const ctor_v = realm.globals.get("Number") orelse break :blk null;
+            const ctor = heap_mod.valueAsFunction(ctor_v) orelse break :blk null;
+            break :blk ctor.prototype;
+        }
+        if (this_value.isBool()) {
+            const ctor_v = realm.globals.get("Boolean") orelse break :blk null;
+            const ctor = heap_mod.valueAsFunction(ctor_v) orelse break :blk null;
+            break :blk ctor.prototype;
+        }
         if (heap_mod.valueAsSymbol(this_value)) |_| {
             const ctor_v = realm.globals.get("Symbol") orelse break :blk null;
             const ctor = heap_mod.valueAsFunction(ctor_v) orelse break :blk null;
@@ -2666,7 +2887,7 @@ fn lookupToStringTag(realm: *Realm, this_value: Value) ?Value {
         break :blk null;
     };
     if (proto_for_primitive) |proto| {
-        const v = proto.get("@@toStringTag");
+        const v = try getPropertyChain(realm, proto, "@@toStringTag");
         if (v.isString()) return v;
     }
     return null;
