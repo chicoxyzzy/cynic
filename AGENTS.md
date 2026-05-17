@@ -413,3 +413,49 @@ the workflow plainly and any agent or human can follow them by hand.
 - Span discipline: every AST node carries the source range it
   spans. Spans drive the printer (golden tests) and diagnostics.
 - Arena allocation per parse; no global state in the parser.
+
+## Website voice
+
+`gh-pages/index.html` is the project's marketing surface and it
+has a *voice* — deadpan, self-deprecating, technically precise,
+slightly hostile to JavaScript-as-marketed. Preserve it. Any
+edit landing on the `gh-pages` branch must read like the rows
+already there. The brand is "Cynic doesn't oversell itself and
+gently distrusts everything else."
+
+What that looks like:
+
+- **Concrete claims, casual register.** "Works." beats "✓
+  Implemented per spec." "Don't ship anything to prod, frankly."
+  beats "Production readiness is not yet guaranteed."
+- **Match the existing patterns** in the status table — short
+  middle column ("Works." / "Mostly." / "In progress." /
+  "Future Cynic's problem."), one-line right-column with a
+  technical jab. Look at sibling rows before writing.
+- **Self-aware about caveats.** "Surprisingly. We checked." —
+  "All the views. All the bytes. None of the drama." — "The
+  plan is real. The plan is also not the code." Cite the
+  uncertainty; let the reader decide.
+- **No hype words.** No "blazingly fast", no "production-ready",
+  no "10×", no "enterprise". The site explicitly avoids
+  benchmark theatre.
+- **Spec sections are fair game.** "Returns ReferenceError on
+  uninit lex bindings, like the spec asked." Concrete §X.Y.Z
+  pointers are on-brand because they signal precision without
+  performing it.
+- **Numbers only when stable.** Avoid hard pass-counts like
+  "987 unit tests" or "89% spec" in the body — they go stale
+  within days. Phrasings like "A lot." or "Getting there.
+  Bigger than last week. Smaller than next week." stay true
+  across sweeps. The `test262-results.md` link at the bottom
+  carries the live numbers.
+- **No emoji.** No exclamation points. No call-to-action
+  buttons. The hero already does the work.
+
+When in doubt: read the existing site top to bottom before
+proposing copy. The voice is unmistakable, and a tone slip
+reads louder than a missing feature.
+
+(See also the memory rule: never edit `gh-pages` without
+explicit user approval; surface the proposed diff as a
+separate question first.)
