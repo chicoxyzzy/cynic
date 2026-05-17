@@ -634,13 +634,65 @@ pub fn buildClass(
             }
         }
     }
-    for (template.static_fields) |*ft| {
+    // §15.7.14 step 34 — `For each element of staticElements in
+    // List order` interleaves static fields and static blocks in
+    // source order. `static_element_order` encodes the source-
+    // order index list: high bit set → block index; clear → field
+    // index. Without this, `static a=1; static {…} static b=2;`
+    // would run field/field/block instead of field/block/field
+    // (observable when the block reads or mutates a previously-
+    // installed static field).
+    for (template.static_element_order) |entry| {
+        const is_block = (entry & 0x8000) != 0;
+        const idx: usize = entry & 0x7FFF;
+        if (is_block) {
+            const c = &template.static_blocks[idx];
+            const blk_fn = try realm.heap.allocateFunction(c, 0, null, false, captured_env);
+            // §15.7.13 ClassStaticBlockDefinitionEvaluation step
+            // 4 — MakeMethod(body, homeObject) where homeObject
+            // is the class constructor F. The interpreter's
+            // super_get dispatch keys off `home_object == null`
+            // for the static path (same as static methods, see
+            // step 21), so set ONLY `home_function = ctor`. Then
+            // `super.x` inside the block walks ctor.proto =
+            // parent ctor and reads the parent class's static
+            // surface. Setting `home_object = proto` here would
+            // route through the prototype chain (the wrong
+            // surface — instance methods, not statics).
+            blk_fn.home_function = ctor;
+            blk_fn.proto = realm.intrinsics.function_prototype;
+            const outcome = interpreter.callJSFunction(realm.allocator, realm, blk_fn, ctor_value, &.{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.OutOfMemory,
+            };
+            switch (outcome) {
+                .value, .yielded => {},
+                .thrown => |ex| {
+                    // §15.7.13 ClassStaticBlock — abrupt completion
+                    // aborts ClassDefinitionEvaluation; later
+                    // elements (fields or blocks) must not run.
+                    realm.pending_exception = ex;
+                    return error.Propagated;
+                },
+            }
+            continue;
+        }
+        const ft = &template.static_fields[idx];
         const resolved = try resolveComputedKey(realm, computed_keys, ft.computed_key_index, ft.name, proto);
         const runtime_name = resolved.name;
         var v: Value = Value.undefined_;
         if (ft.init_chunk) |*c| {
             const init_fn = try realm.heap.allocateFunction(c, 0, resolved.display_name, false, captured_env);
-            init_fn.home_object = proto;
+            // §15.7.14 step 34 / §15.4 — static field initializer
+            // is a method whose [[HomeObject]] is the class
+            // constructor F. Set ONLY `home_function = ctor` so
+            // the super_get dispatch takes the static path
+            // (`home_object == null` → walk
+            // `home_function.proto` for `super.x`). Otherwise
+            // `super.x` would route through the prototype chain
+            // (instance surface) instead of the parent ctor's
+            // own properties.
+            init_fn.home_function = ctor;
             init_fn.proto = realm.intrinsics.function_prototype;
             const outcome = interpreter.callJSFunction(realm.allocator, realm, init_fn, ctor_value, &.{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -652,8 +704,8 @@ pub fn buildClass(
                     // §15.7.14 step 34 / §10.2.1.3 — an abrupt
                     // completion during a static field initializer
                     // aborts ClassDefinitionEvaluation and propagates.
-                    // Subsequent static fields and blocks must NOT
-                    // run.
+                    // Subsequent elements (fields or blocks) must
+                    // NOT run.
                     realm.pending_exception = ex;
                     return error.Propagated;
                 },
@@ -686,27 +738,6 @@ pub fn buildClass(
                 return error.Propagated;
             }
             try ctor.set(realm.allocator, runtime_name, v);
-        }
-    }
-
-    // 9. Static blocks — run with this=ctor. §15.7.13.
-    for (template.static_blocks) |*c| {
-        const blk_fn = try realm.heap.allocateFunction(c, 0, null, false, captured_env);
-        blk_fn.home_object = proto;
-        blk_fn.proto = realm.intrinsics.function_prototype;
-        const outcome = interpreter.callJSFunction(realm.allocator, realm, blk_fn, ctor_value, &.{}) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.OutOfMemory,
-        };
-        switch (outcome) {
-            .value, .yielded => {},
-            .thrown => |ex| {
-                // §15.7.13 ClassStaticBlock — abrupt completion
-                // aborts ClassDefinitionEvaluation; later blocks
-                // must not run.
-                realm.pending_exception = ex;
-                return error.Propagated;
-            },
         }
     }
 

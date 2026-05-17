@@ -5544,6 +5544,13 @@ fn compileClassTemplate(
     errdefer self.allocator.free(static_fields);
     var static_blocks = try self.allocator.alloc(ChunkMod.Chunk, static_block_count);
     errdefer self.allocator.free(static_blocks);
+    // §15.7.14 step 34 — record the interleaved source order of
+    // static fields + static blocks so the runtime evaluates them
+    // in the spec-defined sequence (e.g. `static a = 1; static
+    // { … } static b = 2;` runs field → block → field, not
+    // field → field → block).
+    var static_element_order = try self.allocator.alloc(u16, static_field_count + static_block_count);
+    errdefer self.allocator.free(static_element_order);
 
     // §13.2.5 ComputedPropertyName — pre-walk `body` in source
     // order, assigning a sequential index to every method/field
@@ -5582,6 +5589,7 @@ fn compileClassTemplate(
     var i_if: usize = 0;
     var i_sf: usize = 0;
     var i_sb: usize = 0;
+    var i_so: usize = 0;
     for (body, 0..) |member, pos| switch (member) {
         .field => |fd| {
             const fkey_index: i16 = key_idx_for_pos[pos];
@@ -5613,6 +5621,11 @@ fn compileClassTemplate(
                 .computed_key_index = fkey_index,
             };
             if (fd.is_static) {
+                // Record in source-order list. Low 15 bits hold
+                // the index into `static_fields`; high bit clear
+                // means "field".
+                static_element_order[i_so] = @intCast(i_sf);
+                i_so += 1;
                 static_fields[i_sf] = tmpl;
                 i_sf += 1;
             } else {
@@ -5621,11 +5634,17 @@ fn compileClassTemplate(
             }
         },
         .static_block => |sb| {
+            // Record in source-order list with high bit set
+            // (block marker), low 15 bits = index into
+            // `static_blocks`.
+            static_element_order[i_so] = 0x8000 | @as(u16, @intCast(i_sb));
+            i_so += 1;
             static_blocks[i_sb] = try compileStaticBlockChunk(self, sb.body, sb.span);
             i_sb += 1;
         },
         .method => {},
     };
+    std.debug.assert(i_so == static_field_count + static_block_count);
 
     // Detect any per-instance init work — fields OR private
     // methods need init_instance_fields to fire.
@@ -5764,6 +5783,7 @@ fn compileClassTemplate(
         .instance_fields = instance_fields,
         .static_fields = static_fields,
         .static_blocks = static_blocks,
+        .static_element_order = static_element_order,
     });
 }
 

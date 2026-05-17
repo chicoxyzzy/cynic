@@ -157,6 +157,16 @@ pub const ClassTemplate = struct {
     /// Static blocks (`static { … }`). Run at MakeClass time
     /// with `this = ctor`. Body chunks return undefined.
     static_blocks: []Chunk,
+    /// Interleaved source-order of static fields and static
+    /// blocks (§15.7.14 step 34 — `For each element of
+    /// staticElements in List order`). High bit = is_block,
+    /// low 15 bits = index into `static_blocks` /
+    /// `static_fields`. Empty when the class has no static
+    /// fields or blocks. Without this, `static foo = 1;
+    /// static { sideEffect; } static foo = 2;` runs the two
+    /// field assignments back-to-back before the block, but
+    /// the spec interleaves them.
+    static_element_order: []u16,
 
     pub fn deinit(self: *ClassTemplate, allocator: std.mem.Allocator) void {
         self.constructor_chunk.deinit(allocator);
@@ -178,6 +188,7 @@ pub const ClassTemplate = struct {
         allocator.free(self.static_fields);
         for (self.static_blocks) |*c| c.deinit(allocator);
         allocator.free(self.static_blocks);
+        allocator.free(self.static_element_order);
     }
 };
 
