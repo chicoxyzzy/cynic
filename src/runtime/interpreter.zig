@@ -6203,7 +6203,7 @@ fn runFrames(
                                 // freezes the instance and the second
                                 // attempts to install on the frozen
                                 // object.
-                                if (!inst.extensible) {
+                                if (!inst.extensible and inst.proxy_target == null and inst.proxy_target_fn == null) {
                                     const ex = try makeTypeError(realm, "Cannot add field to non-extensible object");
                                     f.ip = ip;
                                     f.accumulator = acc;
@@ -6213,7 +6213,48 @@ fn runFrames(
                                     }
                                     break;
                                 }
-                                inst.set(allocator, entry.name, v) catch return error.OutOfMemory;
+                                // §10.5.6 Proxy [[DefineOwnProperty]] —
+                                // when `this` is a Proxy (e.g. derived
+                                // `class extends ProxyBase`), the public
+                                // field install must route through the
+                                // handler's `defineProperty` trap with
+                                // a `{value, writable:true, enumerable:
+                                // true, configurable:true}` descriptor.
+                                // `inst.set` would silently bypass the
+                                // trap and the fixture would never see
+                                // the field appear at the trap site.
+                                if (inst.proxy_target != null or inst.proxy_target_fn != null or inst.proxy_revoked) {
+                                    // Build the descriptor object.
+                                    const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
+                                    desc.prototype = realm.intrinsics.object_prototype;
+                                    desc.set(allocator, "value", v) catch return error.OutOfMemory;
+                                    desc.set(allocator, "writable", Value.fromBool(true)) catch return error.OutOfMemory;
+                                    desc.set(allocator, "enumerable", Value.fromBool(true)) catch return error.OutOfMemory;
+                                    desc.set(allocator, "configurable", Value.fromBool(true)) catch return error.OutOfMemory;
+                                    const key_s = realm.heap.allocateString(entry.name) catch return error.OutOfMemory;
+                                    const obj_builtin = @import("builtins/object.zig");
+                                    const args_three = [_]Value{
+                                        heap_mod.taggedObject(inst),
+                                        Value.fromString(key_s),
+                                        heap_mod.taggedObject(desc),
+                                    };
+                                    _ = obj_builtin.objectDefineProperty(realm, Value.undefined_, &args_three) catch |err| switch (err) {
+                                        error.OutOfMemory => return error.OutOfMemory,
+                                        error.NativeThrew => {
+                                            const ex = realm.pending_exception orelse try makeTypeError(realm, "defineProperty on class field receiver threw");
+                                            realm.pending_exception = null;
+                                            f.ip = ip;
+                                            f.accumulator = acc;
+                                            committed = true;
+                                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                                return .{ .thrown = ex };
+                                            }
+                                            break;
+                                        },
+                                    };
+                                } else {
+                                    inst.set(allocator, entry.name, v) catch return error.OutOfMemory;
+                                }
                             }
                         }
                     }
