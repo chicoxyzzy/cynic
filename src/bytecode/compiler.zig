@@ -1076,7 +1076,9 @@ pub const Compiler = struct {
         // §25.5.3.7 step 7.b.iii / 7.c.viii — `iter.next(received)` and
         // `iter.throw(received)` results must both be Objects. The
         // throw / return handlers below jump here after their calls,
-        // so a single gate at body_after_call covers both.
+        // so a single gate at `body_after_call` covers all three
+        // invocations. (The return handler reads `.done` off
+        // `r_result` separately and isn't routed through this label.)
         try self.builder.emitOp(.throw_if_not_object, y.span);
         try self.builder.emitOp(.star, y.span);
         try self.builder.emitU8(r_result);
@@ -4958,6 +4960,20 @@ fn compileSwitch(self: *Compiler, s: ast.statement.SwitchStmt) CompileError!void
     self.scope = &switch_scope;
     defer self.scope = saved_scope;
 
+    // §14.12.4 CaseBlock — the whole CaseBlock shares one lexical
+    // scope; LexicallyDeclaredNames(CaseBlock) is the union of the
+    // lexically-declared names from every case + the default.
+    // Hoist `let` / `const` slots from every case body up-front so
+    // a `switch (x) { case 1: let y = 1; }` (or `default: let y;`)
+    // can resolve its binding when the body runs. Without this the
+    // resolver fails as `UnresolvedReference` at compile time
+    // (test262 language/statements/let/syntax/{without,with}-
+    // initialisers-in-statement-positions-{default,case-expression}-
+    // statement-list).
+    for (s.cases) |case| {
+        try self.hoistLetConst(case.body);
+    }
+
     try self.compileExpression(&s.discriminant);
     const r_disc = try self.reserveTemp();
     defer self.releaseTemp();
@@ -7945,14 +7961,14 @@ fn assignPatternLeaf(self: *Compiler, target: ast.statement.BindingTarget) Compi
 
 fn assignToBinding(self: *Compiler, name: []const u8, span: Span) CompileError!void {
     const scope = self.scope orelse return error.UnresolvedReference;
-    // §13.7.5.13 ForIn/OfBodyEvaluation step 5.h.i — an unresolved
-    // bare identifier resolves to an unresolvable Reference; PutValue
-    // throws ReferenceError at runtime (strict mode). Synthesise a
-    // global binding so the for-of/for-in LHS emits the same
-    // `sta_global_strict` shape as `x = e` does. Fixtures with a
-    // never-entered loop (e.g. `for (k in undefined)`) compile and
-    // run without the ReferenceError firing — it would only fire on
-    // the first iteration assignment, which never happens.
+    // §13.7.5.13 ForIn/OfBodyEvaluation step 5.h.i — `Let lhsRef be
+    // ? Evaluation of lhs`. For an unresolved bare identifier, the
+    // spec resolves to an unresolvable Reference and `PutValue`
+    // throws ReferenceError at runtime (strict mode). Cynic-side:
+    // synthesise a global binding so the for-of/for-in LHS emits the
+    // same `sta_global_strict` shape as `x = e` does — fixtures with
+    // a never-entered loop (e.g. `for (k in undefined)`) compile and
+    // run without raising the runtime ReferenceError.
     const binding = scope.resolve(name) orelse Binding{
         .name = name,
         .env_slot = 0,
