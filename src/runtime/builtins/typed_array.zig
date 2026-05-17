@@ -691,23 +691,17 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                 return @import("../intrinsics.zig").throwTypeError(realm, "Cannot convert a BigInt to TypedArray length");
             }
             if (arg.isInt32() or arg.isDouble() or arg.isUndefined() or arg.isBool() or arg.isNull() or arg.isString()) {
-                // §23.2.5.1.1 — `new TypedArray()` allocates a
-                // zero-length view. `coerceToNumber(undefined)`
-                // would produce NaN and fall into the RangeError
-                // branch; short-circuit here. Strings / booleans
-                // ToNumber-coerce.
-                const n_d: f64 = if (arg.isUndefined()) 0 else blk: {
-                    const n_v = coerceToNumber(arg);
-                    break :blk if (n_v.isInt32()) @floatFromInt(n_v.asInt32()) else n_v.asDouble();
-                };
-                if (std.math.isNan(n_d) or n_d < 0) return throwRangeError(realm, "TypedArray length out of range");
-                // Catch overflow before the int cast — `Infinity`
-                // and any finite value past `maxInt(u32) / elem_size`
-                // would either trap `@intFromFloat` or roll past
-                // the byte-length check below.
-                const max_len: f64 = @floatFromInt(@as(usize, std.math.maxInt(u32)) / elem_size);
-                if (n_d > max_len) return throwRangeError(realm, "TypedArray length out of range");
-                const length: usize = @intFromFloat(@trunc(n_d));
+                // §23.2.5.1.2 InitializeTypedArrayFromLength step 1 —
+                // `Let elementLength be ? ToIndex(length)`. ToIndex
+                // (§7.1.22) coerces NaN / undefined / -0.x to 0 and
+                // only rejects negative or > 2^53-1 (RangeError),
+                // matching the `toindex-length.js` items table.
+                const length = try toIndex(realm, arg);
+                // Cap the per-element-bytes product before allocating
+                // to surface RangeError on `length > maxInt(u32) /
+                // elem_size` rather than wrapping around.
+                if (length > @as(usize, std.math.maxInt(u32)) / elem_size)
+                    return throwRangeError(realm, "TypedArray length out of range");
                 const byte_len = length * elem_size;
                 if (byte_len > std.math.maxInt(u32)) return throwRangeError(realm, "TypedArray byte length out of range");
 
@@ -726,20 +720,29 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
 
             // ArrayBuffer source.
             if (heap_mod.valueAsPlainObject(arg)) |src| {
-                if (src.array_buffer) |ab| {
-                    // §23.2.5.1.4 — byteOffset / length both go
-                    // through ToIndex (ToNumber + bounds check),
-                    // which throws TypeError on Symbol / BigInt.
-                    var byte_offset: usize = 0;
-                    if (args.len > 1 and !args[1].isUndefined()) {
-                        const ov = try intrinsics.toNumber(realm, args[1]);
-                        const od: f64 = if (ov.isInt32()) @floatFromInt(ov.asInt32()) else ov.asDouble();
-                        if (std.math.isNan(od) or od < 0) return throwRangeError(realm, "byteOffset out of range");
-                        byte_offset = @intFromFloat(od);
-                    }
-                    if (byte_offset > ab.len) return throwRangeError(realm, "byteOffset exceeds buffer");
+                if (src.has_array_buffer_data) {
+                    // §23.2.5.1 InitializeTypedArrayFromArrayBuffer
+                    // step 6 — `Let offset be ? ToIndex(byteOffset)`.
+                    // ToIndex (§7.1.22) coerces NaN / undefined / -0.x
+                    // to 0 and only rejects negative or > 2^53-1
+                    // (RangeError). It may run user `valueOf` /
+                    // `toString` that detaches the buffer, so the
+                    // detached-buffer check must come *after* both
+                    // coercions, per step 9.
+                    const byte_offset = if (args.len > 1) try toIndex(realm, args[1]) else 0;
+                    // step 7 — `If offset modulo elementSize ≠ 0,
+                    // throw a RangeError exception`.
                     if (byte_offset % elem_size != 0) return throwRangeError(realm, "byteOffset not aligned");
-
+                    // step 8 — `If length is not undefined, then
+                    // let newLength be ? ToIndex(length)`.
+                    const length_omitted = !(args.len > 2 and !args[2].isUndefined());
+                    const explicit_length: ?usize = if (length_omitted) null else try toIndex(realm, args[2]);
+                    // step 9 — `If IsDetachedBuffer(buffer) is true,
+                    // throw TypeError`. A detached buffer has
+                    // `has_array_buffer_data == true` but
+                    // `array_buffer == null`.
+                    const ab = src.array_buffer orelse return throwTypeError(realm, "TypedArray: ArrayBuffer is detached");
+                    if (byte_offset > ab.len) return throwRangeError(realm, "byteOffset exceeds buffer");
                     const remaining = ab.len - byte_offset;
                     var length: usize = remaining / elem_size;
                     // §23.2.5.1.4 — length argument omitted (or
@@ -747,16 +750,22 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                     // length-tracking view (§10.4.5 [[ArrayLength]] =
                     // auto). Over a fixed-length buffer it's just the
                     // remaining size; the flag stays false.
-                    const length_omitted = !(args.len > 2 and !args[2].isUndefined());
                     const is_resizable = src.array_buffer_max_byte_length != null;
                     var length_tracking = false;
                     if (length_omitted) {
-                        if (is_resizable) length_tracking = true;
+                        // §23.2.5.1 step 13 — when length is omitted
+                        // over a fixed-length buffer,
+                        // `bufferByteLength modulo elementSize ≠ 0`
+                        // throws RangeError. Resizable buffers
+                        // become length-tracking views and skip the
+                        // check.
+                        if (is_resizable) {
+                            length_tracking = true;
+                        } else if (ab.len % elem_size != 0) {
+                            return throwRangeError(realm, "ArrayBuffer length not aligned to element size");
+                        }
                     } else {
-                        const lv = try intrinsics.toNumber(realm, args[2]);
-                        const ld: f64 = if (lv.isInt32()) @floatFromInt(lv.asInt32()) else lv.asDouble();
-                        if (std.math.isNan(ld) or ld < 0) return throwRangeError(realm, "length out of range");
-                        length = @intFromFloat(ld);
+                        length = explicit_length.?;
                         if (length * elem_size > remaining) return throwRangeError(realm, "view exceeds buffer");
                     }
                     inst.typed_view = .{ .kind = kind, .viewed = src, .byte_offset = byte_offset, .length = length, .name = ta_name, .length_tracking = length_tracking };
@@ -876,7 +885,16 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                 // BigInt views); valueOf / Symbol.toPrimitive
                 // throws must propagate.
                 const length_i = try intrinsics.toLengthOf(realm, src);
-                const length: usize = @intCast(length_i);
+                // §23.2.5.1.6 InitializeTypedArrayFromArrayLike step 3
+                // routes through AllocateTypedArrayBuffer, which rejects
+                // `len > 2^53 - 1` (and any `length * elementSize`
+                // overflow) with a RangeError. The
+                // `length-excessive-throws.js` fixture supplies
+                // `Math.pow(2, 53)` and expects the throw.
+                const length_u: u64 = if (length_i < 0) 0 else @intCast(length_i);
+                if (length_u > @as(u64, std.math.maxInt(u32)) / elem_size)
+                    return throwRangeError(realm, "TypedArray length out of range");
+                const length: usize = @intCast(length_u);
                 const byte_len = length * elem_size;
                 const buf_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
                 if (heap_mod.valueAsFunction(realm.globals.get("ArrayBuffer") orelse Value.undefined_)) |ab| {
