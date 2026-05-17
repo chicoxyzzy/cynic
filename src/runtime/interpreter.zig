@@ -5494,97 +5494,115 @@ fn runFrames(
             },
 
             .await_ => {
-                // §27.5.3.8 Await. Four paths:
-                // • acc is a settled Promise → unwrap (acc =
-                // value for fulfilled, throw for rejected).
-                // • acc is a pending Promise → save the frame
-                // into the surrounding async generator,
-                // register the gen as a waiter on the
-                // awaited Promise, and unwind via
-                // `.yielded`. The resumption microtask
-                // re-enters `runFrames` with the settled
-                // value (or throws inside the resumed frame
-                // for rejections).
-                // • acc is a non-Promise object with a callable
-                // `.then` (a *thenable*) → spec routes through
-                // PromiseResolve → PromiseResolveThenableJob.
-                // Allocate a fresh pending Promise, enqueue
-                // the job (which calls `then(resolve, reject)`
-                // on a microtask), suspend on the fresh
-                // Promise just like the pending-Promise case.
-                // • acc isn't a Promise or thenable → leave
-                // as-is (spec wraps in `Promise.resolve(v)`
-                // and immediately resumes; equivalent for
-                // synchronous-fast-path observers).
+                // §27.7.5.3 Await. Per spec the operation is:
+                //   1. promise = ? PromiseResolve(%Promise%, v).
+                //   2. fulfilledClosure = on-fulfilled steps that
+                //      Resume(asyncContext, NormalCompletion(value)).
+                //   3. rejectedClosure  = on-rejected steps that
+                //      Resume(asyncContext, ThrowCompletion(reason)).
+                //   4. PerformPromiseThen(promise, fulfilledClosure,
+                //      rejectedClosure).
+                //   5. Remove asyncContext from execution stack;
+                //      transfer control to its suspending caller.
+                //
+                // Two observable consequences:
+                // • PromiseResolve always allocates a fresh
+                //   Promise (or returns `v` unchanged if it's
+                //   already a same-realm Promise), so `await N`
+                //   for a non-Promise N always defers one tick
+                //   — top-level-ticks{,-2}.js asserts this.
+                // • PerformPromiseThen always queues the
+                //   handler as a microtask, even on an
+                //   already-fulfilled Promise — i.e. there is
+                //   no synchronous-resume fast path for
+                //   `await fulfilledPromise`.
+                //
+                // Four input shapes, all routed through the
+                // same suspend-and-enqueue path:
+                //   • pending Promise   → register as waiter,
+                //     wait for settlement.
+                //   • settled Promise   → enqueue an
+                //     async_resume microtask carrying the
+                //     unwrapped value / reason.
+                //   • thenable (object with callable `.then`)
+                //     → §27.7.5.3 step 1 routes through
+                //     §27.2.1.3.2 Promise Resolve Functions
+                //     7-11, which queues a
+                //     PromiseResolveThenableJob against a
+                //     fresh pending Promise; we then suspend
+                //     on that promise.
+                //   • bare value        → enqueue an
+                //     async_resume microtask carrying `v`.
+                //
+                // The microtask drain runs in the surrounding
+                // job loop (host CLI, harness, or the
+                // microtask drain at the next await / Promise
+                // settlement), not synchronously here.
                 const v = acc;
-                drainMicrotasks(allocator, realm) catch return error.OutOfMemory;
-                var await_target: ?*JSObject = null;
-                if (heap_mod.valueAsPlainObject(v)) |obj| {
-                    if (obj.isPromise()) {
-                        if (obj.promise_state == .fulfilled) {
-                            acc = obj.promise_value;
-                        } else if (obj.promise_state == .rejected) {
-                            const ex = obj.promise_value;
-                            f.ip = ip;
-                            f.accumulator = acc;
-                            committed = true;
-                            if (!try unwindThrow(allocator, realm, frames, ex)) {
-                                return .{ .thrown = ex };
+                const gen_opt: ?*@import("generator.zig").JSGenerator = if (f.generator) |g| (if (g.is_async) g else null) else null;
+                if (gen_opt) |gen| {
+                    var suspend_target: ?*JSObject = null;
+                    var resume_value: Value = v;
+                    var resume_throws: bool = false;
+                    var use_microtask: bool = true;
+                    if (heap_mod.valueAsPlainObject(v)) |obj| {
+                        if (obj.isPromise()) {
+                            if (obj.promise_state == .pending) {
+                                suspend_target = obj;
+                                use_microtask = false;
+                            } else {
+                                resume_value = obj.promise_value;
+                                resume_throws = (obj.promise_state == .rejected);
                             }
-                            continue;
                         } else {
-                            await_target = obj;
-                        }
-                    } else {
-                        // §27.7.5.3 Await step 1 — PromiseResolve(%Promise%, v).
-                        // For thenables, §27.2.1.3.2 Promise Resolve Functions
-                        // steps 7-11 Get(value, "then"); IsCallable(then)
-                        // queues PromiseResolveThenableJob against a fresh
-                        // promise. Synthesise the fresh promise here so the
-                        // pending-await suspend path below runs on it.
-                        const then_v = obj.get("then");
-                        if (heap_mod.valueAsFunction(then_v) != null) {
-                            const promise_v = @import("builtins/promise.zig").allocatePromise(realm, .pending, Value.undefined_) catch return error.OutOfMemory;
-                            const promise_obj = heap_mod.valueAsPlainObject(promise_v) orelse return error.OutOfMemory;
-                            realm.enqueueThenableJob(promise_v, v, then_v) catch return error.OutOfMemory;
-                            await_target = promise_obj;
-                        }
-                    }
-                }
-                if (await_target) |obj| {
-                    // Pending — only suspendable inside an
-                    // async generator. Without one (e.g. a
-                    // top-level `await` outside a function),
-                    // fall through and let the caller see the
-                    // synthesised Promise back.
-                    if (f.generator) |gen| {
-                        if (gen.is_async) {
-                            // Save frame state into the gen and unwind.
-                            gen.ip = ip;
-                            gen.accumulator = Value.undefined_;
-                            gen.env = f.env;
-                            gen.this_value = f.this_value;
-                            gen.home_object = f.home_object;
-                            gen.home_function = f.home_function;
-                            gen.argc = f.argc;
-                            f.ip = ip;
-                            f.accumulator = Value.undefined_;
-                            committed = true;
-                            obj.promise_waiters.append(realm.allocator, gen) catch return error.OutOfMemory;
-                            // §27.6.3.4 — mark the async-gen state so the
-                            // queue drain (asyncGeneratorResumeNext) knows
-                            // not to pop the head request: the body went
-                            // into await, not into yield. Plain async
-                            // functions ignore this flag.
-                            if (gen.is_async_generator) {
-                                gen.async_state = .suspended_await;
+                            // Thenable check — §27.7.5.3 step 1
+                            // through §27.2.1.3.2 Promise Resolve
+                            // Functions steps 7-11.
+                            const then_v = obj.get("then");
+                            if (heap_mod.valueAsFunction(then_v) != null) {
+                                const promise_v = @import("builtins/promise.zig").allocatePromise(realm, .pending, Value.undefined_) catch return error.OutOfMemory;
+                                const promise_obj = heap_mod.valueAsPlainObject(promise_v) orelse return error.OutOfMemory;
+                                realm.enqueueThenableJob(promise_v, v, then_v) catch return error.OutOfMemory;
+                                suspend_target = promise_obj;
+                                use_microtask = false;
                             }
-                            return .{ .yielded = Value.undefined_ };
                         }
                     }
+                    // Save frame state into the gen so the
+                    // resumption microtask re-enters here.
+                    gen.ip = ip;
+                    gen.accumulator = Value.undefined_;
+                    gen.env = f.env;
+                    gen.this_value = f.this_value;
+                    gen.home_object = f.home_object;
+                    gen.home_function = f.home_function;
+                    gen.argc = f.argc;
+                    f.ip = ip;
+                    f.accumulator = Value.undefined_;
+                    committed = true;
+                    if (use_microtask) {
+                        realm.enqueueAsyncResume(gen, resume_value, resume_throws) catch return error.OutOfMemory;
+                    } else if (suspend_target) |obj| {
+                        obj.promise_waiters.append(realm.allocator, gen) catch return error.OutOfMemory;
+                    }
+                    // §27.6.3.4 — async-gen suspended in
+                    // await must not pop its head request when
+                    // the queue drain re-enters; plain async
+                    // functions ignore this flag.
+                    if (gen.is_async_generator) {
+                        gen.async_state = .suspended_await;
+                    }
+                    return .{ .yielded = Value.undefined_ };
                 }
-                // Non-Promise non-thenable, or pending await
-                // outside an async generator: pass through.
+                // `await` only emits inside async function /
+                // async generator bodies (parser-enforced) and
+                // module bodies with top-level await (routed
+                // through startAsyncCall, so f.generator is
+                // set). Reaching here means a caller invoked
+                // the opcode outside that envelope — drain any
+                // queued microtasks for symmetry and fall
+                // through.
+                drainMicrotasks(allocator, realm) catch return error.OutOfMemory;
             },
 
             .iter_open => {
