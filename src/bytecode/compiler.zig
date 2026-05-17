@@ -8839,6 +8839,25 @@ pub fn compileModuleAsChunk(
                 .declaration => |inner| if (inner.* == .function_decl) {
                     try c.compileStatement(s);
                 },
+                // §15.2.3.11 ExportDeclaration : `export default
+                // HoistableDeclaration` — the Hoistable case covers
+                // anonymous FunctionDeclaration / GeneratorDeclaration
+                // / AsyncFunctionDeclaration / AsyncGeneratorDeclaration
+                // exports. Cynic's AST parses these as a `default_value`
+                // wrapping a `function_expr` (since the parser already
+                // had the expression form). Treat them as hoistable
+                // declarations: evaluate the function template here
+                // and publish on the partial namespace under `"default"`
+                // BEFORE imports resolve, so a cycle re-entering the
+                // module sees the closure (and a same-module
+                // `import f from './self.js'` lands on the live
+                // binding instead of `undefined`).
+                .default_value => |dv| if (dv == .function_expr) {
+                    try c.compileExpression(&ed.body.default_value);
+                    const k_default = try c.internString("default");
+                    try c.builder.emitOp(.module_export, ed.span);
+                    try c.builder.emitU16(k_default);
+                },
                 else => {},
             },
             else => {},
@@ -8865,6 +8884,11 @@ pub fn compileModuleAsChunk(
             .import_decl, .function_decl => {},
             .export_decl => |ed| switch (ed.body) {
                 .declaration => |inner| if (inner.* == .function_decl) {} else try c.compileStatement(s),
+                // §15.2.3.11 — Hoistable defaults already published
+                // in phase 1; skip the body-phase compile to avoid
+                // a double `module_export` (and a wasted
+                // template-build on each module evaluation).
+                .default_value => |dv| if (dv == .function_expr) {} else try c.compileStatement(s),
                 else => try c.compileStatement(s),
             },
             else => try c.compileStatement(s),
