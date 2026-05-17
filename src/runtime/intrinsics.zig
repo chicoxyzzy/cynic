@@ -90,6 +90,13 @@ pub const Intrinsics = struct {
     /// protocol. Lazily installed on first wrap (see
     /// `builtins/async_iterator.zig`).
     async_from_sync_iterator_prototype: ?*JSObject = null,
+    /// §27.1.4.1.2 %WrapForValidIteratorPrototype% — the proto
+    /// of objects returned by `Iterator.from(o)` when `o` is a
+    /// valid iterator that needs to be wrapped. Carries `next`
+    /// and `return` that delegate to the wrapped iterator's
+    /// methods. Lazily installed on first `Iterator.from` call
+    /// (see `builtins/iterator.zig`).
+    wrap_for_valid_iterator_prototype: ?*JSObject = null,
 
     /// `%PromisePrototype%` — installed by `installPromise` so
     /// instances of the realm's `Promise` constructor share one

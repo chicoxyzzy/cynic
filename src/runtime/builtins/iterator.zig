@@ -117,36 +117,113 @@ fn iteratorFrom(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         if (err == error.NativeThrew) return error.NativeThrew;
         return throwTypeError(realm, "Iterator.from argument is not iterable");
     };
+    // §27.1.4.1.1 step 4 — if `iteratorRecord.[[Iterator]]` already
+    // has %Iterator.prototype% somewhere in its prototype chain,
+    // return it directly. Generator instances (which extend
+    // %GeneratorPrototype% → %IteratorPrototype% → %Iterator.prototype%)
+    // hit this path: `Object.getPrototypeOf(Iterator.from(g()))` ===
+    // %GeneratorPrototype%, not the wrap proto.
+    if (heap_mod.valueAsPlainObject(inner)) |inner_obj| {
+        const iter_ctor_v = realm.globals.get("Iterator");
+        if (iter_ctor_v) |c_v| {
+            if (heap_mod.valueAsFunction(c_v)) |c_fn| {
+                const iter_proto = c_fn.prototype;
+                var cur: ?*JSObject = inner_obj.prototype;
+                while (cur) |p| : (cur = p.prototype) {
+                    if (p == iter_proto) return inner;
+                }
+            }
+        }
+    }
     return wrapIterator(realm, inner);
 }
 
-/// Wrap a raw iterator object (the kind `openIterator` returns)
-/// in a fresh helper object whose prototype is %Iterator.prototype%.
-/// The wrapper's `next` delegates to the source iterator's `next`.
-fn wrapIterator(realm: *Realm, source: Value) NativeError!Value {
-    const ctor_v = realm.globals.get("Iterator") orelse return source;
-    const ctor = heap_mod.valueAsFunction(ctor_v) orelse return source;
-    // §27.1.4.1.1 step 4 — `Iterator.from(O)` does GetIteratorFlattenable
-    // which reads `O.next` exactly once via GetMethod. Cache it on
-    // the wrapper so `wrappedNext` doesn't re-read the source's
-    // (possibly-getter) `next` every step.
-    const cached_next = try snapshotNext(realm, source);
-    const wrap = realm.heap.allocateObject() catch return error.OutOfMemory;
-    wrap.prototype = ctor.prototype;
-    const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
-    state.* = .{ .source = source, .next_fn = heap_mod.taggedFunction(cached_next) };
-    wrap.iter_helper = state;
-    const scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer scope.close();
-    scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
-    const next_fn = realm.heap.allocateFunctionNative(wrappedNext, 0, "next") catch return error.OutOfMemory;
+/// §27.1.4.1.2 — lazily install %WrapForValidIteratorPrototype%.
+/// Its proto is %Iterator.prototype% and it carries spec-mandated
+/// `next` (delegates to wrapped iter's snapshotted next) and
+/// `return` (calls wrapped iter's `return` via GetMethod, builds
+/// a `{value: undefined, done: true}` if absent).
+fn ensureWrapForValidIteratorPrototype(realm: *Realm) !*JSObject {
+    if (realm.intrinsics.wrap_for_valid_iterator_prototype) |p| return p;
+    const ctor_v = realm.globals.get("Iterator") orelse return error.OutOfMemory;
+    const ctor = heap_mod.valueAsFunction(ctor_v) orelse return error.OutOfMemory;
+    const proto = try realm.heap.allocateObject();
+    proto.prototype = ctor.prototype; // %Iterator.prototype%
+
+    const next_fn = try realm.heap.allocateFunctionNative(wrappedNext, 0, "next");
     next_fn.has_construct = false;
-    wrap.setWithFlags(realm.allocator, "next", heap_mod.taggedFunction(next_fn), .{
-        .writable = true,
-        .enumerable = false,
-        .configurable = true,
-    }) catch return error.OutOfMemory;
+    next_fn.proto = realm.intrinsics.function_prototype;
+    try proto.setWithFlags(realm.allocator, "next", heap_mod.taggedFunction(next_fn), .{
+        .writable = true, .enumerable = false, .configurable = true,
+    });
+
+    const return_fn = try realm.heap.allocateFunctionNative(wrappedReturn, 0, "return");
+    return_fn.has_construct = false;
+    return_fn.proto = realm.intrinsics.function_prototype;
+    try proto.setWithFlags(realm.allocator, "return", heap_mod.taggedFunction(return_fn), .{
+        .writable = true, .enumerable = false, .configurable = true,
+    });
+
+    realm.intrinsics.wrap_for_valid_iterator_prototype = proto;
+    return proto;
+}
+
+/// Wrap a raw iterator object (the kind `openIterator` returns)
+/// in a fresh helper object whose prototype is
+/// %WrapForValidIteratorPrototype%. The wrapper's `next` and
+/// `return` delegate to the source iterator's methods.
+fn wrapIterator(realm: *Realm, source: Value) NativeError!Value {
+    // §7.4.6 step 6 — GetIteratorFlattenable reads `next` once
+    // without a callability check (that happens lazily at
+    // IteratorNext §7.4.3 step 1). Use `snapshotNextValue` so a
+    // missing / non-callable `next` is deferred until the
+    // wrapper's `next()` is actually invoked. `{ next: ... }`
+    // omitted entirely is the `Iterator.from({})` shape — the
+    // wrapper still constructs.
+    const cached_next_v = try snapshotNextValue(realm, source);
+    const proto = ensureWrapForValidIteratorPrototype(realm) catch return error.OutOfMemory;
+    const wrap = realm.heap.allocateObject() catch return error.OutOfMemory;
+    wrap.prototype = proto;
+    const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
+    state.* = .{ .source = source, .next_fn = cached_next_v };
+    wrap.iter_helper = state;
     return heap_mod.taggedObject(wrap);
+}
+
+/// §27.1.4.1.2.2 %WrapForValidIteratorPrototype%.return — calls
+/// `GetMethod(iterated, "return")` and either forwards or returns
+/// a synthesized done result.
+fn wrappedReturn(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    // Step 2 — RequireInternalSlot(O, [[Iterated]]).
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "WrapForValidIteratorPrototype.return called on non-object");
+    const state = obj.iter_helper orelse return throwTypeError(realm, "WrapForValidIteratorPrototype.return called on incompatible receiver");
+    const source = state.source;
+    const src_obj = heap_mod.valueAsPlainObject(source) orelse return throwTypeError(realm, "wrapped iterator is not an object");
+    // Step 5 — GetMethod(iterator, "return").
+    const ret_v = try iterGet(realm, source, "return");
+    if (ret_v.isUndefined() or ret_v.isNull()) {
+        // Step 6 — return CreateIterResultObject(undefined, true).
+        const res = realm.heap.allocateObject() catch return error.OutOfMemory;
+        res.prototype = realm.intrinsics.object_prototype;
+        res.set(realm.allocator, "value", Value.undefined_) catch return error.OutOfMemory;
+        res.set(realm.allocator, "done", Value.true_) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(res);
+    }
+    const ret_fn = heap_mod.valueAsFunction(ret_v) orelse return throwTypeError(realm, "wrapped iterator .return is not callable");
+    _ = src_obj;
+    // Step 7 — Return ? Call(returnMethod, iterator).
+    const outcome = interpreter.callJSFunction(realm.allocator, realm, ret_fn, source, &.{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    return switch (outcome) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
 }
 
 fn wrappedNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -1162,20 +1239,49 @@ fn callIteratorMethod(realm: *Realm, iter_fn: *JSFunction, this_v: Value) Native
 /// Returns a raw iterator object (an Object with a `next`
 /// method).
 fn getIteratorFlattenable(realm: *Realm, v: Value, reject_strings: bool) NativeError!Value {
+    // §7.4.6 step 1 — if O is not Object and stringHandling rejects
+    // strings (or O isn't a String), TypeError. Strings flow through
+    // when stringHandling=iterate-string-primitives (Iterator.from).
     if (heap_mod.valueAsPlainObject(v) == null) {
-        if (v.isString() and !reject_strings) {
-            // §22.1.3.{34,36} String.prototype[@@iterator] yields
-            // a StringIterator. We don't have an explicit one
-            // installed on `String.prototype`; route through
-            // `openIterator` (which array-like-iterates strings)
-            // for the same shape.
-            const it = interpreter.openIteratorAllowArrayLike(realm.allocator, realm, v) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return throwTypeError(realm, "could not open string iterator"),
-            };
-            return it;
+        if (!(v.isString() and !reject_strings)) {
+            return throwTypeError(realm, "iterable is not an object");
         }
-        return throwTypeError(realm, "iterable is not an object");
+        // Spec § 7.4.6 step 2 — `GetMethod(v, @@iterator)` — runs
+        // against the primitive String. The getter sees `this` as
+        // the primitive in strict mode (typeof === 'string'), so
+        // walk `String.prototype` directly rather than boxing first.
+        const sp = realm.intrinsics.string_prototype orelse return throwTypeError(realm, "String.prototype not installed");
+        if (sp.accessors.get("@@iterator")) |acc| {
+            if (acc.getter) |getter| {
+                const out = interpreter.callJSFunction(realm.allocator, realm, getter, v, &.{}) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                const m_v = switch (out) {
+                    .value, .yielded => |x| x,
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                };
+                if (m_v.isUndefined() or m_v.isNull()) {
+                    // Fall through to default string iteration.
+                    return interpreter.openIteratorAllowArrayLike(realm.allocator, realm, v) catch return throwTypeError(realm, "could not open string iterator");
+                }
+                const m_fn = heap_mod.valueAsFunction(m_v) orelse return throwTypeError(realm, "@@iterator is not callable");
+                return callIteratorMethod(realm, m_fn, v);
+            }
+        }
+        // No accessor on String.prototype — fall through to data
+        // slot lookup. If a normal data property is installed
+        // there, invoke it with `this = v`.
+        if (sp.properties.get("@@iterator")) |m_v| {
+            if (heap_mod.valueAsFunction(m_v)) |m_fn| {
+                return callIteratorMethod(realm, m_fn, v);
+            }
+        }
+        // Default String iteration — array-like over code units.
+        return interpreter.openIteratorAllowArrayLike(realm.allocator, realm, v) catch return throwTypeError(realm, "could not open string iterator");
     }
     // §7.4.6 step 2 — accessor-aware `@@iterator` read so the
     // `iterables-iteration*.js` family observes the spec's exact
