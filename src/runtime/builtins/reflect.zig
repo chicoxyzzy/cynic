@@ -508,19 +508,20 @@ fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) 
         _ = fn_obj.property_flags.swapRemove(key_slice);
         return Value.true_;
     }
-    const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.deleteProperty target must be an object");
-    // §10.5.10 Proxy [[Delete]] dispatch.
-    {
-        var proxy_cur = target;
-        while (proxy_cur.proxy_target != null or proxy_cur.proxy_revoked) {
-            const r = try proxy_mod.nativeProxyDelete(realm, proxy_cur, key_slice);
-            switch (r) {
-                .boolean => |b| return Value.fromBool(b),
-                .fallthrough => |t| {
-                    if (t == proxy_cur) break;
-                    proxy_cur = t;
-                },
-            }
+    const target_outer = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.deleteProperty target must be an object");
+    // §10.5.10 Proxy [[Delete]] dispatch. After walking the proxy
+    // chain, `target` points at the inner non-proxy object whose
+    // [[Delete]] the trapless outer proxy ultimately invokes
+    // (§10.5.10 step 7.a).
+    var target = target_outer;
+    while (target.proxy_target != null or target.proxy_revoked) {
+        const r = try proxy_mod.nativeProxyDelete(realm, target, key_slice);
+        switch (r) {
+            .boolean => |b| return Value.fromBool(b),
+            .fallthrough => |t| {
+                if (t == target) break;
+                target = t;
+            },
         }
     }
     // §9.4.6.6 Module Namespace [[Delete]] — string-keyed

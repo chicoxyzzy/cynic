@@ -8811,6 +8811,20 @@ fn runFrames(
                         const r = try proxyDeleteTrap(allocator, realm, frames, f, ip, obj_in, key_s.bytes);
                         switch (r) {
                             .value => |v| {
+                                // §13.5.1.2 step 6 — strict-mode
+                                // `delete` of a Reference must throw
+                                // TypeError when [[Delete]] returns
+                                // false. Cynic is strict-only.
+                                if (!arith.toBoolean(v)) {
+                                    const ex = try makeTypeError(realm, "Cannot delete property");
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    continue;
+                                }
                                 acc = v;
                                 continue;
                             },
@@ -8875,6 +8889,16 @@ fn runFrames(
                         const r = try proxyDeleteTrap(allocator, realm, frames, f, ip, obj_in, key_slice);
                         switch (r) {
                             .value => |v| {
+                                if (!arith.toBoolean(v)) {
+                                    const ex = try makeTypeError(realm, "Cannot delete property");
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    continue;
+                                }
                                 acc = v;
                                 continue;
                             },
