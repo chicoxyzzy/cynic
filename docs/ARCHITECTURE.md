@@ -287,8 +287,9 @@ Cynic targets Source Text Module Record per §16. `import` /
 
 What's wired today:
 
-- Static `import` / `export` (including re-exports and
-  `export * from`).
+- Static `import` / `export` (including re-exports, `export *
+  from`, and StringLiteral as ModuleExportName per §16.2.3.5
+  — `export * as "ns" from "src"`, `import { "y" as local }`).
 - Indirect imports as live aliases per §8.1.1.5.5
   CreateImportBinding — reads dereference through the source
   module's namespace; writes throw TypeError.
@@ -296,14 +297,36 @@ What's wired today:
   `let` / `const` / `class` / `export default` slots are
   Hole-seeded at instantiation so the importer sees a
   ReferenceError before the source body has initialised them
-  (§15.2.1.16.4 step 12).
+  (§15.2.1.16.4 step 12). `export const { x } = obj`
+  destructuring patterns are walked to every binding leaf,
+  matching what `let` / `const` declarators publish.
 - Module Namespace exotic ([[Get]] §9.4.6.7) routes through
   `GetBindingValue` with `strict = true`, surfacing the TDZ
   Hole as ReferenceError. `[[HasProperty]]` and
   `[[OwnPropertyKeys]]` do NOT — only `[[Get]]` honors TDZ.
+  `IsExtensible` / `SetPrototypeOf` are brand-aware per
+  §9.4.6.{1,3}, refusing extension and prototype change with
+  the spec-mandated `false`. `@@toStringTag = "Module"` is
+  installed at brand-on-allocation time so cycles see the
+  right tag while the namespace is still mid-evaluation.
+- Top-level `await` (§16.2.1.5.1). Module bodies with TLA
+  compile with `chunk.is_async_module = true`; the runtime
+  routes them through `startAsyncCall` to produce an
+  evaluation Promise. Async deps suspended at TLA land on
+  `ModuleRecord.pending_async_deps`; the compiler emits a
+  `module_link_complete` opcode after the importer's hoisted
+  import block to drain microtasks (and propagate any dep
+  rejection as an abrupt completion at the link boundary).
+  Cynic doesn't yet model the full §16.2.1.5
+  [[PendingAsyncDependencies]] count or
+  [[AsyncEvaluationOrder]] sort — sufficient for every TLA
+  fixture in today's corpus.
 - Dynamic `import()` per §13.3.10 — returns a Promise that
   rejects with `SyntaxError` on instantiation failure
-  (ambiguous indirect-export, circular re-export, etc.).
+  (ambiguous indirect-export, circular re-export, etc.). For
+  async deps the import() Promise drains microtasks until the
+  dep's evaluation Promise settles, so callers see the post-
+  TLA namespace rather than a partial mid-await view.
 - `import.meta`.
 
 Module loading is host-driven via `Realm.module_loader` — a

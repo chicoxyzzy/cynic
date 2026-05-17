@@ -138,6 +138,64 @@ the source module's env-record `GetBindingValue` with
 `strict = true`, so a `ns.uninit_const` access during the source
 module's TDZ throws ReferenceError. `[[HasProperty]]` and
 `[[OwnPropertyKeys]]` do NOT — only `[[Get]]` honors the TDZ.
+The namespace's `@@toStringTag = "Module"` is installed at
+brand-on-allocation time (alongside `is_module_namespace = true`
+and `prototype = null`); cycles re-entering during evaluation
+see the right tag even though `extensible` is still `true`
+until the body returns.
+
+### Top-level await — the link-complete boundary
+
+A module body with TLA compiles with
+`chunk.is_async_module = true`; `interpreter.run` routes it
+through `startAsyncCall` to produce an evaluation Promise. When
+the body suspends at the first top-level `await`, `loadModule`
+records the dep on the importer's
+`ModuleRecord.pending_async_deps` (Cynic's lightweight stand-in
+for §16.2.1.5 [[PendingAsyncDependencies]]).
+
+The compiler emits a `module_link_complete` opcode after the
+importer's hoisted import block — before the body proper runs.
+The opcode drains the microtask queue (so any async dep
+suspended on `await` gets to resume before the importer
+observes its exports), then walks `pending_async_deps` and
+unwinds throw if any dep's evaluation Promise rejected
+(approximating §16.2.1.9 AsyncModuleExecutionRejected's parent
+path). Sync siblings ran during the import hoist itself, so a
+sync module that destructures `globalThis` captures values from
+*before* any async sibling resumes — the spec ordering for
+`async-module-does-not-block-sibling-modules`.
+
+What this approximation skips: the full
+[[AsyncEvaluationOrder]] sort and the reverse
+[[AsyncParentModules]] propagation. Sufficient for the entire
+`top-level-await` fixture bucket today, but a future cycle test
+that exercises the sort would need the real machinery.
+
+### Dynamic import + async deps
+
+`dynamic_import` calls `loadModule` and inspects the returned
+`mr` — if `state == .evaluating_async`, it drains microtasks
+until the dep's `evaluation_promise` settles, then wraps the
+final namespace in a fulfilled (or rejected) Promise. Without
+this, `await import("./tla")` would return the dep's pre-TLA
+partial namespace.
+
+### Lexical private-name resolution
+
+Private names (`#x`) are lexically scoped to the *declaring*
+class, not the innermost enclosing one. The compiler gathers
+each class's `#name`s into `ClassContext.private_names` and the
+`manglePrivateRef` helper walks `class_stack` outward to find
+the right declaring class — handles the `class Outer { #x;
+inner() { return [class { method() { return obj.#x; } }]; } }`
+case where the inner anonymous class refers to Outer's `#x`.
+The runtime carries `private_compile_prefix` alongside
+`private_brand` on every class prototype and constructor;
+`framePrivateBrand` matches the mangled key's `P{n}#` prefix
+against the receiver's prototype chain to pick the right
+per-evaluation brand. See `bytecode/compiler.zig` /
+`runtime/class.zig` / `runtime/interpreter.zig`.
 
 ## Why this matters for binding-touching changes
 

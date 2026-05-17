@@ -48,7 +48,19 @@ runs the conformance harness.
 
 **In progress / on the watch.**
 
-- Top-level `await` in modules.
+- Top-level `await` cycles via the full
+  [[PendingAsyncDependencies]] graph (§16.2.1.5). Today's
+  `module_link_complete` opcode + `pending_async_deps` slot
+  covers the direct-dep and CycleRoot-via-cycle-leaf cases
+  observably, but skips the [[AsyncEvaluationOrder]] sort and
+  reverse `[[AsyncParentModules]]` propagation. The bucket is
+  at 250 / 251 today — only fixtures that exercise the sort
+  ordering will land beyond what we have. See
+  [`handbook/environments.md`](handbook/environments.md).
+- StringLiteral export/import names (§16.2.3.5) — `export {
+  "x" as "y" }` strips quotes and treats both sides as
+  identifiers; `import { "y" as local }` and `export * as
+  "ns"` ship.
 
 **Out of scope.** Annex B language extensions (no sloppy mode, no
 labels-in-old-positions, no HTML-like comments, no legacy octal,
@@ -114,7 +126,6 @@ code construction (aligns with SES).
 
 - **Tail-call optimization (PTC).** See the dedicated section
   below.
-- **Top-level `await` in modules.**
 - **`typeof` of a callable proxy returning `"function"`.**
 - **Generational / incremental GC.**
 - **Inner `yield*` `.return` non-Object → TypeError** and
@@ -123,6 +134,46 @@ code construction (aligns with SES).
   `yield*` protocol landed in May 2026).
 
 **Recently landed (was in progress; now done).**
+
+- **Top-level `await` in modules — full bucket green** (250 → 251
+  on `language/module-code/top-level-await`). Three-stage roll-
+  out: always-defer `await` (§27.7.5.3 PromiseResolve+then),
+  async-module drain-to-settlement on static import, owning-
+  module thread-through on resume so `module_export` after a
+  TLA-await lands in the right namespace. Final finisher added
+  the `module_link_complete` opcode (drains microtasks after the
+  importer's hoisted import block so sync siblings get to run
+  while an async dep is mid-`await`; CycleRoot-via-cycle-leaf
+  ordering falls out without modelling [[CycleRoot]] directly).
+  Drive-by: `loadModule` now properly save/restores
+  `current_module` (was clobbering to `null` on return);
+  `publishExportedNamesFromDecl` walks BindingPattern leaves so
+  `export const { x } = obj` publishes `x`.
+- **§15.7.14 step 11 lexical private-name resolution across
+  nested classes** — `#x` mangles with the *declaring* class's
+  prefix, not the innermost. `ClassContext.private_names` +
+  `manglePrivateRef` walk `class_stack` outward; the runtime
+  carries `private_compile_prefix` alongside `private_brand` so
+  `framePrivateBrand` picks the right per-evaluation brand by
+  matching the key's `P{n}#` prefix against the prototype chain.
+  `language/statements/class/elements` 54 → 42 fail (−12).
+- **§13.2.5 ComputedPropertyName for class keys evaluates
+  inline.** Sub-chunk dispatch (call-out to a synthesised
+  function frame at class-definition time) is gone — keys
+  evaluate in the enclosing generator frame so `yield` /
+  `await` inside `[expr]` works. Eight `cpn-class-*-from-yield/
+  await-expression` fixtures land.
+- **module-code bucket: +32 pass** — `arbitrary-module-
+  namespace-names` (StringLiteral as ModuleExportName, `export
+  * as "ns"`), module namespace `IsExtensible` /
+  `SetPrototypeOf` honor the §9.4.6 brand, `@@toStringTag`
+  installs at brand-on-allocation time (not at finalisation —
+  visible during cycles), hoisted `export default function`
+  (anonymous + named), module-top `class C {}` as a let
+  binding, `export var` published at module-instantiation
+  hoist, cross-function `const` write defers to runtime
+  (§9.1.1.1.4). Net: 87 → 92 % spec on `language/module-
+  code`.
 
 - **Spec-faithful `yield*` delegation** for both sync and
   async generators (§15.5.5 / §27.6.3.7). Three-step plan
@@ -385,13 +436,39 @@ hosts are single-agent-per-isolate).
   `[[HasProperty]]` / `[[OwnPropertyKeys]]` stay non-throwing.
 - Re-exports (`export { X } from './x.js'`) and star
   re-exports (`export * from`) route through indirect bindings.
+- Top-level `await` in module bodies — full bucket green.
+  Async module bodies run via `startAsyncCall`; the
+  `module_link_complete` opcode drains microtasks after the
+  hoisted import block; `loadModule` records suspended async
+  deps on `ModuleRecord.pending_async_deps` and propagates
+  rejection at the link boundary (§16.2.1.5 / §16.2.1.9
+  parent-path, approximated). Dynamic `import()` chains its
+  Promise to the dep's evaluation Promise so the import()
+  result reflects the post-TLA namespace.
+- StringLiteral as ModuleExportName (§16.2.3.5) — `export {
+  X as "Y" }`, `export * as "ns" from "src"`, `import {
+  "Y" as local }`. Quotes stripped at compile time; the
+  raw key indexes the namespace.
+- §9.4.6.{1,3} namespace `IsExtensible` / `SetPrototypeOf`
+  are brand-aware — a Module Namespace exotic refuses
+  extension and prototype change with the spec-mandated
+  `false` return, not the OrdinaryObject default.
+- `@@toStringTag` installs at brand-on-allocation time so
+  cycles see `Object.prototype.toString.call(ns)` returning
+  `"[object Module]"` while the namespace is still
+  `extensible`.
 
 **Planned.**
 
-- Top-level `await` in module bodies.
-- Module-evaluation cycle resolution edge cases (most
-  star-cycles work; the residual list is in the
-  `language/module-code/instn-star-*` cluster).
+- Module-evaluation cycle resolution edge cases — the residual
+  failures are in the `language/module-code/instn-{iee,star}-*`
+  + `ambiguous-export-bindings/*` clusters and need the full
+  §15.2.1.16.3 ResolveExport chain (indirect-export forward,
+  ambiguity detection) + `export * from` namespace merge.
+- Full §16.2.1.5 [[PendingAsyncDependencies]] +
+  [[AsyncEvaluationOrder]] graph — Cynic's `pending_async_
+  deps` slot is a lightweight stand-in; the remaining
+  fixtures that exercise sort ordering need the real machinery.
 
 ## Regex
 
