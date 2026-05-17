@@ -152,18 +152,65 @@ pub const skip_ses_substrings = [_][]const u8{
     // confirmed eval-based.
     "/cptn-",
 
-    // `language/{expressions,statements}/class/private-*-brand-check-
-    // multiple-evaluations-of-class-*-function-ctor.js` and the
-    // matching `-eval-indirect.js` variants — every one of these
+    // `language/{expressions,statements}/class/private-*-{brand-check,
+    // field,getter,setter,method}-multiple-evaluations-of-class-*-
+    // function-ctor.js` and the matching `-eval-indirect.js` /
+    // `-realm-function-ctor.js` variants — every one of these
     // fixtures builds a class via `new Function(classStringExpression)`
     // (or `(0, eval)(...)`) so each evaluation produces a fresh
     // brand. Cynic doesn't ship runtime code construction (SES
     // carve-out, see AGENTS.md), so the fixtures false-reject for
-    // a permanent OOS reason rather than a real engine bug. 11
-    // fixtures across getter / setter / method / static-method.
-    "-brand-check-multiple-evaluations-of-class-function-ctor",
-    "-brand-check-multiple-evaluations-of-class-realm-function-ctor",
-    "-brand-check-multiple-evaluations-of-class-eval-indirect",
+    // a permanent OOS reason rather than a real engine bug.
+    "-multiple-evaluations-of-class-function-ctor",
+    "-multiple-evaluations-of-class-realm-function-ctor",
+    "-multiple-evaluations-of-class-eval-indirect",
+
+    // `language/{statements,expressions}/class/subclass/builtin-
+    // objects/{Function,GeneratorFunction}/*.js` — every fixture
+    // exercises `class Sub extends Function {}` (or
+    // GeneratorFunction) and then calls
+    // `new Sub('a', 'return a*2')` /
+    // `new Sub('a', 'yield a; yield a*2;')` to verify the
+    // subclassed [[Construct]] path. Construction routes through
+    // §15.3.2 / §27.3.2 CreateDynamicFunction (source-string
+    // function constructor) which is the permanent SES carve-out
+    // per AGENTS.md. Even the no-arg `new Subclass()` form trips
+    // the same path because Function() with no args still routes
+    // through CreateDynamicFunction.
+    "class/subclass/builtin-objects/Function/",
+    "class/subclass/builtin-objects/GeneratorFunction/",
+    "class/subclass-builtins/subclass-Function.js",
+
+    // `language/{statements,expressions}/class/elements/private-
+    // {getter,setter}-is-not-a-own-property.js` — each fixture
+    // probes the negative shape via Annex B `__lookupGetter__` /
+    // `__lookupSetter__` (B.2.2.4 / B.2.2.5). Those accessors are
+    // never installed under AGENTS.md "Annex B in its entirety —
+    // out", so the call surfaces as "value is not callable" rather
+    // than the spec's expected `undefined`. The fixture isn't
+    // feature-tagged (no `[__getter__]` / `[__setter__]`) so
+    // feature-based skip doesn't catch it; substring it.
+    "/private-getter-is-not-a-own-property.js",
+    "/private-setter-is-not-a-own-property.js",
+
+    // `language/{statements,expressions}/class/elements/static-
+    // field-init-with-this.js` — `static h = eval('this.g') + ...`
+    // verifies `this` binding inside a static-field initializer
+    // by routing through `eval()`. Permanent SES carve-out
+    // (AGENTS.md "eval and runtime code construction"). The
+    // `this` binding itself is also exercised non-eval-gated by
+    // the sibling `static g = this.f + '262'` expression — the
+    // assertion path on `h` is `eval`-only.
+    "/static-field-init-with-this.js",
+
+    // `language/{statements,expressions}/class/subclass-builtins/
+    // subclass-SharedArrayBuffer.js` — `class Subclass extends
+    // SharedArrayBuffer {}`, blocked by the missing
+    // SharedArrayBuffer global. Permanent shared-memory carve-out
+    // (AGENTS.md "single-agent-per-isolate"). Not under
+    // `built-ins/SharedArrayBuffer/` so the directory prefix skip
+    // misses it.
+    "/subclass-builtins/subclass-SharedArrayBuffer.js",
 
     // `language/statements/class/elements/private-*-visible-to-direct-eval*.js`
     // — every fixture invokes `eval("this.#x")` (direct eval inside a
