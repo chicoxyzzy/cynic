@@ -367,8 +367,15 @@ fn promiseConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
     switch (outcome) {
         .value, .yielded => {},
         .thrown => |ex| {
-            // Executor threw — reject the promise.
-            settlePromise(realm, inst, .rejected, ex) catch return error.OutOfMemory;
+            // §27.2.3.1 step 10 — executor threw. Reject ONLY if the
+            // resolving functions haven't already been invoked (e.g.
+            // `resolve(thenable); throw …` leaves the Promise pending
+            // until the thenable job runs, so the throw is ignored
+            // per §27.2.1.3.2 alreadyResolved guard).
+            if (!inst.promise_already_resolved) {
+                inst.promise_already_resolved = true;
+                settlePromise(realm, inst, .rejected, ex) catch return error.OutOfMemory;
+            }
         },
     }
     return this_value;
@@ -396,9 +403,11 @@ fn promiseResolveImpl(realm: *Realm, this_value: Value, args: []const Value) Nat
     const target = heap_mod.valueAsPlainObject(this_value) orelse return Value.undefined_;
     const v = argOr(args, 0, Value.undefined_);
     const interp = @import("../interpreter.zig");
-    // §27.2.1.3.2 Promise Resolve Functions — already-settled guard
-    // first (the trampoline ensures one-shot, but we may be reached
-    // from the thenable-job rejection path too).
+    // §27.2.1.3.2 Promise Resolve Functions step 2 —
+    // alreadyResolved guard. Set TRUE on first call regardless
+    // of which path the resolution ultimately settles through.
+    if (target.promise_already_resolved) return Value.undefined_;
+    target.promise_already_resolved = true;
     if (target.promise_state != .pending) return Value.undefined_;
 
     // Step 4 — resolution === target → TypeError.
@@ -466,6 +475,11 @@ fn promiseRejectImpl(realm: *Realm, this_value: Value, args: []const Value) Nati
     const target = heap_mod.valueAsPlainObject(this_value) orelse return Value.undefined_;
     const v = argOr(args, 0, Value.undefined_);
     const interp = @import("../interpreter.zig");
+    // §27.2.1.3.1 Promise Reject Functions step 2 — alreadyResolved
+    // guard. Sets the shared flag so a subsequent executor-threw
+    // path (or duplicate reject) no-ops.
+    if (target.promise_already_resolved) return Value.undefined_;
+    target.promise_already_resolved = true;
     interp.settlePromiseInternal(realm, target, .rejected, v) catch return error.OutOfMemory;
     return Value.undefined_;
 }

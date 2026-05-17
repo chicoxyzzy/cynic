@@ -2531,7 +2531,13 @@ fn runThenableJob(
             // trampolines guard against double-settlement, so if
             // user code already resolved/rejected this is a
             // no-op.
-            if (outer_obj.promise_state == .pending) {
+            // §27.2.1.3 alreadyResolved guard — `then` may have
+            // already invoked resolve(thenable) (which leaves the
+            // outer Promise pending until a nested job runs); the
+            // subsequent throw must NOT reject. `exception-after-
+            // resolve-in-thenable-job.js`.
+            if (!outer_obj.promise_already_resolved) {
+                outer_obj.promise_already_resolved = true;
                 try settlePromiseInternal(realm, outer_obj, .rejected, ex);
             }
         },

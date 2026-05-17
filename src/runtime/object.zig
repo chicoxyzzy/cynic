@@ -457,6 +457,14 @@ pub const JSObject = struct {
     /// `promise_state` is fulfilled or rejected; pending Promises
     /// leave it at `undefined_`.
     promise_value: Value = Value.undefined_,
+    /// §27.2.1.3 alreadyResolved closure flag — set true on the
+    /// first invocation of either the resolve or reject function
+    /// for this Promise. Subsequent invocations no-op, and the
+    /// Promise constructor's executor-threw fallback (§27.2.3.1
+    /// step 10) consults this flag to avoid double-settlement when
+    /// the executor already called resolve(thenable) (which leaves
+    /// the Promise pending until the thenable job runs).
+    promise_already_resolved: bool = false,
     /// §22.2.4 `[[OriginalSource]]` — the source string a RegExp
     /// instance was constructed from (the part between the
     /// slashes in `/abc/i`). Hidden from JS; user-visible via
