@@ -3263,54 +3263,6 @@ fn lookupToStringTag(realm: *Realm, this_value: Value) NativeError!?Value {
     return null;
 }
 
-/// §20.1.3.5 Object.prototype.toLocaleString ( [ reserved1 [ ,
-/// reserved2 ] ] ). Per spec the body is `Return ? Invoke(O,
-/// "toString")` — dispatch back through the receiver's
-/// `toString` so subclasses overriding `toString` also override
-/// `toLocaleString`. The reserved parameters are vestigial host
-/// hooks (kept for Intl-extended overrides) and don't count
-/// toward `.length`.
-fn objectProtoToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    // §7.3.18 Invoke(V, P) — `func = ? GetV(V, P)`. ToObject
-    // primitives so the prototype-installed `toString` resolves,
-    // but keep the original receiver for the call.
-    const obj_v = if (heap_mod.valueAsPlainObject(this_value) != null or heap_mod.valueAsFunction(this_value) != null)
-        this_value
-    else
-        heap_mod.taggedObject(try intrinsics.toObjectThis(realm, this_value));
-    const obj = heap_mod.valueAsPlainObject(obj_v) orelse {
-        // The receiver was a callable; functions have their own
-        // chain. Resolve via JSFunction's own `get`.
-        if (heap_mod.valueAsFunction(obj_v)) |fn_obj| {
-            const func_v = fn_obj.get("toString");
-            const callee = heap_mod.valueAsFunction(func_v) orelse
-                return throwTypeError(realm, "Object.prototype.toLocaleString: toString is not callable");
-            return callAndUnwrap(realm, callee, this_value);
-        }
-        return throwTypeError(realm, "Object.prototype.toLocaleString: receiver is not an object");
-    };
-    const func_v = try intrinsics.getPropertyChain(realm, obj, "toString");
-    const callee = heap_mod.valueAsFunction(func_v) orelse
-        return throwTypeError(realm, "Object.prototype.toLocaleString: toString is not callable");
-    return callAndUnwrap(realm, callee, this_value);
-}
-
-fn callAndUnwrap(realm: *Realm, callee: *JSFunction, this_value: Value) NativeError!Value {
-    const interp = @import("../interpreter.zig");
-    const outcome = interp.callJSFunction(realm.allocator, realm, callee, this_value, &[_]Value{}) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.NativeThrew,
-    };
-    return switch (outcome) {
-        .value, .yielded => |v| v,
-        .thrown => |ex| blk: {
-            realm.pending_exception = ex;
-            break :blk error.NativeThrew;
-        },
-    };
-}
-
 fn objectProtoValueOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = realm;
     _ = args;
