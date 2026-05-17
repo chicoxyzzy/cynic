@@ -5570,11 +5570,52 @@ fn runFrames(
                                 },
                             };
                         }
+                        // §6.2.5.6 PutValue step 3.d / §13.5.1 — a
+                        // Super Reference is *always* strict (Cynic
+                        // is strict-only). When [[Set]] would return
+                        // false — receiver is non-extensible and has
+                        // no own slot to overwrite, OR the existing
+                        // own data slot is non-writable — the spec
+                        // says throw TypeError. Surface that here
+                        // before the silent-write fallback.
+                        if (!this_obj.hasOwn(key_s.bytes)) {
+                            if (!this_obj.extensible) {
+                                const ex = try makeTypeError(realm, "Cannot add property, object is not extensible");
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue;
+                            }
+                        } else {
+                            const ok = this_obj.setIfWritable(allocator, key_s.bytes, value) catch return error.OutOfMemory;
+                            if (!ok) {
+                                const ex = try makeTypeError(realm, "Cannot assign to read-only property via super");
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue;
+                            }
+                            acc = value;
+                            continue;
+                        }
                         // Fall back to a plain `this[key] = value`
                         // write per §10.1.9.2 — the receiver is
                         // the current `this`, not the parent
-                        // prototype.
+                        // prototype. (No own slot + extensible.)
                         this_obj.set(allocator, key_s.bytes, value) catch return error.OutOfMemory;
+                    } else if (heap_mod.valueAsFunction(f.this_value)) |this_fn| {
+                        // Receiver is a class function (static
+                        // super.X = v lands here). No extensibility
+                        // flag on JSFunction yet — leave the silent
+                        // write path. TODO(cynic): wire JSFunction
+                        // extensibility for Object.freeze parity.
+                        this_fn.set(allocator, key_s.bytes, value) catch return error.OutOfMemory;
                     }
                 }
                 acc = value;
@@ -5641,6 +5682,36 @@ fn runFrames(
                 }
                 if (!did_setter) {
                     if (heap_mod.valueAsPlainObject(f.this_value)) |this_obj| {
+                        // §6.2.5.6 PutValue step 3.d — super
+                        // reference is strict; throw TypeError when
+                        // [[Set]] would reject. Same gate as
+                        // `.super_set`.
+                        if (!this_obj.hasOwn(key_slice)) {
+                            if (!this_obj.extensible) {
+                                const ex = try makeTypeError(realm, "Cannot add property, object is not extensible");
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue;
+                            }
+                        } else {
+                            const ok = this_obj.setIfWritable(allocator, key_slice, value) catch return error.OutOfMemory;
+                            if (!ok) {
+                                const ex = try makeTypeError(realm, "Cannot assign to read-only property via super");
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue;
+                            }
+                            acc = value;
+                            continue;
+                        }
                         this_obj.set(allocator, key_slice, value) catch return error.OutOfMemory;
                     }
                 }
