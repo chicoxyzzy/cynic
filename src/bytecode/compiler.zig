@@ -1073,6 +1073,11 @@ pub const Compiler = struct {
         try self.builder.emitU8(1);
         // ── Shared body — acc holds inner result ──
         const body_after_call = self.builder.here();
+        // §25.5.3.7 step 7.b.iii / 7.c.viii — `iter.next(received)` and
+        // `iter.throw(received)` results must both be Objects. The
+        // throw / return handlers below jump here after their calls,
+        // so a single gate at body_after_call covers both.
+        try self.builder.emitOp(.throw_if_not_object, y.span);
         try self.builder.emitOp(.star, y.span);
         try self.builder.emitU8(r_result);
         try self.builder.emitOp(.ldar, y.span);
