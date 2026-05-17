@@ -1571,7 +1571,141 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const groups_v = try buildGroupsObject(realm, bc, captures, cap_count, cbuf_addr, &input, input_s);
     out.set(realm.allocator, "groups", groups_v) catch return error.OutOfMemory;
 
+    // §22.2.7.2 step 8 / step 36 — when `hasIndices` (the `d`
+    // flag), build the match-indices array per §22.2.7.7
+    // MakeIndicesArray and attach it as the `"indices"` own
+    // property via CreateDataProperty. The fixtures under
+    // `built-ins/RegExp/match-indices/` exercise the
+    // shape: each element is either `[startIndex, endIndex]` in
+    // UTF-16 code units or `undefined` for an unmatched capture,
+    // and `indices.groups` mirrors the named-capture map with the
+    // same `[start, end]` pairs (or `undefined`).
+    if ((re_flags & LRE_FLAG_INDICES) != 0) {
+        const indices_v = try buildIndicesArray(realm, bc, captures, cap_count, cbuf_addr, &input);
+        out.set(realm.allocator, "indices", indices_v) catch return error.OutOfMemory;
+    }
+
     return heap_mod.taggedObject(out);
+}
+
+/// §22.2.7.7 MakeIndicesArray ( S, indices, groupNames, hasGroups ).
+/// Builds the array exposed as `result.indices` on the exec result
+/// when the regex has the `/d` flag. Each element is either an
+/// Array `[startIndex, endIndex]` (UTF-16 code-unit positions, the
+/// same space `result.index` lives in) or `undefined` for an
+/// unmatched capture. When the pattern contains any GroupName,
+/// `indices.groups` is a null-prototype Object mirroring the
+/// named-capture map with the same `[start, end]` pairs (or
+/// `undefined`); otherwise `indices.groups` is `undefined` and is
+/// always defined via CreateDataProperty.
+fn buildIndicesArray(
+    realm: *Realm,
+    bc: []const u8,
+    captures: []const ?[*]const u8,
+    cap_count: usize,
+    cbuf_addr: usize,
+    input: *const InputBuf,
+) NativeError!Value {
+    // step 6 — `Let A be ! ArrayCreate(n)`. Array-exotic so
+    // `Array.isArray(indices)` is true (`indices-array.js`).
+    const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
+    arr.prototype = realm.intrinsics.array_prototype;
+    arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+
+    var ibuf: [16]u8 = undefined;
+    var g: usize = 0;
+    while (g < cap_count) : (g += 1) {
+        const start_ptr = captures[2 * g];
+        const end_ptr = captures[2 * g + 1];
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{g}) catch unreachable;
+        // step 13.b — unmatched capture (`null` start / end) → the
+        // entry is `undefined` (`indices-array-unmatched.js`).
+        if (start_ptr == null or end_ptr == null) {
+            arr.set(realm.allocator, islice, Value.undefined_) catch return error.OutOfMemory;
+            continue;
+        }
+        // step 13.a / §22.2.7.7 GetMatchIndicesArray — a fresh
+        // ordinary Array of `[startIndex, endIndex]`, both
+        // numbers (`indices-array-element.js`).
+        const u_start = (@intFromPtr(start_ptr.?) - cbuf_addr) / 2;
+        const u_end = (@intFromPtr(end_ptr.?) - cbuf_addr) / 2;
+        _ = input; // unit indices already in UTF-16 code-unit space
+        const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
+        pair.prototype = realm.intrinsics.array_prototype;
+        pair.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+        pair.set(realm.allocator, "0", Value.fromInt32(@intCast(u_start))) catch return error.OutOfMemory;
+        pair.set(realm.allocator, "1", Value.fromInt32(@intCast(u_end))) catch return error.OutOfMemory;
+        pair.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
+        arr.set(realm.allocator, islice, heap_mod.taggedObject(pair)) catch return error.OutOfMemory;
+    }
+    arr.set(realm.allocator, "length", Value.fromInt32(@intCast(cap_count))) catch return error.OutOfMemory;
+
+    // step 10-12 — `groups` is unconditionally a property on the
+    // indices array; when the pattern has named captures it's a
+    // null-prototype Object mirroring `result.groups`, else
+    // `undefined` (`indices-groups-object-undefined.js`).
+    const groups_v = try buildIndicesGroupsObject(realm, bc, captures, cap_count, cbuf_addr);
+    arr.set(realm.allocator, "groups", groups_v) catch return error.OutOfMemory;
+
+    return heap_mod.taggedObject(arr);
+}
+
+/// Mirror of `buildGroupsObject` but emitting `[startIndex,
+/// endIndex]` pairs instead of captured substrings. Walks the
+/// libregexp name table at the tail of the bytecode buffer; an
+/// empty name entry is an anonymous capture (skipped).
+fn buildIndicesGroupsObject(
+    realm: *Realm,
+    bc: []const u8,
+    captures: []const ?[*]const u8,
+    cap_count: usize,
+    cbuf_addr: usize,
+) NativeError!Value {
+    const re_flags = c.lre_get_flags(bc.ptr);
+    if ((re_flags & LRE_FLAG_NAMED_GROUPS) == 0) return Value.undefined_;
+    if (cap_count <= 1) return Value.undefined_;
+    const RE_HEADER_LEN: usize = 8;
+    const RE_HEADER_BYTECODE_LEN: usize = 4;
+    if (bc.len < RE_HEADER_LEN) return Value.undefined_;
+    const bc_body_len: usize = @as(usize, bc[RE_HEADER_BYTECODE_LEN]) |
+        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 1]) << 8) |
+        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 2]) << 16) |
+        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 3]) << 24);
+    const names_start = RE_HEADER_LEN + bc_body_len;
+    if (names_start > bc.len) return Value.undefined_;
+    const names = bc[names_start..];
+
+    const groups = realm.heap.allocateObject() catch return error.OutOfMemory;
+    // Null prototype mirrors `result.groups` (§22.2.7.2 step 33.a),
+    // so `__proto__` lands as a plain own property
+    // (`indices-groups-object.js`).
+    groups.prototype = null;
+
+    var p: usize = 0;
+    var g: usize = 1;
+    while (g < cap_count) : (g += 1) {
+        const start = p;
+        while (p < names.len and names[p] != 0) : (p += 1) {}
+        if (p > names.len) break;
+        const name = names[start..p];
+        if (p < names.len) p += 1;
+        if (name.len == 0) continue; // anonymous capture
+        const start_ptr = captures[2 * g];
+        const end_ptr = captures[2 * g + 1];
+        const pair_v: Value = if (start_ptr == null or end_ptr == null) Value.undefined_ else blk: {
+            const u_start = (@intFromPtr(start_ptr.?) - cbuf_addr) / 2;
+            const u_end = (@intFromPtr(end_ptr.?) - cbuf_addr) / 2;
+            const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
+            pair.prototype = realm.intrinsics.array_prototype;
+            pair.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+            pair.set(realm.allocator, "0", Value.fromInt32(@intCast(u_start))) catch return error.OutOfMemory;
+            pair.set(realm.allocator, "1", Value.fromInt32(@intCast(u_end))) catch return error.OutOfMemory;
+            pair.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
+            break :blk heap_mod.taggedObject(pair);
+        };
+        groups.set(realm.allocator, name, pair_v) catch return error.OutOfMemory;
+    }
+    return heap_mod.taggedObject(groups);
 }
 
 /// Read libregexp's name table appended after the bytecode body
