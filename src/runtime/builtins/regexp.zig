@@ -1291,44 +1291,87 @@ fn regexpProtoMatchAll(realm: *Realm, this_value: Value, args: []const Value) Na
     return heap_mod.taggedObject(iter);
 }
 
+/// §7.2.10 IsRegExp(argument). Step 1: if not Object, false.
+/// Step 2: `let matcher = ? Get(argument, @@match)`. Step 3:
+/// `if matcher is not undefined, return ToBoolean(matcher)`.
+/// Step 4: if argument has `[[RegExpMatcher]]` internal slot,
+/// return true. Step 5: false. Cynic models the [[RegExpMatcher]]
+/// presence as `regexp_source != null` on the JSObject.
+fn isRegExp(realm: *Realm, v: Value) NativeError!bool {
+    const po = heap_mod.valueAsPlainObject(v) orelse return false;
+    const matcher = try intrinsics.getPropertyChain(realm, po, "@@match");
+    if (!matcher.isUndefined()) return intrinsics.toBoolean(matcher);
+    return po.regexp_source != null;
+}
+
 fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const pattern_v = argOr(args, 0, Value.undefined_);
     const flags_v = argOr(args, 1, Value.undefined_);
-    // §22.2.4.1 step 4 — if pattern is a RegExp (has [[OriginalSource]] /
-    // [[OriginalFlags]] slots), reuse its source and (when flags is
-    // undefined) its flags string rather than stringifying the whole
-    // regex via `RegExp.prototype.toString`. This is the path
-    // SpeciesConstructor in `@@split` / `@@matchAll` takes when it
-    // hands `rx` back to `new C(rx, newFlags)`.
-    const pattern_is_regex: ?*JSObject = if (heap_mod.valueAsPlainObject(pattern_v)) |po|
+    // §22.2.3.1 step 1 — `Let patternIsRegExp be ? IsRegExp(pattern)`.
+    // Note this fires `Get(pattern, @@match)` before either of the
+    // internal-slot checks below; `from-regexp-like-*` fixtures
+    // rely on the @@match read happening on RegExp-shaped objects.
+    const pattern_is_regex_like = try isRegExp(realm, pattern_v);
+    // Identify whether the pattern carries the [[RegExpMatcher]]
+    // internal slot — i.e. it really is a RegExp instance, not a
+    // duck-typed object that happens to have a truthy @@match.
+    const pattern_has_slot: ?*JSObject = if (heap_mod.valueAsPlainObject(pattern_v)) |po|
         if (po.regexp_source != null) po else null
     else
         null;
-    // §22.2.4.1 step 1-3 — when NewTarget is undefined and pattern is
-    // already a RegExp with `flags` also undefined, return the
-    // pattern unchanged. Otherwise (step 5.a) RegExpAlloc(NewTarget)
-    // allocates a fresh instance. Without `new`, `this_value` is the
-    // global object (or undefined under strict-mode call); allocate
-    // a fresh instance with `%RegExp.prototype%` so the no-new path
-    // works like every other "callable constructor" (Boolean, Number,
-    // Date, Array, ...).
     const this_obj = heap_mod.valueAsPlainObject(this_value);
     const global_obj: ?*JSObject = realm.globals.target;
     const called_with_new = this_obj != null and this_obj.? != global_obj;
+    // §22.2.3.1 step 2 — when NewTarget is undefined (i.e. called
+    // without `new`), patternIsRegExp is true, and flags is undefined,
+    // run the @@match-aware short-circuit: read `pattern.constructor`
+    // and if `SameValue(NewTarget, that)`, return pattern unchanged.
+    // NewTarget here is the active function — for the host `RegExp`
+    // builtin that's the constructor we're inside. The
+    // `from-regexp-like-short-circuit.js` and `call_with_regexp_*`
+    // fixtures observe this exact path.
+    if (!called_with_new and pattern_is_regex_like and flags_v.isUndefined()) {
+        const pat_obj_unwrap = heap_mod.valueAsPlainObject(pattern_v).?;
+        const pat_ctor = try intrinsics.getPropertyChain(realm, pat_obj_unwrap, "constructor");
+        const builtin_ctor_v = realm.globals.get("RegExp") orelse Value.undefined_;
+        if (intrinsics.sameValue(pat_ctor, builtin_ctor_v)) return pattern_v;
+    }
     const inst = if (called_with_new) this_obj.? else blk: {
-        if (pattern_is_regex) |po| if (flags_v.isUndefined()) return heap_mod.taggedObject(po);
         const fresh = realm.heap.allocateObject() catch return error.OutOfMemory;
         fresh.prototype = realm.intrinsics.regexp_prototype;
         break :blk fresh;
     };
-    const pat_s = if (pattern_v.isUndefined())
-        realm.heap.allocateString("") catch return error.OutOfMemory
-    else if (pattern_is_regex) |po|
+    // §22.2.3.1 step 6 — when pattern has [[RegExpMatcher]],
+    // reuse its `[[OriginalSource]]` / `[[OriginalFlags]]` slots.
+    // Step 7 — else when patternIsRegExp (duck-typed), read
+    // `pattern.source` / `pattern.flags` (the `flags` only when
+    // the explicit flags arg is undefined; the source read happens
+    // unconditionally). Step 8 — else stringify pattern.
+    const pat_s = if (pattern_has_slot) |po|
         po.regexp_source.?
+    else if (pattern_is_regex_like) blk: {
+        const po = heap_mod.valueAsPlainObject(pattern_v).?;
+        // step 7.a — `Let P be ? Get(pattern, "source")`.
+        const src_v = try intrinsics.getPropertyChain(realm, po, "source");
+        break :blk if (src_v.isUndefined())
+            realm.heap.allocateString("") catch return error.OutOfMemory
+        else
+            try stringifyArg(realm, src_v);
+    } else if (pattern_v.isUndefined())
+        realm.heap.allocateString("") catch return error.OutOfMemory
     else
         try stringifyArg(realm, pattern_v);
     const flag_s = if (flags_v.isUndefined()) blk: {
-        if (pattern_is_regex) |po| if (po.regexp_flags) |f| break :blk f;
+        if (pattern_has_slot) |po| if (po.regexp_flags) |f| break :blk f;
+        if (pattern_is_regex_like) {
+            const po = heap_mod.valueAsPlainObject(pattern_v).?;
+            // step 7.c.i — `Let F be ? Get(pattern, "flags")`.
+            const flags_inner = try intrinsics.getPropertyChain(realm, po, "flags");
+            break :blk if (flags_inner.isUndefined())
+                realm.heap.allocateString("") catch return error.OutOfMemory
+            else
+                try stringifyArg(realm, flags_inner);
+        }
         break :blk realm.heap.allocateString("") catch return error.OutOfMemory;
     } else try stringifyArg(realm, flags_v);
     // §22.2.3.4 RegExpInitialize step 1 — reject unknown / duplicate
