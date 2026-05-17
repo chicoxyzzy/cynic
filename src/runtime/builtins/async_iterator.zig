@@ -91,10 +91,21 @@ fn afsiNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
     const sync_iter_obj = heap_mod.valueAsPlainObject(sync_iter_v) orelse return brandReject(realm);
 
     // §27.6.1.2 step 5 — IteratorNext(syncIteratorRecord[, value]).
-    const next_v = intrinsics_mod.getPropertyChain(realm, sync_iter_obj, "next") catch {
-        const ex = interpreter.consumePendingException(realm) orelse
-            (intrinsics_mod.newTypeError(realm, "sync iterator .next read failed") catch return error.OutOfMemory);
-        return rejectedPromise(realm, ex);
+    // §7.4.2 GetIterator step 4 captured `[[NextMethod]]` once at
+    // iterator-record creation; subsequent IteratorNext calls
+    // reuse that cached method rather than re-running the
+    // `get next` accessor. Use the `__cynic_iter_next__` slot
+    // populated by `iter_step` / `openIterator` if present;
+    // otherwise (first call through this wrapper) read once
+    // and cache so the next call hits the slot.
+    const next_v = if (sync_iter_obj.properties.get("__cynic_iter_next__")) |cached| cached else nv: {
+        const v = intrinsics_mod.getPropertyChain(realm, sync_iter_obj, "next") catch {
+            const ex = interpreter.consumePendingException(realm) orelse
+                (intrinsics_mod.newTypeError(realm, "sync iterator .next read failed") catch return error.OutOfMemory);
+            return rejectedPromise(realm, ex);
+        };
+        sync_iter_obj.set(realm.allocator, "__cynic_iter_next__", v) catch return error.OutOfMemory;
+        break :nv v;
     };
     const next_fn = heap_mod.valueAsFunction(next_v) orelse {
         const ex = intrinsics_mod.newTypeError(realm, "sync iterator .next is not callable") catch return error.OutOfMemory;

@@ -780,6 +780,26 @@ pub const Compiler = struct {
             defer self.releaseTemp();
             const r_arg0 = try self.reserveTemp();
             defer self.releaseTemp();
+            // §7.4.2 GetIterator step 4 — capture `[[NextMethod]]`
+            // once, before the loop. The spec models `.next()`
+            // invocation via `Call(iteratorRecord.[[NextMethod]],
+            // iteratorRecord.[[Iterator]], …)` — re-reading `.next`
+            // on every iteration would re-fire a user-defined `get
+            // next()` accessor, violating
+            // `yield-star-async-next.js` (which logs each access
+            // and asserts exactly one `get next`). Sync `yield*`
+            // also caches via the `__cynic_iter_next__` hidden slot
+            // (see `iter_step`); for the async path we use a stack
+            // temp because the inner loop calls run through
+            // `call_method`, not `iter_step`.
+            const r_next = try self.reserveTemp();
+            defer self.releaseTemp();
+            try self.builder.emitOp(.ldar, y.span);
+            try self.builder.emitU8(r_iter);
+            try self.builder.emitOp(.lda_property, y.span);
+            try self.builder.emitU16(k_next);
+            try self.builder.emitOp(.star, y.span);
+            try self.builder.emitU8(r_next);
 
             // ── Next path ──
             const next_path_start = self.builder.here();
@@ -788,9 +808,7 @@ pub const Compiler = struct {
             try self.builder.emitOp(.star, y.span);
             try self.builder.emitU8(r_recv);
             try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_iter);
-            try self.builder.emitOp(.lda_property, y.span);
-            try self.builder.emitU16(k_next);
+            try self.builder.emitU8(r_next);
             try self.builder.emitOp(.star, y.span);
             try self.builder.emitU8(r_callee);
             try self.builder.emitOp(.ldar, y.span);
@@ -820,6 +838,13 @@ pub const Compiler = struct {
             try self.builder.emitOp(.jmp_if_true, y.span);
             const exit_patch = self.builder.here();
             try self.builder.emitI16(0);
+            // Entry point for the return-completion's "done is
+            // false" branch: r_result is already populated and
+            // done was already observed false in the return
+            // handler. Don't re-read `.done` here — the iterator
+            // result's `get done` accessor must run exactly once
+            // per §27.6.3.7 step 7.c.ix.
+            const body_after_done = self.builder.here();
             try self.builder.emitOp(.ldar, y.span);
             try self.builder.emitU8(r_result);
             try self.builder.emitOp(.lda_property, y.span);
@@ -930,12 +955,16 @@ pub const Compiler = struct {
             try self.builder.emitOp(.return_, y.span);
             const return_not_done_target = self.builder.here();
             try self.builder.patchI16(return_not_done_patch, return_not_done_target);
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_result);
+            // §27.6.3.7 step 7.c.xi — "done is false" branch: pass
+            // the iter-step result to the body's value-read +
+            // outer-yield, but DO NOT re-read `.done` (the
+            // body_after_call entry would, breaking the test262
+            // log-once invariant). Jump past the done read to
+            // body_after_done.
             try self.builder.emitOp(.jmp, y.span);
             const return_to_body_patch = self.builder.here();
             try self.builder.emitI16(0);
-            try self.builder.patchI16(return_to_body_patch, body_after_call);
+            try self.builder.patchI16(return_to_body_patch, body_after_done);
             const no_return_target = self.builder.here();
             try self.builder.patchI16(no_return_patch, no_return_target);
             try self.builder.emitOp(.ldar, y.span);
@@ -1011,6 +1040,18 @@ pub const Compiler = struct {
         defer self.releaseTemp();
         const r_arg0 = try self.reserveTemp();
         defer self.releaseTemp();
+        // §7.4.2 GetIterator step 4 — capture `[[NextMethod]]`
+        // once. Re-reading `.next` each iteration would re-fire
+        // a user-defined `get next()` accessor and break
+        // `yield-star-sync-next.js`'s log-once invariant.
+        const r_next = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.ldar, y.span);
+        try self.builder.emitU8(r_iter);
+        try self.builder.emitOp(.lda_property, y.span);
+        try self.builder.emitU16(k_next);
+        try self.builder.emitOp(.star, y.span);
+        try self.builder.emitU8(r_next);
 
         // ── Next path entry ──
         const next_path_start = self.builder.here();
@@ -1019,9 +1060,7 @@ pub const Compiler = struct {
         try self.builder.emitOp(.star, y.span);
         try self.builder.emitU8(r_recv);
         try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_iter);
-        try self.builder.emitOp(.lda_property, y.span);
-        try self.builder.emitU16(k_next);
+        try self.builder.emitU8(r_next);
         try self.builder.emitOp(.star, y.span);
         try self.builder.emitU8(r_callee);
         try self.builder.emitOp(.ldar, y.span);
