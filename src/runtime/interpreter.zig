@@ -5464,12 +5464,7 @@ fn runFrames(
             },
 
             .await_ => {
-                // §27.5.3.8 Await. Three paths:
-                // • acc isn't a Promise → leave as-is (spec
-                // says wrap in `Promise.resolve(v)` and
-                // immediately resume; equivalent for the
-                // synchronous-fast-path observers we care
-                // about).
+                // §27.5.3.8 Await. Four paths:
                 // • acc is a settled Promise → unwrap (acc =
                 // value for fulfilled, throw for rejected).
                 // • acc is a pending Promise → save the frame
@@ -5480,8 +5475,20 @@ fn runFrames(
                 // re-enters `runFrames` with the settled
                 // value (or throws inside the resumed frame
                 // for rejections).
+                // • acc is a non-Promise object with a callable
+                // `.then` (a *thenable*) → spec routes through
+                // PromiseResolve → PromiseResolveThenableJob.
+                // Allocate a fresh pending Promise, enqueue
+                // the job (which calls `then(resolve, reject)`
+                // on a microtask), suspend on the fresh
+                // Promise just like the pending-Promise case.
+                // • acc isn't a Promise or thenable → leave
+                // as-is (spec wraps in `Promise.resolve(v)`
+                // and immediately resumes; equivalent for
+                // synchronous-fast-path observers).
                 const v = acc;
                 drainMicrotasks(allocator, realm) catch return error.OutOfMemory;
+                var await_target: ?*JSObject = null;
                 if (heap_mod.valueAsPlainObject(v)) |obj| {
                     if (obj.isPromise()) {
                         if (obj.promise_state == .fulfilled) {
@@ -5496,40 +5503,58 @@ fn runFrames(
                             }
                             continue;
                         } else {
-                            // Pending — only suspendable inside
-                            // an async generator. Without one
-                            // (e.g. a top-level `await` outside
-                            // a function), fall through and let
-                            // the caller see the Promise back.
-                            if (f.generator) |gen| {
-                                if (gen.is_async) {
-                                    // Save frame state into the gen and unwind.
-                                    gen.ip = ip;
-                                    gen.accumulator = Value.undefined_;
-                                    gen.env = f.env;
-                                    gen.this_value = f.this_value;
-                                    gen.home_object = f.home_object;
-                                    gen.home_function = f.home_function;
-                                    gen.argc = f.argc;
-                                    f.ip = ip;
-                                    f.accumulator = Value.undefined_;
-                                    committed = true;
-                                    obj.promise_waiters.append(realm.allocator, gen) catch return error.OutOfMemory;
-                                    // §27.6.3.4 — mark the async-gen state so the
-                                    // queue drain (asyncGeneratorResumeNext) knows
-                                    // not to pop the head request: the body went
-                                    // into await, not into yield. Plain async
-                                    // functions ignore this flag.
-                                    if (gen.is_async_generator) {
-                                        gen.async_state = .suspended_await;
-                                    }
-                                    return .{ .yielded = Value.undefined_ };
-                                }
-                            }
+                            await_target = obj;
+                        }
+                    } else {
+                        // §27.7.5.3 Await step 1 — PromiseResolve(%Promise%, v).
+                        // For thenables, §27.2.1.3.2 Promise Resolve Functions
+                        // steps 7-11 Get(value, "then"); IsCallable(then)
+                        // queues PromiseResolveThenableJob against a fresh
+                        // promise. Synthesise the fresh promise here so the
+                        // pending-await suspend path below runs on it.
+                        const then_v = obj.get("then");
+                        if (heap_mod.valueAsFunction(then_v) != null) {
+                            const promise_v = @import("builtins/promise.zig").allocatePromise(realm, .pending, Value.undefined_) catch return error.OutOfMemory;
+                            const promise_obj = heap_mod.valueAsPlainObject(promise_v) orelse return error.OutOfMemory;
+                            realm.enqueueThenableJob(promise_v, v, then_v) catch return error.OutOfMemory;
+                            await_target = promise_obj;
                         }
                     }
                 }
-                // Non-Promise: pass through unchanged.
+                if (await_target) |obj| {
+                    // Pending — only suspendable inside an
+                    // async generator. Without one (e.g. a
+                    // top-level `await` outside a function),
+                    // fall through and let the caller see the
+                    // synthesised Promise back.
+                    if (f.generator) |gen| {
+                        if (gen.is_async) {
+                            // Save frame state into the gen and unwind.
+                            gen.ip = ip;
+                            gen.accumulator = Value.undefined_;
+                            gen.env = f.env;
+                            gen.this_value = f.this_value;
+                            gen.home_object = f.home_object;
+                            gen.home_function = f.home_function;
+                            gen.argc = f.argc;
+                            f.ip = ip;
+                            f.accumulator = Value.undefined_;
+                            committed = true;
+                            obj.promise_waiters.append(realm.allocator, gen) catch return error.OutOfMemory;
+                            // §27.6.3.4 — mark the async-gen state so the
+                            // queue drain (asyncGeneratorResumeNext) knows
+                            // not to pop the head request: the body went
+                            // into await, not into yield. Plain async
+                            // functions ignore this flag.
+                            if (gen.is_async_generator) {
+                                gen.async_state = .suspended_await;
+                            }
+                            return .{ .yielded = Value.undefined_ };
+                        }
+                    }
+                }
+                // Non-Promise non-thenable, or pending await
+                // outside an async generator: pass through.
             },
 
             .iter_open => {

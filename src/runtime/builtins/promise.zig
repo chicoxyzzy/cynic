@@ -134,7 +134,7 @@ fn microtaskDrainNative(realm: *Realm, this_value: Value, args: []const Value) N
 /// a plain object.
 pub const PromiseState = @import("../object.zig").PromiseState;
 
-fn allocatePromise(realm: *Realm, state: PromiseState, value: Value) !Value {
+pub fn allocatePromise(realm: *Realm, state: PromiseState, value: Value) !Value {
     return allocatePromiseFor(realm, null, state, value);
 }
 
