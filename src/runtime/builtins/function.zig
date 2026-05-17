@@ -362,6 +362,13 @@ fn functionBind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     bound.bound_target = target;
     bound.bound_this = bound_this;
     bound.bound_args = owned_args;
+    // §10.4.1.2 BoundFunctionCreate — the bound has [[Construct]] iff
+    // the target has [[Construct]]. Built-in static methods (Math.cos,
+    // String.fromCharCode, …) are installed with `has_construct=false`,
+    // so `Math.cos.bind(…)` must NOT be IsConstructor; otherwise
+    // `Array.of.call(Math.cos.bind(Math))` would take the constructor
+    // path and observe a non-Array receiver (return-a-new-array-object.js).
+    bound.has_construct = target.has_construct;
 
     // Override the §17 default `length` / `name` slots stamped
     // by `installFunctionLengthAndName` with the spec-computed
