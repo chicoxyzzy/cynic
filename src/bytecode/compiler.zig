@@ -697,6 +697,21 @@ pub const Compiler = struct {
         } else {
             try self.builder.emitOp(.lda_undefined, y.span);
         }
+        // §27.6.3.7 AsyncGeneratorYield: spec defines `yield X` in an
+        // async generator as `Await(X); CompleteStep(NormalCompletion(X))`.
+        // Emit the Await first so user-defined thenables get coerced
+        // (§27.7.5.3 step 1 PromiseResolve → §27.2.1.3.2 thenable
+        // detect → enqueue PromiseResolveThenableJob → suspend on
+        // the synthesised Promise → resume with the resolved value
+        // already in `acc`). Then gen_yield emits the resolved value.
+        // Plain `function*` yields skip this — `current_is_async`
+        // gates on the enclosing function being declared `async`.
+        // `yield` is grammar-restricted to generator contexts, so
+        // a `yield` here implies we're in a generator; `current_is_async`
+        // distinguishes async-gen from sync-gen.
+        if (self.current_is_async) {
+            try self.builder.emitOp(.await_, y.span);
+        }
         try self.builder.emitOp(.gen_yield, y.span);
     }
 
