@@ -17,8 +17,10 @@ const JSString = @import("string.zig").JSString;
 const Realm = @import("realm.zig").Realm;
 const heap_mod = @import("heap.zig");
 const intrinsics_mod = @import("intrinsics.zig");
+const utf16 = @import("utf16.zig");
 
 pub const RunError = @import("interpreter.zig").RunError;
+pub const NativeError = @import("function.zig").NativeError;
 const makeTypeError = @import("interpreter.zig").makeTypeError;
 const makeRangeError = @import("interpreter.zig").makeRangeError;
 const formatDoubleSafe = @import("interpreter.zig").formatDoubleSafe;
@@ -708,19 +710,32 @@ fn bigintEqualsDouble(bi: i128, d: f64) bool {
     return as_int == bi;
 }
 
-pub fn relational(comptime op: RelOp, lhs: Value, rhs: Value) Value {
+pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) NativeError!Value {
     // §7.2.13 IsLessThan with the standard four-direction
-    // generalisation. later handles number-number and string-string;
-    // mixed types coerce via ToNumber.
+    // generalisation. The spec funnels every result of the abstract
+    // "Less-Than" through a "false-if-undefined" filter: pairs whose
+    // comparison is *undefined* (NaN involvement, StringToBigInt
+    // parse failure, etc.) collapse to `false` for `<` / `>` and to
+    // `false` for `<=` / `>=` as well — the §13.10 spec text negates
+    // the LessThan result only when it's `true` / `false`.
+    //
+    // Symbol operands of any flavour throw TypeError (§7.1.4
+    // ToNumber, §7.1.13 ToNumeric — Symbols can't be numerified).
+    if (heap_mod.valueAsSymbol(lhs) != null or heap_mod.valueAsSymbol(rhs) != null) {
+        realm.pending_exception = try intrinsics_mod.newTypeError(realm, "Cannot convert a Symbol value to a number");
+        return error.NativeThrew;
+    }
+
     if (heap_mod.valueAsBigInt(lhs)) |a| {
         if (heap_mod.valueAsBigInt(rhs)) |b| {
-            const result = switch (op) {
-                .lt => a.value < b.value,
-                .gt => a.value > b.value,
-                .le => a.value <= b.value,
-                .ge => a.value >= b.value,
-            };
-            return Value.fromBool(result);
+            return Value.fromBool(applyRelOp(op, a.value, b.value));
+        }
+        // §7.2.13 step 3.b — BigInt vs String: StringToBigInt the
+        // string; on failure the result is undefined → false.
+        if (rhs.isString()) {
+            const s: *JSString = @ptrCast(@alignCast(rhs.asString()));
+            const parsed = tryStringToBigInt(s.bytes) orelse return Value.false_;
+            return Value.fromBool(applyRelOp(op, a.value, parsed));
         }
         // BigInt vs Number — compare numerically with the BigInt
         // converted to f64 (lossy for large BigInts but matches
@@ -728,30 +743,25 @@ pub fn relational(comptime op: RelOp, lhs: Value, rhs: Value) Value {
         const af: f64 = @floatFromInt(a.value);
         const bn = toNumber(rhs);
         if (std.math.isNan(bn)) return Value.false_;
-        const result = switch (op) {
-            .lt => af < bn,
-            .gt => af > bn,
-            .le => af <= bn,
-            .ge => af >= bn,
-        };
-        return Value.fromBool(result);
+        return Value.fromBool(applyRelOpFloat(op, af, bn));
     }
     if (heap_mod.valueAsBigInt(rhs)) |b| {
+        if (lhs.isString()) {
+            const s: *JSString = @ptrCast(@alignCast(lhs.asString()));
+            const parsed = tryStringToBigInt(s.bytes) orelse return Value.false_;
+            return Value.fromBool(applyRelOp(op, parsed, b.value));
+        }
         const bf: f64 = @floatFromInt(b.value);
         const an = toNumber(lhs);
         if (std.math.isNan(an)) return Value.false_;
-        const result = switch (op) {
-            .lt => an < bf,
-            .gt => an > bf,
-            .le => an <= bf,
-            .ge => an >= bf,
-        };
-        return Value.fromBool(result);
+        return Value.fromBool(applyRelOpFloat(op, an, bf));
     }
     if (lhs.isString() and rhs.isString()) {
+        // §6.1.4 — Strings are sequences of 16-bit code units;
+        // compare by UTF-16 code-unit value, not WTF-8 byte order.
         const ls: *JSString = @ptrCast(@alignCast(lhs.asString()));
         const rs: *JSString = @ptrCast(@alignCast(rhs.asString()));
-        const cmp = std.mem.order(u8, ls.bytes, rs.bytes);
+        const cmp = utf16.compareCodeUnits(ls.bytes, rs.bytes);
         const result = switch (op) {
             .lt => cmp == .lt,
             .gt => cmp == .gt,
@@ -763,13 +773,66 @@ pub fn relational(comptime op: RelOp, lhs: Value, rhs: Value) Value {
     const a = toNumber(lhs);
     const b = toNumber(rhs);
     if (std.math.isNan(a) or std.math.isNan(b)) return Value.false_;
-    const result = switch (op) {
+    return Value.fromBool(applyRelOpFloat(op, a, b));
+}
+
+inline fn applyRelOp(comptime op: RelOp, a: i128, b: i128) bool {
+    return switch (op) {
         .lt => a < b,
         .gt => a > b,
         .le => a <= b,
         .ge => a >= b,
     };
-    return Value.fromBool(result);
+}
+
+inline fn applyRelOpFloat(comptime op: RelOp, a: f64, b: f64) bool {
+    return switch (op) {
+        .lt => a < b,
+        .gt => a > b,
+        .le => a <= b,
+        .ge => a >= b,
+    };
+}
+
+/// §7.1.14 StringToBigInt — returns null when the trimmed string
+/// is not a StringIntegerLiteral. Decimal point, exponent,
+/// `Infinity`, and any non-digit produce null. Whitespace-only /
+/// empty string maps to 0 (matches the constructor path).
+fn tryStringToBigInt(bytes: []const u8) ?i128 {
+    const trimmed = std.mem.trim(u8, bytes, " \t\n\r\u{000B}\u{000C}\u{00A0}\u{FEFF}");
+    if (trimmed.len == 0) return 0;
+    var rest = trimmed;
+    var negate = false;
+    var has_sign = false;
+    if (rest[0] == '-') {
+        negate = true;
+        has_sign = true;
+        rest = rest[1..];
+    } else if (rest[0] == '+') {
+        has_sign = true;
+        rest = rest[1..];
+    }
+    if (rest.len == 0) return null;
+    if (rest.len >= 2 and rest[0] == '0') {
+        const radix: ?u8 = switch (rest[1]) {
+            'b', 'B' => @as(u8, 2),
+            'o', 'O' => @as(u8, 8),
+            'x', 'X' => @as(u8, 16),
+            else => null,
+        };
+        if (radix) |r| {
+            if (has_sign) return null;
+            const body = rest[2..];
+            if (body.len == 0) return null;
+            const v = std.fmt.parseInt(i128, body, r) catch return null;
+            return v;
+        }
+    }
+    for (rest) |c| {
+        if (c < '0' or c > '9') return null;
+    }
+    const v = std.fmt.parseInt(i128, rest, 10) catch return null;
+    return if (negate) -v else v;
 }
 
 pub fn typeOf(realm: *Realm, v: Value) RunError!Value {

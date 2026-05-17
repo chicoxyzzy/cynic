@@ -4037,7 +4037,18 @@ fn runFrames(
                     committed = true;
                     continue;
                 }
-                acc = relational(.lt, lhs.ok, rhs.ok);
+                acc = relational(.lt, realm, lhs.ok, rhs.ok) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NativeThrew => {
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "comparison threw");
+                        realm.pending_exception = null;
+                        f.ip = ip;
+                        f.accumulator = lhs.ok;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                        committed = true;
+                        continue;
+                    },
+                };
             },
             .gt => {
                 const r = code[ip];
@@ -4054,7 +4065,18 @@ fn runFrames(
                     committed = true;
                     continue;
                 }
-                acc = relational(.gt, lhs.ok, rhs.ok);
+                acc = relational(.gt, realm, lhs.ok, rhs.ok) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NativeThrew => {
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "comparison threw");
+                        realm.pending_exception = null;
+                        f.ip = ip;
+                        f.accumulator = lhs.ok;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                        committed = true;
+                        continue;
+                    },
+                };
             },
             .le => {
                 const r = code[ip];
@@ -4071,7 +4093,18 @@ fn runFrames(
                     committed = true;
                     continue;
                 }
-                acc = relational(.le, lhs.ok, rhs.ok);
+                acc = relational(.le, realm, lhs.ok, rhs.ok) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NativeThrew => {
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "comparison threw");
+                        realm.pending_exception = null;
+                        f.ip = ip;
+                        f.accumulator = lhs.ok;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                        committed = true;
+                        continue;
+                    },
+                };
             },
             .ge => {
                 const r = code[ip];
@@ -4088,7 +4121,18 @@ fn runFrames(
                     committed = true;
                     continue;
                 }
-                acc = relational(.ge, lhs.ok, rhs.ok);
+                acc = relational(.ge, realm, lhs.ok, rhs.ok) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NativeThrew => {
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "comparison threw");
+                        realm.pending_exception = null;
+                        f.ip = ip;
+                        f.accumulator = lhs.ok;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                        committed = true;
+                        continue;
+                    },
+                };
             },
 
             // ── Control flow ────────────────────────────────────────────

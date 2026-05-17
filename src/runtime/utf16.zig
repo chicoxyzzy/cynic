@@ -283,6 +283,70 @@ pub fn appendCodeUnitAsWtf8(allocator: std.mem.Allocator, out: *std.ArrayListUnm
     }
 }
 
+/// §7.2.13 IsLessThan / §22.1.3.10 String.prototype.localeCompare
+/// abstract lexicographic comparison of two String values. The
+/// spec compares by UTF-16 code-unit *integer values*; WTF-8 byte
+/// ordering diverges as soon as a supplementary code point is
+/// involved (4-byte UTF-8 starts with 0xF0..0xF4 which sorts
+/// *after* 3-byte BMP 0xE0..0xEF, but the surrogate pair 0xD800..
+/// 0xDFFF sorts *before* 0xE000..0xFFFF in code-unit order). This
+/// helper walks both strings in lockstep emitting the next UTF-16
+/// code unit (1 unit per 1/2/3-byte sequence, 2 units per 4-byte
+/// sequence — lead then trail surrogate) and returns the first
+/// position they differ. Empty / shorter prefix sorts less than a
+/// longer string with the same prefix.
+pub fn compareCodeUnits(a: []const u8, b: []const u8) std.math.Order {
+    var ai: usize = 0;
+    var bi: usize = 0;
+    // Pending trail surrogate for either side when the previous
+    // step emitted the lead half of a supplementary pair.
+    var a_pending: ?u16 = null;
+    var b_pending: ?u16 = null;
+    while (true) {
+        const a_unit = nextCodeUnit(a, &ai, &a_pending);
+        const b_unit = nextCodeUnit(b, &bi, &b_pending);
+        if (a_unit == null and b_unit == null) return .eq;
+        if (a_unit == null) return .lt;
+        if (b_unit == null) return .gt;
+        if (a_unit.? < b_unit.?) return .lt;
+        if (a_unit.? > b_unit.?) return .gt;
+    }
+}
+
+fn nextCodeUnit(bytes: []const u8, idx: *usize, pending: *?u16) ?u16 {
+    if (pending.*) |trail| {
+        pending.* = null;
+        return trail;
+    }
+    if (idx.* >= bytes.len) return null;
+    const seq_len = utf8SeqLen(bytes[idx.*]);
+    if (idx.* + seq_len > bytes.len) {
+        // Malformed tail — emit the raw byte and advance one.
+        const raw: u16 = bytes[idx.*];
+        idx.* += 1;
+        return raw;
+    }
+    if (seq_len == 4) {
+        const cp = std.unicode.utf8Decode(bytes[idx.* .. idx.* + 4]) catch {
+            const raw: u16 = bytes[idx.*];
+            idx.* += 1;
+            return raw;
+        };
+        idx.* += 4;
+        const adjusted: u32 = @as(u32, @intCast(cp)) - 0x10000;
+        const lead: u16 = @intCast(0xD800 + (adjusted >> 10));
+        const trail: u16 = @intCast(0xDC00 + (adjusted & 0x3FF));
+        pending.* = trail;
+        return lead;
+    }
+    const unit = decodeBmpUnit(bytes[idx.* .. idx.* + seq_len]) orelse blk: {
+        const raw: u16 = bytes[idx.*];
+        break :blk raw;
+    };
+    idx.* += seq_len;
+    return unit;
+}
+
 // ---------------------------------------------------------------------------
 // Tests — focused on the (ASCII, BMP non-ASCII, supplementary, lone
 // surrogate) coverage matrix required by the work item.
