@@ -7460,11 +7460,32 @@ fn runFrames(
                 // walks `home_object.[[Prototype]]` so this is what
                 // makes `super.x()` from inside `{ method(){} }`
                 // resolve against `Object.getPrototypeOf(obj)`.
+                //
+                // §15.4.4 / §15.5 — MethodDefinitions (concise
+                // methods, getters, setters, generators, async
+                // methods) have no [[Construct]] slot. `new obj.m()`
+                // must throw TypeError. Stamp `has_construct = false`
+                // here so the `new_call` opcode rejects them.
                 const r_obj = code[ip];
                 ip += 1;
                 if (heap_mod.valueAsFunction(acc)) |fn_obj| {
                     if (heap_mod.valueAsPlainObject(registers[r_obj])) |home| {
                         fn_obj.home_object = home;
+                    }
+                    fn_obj.has_construct = false;
+                    // §15.4.4 / §15.5.6 step 2 — MethodDefinitions
+                    // (concise methods, getters, setters, generators,
+                    // async methods) are non-constructors and do
+                    // NOT install a `prototype` data property. The
+                    // generic `allocateFunction` path auto-creates
+                    // one for every non-arrow function; drop it here
+                    // so `hasOwnProperty.call(method, 'prototype')`
+                    // returns false. Generator and async-generator
+                    // method shapes get their `prototype` re-installed
+                    // by the dedicated paths above before this fires
+                    // — that branch handles them.
+                    if (!fn_obj.is_generator and !fn_obj.is_async) {
+                        fn_obj.prototype = null;
                     }
                 }
             },
