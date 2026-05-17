@@ -162,22 +162,18 @@ pub const ClassTemplate = struct {
         self.constructor_chunk.deinit(allocator);
         for (self.instance_methods) |*m| {
             m.chunk.deinit(allocator);
-            if (m.key_chunk) |*c| c.deinit(allocator);
         }
         allocator.free(self.instance_methods);
         for (self.static_methods) |*m| {
             m.chunk.deinit(allocator);
-            if (m.key_chunk) |*c| c.deinit(allocator);
         }
         allocator.free(self.static_methods);
         for (self.instance_fields) |*f| {
             if (f.init_chunk) |*c| c.deinit(allocator);
-            if (f.key_chunk) |*c| c.deinit(allocator);
         }
         allocator.free(self.instance_fields);
         for (self.static_fields) |*f| {
             if (f.init_chunk) |*c| c.deinit(allocator);
-            if (f.key_chunk) |*c| c.deinit(allocator);
         }
         allocator.free(self.static_fields);
         for (self.static_blocks) |*c| c.deinit(allocator);
@@ -191,7 +187,7 @@ pub const MethodTemplate = struct {
     /// Method name (`m`, `toString`, etc.). Borrowed slice into
     /// source. For private methods the compiler prefixes the
     /// name with the class's `private_prefix` so brand checks
-    /// route correctly. Ignored when `key_chunk != null`.
+    /// route correctly. Ignored when `computed_key_index >= 0`.
     name: []const u8,
     chunk: Chunk,
     /// Total declared parameter count — see FunctionTemplate.
@@ -211,11 +207,17 @@ pub const MethodTemplate = struct {
     /// in the original source. `null` for the engine-synthesised
     /// default constructor and any other non-source-backed method.
     source: ?[]const u8 = null,
-    /// §13.2.5 ComputedPropertyName — when set, `name` is a
-    /// placeholder; the real key is whatever this chunk
-    /// evaluates to (after ToPropertyKey). Run at
-    /// class-instantiation time in `class.zig`.
-    key_chunk: ?Chunk = null,
+    /// §13.2.5 ComputedPropertyName — index into the
+    /// pre-computed-keys vector that `make_class` consumes when
+    /// >= 0; `-1` means this method's key is the static `.name`
+    /// field. The compiler evaluates each computed key inline in
+    /// the enclosing function's bytecode (so `yield` / `await`
+    /// inside a class-key expression suspend the enclosing
+    /// generator / async function), `to_property_key`-coerces
+    /// the value, and stashes it in a temp register; `make_class`
+    /// gathers those registers into the keys vector. Indices
+    /// follow source order across all members of the class body.
+    computed_key_index: i16 = -1,
 };
 
 pub const FieldTemplate = struct {
@@ -226,8 +228,10 @@ pub const FieldTemplate = struct {
     /// an initializer — assigned `undefined` at runtime.
     init_chunk: ?Chunk,
     /// §13.2.5 ComputedPropertyName for `class C { [expr] = v; }`.
-    /// When set, `name` is a placeholder.
-    key_chunk: ?Chunk = null,
+    /// Same encoding as `MethodTemplate.computed_key_index` —
+    /// index into the pre-computed-keys vector, or `-1` when the
+    /// field's key is the static `.name`.
+    computed_key_index: i16 = -1,
 };
 
 pub const Chunk = struct {

@@ -197,13 +197,19 @@ pub const Op = enum(u8) {
     /// strings in the array at `r_excl_arr` into a fresh object,
     /// leaving the result in `acc`. Used for `const {x, y,...rest} = src`.
     object_rest_from,
-    /// `[op] [k:u16]` — instantiate a class from
+    /// `[op] [k:u16] [r_keys_base:u8]` — instantiate a class from
     /// `Chunk.class_templates[k]`. The heritage value (for
     /// `class … extends X`) is read from the accumulator on entry
     /// (the compiler emits the heritage expression immediately
     /// before this op); when the template's `has_heritage` is
-    /// false, the accumulator is ignored. The resulting class
-    /// constructor lands in `acc`. §15.7.14
+    /// false, the accumulator is ignored. `r_keys_base` is the
+    /// first register of a contiguous block holding the
+    /// `to_property_key`-coerced computed-key values, one per
+    /// member with `computed_key_index >= 0`, in source order;
+    /// `make_class` reads them out of the enclosing frame's
+    /// register file. Templates without computed keys leave
+    /// `r_keys_base` as a don't-care (typically `0`). The
+    /// resulting class constructor lands in `acc`. §15.7.14
     /// OrdinaryClassDefinition mirrors in `runtime/class.zig`.
     make_class,
     /// `[op] [k:u16]` — `acc = home.[[Prototype]][key_k]`, where
@@ -757,7 +763,6 @@ pub const Op = enum(u8) {
             .jmp_if_nullish,
             .make_function,
             .make_named_function_expr,
-            .make_class,
             .super_get,
             .lda_property,
             .lda_private,
@@ -771,6 +776,7 @@ pub const Op = enum(u8) {
             => 2, // u16 / i16
             .capture_unresolved_global,
             .sta_global_strict,
+            .make_class,
             => 3, // k:u16 + r:u8
             .call,
             .new_call,

@@ -94,7 +94,8 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
             },
             .make_class => {
                 const k = readU16(chunk.code, i + 1);
-                try buf.print(allocator, " c{d}", .{k});
+                const r_keys_base = chunk.code[i + 3];
+                try buf.print(allocator, " c{d} keys=r{d}", .{ k, r_keys_base });
             },
             .super_get => {
                 const k = readU16(chunk.code, i + 1);

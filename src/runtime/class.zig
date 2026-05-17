@@ -102,6 +102,14 @@ pub fn buildClass(
     template: *const ClassTemplate,
     captured_env: ?*Environment,
     heritage_v: ?Value,
+    /// Pre-computed `[expr]` key values, one per member with
+    /// `computed_key_index >= 0`, in source order. Each value is
+    /// already coerced via `to_property_key` so it's a string or
+    /// symbol Value. Empty when the class has no computed keys.
+    /// See `bytecode/compiler.zig::emitMakeClass` for the emit
+    /// side; the interpreter's `.make_class` handler gathers
+    /// these out of the register file before this call.
+    computed_keys: []const Value,
 ) ClassError!Value {
     // §15.7.14 step 31 — allocate the per-evaluation
     // [[PrivateBrand]] up front. `proto` and `ctor` both get the
@@ -280,9 +288,11 @@ pub fn buildClass(
 
     for (template.instance_methods) |*m| {
         // §13.2.5 ComputedPropertyName — if the method's key
-        // was `[expr]`, evaluate the key chunk to get the
-        // runtime key. Otherwise use the static `m.name`.
-        const resolved = try resolveComputedKey(realm, optChunkPtr(&m.key_chunk), m.name, captured_env, proto);
+        // was `[expr]`, the enclosing bytecode already evaluated
+        // and `to_property_key`-coerced it into `computed_keys`
+        // at `m.computed_key_index`. Otherwise (`< 0`) fall back
+        // to the static `m.name` decoded at compile time.
+        const resolved = try resolveComputedKey(realm, computed_keys, m.computed_key_index, m.name, proto);
         const runtime_name = resolved.name;
         // §15.7 — private method `.name` is the bare `#method`,
         // not the class-identity-prefixed mangled key. Strip
@@ -404,7 +414,7 @@ pub fn buildClass(
     if (template.instance_fields.len > 0) {
         var inits = try realm.classAllocator().alloc(ObjMod.FieldInit, template.instance_fields.len);
         for (template.instance_fields, 0..) |*ft, i| {
-            const resolved = try resolveComputedKey(realm, optChunkPtr(&ft.key_chunk), ft.name, captured_env, proto);
+            const resolved = try resolveComputedKey(realm, computed_keys, ft.computed_key_index, ft.name, proto);
             const runtime_name = resolved.name;
             const init_fn: ?*JSFunction = if (ft.init_chunk) |*c|
                 try realm.heap.allocateFunction(c, 0, resolved.display_name, false, captured_env)
@@ -447,7 +457,7 @@ pub fn buildClass(
     // test262 fixtures using `super` in static methods are a
     // small fraction of the class-test cluster.
     for (template.static_methods) |*m| {
-        const resolved = try resolveComputedKey(realm, optChunkPtr(&m.key_chunk), m.name, captured_env, proto);
+        const resolved = try resolveComputedKey(realm, computed_keys, m.computed_key_index, m.name, proto);
         const runtime_name = resolved.name;
         // §15.7 — bare `#method` for private static .name.
         // §10.2.5 — Symbol-keyed static method names follow the
@@ -563,7 +573,7 @@ pub fn buildClass(
     const interpreter = @import("interpreter.zig");
     const ctor_value = heap_mod.taggedFunction(ctor);
     for (template.static_fields) |*ft| {
-        const resolved = try resolveComputedKey(realm, optChunkPtr(&ft.key_chunk), ft.name, captured_env, proto);
+        const resolved = try resolveComputedKey(realm, computed_keys, ft.computed_key_index, ft.name, proto);
         const runtime_name = resolved.name;
         var v: Value = Value.undefined_;
         if (ft.init_chunk) |*c| {
@@ -641,21 +651,6 @@ pub fn buildClass(
     return heap_mod.taggedFunction(ctor);
 }
 
-/// §13.2.5 — evaluate a ComputedPropertyName chunk and coerce
-/// the result via ToPropertyKey into a borrowed string slice
-/// suitable for use as a property key. Caller passes a JSObject
-/// (the prototype or constructor) on which to anchor the heap-
-/// allocated key string so it survives GC for the lifetime of
-/// the class. When `key_chunk` is null, returns `fallback`
-/// unchanged.
-/// Convert `*const ?Chunk` to `?*const Chunk` — needed because
-/// `?T` doesn't auto-promote and we want a pointer into the
-/// owning MethodTemplate / FieldTemplate (not a stack copy).
-fn optChunkPtr(opt: *const ?ChunkMod.Chunk) ?*const ChunkMod.Chunk {
-    if (opt.*) |*c| return c;
-    return null;
-}
-
 /// §10.2.5 SetFunctionName step 3.a — for a getter, return
 /// `"get " ++ base`; for a setter, `"set " ++ base`; otherwise
 /// return `base` unchanged. The composed string is anchored on
@@ -692,59 +687,28 @@ const ResolvedKey = struct {
     display_name: []const u8,
 };
 
+/// §13.2.5 — convert a pre-computed `[expr]` key value (already
+/// `to_property_key`-coerced by the enclosing bytecode, so it's a
+/// string or symbol Value) into a borrowed property-key slug plus
+/// a §10.2.5 SetFunctionName-friendly display name. The caller
+/// passes the anchor object (prototype or constructor) the heap-
+/// allocated key string should attach to so the GC keeps it alive
+/// for as long as the class is reachable. When `computed_key_index`
+/// is negative, returns `fallback` (the static name from the
+/// MethodTemplate / FieldTemplate).
 fn resolveComputedKey(
     realm: *Realm,
-    key_chunk: ?*const ChunkMod.Chunk,
+    computed_keys: []const Value,
+    computed_key_index: i16,
     fallback: []const u8,
-    captured_env: ?*@import("environment.zig").Environment,
     anchor: *JSObject,
 ) !ResolvedKey {
-    const chunk_ptr = key_chunk orelse return .{ .name = fallback, .display_name = fallback };
-    const interpreter = @import("interpreter.zig");
+    if (computed_key_index < 0) return .{ .name = fallback, .display_name = fallback };
+    const idx: usize = @intCast(computed_key_index);
+    std.debug.assert(idx < computed_keys.len);
+    const prim_v = computed_keys[idx];
     const heap_mod_ = @import("heap.zig");
-    // `allocateFunction` stores the chunk pointer; it must
-    // outlive the JSFunction. Pass through the
-    // MethodTemplate's / FieldTemplate's owning chunk directly
-    // instead of a stack copy (which would dangle the moment
-    // this function returned).
-    //
-    // `is_arrow=true` skips the auto-allocated prototype JSObject
-    // — this ephemeral function is never user-visible and only
-    // exists to evaluate the key expression. Without this every
-    // computed-key resolution costs 2 heap objects (JSFunction +
-    // its prototype) that pile up under heavy class-creation
-    // loops and pressure both the GC and libc malloc.
-    const ks_fn = try realm.heap.allocateFunction(chunk_ptr, 0, null, true, captured_env);
-    ks_fn.proto = realm.intrinsics.function_prototype;
-    // §13.2.5.5 PropertyDefinitionEvaluation step 1.b — an abrupt
-    // completion from the key expression propagates up through
-    // class-definition evaluation as a user-visible throw.
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, ks_fn, Value.undefined_, &.{}) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.Propagated,
-    };
-    const key_v = switch (outcome) {
-        .value, .yielded => |v| v,
-        .thrown => |ex| {
-            realm.pending_exception = ex;
-            return error.Propagated;
-        },
-    };
     const intrinsics = @import("intrinsics.zig");
-    // §13.2.5.5 / §7.1.19 ToPropertyKey — first ToPrimitive(hint
-    // "string"), then if the primitive is a Symbol return as-is,
-    // else ToString. If the receiver is already a Symbol the
-    // ToPrimitive identity branch returns it unchanged, so we
-    // fold the early-Symbol check into the general path. A throw
-    // from `@@toPrimitive` / `valueOf` / `toString` propagates
-    // via `realm.pending_exception`.
-    const prim_v = if (heap_mod_.valueAsSymbol(key_v) != null)
-        key_v
-    else
-        intrinsics.toPrimitive(realm, key_v, .string) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.Propagated,
-        };
     if (heap_mod_.valueAsSymbol(prim_v)) |sym| {
         // §7.1.19 ToPropertyKey — every Symbol carries a stable
         // `prop_key` slug (`@@iterator` for well-known, `<sym:N>`

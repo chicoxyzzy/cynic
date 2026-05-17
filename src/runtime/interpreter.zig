@@ -4895,11 +4895,45 @@ fn runFrames(
             .make_class => {
                 const k = readU16(code, ip);
                 ip += 2;
+                const r_keys_base = code[ip];
+                ip += 1;
                 if (k >= local_chunk.class_templates.len) return error.InvalidOpcode;
                 const tmpl = &local_chunk.class_templates[k];
                 const heritage: ?Value = if (tmpl.has_heritage) acc else null;
+                // §13.2.5 — gather pre-computed `[expr]` key
+                // values from the contiguous register block
+                // `f.registers[r_keys_base..]`. The compiler
+                // emitted the key expressions inline (so
+                // `yield` / `await` inside a key suspend the
+                // enclosing generator / async function — see
+                // `emitMakeClass` in compiler.zig); each is
+                // already `to_property_key`-coerced to a string
+                // or symbol Value. Walk the template to count
+                // members with `computed_key_index >= 0`, then
+                // slice the register block.
+                var keys_buf: [256]Value = undefined;
+                var key_count: usize = 0;
+                for (tmpl.instance_methods) |*m| {
+                    if (m.computed_key_index >= 0) key_count += 1;
+                }
+                for (tmpl.static_methods) |*m| {
+                    if (m.computed_key_index >= 0) key_count += 1;
+                }
+                for (tmpl.instance_fields) |*fd| {
+                    if (fd.computed_key_index >= 0) key_count += 1;
+                }
+                for (tmpl.static_fields) |*fd| {
+                    if (fd.computed_key_index >= 0) key_count += 1;
+                }
+                if (key_count > keys_buf.len) return error.InvalidOpcode;
+                {
+                    var ki: usize = 0;
+                    while (ki < key_count) : (ki += 1) {
+                        keys_buf[ki] = f.registers[r_keys_base + ki];
+                    }
+                }
                 const class_mod = @import("class.zig");
-                acc = class_mod.buildClass(realm, tmpl, f.env, heritage) catch |err| switch (err) {
+                acc = class_mod.buildClass(realm, tmpl, f.env, heritage, keys_buf[0..key_count]) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.HeritageNotConstructor => blk: {
                         const ex = try makeTypeError(realm, "Class extends value is not a constructor");

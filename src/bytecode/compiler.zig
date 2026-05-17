@@ -2603,6 +2603,15 @@ pub const Compiler = struct {
             },
             .class_expr => |ce| {
                 if (ce.name == null) {
+                    // Mirror `emitClassBuild` anonymous branch: the
+                    // class body may have `[expr]` computed keys
+                    // whose evaluations must run in the enclosing
+                    // frame (so `yield` / `await` work). Route
+                    // through `emitMakeClass` rather than directly
+                    // emitting the opcode — without this the
+                    // bytecode would skip the inline key block and
+                    // `make_class`'s `r_keys_base` operand would
+                    // alias the next opcode byte.
                     const k = try compileClassTemplate(
                         self,
                         name,
@@ -2610,9 +2619,8 @@ pub const Compiler = struct {
                         ce.body,
                         ce.span,
                     );
-                    if (ce.superclass) |s| try self.compileExpression(s);
-                    try self.builder.emitOp(.make_class, ce.span);
-                    try self.builder.emitU16(k);
+                    const reserved = try self.emitMakeClass(k, ce.superclass, ce.body, ce.span);
+                    self.releaseMakeClassTemps(reserved);
                     return;
                 }
             },
@@ -4871,6 +4879,132 @@ fn compileClassExpr(self: *Compiler, ce: ast.expression.ClassExpr) CompileError!
     try self.emitClassBuild(name_slice, ce.superclass, ce.body, ce.span);
 }
 
+/// Count `[expr]` computed keys across every method / field in
+/// `body` — must match the index-assignment walk in
+/// `compileClassTemplate`. Static blocks never contribute.
+fn countComputedKeys(body: []ast.statement.ClassMember) usize {
+    var n: usize = 0;
+    for (body) |member| switch (member) {
+        .method => |m| if (m.key == .computed) {
+            n += 1;
+        },
+        .field => |fd| if (fd.key == .computed) {
+            n += 1;
+        },
+        .static_block => {},
+    };
+    return n;
+}
+
+/// §13.2.5 ComputedPropertyName + §15.7.14 ClassDefinitionEvaluation
+/// step 25 — emit the full make_class opcode sequence, including
+/// any `[expr]` computed-key evaluations and the heritage
+/// expression. Behaviour summary by class shape:
+///
+///   no heritage, no keys: `make_class k 0`
+///   heritage, no keys:    `<heritage>; make_class k 0`
+///   no heritage, keys:    `<key₀>; ToPropertyKey; star r₀; …;
+///                          make_class k r₀`
+///   heritage, keys:       `<heritage>; star r_h;
+///                          <key₀>; ToPropertyKey; star r₀; …;
+///                          ldar r_h; make_class k r₀`
+///
+/// Key expressions emit inline in the enclosing function's
+/// bytecode (not a sub-chunk), so `yield` / `await` inside a
+/// computed key suspend the enclosing generator / async function —
+/// §27.5.3.7 GeneratorYield requires `f.generator != null`, which
+/// would not hold inside a sub-chunk's fresh frame.
+///
+/// Returns the count of contiguous temps reserved (heritage stash
+/// + key block); caller must release them in the same order via
+/// `releaseTemp` once `make_class` has consumed them.
+fn emitMakeClass(
+    self: *Compiler,
+    template_idx: u16,
+    superclass: ?*const Expression,
+    body: []ast.statement.ClassMember,
+    span: Span,
+) CompileError!usize {
+    const key_count = countComputedKeys(body);
+
+    // Fast path: no computed keys. Heritage lands in acc;
+    // make_class ignores `r_keys_base` (template's `has_heritage`
+    // gates acc).
+    if (key_count == 0) {
+        if (superclass) |s| try self.compileExpression(s);
+        try self.builder.emitOp(.make_class, span);
+        try self.builder.emitU16(template_idx);
+        try self.builder.emitU8(0);
+        return 0;
+    }
+
+    // §15.7.14 step 6 — heritage evaluates before the
+    // ClassElementList. Observable order matters when both have
+    // side effects: `class extends side() { [other()](){} }`
+    // calls `side` first, then `other`. Materialise heritage to
+    // a temp so the per-key emit doesn't clobber it.
+    var r_heritage: ?u8 = null;
+    var reserved_count: usize = 0;
+    if (superclass) |s| {
+        try self.compileExpression(s);
+        const r = try self.reserveTemp();
+        reserved_count += 1;
+        r_heritage = r;
+        try self.builder.emitOp(.star, span);
+        try self.builder.emitU8(r);
+    }
+
+    // Reserve a contiguous run of temps for the key block.
+    // `reserveTemp` is monotonic; the run is addressable as
+    // `r_keys_base + i`.
+    const r_keys_base = try self.reserveTemp();
+    reserved_count += 1;
+    {
+        var i: usize = 1;
+        while (i < key_count) : (i += 1) {
+            const r = try self.reserveTemp();
+            reserved_count += 1;
+            std.debug.assert(r == r_keys_base + i);
+        }
+    }
+
+    var next_idx: usize = 0;
+    for (body) |member| switch (member) {
+        .method => |m| if (m.key == .computed) {
+            try self.compileExpression(m.key.computed);
+            try self.builder.emitOp(.to_property_key, m.span);
+            try self.builder.emitOp(.star, m.span);
+            try self.builder.emitU8(@intCast(r_keys_base + next_idx));
+            next_idx += 1;
+        },
+        .field => |fd| if (fd.key == .computed) {
+            try self.compileExpression(fd.key.computed);
+            try self.builder.emitOp(.to_property_key, fd.span);
+            try self.builder.emitOp(.star, fd.span);
+            try self.builder.emitU8(@intCast(r_keys_base + next_idx));
+            next_idx += 1;
+        },
+        .static_block => {},
+    };
+    std.debug.assert(next_idx == key_count);
+
+    if (r_heritage) |rh| {
+        try self.builder.emitOp(.ldar, span);
+        try self.builder.emitU8(rh);
+    }
+    try self.builder.emitOp(.make_class, span);
+    try self.builder.emitU16(template_idx);
+    try self.builder.emitU8(r_keys_base);
+    return reserved_count;
+}
+
+/// Pair with `emitMakeClass`: release the temps reserved for the
+/// heritage stash and the key block, in LIFO order.
+fn releaseMakeClassTemps(self: *Compiler, reserved: usize) void {
+    var i: usize = 0;
+    while (i < reserved) : (i += 1) self.releaseTemp();
+}
+
 /// §15.7.1 ClassDefinitionEvaluation steps 8 / 27 — establish an
 /// inner declarative environment around the class body so methods
 /// close over a single, *immutable* `C` binding that's distinct
@@ -4880,11 +5014,11 @@ fn compileClassExpr(self: *Compiler, ce: ast.expression.ClassExpr) CompileError!
 /// outer is mutable, so `C = null; instance.m()` would surface
 /// `null` instead of the original class.
 ///
-/// Runtime layout (named-class case):
+/// Runtime layout (named-class case, no computed keys):
 ///
 ///     make_environment 1          // push class-env with 1 slot
 ///     [heritage] (if any)         // acc = parent ctor
-///     make_class k                // methods capture class-env
+///     make_class k 0              // methods capture class-env
 ///     sta_env 0 0                 // class fn → inner C slot
 ///     pop_env                     // back to enclosing env
 ///
@@ -4903,9 +5037,8 @@ fn emitClassBuild(
         // from inside — `Function.prototype.toString` gives
         // the empty name. Skip the inner-env scaffolding.
         const k = try compileClassTemplate(self, name_slice, superclass, body, span);
-        if (superclass) |s| try self.compileExpression(s);
-        try self.builder.emitOp(.make_class, span);
-        try self.builder.emitU16(k);
+        const reserved = try self.emitMakeClass(k, superclass, body, span);
+        self.releaseMakeClassTemps(reserved);
         return;
     }
     const name = name_slice.?;
@@ -4951,10 +5084,9 @@ fn emitClassBuild(
     // Compile every method / field template inside the inner
     // scope so they pick `C` up via Scope.resolve.
     const k = try compileClassTemplate(self, name_slice, superclass, body, span);
-    if (superclass) |s| try self.compileExpression(s);
-    try self.builder.emitOp(.make_class, span);
-    try self.builder.emitU16(k);
+    const reserved = try self.emitMakeClass(k, superclass, body, span);
     const build_end_pc = self.builder.here();
+    self.releaseMakeClassTemps(reserved);
     // Store the freshly-minted class function into the inner
     // `C` slot BEFORE popping the env — depth 0, slot
     // `inner_slot` (which is always 0 here, but kept symbolic
@@ -5115,18 +5247,48 @@ fn compileClassTemplate(
     var static_blocks = try self.allocator.alloc(ChunkMod.Chunk, static_block_count);
     errdefer self.allocator.free(static_blocks);
 
+    // §13.2.5 ComputedPropertyName — pre-walk `body` in source
+    // order, assigning a sequential index to every method/field
+    // whose key is `[expr]`. The emit walk in `emitClassBuild`
+    // evaluates each key expression in the enclosing frame's
+    // bytecode, `to_property_key`-coerces, and stashes the result
+    // in a contiguous block of temps; both walks agree on the
+    // slot per member through this side array.
+    //
+    // §15.7.14 step 25 PropertyDefinitionEvaluation iterates the
+    // ClassElementList in source order, so this matches spec.
+    //
+    // Why inline rather than a sub-chunk: a key expression like
+    // `[yield 9]` inside `function* g() { class C { [yield 9](){} } }`
+    // must suspend the enclosing generator, not a private function
+    // frame. Compiling the key into its own chunk (the previous
+    // approach) put `gen_yield` in a non-generator frame and tripped
+    // §27.5.3.7's `f.generator != null` assertion at runtime. Same
+    // story for `await` in an async-module top-level class.
+    var key_idx_for_pos = try self.allocator.alloc(i16, body.len);
+    defer self.allocator.free(key_idx_for_pos);
+    @memset(key_idx_for_pos, -1);
+    var next_key_idx: i16 = 0;
+    for (body, 0..) |member, pos| switch (member) {
+        .method => |m| if (m.key == .computed) {
+            key_idx_for_pos[pos] = next_key_idx;
+            next_key_idx += 1;
+        },
+        .field => |fd| if (fd.key == .computed) {
+            key_idx_for_pos[pos] = next_key_idx;
+            next_key_idx += 1;
+        },
+        .static_block => {},
+    };
+
     var i_if: usize = 0;
     var i_sf: usize = 0;
     var i_sb: usize = 0;
-    for (body) |member| switch (member) {
+    for (body, 0..) |member, pos| switch (member) {
         .field => |fd| {
-            // §13.2.5 — `class C { [expr] = init; }` — compile
-            // the key expression to a sub-chunk and let the class
-            // installer evaluate it at definition time.
-            var fkey_chunk: ?ChunkMod.Chunk = null;
+            const fkey_index: i16 = key_idx_for_pos[pos];
             const key_name = blk: {
                 if (fd.key == .computed) {
-                    fkey_chunk = try compileFieldInitChunk(self, fd.key.computed, fd.span);
                     break :blk "__cynic_computed__";
                 }
                 if (fd.key == .private) {
@@ -5150,7 +5312,7 @@ fn compileClassTemplate(
             const tmpl = ChunkMod.FieldTemplate{
                 .name = key_name,
                 .init_chunk = init_chunk,
-                .key_chunk = fkey_chunk,
+                .computed_key_index = fkey_index,
             };
             if (fd.is_static) {
                 static_fields[i_sf] = tmpl;
@@ -5217,16 +5379,16 @@ fn compileClassTemplate(
 
     var i_inst: usize = 0;
     var i_stat: usize = 0;
-    for (body) |member| switch (member) {
+    for (body, 0..) |member, pos| switch (member) {
         .method => |m| {
             // §13.2.5 ComputedPropertyName — `class C { [expr]() {} }`.
-            // Compile the key expression into a sub-chunk that
-            // returns the value; the class installer runs it at
-            // class-definition time and uses the (post-
-            // ToPropertyKey) result as the property key.
-            var key_chunk: ?ChunkMod.Chunk = null;
+            // The key expression has already been allocated a slot
+            // index in `key_idx_for_pos` above; `emitClassBuild`
+            // evaluates the expression inline in the enclosing
+            // frame and `make_class` reads the coerced value from
+            // the register file at runtime.
+            const method_key_index: i16 = key_idx_for_pos[pos];
             const key_name: []const u8 = if (m.key == .computed) blk: {
-                key_chunk = try compileFieldInitChunk(self, m.key.computed, m.span);
                 break :blk "__cynic_computed__";
             } else blk: {
                 const raw_key = methodKeyName(self.source, m.key) orelse return error.UnsupportedStatement;
@@ -5274,7 +5436,7 @@ fn compileClassTemplate(
                     self.source[m.source_start..m.span.end]
                 else
                     null,
-                .key_chunk = key_chunk,
+                .computed_key_index = method_key_index,
             };
             if (m.is_static) {
                 static_methods[i_stat] = tmpl;
