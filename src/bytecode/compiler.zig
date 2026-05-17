@@ -2739,7 +2739,9 @@ pub const Compiler = struct {
                         ce.body,
                         ce.span,
                     );
-                    const reserved = try self.emitMakeClass(k, ce.superclass, ce.body, ce.span);
+                    // Anonymous class expression — no inner env, no
+                    // binding to publish (sentinel 0xFF).
+                    const reserved = try self.emitMakeClass(k, ce.superclass, ce.body, ce.span, 0xFF);
                     self.releaseMakeClassTemps(reserved);
                     return;
                 }
@@ -5202,6 +5204,13 @@ fn emitMakeClass(
     superclass: ?*const Expression,
     body: []ast.statement.ClassMember,
     span: Span,
+    /// §15.7.14 step 27.b — inner classScopeEnvRec slot index for
+    /// the class binding (`C` in `class C { … }`). The interpreter
+    /// uses this to publish the constructor into the inner env
+    /// BEFORE static fields / blocks run, so a static initializer
+    /// referencing `C` sees the binding live instead of in TDZ.
+    /// Sentinel `0xFF` for anonymous classes (no inner env).
+    inner_class_slot: u8,
 ) CompileError!usize {
     const key_count = countComputedKeys(body);
 
@@ -5213,6 +5222,7 @@ fn emitMakeClass(
         try self.builder.emitOp(.make_class, span);
         try self.builder.emitU16(template_idx);
         try self.builder.emitU8(0);
+        try self.builder.emitU8(inner_class_slot);
         return 0;
     }
 
@@ -5273,6 +5283,7 @@ fn emitMakeClass(
     try self.builder.emitOp(.make_class, span);
     try self.builder.emitU16(template_idx);
     try self.builder.emitU8(r_keys_base);
+    try self.builder.emitU8(inner_class_slot);
     return reserved_count;
 }
 
@@ -5313,9 +5324,11 @@ fn emitClassBuild(
     if (!has_inner_name) {
         // Anonymous `class { … }` expression. No `C` to see
         // from inside — `Function.prototype.toString` gives
-        // the empty name. Skip the inner-env scaffolding.
+        // the empty name. Skip the inner-env scaffolding and
+        // pass the sentinel `0xFF` so make_class doesn't try
+        // to publish into a non-existent inner binding.
         const k = try compileClassTemplate(self, name_slice, superclass, body, span);
-        const reserved = try self.emitMakeClass(k, superclass, body, span);
+        const reserved = try self.emitMakeClass(k, superclass, body, span, 0xFF);
         self.releaseMakeClassTemps(reserved);
         return;
     }
@@ -5362,13 +5375,20 @@ fn emitClassBuild(
     // Compile every method / field template inside the inner
     // scope so they pick `C` up via Scope.resolve.
     const k = try compileClassTemplate(self, name_slice, superclass, body, span);
-    const reserved = try self.emitMakeClass(k, superclass, body, span);
+    // §15.7.14 step 27.b — pass the inner-env slot index for `C`
+    // so make_class publishes the constructor into the binding
+    // BEFORE static fields and static blocks run. The `inner_slot`
+    // is always 0 here (the inner env has a single slot), but
+    // make_class accepts the index symbolically for future-proofing.
+    const reserved = try self.emitMakeClass(k, superclass, body, span, inner_slot);
     const build_end_pc = self.builder.here();
     self.releaseMakeClassTemps(reserved);
-    // Store the freshly-minted class function into the inner
-    // `C` slot BEFORE popping the env — depth 0, slot
-    // `inner_slot` (which is always 0 here, but kept symbolic
-    // for clarity).
+    // The inner `C` slot was already published by make_class
+    // (step 27.b) BEFORE static fields ran. The trailing
+    // `sta_env` here is a no-op rewrite of the same slot to
+    // the same value, kept for symmetry / robustness against
+    // a future refactor that splits the publish step out of
+    // make_class. Depth 0, slot `inner_slot` (always 0 today).
     try self.builder.emitOp(.sta_env, span);
     try self.builder.emitU8(0);
     try self.builder.emitU8(inner_slot);

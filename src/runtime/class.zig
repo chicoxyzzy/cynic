@@ -110,6 +110,20 @@ pub fn buildClass(
     /// side; the interpreter's `.make_class` handler gathers
     /// these out of the register file before this call.
     computed_keys: []const Value,
+    /// §15.7.14 ClassDefinitionEvaluation step 27.b — when the
+    /// class has a name (`class C { … }` declaration *or* a
+    /// `class C = class C { … }` named expression), the inner
+    /// `classScopeEnvRec` slot for `C` must be initialised with
+    /// the freshly-constructed constructor BEFORE static fields
+    /// or static blocks run (steps 33-34). Without this, a
+    /// static initializer that references `C` (e.g.
+    /// `static foo = C.bar`) sees the binding in TDZ and throws
+    /// ReferenceError.
+    ///
+    /// `captured_env` IS the inner classScopeEnvRec (depth 0
+    /// from make_class's vantage). `null` here means the class
+    /// is anonymous — skip the publish step.
+    inner_class_slot: ?u8,
 ) ClassError!Value {
     // §15.7.14 step 31 — allocate the per-evaluation
     // [[PrivateBrand]] up front. `proto` and `ctor` both get the
@@ -601,6 +615,25 @@ pub fn buildClass(
     // install on ctor. §15.7.10 step 1 ClassInitialization.
     const interpreter = @import("interpreter.zig");
     const ctor_value = heap_mod.taggedFunction(ctor);
+
+    // §15.7.14 step 27.b — publish the constructor into the
+    // inner classScopeEnvRec slot BEFORE static fields and
+    // static blocks run. The inner binding is created
+    // immutable; subsequent reads of `C` from inside a static
+    // initializer (e.g. `static foo = C.bar`,
+    // `static { C.bar = 1 }`) must see the constructor. Without
+    // this, the binding stays in TDZ until the trailing
+    // `sta_env` opcode after make_class returns, and the
+    // initializer throws ReferenceError. The `captured_env` IS
+    // the inner classScopeEnvRec at make_class time (the
+    // compiler emits `make_environment 1; … make_class`).
+    if (inner_class_slot) |slot| {
+        if (captured_env) |env| {
+            if (slot < env.slots.len) {
+                env.slots[slot] = ctor_value;
+            }
+        }
+    }
     for (template.static_fields) |*ft| {
         const resolved = try resolveComputedKey(realm, computed_keys, ft.computed_key_index, ft.name, proto);
         const runtime_name = resolved.name;

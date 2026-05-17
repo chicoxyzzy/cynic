@@ -5375,6 +5375,16 @@ fn runFrames(
                 ip += 2;
                 const r_keys_base = code[ip];
                 ip += 1;
+                // §15.7.14 step 27.b — inner classScopeEnvRec slot
+                // index for the class binding (`C` in `class C {…}`).
+                // Sentinel `0xFF` means the class is anonymous, so
+                // there's no inner env / no binding to publish.
+                // Named classes need the binding initialised BEFORE
+                // static fields / static blocks run; see
+                // `class.buildClass`.
+                const inner_slot_raw = code[ip];
+                ip += 1;
+                const inner_class_slot: ?u8 = if (inner_slot_raw == 0xFF) null else inner_slot_raw;
                 if (k >= local_chunk.class_templates.len) return error.InvalidOpcode;
                 const tmpl = &local_chunk.class_templates[k];
                 const heritage: ?Value = if (tmpl.has_heritage) acc else null;
@@ -5411,7 +5421,7 @@ fn runFrames(
                     }
                 }
                 const class_mod = @import("class.zig");
-                acc = class_mod.buildClass(realm, tmpl, f.env, heritage, keys_buf[0..key_count]) catch |err| switch (err) {
+                acc = class_mod.buildClass(realm, tmpl, f.env, heritage, keys_buf[0..key_count], inner_class_slot) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.HeritageNotConstructor => blk: {
                         const ex = try makeTypeError(realm, "Class extends value is not a constructor");
