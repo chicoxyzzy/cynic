@@ -443,6 +443,25 @@ pub const Op = enum(u8) {
     /// declaration so the import side picks up the value once
     /// the body finishes evaluating.
     module_export,
+    /// `[op]` — §16.2.1.5 InnerModuleEvaluation link-complete
+    /// marker. Emitted by the compiler after the hoisted import
+    /// block in `compileModuleAsChunk` (only when the module
+    /// declared at least one import). Drains the microtask queue
+    /// so any async dependency whose body suspended at a top-level
+    /// `await` during its `module_load` gets a chance to settle
+    /// before the importer's body proper begins. After draining,
+    /// iterates the importer's `pending_async_deps` list and, if
+    /// any dep's evaluation Promise rejected, unwinds with the
+    /// rejection value (matching §16.2.1.9
+    /// AsyncModuleExecutionRejected's parent-propagation). This
+    /// is Cynic's lightweight stand-in for the full
+    /// [[PendingAsyncDependencies]] + GatherAvailableAncestors
+    /// dance: sibling sync deps still run during the import
+    /// hoist (so a sync module that destructures `globalThis`
+    /// captures values from before any async sibling resumes),
+    /// and the importer's body runs only after every async dep
+    /// settles. No-op outside module context.
+    module_link_complete,
 
     // ── Globals ─────────────────────────────────────────────────
     /// `[op] [k:u16]` — load a global by name. The name is the
@@ -689,6 +708,7 @@ pub const Op = enum(u8) {
             .super_get_computed,
             .super_check_this,
             .dynamic_import,
+            .module_link_complete,
             => 0,
             .ldar,
             .star,
@@ -856,6 +876,7 @@ pub const Op = enum(u8) {
             .module_load => "ModuleLoad",
             .dynamic_import => "DynamicImport",
             .module_export => "ModuleExport",
+            .module_link_complete => "ModuleLinkComplete",
             .make_environment => "MakeEnvironment",
             .lda_env => "LdaEnv",
             .sta_env => "StaEnv",

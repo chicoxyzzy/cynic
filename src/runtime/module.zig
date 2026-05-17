@@ -90,6 +90,21 @@ pub const ModuleRecord = struct {
     /// on every exported binding to `{w:true, e:true, c:false}`.
     /// Idempotent: callers safely re-enter for cycles.
     namespace_finalized: bool = false,
+    /// §16.2.1.5 InnerModuleEvaluation [[PendingAsyncDependencies]]
+    /// — async dependency modules that suspended at a top-level
+    /// `await` during their `module_load` and whose evaluation
+    /// Promise is still pending. Populated by `loadModule` when
+    /// an async dep's body returns a pending result Promise; drained
+    /// by the `module_link_complete` opcode in the importer's body
+    /// (which awaits microtasks to settle each promise, then
+    /// propagates any rejection as a thrown exception so the
+    /// importer's body sees the abrupt completion). Cleared once
+    /// drained. Cynic's lightweight stand-in for the full
+    /// PendingAsyncDependencies count + GatherAvailableAncestors
+    /// machinery — sufficient because the compiler hoists every
+    /// import to a contiguous block before the body proper, so a
+    /// single drain at the end of that block matches spec ordering.
+    pending_async_deps: std.ArrayListUnmanaged(*ModuleRecord) = .empty,
     /// Mark-sweep bit, written by `Heap.markValue`.
     marked: bool = false,
 
@@ -101,6 +116,7 @@ pub const ModuleRecord = struct {
 
     pub fn deinit(self: *ModuleRecord, allocator: std.mem.Allocator) void {
         if (self.chunk) |*c| c.deinit(allocator);
+        self.pending_async_deps.deinit(allocator);
         allocator.destroy(self);
     }
 };

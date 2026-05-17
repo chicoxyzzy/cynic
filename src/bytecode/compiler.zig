@@ -4081,12 +4081,12 @@ fn publishExportedNamesFromDecl(self: *Compiler, stmt: *const Statement) Compile
     switch (stmt.*) {
         .lexical => |ld| {
             for (ld.declarators) |d| {
-                if (identifierName(self.source, d.name)) |name| {
-                    try self.emitBindingRead(name, d.span);
-                    const k = try self.internString(name);
-                    try self.builder.emitOp(.module_export, d.span);
-                    try self.builder.emitU16(k);
-                }
+                // §14.3.3 BindingPattern — `export const {a, b} = obj;`
+                // / `export const [x, y] = arr;` introduce one binding
+                // per pattern leaf. Walk the pattern and publish each
+                // bound identifier; identifier-only targets short-
+                // circuit through the same helper.
+                try self.publishExportedTargetNames(d.name, d.span);
             }
         },
         .function_decl => |fd| {
@@ -4104,6 +4104,44 @@ fn publishExportedNamesFromDecl(self: *Compiler, stmt: *const Statement) Compile
             try self.builder.emitU16(k);
         },
         else => {},
+    }
+}
+
+/// Walk a `BindingTarget` and emit a `module_export` for every
+/// bound identifier — covers identifier targets (the trivial
+/// case) and §14.3.3 destructuring patterns (`{ a }`, `[x, y]`,
+/// `[, ...rest]`, nested combinations). Used by
+/// `publishExportedNamesFromDecl` so a pattern-shaped `export
+/// const { a } = obj` publishes `a` on the module namespace
+/// alongside the simple-identifier case.
+fn publishExportedTargetNames(self: *Compiler, target: ast.statement.BindingTarget, span: Span) CompileError!void {
+    switch (target) {
+        .identifier => |id| {
+            const name = self.source[id.span.start..id.span.end];
+            try self.emitBindingRead(name, span);
+            const k = try self.internString(name);
+            try self.builder.emitOp(.module_export, span);
+            try self.builder.emitU16(k);
+        },
+        .object => |op| {
+            for (op.properties) |prop| {
+                try self.publishExportedTargetNames(prop.value.target, prop.span);
+            }
+            if (op.rest) |rest| {
+                const name = self.source[rest.span.start..rest.span.end];
+                try self.emitBindingRead(name, rest.span);
+                const k = try self.internString(name);
+                try self.builder.emitOp(.module_export, rest.span);
+                try self.builder.emitU16(k);
+            }
+        },
+        .array => |ap| {
+            for (ap.elements) |maybe_el| {
+                const el = maybe_el orelse continue; // elision
+                try self.publishExportedTargetNames(el.target, el.span);
+            }
+            if (ap.rest) |rest| try self.publishExportedTargetNames(rest.*, span);
+        },
     }
 }
 
@@ -8508,7 +8546,22 @@ pub fn compileModuleAsChunk(
             else => {},
         }
     }
-    for (program.body) |*s| if (s.* == .import_decl) try c.compileStatement(s);
+    var any_import = false;
+    for (program.body) |*s| if (s.* == .import_decl) {
+        any_import = true;
+        try c.compileStatement(s);
+    };
+    // §16.2.1.5 InnerModuleEvaluation — after the import hoist,
+    // drain microtasks so any async dep that suspended at TLA
+    // settles before the body proper observes its exports
+    // (and so a rejection propagates as a throw at this
+    // boundary). Only emit when the module actually has imports;
+    // a zero-import module would never have populated
+    // `pending_async_deps`, and the opcode no-ops anyway.
+    if (any_import) {
+        const link_span: Span = .{ .start = 0, .end = 0 };
+        try c.builder.emitOp(.module_link_complete, link_span);
+    }
     for (program.body) |*s| {
         switch (s.*) {
             .import_decl, .function_decl => {},

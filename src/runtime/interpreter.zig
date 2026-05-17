@@ -1719,6 +1719,16 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
 pub const LoadModuleOutcome = struct {
     value: Value,
     threw: bool,
+    /// The loaded module record when the load reached the
+    /// "ran the body" phase. Lets callers (notably the
+    /// `dynamic_import` opcode) inspect `state` /
+    /// `evaluation_promise` to decide whether to wait on a
+    /// suspended top-level `await` before settling the
+    /// import-Promise. `null` when load failed before the
+    /// body ran (loader error, parse error, compile error)
+    /// or when the request was satisfied by the
+    /// `realm.modules` cache.
+    mr: ?*module_mod.ModuleRecord = null,
 };
 
 pub fn loadModule(
@@ -1744,7 +1754,7 @@ pub fn loadModule(
         switch (mr.state) {
             .uninstantiated, .evaluated => {
                 const ns = module_mod.getModuleNamespace(realm, mr) catch return error.OutOfMemory;
-                return .{ .value = heap_mod.taggedObject(ns), .threw = false };
+                return .{ .value = heap_mod.taggedObject(ns), .threw = false, .mr = mr };
             },
             .evaluating, .evaluating_async => {
                 // §16.2.1.5.4 cycle — the in-progress namespace
@@ -1759,9 +1769,9 @@ pub fn loadModule(
                 // (matches §16.2.1.5 InnerModuleEvaluation step
                 // 4 cycle handling).
                 const ns = module_mod.getModuleNamespace(realm, mr) catch return error.OutOfMemory;
-                return .{ .value = heap_mod.taggedObject(ns), .threw = false };
+                return .{ .value = heap_mod.taggedObject(ns), .threw = false, .mr = mr };
             },
-            .errored => return .{ .value = mr.error_value, .threw = true },
+            .errored => return .{ .value = mr.error_value, .threw = true, .mr = mr },
         }
     }
 
@@ -1825,8 +1835,16 @@ pub fn loadModule(
     // Run the module body. JSFunctions declared inside this
     // chunk hold non-owning pointers into mr.chunk; the chunk
     // stays pinned for the realm's lifetime.
+    //
+    // §16.2.1.5 InnerModuleEvaluation step 14 — while a dep
+    // evaluates, the executing-module reference is the dep.
+    // Restore the caller's `current_module` on return so the
+    // importer's subsequent `module_export` ops (for bindings
+    // declared after the import hoist) land on the importer's
+    // namespace, not silently no-op.
+    const saved_module = realm.current_module;
     realm.current_module = mr;
-    defer realm.current_module = null;
+    defer realm.current_module = saved_module;
 
     const outcome = run(allocator, realm, &mr.chunk.?) catch |err| {
         mr.state = .errored;
@@ -1834,57 +1852,55 @@ pub fn loadModule(
     };
     switch (outcome) {
         .value, .yielded => |v| {
-            // §16.2.1.5.1 [[IsAsync]] — when the module body has
-            // top-level await, `run` routes through
+            // §16.2.1.5.1 [[IsAsync]] — when the module body
+            // has top-level await, `run` routes through
             // `startAsyncCall` which returns a pending result
             // Promise. Per §16.2.1.5 InnerModuleEvaluation, an
             // async module's static-import dependents wait for
             // its `[[TopLevelCapability]]` to settle before
-            // their bodies run. Cynic doesn't yet model the full
-            // PendingAsyncDependencies / GatherAvailableAncestors
-            // dance — instead, on the static-import edge we
-            // drain microtasks here until the result Promise
-            // settles. That matches spec ordering for the
-            // sequential-deps case (the importer's body sees
-            // final exports), at the cost of the
-            // sibling-doesn't-block invariant: an async dep
-            // completes before any sibling import gets to
-            // evaluate. The trade is net-positive on test262
-            // (dfs-invariant + module-import-resolution +
-            // dynamic-import-resolution all rely on the body
-            // having finished by the time imports return).
+            // their bodies run.
+            //
+            // Cynic doesn't model the full
+            // [[PendingAsyncDependencies]] count +
+            // GatherAvailableAncestors machinery. Instead, we
+            // record the dep's evaluation Promise on the
+            // importer's `pending_async_deps` and rely on the
+            // compiler-emitted `module_link_complete` opcode
+            // (fired after the importer's hoisted import block,
+            // before its body proper) to drain microtasks until
+            // every recorded dep settles. That preserves the
+            // sibling-doesn't-block invariant — sync siblings
+            // get to run while an async dep is mid-await — at
+            // the cost of being slightly coarser than spec
+            // (rejection propagation lacks the per-parent
+            // [[CycleRoot]] dance, and we drain the whole
+            // microtask queue rather than just dep-settlement
+            // jobs). Sufficient for the §16.2.1.5 fixtures.
             if (mr.chunk.?.is_async_module) {
                 if (heap_mod.valueAsPlainObject(v)) |p_obj| {
                     if (p_obj.isPromise()) {
                         mr.evaluation_promise = v;
                         mr.state = .evaluating_async;
-                        // Drain until the Promise settles or
-                        // the queue empties (broken Promise
-                        // chains shouldn't infinite-loop).
-                        while (p_obj.promise_state == .pending and realm.microtask_queue.items.len > 0) {
-                            try drainMicrotasks(allocator, realm);
+                        // If the importer is itself a module,
+                        // hand it the pending Promise so its
+                        // module_link_complete drains until we
+                        // settle (or surfaces our rejection).
+                        if (saved_module) |parent| {
+                            parent.pending_async_deps.append(realm.allocator, mr) catch return error.OutOfMemory;
                         }
-                        if (p_obj.promise_state == .rejected) {
-                            mr.state = .errored;
-                            mr.error_value = p_obj.promise_value;
-                            mr.evaluation_promise = Value.undefined_;
-                            return .{ .value = p_obj.promise_value, .threw = true };
-                        }
-                        // Fulfilled (or still pending — treat as
-                        // evaluated; the deferred work will run
-                        // later and settle to undefined).
-                        mr.evaluation_promise = Value.undefined_;
+                        const final_ns = module_mod.getModuleNamespace(realm, mr) catch return error.OutOfMemory;
+                        return .{ .value = heap_mod.taggedObject(final_ns), .threw = false, .mr = mr };
                     }
                 }
             }
             mr.state = .evaluated;
             const final_ns = module_mod.getModuleNamespace(realm, mr) catch return error.OutOfMemory;
-            return .{ .value = heap_mod.taggedObject(final_ns), .threw = false };
+            return .{ .value = heap_mod.taggedObject(final_ns), .threw = false, .mr = mr };
         },
         .thrown => |ex| {
             mr.state = .errored;
             mr.error_value = ex;
-            return .{ .value = ex, .threw = true };
+            return .{ .value = ex, .threw = true, .mr = mr };
         },
     }
 }
@@ -5993,7 +6009,40 @@ fn runFrames(
                     if (outcome.threw) {
                         acc = try promise_mod.allocatePromiseFor(realm, null, .rejected, outcome.value);
                     } else {
-                        acc = try promise_mod.allocatePromiseFor(realm, null, .fulfilled, outcome.value);
+                        // §13.3.10 / §16.2.1.11 HostImportModuleDynamically —
+                        // the import() Promise settles with the namespace
+                        // once the module's evaluation Promise settles. For
+                        // sync modules that's already done; for async modules
+                        // (state == .evaluating_async with a pending
+                        // evaluation_promise) drain microtasks until the
+                        // promise resolves so the import() Promise reflects
+                        // the final settlement, not the partial namespace
+                        // mid-await.
+                        var final_value = outcome.value;
+                        var rejected = false;
+                        if (outcome.mr) |dep_mr| {
+                            if (dep_mr.state == .evaluating_async) {
+                                if (heap_mod.valueAsPlainObject(dep_mr.evaluation_promise)) |p_obj| {
+                                    if (p_obj.isPromise()) {
+                                        while (p_obj.promise_state == .pending and realm.microtask_queue.items.len > 0) {
+                                            try drainMicrotasks(allocator, realm);
+                                        }
+                                        if (p_obj.promise_state == .rejected) {
+                                            final_value = p_obj.promise_value;
+                                            rejected = true;
+                                        }
+                                    }
+                                }
+                            } else if (dep_mr.state == .errored) {
+                                final_value = dep_mr.error_value;
+                                rejected = true;
+                            }
+                        }
+                        if (rejected) {
+                            acc = try promise_mod.allocatePromiseFor(realm, null, .rejected, final_value);
+                        } else {
+                            acc = try promise_mod.allocatePromiseFor(realm, null, .fulfilled, final_value);
+                        }
                     }
                 }
             },
@@ -6052,6 +6101,60 @@ fn runFrames(
                 }
                 // No-op outside module context (e.g. running
                 // module-shaped code as a script for tests).
+            },
+
+            .module_link_complete => {
+                // §16.2.1.5 InnerModuleEvaluation — emitted by
+                // the compiler after the importer's hoisted
+                // import block, before its body proper.
+                // `loadModule` walked each dep depth-first
+                // already; sync ones ran to completion, async
+                // ones suspended at their top-level `await`
+                // (or transitively re-suspended an ancestor in
+                // a cycle). Drain microtasks now so any
+                // outstanding async-module work gets a chance
+                // to settle before the importer's body touches
+                // their exports — matters for both the direct
+                // dep case (the dep's body has suspended at
+                // TLA and we recorded its evaluation Promise
+                // on `pending_async_deps`) AND the cycle-root
+                // case (importer imports a cycle-leaf that's
+                // already `.evaluated`, but the cycle-root is
+                // still suspended; per §16.2.1.5 step 11.c.iv.1
+                // the importer waits on the CycleRoot, not the
+                // leaf — so we drain even with an empty
+                // pending list).
+                //
+                // After draining, walk `pending_async_deps`:
+                // any dep whose evaluation Promise rejected
+                // becomes an abrupt completion at this link
+                // boundary (matches §16.2.1.9
+                // AsyncModuleExecutionRejected propagating to
+                // each [[AsyncParentModule]]).
+                const mr = realm.current_module orelse continue;
+                f.ip = ip;
+                f.accumulator = acc;
+                committed = true;
+                try drainMicrotasks(allocator, realm);
+                var dep_rejection: ?Value = null;
+                for (mr.pending_async_deps.items) |dep| {
+                    if (heap_mod.valueAsPlainObject(dep.evaluation_promise)) |p_obj| {
+                        if (p_obj.isPromise() and p_obj.promise_state == .rejected) {
+                            dep_rejection = p_obj.promise_value;
+                            break;
+                        }
+                    }
+                }
+                mr.pending_async_deps.clearRetainingCapacity();
+                if (dep_rejection) |ex| {
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                }
+                ip = f.ip;
+                acc = f.accumulator;
+                committed = false;
             },
 
             .lda_arguments => {
