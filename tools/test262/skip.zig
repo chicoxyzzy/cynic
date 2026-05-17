@@ -198,6 +198,20 @@ pub const skip_ses_substrings = [_][]const u8{
     "Function/prototype/call/S15.3.4.4_A5_T8.js",
     "Function/prototype/call/S15.3.4.4_A7_T6.js",
 
+    // `language/{module-code,expressions/dynamic-import/usage}/
+    // *eval-gtbndng-indirect-update*.js` — the shared
+    // `eval-gtbndng-indirect-update_FIXTURE.js` (and `-dflt` variant)
+    // does `Function('return this;')()` to retrieve globalThis at
+    // module top, then installs a `test262update` mutator the
+    // importer calls to observe the live-binding semantics of
+    // §8.1.1.5 ModuleEnvironmentRecord. `Function(string)` is the
+    // permanent SES carve-out (AGENTS.md "eval and runtime code
+    // construction" / §15.3.2 Function constructor), so every
+    // fixture loading either FIXTURE false-rejects for an OOS
+    // reason rather than a real engine bug. 39 fixtures across the
+    // two trees share the substring.
+    "eval-gtbndng-indirect-update",
+
     // `language/statementList/eval-*.js` — every fixture in this
     // generated batch wraps a `StatementList` start in
     // `var result = eval('function fn() {}<production>;')` to
