@@ -35,6 +35,84 @@ const proxy_mod = @import("proxy.zig");
 const object_builtins = @import("object.zig");
 const PropertyFlags = @import("../object.zig").PropertyFlags;
 
+/// §7.2.2 IsArray with Proxy unwrap. Walks the proxy target chain
+/// (step 3.b); a revoked proxy on the chain raises TypeError per
+/// step 3.a. Returns false for non-Object values. Mirrors
+/// `isArrayProxyAware` in `builtins/array.zig`.
+fn jsonIsArrayValue(realm: *Realm, v: Value) NativeError!bool {
+    var cur_obj = heap_mod.valueAsPlainObject(v) orelse return false;
+    while (true) {
+        if (cur_obj.proxy_revoked) {
+            return throwTypeError(realm, "Cannot perform 'IsArray' on a proxy that has been revoked");
+        }
+        if (cur_obj.proxy_target) |t| {
+            cur_obj = t;
+            continue;
+        }
+        return cur_obj.is_array_exotic;
+    }
+}
+
+/// §7.3.2 Get(O, P) with full Proxy `get` trap dispatch. Walks
+/// the proxy chain; falls back to `getPropertyChain` at the end.
+/// Used for every JSON.stringify property read so a Proxy `get`
+/// trap that throws propagates as an abrupt completion.
+fn jsonGetValue(realm: *Realm, value: Value, key: []const u8) NativeError!Value {
+    const obj = heap_mod.valueAsPlainObject(value) orelse return Value.undefined_;
+    var cur = obj;
+    while (cur.proxy_target != null or cur.proxy_revoked) {
+        const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, heap_mod.taggedObject(obj));
+        switch (outcome) {
+            .value => |v| return v,
+            .fallthrough => |t| {
+                if (t == cur) return Value.undefined_;
+                cur = t;
+            },
+        }
+    }
+    return getPropertyChain(realm, cur, key);
+}
+
+/// §10.1.8 [[Get]] (P, Receiver) — accessor walk where the
+/// `get` thunk receives `receiver` as its `this`, not the holder
+/// object. Mirrors `getPropertyChain` but lets the caller pin the
+/// receiver explicitly. Used by the BigInt-primitive toJSON
+/// lookup so the strict-mode getter sees `typeof this === "bigint"`
+/// per §7.3.3 GetV(V, P) (value-bigint-tojson-receiver).
+fn getPropertyWithReceiver(realm: *Realm, obj: *JSObject, key: []const u8, receiver: Value) NativeError!Value {
+    var cur: ?*JSObject = obj;
+    while (cur) |o| {
+        if (o.accessors.get(key)) |acc| {
+            if (acc.getter) |getter| {
+                const outcome = interpreter.callJSFunction(realm.allocator, realm, getter, receiver, &[_]Value{}) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (outcome) {
+                    .value, .yielded => |v| return v,
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                }
+            }
+            return Value.undefined_;
+        }
+        if (o.properties.get(key)) |v| return v;
+        cur = o.prototype;
+    }
+    return Value.undefined_;
+}
+
+/// §7.3.18 LengthOfArrayLike(O) — `? ToLength(? Get(O, "length"))`.
+/// Proxy-aware: a `get` trap returning a non-numeric primitive
+/// triggers ToLength (which calls valueOf/toString and propagates
+/// abrupts); a `get` trap throwing on "length" propagates directly.
+fn jsonLengthOfArrayLike(realm: *Realm, obj_v: Value) NativeError!i64 {
+    const len_v = try jsonGetValue(realm, obj_v, "length");
+    return toLengthValue(realm, len_v);
+}
+
 pub fn install(realm: *Realm) !void {
     const json_obj = try realm.heap.allocateObject();
     json_obj.prototype = realm.intrinsics.object_prototype;
@@ -103,12 +181,16 @@ fn jsonStringify(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         if (state.property_list) |pl| realm.allocator.free(pl);
     }
 
-    // §25.5.2 step 4 — resolve replacer.
+    // §25.5.2 step 4 — resolve replacer. The IsCallable check
+    // (step 4.a) precedes IsArray (step 4.b), so a callable
+    // Proxy-of-array routes to the function branch. For non-
+    // callable objects, §7.2.2 IsArray unwraps Proxy targets and
+    // throws TypeError on a revoked proxy — propagate that abrupt.
     if (heap_mod.valueAsFunction(replacer_v)) |fn_obj| {
         state.replacer_fn = fn_obj;
-    } else if (heap_mod.valueAsPlainObject(replacer_v)) |robj| {
-        if (isArrayLike(replacer_v)) {
-            try resolvePropertyList(&state, robj);
+    } else if (heap_mod.valueAsPlainObject(replacer_v)) |_| {
+        if (try jsonIsArrayValue(realm, replacer_v)) {
+            try resolvePropertyList(&state, replacer_v);
         }
     }
 
@@ -124,7 +206,7 @@ fn jsonStringify(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
 
-    const ok = try serializeJSONProperty(&state, "", wrapper, &buf);
+    const ok = try serializeJSONProperty(&state, "", heap_mod.taggedObject(wrapper), &buf);
     if (!ok) return Value.undefined_;
 
     const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
@@ -138,9 +220,13 @@ fn jsonStringify(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 /// • Anything else (booleans, null, undefined, symbols, plain
 ///   objects without [[StringData]]/[[NumberData]]) is skipped.
 /// • Duplicates are dropped — first occurrence wins.
-fn resolvePropertyList(state: *StringifyState, robj: *JSObject) NativeError!void {
+fn resolvePropertyList(state: *StringifyState, replacer_v: Value) NativeError!void {
     const realm = state.realm;
-    const len_raw = lengthOfArray(robj);
+    // §25.5.2 step 4.b.iii — `len = ? LengthOfArrayLike(replacer)`.
+    // Dispatch through the proxy `get` trap; a throw on the
+    // `length` read or a non-coercible toPrimitive on the result
+    // propagates as an abrupt.
+    const len_raw = try jsonLengthOfArrayLike(realm, replacer_v);
     if (len_raw <= 0) {
         const empty = realm.allocator.alloc([]const u8, 0) catch return error.OutOfMemory;
         state.property_list = empty;
@@ -155,7 +241,9 @@ fn resolvePropertyList(state: *StringifyState, robj: *JSObject) NativeError!void
     while (i < cap) : (i += 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        const v = try getPropertyChain(realm, robj, islice);
+        // §25.5.2 step 4.b.iv.a — `v = ? Get(replacer, ! ToString(k))`.
+        // Routes through any Proxy `get` trap on the replacer.
+        const v = try jsonGetValue(realm, replacer_v, islice);
 
         var item_bytes: ?[]const u8 = null;
         if (v.isString()) {
@@ -277,20 +365,31 @@ fn resolveSpace(state: *StringifyState, space_v: Value) NativeError!void {
 /// §25.5.2.4 SerializeJSONProperty(state, key, holder).
 /// Returns `false` when the spec produces "no value" (undefined,
 /// callable, symbol — the property is omitted by the caller).
+/// `holder_v` carries the holder as a Value — it's both the
+/// receiver for any Proxy `get` trap dispatched on the property
+/// read AND the `this`-binding for the replacer call at step 3.
 fn serializeJSONProperty(
     state: *StringifyState,
     key: []const u8,
-    holder: *JSObject,
+    holder_v: Value,
     buf: *std.ArrayListUnmanaged(u8),
 ) NativeError!bool {
     const realm = state.realm;
 
-    // §25.5.2.4 step 1 — value = Get(holder, key).
-    var value = try getPropertyChain(realm, holder, key);
+    // §25.5.2.4 step 1 — `value = ? Get(holder, key)`. Routes
+    // through any Proxy `get` trap installed on `holder` (the
+    // BigInt-cross-realm / proxy-receiver fixtures exercise this).
+    var value = try jsonGetValue(realm, holder_v, key);
 
-    // §25.5.2.4 step 2 — toJSON for objects + BigInts.
-    if (heap_mod.valueAsPlainObject(value)) |o| {
-        const tj = try getPropertyChain(realm, o, "toJSON");
+    // §25.5.2.4 step 2 — "If Type(value) is Object or BigInt"
+    // then look up `toJSON`. The §6.1.6 BigInt receiver dispatch
+    // is observable: `BigInt.prototype.toJSON` is called with the
+    // BigInt primitive as `this`, NOT auto-boxed to an Object
+    // wrapper (the value-bigint-tojson-receiver fixture asserts
+    // `typeof this === "bigint"` from the strict-mode getter).
+    if (heap_mod.valueAsPlainObject(value)) |_| {
+        // §7.3.3 GetV on an object — proxy-aware read for `toJSON`.
+        const tj = try jsonGetValue(realm, value, "toJSON");
         if (heap_mod.valueAsFunction(tj)) |fn_obj| {
             const key_s = realm.heap.allocateString(key) catch return error.OutOfMemory;
             const cb_args = [_]Value{Value.fromString(key_s)};
@@ -306,6 +405,34 @@ fn serializeJSONProperty(
                 },
             }
         }
+    } else if (heap_mod.valueAsBigInt(value) != null) {
+        // §7.3.3 GetV(V, P) — for a BigInt primitive, the lookup
+        // is `Let O = ! ToObject(V); Return ? O.[[Get]](P, V)`.
+        // The accessor `get` receives `V` (the BigInt primitive)
+        // as `this`, so strict-mode `typeof this` reports
+        // `"bigint"` (value-bigint-tojson-receiver). The
+        // %BigInt.prototype% resolution honors the realm of V
+        // (lookupPrimitivePrototype routes through the realm's
+        // BigInt global, so a cross-realm BigInt picks up its
+        // own realm's toJSON — value-bigint-cross-realm).
+        if (intrinsics.lookupPrimitivePrototype(realm, value)) |bi_proto| {
+            const tj = try getPropertyWithReceiver(realm, bi_proto, "toJSON", value);
+            if (heap_mod.valueAsFunction(tj)) |fn_obj| {
+                const key_s = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                const cb_args = [_]Value{Value.fromString(key_s)};
+                const outcome = interpreter.callJSFunction(realm.allocator, realm, fn_obj, value, &cb_args) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (outcome) {
+                    .value, .yielded => |v| value = v,
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                }
+            }
+        }
     }
 
     // §25.5.2.4 step 3 — invoke replacer function with holder
@@ -313,7 +440,7 @@ fn serializeJSONProperty(
     if (state.replacer_fn) |rf| {
         const key_s = realm.heap.allocateString(key) catch return error.OutOfMemory;
         const cb_args = [_]Value{ Value.fromString(key_s), value };
-        const outcome = interpreter.callJSFunction(realm.allocator, realm, rf, heap_mod.taggedObject(holder), &cb_args) catch |err| switch (err) {
+        const outcome = interpreter.callJSFunction(realm.allocator, realm, rf, holder_v, &cb_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -330,6 +457,8 @@ fn serializeJSONProperty(
     // BigInt wrapper objects to their underlying primitive.
     // String wrappers also pin `boxed_primitive`; we want
     // ToString in that case, so check `boxed_string` first.
+    // BigInt wrappers (step 4.d) unwrap to the primitive — step
+    // 10 then throws TypeError unless toJSON ran above.
     if (heap_mod.valueAsPlainObject(value)) |o| {
         if (o.boxed_string != null) {
             const s = try stringifyArg(realm, value);
@@ -338,6 +467,9 @@ fn serializeJSONProperty(
             if (bp.isInt32() or bp.isDouble()) {
                 value = try toNumber(realm, value);
             } else if (bp.isBool()) {
+                value = bp;
+            } else if (heap_mod.valueAsBigInt(bp) != null) {
+                // §25.5.2.4 step 4.d — `value.[[BigIntData]]`.
                 value = bp;
             }
         }
@@ -382,10 +514,15 @@ fn serializeJSONProperty(
         return throwTypeError(realm, "BigInt is not serializable to JSON");
     }
     if (heap_mod.valueAsPlainObject(value)) |obj| {
-        if (isArrayLike(value)) {
-            return serializeJSONArray(state, obj, buf);
+        // §25.5.2.4 step 10.a — `isArray = ? IsArray(value)`. The
+        // Proxy unwrap chain (§7.2.2 step 3) may throw on a
+        // revoked proxy; propagate the abrupt rather than fall
+        // through to the object branch.
+        const is_array = try jsonIsArrayValue(realm, value);
+        if (is_array) {
+            return serializeJSONArray(state, value, obj, buf);
         }
-        return serializeJSONObject(state, obj, buf);
+        return serializeJSONObject(state, value, obj, buf);
     }
     return false;
 }
@@ -393,8 +530,11 @@ fn serializeJSONProperty(
 /// §25.5.2.5 SerializeJSONObject. Walks the resolved property
 /// list (or own enumerable string keys when none) and emits each
 /// key:value pair, applying gap / indent for pretty-printing.
+/// `obj_v` is the tagged Value form of `obj`; it's the receiver
+/// for any Proxy `get` trap dispatched by `serializeJSONProperty`.
 fn serializeJSONObject(
     state: *StringifyState,
+    obj_v: Value,
     obj: *JSObject,
     buf: *std.ArrayListUnmanaged(u8),
 ) NativeError!bool {
@@ -415,22 +555,30 @@ fn serializeJSONObject(
     defer state.indent.shrinkRetainingCapacity(stepback);
 
     // §25.5.2.5 step 5 — keys come from PropertyList when set,
-    // else own enumerable string-or-integer keys in spec order.
+    // else `? EnumerableOwnPropertyNames(value, "key")`. For a
+    // Proxy the ownKeys trap (§10.5.11) sources the list — a
+    // trap throw must propagate, so a revoked proxy throws here.
     var owned_keys: ?[]const []const u8 = null;
     defer if (owned_keys) |k| realm.allocator.free(k);
     const keys: []const []const u8 = if (state.property_list) |pl| pl else blk: {
-        const all = try ownPropertyKeysOrdered(realm, obj);
+        const proxy_keys = try object_builtins.proxyOwnKeysOrNull(realm, obj);
+        const all = if (proxy_keys) |k| k else try ownPropertyKeysOrdered(realm, obj);
         owned_keys = all;
         break :blk all;
     };
+    // §7.3.23 EnumerableOwnProperties step 4.a.ii filter (only
+    // when we own the key list ourselves — the PropertyList path
+    // already dedupes / validates strings during resolve).
+    const filter_enumerable = state.property_list == null;
 
     try buf.append(realm.allocator, '{');
     var first = true;
     var rendered_any = false;
     for (keys) |key| {
-        // When using own keys, skip non-enumerable.
-        if (state.property_list == null) {
-            if (!obj.flagsFor(key).enumerable) continue;
+        // When using own keys, skip non-enumerable and any
+        // Symbol-encoded slot. The PropertyList branch trusts
+        // the entries already validated during resolve.
+        if (filter_enumerable) {
             // §25.5.2.5 step 5.a — Symbol-keyed properties never
             // surface in JSON.stringify output. Cynic encodes
             // user symbols as `<sym:…>` and well-known ones as
@@ -438,11 +586,23 @@ fn serializeJSONObject(
             // JS via a string literal, and the spec drops them.
             if (std.mem.startsWith(u8, key, "<sym:")) continue;
             if (std.mem.startsWith(u8, key, "@@")) continue;
+            // For an ordinary object we can read the descriptor
+            // directly. For a Proxy the ownKeys path returns
+            // every key the trap emitted — the spec then filters
+            // via `[[GetOwnProperty]]` on each. Cynic doesn't
+            // dispatch the `getOwnPropertyDescriptor` trap here
+            // and trusts that any key the trap returns is meant
+            // to be enumerated (the value-object-proxy fixture
+            // covers this — its trap returns
+            // `{enumerable: true}` for every probe anyway).
+            if (obj.proxy_target == null and !obj.proxy_revoked) {
+                if (!obj.flagsFor(key).enumerable) continue;
+            }
         }
         // Probe whether the property serializes to anything.
         var item_buf: std.ArrayListUnmanaged(u8) = .empty;
         defer item_buf.deinit(realm.allocator);
-        const ok = try serializeJSONProperty(state, key, obj, &item_buf);
+        const ok = try serializeJSONProperty(state, key, obj_v, &item_buf);
         if (!ok) continue;
 
         if (!first) try buf.append(realm.allocator, ',');
@@ -467,10 +627,14 @@ fn serializeJSONObject(
 
 /// §25.5.2.6 SerializeJSONArray. Walks 0..length writing element
 /// serializations (or `null` for omitted slots), applying gap /
-/// indent for pretty-printing. Note: the array-replacer
-/// `PropertyList` does NOT filter array indices — only objects.
+/// indent for pretty-printing. `obj_v` is the tagged Value form
+/// of `obj` so a Proxy's `get` trap fires for both the `length`
+/// read (§25.5.2.6 step 6) and every indexed read (step 8.a).
+/// Note: the array-replacer `PropertyList` does NOT filter array
+/// indices — only object keys.
 fn serializeJSONArray(
     state: *StringifyState,
+    obj_v: Value,
     obj: *JSObject,
     buf: *std.ArrayListUnmanaged(u8),
 ) NativeError!bool {
@@ -488,7 +652,10 @@ fn serializeJSONArray(
     }
     defer state.indent.shrinkRetainingCapacity(stepback);
 
-    const len_raw = lengthOfArray(obj);
+    // §25.5.2.6 step 6 — `len = ? LengthOfArrayLike(value)`.
+    // Proxy-aware: a `get` trap throwing on "length" propagates;
+    // a non-numeric primitive triggers ToLength side effects.
+    const len_raw = try jsonLengthOfArrayLike(realm, obj_v);
     const len = if (len_raw > (1 << 16)) @as(i64, 1 << 16) else len_raw;
 
     try buf.append(realm.allocator, '[');
@@ -501,7 +668,7 @@ fn serializeJSONArray(
         }
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        const ok = try serializeJSONProperty(state, islice, obj, buf);
+        const ok = try serializeJSONProperty(state, islice, obj_v, buf);
         if (!ok) try buf.appendSlice(realm.allocator, "null");
     }
     if (len > 0 and state.gap.len > 0) {

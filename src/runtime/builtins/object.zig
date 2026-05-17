@@ -344,9 +344,14 @@ pub fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []
     const handler = obj.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'ownKeys' on a proxy with null handler");
     const trap_v = handler.get("ownKeys");
     // §10.5.11 step 5 — trap is `undefined` / `null` → fall back
-    // to target's [[OwnPropertyKeys]]. Anything else non-callable
-    // is a TypeError per IsCallable.
+    // to target.[[OwnPropertyKeys]]. When the target is itself a
+    // Proxy, recurse so the inner trap fires (proxy-of-proxy
+    // chain — value-object-proxy nested). Anything else
+    // non-callable is a TypeError per IsCallable.
     if (trap_v.isUndefined() or trap_v.isNull()) {
+        if (proxy_target.proxy_target != null or proxy_target.proxy_revoked) {
+            return try proxyOwnKeysOrNull(realm, proxy_target);
+        }
         return try ownPropertyKeysOrdered(realm, proxy_target);
     }
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'ownKeys' trap is not callable");
