@@ -83,6 +83,20 @@ pub fn install(realm: *Realm) !void {
         // (TypedArray or DataView instance). Cynic tracks both
         // with `obj.typed_view`.
         try intrinsics.installNativeMethod(realm, ctor, "isView", arrayBufferIsView, 1);
+        // §25.1.4.2 `get ArrayBuffer [ @@species ]` returns `this`.
+        // Subclasses pick up the inherited getter via
+        // `static_parent` (so `MyAB[@@species] === MyAB` unless
+        // overridden). `Symbol.species` is the hook every
+        // ArrayBuffer.prototype.slice fixture pokes at.
+        {
+            const species_getter = try realm.heap.allocateFunctionNative(arrayBufferSpeciesGetter, 0, "get [Symbol.species]");
+            species_getter.proto = realm.intrinsics.function_prototype;
+            const entry = try ctor.accessors.getOrPut(realm.allocator, "@@species");
+            entry.value_ptr.* = .{ .getter = species_getter };
+            try ctor.property_flags.put(realm.allocator, "@@species", .{
+                .writable = false, .enumerable = false, .configurable = true,
+            });
+        }
     }
 
     // §25.3 DataView constructor + prototype.
@@ -523,42 +537,138 @@ fn arrayBufferTransferToFixedLength(realm: *Realm, this_value: Value, args: []co
     return arrayBufferTransferImpl(realm, this_value, args, false);
 }
 
+/// §25.1.4.2 `get ArrayBuffer [ @@species ]` — returns `this`.
+/// Subclasses inherit this getter through `static_parent`, so
+/// `MyAB[@@species]` resolves to `MyAB` (the subclass) by
+/// default; user code can override on the subclass to interpose.
+fn arrayBufferSpeciesGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = args;
+    return this_value;
+}
+
+/// §7.3.22 SpeciesConstructor(O, defaultConstructor) — the
+/// helper the spec invokes from `slice` (and friends). Resolution:
+///   1. Let C be ? Get(O, "constructor").
+///   2. If C is undefined, return defaultConstructor.
+///   3. If Type(C) is not Object, throw TypeError.
+///   4. Let S be ? Get(C, @@species).
+///   5. If S is either undefined or null, return defaultConstructor.
+///   6. If IsConstructor(S) is true, return S.
+///   7. Throw TypeError.
+fn arrayBufferSpeciesConstructor(realm: *Realm, exemplar: *JSObject, default_ctor: ?*JSFunction) NativeError!?*JSFunction {
+    const ctor_prop = try intrinsics.getPropertyChain(realm, exemplar, "constructor");
+    // §7.3.22 step 2 — undefined → default.
+    if (ctor_prop.isUndefined()) return default_ctor;
+    // §7.3.22 step 3 — non-Object → TypeError. A bare function
+    // counts as Object here, so `valueAsFunction` is the same as
+    // `Type(C) is Object` for our purposes.
+    var species_v: Value = Value.undefined_;
+    if (heap_mod.valueAsFunction(ctor_prop)) |fn_obj| {
+        species_v = try taGetFunctionMember(realm, fn_obj, "@@species");
+    } else if (heap_mod.valueAsPlainObject(ctor_prop)) |obj| {
+        species_v = try intrinsics.getPropertyChain(realm, obj, "@@species");
+    } else {
+        return throwTypeError(realm, "ArrayBuffer.prototype.slice: constructor is not an object");
+    }
+    // §7.3.22 step 5 — undefined / null → default.
+    if (species_v.isUndefined() or species_v.isNull()) return default_ctor;
+    // §7.3.22 step 6 — must be a constructor. Cynic treats every
+    // JSFunction with `has_construct = true` (the install-time
+    // default for `installConstructor`) as a constructor. A bare
+    // method (e.g. `Function.prototype` itself, or an arrow) has
+    // `has_construct = false` and must throw.
+    const species_fn = heap_mod.valueAsFunction(species_v) orelse
+        return throwTypeError(realm, "ArrayBuffer.prototype.slice: @@species is not a constructor");
+    if (!species_fn.has_construct)
+        return throwTypeError(realm, "ArrayBuffer.prototype.slice: @@species is not a constructor");
+    return species_fn;
+}
+
 fn arrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const src = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "slice on non-ArrayBuffer");
-    const buf = src.array_buffer orelse return throwTypeError(realm, "slice on non-ArrayBuffer");
-    const total: i64 = @intCast(buf.len);
-    // §25.1.5.4 ArrayBuffer.prototype.slice — start / end go
-    // through ToIntegerOrInfinity, which routes through
-    // ToNumber and throws on Symbol / BigInt.
+    const src_buf = src.array_buffer orelse return throwTypeError(realm, "slice on non-ArrayBuffer");
+    const total: i64 = @intCast(src_buf.len);
+    // §25.1.5.5 ArrayBuffer.prototype.slice step 5-9 — start / end
+    // go through ToIntegerOrInfinity. NaN -> 0; -Infinity stays
+    // -Infinity (clamps to 0 in step 8); +Infinity stays +Infinity
+    // (clamps to `len` in step 8). `tointeger-conversion-end.js`
+    // and `negative-end.js` together pin the corner cases.
     var start_d: f64 = 0;
     if (args.len > 0) {
-        const v = try intrinsics.toNumber(realm, args[0]);
-        start_d = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
+        start_d = try taSetToIntegerOrInfinity(realm, args[0]);
     }
     var end_d: f64 = @floatFromInt(total);
     if (args.len > 1 and !args[1].isUndefined()) {
-        const v = try intrinsics.toNumber(realm, args[1]);
-        end_d = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
+        end_d = try taSetToIntegerOrInfinity(realm, args[1]);
     }
-    const i64_max_f: f64 = @floatFromInt(std.math.maxInt(i64));
-    const i64_min_f: f64 = @floatFromInt(std.math.minInt(i64));
-    var start_i: i64 = if (std.math.isNan(start_d) or std.math.isInf(start_d)) 0 else if (start_d > i64_max_f) std.math.maxInt(i64) else if (start_d < i64_min_f) std.math.minInt(i64) else @intFromFloat(@trunc(start_d));
-    var end_i: i64 = if (std.math.isNan(end_d) or std.math.isInf(end_d)) total else if (end_d > i64_max_f) std.math.maxInt(i64) else if (end_d < i64_min_f) std.math.minInt(i64) else @intFromFloat(@trunc(end_d));
-    if (start_i < 0) start_i = @max(total + start_i, 0);
-    if (end_i < 0) end_i = @max(total + end_i, 0);
-    start_i = @min(start_i, total);
-    end_i = @min(end_i, total);
+    // §25.1.5.5 step 6/8 — relativeStart < 0 → max(len + s, 0);
+    // else → min(s, len). Same for relativeEnd.
+    const total_f: f64 = @floatFromInt(total);
+    const start_f: f64 = if (start_d < 0) @max(total_f + start_d, 0) else @min(start_d, total_f);
+    const end_f: f64 = if (end_d < 0) @max(total_f + end_d, 0) else @min(end_d, total_f);
+    const start_i: i64 = @intFromFloat(start_f);
+    const end_i: i64 = @intFromFloat(end_f);
     const new_len: usize = if (end_i > start_i) @intCast(end_i - start_i) else 0;
 
-    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    if (heap_mod.valueAsFunction(realm.globals.get("ArrayBuffer") orelse Value.undefined_)) |ab| {
-        out.prototype = ab.prototype;
+    // §25.1.5.5 step 12-14 — SpeciesConstructor(O, %ArrayBuffer%)
+    // and `Construct(ctor, « newLen »)`.
+    const default_ctor = heap_mod.valueAsFunction(realm.globals.get("ArrayBuffer") orelse Value.undefined_);
+    const ctor_fn = try arrayBufferSpeciesConstructor(realm, src, default_ctor);
+
+    // Open a HandleScope across the user construct — it can
+    // trigger GC, which would otherwise sweep ephemerals.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+
+    const ctor_args = [_]Value{numberFromI64(@intCast(new_len))};
+    const interpreter = @import("../interpreter.zig");
+    const result_v = if (ctor_fn) |cf| blk: {
+        const callee_v = heap_mod.taggedFunction(cf);
+        const outcome = interpreter.constructValue(realm.allocator, realm, callee_v, &ctor_args, callee_v) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        break :blk switch (outcome) {
+            .value, .yielded => |v| v,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        };
+    } else err: {
+        // Default path: allocate a fresh ArrayBuffer directly.
+        // This only fires when no `ArrayBuffer` global exists,
+        // which shouldn't happen in practice.
+        const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+        const new_buf = realm.allocator.alloc(u8, new_len) catch return error.OutOfMemory;
+        @memset(new_buf, 0);
+        out.array_buffer = new_buf;
+        out.has_array_buffer_data = true;
+        break :err heap_mod.taggedObject(out);
+    };
+
+    // §25.1.5.5 step 17 — result must have an [[ArrayBufferData]]
+    // internal slot (i.e. be a real ArrayBuffer, not a stub).
+    const result_obj = heap_mod.valueAsPlainObject(result_v) orelse
+        return throwTypeError(realm, "ArrayBuffer.prototype.slice: species ctor returned non-object");
+    const result_buf = result_obj.array_buffer orelse
+        return throwTypeError(realm, "ArrayBuffer.prototype.slice: species ctor did not return an ArrayBuffer");
+    // §25.1.5.5 step 19 — `SameValue(new, O)` is true → TypeError.
+    // The fixture `species-returns-same-arraybuffer.js` returns
+    // the receiver from `@@species` and asserts this throws.
+    if (result_obj == src)
+        return throwTypeError(realm, "ArrayBuffer.prototype.slice: species ctor returned the receiver");
+    // §25.1.5.5 step 20 — result.[[ArrayBufferByteLength]] < newLen
+    // is a TypeError (`species-returns-smaller-arraybuffer.js`).
+    // A larger buffer is allowed (`species-returns-larger-…`).
+    if (result_buf.len < new_len)
+        return throwTypeError(realm, "ArrayBuffer.prototype.slice: species ctor returned too-short ArrayBuffer");
+    // §25.1.5.5 step 22 — CopyDataBlockBytes(result, 0, O, first, newLen).
+    if (new_len > 0) {
+        @memcpy(result_buf[0..new_len], src_buf[@intCast(start_i)..@intCast(end_i)]);
     }
-    const new_buf = realm.allocator.alloc(u8, new_len) catch return error.OutOfMemory;
-    if (new_len > 0) @memcpy(new_buf, buf[@intCast(start_i)..@intCast(end_i)]);
-    out.array_buffer = new_buf;
-    out.has_array_buffer_data = true;
-    return heap_mod.taggedObject(out);
+    return heap_mod.taggedObject(result_obj);
 }
 
 fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_name: []const u8) NativeFn {
