@@ -150,7 +150,21 @@ pub fn buildClass(
             // Arrow functions, generator functions, async functions,
             // and methods (no [[Construct]]) don't qualify. The
             // spec phrasing is IsConstructor(superclass).
-            if (!fn_obj.has_construct or fn_obj.is_arrow or fn_obj.is_generator or fn_obj.is_async) {
+            //
+            // §10.4.1.2 BoundFunctionExoticObject — IsConstructor of
+            // a bound function chains through to its [[BoundTargetFunction]]
+            // (recursively). `(()=>{}).bind()` produces a bound
+            // function whose target is the arrow → not a constructor.
+            // Walk through bound_target so the IsConstructor check
+            // sees the underlying function's flags. Without this,
+            // `class C extends (()=>{}).bind() {}` passes the check
+            // and then proceeds to step 7.e, which reads
+            // `bound.prototype` — observable via an accessor and
+            // mis-firing test262 fixtures that expect step 7's
+            // TypeError to short-circuit the prototype lookup.
+            var unwrapped: *JSFunction = fn_obj;
+            while (unwrapped.bound_target) |tgt| unwrapped = tgt;
+            if (!unwrapped.has_construct or unwrapped.is_arrow or unwrapped.is_generator or unwrapped.is_async) {
                 return error.HeritageNotConstructor;
             }
             parent_ctor = fn_obj;

@@ -4862,6 +4862,29 @@ fn runFrames(
             },
 
             .lda_this => {
+                // §10.2.1.4 BindThisValue / §9.1.1.3.4 GetThisBinding —
+                // in a derived constructor, `this` is uninitialised
+                // until `super(...)` completes. A read before that
+                // point throws ReferenceError "Must call super
+                // constructor before accessing 'this'". Outside a
+                // derived ctor (base ctor, regular function, arrow
+                // bound via captured_this, generator, etc.) the
+                // binding is always initialised, so this gate runs
+                // only when `is_derived_ctor && !super_called`. The
+                // arrow / generator paths set is_derived_ctor=false
+                // on their own frame; `lda_this` runs in the host
+                // ctor frame for `super.x` / `super[x]` chains,
+                // which `super_get` / `super_set` gate separately.
+                if (f.is_derived_ctor and !f.super_called) {
+                    const ex = try makeReferenceError(realm, "Must call super constructor before accessing 'this'");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                }
                 acc = f.this_value;
             },
 
@@ -6099,6 +6122,27 @@ fn runFrames(
                                 }
                                 inst.private_properties.put(allocator, entry.name, v) catch return error.OutOfMemory;
                             } else {
+                                // §7.3.7 CreateDataPropertyOrThrow —
+                                // a public class field installs with
+                                // `[[CreateDataProperty]]`, which on
+                                // a non-extensible receiver returns
+                                // false and the surrounding "OrThrow"
+                                // wrapper raises TypeError. Hit by
+                                // `class C { f = Object.freeze(this);
+                                // g = "x"; }` where the first field
+                                // freezes the instance and the second
+                                // attempts to install on the frozen
+                                // object.
+                                if (!inst.extensible) {
+                                    const ex = try makeTypeError(realm, "Cannot add field to non-extensible object");
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    break;
+                                }
                                 inst.set(allocator, entry.name, v) catch return error.OutOfMemory;
                             }
                         }
