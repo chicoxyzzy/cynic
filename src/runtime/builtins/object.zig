@@ -791,8 +791,9 @@ fn objectHasOwn(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     };
     // §7.1.19 ToPropertyKey — the spec coerces non-string,
     // non-symbol args; `descriptorKey` handles strings, symbols,
-    // and primitive ToString fallback.
-    const key = descriptorKey(realm, argOr(args, 1, Value.undefined_)) catch return error.OutOfMemory;
+    // and primitive ToString fallback. Surface a user-side
+    // ToPrimitive throw instead of masking it as OOM.
+    const key = try descriptorKey(realm, argOr(args, 1, Value.undefined_));
     return Value.fromBool(obj.hasOwn(key));
 }
 
@@ -1012,7 +1013,11 @@ fn isCompatibleRedefine(
 pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const target_v = argOr(args, 0, Value.undefined_);
-    const key = descriptorKey(realm, argOr(args, 1, Value.undefined_)) catch return error.OutOfMemory;
+    // §7.1.19 ToPropertyKey on the property-name argument — may
+    // throw if a user-side `toString` / `valueOf` returns a non-
+    // primitive (the §7.1.1.1 OrdinaryToPrimitive throw). Don't
+    // swallow that as OOM; surface the TypeError back to JS.
+    const key = try descriptorKey(realm, argOr(args, 1, Value.undefined_));
     const desc_v = argOr(args, 2, Value.undefined_);
     // §10.5.6 Proxy [[DefineOwnProperty]] — dispatch through the
     // handler's `defineProperty` trap before falling back.
@@ -3027,7 +3032,7 @@ fn objectHasOwnProperty(realm: *Realm, this_value: Value, args: []const Value) N
 /// `true` iff `key` is an own property of the receiver and its
 /// [[Enumerable]] attribute is `true`.
 fn objectProtoPropertyIsEnumerable(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const key = descriptorKey(realm, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
+    const key = try descriptorKey(realm, argOr(args, 0, Value.undefined_));
     if (heap_mod.valueAsPlainObject(this_value)) |obj| {
         // §20.1.3.4 step 3 composes `O.[[GetOwnProperty]](P)`. For a
         // Proxy that dispatches the `getOwnPropertyDescriptor` trap
