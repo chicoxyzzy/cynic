@@ -170,6 +170,12 @@ pub const ArrayLikeIterState = struct {
     target: Value,
     idx: u32 = 0,
     done: bool = false,
+    /// §14.7.5.6 EnumerateObjectProperties live-deletion check:
+    /// for `for-in` only, the iterator skips any key from the
+    /// snapshot that is no longer present on the original source
+    /// object at yield time. Null for non-for-in iterators
+    /// (e.g. `Array.from` arg, string iter).
+    for_in_source: Value = Value.undefined_,
 
     pub fn deinit(self: *ArrayLikeIterState, allocator: std.mem.Allocator) void {
         allocator.destroy(self);

@@ -633,7 +633,10 @@ pub const Heap = struct {
                         self.markValue(entry.value);
                     }
                 }
-                if (o.array_like_iter) |s| self.markValue(s.target);
+                if (o.array_like_iter) |s| {
+                    self.markValue(s.target);
+                    self.markValue(s.for_in_source);
+                }
                 if (o.iter_helper) |s| {
                     self.markValue(s.source);
                     self.markValue(s.next_fn);

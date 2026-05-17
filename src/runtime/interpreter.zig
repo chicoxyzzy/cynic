@@ -1815,15 +1815,21 @@ pub fn openForInIterator(
     }
     arr.set(realm.allocator, "length", Value.fromInt32(len)) catch return error.OutOfMemory;
 
-    // Wrap the snapshot in an array-like iterator. The for-of
-    // emit path only reads `.next()` so we can reuse the
-    // synthesised array-like iterator from `openIterator`'s
-    // fallback branch. The array always has `.length`, so
-    // NotIterable is impossible here.
-    return openIteratorAllowArrayLike(realm.allocator, realm, heap_mod.taggedObject(arr)) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidOpcode,
-    };
+    // Build a direct array-like iterator over the snapshot
+    // rather than going through %Array.prototype%[@@iterator],
+    // because we need to stash the original source on the
+    // iterator state for §14.7.5.6's live-deletion check.
+    // ("If a property that has not yet been visited during
+    // enumeration is deleted, then it will not be visited.")
+    const iter = realm.heap.allocateObject() catch return error.OutOfMemory;
+    iter.prototype = realm.intrinsics.object_prototype;
+    const state = realm.allocator.create(@import("object.zig").ArrayLikeIterState) catch return error.OutOfMemory;
+    state.* = .{ .target = heap_mod.taggedObject(arr), .idx = 0, .done = false, .for_in_source = obj_v };
+    iter.array_like_iter = state;
+    const next_fn = realm.heap.allocateFunctionNative(arrayLikeIterNext, 0, "next") catch return error.OutOfMemory;
+    next_fn.proto = realm.intrinsics.function_prototype;
+    iter.set(realm.allocator, "next", heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(iter);
 }
 
 /// `next()` for the synthesised array-like iterator. Reads
@@ -1889,23 +1895,49 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
         if (len_v.isInt32()) length = len_v.asInt32() else if (len_v.isDouble()) length = @intFromFloat(len_v.asDouble());
     }
 
-    if (@as(i64, idx) >= length) {
-        result.set(realm.allocator, "value", Value.undefined_) catch return error.OutOfMemory;
-        result.set(realm.allocator, "done", Value.true_) catch return error.OutOfMemory;
-        state.done = true;
+    // §14.7.5.6 — for-in: advance past keys that have been
+    // deleted on the source object since the snapshot was
+    // taken. Other consumers (Array.from, etc.) leave
+    // for_in_source undefined and skip this branch.
+    const has_source = !state.for_in_source.isUndefined();
+    var cursor: u32 = idx;
+    while (true) {
+        if (@as(i64, cursor) >= length) {
+            result.set(realm.allocator, "value", Value.undefined_) catch return error.OutOfMemory;
+            result.set(realm.allocator, "done", Value.true_) catch return error.OutOfMemory;
+            state.done = true;
+            state.idx = cursor;
+            return heap_mod.taggedObject(result);
+        }
+        var elem: Value = Value.undefined_;
+        if (heap_mod.valueAsPlainObject(target)) |obj| {
+            var ibuf: [16]u8 = undefined;
+            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{cursor}) catch unreachable;
+            elem = obj.get(islice);
+        }
+        if (has_source) {
+            // Live-check the key on the original source object.
+            // The snapshot stores keys as JSString values.
+            if (elem.isString()) {
+                const key_str: *@import("string.zig").JSString = @ptrCast(@alignCast(elem.asString()));
+                if (heap_mod.valueAsPlainObject(state.for_in_source)) |src| {
+                    if (!src.hasProperty(key_str.bytes)) {
+                        cursor += 1;
+                        continue;
+                    }
+                } else if (heap_mod.valueAsFunction(state.for_in_source)) |src_fn| {
+                    if (!src_fn.properties.contains(key_str.bytes)) {
+                        cursor += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        result.set(realm.allocator, "value", elem) catch return error.OutOfMemory;
+        result.set(realm.allocator, "done", Value.false_) catch return error.OutOfMemory;
+        state.idx = cursor + 1;
         return heap_mod.taggedObject(result);
     }
-
-    var elem: Value = Value.undefined_;
-    if (heap_mod.valueAsPlainObject(target)) |obj| {
-        var ibuf: [16]u8 = undefined;
-        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
-        elem = obj.get(islice);
-    }
-    result.set(realm.allocator, "value", elem) catch return error.OutOfMemory;
-    result.set(realm.allocator, "done", Value.false_) catch return error.OutOfMemory;
-    state.idx = idx + 1;
-    return heap_mod.taggedObject(result);
 }
 
 /// §16.2.1.5 module load. Resolves `specifier` via the host
