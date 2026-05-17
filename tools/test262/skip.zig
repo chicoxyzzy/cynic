@@ -263,6 +263,17 @@ pub const skip_ses_substrings = [_][]const u8{
     "Function/prototype/call/S15.3.4.4_A5_T8.js",
     "Function/prototype/call/S15.3.4.4_A7_T6.js",
 
+    // `built-ins/global/S10.2.3_A*.js` — Sputnik-era tests that
+    // verify global-property reachability from `eval`-evaluated
+    // code (e.g. `eval('if (NaN === null) { throw …; }')`).
+    // Permanent SES carve-out (AGENTS.md "eval and runtime code
+    // construction"). The non-`S10.2.3_A` siblings under
+    // `built-ins/global/` (the strict-mode TypeError tests like
+    // `10.2.1.1.3-4-*-s.js`) stay attempted — those exercise
+    // §10.1.9.1 / §19.1 frozen globals without eval. 8 fixtures
+    // share the substring.
+    "built-ins/global/S10.2.3_A",
+
     // `language/{module-code,expressions/dynamic-import/usage}/
     // *eval-gtbndng-indirect-update*.js` — the shared
     // `eval-gtbndng-indirect-update_FIXTURE.js` (and `-dflt` variant)

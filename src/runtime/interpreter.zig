@@ -7789,6 +7789,27 @@ fn runFrames(
                     }
                     try realm.globals.putDecl(realm.allocator, key_s.bytes, acc);
                 } else {
+                    // §10.1.9.1 OrdinarySet step 3 — a write to a
+                    // non-writable own data property of the global
+                    // object is a §6.2.5.5 PutValue failure: under
+                    // strict mode (Cynic's only mode) it throws
+                    // TypeError. Covers the §19.1 frozen globals
+                    // (`undefined = 1`, `NaN = 1`, `Infinity = 1`)
+                    // and any host-installed read-only data slot.
+                    if (realm.globals.target) |gt| {
+                        if (gt.property_flags.get(key_s.bytes)) |flags| {
+                            if (!flags.writable) {
+                                const ex = try makeTypeError(realm, "Cannot assign to read-only property on globalThis");
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue;
+                            }
+                        }
+                    }
                     try realm.globals.put(realm.allocator, key_s.bytes, acc);
                 }
             },
@@ -7867,6 +7888,26 @@ fn runFrames(
                     }
                     try realm.globals.putDecl(realm.allocator, key_s.bytes, acc);
                 } else {
+                    // §10.1.9.1 OrdinarySet step 3 — same writable
+                    // gate as `sta_global`. `sta_global_strict` is
+                    // the assignment-expression path; under strict
+                    // mode (Cynic's only mode) a non-writable own
+                    // data property of the global object refuses
+                    // the write with TypeError.
+                    if (realm.globals.target) |gt| {
+                        if (gt.property_flags.get(key_s.bytes)) |flags| {
+                            if (!flags.writable) {
+                                const ex = try makeTypeError(realm, "Cannot assign to read-only property on globalThis");
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue;
+                            }
+                        }
+                    }
                     try realm.globals.put(realm.allocator, key_s.bytes, acc);
                 }
             },
