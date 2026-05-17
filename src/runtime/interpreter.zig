@@ -6487,20 +6487,33 @@ fn runFrames(
                 }
                 // §9.1.1.4 SetMutableBinding — declarative env-
                 // record first. If the binding is `const`, §13.3.1 /
-                // §13.15.2 step 1.f.iii throws TypeError. Otherwise
-                // overwrite the lex slot. Only fall through to the
-                // object env-record when the name isn't lex-
-                // declared.
+                // §13.15.2 step 1.f.iii throws TypeError, BUT only
+                // for re-assignment — the spec routes the very first
+                // write to a `const` slot through InitializeBinding,
+                // not SetMutableBinding. Cynic's identifier `let` /
+                // `const` declarator emits the dedicated
+                // `sta_global_init` opcode for that, but the
+                // destructuring path (`const [x] = iter;`,
+                // `const {a} = obj;`) lowers each leaf through the
+                // shared `assignToBinding` → `emitStoreBinding`
+                // helper which lands here. Detect "first init" by
+                // checking the current slot for the TDZ Hole; if so
+                // the write IS the InitializeBinding and the
+                // immutability gate doesn't fire. Otherwise it's a
+                // user-visible reassignment and we throw.
                 if (realm.globals.hasLexicalDeclaration(key_s.bytes)) {
                     if (realm.globals.isLexConst(key_s.bytes)) {
-                        const ex = try makeTypeError(realm, "Assignment to constant variable");
-                        f.ip = ip;
-                        f.accumulator = acc;
-                        committed = true;
-                        if (!try unwindThrow(allocator, realm, frames, ex)) {
-                            return .{ .thrown = ex };
+                        const cur = realm.globals.getDecl(key_s.bytes) orelse Value.hole_;
+                        if (!cur.isHole()) {
+                            const ex = try makeTypeError(realm, "Assignment to constant variable");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue;
                         }
-                        continue;
                     }
                     try realm.globals.putDecl(realm.allocator, key_s.bytes, acc);
                 } else {
