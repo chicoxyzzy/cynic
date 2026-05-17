@@ -2237,6 +2237,19 @@ pub fn resumeAsyncFunction(
     if (gen.state == .executing) return; // re-entrancy guard
     gen.state = .executing;
 
+    // §16.2.1.5.1 [[IsAsync]] modules — restore the owning
+    // module so `module_export` on resume finds the right
+    // namespace. The original frame ran with
+    // `realm.current_module = mr`, but the synchronous
+    // suspend popped back to its caller and (eventually)
+    // unwound the harness's `defer realm.current_module = …`.
+    // The drain that calls into here happens with whatever
+    // current_module the host had set; for an async-module
+    // resume we need to thread it back through gen.
+    const saved_module = realm.current_module;
+    if (gen.owning_module) |om| realm.current_module = om;
+    defer realm.current_module = saved_module;
+
     var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
     defer {
         for (frames.items) |*f| if (f.owns_registers) allocator.free(f.registers);
@@ -3072,6 +3085,17 @@ pub fn startAsyncCall(
     // generators.
     gen.home_object = home_object;
     gen.home_function = home_function;
+    // §16.2.1.5.1 [[IsAsync]] module entry — capture the
+    // current module record so deferred resumes can re-thread
+    // `realm.current_module` for `module_export`. Plain
+    // `async function` calls happen with `current_module` null
+    // anyway (and stay null on resume), so this is a no-op for
+    // them. For an async module body, `chunk.is_async_module`
+    // is true; the realm's current_module is the module whose
+    // namespace exports should land on.
+    if (chunk.is_async_module) {
+        gen.owning_module = realm.current_module;
+    }
     var i: usize = 0;
     while (i < args.len and i < gen.registers.len) : (i += 1) {
         gen.registers[i] = args[i];

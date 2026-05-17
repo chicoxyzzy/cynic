@@ -1875,6 +1875,7 @@ fn classifyAndRun(
         }
     }
 
+    var entry_chunk_async = false;
     const run_result: cynic.runtime.interpreter.RunResult = blk: {
         if (is_module) {
             const chunk_ptr = realm.allocator.create(@import("cynic").bytecode.chunk.Chunk) catch return error.OutOfMemory;
@@ -1890,6 +1891,7 @@ fn classifyAndRun(
                 if (expected_negative) |_| return .{ .kind = .pass_negative };
                 return .{ .kind = .fail_false_reject };
             };
+            entry_chunk_async = chunk_ptr.is_async_module;
             try realm.script_chunks.append(realm.allocator, chunk_ptr);
             // sec-moduledeclarationinstantiation -- register the entry
             // module under its own URL so a self-import (or a sibling
@@ -1949,6 +1951,27 @@ fn classifyAndRun(
     cynic.runtime.interpreter.drainMicrotasks(arena, &realm) catch {
         test_threw = true;
     };
+
+    // §16.2.1.5.1 [[IsAsync]] entry-module variant — a module
+    // body with top-level `await` is wrapped in
+    // `startAsyncCall`, so `run` returns a pending result
+    // Promise rather than the body's completion. After the
+    // microtask drain, that Promise has settled (or stayed
+    // pending if the body is waiting on a never-settled
+    // source); a rejected result is the module's spec-level
+    // abrupt completion. Only consult this for chunks whose
+    // compiler flagged top-level await — otherwise we'd
+    // surface unrelated Promise values that happen to be left
+    // in the accumulator.
+    if (is_module and !test_threw and run_result == .value) {
+        if (entry_chunk_async) {
+            if (cynic.runtime.heap.valueAsPlainObject(run_result.value)) |p_obj| {
+                if (p_obj.isPromise() and p_obj.promise_state == .rejected) {
+                    test_threw = true;
+                }
+            }
+        }
+    }
 
     if (expected_negative) |_| {
         return .{ .kind = if (test_threw) .pass_negative else .fail_false_accept };
