@@ -2137,6 +2137,13 @@ pub fn objectIsExtensible(realm: *Realm, this_value: Value, args: []const Value)
     // `Object.preventExtensions(fn)`).
     if (heap_mod.valueAsFunction(arg)) |fn_obj| return if (fn_obj.extensible) Value.true_ else Value.false_;
     const obj = heap_mod.valueAsPlainObject(arg) orelse return Value.false_;
+    // §9.4.6.3 [[IsExtensible]] for a Module Namespace exotic
+    // always returns `false` — irrespective of whether
+    // `getModuleNamespace` has finalised the brand bag yet.
+    // A cycle that re-enters the entry module observes the
+    // partial namespace mid-evaluation; the spec still requires
+    // [[IsExtensible]] = false there.
+    if (obj.is_module_namespace) return Value.false_;
     // §10.5.3 Proxy [[IsExtensible]] — trap dispatch with the
     // invariant that the result must match the target's actual
     // extensibility.
@@ -2315,9 +2322,13 @@ pub fn objectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
         // `extensible` is false the new prototype MUST SameValue
         // the current one; otherwise return false and let
         // Object.setPrototypeOf rethrow. Module Namespace exotics
-        // are always non-extensible with `prototype === null`,
-        // so any non-null target is rejected.
-        if (!obj.extensible) {
+        // §9.4.6.1 Module Namespace exotics are always non-extensible
+        // with prototype === null, irrespective of whether the
+        // `extensible` slot has been finalised yet during a cycle.
+        // Treat `is_module_namespace` as the authoritative
+        // IsExtensible-false signal here so a `Object.setPrototypeOf
+        // (ns, anything)` always rejects per the spec.
+        if (!obj.extensible or obj.is_module_namespace) {
             if (new_proto != obj.prototype) {
                 return throwTypeError(realm, "Cannot set prototype on non-extensible object");
             }
