@@ -7905,7 +7905,22 @@ fn assignPatternLeaf(self: *Compiler, target: ast.statement.BindingTarget) Compi
 
 fn assignToBinding(self: *Compiler, name: []const u8, span: Span) CompileError!void {
     const scope = self.scope orelse return error.UnresolvedReference;
-    const binding = scope.resolve(name) orelse return error.UnresolvedReference;
+    // §13.7.5.13 ForIn/OfBodyEvaluation step 5.h.i — an unresolved
+    // bare identifier resolves to an unresolvable Reference; PutValue
+    // throws ReferenceError at runtime (strict mode). Synthesise a
+    // global binding so the for-of/for-in LHS emits the same
+    // `sta_global_strict` shape as `x = e` does. Fixtures with a
+    // never-entered loop (e.g. `for (k in undefined)`) compile and
+    // run without the ReferenceError firing — it would only fire on
+    // the first iteration assignment, which never happens.
+    const binding = scope.resolve(name) orelse Binding{
+        .name = name,
+        .env_slot = 0,
+        .env_depth = 0,
+        .kind = .var_,
+        .span = span,
+        .is_global = true,
+    };
     try self.emitStoreBinding(binding, span);
 }
 
