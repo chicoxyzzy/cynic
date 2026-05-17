@@ -412,10 +412,24 @@ fn stringMatchDispatched(realm: *Realm, this_value: Value, args: []const Value) 
     if (this_value.isNull() or this_value.isUndefined())
         return throwTypeError(realm, "String.prototype.match called on null or undefined");
     const regexp_arg = argOr(args, 0, Value.undefined_);
+    // §22.1.3.13 step 2 — direct @@match on the supplied regexp.
     if (try getSymbolMethod(realm, regexp_arg, "@@match")) |matcher| {
         const recv_s = try coerceThisToJSString(realm, this_value);
         return invokeSymbolMethod(realm, matcher, regexp_arg, Value.fromString(recv_s), null);
     }
+    // §22.1.3.13 step 4-5 — wrap the argument in a fresh RegExp via
+    // `RegExpCreate(regexp, undefined)`, then `Invoke(rx, @@match,
+    // «S»)`. A user-overridden `RegExp.prototype[Symbol.match]`
+    // fires here even when the source argument is a bare string,
+    // because @@match lives on the freshly-allocated regex's
+    // prototype.
+    const recv_s = try coerceThisToJSString(realm, this_value);
+    const rx = try regExpCreate(realm, regexp_arg, null);
+    if (try getSymbolMethod(realm, rx, "@@match")) |matcher| {
+        return invokeSymbolMethod(realm, matcher, rx, Value.fromString(recv_s), null);
+    }
+    // %RegExp.prototype%[@@match] is installed by every realm; the
+    // fall-through is a safety net.
     return stringMatch(realm, this_value, args);
 }
 
@@ -444,7 +458,10 @@ pub fn stringMatch(realm: *Realm, this_value: Value, args: []const Value) Native
         };
         return switch (out) {
             .value, .yielded => |v| v,
-            .thrown => return error.NativeThrew,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
         };
     }
     // Global: walk all matches.
@@ -465,7 +482,10 @@ pub fn stringMatch(realm: *Realm, this_value: Value, args: []const Value) Native
         };
         const v = switch (out) {
             .value, .yielded => |x| x,
-            .thrown => return error.NativeThrew,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
         };
         if (v.isNull()) break;
         const match_arr = heap_mod.valueAsPlainObject(v) orelse break;
@@ -575,7 +595,18 @@ fn regExpCreate(realm: *Realm, pattern: Value, flags: ?[]const u8) NativeError!V
     };
     return switch (out) {
         .value, .yielded => |v| if (v.isUndefined()) heap_mod.taggedObject(inst) else v,
-        .thrown => return error.NativeThrew,
+        .thrown => |ex| {
+            // §22.2.3.3 — propagate the thrown value as a host
+            // exception. Without anchoring it in
+            // `realm.pending_exception`, the surrounding native
+            // method (String.prototype.match here) returns
+            // `error.NativeThrew` but the user JS sees a stale /
+            // default `[object Object]` because the native dispatch
+            // re-creates a TypeError when no pending exception is
+            // present.
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
     };
 }
 

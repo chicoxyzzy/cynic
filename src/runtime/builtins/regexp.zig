@@ -85,8 +85,12 @@ export fn lre_check_timeout(opaque_ptr: ?*anyopaque) c_int {
 // ── §22.2 RegExp install ────────────────────────────────────────────────────
 
 pub fn install(realm: *Realm) !void {
+    // §22.2.4.1 RegExp(pattern, flags) — callable both with and
+    // without `new`. The constructor body handles the no-NewTarget
+    // path (it's an "if NewTarget is undefined" branch in spec).
     const r = try installConstructor(realm, .{
         .name = "RegExp", .ctor = regexpConstructor, .arity = 2,
+        .is_class = false,
         .set_home_object = false,
     });
     const fn_obj = r.ctor;
@@ -1268,7 +1272,6 @@ fn regexpProtoMatchAll(realm: *Realm, this_value: Value, args: []const Value) Na
 }
 
 fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "RegExp constructor requires 'new'");
     const pattern_v = argOr(args, 0, Value.undefined_);
     const flags_v = argOr(args, 1, Value.undefined_);
     // §22.2.4.1 step 4 — if pattern is a RegExp (has [[OriginalSource]] /
@@ -1281,6 +1284,23 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
         if (po.regexp_source != null) po else null
     else
         null;
+    // §22.2.4.1 step 1-3 — when NewTarget is undefined and pattern is
+    // already a RegExp with `flags` also undefined, return the
+    // pattern unchanged. Otherwise (step 5.a) RegExpAlloc(NewTarget)
+    // allocates a fresh instance. Without `new`, `this_value` is the
+    // global object (or undefined under strict-mode call); allocate
+    // a fresh instance with `%RegExp.prototype%` so the no-new path
+    // works like every other "callable constructor" (Boolean, Number,
+    // Date, Array, ...).
+    const this_obj = heap_mod.valueAsPlainObject(this_value);
+    const global_obj: ?*JSObject = realm.globals.target;
+    const called_with_new = this_obj != null and this_obj.? != global_obj;
+    const inst = if (called_with_new) this_obj.? else blk: {
+        if (pattern_is_regex) |po| if (flags_v.isUndefined()) return heap_mod.taggedObject(po);
+        const fresh = realm.heap.allocateObject() catch return error.OutOfMemory;
+        fresh.prototype = realm.intrinsics.regexp_prototype;
+        break :blk fresh;
+    };
     const pat_s = if (pattern_v.isUndefined())
         realm.heap.allocateString("") catch return error.OutOfMemory
     else if (pattern_is_regex) |po|
@@ -1308,7 +1328,7 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     // bytecode is cached on the instance, so methods that go
     // through `ensureBytecode` reuse it.
     _ = try ensureBytecode(realm, inst);
-    return this_value;
+    return heap_mod.taggedObject(inst);
 }
 
 // ── Pattern compile cache ───────────────────────────────────────────────────
