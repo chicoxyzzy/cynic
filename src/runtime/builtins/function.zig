@@ -155,33 +155,56 @@ fn functionHasInstance(realm: *Realm, this_value: Value, args: []const Value) Na
     var target_fn = heap_mod.valueAsFunction(this_value) orelse return Value.false_;
     while (target_fn.bound_target) |inner| target_fn = inner;
 
-    // §7.3.20 OrdinaryHasInstance step 6 — `Let P be ? Get(C,
-    // "prototype")`. Read the JS-visible `prototype` property
-    // (which honors user assignment like `f.prototype = "x"`,
-    // landing in the property bag and shadowing the
-    // auto-allocated `.prototype` slot). Per step 6.b, if `P` is
-    // not an Object, throw TypeError — primitive `prototype`s
-    // (`'string'`, `Symbol()`, `86`, etc.) all hit this.
-    const target_proto_v = target_fn.get("prototype");
+    // §7.3.20 OrdinaryHasInstance step 4 — `Let P be ? Get(C,
+    // "prototype")`. Must walk accessors so a poisoned
+    // `Object.defineProperty(f, "prototype", {get(){throw}})`
+    // surfaces the thrown completion (test262
+    // `this-val-poisoned-prototype.js`). User-set data properties
+    // ride the same path and shadow the auto-allocated slot.
+    const target_proto_v = blk: {
+        if (target_fn.accessors.get("prototype")) |acc| {
+            if (acc.getter) |getter| {
+                const out = interpreter.callJSFunction(realm.allocator, realm, getter, this_value, &.{}) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                break :blk switch (out) {
+                    .value, .yielded => |v_| v_,
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                };
+            }
+            break :blk Value.undefined_;
+        }
+        break :blk target_fn.get("prototype");
+    };
     const target_proto: *JSObject = heap_mod.valueAsPlainObject(target_proto_v) orelse {
         return throwTypeError(realm, "Function has non-object prototype in instanceof check");
     };
 
-    if (heap_mod.valueAsPlainObject(v)) |v_obj| {
-        var cursor: ?*JSObject = v_obj.prototype;
-        while (cursor) |p| : (cursor = p.prototype) {
-            if (p == target_proto) return Value.true_;
-        }
+    // §7.3.20 step 7 — walk the prototype chain by repeatedly
+    // calling `O.[[GetPrototypeOf]]`. For Proxy receivers this
+    // fires the `getPrototypeOf` handler trap at each step; an
+    // abrupt completion from any step short-circuits the walk
+    // (test262 `value-get-prototype-of-err.js`). Route through
+    // `objectGetPrototypeOf` so the trap dispatch + invariants
+    // are honoured.
+    if (heap_mod.valueAsPlainObject(v) == null and heap_mod.valueAsFunction(v) == null) {
         return Value.false_;
     }
-    if (heap_mod.valueAsFunction(v)) |fv| {
-        var cursor: ?*JSObject = fv.proto;
-        while (cursor) |p| : (cursor = p.prototype) {
-            if (p == target_proto) return Value.true_;
+    const get_proto = @import("object.zig").objectGetPrototypeOf;
+    var cursor_v: Value = v;
+    while (true) {
+        const args_one = [_]Value{cursor_v};
+        const next_v = try get_proto(realm, Value.undefined_, &args_one);
+        if (next_v.isNull()) return Value.false_;
+        if (heap_mod.valueAsPlainObject(next_v)) |po| {
+            if (po == target_proto) return Value.true_;
         }
-        return Value.false_;
+        cursor_v = next_v;
     }
-    return Value.false_;
 }
 
 // ── Function.prototype.{call, apply, bind} ──────────────────────────────────
@@ -305,14 +328,15 @@ fn functionBind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         owned_args = buf;
     }
 
-    // §20.2.3.2 step 7-8 — compute bound length. Read
-    // target.length only if it's an own property. If non-Number
-    // or absent, L = 0; otherwise
+    // §20.2.3.2 step 5-7 — `targetHasLength = ? HasOwnProperty(Target,
+    // "length")`. Only read `length` when it is an own property
+    // of the target; non-own lengths (e.g. inherited via
+    // setPrototypeOf) yield L = 0. If `length` is an own data /
+    // accessor whose Type is not Number, L = 0. Otherwise
     // L = max(0, ToInteger(targetLen) - args.length).
-    // §20.2.3.2 step 7-8 — `? Get(Target, "length")`. Spec is
-    // accessor-aware; a thrown getter propagates.
     var bound_length: f64 = 0;
-    {
+    const has_own_length = target.accessors.contains("length") or target.properties.contains("length");
+    if (has_own_length) {
         const len_v = switch (try getAccessorAwareOnFunction(realm, target, "length")) {
             .value => |v| v,
             .thrown => |ex| {
@@ -320,6 +344,10 @@ fn functionBind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
                 return error.NativeThrew;
             },
         };
+        // §20.2.3.2 step 7.b — `If Type(targetLen) is not Number,
+        // let L be 0`. Type() distinguishes primitive Number from
+        // Object (a boxed Number wrapper is Type Object), so any
+        // non-primitive-Number value stays at the 0 default.
         if (len_v.isInt32()) {
             const li: i64 = @as(i64, len_v.asInt32()) - @as(i64, @intCast(prefix_args.len));
             bound_length = @floatFromInt(@max(@as(i64, 0), li));
