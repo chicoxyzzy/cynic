@@ -4943,7 +4943,16 @@ fn compileFunctionDecl(self: *Compiler, fd: ast.statement.FunctionDecl) CompileE
 fn compileClassDecl(self: *Compiler, cd: ast.statement.ClassDecl) CompileError!void {
     // §12.7 — bind by StringValue.
     const name_slice = try self.bindingName(cd.name.span);
-    const binding = try self.declareBindingFull(name_slice, .let_, cd.name.span);
+    // §15.7.1 / §13.2.1 — `class C {}` is a LexicallyScopedDeclaration:
+    // the binding slot is pre-allocated by `hoistLetConst` so an
+    // earlier-in-source-order inner function closing over `C` can
+    // resolve to the binding and observe its TDZ Hole.
+    // `lookupLocal` finds the hoisted binding; if the hoist
+    // skipped this scope (Cynic also reaches `compileClassDecl`
+    // from non-hoisting paths like switch-case bodies), fall
+    // through to a fresh declare.
+    const binding = self.scope.?.lookupLocal(name_slice) orelse
+        try self.declareBindingFull(name_slice, .let_, cd.name.span);
     try self.emitClassBuild(name_slice, if (cd.superclass) |s| &s else null, cd.body, cd.span);
     try self.emitStoreBindingInit(binding, cd.span);
 }
@@ -6033,6 +6042,22 @@ fn hoistLetConst(self: *Compiler, body: []ast.statement.Statement) CompileError!
                 else => continue,
             }
         } else s;
+        // §15.7.1 ClassDeclaration — `class C {}` introduces a
+        // mutable lexical binding for `C` in the enclosing scope.
+        // §13.2.1 LexicallyScopedDeclarations counts it alongside
+        // `let` / `const` for hoisting, so the binding is *visible*
+        // (as a TDZ-Hole sentinel) before the class statement runs.
+        // Module top-level `class C {}` must therefore behave the
+        // same way `let C` does: an inner function `() => typeof C`
+        // closing over `C` resolves to the lex binding and throws
+        // ReferenceError on read instead of falling through to the
+        // global-undef miss path. Treat class-decl as a let hoist.
+        if (target.* == .class_decl) {
+            const cd = target.class_decl;
+            const name = try self.bindingName(cd.name.span);
+            _ = try self.declareBindingFull(name, .let_, cd.name.span);
+            continue;
+        }
         if (target.* != .lexical) continue;
         const ld = target.lexical;
         if (ld.kind == .var_) continue;
