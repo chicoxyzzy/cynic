@@ -10284,7 +10284,7 @@ fn proxyDeleteTrap(
             // and (proxy-missing-checks: §10.5.10 step 14) when
             // target is non-extensible and the property exists on
             // target.
-            const has_own = target.property_flags.contains(key) and (target.properties.contains(key) or target.accessors.contains(key));
+            const has_own = target.properties.contains(key) or target.accessors.contains(key);
             if (has_own) {
                 const flags = target.flagsFor(key);
                 if (!flags.configurable) {
@@ -10365,7 +10365,7 @@ fn proxyHasTrap(
         // property doesn't exist, nor pretend an own property of a
         // non-extensible target doesn't exist.
         if (!b) {
-            const has_own = target.property_flags.contains(key) and (target.properties.contains(key) or target.accessors.contains(key));
+            const has_own = target.properties.contains(key) or target.accessors.contains(key);
             if (has_own) {
                 const flags = target.flagsFor(key);
                 if (!flags.configurable) {

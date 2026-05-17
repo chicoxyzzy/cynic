@@ -232,16 +232,19 @@ pub fn nativeProxyHas(realm: *Realm, proxy: *JSObject, key: []const u8) NativeEr
     const v = try callTrap(realm, trap_fn, handler, &args);
     const arith = @import("../interpreter_arith.zig");
     const b = arith.toBoolean(v);
-    // §10.5.7 invariant — can't pretend a non-configurable own
-    // property doesn't exist.
+    // §10.5.7 invariants — can't pretend a non-configurable own
+    // property doesn't exist, nor an own property of a non-
+    // extensible target.
     if (!b) {
-        if (target.property_flags.get(key)) |flags| {
-            if (!flags.configurable and (target.properties.contains(key) or target.accessors.contains(key))) {
+        const has_own = target.properties.contains(key) or target.accessors.contains(key);
+        if (has_own) {
+            const flags = target.flagsFor(key);
+            if (!flags.configurable) {
                 return throwTypeError(realm, "proxy 'has' trap returned false for non-configurable own property");
             }
-        }
-        if (!target.extensible and (target.properties.contains(key) or target.accessors.contains(key))) {
-            return throwTypeError(realm, "proxy 'has' trap returned false for own property of non-extensible target");
+            if (!target.extensible) {
+                return throwTypeError(realm, "proxy 'has' trap returned false for own property of non-extensible target");
+            }
         }
     }
     return .{ .boolean = b };
@@ -261,11 +264,18 @@ pub fn nativeProxyDelete(realm: *Realm, proxy: *JSObject, key: []const u8) Nativ
     const arith = @import("../interpreter_arith.zig");
     const b = arith.toBoolean(v);
     if (b) {
-        // §10.5.10 invariant — can't delete a non-configurable
-        // own property.
-        if (target.property_flags.get(key)) |flags| {
-            if (!flags.configurable and (target.properties.contains(key) or target.accessors.contains(key))) {
+        // §10.5.10 invariants — can't report success for a non-
+        // configurable own property, nor for an own property of a
+        // non-extensible target (§10.5.10 step 14 added by the
+        // `proxy-missing-checks` proposal).
+        const has_own = target.properties.contains(key) or target.accessors.contains(key);
+        if (has_own) {
+            const flags = target.flagsFor(key);
+            if (!flags.configurable) {
                 return throwTypeError(realm, "proxy 'deleteProperty' trap reported success for non-configurable own property");
+            }
+            if (!target.extensible) {
+                return throwTypeError(realm, "proxy 'deleteProperty' trap reported success for own property of non-extensible target");
             }
         }
     }

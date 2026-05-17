@@ -1525,6 +1525,13 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
                     // non-configurable.
                     const result_obj = heap_mod.valueAsPlainObject(result_v).?;
                     const parsed_inv = parseDescriptor(realm, result_obj) catch return result_v;
+                    // §10.5.5 step 17 — when the target lacks the
+                    // property AND is non-extensible, the trap MUST
+                    // report undefined. A descriptor return here is
+                    // an invariant violation.
+                    if (!target_had and !proxy_target.extensible) {
+                        return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy returned a descriptor for an absent property of a non-extensible target");
+                    }
                     if (parsed_inv.has_configurable and !parsed_inv.configurable) {
                         if (!target_had) {
                             return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy reported non-configurable for an absent target property");
