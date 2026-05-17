@@ -3338,8 +3338,12 @@ fn lookupToStringTag(realm: *Realm, this_value: Value) NativeError!?Value {
 }
 
 fn objectProtoValueOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
     _ = args;
-    return this_value;
+    // §20.1.3.7 Object.prototype.valueOf — Return ? ToObject(this value).
+    // Wraps primitives (booleans, numbers, strings) into their wrapper
+    // objects and throws TypeError on null/undefined. `toObjectThis` is
+    // a no-op pass-through for plain objects, so `({}).valueOf() === ({})`
+    // still holds when the receiver is already an object.
+    return heap_mod.taggedObject(try intrinsics.toObjectThis(realm, this_value));
 }
 
