@@ -263,6 +263,15 @@ pub const skip_ses_substrings = [_][]const u8{
     "Function/prototype/call/S15.3.4.4_A5_T8.js",
     "Function/prototype/call/S15.3.4.4_A7_T6.js",
 
+    // `language/expressions/compound-assignment/11.13.2-*-s.js` —
+    // Sputnik strict-mode shape tests. Every fixture wraps the
+    // operator under test in `assert.throws(ReferenceError, () =>
+    // eval("expr *= 1"))` — the body is `eval(string)`, permanent
+    // SES carve-out (AGENTS.md "eval and runtime code construction").
+    // The non-`-s.js` siblings + `S11.13.2_A*` Sputnik
+    // coercion-order tests stay attempted. 9 fixtures.
+    "language/expressions/compound-assignment/11.13.2-",
+
     // `built-ins/global/S10.2.3_A*.js` — Sputnik-era tests that
     // verify global-property reachability from `eval`-evaluated
     // code (e.g. `eval('if (NaN === null) { throw …; }')`).
