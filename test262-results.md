@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 89.10 % | 95.93 % | 36006 / 40411 | 36006 / 37534 |
+| **runtime** | 89.38 % | 96.24 % | 36084 / 40372 | 36084 / 37495 |
 
 
 ## Where the runtime stands, by area
@@ -26,8 +26,8 @@ browser-era built-ins …).
 | **_100–999 fails_** | | | | | |
 | `built-ins/Object` | 3199 | 127 | 80 | 94 % | 96 % |
 | `built-ins/RegExp` | 1471 | 131 | 161 | 83 % | 92 % |
-| `language/expressions` | 9520 | 354 | 975 | 88 % | 96 % |
-| `language/statements` | 8222 | 205 | 672 | 90 % | 98 % |
+| `language/expressions` | 9545 | 293 | 975 | 88 % | 97 % |
+| `language/statements` | 8243 | 184 | 672 | 91 % | 98 % |
 | **_10–99 fails_** | | | | | |
 | `built-ins/Array` | 2969 | 71 | 36 | 97 % | 98 % |
 | `built-ins/ArrayBuffer` | 166 | 25 | 4 | 85 % | 87 % |
@@ -49,7 +49,7 @@ browser-era built-ins …).
 | `built-ins/WeakMap` | 87 | 14 | 0 | 86 % | 86 % |
 | `built-ins/WeakSet` | 74 | 10 | 0 | 88 % | 88 % |
 | `built-ins/global` | 17 | 12 | 0 | 59 % | 59 % |
-| `language/module-code` | 518 | 64 | 14 | 87 % | 89 % |
+| `language/module-code` | 550 | 29 | 14 | 93 % | 95 % |
 | **_1–9 fails_** | | | | | |
 | `built-ins/AggregateError` | 19 | 5 | 0 | 79 % | 79 % |
 | `built-ins/ArrayIteratorPrototype` | 12 | 7 | 8 | 44 % | 63 % |
@@ -158,16 +158,17 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-17 — cynic `146177d`, test262 `d0c1b455`
+### 2026-05-17 — cynic `945c547`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 89.10 % | 95.93 % | 36006 / 40411 | 36006 / 37534 | +130 | 1m 48s |
+| **runtime** | 89.38 % | 96.24 % | 36084 / 40372 | 36084 / 37495 | +208 | 2m 05s |
 
 Biggest movers (runtime):
 
-- `language/module-code` +3
-- `language/expressions` +1
+- `language/module-code` +32
+- `language/expressions` +25
+- `language/statements` +21
 
 ### 2026-05-16 — cynic `452bafa`, test262 `d0c1b455`
 
