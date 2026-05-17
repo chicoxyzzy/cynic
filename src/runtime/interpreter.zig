@@ -4150,6 +4150,15 @@ fn runFrames(
                         else
                             ensureGeneratorPrototype(realm) catch realm.intrinsics.object_prototype;
                     }
+                } else if (tmpl.is_async) {
+                    // §27.7.4 — `async function f(){}` does NOT have
+                    // an own `prototype` slot (unlike sync functions
+                    // and generator / async-generator functions).
+                    // `allocateFunction` auto-installs one for every
+                    // non-arrow; drop it so reads return `undefined`
+                    // and `Object.defineProperty(f, 'prototype', {…})`
+                    // succeeds as a fresh data / accessor descriptor.
+                    fn_obj.prototype = null;
                 } else if (fn_obj.prototype) |proto| {
                     // §10.2.4 — a regular function's `.prototype`
                     // object inherits from `%Object.prototype%`.

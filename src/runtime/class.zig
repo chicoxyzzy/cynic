@@ -194,9 +194,13 @@ pub fn buildClass(
             } else if (fn_obj.prototype) |p| heap_mod.taggedObject(p) else Value.undefined_;
             if (heap_mod.valueAsPlainObject(parent_proto_v)) |po| {
                 parent_proto = po;
-            } else if (!parent_proto_v.isNull() and !parent_proto_v.isUndefined()) {
+            } else if (!parent_proto_v.isNull()) {
                 // §15.7.14 step 7.h — \`prototype\` of the parent is
                 // present but not Object or null → TypeError.
+                // \`undefined\` is in scope here too: a bound function
+                // has no own \`prototype\` slot and reading it returns
+                // \`undefined\`, which is also not Object / null and so
+                // must trip this branch (matches V8 / SpiderMonkey).
                 realm.pending_exception = @import("intrinsics.zig").newTypeError(realm, "Class extends value's 'prototype' is not an object or null") catch return error.OutOfMemory;
                 return error.Propagated;
             }

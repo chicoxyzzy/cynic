@@ -42,6 +42,17 @@ pub fn install(realm: *Realm) !void {
     installed.ctor.prototype = null;
     // §28.2.2.1 Proxy.revocable — static method, length 2.
     try installNativeMethod(realm, installed.ctor, "revocable", proxyRevocable, 2);
+
+    // §28.2.2 — `Proxy` does not have a `prototype` own
+    // property (the spec defines Proxy.revocable and no
+    // others, and §28.2.2.2 is just `length=2`). The shared
+    // `installConstructor` helper above creates one by default
+    // for ordinary constructors; drop it so reads return
+    // `undefined`. Trips the
+    // `class P extends Proxy {}` path (§15.7.14 step 7.g):
+    // Get(Proxy, 'prototype') = undefined → not Object / null
+    // → TypeError, matching V8 / SpiderMonkey.
+    installed.ctor.prototype = null;
 }
 
 fn proxyConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
