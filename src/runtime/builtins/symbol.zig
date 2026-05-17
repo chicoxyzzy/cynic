@@ -104,9 +104,23 @@ fn symbolToPrimitive(realm: *Realm, this_value: Value, args: []const Value) Nati
     return symbolValueOf(realm, this_value, &.{});
 }
 
+/// §20.4.3.3.1 ThisSymbolValue(value) — accepts either a Symbol
+/// primitive or a Symbol wrapper object (whose [[SymbolData]]
+/// internal slot lives in `boxed_primitive`). Used by every
+/// Symbol.prototype method per spec.
+fn thisSymbolValue(this_value: Value) ?*@import("../symbol.zig").JSSymbol {
+    if (heap_mod.valueAsSymbol(this_value)) |s| return s;
+    if (heap_mod.valueAsPlainObject(this_value)) |obj| {
+        if (obj.boxed_primitive) |bp| {
+            if (heap_mod.valueAsSymbol(bp)) |s| return s;
+        }
+    }
+    return null;
+}
+
 fn symbolToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    const sym = heap_mod.valueAsSymbol(this_value) orelse return throwTypeError(realm, "Symbol.prototype.toString requires a Symbol receiver");
+    const sym = thisSymbolValue(this_value) orelse return throwTypeError(realm, "Symbol.prototype.toString requires a Symbol receiver");
     var buf: [128]u8 = undefined;
     const desc: []const u8 = sym.description orelse "";
     const slice = std.fmt.bufPrint(&buf, "Symbol({s})", .{desc}) catch return error.OutOfMemory;
@@ -128,7 +142,7 @@ fn symbolValueOf(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 
 fn symbolDescriptionGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    const sym = heap_mod.valueAsSymbol(this_value) orelse return throwTypeError(realm, "Symbol.prototype.description requires a Symbol receiver");
+    const sym = thisSymbolValue(this_value) orelse return throwTypeError(realm, "Symbol.prototype.description requires a Symbol receiver");
     if (sym.description) |d| {
         const s = realm.heap.allocateString(d) catch return error.OutOfMemory;
         return Value.fromString(s);
