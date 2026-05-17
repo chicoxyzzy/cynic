@@ -844,37 +844,34 @@ fn asyncGeneratorResumeNext(
                 return;
             },
             .value => |v| {
-                // §27.6.3.1 step 4.g + AsyncGeneratorDrainQueue:
-                // body's normal completion → CompleteStep with
-                // the request, then DrainQueue. Defer settlement
-                // (matches the spec's microtask discipline: the
-                // body's return ran inside a microtask
-                // continuation; the cap settle for the head
-                // request happens in that same task, but
-                // subsequent buffered requests settle in their
-                // own DrainQueue steps).
+                // §27.6.3.1 AsyncGeneratorStart step 4.g —
+                // `AsyncGeneratorResolve(generator, resultValue,
+                // true)`. Per §27.6.3.6 this calls
+                // `Call(promiseCapability.[[Resolve]], …)`
+                // *synchronously*; the `.then` reactions are
+                // queued as ordinary microtasks at settle time
+                // (one tick of latency from the consumer's
+                // perspective, no extra tick added by us).
+                // `return-undefined-implicit-and-explicit.js`
+                // asserts that an explicit `return undefined`
+                // ticks one extra time (via §13.10.1 step 3
+                // `Await(exprValue)` — emitted in the compiler)
+                // while bare `return;` does not. If we
+                // unnecessarily route the body's normal
+                // completion through `enqueueAsyncGenYield`, both
+                // forms add an extra tick and the gap collapses.
                 _ = gen.queue.orderedRemove(0);
-                gen.async_state = .suspended_await;
-                try realm.enqueueAsyncGenYield(
-                    gen,
-                    req.capability_promise,
-                    v,
-                    true,
-                    false,
-                );
-                return;
+                gen.state = .completed;
+                gen.async_state = .completed;
+                try settleAsyncGenRequest(realm, req.capability_promise, v, true);
+                continue;
             },
             .thrown => |ex| {
                 _ = gen.queue.orderedRemove(0);
-                gen.async_state = .suspended_await;
-                try realm.enqueueAsyncGenYield(
-                    gen,
-                    req.capability_promise,
-                    ex,
-                    false,
-                    true,
-                );
-                return;
+                gen.state = .completed;
+                gen.async_state = .completed;
+                try rejectAsyncGenRequest(realm, req.capability_promise, ex);
+                continue;
             },
         }
     }
@@ -2545,26 +2542,23 @@ pub fn resumeAsyncGeneratorOnSettle(
             }
         },
         .value => |v| {
+            // §27.6.3.1 AsyncGeneratorStart step 4.g —
+            // AsyncGeneratorResolve synchronously, same as the
+            // sync drain path in `asyncGeneratorResumeNext`.
+            // Routing through `enqueueAsyncGenYield` would add a
+            // spurious extra tick that breaks the tick-count
+            // assertions in `return-undefined-implicit-and-
+            // explicit.js`.
             gen.state = .completed;
-            gen.async_state = .suspended_await;
-            try realm.enqueueAsyncGenYield(
-                gen,
-                req.capability_promise,
-                v,
-                true,
-                false,
-            );
+            gen.async_state = .completed;
+            try settleAsyncGenRequest(realm, req.capability_promise, v, true);
+            try asyncGeneratorResumeNext(allocator, realm, gen);
         },
         .thrown => |ex| {
             gen.state = .completed;
-            gen.async_state = .suspended_await;
-            try realm.enqueueAsyncGenYield(
-                gen,
-                req.capability_promise,
-                ex,
-                false,
-                true,
-            );
+            gen.async_state = .completed;
+            try rejectAsyncGenRequest(realm, req.capability_promise, ex);
+            try asyncGeneratorResumeNext(allocator, realm, gen);
         },
     }
 }

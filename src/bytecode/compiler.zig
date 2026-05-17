@@ -4890,10 +4890,25 @@ fn compileSwitch(self: *Compiler, s: ast.statement.SwitchStmt) CompileError!void
 }
 
 fn compileReturn(self: *Compiler, s: ast.statement.ReturnStmt) CompileError!void {
+    // §13.10.1 ReturnStatement Runtime Semantics:
+    //   • `return;`                — exprValue is implicitly
+    //     `undefined`, NO Await (step 1: return Completion with
+    //     value undefined).
+    //   • `return Expression;`     — evaluate Expression; if the
+    //     enclosing function is async (regular async or async
+    //     generator), `Await(exprValue)` before completing. The
+    //     observable difference: explicit-form returns defer one
+    //     microtask; bare `return;` settles synchronously inside
+    //     the current task. (`return-undefined-implicit-and-
+    //     explicit.js` asserts the tick gap.)
+    const has_expr = s.argument != null;
     if (s.argument) |*arg| {
         try self.compileExpression(arg);
     } else {
         try self.builder.emitOp(.lda_undefined, s.span);
+    }
+    if (has_expr and self.current_is_async) {
+        try self.builder.emitOp(.await_, s.span);
     }
     // §7.4.6 IteratorClose — close every active for-of iterator
     // on the way out. Walks the loop chain stopping at the
