@@ -252,6 +252,25 @@ pub fn ownPropertyKeysOrdered(
             string_keys.append(realm.allocator, k) catch return error.OutOfMemory;
         }
     }
+    // §15.2.1.18 GetModuleNamespace step 3.c — re-export redirect
+    // keys (`namespace_redirects[K]`) are part of the namespace's
+    // [[Exports]] internal slot and appear in
+    // [[OwnPropertyKeys]]. Ambiguous keys are filtered out (per
+    // step 3.c.ii — they're dropped from the exported names).
+    if (obj.is_module_namespace) {
+        var rit = obj.namespace_redirects.iterator();
+        while (rit.next()) |entry| {
+            const k = entry.key_ptr.*;
+            if (obj.properties.contains(k)) continue;
+            if (obj.accessors.contains(k)) continue;
+            if (obj.ambiguous_namespace_keys.contains(k)) continue;
+            if (canonicalIntegerIndex(k)) |i| {
+                integer_keys.append(realm.allocator, .{ .idx = i, .key = k }) catch return error.OutOfMemory;
+            } else {
+                string_keys.append(realm.allocator, k) catch return error.OutOfMemory;
+            }
+        }
+    }
 
     std.mem.sort(KeyEntry, integer_keys.items, {}, struct {
         fn lessThan(_: void, a: KeyEntry, b: KeyEntry) bool {
@@ -751,27 +770,36 @@ fn moduleNamespaceDefineOwnProperty(
     // Symbol-keyed properties: the only ones present on a module
     // namespace are the `@@toStringTag` slot (and any well-known
     // symbol caller may try to add — those land here too). The
-    // existing-property check below handles them.
-    const had_own = target.properties.contains(key);
+    // existing-property check below handles them. Redirect-only
+    // entries (`namespace_redirects`) installed by re-exports
+    // are also "own" per §15.2.1.16.3 ResolveExport.
+    const had_own = target.properties.contains(key) or target.namespace_redirects.contains(key);
     if (!had_own) return false;
+    if (target.ambiguous_namespace_keys.contains(key)) return false;
     // Accessor descriptor against a data slot → reject.
     if (parsed.isAccessor()) return false;
     const cur_flags = target.flagsFor(key);
     if (parsed.has_configurable and parsed.configurable != cur_flags.configurable) {
-        // exported bindings are c:false; toString tag too. Any
-        // attempt to set c:true is a reject (cur is false).
         if (parsed.configurable) return false;
     }
     if (parsed.has_enumerable and parsed.enumerable != cur_flags.enumerable) {
-        // exported bindings are e:true; toString tag is e:false.
         return false;
     }
     if (parsed.has_writable and parsed.writable != cur_flags.writable) {
-        // exported bindings are w:true; toString tag is w:false.
         return false;
     }
     if (parsed.has_value) {
-        const cur_value = target.properties.get(key) orelse return false;
+        // §9.4.6.8 step 5 — SameValue against the current binding.
+        // For redirect entries we resolve through the chain so the
+        // SameValue applies to the source's value, not a Hole/empty.
+        const cur_value = blk: {
+            if (target.properties.get(key)) |v| break :blk v;
+            if (target.namespace_redirects.get(key)) |r| {
+                const resolved = @import("../module.zig").resolveRedirectChain(r.target_ns, r.target_key) catch return false;
+                break :blk resolved.ns.get(resolved.key);
+            }
+            return false;
+        };
         if (!@import("../intrinsics.zig").sameValue(parsed.value, cur_value)) return false;
     }
     return true;

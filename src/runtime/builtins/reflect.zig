@@ -527,7 +527,9 @@ fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) 
     // export names are permanent (return false). Symbol keys take
     // the OrdinaryDelete fall-through below, where the
     // non-configurable `@@toStringTag` install also rejects.
-    if (target.is_module_namespace and !std.mem.startsWith(u8, key_slice, "@@") and !std.mem.startsWith(u8, key_slice, "<sym:") and (target.properties.contains(key_slice) or target.accessors.contains(key_slice))) {
+    // Includes the `namespace_redirects` entries (re-exports
+    // installed by `module_reexport_named` / `module_reexport_star`).
+    if (target.is_module_namespace and !std.mem.startsWith(u8, key_slice, "@@") and !std.mem.startsWith(u8, key_slice, "<sym:") and (target.properties.contains(key_slice) or target.accessors.contains(key_slice) or target.namespace_redirects.contains(key_slice))) {
         return Value.false_;
     }
     // §10.1.10.1 — non-configurable own property → return false

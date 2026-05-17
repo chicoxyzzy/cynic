@@ -649,7 +649,30 @@ pub const JSObject = struct {
     /// `key`. Returns `PropertyFlags.default` (all-true) when no
     /// override is recorded.
     pub fn flagsFor(self: *const JSObject, key: []const u8) PropertyFlags {
-        return self.property_flags.get(key) orelse PropertyFlags.default;
+        if (self.property_flags.get(key)) |f| return f;
+        // §9.4.6.5 Module Namespace exotic — every exported binding
+        // descriptor is `{writable: true, enumerable: true,
+        // configurable: false}` regardless of when the binding was
+        // installed, so a self-import that reads
+        // `Object.getOwnPropertyDescriptor(ns, "X")` during the body
+        // (before the module's evaluation completes, when
+        // `getModuleNamespace`'s flag-lowering pass runs) still
+        // reports the spec descriptor. The `@@toStringTag` slot has
+        // an explicit entry in `property_flags` so it stays
+        // `{w:false, e:false, c:false}`.
+        if (self.is_module_namespace and
+            !std.mem.startsWith(u8, key, "@@") and
+            !std.mem.startsWith(u8, key, "<sym:"))
+        {
+            if (self.properties.contains(key) or self.namespace_redirects.contains(key)) {
+                return .{
+                    .writable = true,
+                    .enumerable = true,
+                    .configurable = false,
+                };
+            }
+        }
+        return PropertyFlags.default;
     }
 
     /// Set the value AND descriptor flags for `key`. Used by

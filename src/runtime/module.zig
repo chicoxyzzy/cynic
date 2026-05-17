@@ -178,13 +178,26 @@ pub fn getModuleNamespace(realm: *Realm, mr: *ModuleRecord) !*JSObject {
     }
 
     // §9.4.6.5 — exported bindings: {w:true, e:true, c:false}.
-    // Iterate `properties` and lower each entry's flags.
+    // Iterate `properties` and lower each entry's flags. Redirect
+    // entries (`namespace_redirects[K]`) are also exported
+    // bindings per §15.2.1.16.3 — give them the same flags so
+    // `Object.getOwnPropertyDescriptor(ns, "redirected")` reports
+    // the spec descriptor.
     var it = ns.properties.iterator();
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
         // Skip the @@toStringTag installed above — it has different
         // flags.
         if (std.mem.eql(u8, key, "@@toStringTag")) continue;
+        try ns.property_flags.put(realm.allocator, key, .{
+            .writable = true,
+            .enumerable = true,
+            .configurable = false,
+        });
+    }
+    var rit = ns.namespace_redirects.iterator();
+    while (rit.next()) |entry| {
+        const key = entry.key_ptr.*;
         try ns.property_flags.put(realm.allocator, key, .{
             .writable = true,
             .enumerable = true,
