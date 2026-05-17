@@ -4107,8 +4107,22 @@ fn compileExportDecl(self: *Compiler, ed: ast.statement.ExportDecl) CompileError
                 return;
             }
             for (body.specifiers) |spec| {
+                // §16.2.3.5 ExportSpecifier — the *local* side is
+                // always an IdentifierName (no string-literal form);
+                // the *exported* side is a ModuleExportName which
+                // §16.2.2 also lets be a StringLiteral. Strip the
+                // surrounding quotes for the exported key so
+                // `export { f as "☿" }` registers under the bare
+                // code-point key on the namespace, not the literal
+                // `"\"☿\""` six-byte token. The from-clause branch
+                // above already strips; this is the parallel fix
+                // for the local-export branch.
                 const local_name = self.source[spec.local_span.start..spec.local_span.end];
-                const exported_name = self.source[spec.exported_span.start..spec.exported_span.end];
+                const exported_text = self.source[spec.exported_span.start..spec.exported_span.end];
+                const exported_name = if (exported_text.len >= 2 and (exported_text[0] == '"' or exported_text[0] == '\''))
+                    exported_text[1 .. exported_text.len - 1]
+                else
+                    exported_text;
                 try self.emitBindingRead(local_name, spec.span);
                 const k = try self.internString(exported_name);
                 try self.builder.emitOp(.module_export, spec.span);
