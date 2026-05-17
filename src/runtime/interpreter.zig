@@ -10271,11 +10271,55 @@ fn proxyDeleteTrap(
             }
             return .handled;
         }
+        // For callable-target proxies (`proxy_target = null`,
+        // `proxy_target_fn` set), the spec target is a JSFunction.
+        // When the trap is missing we delete on the function
+        // directly; when present we dispatch with the function as
+        // the trap's `target` arg.
+        if (cur.proxy_target == null and cur.proxy_target_fn != null) {
+            const target_fn = cur.proxy_target_fn.?;
+            const handler_opt = cur.proxy_handler;
+            const trap_v = if (handler_opt) |h| h.get("deleteProperty") else Value.undefined_;
+            if (trap_v.isUndefined() or trap_v.isNull()) {
+                // §10.1.10.1 [[Delete]] on a function — non-
+                // configurable own properties return false (and
+                // strict-mode `delete` then throws TypeError at the
+                // bytecode level). `hasOwn` covers the dedicated
+                // `prototype` slot too.
+                if (target_fn.hasOwn(key)) {
+                    if (target_fn.flagsForOwn(key).configurable == false) {
+                        return .{ .value = Value.false_ };
+                    }
+                }
+                _ = target_fn.properties.swapRemove(key);
+                _ = target_fn.accessors.swapRemove(key);
+                _ = target_fn.property_flags.swapRemove(key);
+                return .{ .value = Value.true_ };
+            }
+            const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
+                const ex = try makeTypeError(realm, "Proxy 'deleteProperty' trap is not callable");
+                f.ip = ip;
+                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                return .handled;
+            };
+            const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+            const args = [_]Value{ heap_mod.taggedFunction(target_fn), Value.fromString(key_str) };
+            const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler_opt.?), &args);
+            const v = switch (outcome) {
+                .value, .yielded => |val| val,
+                .thrown => |ex| {
+                    f.ip = ip;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                    return .handled;
+                },
+            };
+            return .{ .value = Value.fromBool(arith.toBoolean(v)) };
+        }
         const target = cur.proxy_target orelse return .{ .fallthrough = cur };
         const handler = cur.proxy_handler orelse return .{ .fallthrough = target };
         const trap_v = handler.get("deleteProperty");
         if (trap_v.isUndefined() or trap_v.isNull()) {
-            if (target.proxy_target != null or target.proxy_revoked) {
+            if (target.proxy_target != null or target.proxy_target_fn != null or target.proxy_revoked) {
                 cur = target;
                 continue;
             }

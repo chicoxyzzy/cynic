@@ -1017,6 +1017,14 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
                                 if (parsed_for_inv.has_configurable and !parsed_for_inv.configurable and cur_flags.configurable) {
                                     return throwTypeError(realm, "'defineProperty' on proxy: cannot flip a configurable target property to non-configurable via the trap");
                                 }
+                                // §10.5.6 step 16.c (proxy-missing-checks) —
+                                // target is non-configurable + writable; the
+                                // new descriptor cannot flip writable to false.
+                                if (!cur_flags.configurable and cur_flags.writable and !cur_is_acc and parsed_for_inv.isData()) {
+                                    if (parsed_for_inv.has_writable and !parsed_for_inv.writable) {
+                                        return throwTypeError(realm, "'defineProperty' on proxy: cannot flip a writable non-configurable target property to non-writable via the trap");
+                                    }
+                                }
                             }
                         }
                         return target_v;
