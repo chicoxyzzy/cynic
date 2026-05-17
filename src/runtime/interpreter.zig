@@ -9535,6 +9535,7 @@ fn strictSetPropertyAnchored(
         // dispatching down the chain (§10.5.6 step 7.a recurses
         // into target.[[Set]]).
         var obj = obj_in;
+        const receiver_is_proxy = obj_in.proxy_target != null or obj_in.proxy_revoked;
         while (obj.proxy_target != null or obj.proxy_revoked) {
             const r = try proxySetTrap(allocator, realm, frames, f, ip, obj, key, value, recv);
             switch (r) {
@@ -9545,6 +9546,68 @@ fn strictSetPropertyAnchored(
                 },
                 .handled => return .handled,
                 .uncaught => |ex| return .{ .uncaught = ex },
+            }
+        }
+        // §10.5.6 step 7.a fall-through — `target.[[Set]](P, V,
+        // Receiver)`. When Receiver is a Proxy (recv differs from
+        // the walked-to target), the spec composition
+        // OrdinarySetWithOwnDescriptor lands on
+        // `Receiver.[[DefineOwnProperty]]`, which fires the
+        // `defineProperty` trap on the Proxy. Route through
+        // `objectDefineProperty` for the data-desc branch so the
+        // trap observes the defineProperty call. Accessor
+        // descriptors on the target still need their setter to
+        // fire with Receiver as this — fall through to the
+        // accessor walk below for that case.
+        if (receiver_is_proxy and obj != obj_in) {
+            const has_own_data = obj.properties.contains(key);
+            const has_own_acc = obj.accessors.contains(key);
+            if (has_own_data and !has_own_acc) {
+                const flags = obj.flagsFor(key);
+                if (!flags.writable) {
+                    const ex = try makeTypeError(realm, "Cannot assign to read-only property");
+                    return throwInSetter(realm, frames, f, ip, value, ex);
+                }
+                // §10.1.9.2 step 3.d.iv — Receiver.[[DefineOwnProperty]](P, {Value: V}).
+                const obj_mod = @import("builtins/object.zig");
+                const desc_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+                desc_obj.prototype = realm.intrinsics.object_prototype;
+                const key_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                desc_obj.set(allocator, "value", value) catch return error.OutOfMemory;
+                const dp_args = [_]Value{ recv, Value.fromString(key_owned), heap_mod.taggedObject(desc_obj) };
+                _ = obj_mod.objectDefineProperty(realm, Value.undefined_, &dp_args) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NativeThrew => {
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "defineProperty trap failed");
+                        realm.pending_exception = null;
+                        return throwInSetter(realm, frames, f, ip, value, ex);
+                    },
+                };
+                return .ok;
+            }
+            // No own descriptor on target — §10.1.9.2 step 2 says
+            // recurse on parent. For now, fall through to a direct
+            // CreateDataProperty on Receiver = proxy via the
+            // defineProperty path.
+            if (!has_own_data and !has_own_acc) {
+                const obj_mod = @import("builtins/object.zig");
+                const desc_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+                desc_obj.prototype = realm.intrinsics.object_prototype;
+                const key_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                desc_obj.set(allocator, "value", value) catch return error.OutOfMemory;
+                desc_obj.set(allocator, "writable", Value.true_) catch return error.OutOfMemory;
+                desc_obj.set(allocator, "enumerable", Value.true_) catch return error.OutOfMemory;
+                desc_obj.set(allocator, "configurable", Value.true_) catch return error.OutOfMemory;
+                const dp_args = [_]Value{ recv, Value.fromString(key_owned), heap_mod.taggedObject(desc_obj) };
+                _ = obj_mod.objectDefineProperty(realm, Value.undefined_, &dp_args) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NativeThrew => {
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "defineProperty trap failed");
+                        realm.pending_exception = null;
+                        return throwInSetter(realm, frames, f, ip, value, ex);
+                    },
+                };
+                return .ok;
             }
         }
         // §10.1.9.2 OrdinarySetWithOwnDescriptor step 2 — if no own
@@ -9788,7 +9851,7 @@ fn getThroughChain(
     receiver: Value,
 ) RunError!GetChainOutcome {
     var cursor: ?*JSObject = obj;
-    while (cursor) |c| : (cursor = c.prototype) {
+    while (cursor) |c| {
         if (c.proxy_target != null or c.proxy_revoked) {
             // §10.5.5 Proxy [[Get]] — dispatch with `receiver`,
             // not the proxy itself. The trap helper already
@@ -9798,46 +9861,10 @@ fn getThroughChain(
                 .fallthrough => |t| {
                     // Trapless proxy whose target is non-proxy —
                     // continue the OrdinaryGet walk starting at
-                    // the target (step 7.a's recursion).
+                    // the target (step 7.a's recursion). Re-enter
+                    // this loop on `t` without advancing prototype.
                     cursor = t;
-                    // Pretend the loop just moved to `t`; the
-                    // `for-step`-style increment would advance us
-                    // past it, so handle the visit inline.
-                    while (cursor) |t2| {
-                        if (t2.proxy_target != null or t2.proxy_revoked) {
-                            switch (try proxyGetTrap(allocator, realm, frames, f, ip, t2, key, receiver)) {
-                                .value => |v2| return .{ .value = v2 },
-                                .fallthrough => |t3| {
-                                    cursor = t3;
-                                    continue;
-                                },
-                                .handled => return .handled,
-                                .uncaught => |ex| return .{ .uncaught = ex },
-                            }
-                        }
-                        if (t2.accessors.get(key)) |acc| {
-                            if (acc.getter) |getter| {
-                                const out = try callJSFunction(allocator, realm, getter, receiver, &.{});
-                                switch (out) {
-                                    .value, .yielded => |v| return .{ .value = v },
-                                    .thrown => |ex| {
-                                        f.ip = ip;
-                                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
-                                        return .handled;
-                                    },
-                                }
-                            }
-                            return .{ .value = Value.undefined_ };
-                        }
-                        if (t2.is_array_exotic) {
-                            if (@import("object.zig").JSObject.canonicalIntegerIndex(key)) |idx| {
-                                if (t2.tryGetIndexedOwn(idx)) |v| return .{ .value = v };
-                            }
-                        }
-                        if (t2.properties.get(key)) |v| return .{ .value = v };
-                        cursor = t2.prototype;
-                    }
-                    return .{ .value = Value.undefined_ };
+                    continue;
                 },
                 .handled => return .handled,
                 .uncaught => |ex| return .{ .uncaught = ex },
@@ -9863,6 +9890,7 @@ fn getThroughChain(
             }
         }
         if (c.properties.get(key)) |v| return .{ .value = v };
+        cursor = c.prototype;
     }
     return .{ .value = Value.undefined_ };
 }
@@ -9900,7 +9928,7 @@ fn setThroughChain(
     recv: Value,
 ) RunError!SetChainOutcome {
     var cursor: ?*JSObject = obj;
-    while (cursor) |c| : (cursor = c.prototype) {
+    while (cursor) |c| {
         if (c.proxy_target != null or c.proxy_revoked) {
             switch (try proxySetTrap(allocator, realm, frames, f, ip, c, key, value, recv)) {
                 .value => return .{ .handled_set = true },
@@ -9962,6 +9990,7 @@ fn setThroughChain(
                 }
             }
         }
+        cursor = c.prototype;
     }
     return .{ .handled_set = false };
 }

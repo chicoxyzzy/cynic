@@ -2893,6 +2893,19 @@ fn objectHasOwnProperty(realm: *Realm, this_value: Value, args: []const Value) N
 fn objectProtoPropertyIsEnumerable(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const key = descriptorKey(realm, argOr(args, 0, Value.undefined_)) catch return error.OutOfMemory;
     if (heap_mod.valueAsPlainObject(this_value)) |obj| {
+        // §20.1.3.4 step 3 composes `O.[[GetOwnProperty]](P)`. For a
+        // Proxy that dispatches the `getOwnPropertyDescriptor` trap
+        // and returns the descriptor (or undefined). Reuse the
+        // already-spec-faithful entry point.
+        if (obj.proxy_target != null or obj.proxy_revoked) {
+            const probe_args = [_]Value{ this_value, argOr(args, 0, Value.undefined_) };
+            const desc_v = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &probe_args);
+            if (desc_v.isUndefined()) return Value.false_;
+            const desc_obj = heap_mod.valueAsPlainObject(desc_v) orelse return Value.false_;
+            const enum_v = desc_obj.get("enumerable");
+            const arith = @import("../interpreter_arith.zig");
+            return Value.fromBool(arith.toBoolean(enum_v));
+        }
         if (!obj.hasOwn(key)) return Value.false_;
         // §20.1.3.4 step 3 calls O.[[GetOwnProperty]](P) to read
         // the descriptor — on a module namespace, the §9.4.6.4
