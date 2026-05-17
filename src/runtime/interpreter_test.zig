@@ -214,7 +214,11 @@ test "interpreter: bitwise and / or / xor" {
 test "interpreter: shifts" {
     try expectInt("1 << 4;", 16);
     try expectInt("16 >> 2;", 4);
-    try expectInt("-1 >>> 0;", -1); // 0xFFFFFFFF as i32 is -1
+    // §6.1.6.1.10 Number::unsignedRightShift returns a Number;
+    // `-1 >>> 0 === 4294967295`, not -1. The high-bit-set u32
+    // doesn't fit in the signed-int32 Smi representation, so the
+    // result escapes to Double.
+    try expectDouble("-1 >>> 0;", 4294967295.0);
 }
 
 test "interpreter: strict equality across types" {

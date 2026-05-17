@@ -2489,6 +2489,36 @@ pub const Compiler = struct {
                 try self.builder.emitOp(.star, a.span);
                 try self.builder.emitU8(r_key);
                 computed_r = r_key;
+                // §13.15.2 + §13.3.4.1 — for a compound / logical
+                // assignment (`obj[k] op= v`) the spec evaluates
+                // the LHS reference (RequireObjectCoercible(base)
+                // at step 5, ToPropertyKey(key) at step 6) BEFORE
+                // the RHS, and the resulting Reference is used
+                // once for both GetValue and PutValue. Cynic
+                // lowers compound forms to `lda_computed` +
+                // `<op>` + `sta_computed`; both ops independently
+                // run ToPropertyKey on the cached key, which fires
+                // user-defined `toString` / `[@@toPrimitive]`
+                // hooks twice. Coerce now so the cached key is a
+                // String/Symbol/BigInt — the runtime ToPropertyKey
+                // is then a no-op on subsequent uses. Order
+                // matters: RequireObjectCoercible(base) MUST fire
+                // before ToPropertyKey(key) so that `null[obj] *=
+                // …` throws TypeError without consulting `obj`.
+                // Plain `=` is left alone: it only runs
+                // `sta_computed` once, so a single ToPropertyKey
+                // at the store site already matches the visible
+                // side-effect count.
+                if (a.op != .eq) {
+                    try self.builder.emitOp(.ldar, m.span);
+                    try self.builder.emitU8(r_obj);
+                    try self.builder.emitOp(.require_object_coercible, m.span);
+                    try self.builder.emitOp(.ldar, key_expr.span());
+                    try self.builder.emitU8(r_key);
+                    try self.builder.emitOp(.to_property_key, key_expr.span());
+                    try self.builder.emitOp(.star, key_expr.span());
+                    try self.builder.emitU8(r_key);
+                }
             },
         }
         defer if (computed_r != null) self.releaseTemp();

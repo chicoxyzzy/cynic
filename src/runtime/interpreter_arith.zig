@@ -237,12 +237,23 @@ pub fn numericBinary(realm: *Realm, comptime op: NumericOp, lhs: Value, rhs: Val
                 if (o[1] == 0) return Value.fromInt32(o[0]);
             },
             .mod => {
-                // §13.6.2 — JS modulus is truncated, not
-                // Euclidean: the result's sign follows the
-                // dividend (a). `@mod` is Euclidean (always
-                // non-negative when b > 0); `@rem` is the
-                // C-style truncated remainder that matches JS.
-                if (b != 0) return Value.fromInt32(@rem(a, b));
+                // §13.6.2 / §6.1.6.1.5 Number::remainder — JS
+                // modulus is truncated, not Euclidean: the
+                // result's sign follows the dividend (a). `@mod`
+                // is Euclidean (always non-negative when b > 0);
+                // `@rem` is the C-style truncated remainder that
+                // matches JS.
+                if (b != 0) {
+                    const rem = @rem(a, b);
+                    // §6.1.6.1.5 — when the result is zero, its
+                    // sign tracks the dividend: `(-1) % 1 === -0`,
+                    // `(-1) % (-1) === -0`. The int32 representation
+                    // collapses ±0 to +0, so a negative dividend
+                    // with zero remainder must escape to a Double
+                    // to preserve sign.
+                    if (rem == 0 and a < 0) return Value.fromDouble(-0.0);
+                    return Value.fromInt32(rem);
+                }
             },
             .div, .pow => unreachable,
         }
@@ -381,10 +392,20 @@ pub fn bitwiseBinary(realm: *Realm, comptime op: BitwiseOp, lhs: Value, rhs: Val
         .shl => Value.fromInt32(a << @as(u5, @intCast(@as(u32, @bitCast(b)) & 0x1F))),
         .shr => Value.fromInt32(a >> @as(u5, @intCast(@as(u32, @bitCast(b)) & 0x1F))),
         .shr_u => blk: {
+            // §13.10 / §6.1.6.1.10 Number::unsignedRightShift —
+            // ToUint32 on both operands, mask the shift count to
+            // 5 bits, then perform a logical right shift. The
+            // result is a u32 that the spec returns as a Number;
+            // values ≥ 2^31 don't fit in the signed-int32 Smi
+            // representation (`-1 >>> 0 === 4294967295`, not -1),
+            // so escape to a Double when the high bit is set.
             const ua: u32 = @bitCast(a);
             const ub: u32 = @bitCast(b);
             const result = ua >> @as(u5, @intCast(ub & 0x1F));
-            break :blk Value.fromInt32(@bitCast(result));
+            if (result > std.math.maxInt(i32)) {
+                break :blk Value.fromDouble(@floatFromInt(result));
+            }
+            break :blk Value.fromInt32(@intCast(result));
         },
     };
 }
