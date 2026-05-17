@@ -148,6 +148,24 @@ pub fn getModuleNamespace(realm: *Realm, mr: *ModuleRecord) !*JSObject {
     ns.is_module_namespace = true;
     ns.prototype = null;
 
+    // §28.3.5 — `Symbol.toStringTag` on a Module Namespace exotic is
+    // fixed at `"Module"` with all-false flags. The spec doesn't gate
+    // it on namespace finalisation: every observer of the namespace
+    // (including a cycling importer that sees the partial namespace
+    // before the source-module body has returned) gets to read it.
+    // Used to live in the finalise block, but that left
+    // `ns[Symbol.toStringTag]` and `hasOwnProperty(ns,
+    // Symbol.toStringTag)` undefined / false for the cycle case.
+    // Idempotent — the `hasOwn` guard keeps repeated calls cheap.
+    if (!ns.hasOwn("@@toStringTag")) {
+        const tag = try realm.heap.allocateString("Module");
+        try ns.setWithFlags(realm.allocator, "@@toStringTag", Value.fromString(tag), .{
+            .writable = false,
+            .enumerable = false,
+            .configurable = false,
+        });
+    }
+
     if (mr.namespace_finalized) return ns;
 
     // Only finalise after the module body has returned. While the
@@ -164,8 +182,8 @@ pub fn getModuleNamespace(realm: *Realm, mr: *ModuleRecord) !*JSObject {
     var it = ns.properties.iterator();
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
-        // Skip the @@toStringTag we install below — it has
-        // different flags.
+        // Skip the @@toStringTag installed above — it has different
+        // flags.
         if (std.mem.eql(u8, key, "@@toStringTag")) continue;
         try ns.property_flags.put(realm.allocator, key, .{
             .writable = true,
@@ -173,14 +191,6 @@ pub fn getModuleNamespace(realm: *Realm, mr: *ModuleRecord) !*JSObject {
             .configurable = false,
         });
     }
-
-    // §28.3.5 — `@@toStringTag` is "Module" with all-false flags.
-    const tag = try realm.heap.allocateString("Module");
-    try ns.setWithFlags(realm.allocator, "@@toStringTag", Value.fromString(tag), .{
-        .writable = false,
-        .enumerable = false,
-        .configurable = false,
-    });
 
     ns.extensible = false;
     mr.namespace_finalized = true;
