@@ -4776,12 +4776,29 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
         try self.declarePatternBindings(pattern_target.?, bind_kind);
     }
 
+    // §14.7.5.7 / §7.4.6 — handler range starts BEFORE the LHS
+    // assignment so a throw inside the per-iteration target
+    // (poisoned setter on `for (x.attr of …)`, TDZ on `let` /
+    // `const`, destructuring failure) calls IteratorClose.
+    // §14.7.5.7 step 4 covers `lhsRef is abrupt` explicitly.
+    // `for-in` is excluded (no IteratorClose contract).
+
     // value = r_result.value → bind
     try self.builder.emitOp(.ldar, s.span);
     try self.builder.emitU8(r_result);
     try self.builder.emitOp(.lda_property, s.span);
     try self.builder.emitU16(k_value);
 
+
+    // §14.7.5.7 / §7.4.6 — handler range starts AFTER `lda_property
+    // "value"` (§7.4.7 IteratorValue runs before LHS assignment; a
+    // thrown getter does NOT trigger IteratorClose per spec) but
+    // BEFORE the LHS assignment so a throw inside the per-iteration
+    // target (poisoned setter on `for (x.attr of …)`, TDZ on `let`
+    // /`const`, destructuring failure) calls IteratorClose.
+    // §14.7.5.7 step 4 covers `lhsRef is abrupt` explicitly.
+    // `for-in` is excluded (no IteratorClose contract).
+    const body_start_pc = self.builder.here();
     // Assign to the binding (lexical, identifier-assign target,
     // member target, assignment pattern, or destructuring pattern
     // walk).
@@ -4816,7 +4833,6 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
     // compileReturn; `continue` exits the body normally. The
     // handler isn't installed for `for-in` (no IteratorClose
     // contract).
-    const body_start_pc = self.builder.here();
     try self.compileStatement(s.body);
     const body_end_pc = self.builder.here();
     if (s.kind != .in_) {

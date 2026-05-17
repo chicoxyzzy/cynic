@@ -4988,7 +4988,35 @@ fn runFrames(
                 const excl_v = registers[r_excl];
                 const out_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
                 out_obj.prototype = realm.intrinsics.object_prototype;
-                if (heap_mod.valueAsPlainObject(src_v)) |src_obj| {
+                // §7.3.27 CopyDataProperties step 2 — `ToObject(source)`.
+                // Primitive sources (Strings, Numbers, Booleans, Symbols,
+                // BigInts) wrap into the matching boxed object — a String
+                // wrapper carries its code-unit characters as own indexed
+                // properties, so `{...rest} = "foo"` yields
+                // `rest = {0:"f", 1:"o", 2:"o"}`. null / undefined are a
+                // no-op (the spec returns the empty target).
+                const src_coerced: Value = if (src_v.isNull() or src_v.isUndefined())
+                    Value.undefined_
+                else if (heap_mod.valueAsPlainObject(src_v) != null or heap_mod.valueAsFunction(src_v) != null)
+                    src_v
+                else blk_coerce: {
+                    const w = intrinsics_mod.toObjectThis(realm, src_v) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => {
+                            const ex = consumePendingException(realm) orelse try makeTypeError(realm, "rest source could not be coerced to object");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            break :blk_coerce Value.undefined_;
+                        },
+                    };
+                    break :blk_coerce heap_mod.taggedObject(w);
+                };
+                if (committed) continue;
+                if (heap_mod.valueAsPlainObject(src_coerced)) |src_obj| {
                     // §14.3.3.4 RestBindingInitialization →
                     // §7.3.27 CopyDataProperties: build the
                     // excluded-key set, walk OwnPropertyKeys in
