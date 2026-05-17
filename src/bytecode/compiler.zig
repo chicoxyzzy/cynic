@@ -4924,7 +4924,25 @@ fn compileForOfMemberAssign(self: *Compiler, m: ast.expression.MemberExpr, span:
     switch (m.property) {
         .ident => |kspan| {
             const raw = self.source[kspan.start..kspan.end];
-            if (raw.len > 0 and raw[0] == '#') return error.UnsupportedExpression;
+            if (raw.len > 0 and raw[0] == '#') {
+                // §13.2.7 / §7.3.30 PrivateFieldSet — `for (this.#x of …)`
+                // and `for (this.#x in …)` assign each iteration value
+                // through the private slot. Mangle the identifier with
+                // the enclosing class's private prefix and emit
+                // `sta_private`, which runs the §7.3.31 PrivateFieldFind
+                // brand check at runtime (throwing TypeError when the
+                // receiver is missing the slot).
+                if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
+                const decoded = try self.decodeIdentifierName(raw[1..]);
+                const mangled = try self.manglePrivateRef(decoded);
+                const k = try self.internString(mangled);
+                try self.builder.emitOp(.ldar, span);
+                try self.builder.emitU8(r_value);
+                try self.builder.emitOp(.sta_private, span);
+                try self.builder.emitU16(k);
+                try self.builder.emitU8(r_obj);
+                return;
+            }
             const key = try self.decodeIdentifierName(raw);
             const k = try self.internString(key);
             try self.builder.emitOp(.ldar, span);
@@ -7793,7 +7811,24 @@ fn assignToMember(self: *Compiler, m: ast.expression.MemberExpr, span: Span) Com
     switch (m.property) {
         .ident => |kspan| {
             const raw = self.source[kspan.start..kspan.end];
-            if (raw.len > 0 and raw[0] == '#') return error.UnsupportedExpression;
+            if (raw.len > 0 and raw[0] == '#') {
+                // §13.2.7 / §7.3.30 PrivateFieldSet — destructuring
+                // LHS like `({...this.#x} = src)` or `({a: this.#x} = src)`
+                // routes the store through the runtime brand check.
+                // Without this branch, the compiler bails on the
+                // member walk and the fixture surfaces a CompileError
+                // instead of the spec's runtime TypeError.
+                if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
+                const decoded = try self.decodeIdentifierName(raw[1..]);
+                const mangled = try self.manglePrivateRef(decoded);
+                const k = try self.internString(mangled);
+                try self.builder.emitOp(.ldar, span);
+                try self.builder.emitU8(r_value);
+                try self.builder.emitOp(.sta_private, span);
+                try self.builder.emitU16(k);
+                try self.builder.emitU8(r_obj);
+                return;
+            }
             const key = try self.decodeIdentifierName(raw);
             const k = try self.internString(key);
             try self.builder.emitOp(.ldar, span);
