@@ -4704,11 +4704,54 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
     const saved_env_depth = self.env_depth;
     defer self.env_depth = saved_env_depth;
 
+    // §13.7.5.6 ForIn/OfHeadEvaluation step 2 — when the
+    // ForDeclaration has BoundNames (i.e. `let` / `const`),
+    // create a fresh DeclarativeEnvironment, install every
+    // bound name as a TDZ (uninitialised lex binding), and
+    // evaluate the iterable expression inside it. Spec step 4
+    // pops the env back to the outer one before
+    // ForIn/OfBodyEvaluation. Closures created inside the
+    // iterable expression (e.g. `{ i: function() { typeof x } }`)
+    // capture the TDZ binding and observe a ReferenceError when
+    // invoked later — `scope-head-lex-{open,close}.js` and
+    // `head-{let,const}-bound-names-fordecl-tdz.js` assert this.
+    var head_tdz_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = true };
+    const head_tdz_env = per_iter_env;
+    var saved_head_slot_count: u8 = 0;
+    if (head_tdz_env) {
+        saved_head_slot_count = self.env_slot_count;
+        self.env_slot_count = 0;
+        self.scope = &head_tdz_scope;
+        self.env_depth = saved_env_depth + 1;
+        try self.builder.emitOp(.make_environment, s.span);
+        const head_size_patch = self.builder.code.items.len;
+        try self.builder.emitU8(0);
+        if (pattern_target) |pt| {
+            try self.declarePatternBindings(pt, bind_kind);
+        } else {
+            _ = try self.declareBinding(bind_name, bind_kind, bind_span);
+        }
+        self.builder.code.items[head_size_patch] = self.env_slot_count;
+    }
+    defer head_tdz_scope.deinit(self.allocator);
+
     // §14.7.5.6 ForIn/OfBodyEvaluation. Eval the iterable, open
     // an iterator (for-of: §7.4.1 GetIterator; for-in:
     // §14.7.5.6 EnumerateObjectProperties), then drive
     // `it.next()` until `result.done`.
     try self.compileExpression(&s.right);
+
+    // §13.7.5.6 step 4 — close the head TDZ env before opening
+    // the iterator. The iterator's `next()` calls and the
+    // per-iteration body run in fresh envs parented to the OUTER
+    // env, not the TDZ env (the TDZ binding is unreachable from
+    // the body — only the iterable expression observed it).
+    if (head_tdz_env) {
+        try self.builder.emitOp(.pop_env, s.span);
+        self.scope = &loop_scope;
+        self.env_depth = saved_env_depth;
+        self.env_slot_count = saved_head_slot_count;
+    }
     const open_op: Op = if (s.kind == .in_)
         .for_in_open
     else if (s.is_await)
