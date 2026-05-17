@@ -40,7 +40,15 @@ strict. Practical consequences:
 - Functions don't expose `arguments.callee` / `arguments.caller`.
 - Annex B §B.3 grammar additions are not implemented.
 
-This narrows the surface and sharpens the spec-conformance target.
+One acknowledged Annex B exception: regex grammar §B.1.4 (`\1`
+outside a capturing group as octal, the lower-bound-elided
+quantifier `{,n}`). The vendored libregexp accepts these forms
+without `/u` or `/v`; every shipping engine does the same, so
+Cynic lives with the leak. See AGENTS.md for the rationale.
+
+This narrows the surface and sharpens the spec-conformance
+target — Cynic is at ~89 % spec / ~96 % attempted on the
+runtime-mode test262 sweep (see `test262-results.md`).
 
 ## Spec-faithful naming
 
@@ -151,16 +159,47 @@ is later.
 ## Environment records
 
 Every named binding (`var` / `let` / `const`, function params,
-function-name self-binding) lives in a heap-allocated declarative
-`Environment`; closures capture the enclosing env pointer. See
+function-name self-binding, imports) lives in a heap-allocated
+declarative `Environment`; closures capture the enclosing env
+pointer. See
 [src/runtime/environment.zig](../src/runtime/environment.zig).
 
-This is heavier than a register-only design at later/later scale, but
-the alternative — register slots for non-captured bindings, env slots
-for captured ones, with a compile-time escape-analysis pre-pass —
-was deferred when the simpler "everything on the heap" design proved
-correct and fast enough for the later milestone work to flow. The
-escape-analysis pre-pass is a later optimization.
+Four record shapes ship today, distinguishing flags on the
+binding rather than separate types:
+
+- **DeclarativeEnvironmentRecord** — the default. Block scopes,
+  function bodies, catch params.
+- **FunctionEnvironmentRecord** — same `Environment` struct;
+  args, `this`, and `[[HomeObject]]` are plumbed through
+  `JSFunction` instead of the env itself.
+- **ModuleEnvironmentRecord** — same `Environment`; imports
+  carry `is_import = true` and read indirectly through the
+  source module's namespace (TDZ-Hole-seeded at instantiation
+  per §15.2.1.16.4). Writes throw TypeError.
+- **GlobalEnvironmentRecord** — split into the object env
+  (the realm's global object, holds `var` / `function` decls
+  and host bindings) plus a declarative env (`let` / `const` /
+  `class`, NOT mirrored on `globalThis`) plus a `[[VarNames]]`
+  set per §9.1.1.4. Top-level writes lower to one of three
+  opcodes (`sta_global_init`, `sta_global_fn_decl`,
+  `sta_global`) that route through the correct sub-record.
+
+Named function expressions (`let r = function G() {...}`) get
+a synthetic one-binding wrapper env between the function body
+and the captured outer env, holding `G` as immutable per
+§15.6.5.
+
+The "register slots for non-captured bindings, env slots for
+captured ones, plus escape-analysis pre-pass" alternative was
+deferred when "everything on the heap" proved correct and fast
+enough; the escape-analysis pass is a later optimization.
+
+See [docs/handbook/environments.md](handbook/environments.md)
+for the per-opcode dispatch table, the §16.1.7 early-error
+pass, the const InitializeBinding / SetMutableBinding
+distinction via the TDZ-Hole sentinel, and the
+named-fn-expr-wrapper-env construction. Read it before touching
+binding declaration or resolution.
 
 ## Built-in layout
 
@@ -173,24 +212,29 @@ top-level `intrinsics.install(realm)` calls each in turn:
 ```
 runtime/intrinsics.zig          orchestrator + shared helpers
 └── runtime/builtins/
-    ├── object.zig               Object statics + Object.prototype
     ├── array.zig                Array.prototype + Array statics
-    ├── string.zig               String.prototype methods
-    ├── number.zig               Number + parseInt / parseFloat globals
-    ├── uri.zig                  encodeURI / decodeURI family
-    ├── math.zig                 Math object
-    ├── json.zig                 JSON.{stringify, parse}
-    ├── error.zig                Error class hierarchy
-    ├── function.zig             Function.prototype + variant ctors
-    ├── collections.zig          Map / Set / WeakMap / WeakSet
-    ├── promise.zig              Promise + then-chaining + statics
-    ├── reflect.zig              Reflect static methods
-    ├── symbol.zig               Symbol constructor + well-known
+    ├── async_iterator.zig       %AsyncFromSyncIteratorPrototype% etc.
     ├── bigint.zig               BigInt constructor + statics
-    ├── proxy.zig                Proxy stub
-    ├── regexp.zig               RegExp stub (no engine)
+    ├── collections.zig          Map / Set / WeakMap / WeakSet
     ├── date.zig                 Date
-    └── typed_array.zig          ArrayBuffer / DataView / TypedArray
+    ├── error.zig                Error class hierarchy
+    ├── finalization_registry.zig FinalizationRegistry
+    ├── function.zig             Function.prototype
+    ├── iterator.zig             Iterator helpers (Stage 4 + drafts)
+    ├── json.zig                 JSON.{stringify, parse}
+    ├── math.zig                 Math object
+    ├── number.zig               Number + parseInt / parseFloat globals
+    ├── object.zig               Object statics + Object.prototype
+    ├── promise.zig              Promise + then-chaining + statics
+    ├── proxy.zig                Proxy
+    ├── reflect.zig              Reflect static methods
+    ├── regexp.zig               RegExp (vendored libregexp + spec
+    │                             surface — see AGENTS.md "Regex")
+    ├── string.zig               String.prototype methods
+    ├── symbol.zig               Symbol constructor + well-known
+    ├── typed_array.zig          ArrayBuffer / DataView / TypedArray
+    ├── uri.zig                  encodeURI / decodeURI family
+    └── weak_ref.zig             WeakRef
 ```
 
 **Layer split.** The `src/runtime/<X>.zig` file holds the heap-side
@@ -213,14 +257,18 @@ file.
 
 ## Realm and host bindings
 
-`Realm` ([src/runtime/realm.zig](../src/runtime/realm.zig)) owns the
-heap and a `globals` map. Host bindings (`print`, `console`, etc.)
-are installed via `installBuiltins` and looked up by the `LdaGlobal`
-opcode when an identifier reference doesn't resolve in any user
-scope. Multiple realms are also the foundation for the SES /
-Compartments direction; later ships a single realm and the API is
-shaped so adding more later is a structural addition, not a
-refactor.
+`Realm` ([src/runtime/realm.zig](../src/runtime/realm.zig)) owns
+the heap, the intrinsics table, the microtask queue, the module
+cache, and a `GlobalBindings` struct (the
+GlobalEnvironmentRecord — see Environment records above for the
+object / declarative / `[[VarNames]]` split). Host bindings
+(`print`, `console`, etc.) are installed on the global object
+via per-builtin `install(realm)` calls and looked up by the
+`lda_global` opcode when an identifier reference doesn't
+resolve in any user scope. Multiple realms are also the
+foundation for the SES / Compartments direction; today ships a
+single realm and the API is shaped so adding more later is a
+structural addition, not a refactor.
 
 `print` and friends are wired as `JSFunction` instances with a
 `native_callback: ?NativeFn` field (a Zig function pointer). The
@@ -234,14 +282,56 @@ would touch every allocation site.
 
 ## Module system
 
-Cynic targets `Source Text Module Record` per §16. `import` / `export` are
-first-class; we don't ship CommonJS interop.
+Cynic targets Source Text Module Record per §16. `import` /
+`export` are first-class; CommonJS interop isn't shipped.
+
+What's wired today:
+
+- Static `import` / `export` (including re-exports and
+  `export * from`).
+- Indirect imports as live aliases per §8.1.1.5.5
+  CreateImportBinding — reads dereference through the source
+  module's namespace; writes throw TypeError.
+- TDZ for indirect imports: the source module's exported
+  `let` / `const` / `class` / `export default` slots are
+  Hole-seeded at instantiation so the importer sees a
+  ReferenceError before the source body has initialised them
+  (§15.2.1.16.4 step 12).
+- Module Namespace exotic ([[Get]] §9.4.6.7) routes through
+  `GetBindingValue` with `strict = true`, surfacing the TDZ
+  Hole as ReferenceError. `[[HasProperty]]` and
+  `[[OwnPropertyKeys]]` do NOT — only `[[Get]]` honors TDZ.
+- Dynamic `import()` per §13.3.10 — returns a Promise that
+  rejects with `SyntaxError` on instantiation failure
+  (ambiguous indirect-export, circular re-export, etc.).
+- `import.meta`.
+
+Module loading is host-driven via `Realm.module_loader` — a
+callback the embedder installs (the CLI resolves siblings on
+disk; the test262 harness reads from `vendor/test262/test/`).
 
 ## Testing
 
-- Inline `test` blocks per file for unit coverage (`zig build test`).
-- Custom test262 harness (a Zig program in `tools/test262.zig`) once the
-  parser exists. Filter to `flags: [onlyStrict, module]` plus tests with no
-  `flags` field that don't rely on Annex B / sloppy mode.
-- Differential testing against V8's `d8` is on the table for behavioural
-  regressions where the spec is ambiguous.
+- Inline `test` blocks per file for unit coverage
+  (`zig build test`).
+- Custom test262 harness (`tools/test262.zig`, ~3 k lines)
+  scored against the Cynic-targeted scope: Annex B,
+  `intl402/`, `staging/`, `harness/`, and the browser-era
+  built-ins Cynic doesn't ship are dropped from `total`
+  entirely. The harness runs in `runtime` (parse + compile +
+  execute) and `parser` (parse-only) modes, supports
+  `--filter` + `--only-failing` for fast iteration, and ships
+  diagnostics flags (`--top-rss`, `--top-slow`, `--top-alloc`,
+  `--mem-summary`, `--leak-check`, `--max-rss`) for the kind
+  of leak / perf bisecting that comes up in shared-machinery
+  work. Per-day score rows + bucket scoreboard live in
+  `test262-results.md`. AGENTS.md "Build & test" covers the
+  iteration cadence and the leak-check policy for new
+  allocation paths;
+  [docs/handbook/agent-checks.md](handbook/agent-checks.md)
+  covers the regression-check protocol for changes that
+  touch shared compiler / runtime machinery.
+- Differential testing against V8's `d8` is still on the
+  table for behavioural regressions where the spec is
+  ambiguous (mostly handled today by direct reference to the
+  spec text via the `tc39` MCP server in `.mcp.json`).
