@@ -4279,11 +4279,28 @@ fn seedTdzExportHoles(self: *Compiler, body: []ast.statement.Statement, span: Sp
                     // `undefined`, not Hole — seeding Hole would
                     // flip pre-init importer reads from the spec
                     // `undefined` to a spurious ReferenceError.
-                    // Only `let` / `const` participate in TDZ.
+                    // Only `let` / `const` participate in TDZ — but
+                    // the namespace still has to *advertise* the
+                    // exported var name from the start of body
+                    // evaluation, otherwise `'attr' in ns` returns
+                    // false for a self-import that sees the partial
+                    // namespace before the `export var attr;` line
+                    // runs. Publish `undefined` at hoist time so
+                    // the property exists; the later var-init (if
+                    // any) overwrites via `compileExportDecl`.
                     .lexical => |ld| if (ld.kind != .var_) {
                         for (ld.declarators) |d| {
                             if (identifierName(self.source, d.name)) |name| {
                                 try self.seedExportHole(name, d.span);
+                            }
+                        }
+                    } else {
+                        for (ld.declarators) |d| {
+                            if (identifierName(self.source, d.name)) |name| {
+                                const k = try self.internString(name);
+                                try self.builder.emitOp(.lda_undefined, d.span);
+                                try self.builder.emitOp(.module_export, d.span);
+                                try self.builder.emitU16(k);
                             }
                         }
                     },
