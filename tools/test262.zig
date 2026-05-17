@@ -86,10 +86,19 @@ const frontmatter = @import("test262/frontmatter.zig");
 const skip_rules = @import("test262/skip.zig");
 const harness_mod = @import("test262/harness.zig");
 
-/// Single-test loader state. Set by `classifyAndRun` before
+/// Per-worker loader state. Set by `classifyAndRun` before
 /// running a module-flagged test; consulted by
-/// `test262ModuleLoader`. Process-global (one test at a time).
-var loader_state: ?LoaderState = null;
+/// `test262ModuleLoader` (a process-global function pointer
+/// installed on the Realm, which dispatches into whichever
+/// worker is currently driving that realm). Must be
+/// `threadlocal` — with the parallel pool (`--threads>1`) two
+/// workers can be evaluating different module-flagged fixtures
+/// at the same time; a process-global would race so the loader
+/// callback resolves sibling specifiers against the wrong
+/// fixture's directory, surfacing as flaky `language/module-code`
+/// + `language/expressions/dynamic-import` fails that disappear
+/// under `--threads=1` or a single-fixture `--filter`.
+threadlocal var loader_state: ?LoaderState = null;
 const LoaderState = struct {
     corpus: std.Io.Dir,
     io: std.Io,
