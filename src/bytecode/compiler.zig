@@ -8852,11 +8852,42 @@ pub fn compileModuleAsChunk(
                 // module sees the closure (and a same-module
                 // `import f from './self.js'` lands on the live
                 // binding instead of `undefined`).
+                //
+                // The named variant `export default function F() {}`
+                // also creates a *local* `F` binding (§15.2.3.11 +
+                // §15.2.1.16.4 step 17 path); the body of the module
+                // can reference `F` directly. We materialise the
+                // template once, store it via `emitStoreBindingInit`
+                // for the local binding, then re-read for the
+                // `default` publish so both views share one closure.
                 .default_value => |dv| if (dv == .function_expr) {
-                    try c.compileExpression(&ed.body.default_value);
-                    const k_default = try c.internString("default");
-                    try c.builder.emitOp(.module_export, ed.span);
-                    try c.builder.emitU16(k_default);
+                    const fe = dv.function_expr;
+                    if (fe.name) |n| {
+                        const name_slice = try c.bindingName(n.span);
+                        const binding = try c.declareBindingFull(name_slice, .var_, n.span);
+                        const k_tmpl = try compileFunctionTemplateExt(
+                            &c,
+                            fe.params,
+                            FunctionBody{ .block = fe.body.body },
+                            name_slice,
+                            false,
+                            fe.is_generator,
+                            fe.is_async,
+                            fe.span,
+                        );
+                        try c.builder.emitOp(.make_function, fe.span);
+                        try c.builder.emitU16(k_tmpl);
+                        try c.emitStoreBindingInit(binding, fe.span);
+                        try c.emitBindingRead(name_slice, fe.span);
+                        const k_default = try c.internString("default");
+                        try c.builder.emitOp(.module_export, ed.span);
+                        try c.builder.emitU16(k_default);
+                    } else {
+                        try c.compileExpression(&ed.body.default_value);
+                        const k_default = try c.internString("default");
+                        try c.builder.emitOp(.module_export, ed.span);
+                        try c.builder.emitU16(k_default);
+                    }
                 },
                 else => {},
             },
