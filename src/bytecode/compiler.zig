@@ -3819,10 +3819,24 @@ pub const Compiler = struct {
                 const m = u.operand.member;
                 if (m.optional) return error.UnsupportedExpression;
                 if (m.object.* == .super_) {
-                    // `delete super.x` — §13.5.1.2 step 5.a is a
-                    // ReferenceError. Compile to a runtime throw
-                    // via plain unsupported for now.
-                    return error.UnsupportedExpression;
+                    // §13.5.1.2 step 5.b — `delete` of a
+                    // SuperReference throws ReferenceError at
+                    // runtime (NOT a compile-time SyntaxError;
+                    // the operand is evaluated as a reference, and
+                    // the IsSuperReference test rejects it). Emit
+                    // `new ReferenceError(); throw`.
+                    const k_ref_error = try self.internString("ReferenceError");
+                    const r_callee = try self.reserveTemp();
+                    defer self.releaseTemp();
+                    try self.builder.emitOp(.lda_global, u.span);
+                    try self.builder.emitU16(k_ref_error);
+                    try self.builder.emitOp(.star, u.span);
+                    try self.builder.emitU8(r_callee);
+                    try self.builder.emitOp(.new_call, u.span);
+                    try self.builder.emitU8(r_callee);
+                    try self.builder.emitU8(0);
+                    try self.builder.emitOp(.throw_, u.span);
+                    return;
                 }
                 switch (m.property) {
                     .ident => |sp| {
