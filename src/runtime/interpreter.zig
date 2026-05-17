@@ -1759,6 +1759,88 @@ pub const LoadModuleOutcome = struct {
     mr: ?*module_mod.ModuleRecord = null,
 };
 
+/// §15.2.1.16.3 / §16.2.3.7 — install a redirect for `key` on
+/// the importer's namespace pointing at `src_ns[src_key]`,
+/// with §15.2.1.18 step 3.c ambiguity detection.
+///
+/// Resolves the source's redirect chain (and the importer's
+/// existing redirect chain, if any) to their terminal `(ns,
+/// key)` pairs before comparing. The terminal is the
+/// originating module + binding name; two `export *` paths can
+/// pull in the same name through different routes but still
+/// resolve to the same final binding (§15.2.1.16.3 step
+/// 8.d.ii.2 vs 8.d.ii.3 — "same module + same binding name"
+/// is not ambiguous). When the terminals differ, drop the
+/// redirect and record the key in `ambiguous_namespace_keys` so
+/// `hasOwn` / `hasProperty` return false (§9.4.6.2 /
+/// §15.2.1.18 step 3.c.ii).
+///
+/// For ambiguity-detection purposes we also peek at the
+/// terminal's value when the terminal is a property entry (not a
+/// redirect) — two namespace bindings that point at the same
+/// JSObject are spec-equivalent (`export * as foo from same`)
+/// and shouldn't fight even though they came from different
+/// importer-side intermediate modules. This is the resolution
+/// step the spec captures by walking IndirectExportEntries with
+/// the `~all~` import-name path: both routes land on the same
+/// Module Namespace exotic, so the bindings match.
+fn mergeStarKey(
+    allocator: std.mem.Allocator,
+    dst_ns: *JSObject,
+    key: []const u8,
+    src_ns: *JSObject,
+    src_key: []const u8,
+) !void {
+    if (dst_ns.properties.contains(key)) return;
+    if (dst_ns.accessors.contains(key)) return;
+    if (dst_ns.ambiguous_namespace_keys.contains(key)) return;
+
+    const new_resolved = module_mod.resolveRedirectChain(src_ns, src_key) catch return;
+
+    if (dst_ns.namespace_redirects.get(key)) |existing| {
+        const old_resolved = module_mod.resolveRedirectChain(existing.target_ns, existing.target_key) catch {
+            try dst_ns.namespace_redirects.put(allocator, key, .{
+                .target_ns = src_ns,
+                .target_key = src_key,
+            });
+            return;
+        };
+        if (old_resolved.ns == new_resolved.ns and std.mem.eql(u8, old_resolved.key, new_resolved.key)) {
+            return;
+        }
+        // §15.2.1.16.3 step 8.d.ii fallback — Cynic compiles
+        // `export * as foo from src` to a value-copy of `src`'s
+        // namespace on the importer's property bag. Two routes
+        // that both end up holding the *same heap-object* in the
+        // terminal slot trace back to the same originating
+        // (module, namespace) binding under the spec's
+        // IndirectExportEntry walk, so they aren't ambiguous.
+        // Primitives are excluded — two modules can each declare
+        // `export var both` and both hold `undefined`, but the
+        // bindings are still distinct and should mark the key
+        // ambiguous per §15.2.1.18 step 3.c.ii.
+        const old_val = old_resolved.ns.get(old_resolved.key);
+        const new_val = new_resolved.ns.get(new_resolved.key);
+        if (heap_mod.valueAsPlainObject(old_val)) |old_obj| {
+            if (heap_mod.valueAsPlainObject(new_val)) |new_obj| {
+                if (old_obj == new_obj) return;
+            }
+        }
+        if (heap_mod.valueAsFunction(old_val)) |old_fn| {
+            if (heap_mod.valueAsFunction(new_val)) |new_fn| {
+                if (old_fn == new_fn) return;
+            }
+        }
+        _ = dst_ns.namespace_redirects.swapRemove(key);
+        try dst_ns.ambiguous_namespace_keys.put(allocator, key, {});
+        return;
+    }
+    try dst_ns.namespace_redirects.put(allocator, key, .{
+        .target_ns = src_ns,
+        .target_key = src_key,
+    });
+}
+
 pub fn loadModule(
     allocator: std.mem.Allocator,
     realm: *Realm,
@@ -6212,47 +6294,54 @@ fn runFrames(
                 // §16.2.3.7 ExportDeclaration step 8 (no `as`) —
                 // merge every non-`default` own export from the
                 // source namespace (in `acc`) onto the executing
-                // module's namespace. Keys already present on
-                // the importer win (matches the ResolveExport
-                // precedence between local / indirect entries
-                // and `*` entries: a star entry never overwrites
-                // a binding the module already exports under the
-                // same name).
+                // module's namespace as a *redirect* pointing at
+                // the source. Redirects (not value-copies) so a
+                // chained `export *` walks back to the originating
+                // module at read time.
                 //
-                // The source's `namespace_redirects` map is also
-                // walked — re-exports installed under a prior
-                // `export { X as Y } from "…"` need to propagate
-                // to the importer's namespace too. We copy the
-                // redirect entry verbatim (same `target_ns` /
-                // `target_key`), so a chained read walks back
-                // through the same source redirect path. Cycle
-                // detection in `resolveRedirectChain` keeps the
-                // walk bounded.
+                // §15.2.1.16.3 step 8 ambiguity check — when two
+                // distinct `export *` sources both expose the
+                // same name and the underlying bindings live on
+                // different modules, the resolution is ambiguous.
+                // §15.2.1.18 GetModuleNamespace step 3.c says
+                // ambiguous names DO NOT appear in the namespace's
+                // exported names. We detect this by walking the
+                // redirect chains of the existing and new entries
+                // down to their terminal (module, binding) pairs;
+                // if they differ, drop the binding and record it
+                // in `ambiguous_namespace_keys` so `'X' in ns` /
+                // `Object.keys(ns)` / `Reflect.has(ns, 'X')` skip
+                // it (matches §9.4.6.{2,5,7}).
+                //
+                // Local / indirect exports take precedence over
+                // star entries (§15.2.1.16.3 step 4-5 before step
+                // 8): if the key is already in `properties` (a
+                // local export pre-seeded by `seedTdzExportHoles`
+                // / `publishExportedNamesFromDecl`) or in
+                // `namespace_redirects` from a prior `export
+                // { X } from "..."`, the star entry is a no-op.
                 //
                 // No-op outside module context.
                 if (realm.current_module) |mr| {
                     const src_obj = heap_mod.valueAsPlainObject(acc) orelse {
                         continue;
                     };
+                    // Helper closure values can't be expressed in
+                    // Zig's switch arms — inline the merge for
+                    // each iter so the ambiguity check stays close
+                    // to the install site.
                     var it = src_obj.properties.iterator();
                     while (it.next()) |entry| {
                         const key = entry.key_ptr.*;
                         if (std.mem.eql(u8, key, "default")) continue;
                         if (std.mem.eql(u8, key, "@@toStringTag")) continue;
-                        if (mr.exports.properties.contains(key)) continue;
-                        if (mr.exports.namespace_redirects.contains(key)) continue;
-                        mr.exports.set(realm.allocator, key, entry.value_ptr.*) catch return error.OutOfMemory;
+                        try mergeStarKey(realm.allocator, mr.exports, key, src_obj, key);
                     }
-                    // Source redirects propagate as redirects on
-                    // the importer — chain resolution walks back
-                    // through them at read time.
                     var rit = src_obj.namespace_redirects.iterator();
                     while (rit.next()) |entry| {
                         const key = entry.key_ptr.*;
                         if (std.mem.eql(u8, key, "default")) continue;
-                        if (mr.exports.properties.contains(key)) continue;
-                        if (mr.exports.namespace_redirects.contains(key)) continue;
-                        mr.exports.namespace_redirects.put(realm.allocator, key, entry.value_ptr.*) catch return error.OutOfMemory;
+                        try mergeStarKey(realm.allocator, mr.exports, key, src_obj, key);
                     }
                 }
             },

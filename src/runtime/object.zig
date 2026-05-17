@@ -549,6 +549,15 @@ pub const JSObject = struct {
     /// final value the source module published after the cycle
     /// returned. The redirect resolves every read at access time.
     namespace_redirects: std.StringArrayHashMapUnmanaged(NamespaceRedirect) = .empty,
+    /// §15.2.1.16.3 step 8 ambiguity result — keys whose
+    /// `export *` chain resolves to multiple distinct (module,
+    /// binding) pairs. §15.2.1.18 GetModuleNamespace step 3.c.ii
+    /// drops these from the namespace's exported names; the
+    /// `hasOwn` / `hasProperty` / [[Get]] paths likewise treat
+    /// them as absent. Populated by `module_reexport_star` when a
+    /// second star source would install the same key with a
+    /// different terminal target.
+    ambiguous_namespace_keys: std.StringArrayHashMapUnmanaged(void) = .empty,
     /// §20.5.1.1 [[ErrorData]] — set when this object is an Error
     /// (or NativeError) instance produced via `new <X>Error(...)`
     /// / `<X>Error(...)`. Object.prototype.toString uses this to
@@ -593,6 +602,7 @@ pub const JSObject = struct {
         self.private_accessors.deinit(allocator);
         self.accessors.deinit(allocator);
         self.namespace_redirects.deinit(allocator);
+        self.ambiguous_namespace_keys.deinit(allocator);
         if (self.map_data) |m| m.deinit(allocator);
         if (self.set_data) |s| s.deinit(allocator);
         if (self.array_like_iter) |s| s.deinit(allocator);
@@ -814,6 +824,12 @@ pub const JSObject = struct {
     /// Returns true for both data and accessor own properties
     /// (§7.3.13 HasOwnProperty: any descriptor counts).
     pub fn hasOwn(self: *const JSObject, key: []const u8) bool {
+        // §15.2.1.16.3 ambiguous star-export resolution — the
+        // namespace's exported-names list excludes ambiguous
+        // entries (§15.2.1.18 step 3.c.ii); reflect that in
+        // [[HasProperty]] / [[GetOwnProperty]] so `'X' in ns` is
+        // `false` and `Object.keys(ns)` omits the key.
+        if (self.is_module_namespace and self.ambiguous_namespace_keys.contains(key)) return false;
         if (self.properties.contains(key) or self.accessors.contains(key)) return true;
         // §15.2.1.16.3 ResolveExport — re-export redirects make
         // the binding "own" on the Module Namespace exotic even
@@ -835,6 +851,9 @@ pub const JSObject = struct {
     /// distinguishes "field not present" from "field is undefined")
     /// and other specs that observe inherited fields.
     pub fn hasProperty(self: *const JSObject, key: []const u8) bool {
+        // §15.2.1.16.3 / §15.2.1.18 — ambiguous star-export keys
+        // are omitted from the namespace.
+        if (self.is_module_namespace and self.ambiguous_namespace_keys.contains(key)) return false;
         if (self.properties.contains(key)) return true;
         if (self.accessors.contains(key)) return true;
         // §15.2.1.16.3 ResolveExport — re-export redirects appear
