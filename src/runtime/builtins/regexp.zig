@@ -140,6 +140,26 @@ pub fn install(realm: *Realm) !void {
     try installNativeGetter(realm, proto, "sticky", regexpStickyGetter);
 
     try installNativeMethod(realm, fn_obj, "escape", regexpEscape, 1);
+
+    // §22.2.4.2 get RegExp [ @@species ] — accessor on the
+    // constructor whose getter returns the `this` value. The
+    // built-in name is `"get [Symbol.species]"` (§22.2.4.2),
+    // descriptor `{ get, set: undefined, enumerable: false,
+    // configurable: true }`.
+    const species_getter = try realm.heap.allocateFunctionNative(regexpSpeciesGetter, 0, "get [Symbol.species]");
+    species_getter.proto = realm.intrinsics.function_prototype;
+    const species_entry = try fn_obj.accessors.getOrPut(realm.allocator, "@@species");
+    species_entry.value_ptr.* = .{ .getter = species_getter };
+    try fn_obj.property_flags.put(realm.allocator, "@@species", .{
+        .writable = false, .enumerable = false, .configurable = true,
+    });
+}
+
+/// §22.2.4.2 get RegExp [ @@species ] — `return this value`.
+fn regexpSpeciesGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = args;
+    return this_value;
 }
 
 /// Install a method whose property key is Cynic's `"@@<name>"`
