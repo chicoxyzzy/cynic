@@ -138,8 +138,12 @@ These are project rules — they apply to everyone.
 
 ## Build & test
 
-Zig 0.17-dev (master) — the Zig project skipped a stable 0.16, so
-CI tracks `master`. One-time setup:
+Zig 0.17-dev — pinned to a specific dev SHA in both `build.zig.zon`
+(`.minimum_zig_version`, read by [anyzig](https://github.com/marler8997/anyzig))
+and `.github/workflows/ci.yml` (`version:`). Bump both in
+lockstep when a Zig parser/codegen change forces it (use
+`anyzig` locally so `zig build` resolves to the pinned SHA).
+One-time setup:
 
     git submodule update --init vendor/test262
 

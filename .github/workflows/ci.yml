@@ -27,7 +27,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: master
+          version: 0.17.0-dev.305+bdfbf432d
 
       - name: Show Zig version
         run: zig version
@@ -67,7 +67,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: master
+          version: 0.17.0-dev.305+bdfbf432d
 
       - name: Run test262 (runtime, parallel)
         # Drop `--quiet` so the per-bucket tally lands in the CI
@@ -108,7 +108,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: master
+          version: 0.17.0-dev.305+bdfbf432d
 
       - name: Filtered sweep with top-rss
         timeout-minutes: 5

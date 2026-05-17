@@ -3,7 +3,11 @@
     .version = "0.0.0",
     // Random 64-bit value identifying this package.
     .fingerprint = 0x2c4a13b0d1568dbe,
-    .minimum_zig_version = "0.16.0",
+    // Pinned to the same dev build CI uses
+    // (`.github/workflows/ci.yml`). anyzig reads this field to pick
+    // the compiler locally, so bump both in lockstep when a Zig
+    // parser/codegen change forces it.
+    .minimum_zig_version = "0.17.0-dev.305+bdfbf432d",
     .dependencies = .{},
     .paths = .{
         "build.zig",

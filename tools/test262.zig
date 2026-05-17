@@ -677,8 +677,7 @@ fn computePreStage4Mask(features: []const []const u8) PreStage4Mask {
 /// and `merge` rolls up under `merge_mu` at worker exit — same
 /// shape as `BucketMap` so the contention model is identical.
 const PreStage4Stats = struct {
-    slots: [tracked_pre_stage4_features.len]Bucket =
-        .{Bucket{ .name = "" }} ** tracked_pre_stage4_features.len,
+    slots: [tracked_pre_stage4_features.len]Bucket = @splat(.{ .name = "" }),
 
     fn bump(self: *PreStage4Stats, mask: PreStage4Mask, kind: BucketKind) void {
         if (mask == 0) return;
@@ -896,7 +895,7 @@ pub fn main(init: std.process.Init) !void {
 
     var main_result: ?PhaseResult = null;
     defer if (main_result) |*r| r.deinit(gpa);
-    var feature_results: [tracked_count]?PhaseResult = .{null} ** tracked_count;
+    var feature_results: [tracked_count]?PhaseResult = @splat(null);
     defer for (&feature_results) |*slot| if (slot.*) |*pr| pr.deinit(gpa);
 
     for (phases_buf[0..phases_len]) |phase| {
