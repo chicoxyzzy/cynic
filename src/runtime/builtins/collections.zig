@@ -1455,36 +1455,95 @@ fn setConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const data = realm.allocator.create(ObjMod.SetData) catch return error.OutOfMemory;
     data.* = .{};
     inst.set_data = data;
-    if (args.len > 0 and !args[0].isUndefined() and !args[0].isNull()) {
-        const iter_v = interpreter.openIterator(realm.allocator, realm, args[0]) catch |err| switch (err) {
+    // §24.2.1.1 Set constructor steps 6-8 — `Get(set, "add")`
+    // MUST NOT fire when iterable is undefined/null
+    // (`set-get-add-method-failure.js` poisons the accessor and
+    // asserts `new Set()` doesn't throw).
+    if (args.len == 0 or args[0].isUndefined() or args[0].isNull()) {
+        return this_value;
+    }
+    const adder_v = intrinsics.getPropertyChain(realm, inst, "add") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const adder = heap_mod.valueAsFunction(adder_v) orelse {
+        // §24.2.1.1 step 7.c — non-callable adder is TypeError.
+        return throwTypeError(realm, "Set: 'add' is not callable");
+    };
+    const iter_v = interpreter.openIterator(realm.allocator, realm, args[0]) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NotIterable => return throwTypeError(realm, "Set constructor: argument is not iterable"),
+        error.Propagated => return error.NativeThrew,
+        else => return error.NativeThrew,
+    };
+    return setAddValuesFromIterable(realm, this_value, iter_v, adder);
+}
+
+/// §24.2.1.1 AddValuesFromIterable — drives the iterator and
+/// invokes the user-installed `adder.call(set, value)` per item,
+/// closing the iterator on every abrupt path. Mirror of
+/// `weakSetAddValuesFromIterable` (§24.4.1.1).
+fn setAddValuesFromIterable(
+    realm: *Realm,
+    target_v: Value,
+    iter_v: Value,
+    adder: *JSFunction,
+) NativeError!Value {
+    const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse return throwTypeError(realm, "Set iterator did not return an object");
+    const max_iter: usize = 1 << 24;
+    var step: usize = 0;
+    while (step < max_iter) : (step += 1) {
+        const next_v = iter_obj.get("next");
+        const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "Set iterator missing next");
+        const outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.NotIterable => return throwTypeError(realm, "Set constructor: argument is not iterable"),
-            error.Propagated => return error.NativeThrew,
             else => return error.NativeThrew,
         };
-        const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse return throwTypeError(realm, "Set iterator did not return an object");
-        const max_iter: usize = 1 << 24;
-        var step: usize = 0;
-        while (step < max_iter) : (step += 1) {
-            const next_v = iter_obj.get("next");
-            const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "Set iterator missing next");
-            const outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.NativeThrew,
-            };
-            const result_v = switch (outcome) {
-                .value, .yielded => |v| v,
-                .thrown => |ex| {
-                    realm.pending_exception = ex;
-                    return error.NativeThrew;
-                },
-            };
-            const result = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "Set iterator next did not return an object");
-            if (result.get("done").toBooleanPrimitive()) break;
-            try setAddInternal(realm, inst, result.get("value"));
+        const result_v = switch (outcome) {
+            .value, .yielded => |v| v,
+            .thrown => |ex| {
+                // §7.4.6 step 6.b — throwing `next()` leaves the
+                // iterator already "done"; no IteratorClose.
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        };
+        const result = heap_mod.valueAsPlainObject(result_v) orelse {
+            return throwTypeError(realm, "Set iterator next did not return an object");
+        };
+        const done_v = intrinsics.getPropertyChain(realm, result, "done") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        if (done_v.toBooleanPrimitive()) break;
+        // §7.4.4 IteratorValue — `Get(iterResult, "value")` fires
+        // user accessors (`set-iterator-value-failure.js`).
+        const value_v = intrinsics.getPropertyChain(realm, result, "value") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        // §24.2.1.1 step 8.f — `Call(adder, set, « nextValue »)`.
+        // Routes through user-installed `Set.prototype.add` so an
+        // overridden `add` sees every value, and a throwing `add`
+        // closes the iterator (`set-iterator-close-after-add-failure.js`).
+        const adder_args = [_]Value{value_v};
+        const add_outcome = interpreter.callJSFunction(realm.allocator, realm, adder, target_v, &adder_args) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                invokeIteratorReturn(realm, iter_obj, iter_v);
+                return error.NativeThrew;
+            },
+        };
+        switch (add_outcome) {
+            .value, .yielded => {},
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                invokeIteratorReturn(realm, iter_obj, iter_v);
+                return error.NativeThrew;
+            },
         }
     }
-    return this_value;
+    return target_v;
 }
 
 fn setDataOf(this_value: Value) ?*@import("../object.zig").SetData {
