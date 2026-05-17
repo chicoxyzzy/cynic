@@ -641,31 +641,38 @@ fn promiseFinally(realm: *Realm, this_value: Value, args: []const Value) NativeE
     };
 }
 
-/// Step 6.a-d of §27.2.5.3 — invoke `onFinally()`, ignore the
-/// result, propagate the original fulfilled value. The per-
-/// `.finally()` context flows in as `this_value` thanks to the
-/// `is_arrow + captured_this` setup at the install site.
+/// Step 6 of §27.2.5.3 — onFinally for fulfilled path.
+///   a. Let result be ? Call(onFinally).
+///   b. Let promise be ? PromiseResolve(C, result).
+///   c. Let valueThunk be a new built-in function that returns value.
+///   d. Return ? Invoke(promise, "then", « valueThunk »).
+///
+/// When `result` is a thenable (or rejected Promise), the chain waits
+/// for `result` to settle and forwards `value` (or `result`'s rejection
+/// reason) — `.finally(() => rejectedPromise)` rejects the .finally
+/// outer with the rejected reason, NOT the original fulfilled value.
 fn finallyThenReaction(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const value = argOr(args, 0, Value.undefined_);
     const ctx = heap_mod.valueAsPlainObject(this_value) orelse return value;
     const cb = ctx.finally_callback orelse return value;
     const interp = @import("../interpreter.zig");
-    const outcome = interp.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &.{}) catch |err| switch (err) {
+    const cb_outcome = interp.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &.{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
-    switch (outcome) {
+    const result = switch (cb_outcome) {
+        .value, .yielded => |v| v,
         .thrown => |ex| {
             realm.pending_exception = ex;
             return error.NativeThrew;
         },
-        else => {},
-    }
-    return value;
+    };
+    return chainFinallyResult(realm, result, value, false);
 }
 
-/// Step 6.e-g — invoke `onFinally()`, then RE-THROW the original
-/// rejection reason. If onFinally itself throws, that throw wins.
+/// Step 7 of §27.2.5.3 — onFinally for rejected path. Same shape as
+/// step 6 but the value thunk re-throws `reason` instead of returning
+/// `value`.
 fn finallyCatchReaction(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const reason = argOr(args, 0, Value.undefined_);
     const ctx = heap_mod.valueAsPlainObject(this_value) orelse {
@@ -677,18 +684,115 @@ fn finallyCatchReaction(realm: *Realm, this_value: Value, args: []const Value) N
         return error.NativeThrew;
     };
     const interp = @import("../interpreter.zig");
-    const outcome = interp.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &.{}) catch |err| switch (err) {
+    const cb_outcome = interp.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &.{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
-    switch (outcome) {
+    const result = switch (cb_outcome) {
+        .value, .yielded => |v| v,
         .thrown => |ex| {
             realm.pending_exception = ex;
             return error.NativeThrew;
         },
-        else => {},
+    };
+    return chainFinallyResult(realm, result, reason, true);
+}
+
+/// Wrap `result` in a Promise (§27.2.4.7 PromiseResolve), then chain
+/// a value-thunk that returns `carry` (if `is_throw=false`) or throws
+/// `carry` (if `is_throw=true`). Equivalent to the spec's
+/// `Invoke(promise, "then", « valueThunk »)`.
+///
+/// When `result` is not a thenable, the short path returns `carry`
+/// directly (or throws for the catch path) — matches the spec's
+/// PromiseResolve fast path on a primitive.
+fn chainFinallyResult(realm: *Realm, result: Value, carry: Value, is_throw: bool) NativeError!Value {
+    const result_obj = heap_mod.valueAsPlainObject(result);
+    const is_thenable_blk: bool = blk: {
+        if (result_obj) |obj| {
+            if (obj.isPromise()) break :blk true;
+            const then_v = obj.get("then");
+            if (heap_mod.valueAsFunction(then_v) != null) break :blk true;
+        }
+        break :blk false;
+    };
+    if (!is_thenable_blk) {
+        if (is_throw) {
+            realm.pending_exception = carry;
+            return error.NativeThrew;
+        }
+        return carry;
     }
-    realm.pending_exception = reason;
+
+    // Wrap result through PromiseResolve so a plain thenable becomes
+    // an adopted Promise. For a native Promise this is identity-fast.
+    const wrapped = blk: {
+        if (result_obj) |obj| if (obj.isPromise()) break :blk result;
+        // Synthesise via NewPromiseCapability + resolve(result) — the
+        // existing PromiseResolveThenableJob path. allocatePromiseFor
+        // with .pending + manual then-on-result would race; use
+        // wrapInPromise after queueing the thenable job instead.
+        const new_p_v = try @import("../interpreter.zig").wrapInPromise(realm, true, Value.undefined_);
+        const new_p = heap_mod.valueAsPlainObject(new_p_v) orelse return error.OutOfMemory;
+        new_p.promise_state = .pending;
+        new_p.promise_value = Value.undefined_;
+        // result must be a thenable here; queue the job per §27.2.1.3.2.
+        const then_v = if (result_obj) |obj| obj.get("then") else Value.undefined_;
+        realm.enqueueThenableJob(new_p_v, result, then_v) catch return error.OutOfMemory;
+        break :blk new_p_v;
+    };
+
+    // Build the value-thunk context (captures `carry` + the throw flag).
+    const thunk_ctx = realm.heap.allocateObject() catch return error.OutOfMemory;
+    thunk_ctx.prototype = realm.intrinsics.object_prototype;
+    thunk_ctx.finally_value = carry;
+    const thunk_fn = realm.heap.allocateFunctionNative(
+        if (is_throw) finallyThrowThunk else finallyReturnThunk,
+        0,
+        "",
+    ) catch return error.OutOfMemory;
+    thunk_fn.proto = realm.intrinsics.function_prototype;
+    thunk_fn.is_arrow = true;
+    thunk_fn.captured_this = heap_mod.taggedObject(thunk_ctx);
+
+    // Invoke(wrapped, "then", « thunk »).
+    const wrapped_obj = heap_mod.valueAsPlainObject(wrapped) orelse return error.OutOfMemory;
+    const then_v = getPropertyChain(realm, wrapped_obj, "then") catch return error.NativeThrew;
+    const then_fn = heap_mod.valueAsFunction(then_v) orelse return error.NativeThrew;
+    const interp = @import("../interpreter.zig");
+    const then_args = [_]Value{heap_mod.taggedFunction(thunk_fn)};
+    const outcome = interp.callJSFunction(realm.allocator, realm, then_fn, wrapped, &then_args) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    return switch (outcome) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+}
+
+/// `() => carry` — value-thunk for the §27.2.5.3 step 6.c return
+/// path. Captures the carried fulfilment value via `is_arrow +
+/// captured_this`.
+fn finallyReturnThunk(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = args;
+    const ctx = heap_mod.valueAsPlainObject(this_value) orelse return Value.undefined_;
+    return ctx.finally_value;
+}
+
+/// `() => { throw carry }` — value-thunk for the §27.2.5.3 step 7.c
+/// re-throw path. Same context shape as `finallyReturnThunk`.
+fn finallyThrowThunk(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const ctx = heap_mod.valueAsPlainObject(this_value) orelse {
+        realm.pending_exception = Value.undefined_;
+        return error.NativeThrew;
+    };
+    realm.pending_exception = ctx.finally_value;
     return error.NativeThrew;
 }
 

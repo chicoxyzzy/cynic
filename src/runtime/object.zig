@@ -378,6 +378,12 @@ pub const JSObject = struct {
     /// `.finally()` context object the reaction closures capture
     /// via `is_arrow + captured_this`. Hidden from JS.
     finally_callback: ?*@import("function.zig").JSFunction = null,
+    /// `Promise.prototype.finally` carried value/reason — set on
+    /// the inner value-thunk's context so the §27.2.5.3 step 6.d
+    /// "return value" / step 7.d "throw reason" semantics keep
+    /// the original around while we await the user-supplied
+    /// onFinally's result. Hidden from JS.
+    finally_value: @import("value.zig").Value = @import("value.zig").Value.undefined_,
     /// `[[DateValue]]` (§21.4.1) — milliseconds since Unix
     /// epoch. NaN means an invalid date. Only set on `new Date()`
     /// instances.
