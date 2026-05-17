@@ -180,13 +180,59 @@ fn iteratorReturnsSelf(realm: *Realm, this_value: Value, args: []const Value) Na
     return this_value;
 }
 
+/// §23.1.5.2 %ArrayIteratorPrototype% — lazy allocator. Empty
+/// object whose [[Prototype]] is %IteratorPrototype% (or
+/// %Object.prototype% in a stripped-down realm without
+/// `Iterator`). Tagged with `@@toStringTag = "Array Iterator"`
+/// per §23.1.5.2.3 so `Object.prototype.toString.call(it)`
+/// returns `"[object Array Iterator]"`. Shared identity across
+/// every array iterator allocated within the realm.
+fn ensureArrayIteratorPrototype(realm: *Realm) !?*JSObject {
+    if (realm.intrinsics.array_iterator_prototype) |p| return p;
+    const proto = try realm.heap.allocateObject();
+    proto.prototype = @import("../interpreter.zig").iteratorPrototypeOrObjectPrototypePub(realm);
+    const tag_str = try realm.heap.allocateString("Array Iterator");
+    try proto.setWithFlags(realm.allocator, "@@toStringTag", Value.fromString(tag_str), .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = true,
+    });
+    realm.intrinsics.array_iterator_prototype = proto;
+    return proto;
+}
+
+/// §22.1.5.2 %StringIteratorPrototype% — sibling of
+/// `ensureArrayIteratorPrototype`. Used by the string-iterator
+/// factory.
+fn ensureStringIteratorPrototype(realm: *Realm) !?*JSObject {
+    if (realm.intrinsics.string_iterator_prototype) |p| return p;
+    const proto = try realm.heap.allocateObject();
+    proto.prototype = @import("../interpreter.zig").iteratorPrototypeOrObjectPrototypePub(realm);
+    const tag_str = try realm.heap.allocateString("String Iterator");
+    try proto.setWithFlags(realm.allocator, "@@toStringTag", Value.fromString(tag_str), .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = true,
+    });
+    realm.intrinsics.string_iterator_prototype = proto;
+    return proto;
+}
+
 /// Array.prototype iterator factory. Reads the `length` of the
 /// receiver and walks numeric indices; works for plain arrays,
 /// `arguments`, and any array-like object. `kind` selects which
 /// of `entries` / `keys` / `values` to produce.
 fn makeArrayLikeIterator(realm: *Realm, src: Value, kind: enum { entries, keys, values }) !Value {
     const it = try realm.heap.allocateObject();
-    it.prototype = realm.intrinsics.object_prototype;
+    // §23.1.5.2 — Array iterators inherit from
+    // %ArrayIteratorPrototype% which itself chains to
+    // %IteratorPrototype%. Test262 fixtures walk
+    // `Object.getPrototypeOf(Object.getPrototypeOf([][Symbol
+    // .iterator]())) === %IteratorPrototype%`, so the
+    // intermediate slot must really exist. Lazily allocate it
+    // and stash on the realm so every array iterator shares
+    // identity.
+    it.prototype = try ensureArrayIteratorPrototype(realm);
     const state = try realm.allocator.create(@import("../object.zig").ArrayLikeIterState);
     state.* = .{ .target = src };
     it.array_like_iter = state;
@@ -304,7 +350,16 @@ pub fn typedArrayEntriesMethod(realm: *Realm, this_value: Value, args: []const V
 
 pub fn stringIteratorMethod(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    return makeArrayLikeIterator(realm, this_value, .values) catch return error.OutOfMemory;
+    const v = makeArrayLikeIterator(realm, this_value, .values) catch return error.OutOfMemory;
+    // §22.1.5.1 — String iterators inherit from
+    // %StringIteratorPrototype%, not %ArrayIteratorPrototype%.
+    // Re-parent the freshly-built iterator (`makeArrayLikeIterator`
+    // wires it under the array proto by default since the two
+    // paths share machinery).
+    if (heap_mod.valueAsPlainObject(v)) |obj| {
+        if (try ensureStringIteratorPrototype(realm)) |sip| obj.prototype = sip;
+    }
+    return v;
 }
 
 const StepOutcome = union(enum) {

@@ -546,6 +546,10 @@ pub fn wrapAsyncGenerator(
 /// `%Object.prototype%` if Iterator isn't present (e.g. a realm
 /// that only loaded core intrinsics).
 fn iteratorPrototypeOrObjectPrototype(realm: *Realm) ?*JSObject {
+    return iteratorPrototypeOrObjectPrototypePub(realm);
+}
+
+pub fn iteratorPrototypeOrObjectPrototypePub(realm: *Realm) ?*JSObject {
     if (realm.globals.get("Iterator")) |ctor_v| {
         if (heap_mod.valueAsFunction(ctor_v)) |ctor| {
             if (ctor.prototype) |p| return p;

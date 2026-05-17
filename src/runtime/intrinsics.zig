@@ -148,6 +148,21 @@ pub const Intrinsics = struct {
     /// `next`, `@@iterator`, and `Symbol.toStringTag = "Set Iterator"`.
     set_iterator_prototype: ?*JSObject = null,
 
+    /// `%ArrayIteratorPrototype%` (§23.1.5.2). Shared prototype of
+    /// every Array iterator returned by `Array.prototype.{values,
+    /// keys, entries}` and `Array.prototype[@@iterator]`. Chains
+    /// to `%IteratorPrototype%` so the Stage 4 `.map` / `.filter`
+    /// / `[Symbol.iterator]` helpers resolve through it. Lazily
+    /// allocated by `ensureArrayIteratorPrototype` on first use
+    /// (collections.zig) — `Iterator` install runs after Array,
+    /// so eager wiring would walk into a not-yet-built proto.
+    array_iterator_prototype: ?*JSObject = null,
+
+    /// `%StringIteratorPrototype%` (§22.1.5.2). Same shape — chains
+    /// to `%IteratorPrototype%`. Lazily allocated alongside
+    /// `array_iterator_prototype`.
+    string_iterator_prototype: ?*JSObject = null,
+
     /// `%RegExpStringIteratorPrototype%` (§22.2.9.2). Shared
     /// prototype for the iterator returned by
     /// `String.prototype.matchAll` / `RegExp.prototype[@@matchAll]`.
