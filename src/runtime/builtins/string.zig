@@ -128,8 +128,14 @@ fn stringSymbolIterator(realm: *Realm, this_value: Value, args: []const Value) N
     };
 }
 
-/// §22.2.9.1 %RegExpStringIteratorPrototype%.next — RequireInternalSlot
+/// §22.2.9.2 %RegExpStringIteratorPrototype%.next — RequireInternalSlot
 /// on `[[IteratingRegExp]]` (presence of `__cynic_matchall_re__`).
+/// Yields each `RegExpExec(R, S)` result. When `[[Global]]` is
+/// false, the first non-null result is returned and the iterator
+/// is exhausted; when `[[Global]]` is true, iteration continues
+/// until `RegExpExec` returns null, and a zero-width match advances
+/// `R.lastIndex` via §22.2.7.3 AdvanceStringIndex (which the
+/// `[[Unicode]]` slot — driven by `flags ∋ {u,v}` — controls).
 fn regexpStringIterNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const it = heap_mod.valueAsPlainObject(this_value) orelse
@@ -143,27 +149,61 @@ fn regexpStringIterNext(realm: *Realm, this_value: Value, args: []const Value) N
     const re_obj = heap_mod.valueAsPlainObject(re_v) orelse return iterResult(realm, Value.undefined_, true);
     const input_v = it.get("__cynic_matchall_input__");
     const input: *JSString = if (input_v.isString()) @ptrCast(@alignCast(input_v.asString())) else return iterResult(realm, Value.undefined_, true);
+    // [[Global]] / [[Unicode]] (default false when the iterator was
+    // constructed by an older path that didn't seed them — the
+    // current `regexp.zig:regexpProtoMatchAll` always seeds both).
+    const is_global = it.get("__cynic_matchall_global__").asBool();
+    const full_unicode = it.get("__cynic_matchall_fullUnicode__").asBool();
+
     const exec_result = try regexExecCall(realm, re_obj, input);
     if (exec_result.isNull()) {
         it.set(realm.allocator, "__cynic_matchall_done__", Value.fromBool(true)) catch return error.OutOfMemory;
         return iterResult(realm, Value.undefined_, true);
     }
+    // §22.2.9.2 step 1.f.iii — when `[[Global]]` is false, the
+    // first match exhausts the iterator. (Mirrors the `not-a-global-
+    // regexp.js` family.)
+    if (!is_global) {
+        it.set(realm.allocator, "__cynic_matchall_done__", Value.fromBool(true)) catch return error.OutOfMemory;
+        return iterResult(realm, exec_result, false);
+    }
     // §22.2.9.2 step 1.f.iv — after a zero-width match the iterator
-    // must AdvanceStringIndex on the regex's `lastIndex`, otherwise
-    // the next pull re-matches the same position forever.
+    // must `AdvanceStringIndex(S, ToLength(? Get(R, "lastIndex")),
+    // fullUnicode)` and write that back via `Set(R, "lastIndex",
+    // nextIndex, true)`, otherwise the next pull re-matches at the
+    // same position forever.
     if (heap_mod.valueAsPlainObject(exec_result)) |match_arr| {
         const whole_v = match_arr.get("0");
         if (whole_v.isString()) {
             const whole: *JSString = @ptrCast(@alignCast(whole_v.asString()));
             if (whole.bytes.len == 0) {
-                const li_v = re_obj.get("lastIndex");
-                const li_unit: usize = if (li_v.isInt32() and li_v.asInt32() >= 0) @intCast(li_v.asInt32()) else 0;
-                const next_unit = advanceUnitOnString(input.bytes, li_unit);
+                const li_v = try intrinsics.getPropertyChain(realm, re_obj, "lastIndex");
+                const li_i64 = try intrinsics.toLengthValue(realm, li_v);
+                const li_unit: usize = if (li_i64 > 0) @intCast(li_i64) else 0;
+                const next_unit = if (full_unicode) advanceStringIndexUnicode(input.bytes, li_unit) else li_unit + 1;
                 re_obj.set(realm.allocator, "lastIndex", Value.fromInt32(@intCast(next_unit))) catch return error.OutOfMemory;
             }
         }
     }
     return iterResult(realm, exec_result, false);
+}
+
+/// AdvanceStringIndex (§22.2.7.3) for the `fullUnicode = true` case
+/// over a WTF-8 buffer indexed in UTF-16 code units. Walks the
+/// bytes counting code units to find the code unit at
+/// `from_unit`; if it begins a surrogate pair (high surrogate
+/// followed by a low surrogate), advance by 2 code units, else by 1.
+fn advanceStringIndexUnicode(s: []const u8, from_unit: usize) usize {
+    var unit_pos: usize = 0;
+    var byte_pos: usize = 0;
+    while (byte_pos < s.len and unit_pos < from_unit) {
+        const seq_len = utf8SeqLen(s[byte_pos]);
+        byte_pos += seq_len;
+        unit_pos += if (seq_len == 4) 2 else 1;
+    }
+    if (byte_pos >= s.len) return from_unit + 1;
+    const seq_len = utf8SeqLen(s[byte_pos]);
+    return from_unit + (if (seq_len == 4) @as(usize, 2) else 1);
 }
 
 /// Advance one UTF-16 code unit in the WTF-8 string starting at

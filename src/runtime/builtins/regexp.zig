@@ -113,10 +113,9 @@ pub fn install(realm: *Realm) !void {
     try installSymbolMethod(realm, proto, "@@replace", "[Symbol.replace]", regexpProtoReplace, 2);
     try installSymbolMethod(realm, proto, "@@search", "[Symbol.search]", regexpProtoSearch, 1);
     try installSymbolMethod(realm, proto, "@@split", "[Symbol.split]", regexpProtoSplit, 2);
-    // §22.2.6.5 RegExp.prototype[@@matchAll] — minimal wiring so
-    // `re[Symbol.matchAll](s)` returns a RegExpStringIterator.
-    // Spec-faithful flag-cloning + species lookup is later; this
-    // path lets test262 reach %RegExpStringIteratorPrototype%.
+    // §22.2.5.9 RegExp.prototype[@@matchAll] — step-by-step traversal
+    // of the spec algorithm so the species-ctor, flag-cloning, and
+    // cached-lastIndex side effects line up with the fixtures.
     try installSymbolMethod(realm, proto, "@@matchAll", "[Symbol.matchAll]", regexpProtoMatchAll, 1);
 
     // §22.2.6.{3, 4, 5, 6, 7, 9, 10, 11, 13, 14} — accessors on
@@ -1113,21 +1112,94 @@ fn arithToUint32(v: Value) u32 {
     return 0;
 }
 
-/// §22.2.6.5 RegExp.prototype [ @@matchAll ] ( S ). Allocates a
-/// RegExpStringIterator chained to `%RegExpStringIteratorPrototype%`.
-/// Cynic shortcut: reuses the same own-slot layout that
-/// String.prototype.matchAll uses, so the shared `next` works
-/// for both entry points. Species + flag cloning per §22.2.6.5
-/// steps 5-9 are later.
+/// §22.2.5.9 RegExp.prototype [ @@matchAll ] ( string ). A step-by-
+/// step traversal of the spec algorithm so each observable side
+/// effect (`Get(R, "constructor")`, `Get(R, "flags")`, the per-
+/// invocation `Construct(C, « R, flags »)`, the `ToLength(? Get(R,
+/// "lastIndex"))` cache, the `Set(matcher, "lastIndex", lastIndex)`
+/// write) lines up with the fixtures under
+/// `built-ins/RegExp/prototype/Symbol.matchAll/`.
+///
+/// Returns a fresh RegExpStringIterator chained to
+/// `%RegExpStringIteratorPrototype%` whose own slots carry the
+/// matcher, the iterated string, the cached `global` /
+/// `fullUnicode` booleans, and the `done` flag. The shared `next`
+/// (in `string.zig:regexpStringIterNext`) drives `RegExpExec` per
+/// pull, advancing zero-width matches via `AdvanceStringIndex`.
 fn regexpProtoMatchAll(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const re = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "RegExp.prototype[@@matchAll] requires a regex receiver");
-    const s_str = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
+    // step 1 — `Let R be the this value`. step 2 — `If R is not
+    // an Object, throw a TypeError`.
+    const r = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.matchAll] called on non-object");
+
+    // step 3 — `Let S be ? ToString(string)`. The `string-tostring-
+    // throws` fixture relies on this firing before any other
+    // accessor on `R`.
+    const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
+
+    // step 4 — `Let C be ? SpeciesConstructor(R, %RegExp%)`.
+    const builtin_regexp = blk: {
+        const ctor_v = realm.globals.get("RegExp") orelse return throwTypeError(realm, "RegExp.prototype[Symbol.matchAll]: %RegExp% missing");
+        break :blk heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.matchAll]: %RegExp% is not callable");
+    };
+    const c_fn = try speciesConstructor(realm, r, builtin_regexp);
+
+    // step 5 — `Let flags be ? ToString(? Get(R, "flags"))`. The
+    // `this-get-flags-throws` / `this-tostring-flags-throws`
+    // fixtures rely on these firing in this order.
+    const flags_v = try intrinsics.getPropertyChain(realm, r, "flags");
+    const flags_s = try intrinsics.stringifyArg(realm, flags_v);
+
+    // step 6 — `Let matcher be ? Construct(C, « R, flags »)`. The
+    // `species-constructor` fixture observes the two-argument
+    // call shape with the original RegExp and the cloned flag
+    // string.
+    const splitter_args = [_]Value{ heap_mod.taggedObject(r), Value.fromString(flags_s) };
+    const interp = @import("../interpreter.zig");
+    const ctor_v = heap_mod.taggedFunction(c_fn);
+    const ctor_outcome = interp.constructValue(realm.allocator, realm, ctor_v, &splitter_args, ctor_v) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const matcher_v: Value = switch (ctor_outcome) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+    const matcher = heap_mod.valueAsPlainObject(matcher_v) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.matchAll]: species constructor returned non-Object");
+
+    // step 7 — `Let lastIndex be ? ToLength(? Get(R, "lastIndex"))`.
+    // The `this-lastindex-cached` fixture relies on this capturing
+    // the value *at @@matchAll time* — a later assignment to
+    // `R.lastIndex` must not perturb the iterator.
+    // step 8 — `Perform ? Set(matcher, "lastIndex", lastIndex, true)`.
+    const li_v = try intrinsics.getPropertyChain(realm, r, "lastIndex");
+    const li_i64 = try intrinsics.toLengthValue(realm, li_v);
+    try setPropertyChainOrThrow(realm, matcher, "lastIndex", Value.fromInt32(@intCast(@min(li_i64, std.math.maxInt(i32)))));
+
+    // step 9 — `If flags contains "g", let global be true; else
+    // false`. step 10 — `If flags contains "u" or "v", let
+    // fullUnicode be true; else false`. Per `species-regexp-get-
+    // global-throws.js`, `global` is NOT re-read from `matcher`
+    // — both flags come from the cloned `flags` string.
+    const is_global = std.mem.indexOfScalar(u8, flags_s.bytes, 'g') != null;
+    const full_unicode = std.mem.indexOfScalar(u8, flags_s.bytes, 'u') != null or
+        std.mem.indexOfScalar(u8, flags_s.bytes, 'v') != null;
+
+    // step 11 — `Return CreateRegExpStringIterator(matcher, S,
+    // global, fullUnicode)`. Allocate an iterator object chained to
+    // `%RegExpStringIteratorPrototype%`; its own slots carry the
+    // [[IteratingRegExp]] / [[IteratedString]] / [[Global]] /
+    // [[Unicode]] / [[Done]] state. `string.zig:regexpStringIterNext`
+    // reads them.
     const iter = realm.heap.allocateObject() catch return error.OutOfMemory;
     iter.prototype = realm.intrinsics.regexp_string_iterator_prototype orelse realm.intrinsics.object_prototype;
-    iter.set(realm.allocator, "__cynic_matchall_re__", heap_mod.taggedObject(re)) catch return error.OutOfMemory;
-    iter.set(realm.allocator, "__cynic_matchall_input__", Value.fromString(s_str)) catch return error.OutOfMemory;
+    iter.set(realm.allocator, "__cynic_matchall_re__", heap_mod.taggedObject(matcher)) catch return error.OutOfMemory;
+    iter.set(realm.allocator, "__cynic_matchall_input__", Value.fromString(s)) catch return error.OutOfMemory;
+    iter.set(realm.allocator, "__cynic_matchall_global__", Value.fromBool(is_global)) catch return error.OutOfMemory;
+    iter.set(realm.allocator, "__cynic_matchall_fullUnicode__", Value.fromBool(full_unicode)) catch return error.OutOfMemory;
     iter.set(realm.allocator, "__cynic_matchall_done__", Value.fromBool(false)) catch return error.OutOfMemory;
-    re.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
     return heap_mod.taggedObject(iter);
 }
 
