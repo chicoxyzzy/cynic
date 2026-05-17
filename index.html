@@ -740,10 +740,10 @@
         <div class="compare-row">
           <div>
             <div class="feature-name"><code>Proxy</code> traps</div>
-            <div class="compare-note">get / set / has / deleteProperty / defineProperty / ownKeys + callable proxies</div>
+            <div class="compare-note">get / set / has / deleteProperty / defineProperty / ownKeys / getPrototypeOf / setPrototypeOf / isExtensible / preventExtensions / apply / construct</div>
           </div>
-          <div class="check">Mostly.</div>
-          <div>Apply / construct trap dispatch is on the list.</div>
+          <div class="check">Works.</div>
+          <div>Every trap the spec wrote down. Apologies to your debugger.</div>
         </div>
 
         <div class="compare-row">
@@ -784,20 +784,29 @@
 
         <div class="compare-row">
           <div>
-            <div class="feature-name"><code>yield*</code> delegation · <code>for await of</code> · top-level <code>await</code> (pending Promises)</div>
-            <div class="compare-note">simple TLA cases through the module preload work; thenable adoption + suspension across module boundaries still pending</div>
+            <div class="feature-name"><code>yield*</code> delegation · <code>for await of</code></div>
+            <div class="compare-note">sync + async generators; <code>IteratorClose</code> on every abrupt path the spec describes</div>
           </div>
-          <div class="cross">In progress.</div>
-          <div>Don't ship to prod on these. Don't ship anything to prod, frankly.</div>
+          <div class="check">Works.</div>
+          <div>We learned §15.5.5 by failing it, then we stopped failing it.</div>
         </div>
 
         <div class="compare-row">
           <div>
             <div class="feature-name">Real module graph</div>
-            <div class="compare-note">cyclic imports with namespace objects, hoisted <code>import</code> bindings with TDZ, real async module evaluation</div>
+            <div class="compare-note">cyclic imports, indirect-binding TDZ, namespace <code>[[Get]]</code> ReferenceError on uninit, dynamic <code>import()</code></div>
           </div>
-          <div class="cross">Partly.</div>
-          <div>Single-file modules and the dynamic-import path work; the multi-file graph plumbing is still being wired.</div>
+          <div class="check">Works.</div>
+          <div>Cyclic. TDZ on indirect imports. The Namespace <code>[[Get]]</code> ReferenceError the spec asked for. Top-level <code>await</code> is the seam left.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">Top-level <code>await</code></div>
+            <div class="compare-note">thenable adoption + suspension across module boundaries</div>
+          </div>
+          <div class="cross">In progress.</div>
+          <div>Don't ship to prod on it. Don't ship anything to prod, frankly.</div>
         </div>
 
         <div class="compare-row">
@@ -819,7 +828,7 @@
     <footer>
       <div>
         <span class="tag">CYNIC · pre-alpha</span>
-        &nbsp; — built in Zig 0.16+, with reluctance, 2026
+        &nbsp; — built in Zig, with reluctance, 2026
       </div>
       <div class="credits">
         Cynic is <a href="https://github.com/chicoxyzzy/cynic/blob/main/LICENSE">MIT</a>. Strict only. Always was.
