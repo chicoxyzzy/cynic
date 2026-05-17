@@ -2440,32 +2440,117 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
     const max_iter: i64 = 1 << 24;
     var i: i64 = 0;
     while (i < max_iter) : (i += 1) {
+        // §7.4.2 IteratorNext — throwing `next()` does NOT close;
+        // the iterator is already "done" per §7.4.6 step 6.b.
         const step = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
         const result_v = switch (step) {
             .value, .yielded => |v| v,
-            .thrown => return error.NativeThrew,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
         };
-        const result = heap_mod.valueAsPlainObject(result_v) orelse break;
-        // §7.4.5 IteratorComplete / IteratorValue use Get(), so
-        // user-supplied iterator results with accessor `done`/`value`
-        // slots must fire those getters.
-        if (toBoolean(try getPropertyChain(realm, result, "done"))) break;
-        const pair_v = try getPropertyChain(realm, result, "value");
-        const pair = heap_mod.valueAsPlainObject(pair_v) orelse return throwTypeError(realm, "Object.fromEntries entry must be an object");
-        const k = try getPropertyChain(realm, pair, "0");
-        const v = try getPropertyChain(realm, pair, "1");
-        const key_str = if (k.isString())
-            (@as(*JSString, @ptrCast(@alignCast(k.asString())))).bytes
-        else blk: {
-            const s = try stringifyArg(realm, k);
-            break :blk s.bytes;
+        // §7.4.2 step 3 — result must be Object. NOT a close case:
+        // the spec returns ? IteratorNext throw, which surfaces
+        // without invoking return.
+        const result = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "iterator next result is not an object");
+        // §7.4.5 IteratorComplete uses Get() — a throwing
+        // `get done()` IS a close case per §7.4.6.
+        const done_v = getPropertyChain(realm, result, "done") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                invokeFromEntriesReturn(realm, iter_obj, iter);
+                return error.NativeThrew;
+            },
         };
-        out.set(realm.allocator, key_str, v) catch return error.OutOfMemory;
+        if (toBoolean(done_v)) break;
+        // §7.4.4 IteratorValue — throwing `get value()` closes.
+        const pair_v = getPropertyChain(realm, result, "value") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                invokeFromEntriesReturn(realm, iter_obj, iter);
+                return error.NativeThrew;
+            },
+        };
+        // §20.1.2.6 step (AddEntriesFromIterable) — if entry is
+        // not Object, IteratorClose with TypeError completion.
+        const pair = heap_mod.valueAsPlainObject(pair_v) orelse {
+            invokeFromEntriesReturn(realm, iter_obj, iter);
+            return throwTypeError(realm, "Object.fromEntries entry must be an object");
+        };
+        // §7.3.5 Get — accessor getters on key/value can throw;
+        // close the iterator on throw.
+        const k = getPropertyChain(realm, pair, "0") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                invokeFromEntriesReturn(realm, iter_obj, iter);
+                return error.NativeThrew;
+            },
+        };
+        const v = getPropertyChain(realm, pair, "1") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                invokeFromEntriesReturn(realm, iter_obj, iter);
+                return error.NativeThrew;
+            },
+        };
+        // §7.1.19 ToPropertyKey — Symbol keys preserve as Symbol
+        // (Cynic stores them as `<sym:N>` / `@@<name>`); other
+        // values coerce to String via ToString. A throwing
+        // ToString (e.g. `Symbol → @@toPrimitive` overrides) is
+        // a close case.
+        const key_slot = propertyKeyForFromEntries(realm, k) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                invokeFromEntriesReturn(realm, iter_obj, iter);
+                return error.NativeThrew;
+            },
+        };
+        // §20.1.2.6 — CreateDataPropertyOrThrow installs as
+        // `{w:true, e:true, c:true}` (the bag default).
+        out.set(realm.allocator, key_slot, v) catch return error.OutOfMemory;
     }
     return heap_mod.taggedObject(out);
+}
+
+/// §7.4.6 IteratorClose specialised for `Object.fromEntries` —
+/// invoke `iter.return()` if present; suppress a throw from
+/// `return` itself (step 7: "If completion is throw, return
+/// completion"). The pre-existing pending exception is what
+/// propagates upward.
+fn invokeFromEntriesReturn(realm: *Realm, iter_obj: *JSObject, iter_v: Value) void {
+    const interpreter = @import("../interpreter.zig");
+    const ret_v = intrinsics.getPropertyChain(realm, iter_obj, "return") catch return;
+    if (ret_v.isUndefined() or ret_v.isNull()) return;
+    const ret_fn = heap_mod.valueAsFunction(ret_v) orelse return;
+    const saved_ex = realm.pending_exception;
+    const outcome = interpreter.callJSFunction(realm.allocator, realm, ret_fn, iter_v, &.{}) catch {
+        realm.pending_exception = saved_ex;
+        return;
+    };
+    realm.pending_exception = saved_ex;
+    _ = outcome;
+}
+
+/// §7.1.19 ToPropertyKey for `Object.fromEntries` — preserves
+/// Symbol keys (Cynic flattens to `<sym:N>` / `@@<name>`) and
+/// ToString-coerces the rest. Returns a slice valid for the
+/// realm's lifetime (heap-allocated JSString.bytes).
+fn propertyKeyForFromEntries(realm: *Realm, k: Value) NativeError![]const u8 {
+    // Symbol primitive — Cynic stores as a `*JSSymbol` whose
+    // `prop_key` is the `<sym:N>` / `@@<descr>` slot key.
+    if (heap_mod.valueAsSymbol(k)) |sym| {
+        return sym.prop_key;
+    }
+    if (k.isString()) {
+        const s: *JSString = @ptrCast(@alignCast(k.asString()));
+        return s.bytes;
+    }
+    const s = try stringifyArg(realm, k);
+    return s.bytes;
 }
 
 /// §10.5.2 Proxy [[SetPrototypeOf]] (V) — shared helper used by
