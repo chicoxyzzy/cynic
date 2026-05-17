@@ -326,6 +326,19 @@ pub fn install(realm: *Realm) !void {
     try realm.globals.put(realm.allocator, "Infinity", Value.fromDouble(std.math.inf(f64)));
     try realm.globals.put(realm.allocator, "undefined", Value.undefined_);
 
+    // §19.2.1 — `eval` global. Cynic is strict-only and explicitly
+    // does NOT ship runtime code construction (eval / new Function /
+    // new GeneratorFunction). The binding still has to EXIST on
+    // globalThis though — Sputnik fixtures (S10.2.3_*) and the
+    // strict-mode global-property tests do `eval === null` etc.,
+    // which fail with ReferenceError if `eval` is not a property.
+    // Wire it as a throwing native (length 1, !construct) so
+    // `eval !== null` is true, `eval(...)` raises EvalError, and
+    // typeof eval === "function".
+    const eval_fn = try realm.heap.allocateFunctionNative(globalEvalNotSupported, 1, "eval");
+    eval_fn.has_construct = false;
+    try realm.globals.put(realm.allocator, "eval", heap_mod.taggedFunction(eval_fn));
+
     // §19.1 — `undefined`, `NaN`, `Infinity` are frozen data
     // properties: `{ w:false, e:false, c:false }`. They were just
     // installed (a few lines above) through the standard
@@ -1731,3 +1744,19 @@ pub const newURIError = @import("builtins/error.zig").newURIError;
 pub const PromiseState = @import("builtins/promise.zig").PromiseState;
 pub const allocatePromiseFor = @import("builtins/promise.zig").allocatePromiseFor;
 
+
+/// §19.2.1 eval(x). Cynic is strict-only and explicitly does NOT
+/// ship runtime code construction (per AGENTS.md — `eval()`,
+/// `new Function(string)`, etc. are out permanently). The binding
+/// must exist on globalThis though so `typeof eval === "function"`
+/// and `eval === null` (Sputnik S10.2.3_* uses both shapes) don't
+/// fall through to ReferenceError. Returns the argument unchanged
+/// for non-string operands per §19.2.1 step 1; throws SyntaxError
+/// on String operands so callers see a spec-flavored failure
+/// rather than silent success.
+fn globalEvalNotSupported(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const arg = if (args.len > 0) args[0] else Value.undefined_;
+    if (!arg.isString()) return arg;
+    return throwSyntaxError(realm, "Cynic does not support eval() of source strings");
+}
