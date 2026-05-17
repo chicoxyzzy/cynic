@@ -550,6 +550,27 @@ pub const Realm = struct {
     /// namespace it should publish into. Set by `loadModule`
     /// before run(), restored after.
     current_module: ?*@import("module.zig").ModuleRecord = null,
+    /// §15.2.1.16 step 9 — IndirectExportEntries are validated
+    /// once per module, after the whole link/evaluate tree has
+    /// settled. Cynic's eager link+evaluate inlines body runs
+    /// inside `loadModule`, so a dep's IndirectExports can't be
+    /// validated when *its* body returns — the dep's chain might
+    /// resolve through a star-export the parent installs *after*
+    /// the dep finishes (e.g. `b` re-exports `a.foo` and `a` has
+    /// `export * from b, export * from c` — `b.foo` resolves
+    /// via `a.foo → c.foo`, but `a` hasn't installed its star
+    /// redirects when `b` returns). `loadModule` queues each
+    /// successfully-evaluated module here; the topmost
+    /// (depth=0) call drains the queue and runs validation
+    /// against the now-final namespace shape.
+    pending_indirect_export_validation: std.ArrayListUnmanaged(*@import("module.zig").ModuleRecord) = .empty,
+    /// Nesting depth of `loadModule` calls. Drives the queued
+    /// validation drain above: depth>0 means we're inside a
+    /// recursive `module_load`; only the depth=0 return is
+    /// safe to validate (every dep's body has finalised by
+    /// then, and every parent's star-exports have been
+    /// installed).
+    module_load_depth: u32 = 0,
     /// `$DONE(err)` host-hook state for the test262 harness.
     /// Async-flagged tests call `$DONE()` to signal success or
     /// `$DONE(err)` for failure; the runner checks these slots
@@ -697,6 +718,7 @@ pub const Realm = struct {
         self.globals.deinit(self.allocator);
         self.output.deinit(self.allocator);
         self.microtask_queue.deinit(self.allocator);
+        self.pending_indirect_export_validation.deinit(self.allocator);
         // ModuleRecords are owned by the realm; the heap
         // doesn't sweep them.
         var mit = self.modules.iterator();

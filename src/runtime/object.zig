@@ -67,6 +67,15 @@ pub const AccessorKind = enum(u8) {
 pub const NamespaceRedirect = struct {
     target_ns: *JSObject,
     target_key: []const u8,
+    /// §15.2.1.16 step 9 — only IndirectExportEntries (the
+    /// `export { X } from "src"` flavour) are validated at
+    /// instantiation. Star-merged redirects come from a
+    /// different ExportEntries list and don't error if their
+    /// chain resolves to ambiguous/circular/null (the spec
+    /// surfaces that lazily, at namespace-read time).
+    /// `false` for `module_reexport_star`-installed entries
+    /// via `mergeStarKey`, `true` for `module_reexport_named`.
+    from_indirect_export: bool = false,
 };
 
 /// §27.2.6 PromiseState — internal slot, never surfaced to JS.

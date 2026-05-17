@@ -1946,6 +1946,62 @@ pub fn loadModule(
     specifier: []const u8,
     base_url: ?[]const u8,
 ) RunError!LoadModuleOutcome {
+    // §15.2.1.16 step 9 — IndirectExport validation must wait
+    // until the whole link tree has finished evaluating, so each
+    // dep gets its IndirectExports resolved against the parent's
+    // final star-export shape (not the partial mid-cycle one).
+    // Track recursion depth so the topmost call drains the
+    // queued validations once everything below it has settled.
+    realm.module_load_depth += 1;
+    defer realm.module_load_depth -= 1;
+    const outcome = try loadModuleInner(allocator, realm, specifier, base_url);
+    // Drain the deferred-validation queue ONCE the topmost
+    // `loadModule` is about to return — depth-1 here means we
+    // were the outermost (decremented in `defer` above). If
+    // validation discovers an ambiguous/circular/null
+    // IndirectExport on the module we're handing back, rewrite
+    // the outcome as a thrown SyntaxError so the caller (static
+    // `module_load` opcode or `dynamic_import`) surfaces the
+    // failure at the import site, not at first access.
+    if (realm.module_load_depth == 1) {
+        return drainPendingIndirectValidation(realm, outcome);
+    }
+    return outcome;
+}
+
+fn drainPendingIndirectValidation(
+    realm: *Realm,
+    outcome: LoadModuleOutcome,
+) RunError!LoadModuleOutcome {
+    // Walk the queued modules and validate each. If any throws,
+    // mark the offending module errored and — if it's the one we
+    // were about to return — rewrite the outcome. Other modules
+    // hitting validation errors still get marked errored; they'll
+    // surface their SyntaxError the next time they're imported.
+    var rewritten = outcome;
+    var i: usize = 0;
+    while (i < realm.pending_indirect_export_validation.items.len) : (i += 1) {
+        const mr = realm.pending_indirect_export_validation.items[i];
+        if (mr.state != .evaluated) continue;
+        module_mod.validateIndirectExports(mr) catch {
+            mr.state = .errored;
+            const ex = makeSyntaxError(realm, "indirect export does not resolve") catch return error.OutOfMemory;
+            mr.error_value = ex;
+            if (outcome.mr == mr and !outcome.threw) {
+                rewritten = .{ .value = ex, .threw = true, .mr = mr };
+            }
+        };
+    }
+    realm.pending_indirect_export_validation.clearRetainingCapacity();
+    return rewritten;
+}
+
+fn loadModuleInner(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    specifier: []const u8,
+    base_url: ?[]const u8,
+) RunError!LoadModuleOutcome {
     const ModuleRecord = module_mod.ModuleRecord;
     const loader = realm.module_loader orelse {
         const ex = try makeTypeError(realm, "no module loader installed");
@@ -2103,6 +2159,13 @@ pub fn loadModule(
                 }
             }
             mr.state = .evaluated;
+            // §15.2.1.16 step 9 — queue this module's
+            // IndirectExports for validation. We can't validate
+            // here because a dep's re-export chain may resolve
+            // through a star-export the *parent* installs after
+            // we return. The topmost `loadModule` drains the
+            // queue against final namespace shapes.
+            realm.pending_indirect_export_validation.append(realm.allocator, mr) catch return error.OutOfMemory;
             const final_ns = module_mod.getModuleNamespace(realm, mr) catch return error.OutOfMemory;
             return .{ .value = heap_mod.taggedObject(final_ns), .threw = false, .mr = mr };
         },
@@ -6747,6 +6810,14 @@ fn runFrames(
                         mr.exports.namespace_redirects.put(realm.allocator, exp_s.bytes, .{
                             .target_ns = src_obj,
                             .target_key = local_s.bytes,
+                            // §15.2.1.16 IndirectExportEntries — flag
+                            // so post-body validation in
+                            // `validateIndirectExports` walks this
+                            // entry. Star-merged redirects via
+                            // `mergeStarKey` leave the flag default
+                            // false; they're not validated at
+                            // instantiation per spec.
+                            .from_indirect_export = true,
                         }) catch return error.OutOfMemory;
                         // Drop the placeholder so `'X' in ns`
                         // still resolves through the redirect

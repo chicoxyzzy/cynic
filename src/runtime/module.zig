@@ -278,6 +278,57 @@ pub fn resolveRedirectChain(
     }
 }
 
+/// §15.2.1.16 ModuleDeclarationInstantiation step 9 — for each
+/// IndirectExportEntry of the module, ResolveExport must succeed.
+/// If the resolution is null (binding not found, or circular per
+/// §15.2.1.16.3 step 2) or "ambiguous" (per §15.2.1.16.3 step 8
+/// star-resolution collision), throw a SyntaxError.
+///
+/// Cynic flags every redirect installed by `module_reexport_named`
+/// with `from_indirect_export = true`. Star-installed redirects
+/// (`mergeStarKey`) are NOT validated here per spec — star
+/// ambiguity is surfaced lazily at namespace-read time.
+///
+/// The terminal of `resolveRedirectChain` lands on a non-redirected
+/// (ns, key) pair. The resolution is "ambiguous" iff the terminal
+/// key is in `terminal.ns.ambiguous_namespace_keys` (set by
+/// `mergeStarKey` when two `export *` sources expose the same
+/// binding from different originating modules). The resolution is
+/// null iff the terminal key has no entry in either `properties`
+/// or `namespace_redirects` (and isn't in `ambiguous_namespace_keys`,
+/// which would have already short-circuited above).
+///
+/// Returns `error.AmbiguousOrCircularExport` if any IndirectExport
+/// fails to resolve. Callers translate that into a SyntaxError on
+/// the importer's module record (state → errored).
+pub fn validateIndirectExports(mr: *ModuleRecord) ResolveError!void {
+    const ns = mr.exports;
+    var it = ns.namespace_redirects.iterator();
+    while (it.next()) |entry| {
+        if (!entry.value_ptr.from_indirect_export) continue;
+        const key = entry.key_ptr.*;
+        const resolved = try resolveRedirectChain(ns, key);
+        // §15.2.1.16.3 step 8 ambiguous case.
+        if (resolved.ns.ambiguous_namespace_keys.contains(resolved.key)) {
+            return error.AmbiguousOrCircularExport;
+        }
+        // §15.2.1.16.3 null resolution — terminal key has no
+        // backing binding on the terminal namespace. Module
+        // namespaces are the only target shape we install
+        // redirects against (re-export source must be a module),
+        // so the absence of both a property and a redirect at the
+        // terminal is the null-resolution shape. A Hole sentinel
+        // counts as a *bound* (but uninitialised) binding — it's
+        // a ReferenceError at access time per §8.1.1.1.6, not a
+        // SyntaxError at instantiation.
+        if (!resolved.ns.properties.contains(resolved.key) and
+            !resolved.ns.namespace_redirects.contains(resolved.key))
+        {
+            return error.AmbiguousOrCircularExport;
+        }
+    }
+}
+
 /// §9.4.6.7 Module Namespace [[Get]] (P, Receiver), data-property
 /// path (steps 8-13). After the exotic dispatch resolves a string
 /// key to a bound export, the spec routes the read through
