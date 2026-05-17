@@ -9649,8 +9649,21 @@ fn strictSetPropertyAnchored(
                     const ex = try makeTypeError(realm, "Cannot assign to read-only property");
                     return throwInSetter(realm, frames, f, ip, value, ex);
                 }
-                // §10.1.9.2 step 3.d.iv — Receiver.[[DefineOwnProperty]](P, {Value: V}).
+                // §10.1.9.2 step 3.c — existingDescriptor =
+                // Receiver.[[GetOwnProperty]](P). Fires the proxy's
+                // `getOwnPropertyDescriptor` trap as a side effect.
                 const obj_mod = @import("builtins/object.zig");
+                const key_owned_gop = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                const gop_args = [_]Value{ recv, Value.fromString(key_owned_gop) };
+                _ = obj_mod.objectGetOwnPropertyDescriptor(realm, Value.undefined_, &gop_args) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NativeThrew => {
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "getOwnPropertyDescriptor trap failed");
+                        realm.pending_exception = null;
+                        return throwInSetter(realm, frames, f, ip, value, ex);
+                    },
+                };
+                // §10.1.9.2 step 3.d.iv — Receiver.[[DefineOwnProperty]](P, {Value: V}).
                 const desc_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
                 desc_obj.prototype = realm.intrinsics.object_prototype;
                 const key_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
@@ -9667,11 +9680,21 @@ fn strictSetPropertyAnchored(
                 return .ok;
             }
             // No own descriptor on target — §10.1.9.2 step 2 says
-            // recurse on parent. For now, fall through to a direct
-            // CreateDataProperty on Receiver = proxy via the
-            // defineProperty path.
+            // recurse on parent. For now, fall through to a
+            // CreateDataProperty on Receiver = proxy via the GOPD +
+            // defineProperty pair so both traps observe each call.
             if (!has_own_data and !has_own_acc) {
                 const obj_mod = @import("builtins/object.zig");
+                const key_owned_gop = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                const gop_args = [_]Value{ recv, Value.fromString(key_owned_gop) };
+                _ = obj_mod.objectGetOwnPropertyDescriptor(realm, Value.undefined_, &gop_args) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NativeThrew => {
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "getOwnPropertyDescriptor trap failed");
+                        realm.pending_exception = null;
+                        return throwInSetter(realm, frames, f, ip, value, ex);
+                    },
+                };
                 const desc_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
                 desc_obj.prototype = realm.intrinsics.object_prototype;
                 const key_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;

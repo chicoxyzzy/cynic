@@ -942,11 +942,22 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
     // §10.5.6 Proxy [[DefineOwnProperty]] — dispatch through the
     // handler's `defineProperty` trap before falling back.
     if (heap_mod.valueAsPlainObject(target_v)) |obj_in| {
-        if (obj_in.proxy_target != null or obj_in.proxy_revoked) {
+        if (obj_in.proxy_target != null or obj_in.proxy_target_fn != null or obj_in.proxy_revoked) {
             if (obj_in.proxy_revoked) return throwTypeError(realm, "Cannot perform 'defineProperty' on a revoked proxy");
-            const proxy_target = obj_in.proxy_target.?;
+            // Build the target value for the trap and the
+            // proxy_target object pointer (for invariant checks).
+            // For a callable-target proxy, the value is the
+            // function; there's no plain-object target so the
+            // invariant guards (which expect property bags) skip.
+            const proxy_target_v: Value = if (obj_in.proxy_target) |t|
+                heap_mod.taggedObject(t)
+            else if (obj_in.proxy_target_fn) |tfn|
+                heap_mod.taggedFunction(tfn)
+            else
+                unreachable;
+            const proxy_target_obj: ?*@import("../object.zig").JSObject = obj_in.proxy_target;
             const handler = obj_in.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'defineProperty' on a proxy with null handler");
-            const trap_v = handler.get("defineProperty");
+            const trap_v = try intrinsics.getPropertyChain(realm, handler, "defineProperty");
             // §10.5.6 step 5 — IsCallable check. `undefined` /
             // `null` means "no trap; fall through". Anything else
             // non-callable is a TypeError.
@@ -954,61 +965,58 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
                 const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'defineProperty' trap is not callable");
                 const interpreter = @import("../interpreter.zig");
                 const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                const trap_args = [_]Value{ heap_mod.taggedObject(proxy_target), Value.fromString(key_str), desc_v };
+                const trap_args = [_]Value{ proxy_target_v, Value.fromString(key_str), desc_v };
                 const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
                 };
                 switch (outcome) {
                     .value, .yielded => |v| {
-                        if (!intrinsics.toBoolean(v)) return throwTypeError(realm, "'defineProperty' on proxy returned falsy");
-                        // §10.5.6 steps 16-19 — invariant guards.
-                        // Read the target's current own-descriptor
-                        // and compare against the descriptor we
-                        // were asked to install. Three failure modes:
-                        //   - target lacks the property AND is
-                        //     non-extensible → throw.
-                        //   - target lacks the property AND the
-                        //     descriptor is non-configurable → throw.
-                        //   - descriptor is incompatible with the
-                        //     existing target descriptor → throw.
-                        const target_had = proxy_target.hasOwn(key) or proxy_target.accessors.contains(key);
-                        const parsed_for_inv = parseDescriptor(realm, heap_mod.valueAsPlainObject(desc_v) orelse return target_v) catch return target_v;
-                        if (!target_had) {
-                            if (!proxy_target.extensible) {
-                                return throwTypeError(realm, "'defineProperty' on proxy: target is not extensible and trap returned truthy for an absent property");
-                            }
-                            if (parsed_for_inv.has_configurable and !parsed_for_inv.configurable) {
-                                return throwTypeError(realm, "'defineProperty' on proxy: cannot define a non-configurable property absent from the target");
-                            }
-                        } else {
-                            const cur_flags = proxy_target.flagsFor(key);
-                            const cur_is_acc = proxy_target.accessors.contains(key);
-                            const cur_value: Value = blk: {
-                                if (cur_is_acc) break :blk Value.undefined_;
-                                if (proxy_target.properties.get(key)) |val| break :blk val;
-                                break :blk Value.undefined_;
-                            };
-                            var cur_getter: ?*JSFunction = null;
-                            var cur_setter: ?*JSFunction = null;
-                            if (proxy_target.accessors.get(key)) |a| {
-                                cur_getter = a.getter;
-                                cur_setter = a.setter;
-                            }
-                            if (!isCompatibleRedefine(cur_is_acc, cur_flags, cur_value, cur_getter, cur_setter, parsed_for_inv)) {
-                                return throwTypeError(realm, "'defineProperty' on proxy: trap returned truthy for an incompatible redefine of a non-configurable target property");
-                            }
-                            // Configurable-flip guard — if the new
-                            // descriptor is non-configurable but the
-                            // target's current property is configurable,
-                            // a fresh `getOwnPropertyDescriptor` on the
-                            // target must observe the new flags. Since
-                            // we don't actually mutate the target via
-                            // the trap, just guard against the
-                            // configurable-flip when the new desc
-                            // is non-configurable but the target is.
-                            if (parsed_for_inv.has_configurable and !parsed_for_inv.configurable and cur_flags.configurable) {
-                                return throwTypeError(realm, "'defineProperty' on proxy: cannot flip a configurable target property to non-configurable via the trap");
+                        if (!intrinsics.toBoolean(v)) {
+                            // Signal `Reflect.defineProperty` to
+                            // translate this into a `false` return
+                            // rather than re-raising the TypeError;
+                            // `Object.defineProperty` still throws.
+                            realm.define_own_property_rejected = true;
+                            return throwTypeError(realm, "'defineProperty' on proxy returned falsy");
+                        }
+                        // §10.5.6 steps 16-19 — invariant guards
+                        // only fire for plain-object targets (the
+                        // callable-target case is subsumed by
+                        // JSFunction's own [[DefineOwnProperty]]
+                        // semantics; in particular, redefining
+                        // `prototype` on a function is governed by
+                        // §10.2.4 not the proxy invariant set).
+                        if (proxy_target_obj) |proxy_target| {
+                            const target_had = proxy_target.hasOwn(key) or proxy_target.accessors.contains(key);
+                            const parsed_for_inv = parseDescriptor(realm, heap_mod.valueAsPlainObject(desc_v) orelse return target_v) catch return target_v;
+                            if (!target_had) {
+                                if (!proxy_target.extensible) {
+                                    return throwTypeError(realm, "'defineProperty' on proxy: target is not extensible and trap returned truthy for an absent property");
+                                }
+                                if (parsed_for_inv.has_configurable and !parsed_for_inv.configurable) {
+                                    return throwTypeError(realm, "'defineProperty' on proxy: cannot define a non-configurable property absent from the target");
+                                }
+                            } else {
+                                const cur_flags = proxy_target.flagsFor(key);
+                                const cur_is_acc = proxy_target.accessors.contains(key);
+                                const cur_value: Value = blk: {
+                                    if (cur_is_acc) break :blk Value.undefined_;
+                                    if (proxy_target.properties.get(key)) |val| break :blk val;
+                                    break :blk Value.undefined_;
+                                };
+                                var cur_getter: ?*JSFunction = null;
+                                var cur_setter: ?*JSFunction = null;
+                                if (proxy_target.accessors.get(key)) |a| {
+                                    cur_getter = a.getter;
+                                    cur_setter = a.setter;
+                                }
+                                if (!isCompatibleRedefine(cur_is_acc, cur_flags, cur_value, cur_getter, cur_setter, parsed_for_inv)) {
+                                    return throwTypeError(realm, "'defineProperty' on proxy: trap returned truthy for an incompatible redefine of a non-configurable target property");
+                                }
+                                if (parsed_for_inv.has_configurable and !parsed_for_inv.configurable and cur_flags.configurable) {
+                                    return throwTypeError(realm, "'defineProperty' on proxy: cannot flip a configurable target property to non-configurable via the trap");
+                                }
                             }
                         }
                         return target_v;
@@ -1019,8 +1027,8 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
                     },
                 }
             }
-            // Trap absent — recurse on the target.
-            const inner_args = [_]Value{ heap_mod.taggedObject(proxy_target), argOr(args, 1, Value.undefined_), desc_v };
+            // §10.5.6 step 7.a — Trap absent: recurse on the target.
+            const inner_args = [_]Value{ proxy_target_v, argOr(args, 1, Value.undefined_), desc_v };
             return objectDefineProperty(realm, Value.undefined_, &inner_args);
         }
     }
