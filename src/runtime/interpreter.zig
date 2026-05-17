@@ -563,17 +563,12 @@ pub fn ensureGeneratorPrototype(realm: *Realm) !*JSObject {
     const proto = try realm.heap.allocateObject();
     proto.prototype = iteratorPrototypeOrObjectPrototype(realm);
 
-    const next_fn = try realm.heap.allocateFunctionNative(genNext, 1, "next");
-    next_fn.proto = realm.intrinsics.function_prototype;
-    try proto.set(realm.allocator, "next", heap_mod.taggedFunction(next_fn));
-
-    const return_fn = try realm.heap.allocateFunctionNative(genReturn, 1, "return");
-    return_fn.proto = realm.intrinsics.function_prototype;
-    try proto.set(realm.allocator, "return", heap_mod.taggedFunction(return_fn));
-
-    const throw_fn = try realm.heap.allocateFunctionNative(genThrow, 1, "throw");
-    throw_fn.proto = realm.intrinsics.function_prototype;
-    try proto.set(realm.allocator, "throw", heap_mod.taggedFunction(throw_fn));
+    // §27.5.1 — `next` / `return` / `throw` install with the
+    // standard §17 built-in-prototype-method descriptor:
+    // `{ writable:true, enumerable:false, configurable:true }`.
+    try intrinsics_mod.installNativeMethodOnProto(realm, proto, "next", genNext, 1);
+    try intrinsics_mod.installNativeMethodOnProto(realm, proto, "return", genReturn, 1);
+    try intrinsics_mod.installNativeMethodOnProto(realm, proto, "throw", genThrow, 1);
 
     // For-of integration: `Symbol.iterator` returns the iterator
     // itself (a generator IS its own iterator per §27.5.1.5).
@@ -638,17 +633,14 @@ pub fn ensureAsyncGeneratorPrototype(realm: *Realm) !*JSObject {
     // resolves the method through the chain.
     proto.prototype = try ensureAsyncIteratorPrototype(realm);
 
-    const next_fn = try realm.heap.allocateFunctionNative(asyncGenNext, 1, "next");
-    next_fn.proto = realm.intrinsics.function_prototype;
-    try proto.set(realm.allocator, "next", heap_mod.taggedFunction(next_fn));
-
-    const return_fn = try realm.heap.allocateFunctionNative(asyncGenReturn, 1, "return");
-    return_fn.proto = realm.intrinsics.function_prototype;
-    try proto.set(realm.allocator, "return", heap_mod.taggedFunction(return_fn));
-
-    const throw_fn = try realm.heap.allocateFunctionNative(asyncGenThrow, 1, "throw");
-    throw_fn.proto = realm.intrinsics.function_prototype;
-    try proto.set(realm.allocator, "throw", heap_mod.taggedFunction(throw_fn));
+    // §27.6.1 — `next` / `return` / `throw` install with the
+    // standard §17 built-in-prototype-method descriptor:
+    // `{ writable:true, enumerable:false, configurable:true }`.
+    // The old plain `set` left them enumerable, which trips
+    // `prop-desc.js` fixtures.
+    try intrinsics_mod.installNativeMethodOnProto(realm, proto, "next", asyncGenNext, 1);
+    try intrinsics_mod.installNativeMethodOnProto(realm, proto, "return", asyncGenReturn, 1);
+    try intrinsics_mod.installNativeMethodOnProto(realm, proto, "throw", asyncGenThrow, 1);
 
     const tag_str = try realm.heap.allocateString("AsyncGenerator");
     try proto.setWithFlags(realm.allocator, "@@toStringTag", Value.fromString(tag_str), .{
