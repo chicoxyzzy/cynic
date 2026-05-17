@@ -4721,6 +4721,15 @@ fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!vo
     try self.builder.emitOp(.star, s.span);
     try self.builder.emitU8(r_result);
 
+    // §7.4.2 IteratorNext step 4 — `If Type(result) is not Object, throw a TypeError`.
+    // Plain `for-of`: validate r_result; `for-in` is driven by
+    // the harness iterator (always Object), so skip the check.
+    if (s.kind != .in_) {
+        try self.builder.emitOp(.ldar, s.span);
+        try self.builder.emitU8(r_result);
+        try self.builder.emitOp(.throw_if_not_object, s.span);
+    }
+
     // if (r_result.done) jmp exit
     try self.builder.emitOp(.ldar, s.span);
     try self.builder.emitU8(r_result);
