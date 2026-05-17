@@ -2993,6 +2993,11 @@ const k_fa_mapfn = "__cynic_fa_mapfn__";
 const k_fa_this_arg = "__cynic_fa_this_arg__";
 const k_fa_items = "__cynic_fa_items__";
 const k_fa_mode = "__cynic_fa_mode__"; // 0 = array-like, 1 = iterator
+// §23.1.2.1.1 step 3.j.ii — async-iterator path does NOT await
+// `nextValue` (the iterator already returned it after awaiting
+// the IteratorResult promise). Sync-iterator path wraps via
+// %AsyncFromSyncIteratorPrototype% so its values ARE awaited.
+const k_fa_is_async = "__cynic_fa_is_async__";
 
 const promise_mod = @import("promise.zig");
 
@@ -3098,6 +3103,7 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
         state.set(realm.allocator, k_fa_iter, iter_v) catch return error.OutOfMemory;
         state.set(realm.allocator, k_fa_next_fn, heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
         state.set(realm.allocator, k_fa_mode, Value.fromInt32(1)) catch return error.OutOfMemory;
+        state.set(realm.allocator, k_fa_is_async, Value.true_) catch return error.OutOfMemory;
         fromAsyncIterStep(realm, state) catch {
             return rejectPendingException(realm, cap);
         };
@@ -3136,6 +3142,7 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
         state.set(realm.allocator, k_fa_iter, iter_v) catch return error.OutOfMemory;
         state.set(realm.allocator, k_fa_next_fn, heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
         state.set(realm.allocator, k_fa_mode, Value.fromInt32(1)) catch return error.OutOfMemory;
+        state.set(realm.allocator, k_fa_is_async, Value.false_) catch return error.OutOfMemory;
         fromAsyncIterStep(realm, state) catch {
             return rejectPendingException(realm, cap);
         };
@@ -3325,15 +3332,44 @@ fn fromAsyncIterOnNextResult(realm: *Realm, this_value: Value, args: []const Val
     if (intrinsics.toBoolean(done_v)) {
         const out = heap_mod.valueAsPlainObject(state.get(k_fa_array)) orelse return Value.undefined_;
         const k = state.get(k_fa_index).asInt32();
-        setLength(realm, out, k) catch return error.OutOfMemory;
+        // §23.1.2.1.1 step 3.j.ii.4.a — `Set(A, "length", 𝔽(k), true)`
+        // fires user-installed setters (`this-constructor-with-bad-
+        // length-setter.js`) and honors writable:false
+        // (`this-constructor-with-readonly-length.js`).
+        setLengthOrThrow(realm, out, k) catch {
+            return rejectFromState(realm, state);
+        };
         return resolveFromState(realm, state, heap_mod.taggedObject(out));
     }
 
-    // Await the raw value (per spec the mapfn input is awaited too).
+    // §23.1.2.1.1 step 3.j.ii — for the async-iterator path the
+    // value coming out of `IteratorValue(iterResult)` is NOT
+    // awaited (the iter already awaited the IteratorResult
+    // promise). The sync-iterator branch wraps via
+    // %AsyncFromSyncIteratorPrototype% which DOES await values,
+    // so re-await there. `async-iterable-input-does-not-await-
+    // input.js` asserts a `value: Promise` yielded from an async
+    // iterator survives as a Promise in the resulting array.
+    if (state.get(k_fa_is_async).toBooleanPrimitive()) {
+        return fromAsyncIterOnValueAwaited(realm, this_value, &[_]Value{value_v});
+    }
+    // §23.1.2.1.1 sync-iterator branch — value comes from a sync
+    // iterator wrapped via %AsyncFromSyncIteratorPrototype%; the
+    // continuation awaits the yielded value. If that await rejects
+    // (e.g. a thenable yielded by the generator calls `reject`), the
+    // sync iterator MUST be closed (IfAbruptCloseAsyncIterator).
+    // `sync-iterable-with-rejecting-thenable-closes.js`.
     const on_res = try makeBoundCb(realm, fromAsyncIterOnValueAwaited, state);
-    const on_rej = try makeBoundCb(realm, fromAsyncIterOnNextReject, state);
+    const on_rej = try makeBoundCb(realm, fromAsyncIterOnValueReject, state);
     try awaitAndThen(realm, value_v, on_res, on_rej);
     return Value.undefined_;
+}
+
+fn fromAsyncIterOnValueReject(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const state = heap_mod.valueAsPlainObject(this_value) orelse return Value.undefined_;
+    const reason = argOr(args, 0, Value.undefined_);
+    realm.pending_exception = reason;
+    return closeIterAndReject(realm, state);
 }
 
 fn fromAsyncIterOnValueAwaited(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -3466,7 +3502,13 @@ fn fromAsyncArrayLikeStep(realm: *Realm, state: *JSObject) NativeError!void {
 
     if (@as(i64, k) >= len) {
         const out = heap_mod.valueAsPlainObject(state.get(k_fa_array)) orelse return;
-        setLength(realm, out, len) catch return error.OutOfMemory;
+        // §23.1.2.1.1 step 3.k.viii — `Set(A, "length", 𝔽(len), true)`
+        // honors a readonly / setter-installed `length`
+        // (`this-constructor-with-{readonly-length,bad-length-setter}.js`).
+        setLengthOrThrow(realm, out, len) catch {
+            _ = rejectFromState(realm, state) catch {};
+            return;
+        };
         _ = resolveFromState(realm, state, heap_mod.taggedObject(out)) catch {};
         return;
     }

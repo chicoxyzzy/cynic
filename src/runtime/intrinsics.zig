@@ -950,6 +950,10 @@ fn toLengthValuePropagating(realm: *Realm, v: Value) NativeError!i64 {
         return doubleToI64Saturating(d);
     }
     if (heap_mod.valueAsSymbol(v) != null) return throwTypeError(realm, "Cannot convert a Symbol value to a number");
+    // §7.1.4 ToNumber step 5 — BigInt → TypeError. Array.fromAsync /
+    // Array.from on `{ length: 1n }` must reject with TypeError per
+    // §23.1.2.1 step 6 (LengthOfArrayLike → ToLength → ToNumber).
+    if (heap_mod.isBigInt(v)) return throwTypeError(realm, "Cannot convert a BigInt value to a number");
     // §7.1.4 ToNumber step 6 — Object: ToPrimitive(arg, hint
     // "number") which invokes `@@toPrimitive` / `valueOf` /
     // `toString` in that order. Any throw propagates.
