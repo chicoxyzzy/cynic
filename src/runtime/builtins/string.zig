@@ -1650,29 +1650,14 @@ fn isRegexLike(value: Value) ?*JSObject {
 /// the result to be either Object or Null (per spec, throw TypeError
 /// otherwise). Caller inspects for null vs match-array.
 fn regexExecCall(realm: *Realm, regex_obj: *JSObject, input: *JSString) NativeError!Value {
-    const exec_v = try intrinsics.getPropertyChain(realm, regex_obj, "exec");
-    const exec_fn = heap_mod.valueAsFunction(exec_v) orelse return throwTypeError(realm, "regex has no exec method");
-    const args_call = [_]Value{Value.fromString(input)};
-    const out = interpreter.callJSFunction(realm.allocator, realm, exec_fn, heap_mod.taggedObject(regex_obj), &args_call) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.NativeThrew,
-    };
-    const v: Value = switch (out) {
-        .value, .yielded => |x| x,
-        // §22.2.7.1 RegExpExec step 4.a — `Call(exec, R, «S»)` is a
-        // `?` step, so a user `exec` that throws propagates verbatim.
-        // Surface the user's exception value via `pending_exception`
-        // so the native-error wrapper at the top of the call path
-        // doesn't substitute a generic TypeError.
-        .thrown => |ex| {
-            realm.pending_exception = ex;
-            return error.NativeThrew;
-        },
-    };
-    if (!v.isNull() and heap_mod.valueAsPlainObject(v) == null) {
-        return throwTypeError(realm, "RegExpExec: exec must return Object or null");
-    }
-    return v;
+    // §22.2.7.1 RegExpExec — delegate to the spec-faithful impl in
+    // `regexp.zig`. It runs `? Get(R, "exec")`, calls a callable
+    // `exec` with `«S»` and propagates throws, otherwise falls
+    // through to `RegExpBuiltinExec` when `R` has [[RegExpMatcher]]
+    // (the `custom-regexpexec-not-callable.js` matrix overwrites
+    // `RegExp.prototype.exec` with `undefined / null / 5 / true /
+    // Symbol()` and relies on the builtin path being chosen).
+    return @import("regexp.zig").regExpExecGeneric(realm, regex_obj, input);
 }
 
 fn flagsHas(realm: *Realm, regex_obj: *JSObject, flag: u8) bool {

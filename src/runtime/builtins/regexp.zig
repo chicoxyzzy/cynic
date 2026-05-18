@@ -1057,7 +1057,7 @@ fn speciesConstructor(realm: *Realm, source: *JSObject, default_ctor: *JSFunctio
 /// we always go through the user-`exec` path when one is callable.
 /// When it's not, we fall through to `regexExec` on the JSObject's
 /// own `[[RegExpMatcher]]` (Cynic stores this as `regex_bytecode`).
-fn regExpExecGeneric(realm: *Realm, r: *JSObject, s: *JSString) NativeError!Value {
+pub fn regExpExecGeneric(realm: *Realm, r: *JSObject, s: *JSString) NativeError!Value {
     const exec_v = try intrinsics.getPropertyChain(realm, r, "exec");
     if (heap_mod.valueAsFunction(exec_v)) |exec_fn| {
         const interp = @import("../interpreter.zig");
@@ -1082,25 +1082,14 @@ fn regExpExecGeneric(realm: *Realm, r: *JSObject, s: *JSString) NativeError!Valu
     if (r.regex_bytecode == null and r.regexp_source == null) {
         return throwTypeError(realm, "RegExpExec: receiver lacks [[RegExpMatcher]]");
     }
-    // Fall through to the built-in exec by re-routing through the
-    // intrinsic %RegExp.prototype.exec%. This mirrors §22.2.7.2
-    // RegExpBuiltinExec without re-implementing it inline.
-    const proto = realm.intrinsics.regexp_prototype orelse return throwTypeError(realm, "RegExpExec: %RegExp.prototype% missing");
-    const proto_exec = proto.get("exec");
-    const exec_proto_fn = heap_mod.valueAsFunction(proto_exec) orelse return throwTypeError(realm, "RegExpExec: %RegExp.prototype.exec% missing");
-    const interp = @import("../interpreter.zig");
+    // §22.2.7.2 RegExpBuiltinExec — invoke the engine-internal
+    // implementation directly rather than re-reading
+    // `%RegExp.prototype.exec%`, which the user may have shadowed
+    // with a non-callable value (fixture `custom-regexpexec-not
+    // -callable.js`). Calling the native body bypasses the user
+    // shadow while still using the same code path.
     const call_args = [_]Value{Value.fromString(s)};
-    const outcome = interp.callJSFunction(realm.allocator, realm, exec_proto_fn, heap_mod.taggedObject(r), &call_args) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.NativeThrew,
-    };
-    return switch (outcome) {
-        .value, .yielded => |x| x,
-        .thrown => |ex| blk: {
-            realm.pending_exception = ex;
-            break :blk error.NativeThrew;
-        },
-    };
+    return regexpExec(realm, heap_mod.taggedObject(r), &call_args);
 }
 
 /// `Set(O, P, V, Throw)` — accessor-chain-aware write. The setter,
