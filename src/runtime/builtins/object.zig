@@ -157,11 +157,25 @@ fn canonicalIntegerIndex(s: []const u8) ?u32 {
     return @intCast(n);
 }
 
+/// Linear scan of `obj.own_key_order` — used by the
+/// `ownPropertyKeysOrdered` fallback walks to dedupe entries
+/// that were already emitted via the unified order list. The
+/// list is bounded by the object's own-key count; a hash set
+/// would win only on pathologically large objects, and Cynic
+/// doesn't currently profile any.
+fn orderListContains(obj: *const JSObject, key: []const u8) bool {
+    for (obj.own_key_order.items) |k| {
+        if (std.mem.eql(u8, k, key)) return true;
+    }
+    return false;
+}
+
 /// §10.1.11 OrdinaryOwnPropertyKeys ordering. Returns own
 /// property keys in spec order: integer-indexed in ascending
-/// numeric order, then string keys in insertion order, then
-/// (eventually) symbol keys. Skips internal `__cynic_*` slots.
-/// Caller owns the returned slice (allocated via `realm.allocator`).
+/// numeric order, then string keys in unified-insertion order
+/// (data + accessor merged), then (eventually) symbol keys.
+/// Skips internal `__cynic_*` slots. Caller owns the returned
+/// slice (allocated via `realm.allocator`).
 pub fn ownPropertyKeysOrdered(
     realm: *Realm,
     obj: *JSObject,
@@ -225,27 +239,60 @@ pub fn ownPropertyKeysOrdered(
             integer_keys.append(realm.allocator, .{ .idx = ti, .key = owned.bytes }) catch return error.OutOfMemory;
         }
     }
+    // §10.1.11 OrdinaryOwnPropertyKeys — the spec walks String
+    // keys in ascending chronological order of property creation,
+    // which is *unified* across data and accessor descriptors:
+    // installing `a` as accessor, then `b` as data, then
+    // redefining `a` keeps the slot in chronological order
+    // `[a, b]`. `own_key_order` carries that unified list for
+    // every key inserted through the user-visible
+    // `recordKey` paths (object literal data/accessor, `[[Set]]`,
+    // `Object.defineProperty`). Walk it first so the order is
+    // authoritative; then sweep `properties` / `accessors` for
+    // any leftover keys not in the list (built-in proto
+    // installation that bypasses the helpers — those keys exist
+    // in the maps but were never recorded). The map iteration
+    // order is itself insertion-ordered, so the leftover sweep
+    // is deterministic.
+    for (obj.own_key_order.items) |k| {
+        if (std.mem.startsWith(u8, k, "__cynic_")) continue;
+        // The order list refuses integer-index keys at recordKey
+        // time, so they never appear here. The guards stay
+        // defensive in case a future code path adds one.
+        if (obj.typed_view != null) {
+            if (canonicalIntegerIndex(k)) |_| continue;
+        }
+        if (canonicalIntegerIndex(k)) |i| {
+            integer_keys.append(realm.allocator, .{ .idx = i, .key = k }) catch return error.OutOfMemory;
+            continue;
+        }
+        // Confirm the key is still live (not deleted) — the
+        // delete paths call `forgetKey` so this is normally
+        // redundant, but a missed delete site would surface as
+        // a phantom key here. Trust the maps as the source of
+        // truth for liveness.
+        if (!obj.properties.contains(k) and !obj.accessors.contains(k)) continue;
+        string_keys.append(realm.allocator, k) catch return error.OutOfMemory;
+    }
+    // Fallback: pick up any `properties` keys not already in the
+    // order list (built-in installation paths that don't call
+    // `recordKey`). The map's own insertion order applies here.
     var it = obj.properties.iterator();
     while (it.next()) |entry| {
         const k = entry.key_ptr.*;
         if (std.mem.startsWith(u8, k, "__cynic_")) continue;
-        // §10.4.5.7 — for typed arrays, the integer-index slots
-        // are already pulled from the live view above; any
-        // matching keys lingering in `properties` (e.g. from a
-        // historical bypass-set) must NOT be reported twice and
-        // are also NOT eligible to land in the ordinary keys
-        // bucket (the spec says integer-indexed keys live only
-        // in the prefix). Drop them.
         if (obj.typed_view != null) {
             if (canonicalIntegerIndex(k)) |_| continue;
         }
+        // Already counted above?
+        if (orderListContains(obj, k)) continue;
         if (canonicalIntegerIndex(k)) |i| {
             integer_keys.append(realm.allocator, .{ .idx = i, .key = k }) catch return error.OutOfMemory;
         } else {
             string_keys.append(realm.allocator, k) catch return error.OutOfMemory;
         }
     }
-    // Accessors live in a separate map; include their keys too.
+    // Same fallback for `accessors`.
     var ait = obj.accessors.iterator();
     while (ait.next()) |entry| {
         const k = entry.key_ptr.*;
@@ -254,6 +301,7 @@ pub fn ownPropertyKeysOrdered(
         if (obj.typed_view != null) {
             if (canonicalIntegerIndex(k)) |_| continue;
         }
+        if (orderListContains(obj, k)) continue;
         if (canonicalIntegerIndex(k)) |i| {
             integer_keys.append(realm.allocator, .{ .idx = i, .key = k }) catch return error.OutOfMemory;
         } else {
@@ -1361,6 +1409,11 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             // Accessors don't honor `writable`; clear that bit.
             flags.writable = false;
             target.property_flags.put(realm.allocator, key, flags) catch return error.OutOfMemory;
+            // §10.1.11 — record this as an own key for enumeration
+            // order. The matching `properties.swapRemove(key)` above
+            // does NOT call `forgetKey` because data→accessor
+            // conversion preserves the original insertion slot.
+            target.recordKey(realm.allocator, key) catch return error.OutOfMemory;
             return target_v;
         }
 
@@ -1456,6 +1509,8 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             } else {
                 target_fn.property_flags.put(realm.allocator, key, flags) catch return error.OutOfMemory;
             }
+            // §10.1.11 — track function objects' own keys too.
+            target_fn.recordKey(realm.allocator, key) catch return error.OutOfMemory;
             return target_v;
         }
 

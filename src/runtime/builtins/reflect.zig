@@ -514,6 +514,7 @@ fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) 
         _ = fn_obj.properties.swapRemove(key_slice);
         _ = fn_obj.accessors.swapRemove(key_slice);
         _ = fn_obj.property_flags.swapRemove(key_slice);
+        fn_obj.forgetKey(key_slice);
         return Value.true_;
     }
     const target_outer = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.deleteProperty target must be an object");
@@ -547,6 +548,7 @@ fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) 
     _ = target.properties.swapRemove(key_slice);
     _ = target.accessors.swapRemove(key_slice);
     _ = target.property_flags.swapRemove(key_slice);
+    target.forgetKey(key_slice);
     return Value.true_;
 }
 

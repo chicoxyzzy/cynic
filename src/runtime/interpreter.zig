@@ -7462,6 +7462,9 @@ fn runFrames(
                 } else {
                     entry.value_ptr.*.getter = fn_obj;
                 }
+                // §10.1.11 OrdinaryOwnPropertyKeys — accessor counts as
+                // an own key for enumeration order.
+                obj.recordKey(allocator, key_s.bytes) catch return error.OutOfMemory;
             },
 
             .def_computed_accessor => {
@@ -7494,6 +7497,7 @@ fn runFrames(
                 } else {
                     entry.value_ptr.*.getter = fn_obj;
                 }
+                obj.recordKey(allocator, owned.bytes) catch return error.OutOfMemory;
             },
 
             .set_home => {
@@ -9911,6 +9915,11 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
             if (!flags.configurable) return .{ .throw_typeerror = "Cannot delete non-configurable property" };
             _ = obj.accessors.swapRemove(key);
             _ = obj.property_flags.swapRemove(key);
+            // §10.1.11 — drop the slot from the unified order list
+            // unless the data half also exists (it shouldn't —
+            // OrdinaryDefineOwnProperty wipes one when the other
+            // is installed — but be defensive).
+            if (!obj.properties.contains(key)) obj.forgetKey(key);
             return .{ .ok = true };
         }
         // §10.4.2 Array exotic — integer-indexed keys live in
@@ -9931,6 +9940,7 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
         if (!flags.configurable) return .{ .throw_typeerror = "Cannot delete non-configurable property" };
         _ = obj.properties.swapRemove(key);
         _ = obj.property_flags.swapRemove(key);
+        if (!obj.accessors.contains(key)) obj.forgetKey(key);
         return .{ .ok = true };
     }
     if (heap_mod.valueAsFunction(recv)) |fn_obj| {
@@ -9948,6 +9958,7 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
         if (fn_obj.accessors.contains(key)) {
             _ = fn_obj.accessors.swapRemove(key);
             _ = fn_obj.property_flags.swapRemove(key);
+            if (!fn_obj.properties.contains(key)) fn_obj.forgetKey(key);
             return .{ .ok = true };
         }
         // Removing `name` clears the dedicated slot; removing
@@ -9961,6 +9972,7 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
         if (std.mem.eql(u8, key, "prototype")) fn_obj.prototype = null;
         _ = fn_obj.properties.swapRemove(key);
         _ = fn_obj.property_flags.swapRemove(key);
+        if (!fn_obj.accessors.contains(key)) fn_obj.forgetKey(key);
         return .{ .ok = true };
     }
     if (recv.isNull() or recv.isUndefined()) {
@@ -10739,6 +10751,7 @@ fn proxyDeleteTrap(
                 _ = target_fn.properties.swapRemove(key);
                 _ = target_fn.accessors.swapRemove(key);
                 _ = target_fn.property_flags.swapRemove(key);
+                target_fn.forgetKey(key);
                 return .{ .value = Value.true_ };
             }
             const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {

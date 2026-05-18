@@ -2032,6 +2032,25 @@ test "later: Object.getOwnPropertyNames includes non-enumerable" {
     , 2);
 }
 
+test "later: Object.values walks accessor + data keys in chronological order" {
+    // §7.3.21 EnumerableOwnPropertyNames + §10.1.11
+    // OrdinaryOwnPropertyKeys: when `a` is installed as an
+    // accessor before `b` is installed as a data property,
+    // redefining `a` must NOT move its slot. Order is `[a, b]`.
+    // built-ins/Object/values/order-after-define-property.js.
+    try expectScriptStringWithBuiltins(
+        \\const o = {};
+        \\Object.defineProperty(o, "a", {
+        \\  get() { return 1; },
+        \\  enumerable: true,
+        \\  configurable: true,
+        \\});
+        \\o.b = "b";
+        \\Object.defineProperty(o, "a", { get() { return "a"; } });
+        \\Object.values(o).join(",");
+    , "a,b");
+}
+
 test "later: Promise.resolve + .then is microtask-deferred" {
     // Microtask scheduling: the.then callback runs only after
     // the current sync stack drains. With a real microtask

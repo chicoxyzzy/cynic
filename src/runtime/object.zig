@@ -624,6 +624,27 @@ pub const JSObject = struct {
     /// `setComputedOwned` land here.
     key_anchors: std.ArrayListUnmanaged(*@import("string.zig").JSString) = .empty,
 
+    /// §10.1.11 OrdinaryOwnPropertyKeys — unified insertion-order
+    /// list across `properties` and `accessors`, so an object that
+    /// installs `a` as an accessor, then `b` as data, then
+    /// redefines `a` reports `[a, b]` (not `[b, a]`). Each entry
+    /// is a borrowed slice — the backing bytes are pinned by the
+    /// matching `properties` / `accessors` entry (or by
+    /// `key_anchors` when the key originated from
+    /// `setComputedOwned`). Append-only on first insertion;
+    /// removed when the key is deleted. Only mutated through the
+    /// `recordKey` / `forgetKey` helpers below; the raw `put`
+    /// callsites in object.zig / interpreter.zig / builtins/object.zig
+    /// route through them. Built-in proto installation that
+    /// bypasses the helpers (e.g. realm wiring) doesn't land in
+    /// this list; that's intentional — those keys are
+    /// non-enumerable and don't surface through
+    /// `Object.keys/values/entries` anyway, and the fallback in
+    /// `ownPropertyKeysOrdered` covers them by walking
+    /// `properties` + `accessors` directly when this list is
+    /// empty.
+    own_key_order: std.ArrayListUnmanaged([]const u8) = .empty,
+
     pub fn init(allocator: std.mem.Allocator) !*JSObject {
         const o = try allocator.create(JSObject);
         o.* = .{ .kind = .object };
@@ -649,6 +670,7 @@ pub const JSObject = struct {
         self.promise_waiters.deinit(allocator);
         self.promise_reactions.deinit(allocator);
         self.key_anchors.deinit(allocator);
+        self.own_key_order.deinit(allocator);
         self.elements.deinit(allocator);
         self.sparse_elements.deinit(allocator);
         // instance_field_inits / private_method_inits are
@@ -656,6 +678,41 @@ pub const JSObject = struct {
         // the realm allocator and tracked by the realm); freeing
         // them happens at realm.deinit().
         allocator.destroy(self);
+    }
+
+    /// §10.1.11 OrdinaryOwnPropertyKeys — record `key` as a member
+    /// of the unified insertion-order list, if it isn't already
+    /// tracked. No-op for internal `__cynic_*` slots, integer-index
+    /// keys (those have their own ordering rule in
+    /// `ownPropertyKeysOrdered`), and re-insertions of an existing
+    /// key (chronological order is anchored at first insertion).
+    pub fn recordKey(
+        self: *JSObject,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+    ) !void {
+        if (std.mem.startsWith(u8, key, "__cynic_")) return;
+        if (canonicalIntegerIndex(key) != null) return;
+        for (self.own_key_order.items) |existing| {
+            if (std.mem.eql(u8, existing, key)) return;
+        }
+        try self.own_key_order.append(allocator, key);
+    }
+
+    /// §10.1.11 OrdinaryOwnPropertyKeys — drop `key` from the
+    /// unified insertion-order list. Called from the delete /
+    /// swapRemove paths in builtins/object.zig / interpreter.zig
+    /// when both the data and accessor map entries for `key` go
+    /// away. Cheap linear scan — the list is bounded by the
+    /// object's own-key count.
+    pub fn forgetKey(self: *JSObject, key: []const u8) void {
+        var i: usize = 0;
+        while (i < self.own_key_order.items.len) : (i += 1) {
+            if (std.mem.eql(u8, self.own_key_order.items[i], key)) {
+                _ = self.own_key_order.orderedRemove(i);
+                return;
+            }
+        }
     }
 
     /// Like `set`, but anchors `key_str` (whose `bytes` is the
@@ -679,6 +736,7 @@ pub const JSObject = struct {
         }
         try self.properties.put(allocator, key_str.bytes, v);
         try self.key_anchors.append(allocator, key_str);
+        try self.recordKey(allocator, key_str.bytes);
     }
 
     /// Read the (possibly defaulted) descriptor flags for
@@ -752,6 +810,7 @@ pub const JSObject = struct {
             }
         }
         try self.properties.put(allocator, key, v);
+        try self.recordKey(allocator, key);
         // Skip the flags entry when the descriptor is the
         // all-true default — keeps the parallel map sparse.
         if (is_default) {
@@ -781,6 +840,7 @@ pub const JSObject = struct {
             if (canonicalIntegerIndex(key)) |idx| {
                 if (self.properties.contains(key)) {
                     try self.properties.put(allocator, key, v);
+                    // Already-tracked key — no-op for recordKey.
                     return;
                 }
                 return self.setIndexed(allocator, idx, v);
@@ -823,6 +883,7 @@ pub const JSObject = struct {
             }
         }
         try self.properties.put(allocator, key, v);
+        try self.recordKey(allocator, key);
     }
 
     /// `[[Set]]` honoring §10.1.9 writability. Returns:
@@ -858,6 +919,7 @@ pub const JSObject = struct {
             if (!flags.writable) return false;
         }
         try self.properties.put(allocator, key, v);
+        try self.recordKey(allocator, key);
         return true;
     }
 
@@ -1264,11 +1326,13 @@ pub const JSObject = struct {
         if (self.accessors.contains(key)) {
             _ = self.accessors.swapRemove(key);
             _ = self.property_flags.swapRemove(key);
+            if (!self.properties.contains(key)) self.forgetKey(key);
             return true;
         }
         if (!self.properties.contains(key)) return true;
         _ = self.properties.swapRemove(key);
         _ = self.property_flags.swapRemove(key);
+        if (!self.accessors.contains(key)) self.forgetKey(key);
         return true;
     }
 };

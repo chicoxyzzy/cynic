@@ -282,6 +282,15 @@ pub const JSFunction = struct {
     /// cycle and reset to `false` after the sweep.
     marked: bool = false,
 
+    /// §10.1.11 OrdinaryOwnPropertyKeys — unified insertion-order
+    /// list spanning `properties` and `accessors`, mirroring
+    /// `JSObject.own_key_order`. See that field's doc for the
+    /// rationale; the function-object branch matters because
+    /// `Object.defineProperty(fn, "x", {get…})` followed by
+    /// `fn.y = 1` must report `["x", "y"]` from
+    /// `Object.getOwnPropertyNames(fn)`, not `["y", "x"]`.
+    own_key_order: std.ArrayListUnmanaged([]const u8) = .empty,
+
     pub fn init(
         allocator: std.mem.Allocator,
         chunk: *const Chunk,
@@ -334,8 +343,37 @@ pub const JSFunction = struct {
         self.private_properties.deinit(allocator);
         self.private_accessors.deinit(allocator);
         self.private_methods.deinit(allocator);
+        self.own_key_order.deinit(allocator);
         if (self.bound_args) |a| allocator.free(a);
         allocator.destroy(self);
+    }
+
+    /// §10.1.11 — see `JSObject.recordKey`. Same contract.
+    pub fn recordKey(
+        self: *JSFunction,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+    ) !void {
+        if (std.mem.startsWith(u8, key, "__cynic_")) return;
+        // Reuse JSObject's canonical-integer-index check via the
+        // shared helper.
+        const obj_mod = @import("object.zig");
+        if (obj_mod.JSObject.canonicalIntegerIndex(key) != null) return;
+        for (self.own_key_order.items) |existing| {
+            if (std.mem.eql(u8, existing, key)) return;
+        }
+        try self.own_key_order.append(allocator, key);
+    }
+
+    /// §10.1.11 — see `JSObject.forgetKey`.
+    pub fn forgetKey(self: *JSFunction, key: []const u8) void {
+        var i: usize = 0;
+        while (i < self.own_key_order.items.len) : (i += 1) {
+            if (std.mem.eql(u8, self.own_key_order.items[i], key)) {
+                _ = self.own_key_order.orderedRemove(i);
+                return;
+            }
+        }
     }
 
     /// Set a property by name. Mirrors `JSObject.set`. The `key`
