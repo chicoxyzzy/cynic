@@ -405,6 +405,37 @@ pub fn ownPropertyKeysOrdered(
     return out;
 }
 
+/// §7.3.2 Get(handler, P) for proxy-trap fetches. When `handler`
+/// is itself a Proxy, dispatch through `nativeProxyGet` so the
+/// outer handler's `get` trap fires (test262
+/// built-ins/Object/keys/property-traps-order-with-proxied-array.js
+/// uses `new Proxy(target, new Proxy({}, {get(t, pk) {…}}))`).
+/// Otherwise fall through to `getPropertyChain`, which walks the
+/// prototype chain and invokes accessor getters — so a handler
+/// that defines `ownKeys` as a getter (test262
+/// built-ins/Object/keys/proxy-keys.js) is observed.
+pub fn getHandlerProperty(realm: *Realm, handler: *JSObject, key: []const u8) NativeError!Value {
+    if (handler.proxy_target != null or handler.proxy_revoked) {
+        const proxy_mod = @import("proxy.zig");
+        var cur = handler;
+        while (true) {
+            const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, heap_mod.taggedObject(handler));
+            switch (outcome) {
+                .value => |v| return v,
+                .fallthrough => |t| {
+                    if (t == cur) return Value.undefined_;
+                    if (t.proxy_target != null or t.proxy_revoked) {
+                        cur = t;
+                        continue;
+                    }
+                    return getPropertyChain(realm, t, key);
+                },
+            }
+        }
+    }
+    return getPropertyChain(realm, handler, key);
+}
+
 /// §10.5.11 Proxy [[OwnPropertyKeys]] — when `obj` is a proxy
 /// with an `ownKeys` handler trap, call it and convert the
 /// returned Array into a `[]const []const u8` slice. The caller
@@ -417,7 +448,18 @@ pub fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []
     if (obj.proxy_revoked) return throwTypeError(realm, "Cannot perform 'ownKeys' on a revoked proxy");
     const proxy_target = obj.proxy_target.?;
     const handler = obj.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'ownKeys' on a proxy with null handler");
-    const trap_v = handler.get("ownKeys");
+    // §10.5.11 step 5 — `Let trap be ? GetMethod(handler, "ownKeys")`.
+    // §7.3.11 GetMethod chains through §7.3.10 Get which fires
+    // accessor getters AND nested-Proxy handler `get` traps.
+    // `getHandlerProperty` walks the proxy chain when the handler
+    // is itself a Proxy, then falls through to `getPropertyChain`
+    // (which fires accessor getters) on the inner plain object.
+    // Without this, a fixture like
+    // `new Proxy([], new Proxy({}, {get(t, pk) { log.push(pk) }}))`
+    // reads `handler.get("ownKeys")` directly and the inner trap
+    // never logs (test262 built-ins/Object/keys/proxy-keys.js,
+    // /property-traps-order-with-proxied-array.js).
+    const trap_v = try getHandlerProperty(realm, handler, "ownKeys");
     // §10.5.11 step 5 — trap is `undefined` / `null` → fall back
     // to target.[[OwnPropertyKeys]]. When the target is itself a
     // Proxy, recurse so the inner trap fires (proxy-of-proxy
@@ -444,7 +486,13 @@ pub fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []
         },
     };
     const result = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "'ownKeys' on proxy must return an array-like");
-    const len = lengthOfArrayLocal(result);
+    // §7.3.18 CreateListFromArrayLike step 4 — `Let len be ?
+    // LengthOfArrayLike(obj)`, which is §7.3.19 ToLength(Get(obj,
+    // "length")). Use `toLengthOf` (which calls `getPropertyChain`
+    // and then ToLength) so a `length` accessor on the trap result
+    // is observed (test262 built-ins/Object/keys/proxy-keys.js
+    // defines `get length() { log.push(...) }`).
+    const len = try intrinsics.toLengthOf(realm, result);
     var out: std.ArrayListUnmanaged([]const u8) = .empty;
     // `out`'s backing buffer is freed on every error path via this
     // `errdefer`; the success path calls `toOwnedSlice` below which
@@ -457,7 +505,10 @@ pub fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        const k_v = result.get(islice);
+        // §7.3.18 step 6.b — `Let next be ? Get(obj, ! ToString(F(index)))`.
+        // Accessor getters on the index keys must fire — the test262
+        // fixture above also defines `get 0() { … }` etc.
+        const k_v = try getPropertyChain(realm, result, islice);
         // §10.5.11 step 8 — CreateListFromArrayLike rejects any
         // entry that isn't a String or Symbol. Numbers / booleans /
         // null / undefined → TypeError.
@@ -576,6 +627,7 @@ fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError
     result.prototype = realm.intrinsics.array_prototype;
     result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     var idx: usize = 0;
+    const is_proxy = obj.proxy_target != null or obj.proxy_revoked;
     for (keys) |key| {
         // §7.3.21 EnumerableOwnProperties step 4.a.i calls
         // O.[[GetOwnProperty]](key) to read the descriptor — on a
@@ -591,7 +643,28 @@ fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError
         // Cynic flattens symbols into `@@<name>` / `<sym:N>`; filter
         // both forms so neither leaks into `Object.keys`.
         if (isSymbolKey(key)) continue;
-        if (!obj.flagsFor(key).enumerable) continue;
+        // §7.3.21 step 4.a.i — `Let desc be ? O.[[GetOwnProperty]](key)`.
+        // For a Proxy this fires the `getOwnPropertyDescriptor`
+        // trap and runs the §10.5.5 invariant checks. The trap
+        // may override the enumerable bit relative to the target's
+        // own descriptor (test262 built-ins/Object/keys/proxy-keys.js),
+        // and it may legitimately report `false` for a non-
+        // enumerable target prop the trap chose to surface
+        // (test262 …/proxy-non-enumerable-prop-invariant-3.js). For
+        // a plain object we keep the direct flag read — it's the
+        // ordinary [[GetOwnProperty]] result.
+        const enumerable = if (is_proxy) blk: {
+            const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+            const desc_args = [_]Value{ heap_mod.taggedObject(obj), Value.fromString(key_str) };
+            const desc_v = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &desc_args);
+            // step 4.a.ii — desc undefined → skip key (proxy reported
+            // it absent).
+            if (desc_v.isUndefined()) continue;
+            const desc_obj = heap_mod.valueAsPlainObject(desc_v) orelse continue;
+            const enum_v = desc_obj.get("enumerable");
+            break :blk enum_v.isBool() and enum_v.asBool();
+        } else obj.flagsFor(key).enumerable;
+        if (!enumerable) continue;
         const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
         var ibuf: [16]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
@@ -1686,7 +1759,7 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
                 heap_mod.taggedFunction(tfn)
             else
                 unreachable;
-            const trap_v = try intrinsics.getPropertyChain(realm, handler, "getOwnPropertyDescriptor");
+            const trap_v = try getHandlerProperty(realm, handler, "getOwnPropertyDescriptor");
             if (trap_v.isUndefined() or trap_v.isNull()) {
                 // §10.5.5 step 7.a — fall through to target.
                 // [[GetOwnProperty]]. If target itself is a proxy,

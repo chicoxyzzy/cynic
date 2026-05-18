@@ -528,10 +528,28 @@ fn stringSearchDispatched(realm: *Realm, this_value: Value, args: []const Value)
     if (this_value.isNull() or this_value.isUndefined())
         return throwTypeError(realm, "String.prototype.search called on null or undefined");
     const regexp_arg = argOr(args, 0, Value.undefined_);
+    // §22.1.3.13 step 2 — direct @@search on the supplied regexp.
+    // `GetMethod` returns undefined when the property is undefined
+    // *or* null, so a user-installed `target[@@search] = undefined`
+    // falls through to the RegExpCreate path
+    // (`search/invoke-builtin-search-searcher-undef.js`).
     if (try getSymbolMethod(realm, regexp_arg, "@@search")) |searcher| {
         const recv_s = try coerceThisToJSString(realm, this_value);
         return invokeSymbolMethod(realm, searcher, regexp_arg, Value.fromString(recv_s), null);
     }
+    // §22.1.3.13 step 4-5 — wrap in `RegExpCreate(regexp, undefined)`,
+    // then `Invoke(rx, @@search, «S»)`. The user-overridable
+    // `RegExp.prototype[@@search]` must fire even when the source
+    // argument is a primitive string (`search/invoke-builtin-
+    // search.js` swaps the prototype method and asserts the
+    // fresh regex is the `this` value).
+    const recv_s = try coerceThisToJSString(realm, this_value);
+    const rx = try regExpCreate(realm, regexp_arg, null);
+    if (try getSymbolMethod(realm, rx, "@@search")) |searcher| {
+        return invokeSymbolMethod(realm, searcher, rx, Value.fromString(recv_s), null);
+    }
+    // %RegExp.prototype%[@@search] is installed by every realm; the
+    // fall-through is the legacy exec-based path as a safety net.
     return stringSearch(realm, this_value, args);
 }
 
@@ -660,8 +678,23 @@ fn coerceThisToJSString(realm: *Realm, this_value: Value) NativeError!*JSString 
         // directly without re-allocating.
         if (obj.boxed_string) |s| return s;
     }
+    // §7.1.17 ToString on an object: run ToPrimitive with hint
+    // "string" first (which consults `Symbol.toPrimitive` /
+    // `toString` / `valueOf` in spec order), then stringify the
+    // resulting primitive. `stringifyArg` short-circuits Function
+    // receivers to `fn.source`, which would skip a user-installed
+    // `valueOf` / `toString` — Sputnik
+    // `built-ins/String/prototype/slice/S15.5.4.13_A1_T5.js`
+    // expects `__func.toString` (returns a non-primitive) → fall
+    // through to `valueOf` ("gnulluna") rather than the function's
+    // source text. Route through `toPrimitive` so the spec walk
+    // fires before the source-text shortcut.
+    if (this_value.isObject()) {
+        const prim = try intrinsics.toPrimitive(realm, this_value, .string);
+        return stringifyArg(realm, prim);
+    }
     // Fallback: stringify via the existing coercion (numbers /
-    // booleans / objects via `.toString()`).
+    // booleans).
     return stringifyArg(realm, this_value);
 }
 

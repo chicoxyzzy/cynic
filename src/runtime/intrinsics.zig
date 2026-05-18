@@ -335,11 +335,19 @@ pub fn install(realm: *Realm) !void {
     // String.prototype methods all live in builtins/string.zig.
     try @import("builtins/string.zig").install(realm);
     if (realm.intrinsics.string_prototype) |sp| {
-        // §22.1.3 — `%String.prototype%` itself has
-        // `[[StringData]]: ""`. Calling a String.prototype
-        // method directly on the prototype unboxes to "".
+        // §22.1.3 — `%String.prototype%` itself is a String exotic
+        // object whose `[[StringData]]` is the empty String. Cynic
+        // records the slot two ways: `boxed_primitive` for the
+        // ToString / ToNumber unboxing path, and `boxed_string` for
+        // the §10.4.3 String-exotic brand check (which drives the
+        // `"String"` builtinTag in §20.1.3.6 Object.prototype.toString
+        // — Sputnik `built-ins/String/prototype/S15.5.4_A{1,2,3}.js`
+        // delete `String.prototype.toString` and rely on the
+        // inherited `Object.prototype.toString.call(String.prototype)`
+        // returning `"[object String]"`).
         const empty_str = realm.heap.allocateString("") catch return error.OutOfMemory;
         sp.boxed_primitive = Value.fromString(empty_str);
+        sp.boxed_string = empty_str;
     }
 
     // Number prototype + statics + parseInt/parseFloat/isNaN/isFinite globals.

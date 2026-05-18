@@ -409,7 +409,21 @@ pub fn typedArrayEntriesMethod(realm: *Realm, this_value: Value, args: []const V
 
 pub fn stringIteratorMethod(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    const v = makeArrayLikeIterator(realm, this_value, .values) catch return error.OutOfMemory;
+    // §22.1.3.36 step 1 — `Let O be ? RequireObjectCoercible(this
+    // value)`. Reject `null` / `undefined` with TypeError before
+    // building the iterator (`Symbol.iterator/this-val-non-obj-
+    // coercible.js`).
+    if (this_value.isNull() or this_value.isUndefined()) {
+        return throwTypeError(realm, "String.prototype[Symbol.iterator] called on null or undefined");
+    }
+    // §22.1.3.36 step 2 — `Let s be ? ToString(O)`. Forcing the
+    // ToString here makes a poisoned `toString` propagate before
+    // the iterator object exists (`Symbol.iterator/this-val-to-
+    // str-err.js`). Once coerced, iterate the resulting String
+    // primitive directly so the array-like walk sees the canonical
+    // form (rather than indexed lookups on the raw receiver).
+    const s = try intrinsics.stringifyArg(realm, this_value);
+    const v = makeArrayLikeIterator(realm, Value.fromString(s), .values) catch return error.OutOfMemory;
     // §22.1.5.1 — String iterators inherit from
     // %StringIteratorPrototype%, not %ArrayIteratorPrototype%.
     // Re-parent the freshly-built iterator (`makeArrayLikeIterator`
