@@ -1769,9 +1769,11 @@ pub const Compiler = struct {
     }
 
     /// Decode a template quasi's escape sequences into a fresh
-    /// allocator-owned slice. Mirrors what
-    /// `compileTemplateQuasi` did at runtime, but eagerly so the
-    /// cooked text can land in a heap-allocated `strs` element.
+    /// allocator-owned slice. §12.8.6.1 TV (Template Value) —
+    /// `\xNN`, `\uNNNN`, `\u{N…}`, LineContinuation all get the
+    /// same decoding as a string literal would. Falls through to
+    /// the shared `decodeStringContent` helper so the lexer's
+    /// view stays the single source of truth.
     /// Returns owned bytes — caller frees.
     fn decodeQuasi(self: *Compiler, span: Span) ![]u8 {
         const raw = self.source[span.start..span.end];
@@ -1779,42 +1781,7 @@ pub const Compiler = struct {
         if (std.mem.indexOfScalar(u8, raw, '\\') == null) {
             return self.allocator.dupe(u8, raw);
         }
-        var out: std.ArrayListUnmanaged(u8) = .empty;
-        defer out.deinit(self.allocator);
-        var i: usize = 0;
-        while (i < raw.len) {
-            const c = raw[i];
-            if (c != '\\' or i + 1 >= raw.len) {
-                try out.append(self.allocator, c);
-                i += 1;
-                continue;
-            }
-            const next = raw[i + 1];
-            switch (next) {
-                'n' => try out.append(self.allocator, '\n'),
-                't' => try out.append(self.allocator, '\t'),
-                'r' => try out.append(self.allocator, '\r'),
-                '\\' => try out.append(self.allocator, '\\'),
-                '\'' => try out.append(self.allocator, '\''),
-                '"' => try out.append(self.allocator, '"'),
-                '`' => try out.append(self.allocator, '`'),
-                '0' => try out.append(self.allocator, 0),
-                'b' => try out.append(self.allocator, 8),
-                'f' => try out.append(self.allocator, 12),
-                'v' => try out.append(self.allocator, 11),
-                else => {
-                    // Leave unrecognised escapes verbatim — full
-                    // \u/\x decoding is the existing emit-time
-                    // path, which the runtime LdaConstant handled
-                    // before. Tests exercising tag-identity rarely
-                    // need full decoding.
-                    try out.append(self.allocator, '\\');
-                    try out.append(self.allocator, next);
-                },
-            }
-            i += 2;
-        }
-        return out.toOwnedSlice(self.allocator);
+        return decodeStringContent(self.allocator, raw);
     }
 
     /// Emit `LdaConstant` for the *raw* quasi text — preserves
