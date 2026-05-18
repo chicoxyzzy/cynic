@@ -154,6 +154,27 @@ pub const Compiler = struct {
     /// `false` for scripts and inline-test compiles, where
     /// import/export still parse but compile as no-ops.
     is_module: bool = false,
+    /// §9.4.6.7 Module Namespace [[Get]] live binding propagation —
+    /// maps a module-local binding name to the namespace key(s) it
+    /// is exported under. Populated by `compileModuleAsChunk` from
+    /// the module's export entries (`export var/let/const/class`,
+    /// `export { local as exported }`, `export default <named>`).
+    /// `emitStoreBindingMode` consults this map after each store
+    /// to a top-level binding and emits a follow-up `module_export
+    /// <exported>` for every alias so subsequent reads through
+    /// `ns.<exported>` observe the live mutation rather than the
+    /// declaration-time snapshot. `null` outside module-mode.
+    ///
+    /// Limitation: the `module_export` opcode writes to
+    /// `realm.current_module`. Mutations made from inside a
+    /// callback invoked across a module boundary (e.g. importer
+    /// calls a setter exported by this module) land on the
+    /// *caller's* current module if any — which is rare in the
+    /// corpus but a spec divergence (true live bindings would
+    /// follow the binding's *defining* module). Same-module
+    /// mutation, the case the corpus and the spec
+    /// (get-str-update.js) actually exercise, works.
+    module_exports_by_local: ?*std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = null,
     /// Sticky flag set by `compileAwait` whenever an `await`
     /// emits at module top level (lexically outside any function /
     /// arrow / method body — i.e. the enclosing function-like
@@ -522,6 +543,17 @@ pub const Compiler = struct {
             try self.builder.emitU8(depth);
             try self.builder.emitU8(binding.env_slot);
         }
+        // §9.4.6.7 Module Namespace [[Get]] — re-publish to the
+        // executing module's namespace if this binding is one of
+        // its exports. `acc` is unmodified by `sta_env` /
+        // `sta_global*`, so the follow-up `module_export` writes
+        // the just-stored value through. `is_init` writes already
+        // emit a `module_export` via `publishExportedNamesFromDecl`
+        // (the per-decl publish path); a second emit here is
+        // harmless but redundant. Only fire for re-assignments
+        // (`is_init == false`) to avoid the double-publish on the
+        // declaration line.
+        if (!is_init) try self.maybeRepublishExport(binding, span);
     }
 
     fn functionScope(self: *Compiler) *Scope {
@@ -4557,6 +4589,43 @@ pub const Compiler = struct {
                         exported_text[1 .. exported_text.len - 1]
                     else
                         try self.decodeIdentifierName(exported_text);
+                    // §16.2.1.7.1 ParseModule step 10.1.ii — if
+                    // ExportEntry.LocalName matches an
+                    // ImportEntry.LocalName, the export entry is
+                    // demoted to an IndirectExportEntry referencing
+                    // the original module. So
+                    //     import { foo } from "./src";
+                    //     export { foo };
+                    // is spec-equivalent to
+                    //     export { foo } from "./src";
+                    // — both forms preserve binding identity, which
+                    // matters for §15.2.1.16.3 ResolveExport's
+                    // ambiguity test (two re-export routes that
+                    // ultimately resolve to the same source-module
+                    // binding aren't ambiguous, even when one is
+                    // value-copied here and the other is a direct
+                    // redirect). Detect the import-binding case and
+                    // emit `module_reexport_named` so the redirect
+                    // is installed on our namespace, giving
+                    // `mergeStarKey` a chance to match terminals.
+                    const scope = self.scope orelse return error.UnsupportedStatement;
+                    const resolved = scope.resolve(local_name);
+                    if (resolved) |binding| if (binding.is_import) {
+                        // Re-export through the same import-source
+                        // namespace. Load the source namespace from
+                        // the import's persistent `import_ns_slot`
+                        // into `acc`, then install the redirect.
+                        const depth = self.env_depth - binding.env_depth;
+                        try self.builder.emitOp(.lda_env, spec.span);
+                        try self.builder.emitU8(depth);
+                        try self.builder.emitU8(binding.import_ns_slot);
+                        const k_local = try self.internString(binding.import_name);
+                        const k_exp = try self.internString(exported_name);
+                        try self.builder.emitOp(.module_reexport_named, spec.span);
+                        try self.builder.emitU16(k_local);
+                        try self.builder.emitU16(k_exp);
+                        continue;
+                    };
                     try self.emitBindingRead(local_name, spec.span);
                     const k = try self.internString(exported_name);
                     try self.builder.emitOp(.module_export, spec.span);
@@ -4825,6 +4894,33 @@ pub const Compiler = struct {
         try self.builder.emitOp(.lda_hole, span);
         try self.builder.emitOp(.module_export, span);
         try self.builder.emitU16(k);
+    }
+
+    /// §9.4.6.7 Module Namespace [[Get]] live-binding helper. After
+    /// any `sta_env` / `sta_global` to a top-level binding that's
+    /// also exported, emit a `module_export <exported>` for each
+    /// alias so subsequent reads through the namespace observe the
+    /// new value rather than the declaration-time snapshot. `acc`
+    /// is preserved across both store ops and `module_export` so
+    /// the resulting bytecode is value-neutral.
+    ///
+    /// Only fires for top-level bindings (`env_depth == 0`) inside
+    /// a module — nested-scope bindings can't be exported in the
+    /// first place. Indirect-export entries
+    /// (`export { x } from "..."`) are NOT in this map: those
+    /// resolve through `namespace_redirects` and have no local
+    /// owning storage to mutate.
+    fn maybeRepublishExport(self: *Compiler, binding: Binding, span: Span) CompileError!void {
+        if (!self.is_module) return;
+        if (binding.env_depth != 0) return;
+        if (binding.is_import) return;
+        const map = self.module_exports_by_local orelse return;
+        const entry = map.get(binding.name) orelse return;
+        for (entry.items) |exported| {
+            const k = try self.internString(exported);
+            try self.builder.emitOp(.module_export, span);
+            try self.builder.emitU16(k);
+        }
     }
 
     /// §14.12 SwitchStatement.
@@ -9199,6 +9295,107 @@ pub const Compiler = struct {
     }
 };
 
+/// §9.4.6.7 — walk `body` and populate `out` with
+/// (local-name → exported-name(s)) for every export entry that
+/// owns a local binding. Aliasing (`export { x as a, x as b }`)
+/// appends multiple names per local; `export { x } from "src"`
+/// is omitted (re-exports have no local owning storage; their
+/// live bindings flow through `namespace_redirects`).
+fn collectLiveExports(
+    c: *Compiler,
+    body: []ast.statement.Statement,
+    out: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)),
+) CompileError!void {
+    for (body) |s| switch (s) {
+        .export_decl => |ed| switch (ed.body) {
+            .declaration => |inner| switch (inner.*) {
+                .lexical => |ld| {
+                    for (ld.declarators) |d| {
+                        try collectLiveExportsFromTarget(c, d.name, out);
+                    }
+                },
+                .function_decl => |fd| {
+                    const name = try c.bindingName(fd.name.span);
+                    try addLiveExportAlias(c, out, name, name);
+                },
+                .class_decl => |cd| {
+                    const name = try c.bindingName(cd.name.span);
+                    try addLiveExportAlias(c, out, name, name);
+                },
+                else => {},
+            },
+            .named => |nb| {
+                if (nb.source != null) continue;
+                for (nb.specifiers) |spec| {
+                    const local_text = c.source[spec.local_span.start..spec.local_span.end];
+                    const local_name = if (local_text.len >= 2 and (local_text[0] == '"' or local_text[0] == '\''))
+                        local_text[1 .. local_text.len - 1]
+                    else
+                        try c.decodeIdentifierName(local_text);
+                    const exported_text = c.source[spec.exported_span.start..spec.exported_span.end];
+                    const exported_name = if (exported_text.len >= 2 and (exported_text[0] == '"' or exported_text[0] == '\''))
+                        exported_text[1 .. exported_text.len - 1]
+                    else
+                        try c.decodeIdentifierName(exported_text);
+                    try addLiveExportAlias(c, out, local_name, exported_name);
+                }
+            },
+            // `export default <expr>` — anonymous defaults have no
+            // observable local binding; named defaults
+            // (`export default function F() {}` /
+            // `export default class F {}`) create a local F that
+            // user code can't reassign (no `let` form), so live-
+            // binding propagation has no observable effect today.
+            .default_value => {},
+            .all => {},
+        },
+        else => {},
+    };
+}
+
+fn collectLiveExportsFromTarget(
+    c: *Compiler,
+    target: ast.statement.BindingTarget,
+    out: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)),
+) CompileError!void {
+    switch (target) {
+        .identifier => |id| {
+            const name = c.source[id.span.start..id.span.end];
+            try addLiveExportAlias(c, out, name, name);
+        },
+        .object => |op| {
+            for (op.properties) |prop| {
+                try collectLiveExportsFromTarget(c, prop.value.target, out);
+            }
+            if (op.rest) |rest| {
+                // Object rest target is a BindingIdentifier (not a
+                // nested pattern) — the spec disallows
+                // `let {...{a}} = obj`.
+                const name = c.source[rest.span.start..rest.span.end];
+                try addLiveExportAlias(c, out, name, name);
+            }
+        },
+        .array => |ap| {
+            for (ap.elements) |maybe_el| {
+                const el = maybe_el orelse continue; // elision
+                try collectLiveExportsFromTarget(c, el.target, out);
+            }
+            if (ap.rest) |rest| try collectLiveExportsFromTarget(c, rest.*, out);
+        },
+    }
+}
+
+fn addLiveExportAlias(
+    c: *Compiler,
+    out: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)),
+    local_name: []const u8,
+    exported_name: []const u8,
+) CompileError!void {
+    const gop = try out.getOrPut(c.allocator, local_name);
+    if (!gop.found_existing) gop.value_ptr.* = .empty;
+    try gop.value_ptr.append(c.allocator, exported_name);
+}
+
 /// Discriminator for the body shape passed to
 /// [compileFunctionTemplate]. Block-bodied functions and arrows
 /// share one path; concise-body arrows take the other.
@@ -9556,6 +9753,21 @@ pub fn compileModuleAsChunk(
     defer c.pending_labels.deinit(c.allocator);
     c.diagnostics = diagnostics;
     c.is_module = true;
+
+    // §9.4.6.7 Module Namespace [[Get]] — collect (local-name →
+    // exported-aliases) so subsequent stores to top-level
+    // bindings auto-publish onto the namespace, giving spec-
+    // mandated live-binding semantics. Allocated on the compile-
+    // time arena (`c.allocator`) and torn down via `deinit` below
+    // after `c.finish` has produced the immutable chunk.
+    var exports_by_local: std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .empty;
+    defer {
+        var it_e = exports_by_local.iterator();
+        while (it_e.next()) |entry| entry.value_ptr.deinit(c.allocator);
+        exports_by_local.deinit(c.allocator);
+    }
+    try collectLiveExports(&c, program.body, &exports_by_local);
+    c.module_exports_by_local = &exports_by_local;
 
     var script_scope: Scope = .{ .parent = null, .kind = .script };
     defer script_scope.deinit(c.allocator);
