@@ -5284,17 +5284,40 @@ fn runFrames(
                     }
                     // Snapshot the key list before we start calling
                     // user getters — they could otherwise mutate the
-                    // property bag mid-iteration.
+                    // property bag mid-iteration. For a Proxy source,
+                    // route through `proxyOwnKeysOrNull` so the
+                    // `ownKeys` trap fires (§7.3.27 step 4 +
+                    // §10.5.11), and use `getOwnPropertyDescriptor`
+                    // to decide enumerability — that fires the
+                    // §10.5.5 trap for every non-excluded key, even
+                    // when the descriptor will ultimately be
+                    // ignored.
                     const obj_mod_inner = @import("builtins/object.zig");
-                    const keys = obj_mod_inner.ownPropertyKeysOrdered(realm, src_obj) catch |err| switch (err) {
+                    const is_src_proxy = src_obj.proxy_target != null or src_obj.proxy_revoked;
+                    const keys_opt: ?[]const []const u8 = blk_pk: {
+                        const ko = obj_mod_inner.proxyOwnKeysOrNull(realm, src_obj) catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            else => {
+                                const ex = consumePendingException(realm) orelse try makeTypeError(realm, "object rest ownKeys trap threw");
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                break :blk_pk null;
+                            },
+                        };
+                        break :blk_pk ko;
+                    };
+                    if (committed) continue;
+                    const keys: []const []const u8 = if (keys_opt) |k| k else (obj_mod_inner.ownPropertyKeysOrdered(realm, src_obj) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => return error.InvalidOpcode,
-                    };
+                    });
                     defer allocator.free(keys);
                     for (keys) |k| {
                         if (std.mem.startsWith(u8, k, "__cynic_")) continue;
-                        const flags = src_obj.flagsFor(k);
-                        if (!flags.enumerable) continue;
                         var skip = false;
                         for (excluded.items) |ek| {
                             if (std.mem.eql(u8, ek, k)) {
@@ -5303,6 +5326,32 @@ fn runFrames(
                             }
                         }
                         if (skip) continue;
+                        // §7.3.27 step 4.c.i — `desc = ? from.[[GetOwnProperty]](key)`.
+                        // For a Proxy source, the trap must fire for
+                        // every non-excluded key. For a plain object
+                        // it's a quick own-flag read.
+                        if (is_src_proxy) {
+                            const key_str = realm.heap.allocateString(k) catch return error.OutOfMemory;
+                            const desc_args = [_]Value{ heap_mod.taggedObject(src_obj), Value.fromString(key_str) };
+                            const desc_v = obj_mod_inner.objectGetOwnPropertyDescriptor(realm, Value.undefined_, &desc_args) catch |err| switch (err) {
+                                error.OutOfMemory => return error.OutOfMemory,
+                                else => {
+                                    const ex = consumePendingException(realm) orelse try makeTypeError(realm, "object rest descriptor trap threw");
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    break;
+                                },
+                            };
+                            if (desc_v.isUndefined()) continue;
+                            const desc_obj = heap_mod.valueAsPlainObject(desc_v) orelse continue;
+                            if (!intrinsics_mod.toBoolean(desc_obj.get("enumerable"))) continue;
+                        } else {
+                            if (!src_obj.flagsFor(k).enumerable) continue;
+                        }
                         // §7.3.27 step 4.c.iii — Get(from, nextKey).
                         // A throw here propagates as an abrupt
                         // completion through the destructuring.
@@ -8460,34 +8509,101 @@ fn runFrames(
                     continue;
                 };
                 const obj_mod = @import("builtins/object.zig");
-                const keys = obj_mod.ownPropertyKeysOrdered(realm, src_obj) catch |err| switch (err) {
+                // §7.3.27 CopyDataProperties step 4 — fire the
+                // Proxy `ownKeys` trap when `src` is a proxy
+                // exotic, then iterate the trap result. When
+                // `src` isn't a proxy this is just the ordinary
+                // own-key walk.
+                const is_src_proxy = src_obj.proxy_target != null or src_obj.proxy_revoked;
+                const keys_opt: ?[]const []const u8 = blk_pk: {
+                    const ko = obj_mod.proxyOwnKeysOrNull(realm, src_obj) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => {
+                            const ex = consumePendingException(realm) orelse try makeTypeError(realm, "object spread ownKeys trap threw");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            break :blk_pk null;
+                        },
+                    };
+                    break :blk_pk ko;
+                };
+                if (committed) continue;
+                const keys: []const []const u8 = if (keys_opt) |k| k else (obj_mod.ownPropertyKeysOrdered(realm, src_obj) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.InvalidOpcode,
-                };
+                });
                 defer realm.allocator.free(keys);
                 for (keys) |key| {
-                    if (!src_obj.flagsFor(key).enumerable) continue;
+                    if (std.mem.startsWith(u8, key, "__cynic_")) continue;
                     var prop_value: Value = undefined;
-                    if (lookupAccessor(src_obj, key)) |acc_pair| {
-                        if (acc_pair.getter) |getter| {
-                            const outcome = try callJSFunction(allocator, realm, getter, src_v, &.{});
-                            switch (outcome) {
-                                .value, .yielded => |v| prop_value = v,
-                                .thrown => |ex| {
-                                    f.ip = ip;
-                                    f.accumulator = acc;
-                                    committed = true;
-                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
-                                        return .{ .thrown = ex };
-                                    }
-                                    break;
-                                },
+                    if (is_src_proxy) {
+                        // §7.3.27 step 4.c.i — `desc = ? from.[[GetOwnProperty]](key)`.
+                        // The Proxy `getOwnPropertyDescriptor` trap must
+                        // fire even when we'll discard the result; that's
+                        // what fixtures like
+                        // `object-spread-proxy-no-excluded-keys.js` assert.
+                        const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                        const desc_args = [_]Value{ src_v, Value.fromString(key_str) };
+                        const desc_v = obj_mod.objectGetOwnPropertyDescriptor(realm, Value.undefined_, &desc_args) catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            else => {
+                                const ex = consumePendingException(realm) orelse try makeTypeError(realm, "object spread descriptor trap threw");
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                break;
+                            },
+                        };
+                        if (desc_v.isUndefined()) continue;
+                        const desc_obj = heap_mod.valueAsPlainObject(desc_v) orelse continue;
+                        if (!intrinsics_mod.toBoolean(desc_obj.get("enumerable"))) continue;
+                        // §7.3.27 step 4.c.iii — `Get(from, key)`.
+                        // Fires the Proxy `get` trap and any accessor
+                        // on the chain.
+                        const v = intrinsics_mod.getPropertyChain(realm, src_obj, key) catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            else => {
+                                const ex = consumePendingException(realm) orelse try makeTypeError(realm, "object spread get failed");
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                break;
+                            },
+                        };
+                        prop_value = v;
+                    } else {
+                        if (!src_obj.flagsFor(key).enumerable) continue;
+                        if (lookupAccessor(src_obj, key)) |acc_pair| {
+                            if (acc_pair.getter) |getter| {
+                                const outcome = try callJSFunction(allocator, realm, getter, src_v, &.{});
+                                switch (outcome) {
+                                    .value, .yielded => |v| prop_value = v,
+                                    .thrown => |ex| {
+                                        f.ip = ip;
+                                        f.accumulator = acc;
+                                        committed = true;
+                                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                            return .{ .thrown = ex };
+                                        }
+                                        break;
+                                    },
+                                }
+                            } else {
+                                prop_value = Value.undefined_;
                             }
                         } else {
-                            prop_value = Value.undefined_;
+                            prop_value = src_obj.get(key);
                         }
-                    } else {
-                        prop_value = src_obj.get(key);
                     }
                     target.set(allocator, key, prop_value) catch return error.OutOfMemory;
                 }
