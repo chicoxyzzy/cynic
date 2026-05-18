@@ -608,10 +608,37 @@ fn promiseCatch(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 /// through `Promise.resolve` (§27.2.5.3 step 6.c). Fixtures that
 /// expect `finally` to wait on a thenable result still time the
 /// resolution one tick early. Tracked in the Promise triage.
+/// §7.3.22 SpeciesConstructor(promise, %Promise%). Reads
+/// `constructor` from `source`; if undefined fall back to
+/// %Promise%. Otherwise reads `@@species` from the constructor;
+/// if undefined / null fall back to the constructor itself.
+/// Non-constructor results throw TypeError. Used by
+/// `Promise.prototype.{then, finally}` to honor user subclasses.
+fn promiseSpeciesConstructor(realm: *Realm, source: *JSObject) NativeError!*JSFunction {
+    const builtin_promise = heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_) orelse return throwTypeError(realm, "%Promise% missing");
+    const ctor_v = getPropertyChain(realm, source, "constructor") catch return error.NativeThrew;
+    if (ctor_v.isUndefined()) return builtin_promise;
+    const c_obj = heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "SpeciesConstructor: constructor is not an object");
+    const species_v = ctorGetMember(realm, c_obj, "@@species") catch return error.NativeThrew;
+    if (species_v.isUndefined() or species_v.isNull()) return c_obj;
+    const s_fn = heap_mod.valueAsFunction(species_v) orelse return throwTypeError(realm, "SpeciesConstructor: species is not a constructor");
+    if (!s_fn.has_construct or s_fn.is_arrow) return throwTypeError(realm, "SpeciesConstructor: species is not a constructor");
+    return s_fn;
+}
+
 fn promiseFinally(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const this_obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Promise.prototype.finally called on non-object");
     const on_finally = argOr(args, 0, Value.undefined_);
     const on_finally_fn = heap_mod.valueAsFunction(on_finally);
+
+    // §27.2.5.3 step 3 — `Let C be ? SpeciesConstructor(promise,
+    // %Promise%)`. The thenFinally / catchFinally reactions wrap
+    // the callback result via `PromiseResolve(C, …)` so user-
+    // subclassed promises see their own constructor called for
+    // the wrap. Default to %Promise% when constructor lookup
+    // falls back per §7.3.22.
+    const C: *JSFunction = try promiseSpeciesConstructor(realm, this_obj);
+
     // §27.2.5.3 step 4-7 — build the two reaction wrappers when
     // onFinally is callable; otherwise pass through.
     var then_arg: Value = on_finally;
@@ -620,6 +647,7 @@ fn promiseFinally(realm: *Realm, this_value: Value, args: []const Value) NativeE
         const ctx = realm.heap.allocateObject() catch return error.OutOfMemory;
         ctx.prototype = realm.intrinsics.object_prototype;
         ctx.finally_callback = on_finally_fn;
+        ctx.finally_constructor = C;
 
         const then_fn = realm.heap.allocateFunctionNative(finallyThenReaction, 1, "") catch return error.OutOfMemory;
         then_fn.proto = realm.intrinsics.function_prototype;
@@ -681,7 +709,7 @@ fn finallyThenReaction(realm: *Realm, this_value: Value, args: []const Value) Na
             return error.NativeThrew;
         },
     };
-    return chainFinallyResult(realm, result, value, false);
+    return chainFinallyResult(realm, result, value, false, ctx.finally_constructor);
 }
 
 /// Step 7 of §27.2.5.3 — onFinally for rejected path. Same shape as
@@ -709,7 +737,7 @@ fn finallyCatchReaction(realm: *Realm, this_value: Value, args: []const Value) N
             return error.NativeThrew;
         },
     };
-    return chainFinallyResult(realm, result, reason, true);
+    return chainFinallyResult(realm, result, reason, true, ctx.finally_constructor);
 }
 
 /// Wrap `result` in a Promise (§27.2.4.7 PromiseResolve), then chain
@@ -720,7 +748,16 @@ fn finallyCatchReaction(realm: *Realm, this_value: Value, args: []const Value) N
 /// When `result` is not a thenable, the short path returns `carry`
 /// directly (or throws for the catch path) — matches the spec's
 /// PromiseResolve fast path on a primitive.
-fn chainFinallyResult(realm: *Realm, result: Value, carry: Value, is_throw: bool) NativeError!Value {
+fn chainFinallyResult(realm: *Realm, result: Value, carry: Value, is_throw: bool, ctor: ?*JSFunction) NativeError!Value {
+    // §27.2.5.3 step 6.b / 7.b — `promise = ? PromiseResolve(C,
+    // result)`. PromiseResolve fast-paths when `result` is already
+    // a Promise whose constructor IS C: just return result. For
+    // plain values (the common `.finally(() => undefined)` case)
+    // we still need to allocate so step 6.d / 7.d (`Invoke(promise,
+    // "then", « valueThunk »)`) settles via C's reactions, not
+    // by the synchronous `carry` shortcut.
+    const builtin_promise = heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_);
+    const using_default = ctor == null or ctor.? == builtin_promise;
     const result_obj = heap_mod.valueAsPlainObject(result);
     const is_thenable_blk: bool = blk: {
         if (result_obj) |obj| {
@@ -730,7 +767,12 @@ fn chainFinallyResult(realm: *Realm, result: Value, carry: Value, is_throw: bool
         }
         break :blk false;
     };
-    if (!is_thenable_blk) {
+    // Fast path: built-in Promise + non-thenable result. Skip the
+    // `PromiseResolve(C, result).then(thunk)` chain — the value-
+    // thunk's effect is observably equivalent to settling with
+    // `carry` directly (microtask scheduling order doesn't matter
+    // for a synchronous handler).
+    if (using_default and !is_thenable_blk) {
         if (is_throw) {
             realm.pending_exception = carry;
             return error.NativeThrew;
@@ -738,22 +780,52 @@ fn chainFinallyResult(realm: *Realm, result: Value, carry: Value, is_throw: bool
         return carry;
     }
 
-    // Wrap result through PromiseResolve so a plain thenable becomes
-    // an adopted Promise. For a native Promise this is identity-fast.
+    // Wrap result through PromiseResolve(C, result). When C is the
+    // built-in %Promise%, fast-path for already-Promise results;
+    // otherwise build a fresh capability via C so subclasses
+    // observe their constructor call (§27.2.5.3 species-count
+    // fixtures).
     const wrapped = blk: {
-        if (result_obj) |obj| if (obj.isPromise()) break :blk result;
-        // Synthesise via NewPromiseCapability + resolve(result) — the
-        // existing PromiseResolveThenableJob path. allocatePromiseFor
-        // with .pending + manual then-on-result would race; use
-        // wrapInPromise after queueing the thenable job instead.
-        const new_p_v = try @import("../interpreter.zig").wrapInPromise(realm, true, Value.undefined_);
-        const new_p = heap_mod.valueAsPlainObject(new_p_v) orelse return error.OutOfMemory;
-        new_p.promise_state = .pending;
-        new_p.promise_value = Value.undefined_;
-        // result must be a thenable here; queue the job per §27.2.1.3.2.
-        const then_v = if (result_obj) |obj| obj.get("then") else Value.undefined_;
-        realm.enqueueThenableJob(new_p_v, result, then_v) catch return error.OutOfMemory;
-        break :blk new_p_v;
+        if (using_default) {
+            if (result_obj) |obj| if (obj.isPromise()) break :blk result;
+            // Default constructor + thenable result: synthesise via
+            // PromiseResolveThenableJob.
+            const new_p_v = try @import("../interpreter.zig").wrapInPromise(realm, true, Value.undefined_);
+            const new_p = heap_mod.valueAsPlainObject(new_p_v) orelse return error.OutOfMemory;
+            new_p.promise_state = .pending;
+            new_p.promise_value = Value.undefined_;
+            const then_v = if (result_obj) |obj| obj.get("then") else Value.undefined_;
+            realm.enqueueThenableJob(new_p_v, result, then_v) catch return error.OutOfMemory;
+            break :blk new_p_v;
+        }
+        // Subclass path — NewPromiseCapability(C) + Resolve(result).
+        // PromiseResolve(C, result) per §27.2.4.7: if result is a
+        // Promise whose constructor IS C, identity-return; else
+        // build a fresh capability via C and resolve(result).
+        const C = ctor.?;
+        if (result_obj) |obj| {
+            if (obj.isPromise()) {
+                const result_ctor = heap_mod.valueAsFunction(getPropertyChain(realm, obj, "constructor") catch return error.NativeThrew);
+                if (result_ctor != null and result_ctor.? == C) break :blk result;
+            }
+        }
+        const cap = try newPromiseCapability(realm, C);
+        // Call cap.resolve(result) so adoption (thenable or plain)
+        // routes through the capability's resolve closure.
+        const interp_mod = @import("../interpreter.zig");
+        const resolve_args = [_]Value{result};
+        const r_outcome = interp_mod.callJSFunction(realm.allocator, realm, cap.resolve, Value.undefined_, &resolve_args) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        switch (r_outcome) {
+            .value, .yielded => {},
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        }
+        break :blk cap.promise;
     };
 
     // Build the value-thunk context (captures `carry` + the throw flag).

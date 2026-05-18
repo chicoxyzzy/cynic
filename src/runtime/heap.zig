@@ -649,6 +649,7 @@ pub const Heap = struct {
                 }
                 if (o.finally_callback) |f| self.markValue(taggedFunction(f));
                 self.markValue(o.finally_value);
+                if (o.finally_constructor) |f| self.markValue(taggedFunction(f));
                 if (o.generator_ref) |gen| self.markGenerator(gen);
                 // §10.4.2 Array exotic — packed indexed elements
                 // are part of the JSObject's own state; mark each

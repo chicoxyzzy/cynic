@@ -384,6 +384,12 @@ pub const JSObject = struct {
     /// the original around while we await the user-supplied
     /// onFinally's result. Hidden from JS.
     finally_value: @import("value.zig").Value = @import("value.zig").Value.undefined_,
+    /// `Promise.prototype.finally` SpeciesConstructor (§27.2.5.3
+    /// step 3) — captured at finally() entry, threaded through the
+    /// thenFinally / catchFinally context so the `PromiseResolve(C,
+    /// result)` wrap uses the user-subclass ctor and not %Promise%.
+    /// `null` ≡ %Promise% (the fast path).
+    finally_constructor: ?*@import("function.zig").JSFunction = null,
     /// `[[DateValue]]` (§21.4.1) — milliseconds since Unix
     /// epoch. NaN means an invalid date. Only set on `new Date()`
     /// instances.
