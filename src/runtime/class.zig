@@ -370,11 +370,24 @@ pub fn buildClass(
         // (§15.7.10 ClassDefinitionEvaluation) so this drop never
         // touches them.
         if (!m.is_generator and !m.is_async) {
-            // Generators / async methods set `prototype` to a
-            // %GeneratorPrototype% / %AsyncGeneratorPrototype% by
-            // their own intrinsics path further down; ordinary
-            // and accessor methods don't.
+            // Generators / async methods keep `prototype` — see
+            // the wiring below.
             fn_obj.prototype = null;
+        } else if (fn_obj.prototype) |gp| {
+            // §27.5.1 / §27.6.1 — a class generator / async-generator
+            // method's `.prototype` is an ordinary object whose
+            // [[Prototype]] is %GeneratorPrototype% / %AsyncGenerator
+            // Prototype%, with NO own `constructor` (matching the
+            // `make_function` path for non-class generator function
+            // expressions). `allocateFunction` allocated `gp` with a
+            // default ctor + null [[Prototype]] — fix both here.
+            _ = gp.properties.swapRemove("constructor");
+            _ = gp.property_flags.swapRemove("constructor");
+            const interp_mod = @import("interpreter.zig");
+            gp.prototype = if (m.is_async)
+                interp_mod.ensureAsyncGeneratorPrototype(realm) catch realm.intrinsics.object_prototype
+            else
+                interp_mod.ensureGeneratorPrototype(realm) catch realm.intrinsics.object_prototype;
         }
         fn_obj.has_construct = false;
         if (m.spec_length != m.param_count) {
@@ -539,6 +552,20 @@ pub fn buildClass(
         // off [[Construct]] so `new C.staticMethod()` throws.
         if (!m.is_generator and !m.is_async) {
             fn_obj.prototype = null;
+        } else if (fn_obj.prototype) |gp| {
+            // §27.5.1 / §27.6.1 — static generator / async-generator
+            // methods carry `.prototype` whose [[Prototype]] is
+            // %GeneratorPrototype% / %AsyncGeneratorPrototype% and
+            // which has no own `constructor`. Mirror the instance
+            // gen-method path so `C.gen()` wrappers find `.next` via
+            // the inherited chain.
+            _ = gp.properties.swapRemove("constructor");
+            _ = gp.property_flags.swapRemove("constructor");
+            const interp_mod = @import("interpreter.zig");
+            gp.prototype = if (m.is_async)
+                interp_mod.ensureAsyncGeneratorPrototype(realm) catch realm.intrinsics.object_prototype
+            else
+                interp_mod.ensureGeneratorPrototype(realm) catch realm.intrinsics.object_prototype;
         }
         fn_obj.has_construct = false;
         if (m.spec_length != m.param_count) {
