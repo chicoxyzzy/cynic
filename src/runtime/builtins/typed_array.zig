@@ -1463,11 +1463,44 @@ fn taSetFromTypedArray(
     return Value.undefined_;
 }
 
-/// §23.2.3.27.1 SetTypedArrayFromArrayLike. ToLength on source.length,
-/// then per-element ToNumber / ToBigInt. Throwing converters
-/// propagate. After each conversion we re-check the target buffer
-/// because a side-effecting valueOf can detach it; writes past a
-/// shrunk buffer silently no-op (§10.4.5 IntegerIndexedElementSet).
+/// Proxy- and accessor-aware [[Get]] for the array-like source
+/// in `taSetFromArrayLike`. A `length` getter or numeric-index
+/// `get` trap on a Proxy must fire — that's the side-effect the
+/// resizable-rab test262 fixtures observe. `getPropertyChain`
+/// alone walks own/accessor/proto only and doesn't enter Proxy
+/// traps, so we route through `nativeProxyGet` here.
+fn taSourceGet(realm: *Realm, src: *JSObject, key: []const u8) NativeError!Value {
+    const proxy_mod = @import("proxy.zig");
+    var cur = src;
+    while (true) {
+        if (cur.proxy_target != null or cur.proxy_revoked) {
+            const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, heap_mod.taggedObject(src));
+            switch (outcome) {
+                .value => |v| return v,
+                .fallthrough => |t| {
+                    if (t == cur) return Value.undefined_;
+                    cur = t;
+                    continue;
+                },
+            }
+        }
+        return getPropertyChain(realm, cur, key);
+    }
+}
+
+/// §7.3.18 LengthOfArrayLike on a possibly-Proxy source.
+fn taSourceLength(realm: *Realm, src: *JSObject) NativeError!i64 {
+    const v = try taSourceGet(realm, src, "length");
+    return intrinsics.toLengthValue(realm, v);
+}
+
+/// §23.2.3.27.1 SetTypedArrayFromArrayLike. ToLength on source.length
+/// (snapshotting `targetLength` BEFORE — a Proxy `length` getter
+/// can resize the target's rab), then per-element ToNumber /
+/// ToBigInt. Throwing converters propagate. After each conversion
+/// we re-check the target view's witness because a side-effecting
+/// Get can resize the rab OOB or grow it back in-bounds; writes
+/// to an OOB slot silently no-op (§10.4.5 IsValidIntegerIndex).
 fn taSetFromArrayLike(
     realm: *Realm,
     target: *JSObject,
@@ -1476,22 +1509,29 @@ fn taSetFromArrayLike(
     target_offset: f64,
 ) NativeError!Value {
     _ = tv_in;
-    const src_len_i64 = try intrinsics.toLengthOf(realm, src);
+    // §23.2.3.27.1 step 1-3 — MakeTypedArrayWithBufferWitnessRecord(target,
+    // seq-cst), throw if IsTypedArrayOutOfBounds, snapshot targetLength.
+    // CRUCIAL: do this BEFORE LengthOfArrayLike(src) — the source's
+    // `length` getter (Proxy `get` trap) can resize the rab and
+    // observably take the target view OOB, but the spec compares
+    // against the pre-getter targetLength.
+    const tv_entry = target.typed_view orelse
+        return throwTypeError(realm, "TypedArray.prototype.set: target lost typed-view brand");
+    if (taIsOutOfBounds(tv_entry)) {
+        return throwTypeError(realm, "TypedArray.prototype.set: target is out-of-bounds");
+    }
+    const target_length: usize = taCurrentLength(tv_entry);
+
+    // §23.2.3.27.1 step 4-5 — `src = ToObject(source)` already
+    // done by the caller; LengthOfArrayLike(src) here. Routed
+    // through `taSourceLength` so a Proxy `length` getter fires.
+    const src_len_i64 = try taSourceLength(realm, src);
     if (src_len_i64 < 0) return Value.undefined_;
     const src_length: usize = @intCast(src_len_i64);
 
-    const tv = target.typed_view orelse
-        return throwTypeError(realm, "TypedArray.prototype.set: target lost typed-view brand");
-    // §23.2.3.27.1 — use live `[[ArrayLength]]` so a length-
-    // tracking target's capacity reflects the current buffer
-    // size, and so a fixed-length target that's been shrunk OOB
-    // reports 0 (the entry validation also throws TypeError on
-    // OOB, but the per-element math still has to be correct).
-    const target_length: usize = taCurrentLength(tv);
-    if (tv.viewed.array_buffer == null) {
-        return throwTypeError(realm, "TypedArray.prototype.set: target buffer is detached");
-    }
-
+    // §23.2.3.27.1 step 6-7 — bounds check against the pre-getter
+    // snapshot. A Proxy `length` getter that resized the rab does
+    // NOT excuse a too-large srcLength; the throw still fires.
     if (target_offset == std.math.inf(f64)) {
         return throwRangeError(realm, "TypedArray.prototype.set: offset out of range");
     }
@@ -1502,27 +1542,36 @@ fn taSetFromArrayLike(
     }
 
     const offset: usize = @intFromFloat(target_offset);
-    const elem_size = tv.kind.elementSize();
-    const dst_base = tv.byte_offset + offset * elem_size;
+    // Capture `byte_offset` from the entry-time view: a length-
+    // tracking view's `[[ByteOffset]]` is immutable, so this is
+    // safe even when the underlying buffer is resized mid-loop.
+    const elem_size = tv_entry.kind.elementSize();
+    const dst_base_offset = tv_entry.byte_offset + offset * elem_size;
 
     var k: usize = 0;
     while (k < src_length) : (k += 1) {
         var ibuf: [24]u8 = undefined;
         const key = std.fmt.bufPrint(&ibuf, "{d}", .{k}) catch unreachable;
-        const raw = try getPropertyChain(realm, src, key);
-        const converted: Value = switch (tv.kind) {
+        // §23.2.3.27.1 step 9.b — Get(src, !ToString(k)). For a
+        // Proxy source this fires the `get` trap, which can resize
+        // the rab between iterations.
+        const raw = try taSourceGet(realm, src, key);
+        const converted: Value = switch (tv_entry.kind) {
             .bigint64, .biguint64 => try toBigIntValue(realm, raw),
             else => try intrinsics.toNumber(realm, raw),
         };
-        // §23.2.3.27.1 step 22 — the per-element loop continues
-        // even after a user `Get` accessor detaches the buffer or
-        // shrinks the RAB so the view becomes OOB.  Writes to a
-        // detached / OOB slot silently no-op (per
-        // IntegerIndexedElementSet's IsValidIntegerIndex gate),
-        // but ToNumber on the remaining source items still fires.
+        // §23.2.3.27.1 step 9.e-f — re-evaluate the buffer
+        // witness, then guard the write with `IsTypedArrayOutOfBounds
+        // is false AND k < TypedArrayLength(taRecord)`. For a fixed-
+        // length view that the proxy shrunk OOB, both conditions
+        // collapse to "skip"; for a length-tracking view the
+        // length is the live count over the current buffer size.
         const cur_tv = target.typed_view orelse continue;
+        if (taIsOutOfBounds(cur_tv)) continue;
+        const cur_len = taCurrentLength(cur_tv);
+        if (k + offset >= cur_len) continue;
         const cur_buf = cur_tv.viewed.array_buffer orelse continue;
-        const slot = dst_base + k * elem_size;
+        const slot = dst_base_offset + k * elem_size;
         if (slot + elem_size > cur_buf.len) continue;
         writeTypedElementForView(cur_buf, cur_tv, slot, converted);
     }
@@ -2335,37 +2384,92 @@ fn typedArrayReverse(realm: *Realm, this_value: Value, args: []const Value) Nati
 // ── TypedArray prototype: methods that allocate a new TA ─────────────────────
 
 fn typedArraySlice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §23.2.3.27 %TypedArray%.prototype.slice ( start, end )
+    // Steps 1-4: ValidateTypedArray and snapshot srcArrayLength
+    // from MakeTypedArrayWithBufferWitnessRecord(O, seq-cst).
     const tv_pre = try taValidatedView(realm, this_value, "slice");
     const self = heap_mod.valueAsPlainObject(this_value).?;
     const len: i64 = @intCast(taCurrentLength(tv_pre));
+    // §23.2.3.27 steps 5-12 — ToIntegerOrInfinity(start), then
+    // ToIntegerOrInfinity(end). Each call can run a user
+    // `valueOf` that resizes the backing rab; the spec requires
+    // both indices to be computed against the snapshot `len`,
+    // and then for the buffer-witness to be re-evaluated after
+    // they both run (step 15).
     const start = try taResolveIndex(realm, argOr(args, 0, Value.fromInt32(0)), len, 0);
     const end = try taResolveIndex(realm, argOr(args, 1, Value.undefined_), len, len);
-    const new_len: usize = if (end > start) @intCast(end - start) else 0;
+    const count_length: usize = if (end > start) @intCast(end - start) else 0;
     const kind = tv_pre.kind;
-    // §23.2.3.27 step 13 — TypedArraySpeciesCreate(O, « count »).
-    // The construct call re-enters the interpreter; user
-    // species ctors can detach the buffer mid-call. Re-read tv
-    // and buf AFTER the construct so we don't dereference a
-    // freed pointer.
-    const out = try taSpeciesCreate(realm, self, kind, new_len);
-    if (new_len > 0) {
-        const tv = self.typed_view orelse return throwTypeError(realm, "TypedArray detached during slice");
-        const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached during slice");
-        const elem_size = kind.elementSize();
-        const out_tv = out.typed_view orelse return throwTypeError(realm, "Species ctor returned non-TypedArray");
-        const out_buf = out_tv.viewed.array_buffer orelse return throwTypeError(realm, "Species ctor returned detached buffer");
-        const src_off = tv.byte_offset + @as(usize, @intCast(start)) * elem_size;
-        // Clamp copy to what's actually available in source AND
-        // destination. ES2024 resizable buffers can leave both
-        // shrunk under the views captured here — copying a full
-        // `new_len * elem_size` would slice past `buf.len` or
-        // `out_buf.len` and panic.
-        const want = new_len * elem_size;
+    // §23.2.3.27 step 14 — TypedArraySpeciesCreate(O, « countLength »).
+    // The construct call re-enters the interpreter; user species
+    // ctors can detach OR resize the buffer mid-call. Step 15
+    // re-evaluates the witness *after* the construct.
+    const out = try taSpeciesCreate(realm, self, kind, count_length);
+    if (count_length == 0) return heap_mod.taggedObject(out);
+    // §23.2.3.27 step 15.a-b — MakeTypedArrayWithBufferWitnessRecord
+    // re-run; if IsTypedArrayOutOfBounds(taRecord) is true, throw
+    // TypeError. Catches the case where (a) ToIntegerOrInfinity
+    // ran a user `valueOf` that shrunk the rab below the
+    // fixed-length view's window, or (b) the species ctor did.
+    const tv_post = self.typed_view orelse return throwTypeError(realm, "TypedArray detached during slice");
+    if (taIsOutOfBounds(tv_post)) return throwTypeError(realm, "TypedArray.prototype.slice: source went out-of-bounds during coercion");
+    // §23.2.3.27 step 15.c-d — refresh srcArrayLength after the
+    // recheck and clamp `endIndex` to it. `startIndex` is *not*
+    // re-clamped (it's already against the snapshot length per
+    // spec). `count` for the copy is `max(endIndex - startIndex, 0)`.
+    const src_array_length_post: i64 = @intCast(taCurrentLength(tv_post));
+    const end_clamped: i64 = @min(end, src_array_length_post);
+    const count: usize = if (end_clamped > start) @intCast(end_clamped - start) else 0;
+    const buf = taBufOf(tv_post) orelse return throwTypeError(realm, "TypedArray detached during slice");
+    const out_tv = out.typed_view orelse return throwTypeError(realm, "Species ctor returned non-TypedArray");
+    const out_buf = out_tv.viewed.array_buffer orelse return throwTypeError(realm, "Species ctor returned detached buffer");
+    const elem_size = kind.elementSize();
+    const src_off = tv_post.byte_offset + @as(usize, @intCast(start)) * elem_size;
+    const dst_off = out_tv.byte_offset;
+    if (count == 0) return heap_mod.taggedObject(out);
+    // §23.2.3.27 step 15.e-g — when srcType == targetType the
+    // copy is byte-by-byte (matters when the species ctor
+    // returned a view aliasing the same buffer at a higher
+    // offset — forward byte-copy intentionally reads its own
+    // writes). When the types differ (or are SameValue under
+    // a different name like Uint8 vs Uint8Clamped), step 16
+    // mandates Get(O, Pk)+Set(A, Pn, kValue) per-element.
+    const out_size = out_tv.kind.elementSize();
+    const same_type = out_tv.kind == kind;
+    if (same_type) {
+        const want = count * elem_size;
         const src_avail: usize = if (src_off >= buf.len) 0 else @min(want, buf.len - src_off);
-        const dst_off = out_tv.byte_offset;
         const dst_avail: usize = if (dst_off >= out_buf.len) 0 else @min(want, out_buf.len - dst_off);
         const avail = @min(src_avail, dst_avail);
-        if (avail > 0) @memcpy(out_buf[dst_off .. dst_off + avail], buf[src_off .. src_off + avail]);
+        if (avail == 0) return heap_mod.taggedObject(out);
+        const same_buffer = out_tv.viewed == tv_post.viewed;
+        if (same_buffer) {
+            // §23.2.3.27 step 15.g.v — forward byte-by-byte copy
+            // even when the destination aliases the source, since
+            // GetValueFromBuffer + SetValueInBuffer in the spec
+            // walks one byte at a time. The forward direction
+            // matters when dst_off > src_off and the regions
+            // overlap: writes feed into later reads, exactly the
+            // behavior the spec describes.
+            var i: usize = 0;
+            while (i < avail) : (i += 1) {
+                out_buf[dst_off + i] = buf[src_off + i];
+            }
+        } else {
+            @memcpy(out_buf[dst_off .. dst_off + avail], buf[src_off .. src_off + avail]);
+        }
+        return heap_mod.taggedObject(out);
+    }
+    // §23.2.3.27 step 16 — different element types: per-element
+    // Get + Set, with the destination's own element kind.
+    var n: usize = 0;
+    while (n < count) : (n += 1) {
+        const src_byte = src_off + n * elem_size;
+        const v = readTypedElement(realm, buf, kind, src_byte);
+        const cur_out_buf = out_tv.viewed.array_buffer orelse break;
+        const dst_byte = dst_off + n * out_size;
+        if (dst_byte + out_size > cur_out_buf.len) break;
+        writeTypedElementForView(cur_out_buf, out_tv, dst_byte, v);
     }
     return heap_mod.taggedObject(out);
 }
