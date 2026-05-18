@@ -1854,6 +1854,19 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
         out.prototype = realm.intrinsics.array_prototype;
         out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
         var len: i32 = 0;
+        // §10.2.4 — built-in constructors expose `prototype` as
+        // an own property; the slot is dedicated (`fn_obj.prototype`)
+        // and doesn't appear in the property bag iteration. Surface
+        // it in spec order — for a class / non-arrow function the
+        // prototype slot is wired at construction time, BEFORE any
+        // method or static field is installed, so `prototype` must
+        // appear immediately after `length`+`name` in the key list.
+        // A user `defineProperty(fn, "prototype", …)` re-routes
+        // through the property bag (the dedicated slot is read-only
+        // when the bag override exists), so check `!bag.contains`
+        // to avoid emitting a duplicate.
+        const has_dedicated_prototype = fn_obj.prototype != null and !fn_obj.properties.contains("prototype");
+        var emitted_prototype = false;
         var fit = fn_obj.properties.iterator();
         while (fit.next()) |entry| {
             const key = entry.key_ptr.*;
@@ -1865,14 +1878,26 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
             const k_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
             out.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
             len += 1;
+            // Emit `prototype` immediately after `name`, matching
+            // the spec order: `allocateFunction` installs
+            // `length` then `name`, then wires the prototype slot
+            // (steps 10-11 of CreateBuiltinFunction / step 11 of
+            // ClassDefinitionEvaluation), THEN methods land.
+            if (!emitted_prototype and has_dedicated_prototype and std.mem.eql(u8, key, "name")) {
+                var ibuf2: [16]u8 = undefined;
+                const islice2 = std.fmt.bufPrint(&ibuf2, "{d}", .{len}) catch unreachable;
+                const idx2 = realm.heap.allocateString(islice2) catch return error.OutOfMemory;
+                const k2 = realm.heap.allocateString("prototype") catch return error.OutOfMemory;
+                out.set(realm.allocator, idx2.bytes, Value.fromString(k2)) catch return error.OutOfMemory;
+                len += 1;
+                emitted_prototype = true;
+            }
         }
-        // §10.2.4 — built-in constructors expose `prototype` as
-        // an own property; the slot is dedicated (`fn_obj.prototype`)
-        // and doesn't appear in the property bag iteration above.
-        // Only surface it when the function actually has one AND
-        // the bag hasn't redirected it (a `defineProperty(fn,
-        // "prototype", …)` on a user function lands in the bag).
-        if (fn_obj.prototype != null and !fn_obj.properties.contains("prototype")) {
+        // Edge case: the function had no `name` in its bag (very
+        // unusual — `installFunctionLengthAndName` always puts it
+        // there, but a `delete fn.name` would remove it). Emit
+        // `prototype` at the end so it still surfaces.
+        if (!emitted_prototype and has_dedicated_prototype) {
             var ibuf: [16]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
             const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
