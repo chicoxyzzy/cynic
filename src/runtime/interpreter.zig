@@ -10498,6 +10498,15 @@ fn strictSetPropertyAnchored(
                             }
                         }
                     }
+                    // §10.4.2.1 [[DefineOwnProperty]] for Array exotic —
+                    // adding a NEW indexed slot on a non-extensible
+                    // array is the §10.1.6.3 OrdinaryDefineOwnProperty
+                    // step-2 reject (extensibility check). Strict
+                    // assignment surfaces it as TypeError.
+                    if (!obj.extensible and !obj.hasOwnIndexedSlot(idx)) {
+                        const ex = try makeTypeError(realm, "Cannot add property, object is not extensible");
+                        return throwInSetter(realm, frames, f, ip, value, ex);
+                    }
                     obj.setIndexed(allocator, idx, value) catch return error.OutOfMemory;
                     return .ok;
                 }
@@ -10583,6 +10592,19 @@ fn strictSetPropertyAnchored(
                 }
             }
             const ex = try makeTypeError(realm, "Cannot set property which has only a getter");
+            return throwInSetter(realm, frames, f, ip, value, ex);
+        }
+        // §10.1.9.2 OrdinarySetWithOwnDescriptor — a write that
+        // would add a new own property on a non-extensible
+        // function (e.g. after `Object.preventExtensions(fn)`)
+        // must fail; strict-mode assignment surfaces that as a
+        // TypeError per §10.1.9.1 step 4. Cynic's JSFunction
+        // carries its own `extensible` slot (flipped by
+        // `Object.preventExtensions(fn)` in
+        // `objectPreventExtensions`).
+        const had_fn_entry = fn_obj.properties.contains(key);
+        if (!had_fn_entry and !fn_obj.extensible) {
+            const ex = try makeTypeError(realm, "Cannot add property, object is not extensible");
             return throwInSetter(realm, frames, f, ip, value, ex);
         }
         const ok = fn_obj.setIfWritable(allocator, key, value) catch return error.OutOfMemory;
