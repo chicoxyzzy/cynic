@@ -278,10 +278,13 @@ pub fn allocatePromiseFor(
         if (c.prototype) |p| obj.prototype = p;
     }
     if (obj.prototype == null) {
-        obj.prototype = if (heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_)) |p|
-            p.prototype
-        else
-            realm.intrinsics.object_prototype;
+        // §27 — when no caller-supplied constructor is in play we use
+        // the intrinsic `%PromisePrototype%` directly. Reading
+        // `globals.get("Promise")` would observe a user-mutated global
+        // (see test262 language/expressions/dynamic-import/
+        // returns-promise.js where `globalThis.Promise` is overridden);
+        // engine-internal Promises must keep the intrinsic shape.
+        obj.prototype = realm.intrinsics.promise_prototype orelse realm.intrinsics.object_prototype;
     }
     // §27.2.3.1 — the spec models `[[PromiseState]]` /
     // `[[PromiseResult]]` as internal slots, NOT properties.
