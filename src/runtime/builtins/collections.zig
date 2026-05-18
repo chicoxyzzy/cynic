@@ -487,10 +487,28 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) StepOutcome {
         // Yielding a multi-byte slice keeps astral codepoints
         // intact (4-byte WTF-8 sequences). Invalid leading byte
         // falls back to a single-byte step so we don't loop.
+        //
+        // CESU-8 pair detection: spec §22.1.5.2.1 step 6.b.ii — when
+        // the lead code unit is a high surrogate AND the next code
+        // unit is a low surrogate, yield them together as one
+        // supplementary code point. Concatenation (`'\uD834' +
+        // '\uDF06'`) preserves each lone surrogate as its 3-byte
+        // CESU-8 sequence rather than re-encoding to the 4-byte
+        // form; detect the adjacency here so the iterator yields
+        // the surrogate pair as a single step.
         const start: usize = @intCast(idx);
         if (start < s.bytes.len) {
             const lead = s.bytes[start];
-            const cp_len: usize = if (lead & 0x80 == 0) 1 else if (lead & 0xE0 == 0xC0) 2 else if (lead & 0xF0 == 0xE0) 3 else if (lead & 0xF8 == 0xF0) 4 else 1;
+            var cp_len: usize = if (lead & 0x80 == 0) 1 else if (lead & 0xE0 == 0xC0) 2 else if (lead & 0xF0 == 0xE0) 3 else if (lead & 0xF8 == 0xF0) 4 else 1;
+            if (cp_len == 3 and start + 6 <= s.bytes.len) {
+                // High-surrogate WTF-8: 0xED 0xA0..0xAF 0x80..0xBF
+                // encodes U+D800..U+DBFF.
+                if (lead == 0xED and s.bytes[start + 1] >= 0xA0 and s.bytes[start + 1] <= 0xAF and
+                    s.bytes[start + 3] == 0xED and s.bytes[start + 4] >= 0xB0 and s.bytes[start + 4] <= 0xBF)
+                {
+                    cp_len = 6;
+                }
+            }
             const end = @min(start + cp_len, s.bytes.len);
             const sub = realm.heap.allocateString(s.bytes[start..end]) catch return .done;
             elem = Value.fromString(sub);
