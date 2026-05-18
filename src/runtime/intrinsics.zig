@@ -613,6 +613,11 @@ pub const ConstructorSpec = struct {
     /// `realm.intrinsics.*` and not exposed as a global —
     /// matches `%TypedArray%` semantics.
     install_global: bool = true,
+    /// When `false`, skip the default `prototype.constructor`
+    /// data-property wiring. The caller is expected to install
+    /// its own descriptor (e.g. `Iterator.prototype.constructor`
+    /// is an accessor pair per §27.1.4.6).
+    install_constructor_property: bool = true,
 };
 
 /// Generic constructor installer. Returns the
@@ -625,7 +630,9 @@ pub fn installConstructor(realm: *Realm, spec: ConstructorSpec) !struct { ctor: 
     fn_obj.proto = realm.intrinsics.function_prototype;
     const proto = try realm.heap.allocateObject();
     proto.prototype = realm.intrinsics.object_prototype;
-    try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
+    if (spec.install_constructor_property) {
+        try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
+    }
     if (spec.to_string_tag) |t| try installToStringTag(realm, proto, t);
     fn_obj.prototype = proto;
     if (spec.set_home_object) fn_obj.home_object = proto;

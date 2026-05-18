@@ -45,10 +45,22 @@ pub fn install(realm: *Realm) !void {
         .ctor = iteratorConstructor,
         .arity = 0,
         .set_home_object = false,
-        .to_string_tag = "Iterator",
+        // §27.1.4.5 / §27.1.4.6 — `Iterator.prototype.constructor`
+        // and `Iterator.prototype[@@toStringTag]` are **accessor**
+        // properties whose setter performs
+        // SetterThatIgnoresPrototypeProperties. We install both
+        // pairs below; suppress the default data-property setup
+        // so the generic `installConstructor` doesn't shadow.
+        .to_string_tag = null,
+        .install_constructor_property = false,
     });
     const fn_obj = r.ctor;
     const proto = r.proto;
+
+    // §27.1.4.6 — `Iterator.prototype.constructor` accessor.
+    try installIteratorPrototypeConstructorAccessor(realm, proto);
+    // §27.1.4.5 — `Iterator.prototype[@@toStringTag]` accessor.
+    try installIteratorPrototypeToStringTagAccessor(realm, proto);
 
     try installNativeMethod(realm, fn_obj, "from", iteratorFrom, 1);
     try installNativeMethod(realm, fn_obj, "concat", iteratorConcat, 0);
@@ -114,6 +126,122 @@ pub fn install(realm: *Realm) !void {
     if (realm.intrinsics.set_iterator_prototype) |sip| {
         sip.prototype = proto;
     }
+}
+
+// ── §27.1.4.5 / §27.1.4.6 — accessor pairs on Iterator.prototype ────────────
+
+/// Install `Iterator.prototype.constructor` as an accessor pair.
+/// Getter returns `%Iterator%`; setter performs
+/// SetterThatIgnoresPrototypeProperties(%Iterator.prototype%,
+/// "constructor", v). Matches `built-ins/Iterator/prototype/
+/// constructor/{prop-desc,weird-setter}.js`.
+fn installIteratorPrototypeConstructorAccessor(realm: *Realm, proto: *JSObject) !void {
+    const getter = try realm.heap.allocateFunctionNative(iteratorPrototypeConstructorGet, 0, "get constructor");
+    getter.proto = realm.intrinsics.function_prototype;
+    const setter = try realm.heap.allocateFunctionNative(iteratorPrototypeConstructorSet, 1, "set constructor");
+    setter.proto = realm.intrinsics.function_prototype;
+    // §17 — built-in accessor properties: { enumerable: false,
+    // configurable: true }.
+    const entry = try proto.accessors.getOrPut(realm.allocator, "constructor");
+    entry.value_ptr.* = .{ .getter = getter, .setter = setter };
+    try proto.property_flags.put(realm.allocator, "constructor", .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = true,
+    });
+    // installConstructor left a data slot under "constructor" —
+    // strip it so the accessor wins on lookup. (Even though
+    // `install_constructor_property = false` now skips it, we
+    // keep the cleanup for safety.)
+    _ = proto.properties.swapRemove("constructor");
+    proto.forgetKey("constructor");
+}
+
+/// Install `Iterator.prototype[@@toStringTag]` as an accessor
+/// pair. Getter returns `"Iterator"`; setter performs
+/// SetterThatIgnoresPrototypeProperties(%Iterator.prototype%,
+/// @@toStringTag, v).
+fn installIteratorPrototypeToStringTagAccessor(realm: *Realm, proto: *JSObject) !void {
+    const getter = try realm.heap.allocateFunctionNative(iteratorPrototypeToStringTagGet, 0, "get [Symbol.toStringTag]");
+    getter.proto = realm.intrinsics.function_prototype;
+    const setter = try realm.heap.allocateFunctionNative(iteratorPrototypeToStringTagSet, 1, "set [Symbol.toStringTag]");
+    setter.proto = realm.intrinsics.function_prototype;
+    const entry = try proto.accessors.getOrPut(realm.allocator, "@@toStringTag");
+    entry.value_ptr.* = .{ .getter = getter, .setter = setter };
+    try proto.property_flags.put(realm.allocator, "@@toStringTag", .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = true,
+    });
+    _ = proto.properties.swapRemove("@@toStringTag");
+    proto.forgetKey("@@toStringTag");
+}
+
+fn iteratorPrototypeConstructorGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    _ = args;
+    // §27.1.4.6 getter — returns %Iterator%.
+    return realm.globals.get("Iterator") orelse Value.undefined_;
+}
+
+fn iteratorPrototypeConstructorSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const v = argOr(args, 0, Value.undefined_);
+    const ctor_v = realm.globals.get("Iterator") orelse return throwTypeError(realm, "Iterator constructor missing");
+    const ctor = heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "Iterator constructor missing");
+    const home = ctor.prototype orelse return throwTypeError(realm, "Iterator.prototype missing");
+    try setterThatIgnoresPrototypeProperties(realm, this_value, home, "constructor", v);
+    return Value.undefined_;
+}
+
+fn iteratorPrototypeToStringTagGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    _ = args;
+    // §27.1.4.5 getter — returns "Iterator".
+    const s = realm.heap.allocateString("Iterator") catch return error.OutOfMemory;
+    return Value.fromString(s);
+}
+
+fn iteratorPrototypeToStringTagSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const v = argOr(args, 0, Value.undefined_);
+    const ctor_v = realm.globals.get("Iterator") orelse return throwTypeError(realm, "Iterator constructor missing");
+    const ctor = heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "Iterator constructor missing");
+    const home = ctor.prototype orelse return throwTypeError(realm, "Iterator.prototype missing");
+    try setterThatIgnoresPrototypeProperties(realm, this_value, home, "@@toStringTag", v);
+    return Value.undefined_;
+}
+
+/// §27.1.4.x SetterThatIgnoresPrototypeProperties(O, home, p, v):
+///   1. If O is not Object → TypeError.
+///   2. If SameValue(O, home) → TypeError (emulates assigning a
+///      non-writable data property on `home`).
+///   3. Let desc be ? O.[[GetOwnProperty]](p).
+///   4. If desc is undefined → CreateDataPropertyOrThrow(O, p, v).
+///   5. Else → Set(O, p, v, true).
+fn setterThatIgnoresPrototypeProperties(realm: *Realm, this_value: Value, home: *JSObject, key: []const u8, v: Value) NativeError!void {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse {
+        return throwTypeError(realm, "SetterThatIgnoresPrototypeProperties: receiver is not an object");
+    };
+    if (obj == home) {
+        return throwTypeError(realm, "Cannot assign to non-writable property on Iterator.prototype");
+    }
+    if (obj.hasOwn(key)) {
+        // OrdinarySet honouring writability — bypass accessor
+        // setters: the spec uses ? Set(O, p, v, true).
+        const ok = obj.setIfWritable(realm.allocator, key, v) catch return error.OutOfMemory;
+        if (!ok) {
+            return throwTypeError(realm, "Cannot assign to read-only property");
+        }
+        return;
+    }
+    // CreateDataPropertyOrThrow — must throw if not extensible.
+    if (!obj.extensible) {
+        return throwTypeError(realm, "Cannot define property on non-extensible object");
+    }
+    obj.setWithFlags(realm.allocator, key, v, .{
+        .writable = true,
+        .enumerable = true,
+        .configurable = true,
+    }) catch return error.OutOfMemory;
 }
 
 fn iteratorConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -412,14 +540,25 @@ fn iteratorSymbolIterator(realm: *Realm, this_value: Value, args: []const Value)
 /// `return()` is dropped (along with any pending exception it
 /// may have set on the realm).
 fn closeIteratorSwallow(realm: *Realm, iter: Value) void {
-    const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return;
-    const ret_v = iter_obj.get("return");
-    if (ret_v.isUndefined() or ret_v.isNull()) return;
-    const ret_fn = heap_mod.valueAsFunction(ret_v) orelse return;
+    if (heap_mod.valueAsPlainObject(iter) == null) return;
     // Preserve pending_exception across the return-call: the
     // caller is mid-throw and the `error.NativeThrew` we'll
-    // return next must carry that exception.
+    // return next must carry that exception. `iterGet` honours
+    // `get return` accessors; if reading itself throws, the
+    // surrounding throw still wins, so swallow.
     const saved = realm.pending_exception;
+    const ret_v = iterGet(realm, iter, "return") catch {
+        realm.pending_exception = saved;
+        return;
+    };
+    if (ret_v.isUndefined() or ret_v.isNull()) {
+        realm.pending_exception = saved;
+        return;
+    }
+    const ret_fn = heap_mod.valueAsFunction(ret_v) orelse {
+        realm.pending_exception = saved;
+        return;
+    };
     const result = interpreter.callJSFunction(realm.allocator, realm, ret_fn, iter, &.{}) catch {
         realm.pending_exception = saved;
         return;
@@ -453,8 +592,12 @@ fn callbackErrored(realm: *Realm, src: Value) NativeError {
 /// before calling here). Used for normal-completion close paths
 /// like `take(0)`-on-exhaustion or a direct `iterator.return()`.
 fn closeIteratorPropagate(realm: *Realm, iter: Value) NativeError!void {
-    const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return;
-    const ret_v = iter_obj.get("return");
+    if (heap_mod.valueAsPlainObject(iter) == null) return;
+    // §7.4.10 step 5 — `GetMethod(iterator, "return")`. The
+    // §10.1.8.1 [[Get]] respects accessors; a throwing
+    // `get return` is an abrupt completion that must propagate
+    // (`built-ins/Iterator/prototype/<helper>/get-return-method-throws.js`).
+    const ret_v = try iterGet(realm, iter, "return");
     if (ret_v.isUndefined() or ret_v.isNull()) return;
     const ret_fn = heap_mod.valueAsFunction(ret_v) orelse {
         return throwTypeError(realm, "iterator return is not callable");
@@ -708,15 +851,19 @@ fn iteratorTake(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         return err;
     };
     const d: f64 = if (num_v.isInt32()) @floatFromInt(num_v.asInt32()) else num_v.asDouble();
+    // §27.1.4.x step 4: "If numLimit is NaN, throw RangeError."
     if (std.math.isNan(d)) {
         return rangeErrorAfterClose(realm, this_value, "Iterator.prototype.take limit is NaN");
     }
-    // §7.1.5 ToIntegerOrInfinity then "if integerLimit < 0 throw
-    // RangeError" — covered by "< 0" check.
-    if (d < 0) {
+    // §7.1.5 ToIntegerOrInfinity first (truncates toward zero;
+    // `-0.5` -> `0`), THEN the "< 0" check. Doing the `< 0`
+    // test on the raw double would wrongly reject `-0.5`
+    // (fixture `take/limit-rangeerror.js`).
+    const integer_limit: f64 = if (std.math.isInf(d)) d else @trunc(d);
+    if (integer_limit < 0) {
         return rangeErrorAfterClose(realm, this_value, "Iterator.prototype.take limit is negative");
     }
-    const limit_clamped: f64 = if (std.math.isInf(d)) std.math.maxInt(i32) else @trunc(d);
+    const limit_clamped: f64 = if (std.math.isInf(integer_limit)) @as(f64, std.math.maxInt(i32)) else integer_limit;
     const limit_i32: i32 = if (limit_clamped >= std.math.maxInt(i32)) std.math.maxInt(i32) else @intFromFloat(limit_clamped);
     return buildLazy(realm, this_value, Value.fromInt32(limit_i32), takeNext);
 }
@@ -732,13 +879,18 @@ fn iteratorDrop(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         return err;
     };
     const d: f64 = if (num_v.isInt32()) @floatFromInt(num_v.asInt32()) else num_v.asDouble();
+    // §27.1.4.x step 3: "If numLimit is NaN, throw RangeError."
     if (std.math.isNan(d)) {
         return rangeErrorAfterClose(realm, this_value, "Iterator.prototype.drop limit is NaN");
     }
-    if (d < 0) {
+    // §7.1.5 ToIntegerOrInfinity first, THEN the "< 0" check.
+    // `-0.5` truncs to `0`, which is not `< 0` (fixture
+    // `drop/limit-rangeerror.js`).
+    const integer_limit: f64 = if (std.math.isInf(d)) d else @trunc(d);
+    if (integer_limit < 0) {
         return rangeErrorAfterClose(realm, this_value, "Iterator.prototype.drop limit is negative");
     }
-    const drop_clamped: f64 = if (std.math.isInf(d)) std.math.maxInt(i32) else @trunc(d);
+    const drop_clamped: f64 = if (std.math.isInf(integer_limit)) @as(f64, std.math.maxInt(i32)) else integer_limit;
     const drop_i32: i32 = if (drop_clamped >= std.math.maxInt(i32)) std.math.maxInt(i32) else @intFromFloat(drop_clamped);
     return buildLazy(realm, this_value, Value.fromInt32(drop_i32), dropNext);
 }
@@ -1138,8 +1290,10 @@ fn iteratorFind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             .thrown => |ex| return callbackThrew(realm, this_value, ex),
         };
         if (pass) {
-            // Found a match — close the iterator and return.
-            closeIteratorSwallow(realm, this_value);
+            // §27.1.4.x step "return ? IteratorClose(iterated,
+            // NormalCompletion(value))" — `?` propagates any
+            // throw from `.return()` (or `get return`).
+            try closeIteratorPropagate(realm, this_value);
             return value;
         }
         idx += 1;
@@ -1176,7 +1330,10 @@ fn iteratorSome(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             .thrown => |ex| return callbackThrew(realm, this_value, ex),
         };
         if (pass) {
-            closeIteratorSwallow(realm, this_value);
+            // §27.1.4.x — return ? IteratorClose(iterated,
+            // NormalCompletion(true)). `?` propagates throws
+            // from `.return()` / `get return`.
+            try closeIteratorPropagate(realm, this_value);
             return Value.fromBool(true);
         }
         idx += 1;
@@ -1213,7 +1370,10 @@ fn iteratorEvery(realm: *Realm, this_value: Value, args: []const Value) NativeEr
             .thrown => |ex| return callbackThrew(realm, this_value, ex),
         };
         if (!pass) {
-            closeIteratorSwallow(realm, this_value);
+            // §27.1.4.x — return ? IteratorClose(iterated,
+            // NormalCompletion(false)). `?` propagates throws
+            // from `.return()` / `get return`.
+            try closeIteratorPropagate(realm, this_value);
             return Value.fromBool(false);
         }
         idx += 1;
