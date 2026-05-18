@@ -365,26 +365,59 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
                 }
                 return Value.true_;
             }
-            // Receiver != target. §10.4.5.5 step 2.b.ii: if
+            // Receiver != target. §10.4.5.6 step 2.b.ii: if
             // IsValidIntegerIndex is *false*, return true without
             // ToNumber (no side effect on `value`). When the index
             // *is* valid, the spec falls through to step 3
             // OrdinarySet(O, P, V, Receiver) — the value lands on
             // the receiver via §10.1.9.2, with NO ToNumber call
             // (target's IIE [[GetOwnProperty]] hides the receiver-
-            // side write from coercion). The OrdinarySet path
-            // below already handles writable-data short-circuits,
-            // accessor descriptors on TA.prototype, non-extensible
-            // receivers, and `receiver_v` not being an object.
-            // Receiver-is-another-TypedArray (the deep coerce-on-
-            // receiver shape from `Set/key-is-valid-index-reflect-
-            // set.js`) is still a known gap.
+            // side write from coercion). For a TA receiver, route
+            // through IIE [[DefineOwnProperty]] (coerce once, drop
+            // on invalid index, reject as `false` on OOB receiver).
             if (!ta_mod.isValidIntegerIndexPub(tv, num)) return Value.true_;
-            // Fall through to OrdinarySet below.
+            // Step 3 OrdinarySet — bypass the accessor-walk on the
+            // target chain (TA's IIE [[GetOwnProperty]] shadows any
+            // accessor installed on TA.prototype for canonical
+            // numeric keys; the value lands on Receiver).
+            return try reflectSetOnReceiver(realm, receiver_v, key_slice, v);
         }
         // Non-canonical key — fall through to the regular target.set
         // path below so an ordinary writable property can still land
         // on the typed array (matches `key-is-not-canonical-index.js`).
+    }
+    // §10.4.5.6 IIE [[Set]] step 2.b — when `target` is a plain
+    // object whose prototype chain contains a TypedArray and `key`
+    // is a CanonicalNumericIndexString, the proto-chain walk reaches
+    // the TA rung and dispatches its IIE [[Set]] with `Receiver`
+    // unchanged. SameValue(TA, Receiver) triggers TypedArraySetElement
+    // (ToNumber once, drop on invalid index, return true); otherwise
+    // !valid short-circuits to true and valid falls through to
+    // OrdinarySet on Receiver.
+    if (target.typed_view == null) {
+        const ta_mod = @import("typed_array.zig");
+        if (ta_mod.canonicalNumericIndex(key_slice)) |num| {
+            var cursor: ?*@import("../object.zig").JSObject = target.prototype;
+            while (cursor) |c| : (cursor = c.prototype) {
+                if (c.typed_view) |tv2| {
+                    const recv_obj = heap_mod.valueAsPlainObject(receiver_v);
+                    const same_as_ta = (recv_obj == c);
+                    if (same_as_ta) {
+                        const coerced = try ta_mod.coerceForTypedSlot(realm, tv2.kind, v);
+                        const live_tv = c.typed_view orelse return Value.true_;
+                        if (ta_mod.isValidIntegerIndexPub(live_tv, num)) {
+                            const buf = live_tv.viewed.array_buffer.?;
+                            const elem_size = live_tv.kind.elementSize();
+                            const idx: usize = @intFromFloat(num);
+                            @import("../intrinsics.zig").writeTypedElementForView(buf, live_tv, live_tv.byte_offset + idx * elem_size, coerced);
+                        }
+                        return Value.true_;
+                    }
+                    if (!ta_mod.isValidIntegerIndexPub(tv2, num)) return Value.true_;
+                    return try reflectSetOnReceiver(realm, receiver_v, key_slice, v);
+                }
+            }
+        }
     }
     // §10.4.2.1 Array exotic [[DefineOwnProperty]] — when writing
     // `length` on an Array, [[Set]] composes through ArraySetLength.
@@ -497,6 +530,74 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // §10.1.9.2 step 3.f — CreateDataProperty(Receiver, P, V).
     // Receiver doesn't have the property; create it with the
     // default `{writable, enumerable, configurable}: true` flags.
+    if (!receiver_obj.extensible) return Value.false_;
+    const owned_k = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
+    receiver_obj.set(realm.allocator, owned_k.bytes, v) catch return error.OutOfMemory;
+    return Value.true_;
+}
+
+/// §10.1.9.2 OrdinarySetWithOwnDescriptor step 3 — receiver-side
+/// write (existing-descriptor-on-Receiver + CreateDataProperty),
+/// dispatched after a TA-on-chain interception bypassed the
+/// ordinary accessor walk. Routes TA receivers through IIE
+/// [[DefineOwnProperty]] (coerce once, drop on invalid index),
+/// array receivers through array-exotic length tracking, and
+/// plain objects through the standard slot create / update.
+fn reflectSetOnReceiver(realm: *Realm, receiver_v: Value, key_slice: []const u8, v: Value) NativeError!Value {
+    // §10.1.9.2 step 3.b — Receiver must be an Object.
+    const receiver_obj = heap_mod.valueAsPlainObject(receiver_v) orelse {
+        if (heap_mod.valueAsFunction(receiver_v)) |fn_recv| {
+            const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
+            const ok = fn_recv.setIfWritable(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+            return Value.fromBool(ok);
+        }
+        return Value.false_;
+    };
+    // Receiver is itself a TA — §10.4.5.3 IIE [[DefineOwnProperty]].
+    // CreateDataProperty calls Receiver.[[DefineOwnProperty]] with a
+    // fresh {Value, w/e/c: true} descriptor. For a canonical numeric
+    // index, IIE rejects out-of-bounds without coercion; in-bounds
+    // routes through SetTypedArrayElement (ToNumber once, drop if
+    // detached mid-coercion). Reflect.set surfaces a reject as false.
+    if (receiver_obj.typed_view) |recv_tv| {
+        const ta_mod = @import("typed_array.zig");
+        if (ta_mod.canonicalNumericIndex(key_slice)) |recv_num| {
+            if (!ta_mod.isValidIntegerIndexPub(recv_tv, recv_num)) {
+                // §10.4.5.3 step b.i — IsValidIntegerIndex false:
+                // [[DefineOwnProperty]] rejects → Reflect.set false.
+                return Value.false_;
+            }
+            const coerced = try ta_mod.coerceForTypedSlot(realm, recv_tv.kind, v);
+            const live_tv = receiver_obj.typed_view orelse return Value.true_;
+            if (ta_mod.isValidIntegerIndexPub(live_tv, recv_num)) {
+                const buf = live_tv.viewed.array_buffer.?;
+                const elem_size = live_tv.kind.elementSize();
+                const idx: usize = @intFromFloat(recv_num);
+                @import("../intrinsics.zig").writeTypedElementForView(buf, live_tv, live_tv.byte_offset + idx * elem_size, coerced);
+            }
+            return Value.true_;
+        }
+    }
+    // §10.1.9.2 step 3.c-e — existing accessor on Receiver: reject.
+    if (receiver_obj.accessors.contains(key_slice)) return Value.false_;
+    if (receiver_obj.properties.contains(key_slice)) {
+        const flags = receiver_obj.flagsFor(key_slice);
+        if (!flags.writable) return Value.false_;
+        receiver_obj.properties.put(realm.allocator, key_slice, v) catch return error.OutOfMemory;
+        return Value.true_;
+    }
+    // §10.4.2.1 Array exotic [[DefineOwnProperty]] — for indexed
+    // keys on an array receiver, route through the array-exotic
+    // path so `length` auto-bumps.
+    if (receiver_obj.is_array_exotic) {
+        if (@import("../object.zig").JSObject.canonicalIntegerIndex(key_slice)) |idx| {
+            if (idx <= 0xFFFFFFFE) {
+                if (!receiver_obj.extensible and !receiver_obj.hasOwnIndexedSlot(idx)) return Value.false_;
+                receiver_obj.setIndexed(realm.allocator, idx, v) catch return error.OutOfMemory;
+                return Value.true_;
+            }
+        }
+    }
     if (!receiver_obj.extensible) return Value.false_;
     const owned_k = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
     receiver_obj.set(realm.allocator, owned_k.bytes, v) catch return error.OutOfMemory;

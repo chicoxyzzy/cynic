@@ -10540,6 +10540,41 @@ fn strictSetPropertyAnchored(
                 .uncaught => |ex| return .{ .uncaught = ex },
             }
         }
+        // §10.4.5.6 IntegerIndexedExoticSet — when any ancestor of
+        // `obj` is a TypedArray and `key` is a CanonicalNumericIndex
+        // String, the TA's [[Set]] intercepts the inherited write
+        // BEFORE any TA.prototype accessor or receiver-side
+        // defineProperty trap fires. `!IsValidIntegerIndex(O, num)`
+        // (with `recv` differing from the TA) short-circuits to step
+        // 2.b.ii: return true, no coercion, no further write. The
+        // valid-index + different-receiver case falls through to the
+        // ordinary receiver-side write below — `lookupAccessor`
+        // already treats canonical-numeric keys as data-shadowing
+        // at the TA rung, so the accessor path won't fire.
+        const ta_decision = typedArrayChainSetDecision(obj, key, recv);
+        if (ta_decision.decision == .short_circuit) return .ok;
+        if (ta_decision.decision == .coerce_and_write) {
+            const ta_mod = @import("builtins/typed_array.zig");
+            const tv0 = ta_decision.ta.?.typed_view orelse return .ok;
+            const coerced = ta_mod.coerceForTypedSlot(realm, tv0.kind, value) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.NativeThrew => {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "TypedArray element type-coercion failed");
+                    realm.pending_exception = null;
+                    return throwInSetter(realm, frames, f, ip, value, ex);
+                },
+            };
+            const live_tv = ta_decision.ta.?.typed_view orelse return .ok;
+            if (ta_mod.isValidIntegerIndexPub(live_tv, ta_decision.num)) {
+                const buf = live_tv.viewed.array_buffer.?;
+                const elem_size = live_tv.kind.elementSize();
+                const idx: usize = @intFromFloat(ta_decision.num);
+                @import("intrinsics.zig").writeTypedElementForView(buf, live_tv, live_tv.byte_offset + idx * elem_size, coerced);
+            }
+            return .ok;
+        }
+        // For `.ordinary_set`, fall through to the existing receiver-
+        // side write path. For `.not_applicable`, identical fall-through.
         // §10.5.6 step 7.a fall-through — `target.[[Set]](P, V,
         // Receiver)`. When Receiver is a Proxy (recv differs from
         // the walked-to target), the spec composition
@@ -10886,6 +10921,56 @@ fn chainHasProxy(obj: *JSObject) bool {
         if (c.proxy_target != null or c.proxy_target_fn != null or c.proxy_revoked) return true;
     }
     return false;
+}
+
+/// §10.4.5.6 IntegerIndexedExoticSet decision for the prototype-
+/// chain walk. When any ancestor of `obj` is a TypedArray and `key`
+/// is a CanonicalNumericIndexString, the IIE `[[Set]]` short-circuits
+/// the inherited-accessor / defineProperty paths. Returns:
+///   - `not_applicable` — no TA ancestor, or key isn't a canonical
+///     numeric string; caller continues with ordinary walk.
+///   - `coerce_and_write` — `recv` is the TA itself (SameValue
+///     case, §10.4.5.6 step 2.b.i.1). Caller runs SetTypedArrayElement
+///     (ToNumber/ToBigInt + maybe write).
+///   - `short_circuit` — TA ancestor present, !IsValidIntegerIndex,
+///     `recv` differs from the TA (§10.4.5.6 step 2.b.ii). [[Set]]
+///     returns true with no coercion, no write — must not fire any
+///     accessor on TA.prototype, nor any receiver-side defineProperty.
+///   - `ordinary_set` — TA ancestor present, valid integer index,
+///     `recv` differs (§10.4.5.6 step 3). Falls through to OrdinarySet
+///     on Receiver; the TA's IIE [[GetOwnProperty]] hides the receiver-
+///     side write from any TA.prototype accessor (no coercion).
+const TAChainSetDecision = enum {
+    not_applicable,
+    coerce_and_write,
+    short_circuit,
+    ordinary_set,
+};
+
+const TAChainSetResult = struct {
+    decision: TAChainSetDecision,
+    ta: ?*JSObject = null,
+    num: f64 = 0,
+};
+
+fn typedArrayChainSetDecision(obj: *JSObject, key: []const u8, recv: Value) TAChainSetResult {
+    const ta_mod = @import("builtins/typed_array.zig");
+    const num = ta_mod.canonicalNumericIndex(key) orelse return .{ .decision = .not_applicable };
+    var cursor: ?*JSObject = obj;
+    while (cursor) |c| : (cursor = c.prototype) {
+        if (c.typed_view) |tv| {
+            const recv_obj = heap_mod.valueAsPlainObject(recv);
+            const same_receiver = (recv_obj == c);
+            if (same_receiver) {
+                return .{ .decision = .coerce_and_write, .ta = c, .num = num };
+            }
+            if (!ta_mod.isValidIntegerIndexPub(tv, num)) {
+                return .{ .decision = .short_circuit, .ta = c, .num = num };
+            }
+            return .{ .decision = .ordinary_set, .ta = c, .num = num };
+        }
+    }
+    return .{ .decision = .not_applicable };
 }
 
 const GetChainOutcome = union(enum) {
