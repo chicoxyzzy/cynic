@@ -1520,10 +1520,65 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
         }
         return throwTypeError(realm, "Cannot convert object to primitive value");
     }
-    // Functions, symbols, bigints — for now fall back to `value`
-    // (treat as primitive). Symbols can't reach here via the
-    // hint=number path without throwing per §7.1.4 ToNumber, but
-    // we keep this conservative.
+    // §7.1.1 OrdinaryToPrimitive for a callable Function — same
+    // shape as the plain-object path, but Cynic stores functions in
+    // a separate value family. Symbols / BigInts are primitives and
+    // exit at the top check; they never reach this branch.
+    if (heap_mod.valueAsFunction(value)) |fn_obj| {
+        // GetMethod(@@toPrimitive) — Function objects don't usually
+        // expose it but a user can `defineProperty(fn, @@toPrimitive,
+        // …)` to install one. Read via the function's data + chain.
+        const exotic = fn_obj.get("@@toPrimitive");
+        const exotic_present = !exotic.isUndefined() and !exotic.isNull();
+        if (heap_mod.valueAsFunction(exotic)) |trap| {
+            const hint_v = realm.heap.allocateString(hint_str) catch return error.OutOfMemory;
+            const args = [_]Value{Value.fromString(hint_v)};
+            const outcome = interp.callJSFunction(realm.allocator, realm, trap, value, &args) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            switch (outcome) {
+                .value, .yielded => |v| {
+                    if (heap_mod.isJSObject(v)) return throwTypeError(realm, "Symbol.toPrimitive must return a primitive value");
+                    return v;
+                },
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            }
+        } else if (exotic_present) {
+            return throwTypeError(realm, "Symbol.toPrimitive must be callable");
+        }
+        // OrdinaryToPrimitive — `valueOf` then `toString` (number/default)
+        // or vice versa (string). For an ordinary Function, only
+        // `toString` is meaningful (inherited from
+        // `%Function.prototype.toString%`), but a user-installed
+        // `valueOf` (own or via the proto chain) should still fire
+        // first per spec.
+        const first_name: []const u8 = if (hint == .string) "toString" else "valueOf";
+        const second_name: []const u8 = if (hint == .string) "valueOf" else "toString";
+        for ([_][]const u8{ first_name, second_name }) |name| {
+            const method = fn_obj.get(name);
+            if (heap_mod.valueAsFunction(method)) |m_fn| {
+                const outcome = interp.callJSFunction(realm.allocator, realm, m_fn, value, &[_]Value{}) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (outcome) {
+                    .value, .yielded => |v| {
+                        if (!heap_mod.isJSObject(v)) return v;
+                    },
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                }
+            }
+        }
+        return throwTypeError(realm, "Cannot convert function to primitive value");
+    }
+    // Symbols / BigInts already exit at the top `!isObject()` check.
     return value;
 }
 
