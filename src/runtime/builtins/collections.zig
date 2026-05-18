@@ -1834,11 +1834,47 @@ fn forEachSetLikeKey(
         if (intrinsics.toBoolean(try intrinsics.getPropertyChain(realm, ro, "done"))) return;
         const v = try intrinsics.getPropertyChain(realm, ro, "value");
         each(ctx, v) catch |err| switch (err) {
-            error.IterStop => return,
-            else => |e2| return e2,
+            error.IterStop => {
+                // §7.4.10 IteratorClose — early termination invokes
+                // `return` on the iterator if present and callable.
+                // `set-like-iter-return.js` asserts that
+                // `isSupersetOf` / `isDisjointFrom` / etc. call
+                // `return()` once when they short-circuit.
+                try closeSetLikeIterator(realm, iter);
+                return;
+            },
+            else => |e2| {
+                // Propagating a JS exception from `each`: per
+                // §7.4.10 step 1, we still attempt to close the
+                // iterator but swallow any close-side throw so the
+                // original abrupt completion wins.
+                closeSetLikeIterator(realm, iter) catch {};
+                return e2;
+            },
         };
     }
     return throwTypeError(realm, "set-like iteration exceeded the safety budget");
+}
+
+/// §7.4.10 IteratorClose — invoke `return` on the iterator object
+/// if present and callable; ignore a non-callable `return` (per
+/// step 5 — return is optional). A throwing trap propagates.
+fn closeSetLikeIterator(realm: *Realm, iter: Value) NativeError!void {
+    const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return;
+    const ret_v = intrinsics.getPropertyChain(realm, iter_obj, "return") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    if (ret_v.isUndefined() or ret_v.isNull()) return;
+    const ret_fn = heap_mod.valueAsFunction(ret_v) orelse return;
+    const out = callJSFunction(realm.allocator, realm, ret_fn, iter, &.{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    switch (out) {
+        .value, .yielded => {},
+        .thrown => return error.NativeThrew,
+    }
 }
 
 fn allocateEmptySet(realm: *Realm) NativeError!*JSObject {
