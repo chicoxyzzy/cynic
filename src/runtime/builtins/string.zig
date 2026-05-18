@@ -64,7 +64,9 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, sp, "replaceAll", stringReplaceAllDispatched, 2);
     try installNativeMethodOnProto(realm, sp, "trimStart", stringTrimStart, 0);
     try installNativeMethodOnProto(realm, sp, "trimEnd", stringTrimEnd, 0);
-    try installNativeMethodOnProto(realm, sp, "normalize", stringNormalize, 1);
+    // §22.1.3.16 — `normalize` has a length of 0 because its
+    // single parameter is optional.
+    try installNativeMethodOnProto(realm, sp, "normalize", stringNormalize, 0);
     try installNativeMethodOnProto(realm, sp, "codePointAt", stringCodePointAt, 1);
     try installNativeMethodOnProto(realm, sp, "localeCompare", stringLocaleCompare, 1);
     try installNativeMethodOnProto(realm, sp, "toLocaleUpperCase", stringToUpperCase, 0);
@@ -2307,24 +2309,92 @@ fn stringTrimEnd(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     return Value.fromString(out);
 }
 
-/// §22.1.3.13 String.prototype.normalize — without an ICU/UCD
-/// normaliser, return the receiver unchanged. Tests that just
-/// check method shape and ASCII-passthrough behaviour pass; full
-/// NFC/NFD/NFKC/NFKD is a later task. The form argument is
-/// validated per spec to throw RangeError on unknown values.
+/// §22.1.3.16 String.prototype.normalize ( [ form ] ). Performs
+/// §3.11 Unicode Normalization (NFC / NFD / NFKC / NFKD) via
+/// libunicode's `unicode_normalize` — decompose into a u32
+/// code-point buffer, hand off to libunicode, re-encode the
+/// result as WTF-8. The default form is NFC (§22.1.3.16 step 4);
+/// unknown forms throw RangeError per step 7.
 fn stringNormalize(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const form_v = argOr(args, 0, Value.undefined_);
+    // §22.1.3.16 step 4 — defaulting to "NFC".
+    var form_kind: lib_unicode.UnicodeNormalizationEnum = lib_unicode.UNICODE_NFC;
     if (!form_v.isUndefined()) {
+        // §22.1.3.16 step 5 — Let f be ? ToString(form).
         const form_s = try intrinsics.stringifyArg(realm, form_v);
         const f = form_s.bytes;
-        if (!std.mem.eql(u8, f, "NFC") and !std.mem.eql(u8, f, "NFD") and
-            !std.mem.eql(u8, f, "NFKC") and !std.mem.eql(u8, f, "NFKD"))
-        {
+        if (std.mem.eql(u8, f, "NFC")) {
+            form_kind = lib_unicode.UNICODE_NFC;
+        } else if (std.mem.eql(u8, f, "NFD")) {
+            form_kind = lib_unicode.UNICODE_NFD;
+        } else if (std.mem.eql(u8, f, "NFKC")) {
+            form_kind = lib_unicode.UNICODE_NFKC;
+        } else if (std.mem.eql(u8, f, "NFKD")) {
+            form_kind = lib_unicode.UNICODE_NFKD;
+        } else {
+            // §22.1.3.16 step 7 — RangeError on unknown form.
             return intrinsics.throwRangeError(realm, "String.prototype.normalize: invalid form");
         }
     }
-    return Value.fromString(s);
+
+    // Decode the receiver into a u32 codepoint buffer (lone
+    // surrogates pass through as their 0xD800..0xDFFF code-point
+    // values — §3.11 treats them as themselves since
+    // normalization is defined on code points).
+    var cps: std.ArrayListUnmanaged(u32) = .empty;
+    defer cps.deinit(realm.allocator);
+    decodeWtf8ToCodepoints(realm.allocator, &cps, s.bytes) catch return error.OutOfMemory;
+
+    // `unicode_normalize` allocates `*pdst` via the supplied
+    // realloc; we hand it `std.c.malloc/free` via the same hook
+    // libregexp uses (`lre_realloc`). On a length-0 input it
+    // returns 0 and leaves `*pdst` untouched, so seed it null.
+    var dst_ptr: ?[*]u32 = null;
+    const src_len: c_int = @intCast(cps.items.len);
+    const src_ptr: ?[*]const u32 = if (cps.items.len == 0) null else cps.items.ptr;
+    const out_len = lib_unicode.unicode_normalize(
+        @ptrCast(&dst_ptr),
+        @ptrCast(src_ptr),
+        src_len,
+        form_kind,
+        null,
+        normalizeRealloc,
+    );
+    if (out_len < 0) return error.OutOfMemory;
+    defer if (dst_ptr) |p| std.c.free(@ptrCast(p));
+
+    // Re-encode the normalized code-point list as WTF-8.
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(realm.allocator);
+    if (dst_ptr) |p| {
+        var i: usize = 0;
+        const n: usize = @intCast(out_len);
+        while (i < n) : (i += 1) {
+            const cp: u32 = p[i];
+            // `unicode_normalize` returns code points in the
+            // valid range 0..0x10FFFF (including the surrogate
+            // values for unpaired-surrogate inputs).
+            appendWtf8(realm.allocator, &out, @intCast(cp)) catch return error.OutOfMemory;
+        }
+    }
+    const new_s = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
+    return Value.fromString(new_s);
+}
+
+/// Realloc shim for `unicode_normalize`. The opaque is unused
+/// (libunicode's only state lives in the output buffer it
+/// reallocs), so we drop it and dispatch through libc — same
+/// pattern as `lre_realloc` in `builtins/regexp.zig`. `size == 0`
+/// means free.
+fn normalizeRealloc(opaque_ptr: ?*anyopaque, ptr: ?*anyopaque, size: usize) callconv(.c) ?*anyopaque {
+    _ = opaque_ptr;
+    if (size == 0) {
+        if (ptr) |p| std.c.free(p);
+        return null;
+    }
+    if (ptr) |p| return std.c.realloc(p, size);
+    return std.c.malloc(size);
 }
 
 /// §22.1.3.4 String.prototype.codePointAt — UTF-16-code-unit-
