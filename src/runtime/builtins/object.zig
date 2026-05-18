@@ -2307,6 +2307,22 @@ fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         return arg;
     }
     const obj = heap_mod.valueAsPlainObject(arg) orelse return arg; // §20.1.2.5 — primitives pass through
+    // §9.4.6.8 Module Namespace Exotic [[DefineOwnProperty]] — a
+    // module namespace's exported data bindings ship with
+    // `{w:true, e:true, c:false}`. `SetIntegrityLevel(O, "frozen")`
+    // (§7.3.20) calls `DefinePropertyOrThrow(O, k,
+    // {configurable: false, writable: false})` on each own key; the
+    // exotic accepts a redefine only when it SameValue-matches the
+    // existing descriptor, so flipping `writable` to false rejects
+    // and `DefinePropertyOrThrow` raises TypeError. The fixture
+    // (`namespace/internals/define-own-property.js`) asserts
+    // `Object.freeze(ns)` throws and `desc.writable` survives as
+    // `true`. Short-circuit here so we don't run the loop below
+    // (which would lower the flags in-place and silently succeed).
+    if (obj.is_module_namespace) {
+        realm.define_own_property_rejected = true;
+        return throwTypeError(realm, "Cannot freeze module namespace");
+    }
     // §10.5 Proxy receivers — every integrity-level effect MUST be
     // observable through the handler traps. Drive SetIntegrityLevel
     // via the public [[X]] methods instead of mutating the proxy's
