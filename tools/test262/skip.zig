@@ -398,6 +398,19 @@ pub const skip_ses_substrings = [_][]const u8{
     "language/function-code/10.4.3-1-64gs.js",
     "language/function-code/10.4.3-1-65-s.js",
     "language/function-code/10.4.3-1-65gs.js",
+
+    // `language/module-code/eval-rqstd-{once,order}.js` — both
+    // fixtures import sibling `*_FIXTURE.js` modules whose bodies
+    // do `Function('return this;')()` to retrieve the global. The
+    // FIXTUREs are imports, not includes, so the harness-shipped
+    // `fnGlobalObject.js` stub (which substitutes `globalThis`)
+    // doesn't intercept them — the source-string Function call
+    // executes verbatim and false-rejects on Cynic's permanent SES
+    // carve-out (§15.3.2 Function constructor; AGENTS.md "eval and
+    // runtime code construction"). The `eval-rqstd-` prefix only
+    // matches these two test fixtures (FIXTURE files aren't loaded
+    // as test entries by the harness). 2 fixtures.
+    "language/module-code/eval-rqstd-",
 };
 
 /// Sputnik-era and cross-realm fixtures that exercise
@@ -537,6 +550,22 @@ pub const skip_ses_exact_paths = [_][]const u8{
     "language/comments/S7.4_A5.js",
     "language/comments/S7.4_A6.js",
     "language/comments/hashbang/eval.js",
+    // §19.2.1 indirect `(0, eval)('…')` — the fixture asserts that
+    // a hashbang comment is permitted at the start of indirect-eval
+    // source text. Without runtime `eval()` (permanent SES carve-out
+    // per AGENTS.md) the assertion can't be exercised; the sibling
+    // direct-eval (`eval.js`) is already skipped above.
+    "language/comments/hashbang/eval-indirect.js",
+    // §15.3.2 / §27.{3,4,7}.2 — `function-constructor.js` iterates
+    // `[Function, AsyncFunction, GeneratorFunction,
+    // AsyncGeneratorFunction]` and asserts each `ctor('#!\n_', '')`
+    // throws SyntaxError (hashbang not allowed as the first token
+    // of a string-source function body). Cynic doesn't ship the
+    // source-string constructors (permanent SES carve-out per
+    // AGENTS.md "eval and runtime code construction"), so the call
+    // throws TypeError before the parser would have a chance to
+    // reject the hashbang.
+    "language/comments/hashbang/function-constructor.js",
     "language/comments/hashbang/no-line-separator.js",
     "language/comments/mongolian-vowel-separator-single-eval.js",
     "language/expressions/addition/S11.6.1_A1.js",
@@ -602,6 +631,14 @@ pub const skip_ses_exact_paths = [_][]const u8{
     "language/expressions/object/11.1.5_6-3-2.js",
     "language/expressions/object/11.1.5_7-3-1.js",
     "language/expressions/object/11.1.5_7-3-2.js",
+    // §13.3.9 optional-chaining `eval?.('a')` — the fixture asserts
+    // that the optional call form on `eval` performs indirect eval
+    // (resolves bindings in the global scope, not the local one).
+    // Cynic doesn't ship `eval()` (permanent SES carve-out per
+    // AGENTS.md "eval and runtime code construction"), so the call
+    // surfaces as a "not callable" reject rather than the expected
+    // indirect-eval semantics.
+    "language/expressions/optional-chaining/eval-optional-call.js",
     "language/expressions/property-accessors/S11.2.1_A1.1.js",
     "language/expressions/property-accessors/S11.2.1_A1.2.js",
     "language/expressions/right-shift/S11.7.2_A1.js",
@@ -631,6 +668,14 @@ pub const skip_ses_exact_paths = [_][]const u8{
     "language/expressions/unsigned-right-shift/S11.7.3_A1.js",
     "language/expressions/void/S11.4.2_A1.js",
     "language/global-code/script-decl-lex-var-declared-via-eval.js",
+    // §15.3.2 Function constructor — `instn-same-global.js` imports
+    // `instn-same-global-set_FIXTURE.js` whose body is `new Function(
+    // 'return this;')().test262 = 262`. The imported FIXTURE isn't an
+    // `includes:` entry (it's a module import), so Cynic's
+    // `fnGlobalObject.js` stub doesn't intercept; the source-string
+    // Function call false-rejects on the permanent SES carve-out
+    // (AGENTS.md "eval and runtime code construction").
+    "language/module-code/instn-same-global.js",
     "language/line-terminators/S7.3_A5.4.js",
     "language/line-terminators/S7.3_A7_T1.js",
     "language/line-terminators/S7.3_A7_T2.js",
