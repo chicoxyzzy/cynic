@@ -1377,16 +1377,17 @@ pub const Compiler = struct {
             }
             return error.UnresolvedReference;
         };
-        // Global `const` (§9.1.1.4) defers to runtime TypeError; the
-        // named-function-expression self-binding (§15.6.5) is also
-        // const but defers to runtime via throw_assign_const. Both
-        // skip the compile-time SyntaxError diagnostic. Cross-function
-        // captures (the binding lives in an outer function-like scope)
-        // also defer — see compileAssignment for the parallel rationale.
-        const cross_fn_capture = binding.env_depth < self.env_depth;
-        if (binding.kind == .const_ and !binding.is_global and !binding.is_fn_expr_name and !cross_fn_capture) {
-            try self.report(.assignment_to_const, u.span);
-            return error.AssignmentToConst;
+        // §13.4.4 PostfixExpression / §13.4.5 UnaryExpression UPDATE
+        // — no early error for `x++` / `++x` on a const binding. The
+        // runtime path (PutValue → SetMutableBinding step 9.b) throws
+        // TypeError. test262
+        // language/statements/const/syntax/const-invalid-assignment-*
+        // wrap the update in `assert.throws(TypeError, function(){})`,
+        // so the surrounding function MUST compile; the body's update
+        // op throws at runtime.
+        if (binding.kind == .const_ and !binding.is_global and !binding.is_fn_expr_name) {
+            try self.builder.emitOp(.throw_assign_const, u.span);
+            return;
         }
 
         // Read x → acc (with TDZ check for let/const).
