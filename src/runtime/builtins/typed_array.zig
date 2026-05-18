@@ -3528,8 +3528,20 @@ pub fn readTypedElement(realm: *Realm, buf: []const u8, kind: ObjMod.TypedKind, 
             const u = std.mem.readInt(u64, buf[byte_pos..][0..8], .little);
             return Value.fromDouble(@bitCast(u));
         },
-        .bigint64, .biguint64 => {
+        .bigint64 => {
+            // §10.4.5.16 GetValueFromBuffer with Element Type "BigInt64"
+            // — read as a signed 64-bit two's-complement value.
             const u = std.mem.readInt(i64, buf[byte_pos..][0..8], .little);
+            const bi = realm.heap.allocateBigInt(@intCast(u)) catch return Value.fromInt32(0);
+            return heap_mod.taggedBigInt(bi);
+        },
+        .biguint64 => {
+            // §10.4.5.16 GetValueFromBuffer with Element Type "BigUint64"
+            // — read as an unsigned 64-bit value. Reading via `i64` would
+            // sign-extend the high bit and turn 2^63+x into a negative
+            // BigInt (`built-ins/TypedArrayConstructors/internals/Set/
+            // BigInt/bigint-tobiguint64.js`).
+            const u = std.mem.readInt(u64, buf[byte_pos..][0..8], .little);
             const bi = realm.heap.allocateBigInt(@intCast(u)) catch return Value.fromInt32(0);
             return heap_mod.taggedBigInt(bi);
         },

@@ -342,14 +342,22 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
                 }
                 return Value.true_;
             }
-            // Receiver != target: spec step 2.b.ii — return true
-            // without ToNumber when the index is invalid; step 3
-            // would fall through to OrdinarySet on the receiver,
-            // but Cynic doesn't yet wire a full receiver-aware
-            // OrdinarySet through reflectSet, so return true and
-            // leave the receiver mutation as a known gap
-            // (`Set/key-is-valid-index-reflect-set.js`).
-            return Value.true_;
+            // Receiver != target. §10.4.5.5 step 2.b.ii: if
+            // IsValidIntegerIndex is *false*, return true without
+            // ToNumber (no side effect on `value`). When the index
+            // *is* valid, the spec falls through to step 3
+            // OrdinarySet(O, P, V, Receiver) — the value lands on
+            // the receiver via §10.1.9.2, with NO ToNumber call
+            // (target's IIE [[GetOwnProperty]] hides the receiver-
+            // side write from coercion). The OrdinarySet path
+            // below already handles writable-data short-circuits,
+            // accessor descriptors on TA.prototype, non-extensible
+            // receivers, and `receiver_v` not being an object.
+            // Receiver-is-another-TypedArray (the deep coerce-on-
+            // receiver shape from `Set/key-is-valid-index-reflect-
+            // set.js`) is still a known gap.
+            if (!ta_mod.isValidIntegerIndexPub(tv, num)) return Value.true_;
+            // Fall through to OrdinarySet below.
         }
         // Non-canonical key — fall through to the regular target.set
         // path below so an ordinary writable property can still land
