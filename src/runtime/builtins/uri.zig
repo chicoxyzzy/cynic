@@ -39,20 +39,26 @@ pub fn install(realm: *Realm) !void {
 
 // ── §19.2 URI handling globals ──────────────────────────────────────────────
 
-/// `unreserved` per RFC 3986: ALPHA / DIGIT / "-" / "_" / "."
-/// / "~". URI-encoding leaves these alone.
+/// §19.2.6 uriUnescaped — `unreserved` (ALPHA / DIGIT) plus the
+/// uriMark set (`-` `_` `.` `!` `~` `*` `'` `(` `)`). The
+/// ECMAScript grammar pins these as never-percent-encoded even
+/// for `encodeURIComponent`, so they aren't the RFC 3986 set.
 fn isUnreservedURI(c: u8) bool {
     return (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or
-        (c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.' or c == '~';
+        (c >= '0' and c <= '9') or
+        c == '-' or c == '_' or c == '.' or c == '~' or
+        c == '!' or c == '*' or c == '\'' or c == '(' or c == ')';
 }
 
-/// Reserved set for `encodeURI` (these stay un-encoded too;
-/// they're URI-syntax-significant). `encodeURIComponent` escapes
-/// these.
+/// §19.2.6 uriReserved — `; / ? : @ & = + $ ,` plus `#`. These
+/// stay un-encoded for `encodeURI` (URI-syntax-significant) but
+/// are encoded by `encodeURIComponent`. (The historical Cynic
+/// list lumped uriMark and uriReserved together; that's
+/// observably wrong — uriMark is part of uriUnescaped, see
+/// `isUnreservedURI` above.)
 fn isUriReserved(c: u8) bool {
     return c == ';' or c == ',' or c == '/' or c == '?' or c == ':' or c == '@' or
-        c == '&' or c == '=' or c == '+' or c == '$' or c == '#' or c == '!' or
-        c == '*' or c == '\'' or c == '(' or c == ')';
+        c == '&' or c == '=' or c == '+' or c == '$' or c == '#';
 }
 
 fn encodeURIImpl(realm: *Realm, src: []const u8, full_uri: bool) NativeError!Value {
@@ -104,11 +110,49 @@ fn encodeURIImpl(realm: *Realm, src: []const u8, full_uri: bool) NativeError!Val
             if (cb & 0b1100_0000 != 0b1000_0000) return throwURIMalformed(realm);
             cp = (cp << 6) | (cb & 0x3F);
         }
-        // §19.2.6.5 step 6.b — unpaired surrogate is a URIError.
-        // (Cynic doesn't yet pair surrogates back into supplementary
-        // codepoints at parse time, so any 3-byte D800-DFFF here is
-        // by definition unpaired.)
-        if (cp >= 0xD800 and cp <= 0xDFFF) return throwURIMalformed(realm);
+        // §19.2.6.5 step 6 — surrogates. Cynic stores strings as
+        // WTF-8: a valid surrogate pair encodes as the 4-byte UTF-8
+        // form (`cp >= 0x10000`), but `String.fromCharCode(D800, DC00)`
+        // emits two CESU-8 3-byte sequences. Pair them here and emit
+        // four %XX bytes of the supplementary codepoint's UTF-8
+        // encoding — `encodeURI` MUST produce the same output as if
+        // the high+low pair came from a single supplementary char,
+        // because the spec walks code units, not stored bytes.
+        if (cp >= 0xD800 and cp <= 0xDBFF) {
+            // Try to consume the next 3-byte CESU-8 low-surrogate.
+            if (i + seq_len + 3 <= src.len and seq_len == 3) {
+                const c0 = src[i + 3];
+                const c1 = src[i + 4];
+                const c2 = src[i + 5];
+                if (c0 & 0b1111_0000 == 0b1110_0000 and
+                    c1 & 0b1100_0000 == 0b1000_0000 and
+                    c2 & 0b1100_0000 == 0b1000_0000)
+                {
+                    const cp2: u32 = (@as(u32, c0 & 0x0F) << 12) | (@as(u32, c1 & 0x3F) << 6) | @as(u32, c2 & 0x3F);
+                    if (cp2 >= 0xDC00 and cp2 <= 0xDFFF) {
+                        const combined: u32 = 0x10000 + ((cp - 0xD800) << 10) + (cp2 - 0xDC00);
+                        const pair_bytes: [4]u8 = .{
+                            @intCast(0xF0 | (combined >> 18)),
+                            @intCast(0x80 | ((combined >> 12) & 0x3F)),
+                            @intCast(0x80 | ((combined >> 6) & 0x3F)),
+                            @intCast(0x80 | (combined & 0x3F)),
+                        };
+                        var k: usize = 0;
+                        while (k < 4) : (k += 1) {
+                            out.append(realm.allocator, '%') catch return error.OutOfMemory;
+                            out.append(realm.allocator, hex[pair_bytes[k] >> 4]) catch return error.OutOfMemory;
+                            out.append(realm.allocator, hex[pair_bytes[k] & 0x0F]) catch return error.OutOfMemory;
+                        }
+                        i += seq_len + 3;
+                        continue;
+                    }
+                }
+            }
+            // §19.2.6.5 step 6.b — unpaired high surrogate ⇒ URIError.
+            return throwURIMalformed(realm);
+        }
+        // §19.2.6.5 step 6.b — unpaired low surrogate ⇒ URIError.
+        if (cp >= 0xDC00 and cp <= 0xDFFF) return throwURIMalformed(realm);
         // Emit one %XX per UTF-8 byte.
         var k: usize = 0;
         while (k < seq_len) : (k += 1) {
