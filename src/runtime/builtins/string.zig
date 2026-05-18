@@ -264,8 +264,13 @@ fn stringFromCodePoint(realm: *Realm, this_value: Value, args: []const Value) Na
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
     for (args) |a| {
-        const nv = coerceToNumber(a);
+        // §22.1.2.2 step 2.a — Let nextCP be ? ToNumber(next).
+        // ToNumber (not the silent coerceToNumber) is what propagates
+        // Symbol → TypeError and re-enters JS for `valueOf` /
+        // `Symbol.toPrimitive`, both of which the fixtures exercise.
+        const nv = try intrinsics.toNumber(realm, a);
         const n: f64 = if (nv.isInt32()) @floatFromInt(nv.asInt32()) else nv.asDouble();
+        // §22.1.2.2 step 2.b/c — non-integral or out-of-range ⇒ RangeError.
         if (std.math.isNan(n) or std.math.isInf(n) or n != @trunc(n) or n < 0 or n > 0x10FFFF) {
             return intrinsics.throwRangeError(realm, "String.fromCodePoint: argument out of range");
         }
