@@ -52,7 +52,7 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, obj, "isExtensible", reflectIsExtensible, 1);
     try installNativeMethodOnProto(realm, obj, "apply", reflectApply, 3);
     try installNativeMethodOnProto(realm, obj, "construct", reflectConstruct, 2);
-    try installNativeMethodOnProto(realm, obj, "getOwnPropertyDescriptor", intrinsics.objectGetOwnPropertyDescriptor, 2);
+    try installNativeMethodOnProto(realm, obj, "getOwnPropertyDescriptor", reflectGetOwnPropertyDescriptor, 2);
     try installNativeMethodOnProto(realm, obj, "defineProperty", reflectDefineProperty, 3);
     try installNativeMethodOnProto(realm, obj, "preventExtensions", reflectPreventExtensions, 1);
     try realm.globals.put(realm.allocator, "Reflect", heap_mod.taggedObject(obj));
@@ -77,6 +77,20 @@ fn reflectPreventExtensions(realm: *Realm, this_value: Value, args: []const Valu
     }
     obj.extensible = false;
     return Value.fromBool(true);
+}
+
+fn reflectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §28.1.7 step 1 — target must be Object. Unlike
+    // `Object.getOwnPropertyDescriptor` (which ES2015+ coerces
+    // primitives via ToObject), the Reflect equivalent throws
+    // TypeError on Symbol / BigInt / number / string / boolean /
+    // null / undefined. Gate before delegating to the shared
+    // Object impl.
+    const target_v = argOr(args, 0, Value.undefined_);
+    if (heap_mod.valueAsPlainObject(target_v) == null and heap_mod.valueAsFunction(target_v) == null) {
+        return throwTypeError(realm, "Reflect.getOwnPropertyDescriptor called on non-object");
+    }
+    return intrinsics.objectGetOwnPropertyDescriptor(realm, this_value, args);
 }
 
 fn reflectDefineProperty(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -128,11 +142,15 @@ fn reflectDefineProperty(realm: *Realm, this_value: Value, args: []const Value) 
 fn reflectHas(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
+    // §28.1.9 step 1 — target must be Object.
+    if (heap_mod.valueAsPlainObject(arg) == null and heap_mod.valueAsFunction(arg) == null) {
+        return throwTypeError(realm, "Reflect.has target must be an object");
+    }
+    // §28.1.9 step 2 — `key = ? ToPropertyKey(propertyKey)`.
+    // A throwing toString / valueOf / @@toPrimitive on a user
+    // key propagates before any lookup runs.
     const key_v = argOr(args, 1, Value.undefined_);
-    var key_buf: [64]u8 = undefined;
-    const key_slice = computedKeyForReflect(key_v, &key_buf);
-    // §28.1.2.6 Reflect.has — target must be an Object. Proxy
-    // exotic dispatches through `handler.has` per §10.5.7.
+    const key_slice = try toPropertyKeySpec(realm, key_v);
     if (heap_mod.valueAsPlainObject(arg)) |maybe_proxy| {
         var cur = maybe_proxy;
         while (cur.proxy_target != null or cur.proxy_revoked) {
@@ -174,9 +192,14 @@ fn reflectHas(realm: *Realm, this_value: Value, args: []const Value) NativeError
 fn reflectGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
+    // §28.1.6 step 1 — target must be Object.
+    if (heap_mod.valueAsPlainObject(arg) == null and heap_mod.valueAsFunction(arg) == null) {
+        return throwTypeError(realm, "Reflect.get target must be an object");
+    }
+    // §28.1.6 step 2 — `key = ? ToPropertyKey(propertyKey)`. A
+    // throwing object key propagates synchronously.
     const key_v = argOr(args, 1, Value.undefined_);
-    var key_buf: [64]u8 = undefined;
-    const key_slice = computedKeyForReflect(key_v, &key_buf);
+    const key_slice = try toPropertyKeySpec(realm, key_v);
     // §28.1.6 step 4 — default receiver = target.
     const receiver: Value = if (args.len >= 3) args[2] else arg;
     if (heap_mod.valueAsFunction(arg)) |fn_obj| {
@@ -504,9 +527,13 @@ fn toPropertyKeySpec(realm: *Realm, v: Value) NativeError![]const u8 {
 fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
+    // §28.1.4 step 1 — target must be Object.
+    if (heap_mod.valueAsPlainObject(arg) == null and heap_mod.valueAsFunction(arg) == null) {
+        return throwTypeError(realm, "Reflect.deleteProperty target must be an object");
+    }
+    // §28.1.4 step 2 — ToPropertyKey, abrupt-propagating.
     const key_v = argOr(args, 1, Value.undefined_);
-    var key_buf: [64]u8 = undefined;
-    const key_slice = computedKeyForReflect(key_v, &key_buf);
+    const key_slice = try toPropertyKeySpec(realm, key_v);
     if (heap_mod.valueAsFunction(arg)) |fn_obj| {
         // §10.1.10.1 [[Delete]] step 4 — return false when the
         // own property is non-configurable.
@@ -622,6 +649,12 @@ fn reflectOwnKeys(realm: *Realm, this_value: Value, args: []const Value) NativeE
 }
 
 fn reflectGetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §28.1.8 step 1 — target must be Object. The Object.* sibling
+    // ES2015+ coerces primitives via ToObject; Reflect throws.
+    const target_v = argOr(args, 0, Value.undefined_);
+    if (heap_mod.valueAsPlainObject(target_v) == null and heap_mod.valueAsFunction(target_v) == null) {
+        return throwTypeError(realm, "Reflect.getPrototypeOf called on non-object");
+    }
     return objectGetPrototypeOf(realm, this_value, args);
 }
 
@@ -716,16 +749,23 @@ fn reflectApply(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // §28.1.1 step 4 — `CreateListFromArrayLike(argumentsList)`.
     // The list source must be an Object; primitives (null,
     // undefined, false, NaN, …) throw TypeError synchronously,
-    // before any function invocation.
+    // before any function invocation. The `length` lookup must
+    // fire any accessor (so a `{get length() { throw }}` source
+    // propagates the throw before the call dispatches), and
+    // `ToLength(length)` runs through `getPropertyChain` so
+    // inherited / proxy-trapped lengths participate.
     var apply_args: std.ArrayListUnmanaged(Value) = .empty;
     defer apply_args.deinit(realm.allocator);
     if (heap_mod.valueAsPlainObject(args_v)) |arr| {
-        const len = try clampArrayLength(lengthOfArray(arr));
+        const len_v = try intrinsics.getPropertyChain(realm, arr, "length");
+        const len_i = try intrinsics.toLengthValue(realm, len_v);
+        const len = try clampArrayLength(len_i);
         var i: i64 = 0;
         while (i < len) : (i += 1) {
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-            apply_args.append(realm.allocator, arr.get(islice)) catch return error.OutOfMemory;
+            const elt = try intrinsics.getPropertyChain(realm, arr, islice);
+            apply_args.append(realm.allocator, elt) catch return error.OutOfMemory;
         }
     } else {
         return throwTypeError(realm, "Reflect.apply: argumentsList is not an object");
@@ -753,16 +793,23 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const interpreter = @import("../interpreter.zig");
 
     // §28.1.2 step 3 — `CreateListFromArrayLike(argumentsList)`.
-    // Reject non-object argumentsList per §7.3.18 step 2.
+    // Reject non-object argumentsList per §7.3.18 step 2. Read
+    // `length` and each indexed slot via `getPropertyChain` so
+    // user-defined accessors / proxy `get` traps participate
+    // (an `argumentsList = {get length() { throw }}` must
+    // propagate the throw before the constructor runs).
     var ctor_args: std.ArrayListUnmanaged(Value) = .empty;
     defer ctor_args.deinit(realm.allocator);
     if (heap_mod.valueAsPlainObject(args_v)) |arr| {
-        const len = try clampArrayLength(lengthOfArray(arr));
+        const len_v = try intrinsics.getPropertyChain(realm, arr, "length");
+        const len_i = try intrinsics.toLengthValue(realm, len_v);
+        const len = try clampArrayLength(len_i);
         var i: i64 = 0;
         while (i < len) : (i += 1) {
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-            ctor_args.append(realm.allocator, arr.get(islice)) catch return error.OutOfMemory;
+            const elt = try intrinsics.getPropertyChain(realm, arr, islice);
+            ctor_args.append(realm.allocator, elt) catch return error.OutOfMemory;
         }
     } else {
         return throwTypeError(realm, "Reflect.construct: argumentsList is not an object");
