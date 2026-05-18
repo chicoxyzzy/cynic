@@ -61,6 +61,28 @@ pub fn toNumber(v: Value) f64 {
         // filled in with the `Number.parseFloat` work later.
         const trimmed = std.mem.trim(u8, s.bytes, " \t\r\n");
         if (trimmed.len == 0) return 0.0;
+        // §7.1.4.1.1 StringToNumber — the StrUnsignedDecimalLiteral
+        // grammar accepts only the case-sensitive `Infinity`. Zig's
+        // `parseFloat` accepts `INFINITY`/`inf` etc.; pre-check the
+        // literal forms ourselves and return NaN for anything that
+        // would case-fold into `inf`/`nan`.
+        const infinity_form = std.mem.eql(u8, trimmed, "Infinity") or
+            std.mem.eql(u8, trimmed, "+Infinity") or
+            std.mem.eql(u8, trimmed, "-Infinity");
+        if (!infinity_form) {
+            // Reject any string that's a case-insensitive match for
+            // an inf/nan literal but isn't the canonical `Infinity`.
+            const body = if (trimmed.len > 0 and (trimmed[0] == '+' or trimmed[0] == '-'))
+                trimmed[1..]
+            else
+                trimmed;
+            if (std.ascii.eqlIgnoreCase(body, "inf") or
+                std.ascii.eqlIgnoreCase(body, "infinity") or
+                std.ascii.eqlIgnoreCase(body, "nan"))
+            {
+                return std.math.nan(f64);
+            }
+        }
         return std.fmt.parseFloat(f64, trimmed) catch std.math.nan(f64);
     }
     if (heap_mod.valueAsPlainObject(v)) |obj| {
