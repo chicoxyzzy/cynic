@@ -724,8 +724,21 @@ pub const skip_ses_substring_pairs = [_][2][]const u8{
 };
 
 pub const skip_ses_features = [_][]const u8{
-    // Empty: same reasoning as Annex B — fixtures parse fine but
-    // need globals Cynic intentionally doesn't ship.
+    // §25.2 SharedArrayBuffer — Cynic's edge-runtime hosts are
+    // single-agent-per-isolate (AGENTS.md "shared memory … out").
+    // The `built-ins/SharedArrayBuffer/` + `-sab.js`-suffix paths
+    // are already pruned wholesale, but cross-bucket fixtures
+    // tagged `features: [SharedArrayBuffer]` (e.g. `ArrayBuffer/
+    // prototype/{resize,transfer,detached,slice,…}/this-is-
+    // sharedarraybuffer.js`, `TypedArrayConstructors/.../
+    // typedarray-backed-by-sharedarraybuffer.js`,
+    // `TypedArrayConstructors/internals/Delete/.../indexed-value-
+    // sab-strict.js`) live outside those paths. Confirmed all
+    // call `new SharedArrayBuffer(...)` directly; none of the
+    // currently-passing SAB-tagged fixtures lie outside the
+    // existing path/-sab.js skips, so the feature-flag prune
+    // doesn't disturb any pass. ~13 fail → skip.
+    "SharedArrayBuffer",
 };
 
 // ── Group 3: Stage maturity ─────────────────────────────────────────
