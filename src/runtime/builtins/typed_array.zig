@@ -985,8 +985,13 @@ fn typedArrayCreate(
     return result;
 }
 
-/// IntegerIndexedElementSet — coerce `v` to the target's element
-/// type (ToNumber or ToBigInt) and write at index `idx`.
+/// §10.4.5.10 IntegerIndexedElementSet — coerce `v` to the
+/// target's element type (ToNumber or ToBigInt), then write at
+/// index `idx` if IsValidIntegerIndex holds. Out-of-bounds /
+/// detached-buffer writes are silently dropped per spec (the
+/// coercion still runs first; its side effects must be observable
+/// even when the eventual Set is a no-op — test262
+/// built-ins/TypedArray/from/from-*-mapper-detaches-result.js).
 fn typedArrayWriteIndex(realm: *Realm, target: *JSObject, idx: usize, v: Value) NativeError!void {
     const bigint_mod = @import("bigint.zig");
     const tv = target.typed_view orelse return throwTypeError(realm, "TypedArray write on non-TypedArray");
@@ -998,7 +1003,10 @@ fn typedArrayWriteIndex(realm: *Realm, target: *JSObject, idx: usize, v: Value) 
         },
         else => try intrinsics.toNumber(realm, v),
     };
-    const buf = tv.viewed.array_buffer orelse return throwTypeError(realm, "TypedArray write on detached buffer");
+    // §10.4.5.10 step 1 — IsValidIntegerIndex returns false for
+    // detached / OOB; the spec then returns NormalCompletion
+    // (silent drop). Throwing here is wrong.
+    const buf = tv.viewed.array_buffer orelse return;
     const byte_pos = tv.byte_offset + idx * elem_size;
     if (byte_pos + elem_size > buf.len) return;
     writeTypedElementForView(buf, tv, byte_pos, coerced);
