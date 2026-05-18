@@ -5,6 +5,7 @@
 //! UTF-16 surrogate-pair fidelity is later.
 
 const std = @import("std");
+const lib_unicode = @import("c");
 
 const Realm = @import("../realm.zig").Realm;
 const Value = @import("../value.zig").Value;
@@ -968,28 +969,139 @@ fn stringToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
     return throwTypeError(realm, "String.prototype.toString called on non-String");
 }
 
+/// §22.1.3.27 String.prototype.toUpperCase — full Unicode case
+/// conversion via libunicode's `lre_case_conv` (UCD-derived
+/// tables, conv_type 0 = upper). Decode each WTF-8 codepoint,
+/// apply the language-insensitive mapping (1-3 result code
+/// points per input), re-encode as WTF-8. Lone surrogates pass
+/// through unchanged — `lre_case_conv` returns the input
+/// code point for non-cased values.
 fn stringToUpperCase(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const s = try coerceThisToJSString(realm, this_value);
-    const buf = realm.allocator.alloc(u8, s.bytes.len) catch return error.OutOfMemory;
-    defer realm.allocator.free(buf);
-    for (s.bytes, 0..) |c, i| {
-        buf[i] = if (c >= 'a' and c <= 'z') c - 32 else c;
-    }
-    const out = realm.heap.allocateString(buf) catch return error.OutOfMemory;
-    return Value.fromString(out);
+    return caseConvertString(realm, s.bytes, 0);
 }
 
+/// §22.1.3.26 String.prototype.toLowerCase. Uses libunicode's
+/// `lre_case_conv` (conv_type 1 = lower) plus a §22.1.3.26
+/// step 4.a Final_Sigma rule on U+03A3 GREEK CAPITAL LETTER
+/// SIGMA: Sigma maps to U+03C2 SMALL FINAL SIGMA when the
+/// preceding context (zero+ Case_Ignorable then Cased) is set
+/// and the following context (zero+ Case_Ignorable then Cased)
+/// is not. Otherwise the default U+03C3 mapping from the table
+/// applies.
 fn stringToLowerCase(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const s = try coerceThisToJSString(realm, this_value);
-    const buf = realm.allocator.alloc(u8, s.bytes.len) catch return error.OutOfMemory;
-    defer realm.allocator.free(buf);
-    for (s.bytes, 0..) |c, i| {
-        buf[i] = if (c >= 'A' and c <= 'Z') c + 32 else c;
+    return caseConvertString(realm, s.bytes, 1);
+}
+
+/// Shared body for §22.1.3.{26, 27, 28, 29}. `conv_type` is the
+/// libunicode tag: 0 = to-upper, 1 = to-lower (the toLocale*
+/// variants share the same table for default/`en` locales —
+/// Turkish dotless-i lives in intl402/, out of scope per
+/// AGENTS.md). The Final_Sigma adjustment is gated on
+/// `conv_type == 1` so toUpperCase never observes it.
+fn caseConvertString(realm: *Realm, bytes: []const u8, conv_type: c_int) NativeError!Value {
+    // §22.1.3.{26, 27} step 3 — Let cpList be the list of code
+    // points of S. Decode WTF-8 to codepoints first so we can
+    // run the Final_Sigma context lookahead without re-walking.
+    var cps: std.ArrayListUnmanaged(u32) = .empty;
+    defer cps.deinit(realm.allocator);
+    decodeWtf8ToCodepoints(realm.allocator, &cps, bytes) catch return error.OutOfMemory;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(realm.allocator);
+
+    var i: usize = 0;
+    while (i < cps.items.len) : (i += 1) {
+        const cp = cps.items[i];
+        // §22.1.3.26 step 4.a — Final_Sigma override.
+        if (conv_type == 1 and cp == 0x03A3 and isFinalSigmaContext(cps.items, i)) {
+            appendWtf8(realm.allocator, &out, 0x03C2) catch return error.OutOfMemory;
+            continue;
+        }
+        var res: [3]u32 = undefined;
+        const len = lib_unicode.lre_case_conv(&res, cp, conv_type);
+        var k: usize = 0;
+        while (k < @as(usize, @intCast(len))) : (k += 1) {
+            const r = res[k];
+            // `lre_case_conv` returns code points up to 0x10FFFF;
+            // narrow back to u21 for `appendWtf8`.
+            appendWtf8(realm.allocator, &out, @intCast(r)) catch return error.OutOfMemory;
+        }
     }
-    const out = realm.heap.allocateString(buf) catch return error.OutOfMemory;
-    return Value.fromString(out);
+    const new_s = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
+    return Value.fromString(new_s);
+}
+
+/// Decode `bytes` (WTF-8: UTF-8 with 3-byte CESU-8 lone-surrogate
+/// escapes) into a flat list of code points. A 4-byte UTF-8
+/// sequence is a single supplementary code point; 3-byte
+/// sequences in the 0xD800..0xDFFF range round-trip as the lone
+/// surrogate code unit value.
+fn decodeWtf8ToCodepoints(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u32),
+    bytes: []const u8,
+) std.mem.Allocator.Error!void {
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const seq_len = utf8SeqLen(bytes[i]);
+        if (i + seq_len > bytes.len) {
+            // Malformed tail — emit the raw byte to make progress.
+            try out.append(allocator, bytes[i]);
+            i += 1;
+            continue;
+        }
+        const cp: u32 = switch (seq_len) {
+            1 => bytes[i],
+            2 => (@as(u32, bytes[i] & 0x1F) << 6) | @as(u32, bytes[i + 1] & 0x3F),
+            3 => (@as(u32, bytes[i] & 0x0F) << 12) |
+                (@as(u32, bytes[i + 1] & 0x3F) << 6) |
+                @as(u32, bytes[i + 2] & 0x3F),
+            4 => (@as(u32, bytes[i] & 0x07) << 18) |
+                (@as(u32, bytes[i + 1] & 0x3F) << 12) |
+                (@as(u32, bytes[i + 2] & 0x3F) << 6) |
+                @as(u32, bytes[i + 3] & 0x3F),
+            else => unreachable,
+        };
+        try out.append(allocator, cp);
+        i += seq_len;
+    }
+}
+
+/// §22.1.3.26 Final_Sigma — true iff `idx` is preceded by a
+/// Cased code point with zero or more Case_Ignorable code
+/// points between, and *not* followed by zero or more
+/// Case_Ignorable code points then a Cased code point. Uses
+/// libunicode's `lre_is_cased` / `lre_is_case_ignorable`
+/// which mirror DerivedCoreProperties' Cased and
+/// Case_Ignorable.
+fn isFinalSigmaContext(cps: []const u32, idx: usize) bool {
+    // Before: walk backwards skipping Case_Ignorable; first
+    // non-ignorable must be Cased.
+    var before_cased = false;
+    if (idx > 0) {
+        var j = idx;
+        while (j > 0) {
+            j -= 1;
+            const p = cps[j];
+            if (lib_unicode.lre_is_case_ignorable(p)) continue;
+            before_cased = lib_unicode.lre_is_cased(p);
+            break;
+        }
+    }
+    if (!before_cased) return false;
+    // After: walk forward skipping Case_Ignorable; first non-
+    // ignorable must NOT be Cased (or end-of-string).
+    var j: usize = idx + 1;
+    while (j < cps.len) : (j += 1) {
+        const p = cps[j];
+        if (lib_unicode.lre_is_case_ignorable(p)) continue;
+        return !lib_unicode.lre_is_cased(p);
+    }
+    return true;
 }
 
 /// §11.2 WhiteSpace + §11.3 LineTerminator productions —
