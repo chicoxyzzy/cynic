@@ -555,9 +555,42 @@ pub fn setLengthOrThrow(realm: *Realm, obj: *JSObject, len: i64) NativeError!voi
 
 /// §7.3.5 DeletePropertyOrThrow — Strict-mode delete that throws
 /// TypeError if the [[Delete]] returns false. Used by push / pop /
-/// shift / unshift / splice to drop indices.
+/// shift / unshift / splice / copyWithin to drop indices.
+///
+/// Dispatches through the Proxy `deleteProperty` trap when the
+/// receiver is a Proxy (§10.5.10) so trap-thrown abrupts surface,
+/// and falls through to §10.1.10.1 OrdinaryDelete which rejects
+/// a non-configurable own property with TypeError per §7.3.5.
 pub fn deletePropertyOrThrow(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!void {
-    if (!obj.deleteOwn(key)) {
+    const proxy_mod = @import("proxy.zig");
+    var cur = obj;
+    while (cur.proxy_target != null or cur.proxy_revoked) {
+        const r = try proxy_mod.nativeProxyDelete(realm, cur, key);
+        switch (r) {
+            .boolean => |b| {
+                if (!b) return throwTypeError(realm, "Cannot delete property");
+                return;
+            },
+            .fallthrough => |t| {
+                if (t == cur) {
+                    if (!cur.deleteOwn(key)) return throwTypeError(realm, "Cannot delete property");
+                    return;
+                }
+                cur = t;
+            },
+        }
+    }
+    // §10.1.10.1 OrdinaryDelete step 4 — a non-configurable own
+    // property returns false; §7.3.5 lifts that to TypeError.
+    // `deleteOwn` already honors configurable on array-exotic
+    // indexed slots, but unconditionally strips named bag entries,
+    // so reject non-configurable here before calling it.
+    if (cur.accessors.contains(key) or cur.properties.contains(key)) {
+        if (cur.property_flags.get(key)) |flags| {
+            if (!flags.configurable) return throwTypeError(realm, "Cannot delete non-configurable property");
+        }
+    }
+    if (!cur.deleteOwn(key)) {
         return throwTypeError(realm, "Cannot delete property");
     }
 }
@@ -2163,7 +2196,12 @@ fn copyWithinStep(realm: *Realm, obj: *JSObject, src: i64, dst: i64) NativeError
     var db: [24]u8 = undefined;
     const sslice = std.fmt.bufPrint(&sb, "{d}", .{src}) catch unreachable;
     const dslice = std.fmt.bufPrint(&db, "{d}", .{dst}) catch unreachable;
-    if (obj.hasProperty(sslice)) {
+    // §23.1.3.4 step 15.b — HasProperty(O, fromKey). Dispatch
+    // through the Proxy `has` trap so a poisoned trap propagates
+    // its abrupt completion (fixture
+    // `copyWithin/return-abrupt-from-has-start.js`).
+    const present = try hasPropertyP(realm, obj, sslice);
+    if (present) {
         const v = try getPropertyChain(realm, obj, sslice);
         // §23.1.3.4 step 15.b.iv — Set(O, toKey, fromVal, true).
         // Honor setter / writable / extensible.
@@ -2172,6 +2210,25 @@ fn copyWithinStep(realm: *Realm, obj: *JSObject, src: i64, dst: i64) NativeError
     } else {
         try deletePropertyOrThrow(realm, obj, dslice);
     }
+}
+
+/// §7.3.11 HasProperty — proxy-aware wrapper. Dispatches through
+/// the Proxy `has` trap (§10.5.7) before falling through to
+/// §10.1.7.1 OrdinaryHasProperty.
+fn hasPropertyP(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!bool {
+    const proxy_mod = @import("proxy.zig");
+    var cur = obj;
+    while (cur.proxy_target != null or cur.proxy_revoked) {
+        const r = try proxy_mod.nativeProxyHas(realm, cur, key);
+        switch (r) {
+            .boolean => |b| return b,
+            .fallthrough => |t| {
+                if (t == cur) return cur.hasProperty(key);
+                cur = t;
+            },
+        }
+    }
+    return cur.hasProperty(key);
 }
 
 fn arraySort(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
