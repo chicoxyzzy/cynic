@@ -567,55 +567,9 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) StepOutcome {
 }
 
 /// §23.1.5.3.1 ArrayIteratorPrototype.next brand check —
-/// `RequireInternalSlot(O, [[IteratedArrayLike]])`. Cynic stores
-/// the slot as the `array_like_iter` pointer; a receiver without
-/// it (e.g. `Object.create(iter).next()`) throws TypeError
-/// instead of returning a silent `{done: true}`.
-fn arrayIterRequireSlot(realm: *Realm, this_value: Value) NativeError!void {
-    const it = heap_mod.valueAsPlainObject(this_value) orelse
-        return throwTypeError(realm, "Array Iterator method called on incompatible receiver");
-    if (it.array_like_iter == null)
-        return throwTypeError(realm, "Array Iterator method called on incompatible receiver");
-}
-
-fn arrayLikeIterValuesNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    try arrayIterRequireSlot(realm, this_value);
-    switch (arrayLikeIterStep(realm, this_value)) {
-        .step => |s| return iterResult(realm, s.value, false) catch return error.OutOfMemory,
-        .typed_array_oob => return throwTypeError(realm, "TypedArray iterator: backing buffer is out-of-bounds"),
-        .propagated => return error.NativeThrew,
-        .done => return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory,
-    }
-}
-fn arrayLikeIterKeysNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    try arrayIterRequireSlot(realm, this_value);
-    switch (arrayLikeIterStep(realm, this_value)) {
-        .step => |s| return iterResult(realm, Value.fromInt32(s.idx), false) catch return error.OutOfMemory,
-        .typed_array_oob => return throwTypeError(realm, "TypedArray iterator: backing buffer is out-of-bounds"),
-        .propagated => return error.NativeThrew,
-        .done => return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory,
-    }
-}
-fn arrayLikeIterEntriesNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    try arrayIterRequireSlot(realm, this_value);
-    switch (arrayLikeIterStep(realm, this_value)) {
-        .step => |s| {
-            const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
-            arr.prototype = realm.intrinsics.array_prototype;
-            arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
-            arr.set(realm.allocator, "0", Value.fromInt32(s.idx)) catch return error.OutOfMemory;
-            arr.set(realm.allocator, "1", s.value) catch return error.OutOfMemory;
-            arr.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
-            return iterResult(realm, heap_mod.taggedObject(arr), false) catch return error.OutOfMemory;
-        },
-        .typed_array_oob => return throwTypeError(realm, "TypedArray iterator: backing buffer is out-of-bounds"),
-        .propagated => return error.NativeThrew,
-        .done => return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory,
-    }
-}
+// (Per-kind array-iterator `next` natives were folded into the
+// prototype-level `arrayIteratorProtoNext` above — instance shape
+// no longer needs an own `next`.)
 
 fn iterResult(realm: *Realm, value: Value, done: bool) !Value {
     const r = try realm.heap.allocateObject();
