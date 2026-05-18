@@ -996,27 +996,14 @@ fn hasPropertyAny(v: Value, key: []const u8) bool {
 // ── Additional Array methods ────────────────────────────────────────────────
 
 fn arrayIsArray(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
     _ = this_value;
     const v = argOr(args, 0, Value.undefined_);
-    const obj = heap_mod.valueAsPlainObject(v) orelse return Value.false_;
-    // Heuristic: an "array" is an object whose [[Prototype]] is
-    // %Array.prototype% (or chains to it). Real engines check
-    // an internal slot; ours uses prototype identity. Good
-    // enough for later — `Array.isArray([1,2])` is true,
-    // `Array.isArray({})` is false.
-    if (obj.prototype) |p| {
-        var c: ?*JSObject = p;
-        while (c) |x| : (c = x.prototype) {
-            const ctor_v = x.get("constructor");
-            if (heap_mod.valueAsFunction(ctor_v)) |fn_obj| {
-                if (fn_obj.name) |nm| {
-                    if (std.mem.eql(u8, nm, "Array")) return Value.true_;
-                }
-            }
-        }
-    }
-    return Value.false_;
+    // §23.1.2.2 Array.isArray ⇒ §7.2.2 IsArray. The spec checks
+    // the [[ArrayLength]] internal slot (Cynic's
+    // `is_array_exotic`), not "has Array.prototype on its chain"
+    // — `Object.create([])` is NOT an Array, `Array.prototype`
+    // itself IS one, and a revoked Proxy throws TypeError.
+    return if (try isArrayProxyAware(realm, v)) Value.true_ else Value.false_;
 }
 
 /// §23.1.2.3 Array.of(...items). Per spec:
