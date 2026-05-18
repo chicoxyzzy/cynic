@@ -3488,7 +3488,50 @@ pub fn constructValue(
     const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
     instance.prototype = resolved_proto;
     const this_arg = heap_mod.taggedObject(instance);
-    const outcome = try callJSFunction(allocator, realm, target, this_arg, args);
+    // §10.2.2 [[Construct]] — body runs with NewTarget bound to
+    // `new_target`. The frame must carry it so `new.target`
+    // (`lda_new_target`) inside the body reads the species ctor
+    // (or whatever the caller of constructValue supplied) rather
+    // than `undefined`. The native / generator / async paths don't
+    // observe NewTarget through a frame slot, so route them
+    // through plain callJSFunction unchanged.
+    if (target.native_callback != null or target.is_generator or target.is_async or target.chunk == null) {
+        const outcome = try callJSFunction(allocator, realm, target, this_arg, args);
+        switch (outcome) {
+            .value, .yielded => |v| {
+                if (heap_mod.valueAsPlainObject(v) != null or heap_mod.valueAsFunction(v) != null) return .{ .value = v };
+                return .{ .value = this_arg };
+            },
+            .thrown => |ex| return .{ .thrown = ex },
+        }
+    }
+    const callee_chunk = target.chunk.?;
+    var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
+    defer {
+        for (frames.items) |*f| if (f.owns_registers) allocator.free(f.registers);
+        frames.deinit(allocator);
+    }
+    const regs = try allocator.alloc(Value, @max(@as(usize, callee_chunk.register_count), args.len));
+    @memset(regs, Value.undefined_);
+    var i: usize = 0;
+    while (i < args.len and i < regs.len) : (i += 1) regs[i] = args[i];
+    try frames.append(allocator, .{
+        .chunk = callee_chunk,
+        .ip = 0,
+        .accumulator = Value.undefined_,
+        .registers = regs,
+        .env = target.captured_env,
+        .this_value = this_arg,
+        .is_construct = true,
+        .is_derived_ctor = target.constructor_kind == .derived,
+        .new_target = new_target,
+        .home_object = target.home_object,
+        .home_function = target.home_function,
+        .super_called_cell = target.super_called_cell,
+        .argc = @intCast(@min(args.len, std.math.maxInt(u8))),
+        .wrap_return_in_promise = false,
+    });
+    const outcome = try runFrames(allocator, realm, &frames);
     switch (outcome) {
         .value, .yielded => |v| {
             if (heap_mod.valueAsPlainObject(v) != null or heap_mod.valueAsFunction(v) != null) return .{ .value = v };

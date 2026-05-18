@@ -1946,7 +1946,17 @@ fn arrayFlatMap(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             write_idx += 1;
         }
     }
-    setLength(realm, out, write_idx) catch return error.OutOfMemory;
+    // §23.1.3.11.1 FlattenIntoArray relies on `CreateDataPropertyOrThrow`
+    // for the per-index write; an Array exotic's `length` auto-extends
+    // as a side effect. For a non-Array species result (e.g.
+    // `arr.constructor = { [Symbol.species]: ctor }` returning a plain
+    // object) the spec leaves `length` alone — the fixture
+    // `flatMap/this-value-ctor-object-species-custom-ctor.js` asserts
+    // the result has NO own `length`. Only stamp it on Array-shaped
+    // results where the property already exists.
+    if (out.is_array_exotic) {
+        setLength(realm, out, write_idx) catch return error.OutOfMemory;
+    }
     return out_v;
 }
 
