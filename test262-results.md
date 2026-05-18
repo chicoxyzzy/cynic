@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 91.93 % | 99.02 % | 36879 / 40115 | 36879 / 37245 |
+| **runtime** | 91.94 % | 99.03 % | 36883 / 40115 | 36883 / 37245 |
 
 
 ## Where the runtime stands, by area
@@ -32,8 +32,8 @@ browser-era built-ins …).
 | `built-ins/String` | 1190 | 13 | 5 | 99 % | 99 % |
 | `built-ins/TypedArray` | 1398 | 25 | 8 | 98 % | 98 % |
 | `built-ins/TypedArrayConstructors` | 644 | 16 | 16 | 95 % | 98 % |
-| `language/expressions` | 9713 | 58 | 972 | 90 % | 99 % |
-| `language/statements` | 8393 | 19 | 672 | 92 % | 100 % |
+| `language/expressions` | 9715 | 56 | 972 | 90 % | 99 % |
+| `language/statements` | 8395 | 17 | 672 | 92 % | 100 % |
 | **_1–9 fails_** | | | | | |
 | `built-ins/AggregateError` | 22 | 1 | 0 | 96 % | 96 % |
 | `built-ins/AsyncFunction` | 12 | 2 | 0 | 86 % | 86 % |
@@ -157,17 +157,16 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-18 — cynic `e6c959d`, test262 `d0c1b455`
+### 2026-05-18 — cynic `b9a7204`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 91.93 % | 99.02 % | 36879 / 40115 | 36879 / 37245 | +217 | 1m 56s |
+| **runtime** | 91.94 % | 99.03 % | 36883 / 40115 | 36883 / 37245 | +221 | 1m 52s |
 
 Biggest movers (runtime):
 
-- `built-ins/AsyncGeneratorPrototype` +1
-- `built-ins/GeneratorPrototype` +1
-- `built-ins/Object` +1
+- `language/expressions` +2
+- `language/statements` +2
 
 ### 2026-05-17 — cynic `400fbae`, test262 `d0c1b455`
 
