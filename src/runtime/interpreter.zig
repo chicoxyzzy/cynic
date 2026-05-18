@@ -4419,15 +4419,6 @@ fn runFrames(
                 }
                 fn_obj.is_generator = tmpl.is_generator;
                 fn_obj.is_async = tmpl.is_async;
-                // §27.3.1 / §27.4 / §27.7 — generator functions,
-                // async generator functions, and async functions have
-                // no [[Construct]] internal method. `new g()` must
-                // throw TypeError. `allocateFunction` defaults to
-                // `has_construct = true` for non-arrow templates; drop
-                // it for these flavours.
-                if (tmpl.is_generator or tmpl.is_async) {
-                    fn_obj.has_construct = false;
-                }
                 // §27.3.5 / §27.4.5 — `function*(){}.prototype` /
                 // `async function*(){}.prototype` is an ordinary
                 // object whose `[[Prototype]]` is `%GeneratorPrototype%`
