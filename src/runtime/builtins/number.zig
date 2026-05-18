@@ -163,11 +163,18 @@ fn numberToExponential(realm: *Realm, this_value: Value, args: []const Value) Na
     if (!digits_finite_in_range) {
         return throwRangeError(realm, "toExponential digits out of range [0, 100]");
     }
+    // §21.1.3.2 step 3 — `x < 0` controls the sign character; -0
+    // is NOT < 0 and renders as `"0e+0"`, not `"-0e+0"`. Zig's
+    // `{e}` formatter prints `-0e0` for IEEE -0, which would
+    // otherwise leak through the normaliser. Special-case before
+    // bufPrint so step 9 (`If x = 0`) routes through the
+    // unsigned-zero formatter.
     var buf: [128]u8 = undefined;
+    const x_for_print: f64 = if (x == 0) 0 else x;
     const raw = if (digits < 0)
-        std.fmt.bufPrint(&buf, "{e}", .{x}) catch return error.OutOfMemory
+        std.fmt.bufPrint(&buf, "{e}", .{x_for_print}) catch return error.OutOfMemory
     else
-        std.fmt.bufPrint(&buf, "{e:.[1]}", .{ x, @as(usize, @intCast(digits)) }) catch return error.OutOfMemory;
+        std.fmt.bufPrint(&buf, "{e:.[1]}", .{ x_for_print, @as(usize, @intCast(digits)) }) catch return error.OutOfMemory;
     // §6.1.6.1.13 Number::toString — JS demands `1e+22` for
     // positive exponents; Zig's `{e}` emits a bare `1e22`. Patch
     // through the shared normaliser.

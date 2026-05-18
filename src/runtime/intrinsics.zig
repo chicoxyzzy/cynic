@@ -661,7 +661,17 @@ pub fn formatIndex(buf: *[24]u8, i: i64) []const u8 {
 }
 
 pub fn installNativeMethodOnProto(realm: *Realm, proto: *JSObject, name: []const u8, native: NativeFn, params: u8) !void {
-    const fn_obj = try realm.heap.allocateFunctionNative(native, params, name);
+    // §17 — when the property key is a well-known Symbol the
+    // function's `.name` is `"[Symbol.<descr>]"`, not the raw
+    // `@@<descr>` slot key. Cynic stores well-known symbols under
+    // `"@@<descr>"`; rewrite when allocating the function so
+    // test262 (e.g. `String.prototype[Symbol.iterator].name ===
+    // "[Symbol.iterator]"`) sees the spec-faithful form.
+    const fn_name = if (std.mem.startsWith(u8, name, "@@"))
+        std.fmt.allocPrint(realm.classAllocator(), "[Symbol.{s}]", .{name[2..]}) catch return error.OutOfMemory
+    else
+        name;
+    const fn_obj = try realm.heap.allocateFunctionNative(native, params, fn_name);
     // §17 — built-in prototype methods are not constructors.
     fn_obj.has_construct = false;
     // §17 — built-in methods install with `enumerable: false`
