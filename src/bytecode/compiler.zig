@@ -1,4 +1,4 @@
-//! AST → bytecode compiler statements + lexical scope. EDIT_MARKER
+//! AST → bytecode compiler statements + lexical scope.
 //!
 //! Walks `Statement` and `Expression` AST and emits Ignition-style
 //! bytecode into a `Builder`. The result of every expression
@@ -4015,17 +4015,26 @@ pub const Compiler = struct {
         // (silent miss). TDZ / let / const cases still resolve
         // to a real binding so they keep their throw-on-hole
         // behavior, matching the spec.
-        if (u.op == .typeof_ and u.operand.* == .identifier_reference) {
-            const span = u.operand.identifier_reference.span;
-            // §12.7 — typeof's silent-miss path also keys on StringValue.
-            const name = try self.bindingName(span);
-            const scope = self.scope orelse return error.UnresolvedReference;
-            if (scope.resolve(name) == null and !std.mem.eql(u8, name, "undefined")) {
-                const k = try self.internString(name);
-                try self.builder.emitOp(.lda_global_or_undef, span);
-                try self.builder.emitU16(k);
-                try self.builder.emitOp(.typeof_, u.span);
-                return;
+        if (u.op == .typeof_) {
+            // §13.5.3 typeof — parens don't change reference status:
+            // `typeof (x)` and `typeof ((x))` are still typeof of a
+            // bare Reference per §13.2.8 ParenthesizedExpression
+            // (StringValue / IsIdentifierRef pass through). Unwrap
+            // any ParenthesizedExpression layers before checking.
+            var inner: *const ast.expression.Expression = u.operand;
+            while (inner.* == .parenthesized) inner = inner.parenthesized.expression;
+            if (inner.* == .identifier_reference) {
+                const span = inner.identifier_reference.span;
+                // §12.7 — typeof's silent-miss path also keys on StringValue.
+                const name = try self.bindingName(span);
+                const scope = self.scope orelse return error.UnresolvedReference;
+                if (scope.resolve(name) == null and !std.mem.eql(u8, name, "undefined")) {
+                    const k = try self.internString(name);
+                    try self.builder.emitOp(.lda_global_or_undef, span);
+                    try self.builder.emitU16(k);
+                    try self.builder.emitOp(.typeof_, u.span);
+                    return;
+                }
             }
         }
         try self.compileExpression(u.operand);
