@@ -1675,10 +1675,53 @@ pub fn openForInIterator(
             arr.set(realm.allocator, idx_owned.bytes, Value.fromString(key_owned)) catch return error.OutOfMemory;
             len += 1;
         }
-        // Function's [[Prototype]] is typically %Function.prototype%
-        // — its inherited methods are all non-enumerable, so we
-        // can skip walking the chain. Test fixtures that probe
-        // for inherited keys via for-in expect none.
+        // §14.7.5.6 EnumerateObjectProperties step 5 — climb the
+        // [[Prototype]] chain after the function's own properties.
+        // Stock `%Function.prototype%` methods are all non-
+        // enumerable, but a user `Object.defineProperty(
+        // Function.prototype, "x", {enumerable: true})` adds an
+        // enumerable inherited key that for-in must surface
+        // (test262 built-ins/Object/defineProperty/15.2.3.6-4-419.js,
+        // /15.2.3.6-4-595.js — same shape on bound functions). The
+        // function's [[Prototype]] is the bound-function proto for
+        // a bound function, else `%Function.prototype%`.
+        var current_proto: ?*JSObject = fn_obj.proto;
+        while (current_proto) |cur| {
+            var pit = cur.properties.iterator();
+            while (pit.next()) |entry| {
+                const key = entry.key_ptr.*;
+                if (std.mem.startsWith(u8, key, "__cynic_")) continue;
+                if (std.mem.startsWith(u8, key, "@@") or std.mem.startsWith(u8, key, "<sym:")) continue;
+                const gop = seen.getOrPut(realm.allocator, key) catch return error.OutOfMemory;
+                if (gop.found_existing) continue;
+                if (!cur.flagsFor(key).enumerable) continue;
+                var ibuf: [16]u8 = undefined;
+                const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
+                const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+                const k_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                arr.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
+                len += 1;
+            }
+            // §14.7.5.6 also surfaces accessor properties; mark them
+            // seen so a same-named ancestor data property doesn't
+            // re-emit (shadowing rule).
+            var ait = cur.accessors.iterator();
+            while (ait.next()) |entry| {
+                const key = entry.key_ptr.*;
+                if (std.mem.startsWith(u8, key, "__cynic_")) continue;
+                if (std.mem.startsWith(u8, key, "@@") or std.mem.startsWith(u8, key, "<sym:")) continue;
+                const gop = seen.getOrPut(realm.allocator, key) catch return error.OutOfMemory;
+                if (gop.found_existing) continue;
+                if (!cur.flagsFor(key).enumerable) continue;
+                var ibuf: [16]u8 = undefined;
+                const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
+                const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+                const k_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                arr.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
+                len += 1;
+            }
+            current_proto = cur.prototype;
+        }
     } else if (heap_mod.valueAsPlainObject(obj_v)) |start_obj| {
         var current: ?*JSObject = start_obj;
         while (current) |cur| {
@@ -2001,7 +2044,28 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
                         continue;
                     }
                 } else if (heap_mod.valueAsFunction(state.for_in_source)) |src_fn| {
-                    if (!src_fn.properties.contains(key_str.bytes)) {
+                    // §14.7.5.6 — the live-deletion check probes
+                    // HasProperty on the source, which walks the
+                    // prototype chain. A key inherited from
+                    // `%Function.prototype%` (or its parent
+                    // `%Object.prototype%`) is still HasProperty:true
+                    // and must not be filtered out (test262
+                    // built-ins/Object/defineProperty/15.2.3.6-4-419.js,
+                    // /15.2.3.6-4-595.js — for-in over a function
+                    // surfacing a user-installed enumerable inherited
+                    // `prop`).
+                    var fn_has = src_fn.properties.contains(key_str.bytes) or src_fn.accessors.contains(key_str.bytes);
+                    if (!fn_has) {
+                        var ancestor: ?*JSObject = src_fn.proto;
+                        while (ancestor) |a| {
+                            if (a.properties.contains(key_str.bytes) or a.accessors.contains(key_str.bytes)) {
+                                fn_has = true;
+                                break;
+                            }
+                            ancestor = a.prototype;
+                        }
+                    }
+                    if (!fn_has) {
                         cursor += 1;
                         continue;
                     }

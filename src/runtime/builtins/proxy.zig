@@ -199,7 +199,15 @@ pub fn nativeProxyGet(realm: *Realm, proxy: *JSObject, key: []const u8, receiver
     if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'get' on a proxy that has been revoked");
     const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
     const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
-    const trap_v = handler.get("get");
+    // §10.5.5 step 5 — `Let trap be ? GetMethod(handler, "get")`.
+    // §7.3.11 GetMethod walks through §7.3.10 Get, which fires
+    // accessor getters AND a nested Proxy handler's `get` trap.
+    // `getTrap` dispatches through `nativeProxyGet` when the
+    // handler is itself a Proxy (test262
+    // built-ins/Object/{values,entries}/observable-operations.js
+    // use `new Proxy(target, new Proxy(handler, check))`; the
+    // inner `check.get` must log every trap-name lookup).
+    const trap_v = try getTrap(realm, handler, "get");
     if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'get' trap is not callable");
     const key_v = try trapKeyValue(realm, key);

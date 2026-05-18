@@ -436,6 +436,43 @@ pub fn getHandlerProperty(realm: *Realm, handler: *JSObject, key: []const u8) Na
     return getPropertyChain(realm, handler, key);
 }
 
+/// §10.5.5 [[Get]] on a possibly-Proxy receiver. When `obj` is a
+/// Proxy, dispatch through `nativeProxyGet` (and walk a Proxy of
+/// Proxy chain), so the user-installed `get` trap observes the
+/// read — §7.3.2 Get is the spec's per-key fetch in
+/// EnumerableOwnProperties (§7.3.21) and friends, and a Proxy
+/// receiver must see each `get`. Otherwise fall through to
+/// `getPropertyChain` which fires accessor getters along the
+/// prototype chain.
+///
+/// The `receiver` parameter is the original Value the caller is
+/// reading from — for a Proxy, the spec calls the trap with
+/// `Receiver` = the outermost proxy, so this function threads
+/// that through (test262 Object/{values,entries,
+/// getOwnPropertyDescriptors}/observable-operations.js verify the
+/// trap was called with `proxy === receiver`).
+pub fn getPropertyValue(realm: *Realm, obj: *JSObject, key: []const u8, receiver: Value) NativeError!Value {
+    if (obj.proxy_target != null or obj.proxy_revoked) {
+        const proxy_mod = @import("proxy.zig");
+        var cur = obj;
+        while (true) {
+            const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, receiver);
+            switch (outcome) {
+                .value => |v| return v,
+                .fallthrough => |t| {
+                    if (t == cur) return Value.undefined_;
+                    if (t.proxy_target != null or t.proxy_revoked) {
+                        cur = t;
+                        continue;
+                    }
+                    return getPropertyChain(realm, t, key);
+                },
+            }
+        }
+    }
+    return getPropertyChain(realm, obj, key);
+}
+
 /// §10.5.11 Proxy [[OwnPropertyKeys]] — when `obj` is a proxy
 /// with an `ownKeys` handler trap, call it and convert the
 /// returned Array into a `[]const []const u8` slice. The caller
@@ -753,8 +790,12 @@ fn enumerableOwnPropertyKeyValues(
         if (!enum_v.isBool() or !enum_v.asBool()) continue;
         // step 3.a.v — `Let value be ? Get(O, key)`. Re-read via
         // the spec-correct accessor chain so a Proxy `get` trap or
-        // an inherited getter fires.
-        const value = try getPropertyChain(realm, obj, key);
+        // an inherited getter fires. For a Proxy receiver, route
+        // through `getPropertyValue` so the user-installed `get`
+        // trap observes the read (test262
+        // built-ins/Object/values/observable-operations.js,
+        // /entries/observable-operations.js).
+        const value = try getPropertyValue(realm, obj, key, heap_mod.taggedObject(obj));
         const key_str = @as(*JSString, @ptrCast(@alignCast(key_v.asString())));
         out.append(realm.allocator, .{ .key_str = key_str, .value = value }) catch return error.OutOfMemory;
     }
@@ -762,11 +803,65 @@ fn enumerableOwnPropertyKeyValues(
     return out.toOwnedSlice(realm.allocator) catch return error.OutOfMemory;
 }
 
+/// Shared §17 walk for `Object.values` / `Object.entries` over a
+/// function object. JSFunction's property bag carries the
+/// installed `length` / `name` (and any user `fn.x = …` writes);
+/// emit each enumerable own data key per spec ordering, then
+/// build the result Array.
+const FunctionEnumKind = enum { value, entry };
+
+fn functionEnumerableOwnValues(
+    realm: *Realm,
+    fn_obj: *@import("../function.zig").JSFunction,
+    kind: FunctionEnumKind,
+) NativeError!Value {
+    const result = realm.heap.allocateObject() catch return error.OutOfMemory;
+    result.prototype = realm.intrinsics.array_prototype;
+    result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    var idx: usize = 0;
+    var fit = fn_obj.properties.iterator();
+    while (fit.next()) |entry| {
+        const key = entry.key_ptr.*;
+        if (std.mem.startsWith(u8, key, "__cynic_")) continue;
+        if (isSymbolKey(key)) continue;
+        if (!fn_obj.flagsForOwn(key).enumerable) continue;
+        const value = entry.value_ptr.*;
+        var ibuf: [16]u8 = undefined;
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
+        const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+        switch (kind) {
+            .value => {
+                result.set(realm.allocator, idx_owned.bytes, value) catch return error.OutOfMemory;
+            },
+            .entry => {
+                const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
+                pair.prototype = realm.intrinsics.array_prototype;
+                pair.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+                const key_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                pair.set(realm.allocator, "0", Value.fromString(key_owned)) catch return error.OutOfMemory;
+                pair.set(realm.allocator, "1", value) catch return error.OutOfMemory;
+                pair.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
+                result.set(realm.allocator, idx_owned.bytes, heap_mod.taggedObject(pair)) catch return error.OutOfMemory;
+            },
+        }
+        idx += 1;
+    }
+    result.set(realm.allocator, "length", Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(result);
+}
+
 fn objectValues(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const raw = argOr(args, 0, Value.undefined_);
     // §20.1.2.21 step 1 — `Let obj be ? ToObject(O)`.
     const coerced = try enumerableOwnPropertyHelperToObject(realm, raw, "Object.values called on null or undefined");
+    // §17 — Function objects are also ordinary objects; walk their
+    // enumerable own data properties directly (the JSFunction heap
+    // struct isn't a JSObject so `enumerableOwnPropertyKeyValues`
+    // can't accept it).
+    if (heap_mod.valueAsFunction(coerced)) |fn_obj| {
+        return functionEnumerableOwnValues(realm, fn_obj, .value);
+    }
     const obj = heap_mod.valueAsPlainObject(coerced) orelse return throwTypeError(realm, "Object.values called on non-object");
     // §20.1.2.21 step 2 — `Let nameList be ?
     // EnumerableOwnPropertyNames(obj, value)`.
@@ -793,6 +888,13 @@ fn objectEntries(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const raw = argOr(args, 0, Value.undefined_);
     // §20.1.2.5 step 1 — `Let obj be ? ToObject(O)`.
     const coerced = try enumerableOwnPropertyHelperToObject(realm, raw, "Object.entries called on null or undefined");
+    // §17 — Function objects participate in `Object.entries` too;
+    // walk the function bag directly because JSFunction isn't a
+    // JSObject (test262
+    // built-ins/Object/entries/order-after-define-property-with-function.js).
+    if (heap_mod.valueAsFunction(coerced)) |fn_obj| {
+        return functionEnumerableOwnValues(realm, fn_obj, .entry);
+    }
     const obj = heap_mod.valueAsPlainObject(coerced) orelse return throwTypeError(realm, "Object.entries called on non-object");
     // step 2 — `Let nameList be ?
     // EnumerableOwnPropertyNames(obj, key+value)`.
@@ -1166,8 +1268,20 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             if (!trap_v.isUndefined() and !trap_v.isNull()) {
                 const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'defineProperty' trap is not callable");
                 const interpreter = @import("../interpreter.zig");
-                const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                const trap_args = [_]Value{ proxy_target_v, Value.fromString(key_str), desc_v };
+                // §10.5.6 step 7 — pass the property key as a Symbol
+                // when the slot is symbol-keyed (Cynic flattens
+                // symbols into `@@<name>` / `<sym:N>` slugs internally
+                // — the trap, per §6.1.7.1, must receive a Symbol
+                // Value). Plain string keys round-trip as Strings
+                // (test262 built-ins/Object/seal/proxy-no-ownkeys-returned-keys-order.js,
+                // built-ins/Object/defineProperties/proxy-no-ownkeys-returned-keys-order.js).
+                const key_v = if ((std.mem.startsWith(u8, key, "@@") or std.mem.startsWith(u8, key, "<sym:")) and realm.heap.symbolForKey(key) != null)
+                    heap_mod.taggedSymbol(realm.heap.symbolForKey(key).?)
+                else blk_key: {
+                    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                    break :blk_key Value.fromString(key_str);
+                };
+                const trap_args = [_]Value{ proxy_target_v, key_v, desc_v };
                 const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
@@ -1642,17 +1756,35 @@ fn objectDefineProperties(realm: *Realm, this_value: Value, args: []const Value)
         break :blk_props try intrinsics.toObjectThis(realm, props_v);
     };
 
-    // §20.1.2.3.1 ObjectDefineProperties — walk OwnPropertyKeys in
-    // spec order (integer-indexed ascending, then string-keyed in
-    // insertion order). This includes accessor-backed keys, whose
-    // getters must fire per step 5.b.ii.
-    const keys = try ownPropertyKeysOrdered(realm, props);
+    // §20.1.2.3.1 step 3 — `Let keys be ? props.[[OwnPropertyKeys]]()`.
+    // For a Proxy `props` this fires the `ownKeys` trap (test262
+    // built-ins/Object/defineProperties/proxy-no-ownkeys-returned-keys-order.js).
+    // ownPropertyKeysOrdered walks in spec order (integer-indexed
+    // ascending, then string-keyed in insertion order); accessor-
+    // backed keys are included so their getters fire per step 5.b.ii.
+    const props_is_proxy = props.proxy_target != null or props.proxy_revoked;
+    const keys = if (try proxyOwnKeysOrNull(realm, props)) |k| k else try ownPropertyKeysOrdered(realm, props);
     defer realm.allocator.free(keys);
     for (keys) |key| {
-        if (!props.flagsFor(key).enumerable) continue;
-        // §20.1.2.3.1 step 5.b.ii — Get each descriptor through the
-        // chain so accessor-backed descriptor slots fire.
-        const desc_v = try getPropertyChain(realm, props, key);
+        // §20.1.2.3.1 step 5.a — `Let propDesc be ? props.[[GetOwnProperty]](nextKey)`,
+        // step 5.b — only iterate when `propDesc.[[Enumerable]]` is true.
+        // For a Proxy receiver, dispatch through the
+        // `getOwnPropertyDescriptor` trap and read the descriptor's
+        // `enumerable` field — the trap may have overridden it.
+        if (props_is_proxy) {
+            const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+            const desc_args = [_]Value{ heap_mod.taggedObject(props), Value.fromString(key_str) };
+            const desc_v = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &desc_args);
+            if (desc_v.isUndefined()) continue;
+            const desc_obj = heap_mod.valueAsPlainObject(desc_v) orelse continue;
+            const enum_v = desc_obj.get("enumerable");
+            if (!enum_v.isBool() or !enum_v.asBool()) continue;
+        } else {
+            if (!props.flagsFor(key).enumerable) continue;
+        }
+        // §20.1.2.3.1 step 5.b.ii — `Let descObj be ? Get(props, nextKey)`.
+        // Route through `getPropertyValue` so a Proxy `get` trap fires.
+        const desc_v = try getPropertyValue(realm, props, key, heap_mod.taggedObject(props));
         const inner_args = [_]Value{ heap_mod.taggedObject(target), blk: {
             const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
             break :blk Value.fromString(k_str);
@@ -1961,14 +2093,36 @@ fn objectGetOwnPropertyDescriptors(realm: *Realm, this_value: Value, args: []con
     const obj = heap_mod.valueAsPlainObject(target) orelse return throwTypeError(realm, "Object.getOwnPropertyDescriptors target is not an object");
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.object_prototype;
-    // §20.1.2.10 — walk OwnPropertyKeys(O), which on an Array
-    // exotic surfaces the packed-element indices.
-    const keys = try ownPropertyKeysOrdered(realm, obj);
+    // §20.1.2.10 step 2 — `Let ownKeys be ? O.[[OwnPropertyKeys]]()`.
+    // For a Proxy this fires the `ownKeys` trap (test262
+    // built-ins/Object/getOwnPropertyDescriptors/observable-operations.js
+    // and /proxy-no-ownkeys-returned-keys-order.js). On an Array
+    // exotic ownPropertyKeysOrdered surfaces the packed-element
+    // indices.
+    const keys = if (try proxyOwnKeysOrNull(realm, obj)) |k| k else try ownPropertyKeysOrdered(realm, obj);
     defer realm.allocator.free(keys);
     for (keys) |key| {
+        // §20.1.2.10 step 4 — `Let desc be ? obj.[[GetOwnProperty]](key)`,
+        // step 5 — `Let descriptor be FromPropertyDescriptor(desc)`.
+        // FromPropertyDescriptor returns undefined when desc is
+        // undefined; the spec's CreateDataPropertyOrThrow then skips
+        // (§7.3.4 wraps CreateDataProperty which only fires for
+        // non-undefined `descriptor`). Filter the undefined case so
+        // a Proxy `getOwnPropertyDescriptor` trap that returns
+        // `undefined` doesn't surface a `key: undefined` slot
+        // (test262 built-ins/Object/getOwnPropertyDescriptors/proxy-undefined-descriptor.js).
         const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-        const inner_args = [_]Value{ heap_mod.taggedObject(obj), Value.fromString(k_str) };
+        // Symbol-keyed properties must be passed back as a Symbol
+        // primitive (Cynic flattens to `<sym:N>` internally), so
+        // `objectGetOwnPropertyDescriptor`'s ToPropertyKey resolves
+        // to the same slot the `ownKeys` walk produced.
+        const key_arg: Value = if (isSymbolKey(key))
+            if (realm.heap.symbolForKey(key)) |sym| heap_mod.taggedSymbol(sym) else Value.fromString(k_str)
+        else
+            Value.fromString(k_str);
+        const inner_args = [_]Value{ heap_mod.taggedObject(obj), key_arg };
         const desc = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &inner_args);
+        if (desc.isUndefined()) continue;
         out.set(realm.allocator, k_str.bytes, desc) catch return error.OutOfMemory;
     }
     return heap_mod.taggedObject(out);
@@ -3165,25 +3319,41 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const max_iter: i64 = 1 << 24;
     var i: i64 = 0;
     while (i < max_iter) : (i += 1) {
+        // §23.1 GroupBy step 6.b — `Let next be ? IteratorStep(iteratorRecord)`.
+        // A user `next` that throws (test262
+        // built-ins/Object/groupBy/iterator-next-throws.js) must
+        // propagate the original throw value; record the exception
+        // on the realm so the JS `assert.throws(Test262Error, …)`
+        // catches it instead of a synthetic TypeError.
         const step = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
         const result_v = switch (step) {
             .value, .yielded => |v| v,
-            .thrown => return error.NativeThrew,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
         };
         const result = heap_mod.valueAsPlainObject(result_v) orelse break;
         if (toBoolean(try getPropertyChain(realm, result, "done"))) break;
         const item = try getPropertyChain(realm, result, "value");
         const cb_args = [_]Value{ item, Value.fromInt32(@intCast(i)) };
+        // §23.1 GroupBy step 6.e — `Let key be Completion(Call(callbackfn, …))`.
+        // A user callback throw (test262
+        // built-ins/Object/groupBy/callback-throws.js) must surface
+        // intact — register the exception on the realm.
         const key_outcome = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &cb_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
         const key_v = switch (key_outcome) {
             .value, .yielded => |v| v,
-            .thrown => return error.NativeThrew,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
         };
         const key_str = if (key_v.isString())
             (@as(*JSString, @ptrCast(@alignCast(key_v.asString())))).bytes
