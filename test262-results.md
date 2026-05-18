@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 91.48 % | 98.52 % | 36723 / 40144 | 36723 / 37274 |
+| **runtime** | 91.63 % | 98.69 % | 36763 / 40122 | 36763 / 37252 |
 
 
 ## Where the runtime stands, by area
@@ -24,37 +24,33 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_10–99 fails_** | | | | | |
-| `built-ins/Array` | 2997 | 43 | 36 | 97 % | 99 % |
+| `built-ins/Array` | 2997 | 38 | 36 | 98 % | 99 % |
 | `built-ins/ArrayBuffer` | 181 | 10 | 4 | 93 % | 95 % |
 | `built-ins/Iterator` | 403 | 22 | 6 | 94 % | 95 % |
-| `built-ins/Object` | 3273 | 46 | 80 | 96 % | 99 % |
+| `built-ins/Object` | 3283 | 36 | 80 | 97 % | 99 % |
 | `built-ins/Promise` | 609 | 19 | 38 | 91 % | 97 % |
-| `built-ins/Proxy` | 282 | 16 | 13 | 91 % | 95 % |
-| `built-ins/Reflect` | 142 | 11 | 0 | 93 % | 93 % |
+| `built-ins/Proxy` | 282 | 11 | 13 | 92 % | 96 % |
 | `built-ins/RegExp` | 1518 | 84 | 161 | 86 % | 95 % |
 | `built-ins/Set` | 371 | 10 | 1 | 97 % | 97 % |
-| `built-ins/String` | 1171 | 34 | 5 | 97 % | 97 % |
+| `built-ins/String` | 1187 | 16 | 5 | 98 % | 99 % |
 | `built-ins/TypedArray` | 1394 | 29 | 8 | 97 % | 98 % |
 | `built-ins/TypedArrayConstructors` | 641 | 19 | 16 | 95 % | 97 % |
-| `language/expressions` | 9697 | 78 | 972 | 90 % | 99 % |
+| `language/expressions` | 9698 | 74 | 972 | 90 % | 99 % |
 | `language/statements` | 8378 | 34 | 672 | 92 % | 100 % |
 | **_1–9 fails_** | | | | | |
-| `built-ins/AggregateError` | 20 | 4 | 0 | 83 % | 83 % |
+| `built-ins/AggregateError` | 20 | 3 | 0 | 87 % | 87 % |
 | `built-ins/ArrayIteratorPrototype` | 15 | 4 | 8 | 56 % | 79 % |
 | `built-ins/AsyncFunction` | 12 | 2 | 0 | 86 % | 86 % |
 | `built-ins/AsyncGeneratorFunction` | 7 | 2 | 0 | 78 % | 78 % |
 | `built-ins/AsyncGeneratorPrototype` | 42 | 6 | 0 | 88 % | 88 % |
 | `built-ins/BigInt` | 71 | 5 | 0 | 93 % | 93 % |
 | `built-ins/DataView` | 465 | 1 | 55 | 89 % | 100 % |
-| `built-ins/Error` | 52 | 4 | 0 | 93 % | 93 % |
-| `built-ins/Function` | 254 | 2 | 10 | 95 % | 99 % |
+| `built-ins/Error` | 52 | 3 | 0 | 95 % | 95 % |
 | `built-ins/GeneratorFunction` | 7 | 2 | 0 | 78 % | 78 % |
 | `built-ins/GeneratorPrototype` | 57 | 4 | 0 | 93 % | 93 % |
-| `built-ins/JSON` | 141 | 3 | 21 | 85 % | 98 % |
 | `built-ins/Map` | 168 | 1 | 1 | 99 % | 99 % |
 | `built-ins/Number` | 334 | 5 | 0 | 99 % | 99 % |
-| `built-ins/RegExpStringIteratorPrototype` | 11 | 6 | 0 | 65 % | 65 % |
-| `built-ins/StringIteratorPrototype` | 3 | 4 | 0 | 43 % | 43 % |
+| `built-ins/Reflect` | 143 | 9 | 0 | 94 % | 94 % |
 | `built-ins/Symbol` | 69 | 6 | 6 | 85 % | 92 % |
 | `built-ins/ThrowTypeError` | 12 | 1 | 0 | 92 % | 92 % |
 | `built-ins/decodeURI` | 53 | 2 | 0 | 96 % | 96 % |
@@ -68,7 +64,7 @@ browser-era built-ins …).
 | `language/computed-property-names` | 45 | 3 | 0 | 94 % | 94 % |
 | `language/destructuring` | 16 | 2 | 1 | 84 % | 89 % |
 | `language/module-code` | 571 | 8 | 14 | 96 % | 99 % |
-| `language/types` | 94 | 4 | 9 | 88 % | 96 % |
+| `language/types` | 94 | 3 | 9 | 89 % | 97 % |
 | **_0 fails (passing or wholly OOS)_** | | | | | |
 | ~~`built-ins/AbstractModuleSource`~~ | ~~0~~ | ~~0~~ | ~~8~~ | ~~0 %~~ | ~~0 %~~ |
 | ~~`built-ins/AsyncDisposableStack`~~ | ~~0~~ | ~~0~~ | ~~103~~ | ~~0 %~~ | ~~0 %~~ |
@@ -78,12 +74,16 @@ browser-era built-ins …).
 | `built-ins/Date` | 583 | 0 | 0 | 100 % | 100 % |
 | ~~`built-ins/DisposableStack`~~ | ~~0~~ | ~~0~~ | ~~92~~ | ~~0 %~~ | ~~0 %~~ |
 | `built-ins/FinalizationRegistry` | 46 | 0 | 0 | 100 % | 100 % |
+| `built-ins/Function` | 254 | 0 | 10 | 96 % | 100 % |
 | `built-ins/Infinity` | 4 | 0 | 2 | 67 % | 100 % |
+| `built-ins/JSON` | 143 | 0 | 21 | 87 % | 100 % |
 | `built-ins/MapIteratorPrototype` | 11 | 0 | 0 | 100 % | 100 % |
 | `built-ins/Math` | 322 | 0 | 5 | 98 % | 100 % |
 | `built-ins/NaN` | 4 | 0 | 2 | 67 % | 100 % |
 | `built-ins/NativeErrors` | 88 | 0 | 0 | 100 % | 100 % |
+| `built-ins/RegExpStringIteratorPrototype` | 17 | 0 | 0 | 100 % | 100 % |
 | `built-ins/SetIteratorPrototype` | 11 | 0 | 0 | 100 % | 100 % |
+| `built-ins/StringIteratorPrototype` | 7 | 0 | 0 | 100 % | 100 % |
 | ~~`built-ins/SuppressedError`~~ | ~~0~~ | ~~0~~ | ~~21~~ | ~~0 %~~ | ~~0 %~~ |
 | `built-ins/WeakMap` | 101 | 0 | 0 | 100 % | 100 % |
 | `built-ins/WeakRef` | 28 | 0 | 0 | 100 % | 100 % |
@@ -157,16 +157,19 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-18 — cynic `193038f`, test262 `d0c1b455`
+### 2026-05-18 — cynic `627682a`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 91.48 % | 98.52 % | 36723 / 40144 | 36723 / 37274 | +61 | 1m 44s |
+| **runtime** | 91.63 % | 98.69 % | 36763 / 40122 | 36763 / 37252 | +101 | 4m 07s |
 
 Biggest movers (runtime):
 
-- `language/expressions` +5
-- `built-ins/Object` +1
+- `built-ins/String` +16
+- `built-ins/Object` +10
+- `built-ins/RegExpStringIteratorPrototype` +6
+- `built-ins/StringIteratorPrototype` +4
+- `built-ins/JSON` +2
 
 ### 2026-05-17 — cynic `400fbae`, test262 `d0c1b455`
 

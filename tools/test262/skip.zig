@@ -724,21 +724,15 @@ pub const skip_ses_substring_pairs = [_][2][]const u8{
 };
 
 pub const skip_ses_features = [_][]const u8{
-    // §25.2 SharedArrayBuffer — Cynic's edge-runtime hosts are
-    // single-agent-per-isolate (AGENTS.md "shared memory … out").
-    // The `built-ins/SharedArrayBuffer/` + `-sab.js`-suffix paths
-    // are already pruned wholesale, but cross-bucket fixtures
-    // tagged `features: [SharedArrayBuffer]` (e.g. `ArrayBuffer/
-    // prototype/{resize,transfer,detached,slice,…}/this-is-
-    // sharedarraybuffer.js`, `TypedArrayConstructors/.../
-    // typedarray-backed-by-sharedarraybuffer.js`,
-    // `TypedArrayConstructors/internals/Delete/.../indexed-value-
-    // sab-strict.js`) live outside those paths. Confirmed all
-    // call `new SharedArrayBuffer(...)` directly; none of the
-    // currently-passing SAB-tagged fixtures lie outside the
-    // existing path/-sab.js skips, so the feature-flag prune
-    // doesn't disturb any pass. ~13 fail → skip.
-    "SharedArrayBuffer",
+    // SES carve-outs (eval, SharedArrayBuffer, Atomics) skip by
+    // PATH (the `skip_ses_paths` / `skip_ses_path_suffixes` /
+    // `skip_ses_substrings` rules above), NOT by feature tag.
+    // Feature-tag skipping hides cross-bucket fixtures that only
+    // *use* the surface name (e.g. an `ArrayBuffer` fixture tagged
+    // `[SharedArrayBuffer]` but exercising legitimate non-SAB
+    // ArrayBuffer behaviour). Path/suffix rules are surgical;
+    // feature-tag rules over-fire. See the `runtime-only gaps are
+    // NOT hidden` test below for the asserted policy.
 };
 
 // ── Group 3: Stage maturity ─────────────────────────────────────────
