@@ -5073,7 +5073,8 @@ fn runFrames(
                     const outcome = try callJSFunction(allocator, realm, hi_fn, rhs, &hi_args);
                     switch (outcome) {
                         .value, .yielded => |v| {
-                            acc = Value.fromBool(v.toBooleanPrimitive());
+                            // §13.10.2 step 4.a — `ToBoolean(? Call(…))`.
+                            acc = Value.fromBool(arith.toBoolean(v));
                             continue;
                         },
                         .thrown => |ex| {
