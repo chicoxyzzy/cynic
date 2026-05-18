@@ -34,8 +34,13 @@ pub fn install(realm: *Realm) !void {
         .ctor = dateConstructor,
         .arity = 7,
         .is_class = false,
-        // §21.4.4 — `[object Date]` via @@toStringTag.
-        .to_string_tag = "Date",
+        // §21.4.4 — Date.prototype does NOT have a @@toStringTag
+        // entry; `Object.prototype.toString` derives `[object Date]`
+        // from the `[[DateValue]]` internal slot (step 14 of
+        // §20.1.3.6). The slot-based path lets user code install
+        // its own toStringTag via `d[Symbol.toStringTag] = "..."`,
+        // since no non-writable inherited descriptor blocks the
+        // assignment.
     });
     const fn_obj = r.ctor;
     const proto = r.proto;

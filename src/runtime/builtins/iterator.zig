@@ -101,6 +101,19 @@ pub fn install(realm: *Realm) !void {
     if (realm.intrinsics.string_iterator_prototype) |sip| {
         sip.prototype = proto;
     }
+    // §24.1.5.2 %MapIteratorPrototype% / §24.2.5.2 %SetIteratorPrototype%
+    // — both are eagerly allocated in `collections.installMap` /
+    // `installSet` (which run before this install) with a temporary
+    // `%Object.prototype%` parent. Re-parent to `%IteratorPrototype%`
+    // so deleting a Map/Set iterator's own `@@toStringTag` falls
+    // through to `@@toStringTag === "Iterator"` one level up
+    // (`built-ins/Object/prototype/toString/symbol-tag-{map,set}-builtin.js`).
+    if (realm.intrinsics.map_iterator_prototype) |mip| {
+        mip.prototype = proto;
+    }
+    if (realm.intrinsics.set_iterator_prototype) |sip| {
+        sip.prototype = proto;
+    }
 }
 
 fn iteratorConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

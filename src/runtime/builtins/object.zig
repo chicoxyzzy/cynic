@@ -1543,20 +1543,29 @@ fn objectDefineProperties(realm: *Realm, this_value: Value, args: []const Value)
     _ = this_value;
     const target = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Object.defineProperties target is not an object");
     // §20.1.2.3.1 step 2 — `props = ? ToObject(Properties)`.
-    // Boolean / Number / String primitives box into wrappers with
-    // no extra enumerable own keys (becomes a no-op iteration).
-    // Function objects flow through unchanged (functions are
-    // Objects per §17). `null` / `undefined` throw.
+    // `null` / `undefined` throw; primitives box into wrappers.
+    // Boolean / Number / Symbol / BigInt wrappers carry no extra
+    // enumerable own keys, so iteration is a no-op. A non-empty
+    // primitive String wraps into a String exotic whose indexed-
+    // character own properties ARE enumerable per §22.1.4.4, so
+    // each character flows into ToPropertyDescriptor which throws
+    // on a non-object descObj
+    // (`built-ins/Object/create/properties-arg-to-object-non-empty-string.js`).
+    // Functions are Objects per §17 and must be walked directly so
+    // user-installed getter / data props see `this === fn`
+    // (`built-ins/Object/create/15.2.3.5-4-5.js`); the JSFunction
+    // heap struct can't pose as `*JSObject` for `getPropertyChain`
+    // so the function case routes through `defineFromFunctionProps`.
     const props_v = argOr(args, 1, Value.undefined_);
+    if (props_v.isNull() or props_v.isUndefined()) {
+        return throwTypeError(realm, "Object.defineProperties properties is not an object");
+    }
+    if (heap_mod.valueAsFunction(props_v)) |props_fn| {
+        return defineFromFunctionProps(realm, target, props_fn);
+    }
     const props: *@import("../object.zig").JSObject = blk_props: {
         if (heap_mod.valueAsPlainObject(props_v)) |o| break :blk_props o;
-        if (props_v.isNull() or props_v.isUndefined()) {
-            return throwTypeError(realm, "Object.defineProperties properties is not an object");
-        }
-        // §7.1.18 ToObject for primitives + function objects.
-        // Symbols / BigInts box into wrappers with no own enumerable
-        // keys; same with Function (its own keys like `length` /
-        // `name` are non-enumerable).
+        // §7.1.18 ToObject for non-null/non-undefined primitives.
         break :blk_props try intrinsics.toObjectThis(realm, props_v);
     };
 
@@ -1576,6 +1585,64 @@ fn objectDefineProperties(realm: *Realm, this_value: Value, args: []const Value)
             break :blk Value.fromString(k_str);
         }, desc_v };
         _ = try objectDefineProperty(realm, Value.undefined_, &inner_args);
+    }
+    return heap_mod.taggedObject(target);
+}
+
+/// §20.1.2.3.1 ObjectDefineProperties when `Properties` is a
+/// Function object. JSFunction and JSObject are distinct heap
+/// structs in Cynic, so we can't pass the function through the
+/// JSObject-typed `getPropertyChain`; walk its `properties` /
+/// `accessors` bags directly and fire getters with the original
+/// function as the receiver (so user code that observes `this`
+/// inside the getter sees the function, not a wrapper).
+fn defineFromFunctionProps(
+    realm: *Realm,
+    target: *@import("../object.zig").JSObject,
+    props_fn: *@import("../function.zig").JSFunction,
+) NativeError!Value {
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(realm.allocator);
+    var pit = props_fn.properties.iterator();
+    while (pit.next()) |entry| {
+        const key = entry.key_ptr.*;
+        _ = seen.put(realm.allocator, key, {}) catch return error.OutOfMemory;
+        // No explicit flags entry ⇒ default to a writable /
+        // enumerable / configurable data descriptor (the same
+        // default JSObject.flagsFor returns for an unknown key).
+        // A user `fn.prop = …` write doesn't pin flags, so the
+        // spec-default applies.
+        const flags = props_fn.property_flags.get(key) orelse @import("../object.zig").PropertyFlags{};
+        if (!flags.enumerable) continue;
+        const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+        const desc_v = entry.value_ptr.*;
+        const inner = [_]Value{ heap_mod.taggedObject(target), Value.fromString(k_str), desc_v };
+        _ = try objectDefineProperty(realm, Value.undefined_, &inner);
+    }
+    var ait = props_fn.accessors.iterator();
+    while (ait.next()) |entry| {
+        const key = entry.key_ptr.*;
+        if (seen.contains(key)) continue;
+        const flags = props_fn.property_flags.get(key) orelse continue;
+        if (!flags.enumerable) continue;
+        const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+        var desc_v: Value = Value.undefined_;
+        if (entry.value_ptr.getter) |getter| {
+            const interpreter = @import("../interpreter.zig");
+            const outcome = interpreter.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(props_fn), &.{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            desc_v = switch (outcome) {
+                .value, .yielded => |v| v,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            };
+        }
+        const inner = [_]Value{ heap_mod.taggedObject(target), Value.fromString(k_str), desc_v };
+        _ = try objectDefineProperty(realm, Value.undefined_, &inner);
     }
     return heap_mod.taggedObject(target);
 }
@@ -2038,79 +2105,18 @@ fn objectCreate(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     } else {
         return throwTypeError(realm, "Object.create prototype must be an Object or null");
     }
-    // Optional second arg: properties descriptor.
-    // §20.1.2.2 Object.create step 3 → ObjectDefineProperties step 2:
-    // `Let props be ? ToObject(Properties)`. Primitives (numbers,
-    // strings, booleans, BigInts, Symbols) wrap into their boxed
-    // form, which carries no own enumerable keys — observably a
-    // no-op define-properties walk. Functions ARE objects and must
-    // route through the function-keyed lookup so a `props.prop`
-    // accessor / data descriptor fires.
+    // §20.1.2.2 Object.create step 3 — `If Properties is not
+    // undefined, then Return ? ObjectDefineProperties(obj, Properties)`.
+    // Delegate to the shared `Object.defineProperties` path so the
+    // spec's `Let props be ? ToObject(Properties)` (step 2 of
+    // §20.1.2.3.1 ObjectDefineProperties) fires the TypeError for
+    // `null`, and primitive-string wrappers' own enumerable indexed
+    // characters get walked into ToPropertyDescriptor (which throws
+    // on the first non-object descObj — `Object.create({}, 'h')`
+    // sees descObj === 'h' for the first index).
     if (args.len > 1 and !args[1].isUndefined()) {
-        const props_v = args[1];
-        if (heap_mod.valueAsPlainObject(props_v)) |props| {
-            const keys = try ownPropertyKeysOrdered(realm, props);
-            defer realm.allocator.free(keys);
-            for (keys) |key| {
-                if (!props.flagsFor(key).enumerable) continue;
-                const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                const desc_v = try getPropertyChain(realm, props, key);
-                const inner = [_]Value{ heap_mod.taggedObject(obj), Value.fromString(k_str), desc_v };
-                _ = try objectDefineProperty(realm, Value.undefined_, &inner);
-            }
-        } else if (heap_mod.valueAsFunction(props_v)) |props_fn| {
-            // Function carries its own property/accessor bag — walk
-            // the same enumerable keys the spec asks for. (No
-            // ownPropertyKeysOrdered helper for JSFunction; iterate
-            // .properties + .accessors directly.)
-            var seen: std.StringHashMapUnmanaged(void) = .empty;
-            defer seen.deinit(realm.allocator);
-            var pit = props_fn.properties.iterator();
-            while (pit.next()) |entry| {
-                const key = entry.key_ptr.*;
-                _ = seen.put(realm.allocator, key, {}) catch return error.OutOfMemory;
-                // No explicit flags entry ⇒ default to a writable /
-                // enumerable / configurable data descriptor (the same
-                // default JSObject.flagsFor returns for an unknown
-                // key). A user `fn.prop = …` write doesn't pin
-                // flags, so the spec-default applies.
-                const flags = props_fn.property_flags.get(key) orelse @import("../object.zig").PropertyFlags{};
-                if (!flags.enumerable) continue;
-                const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                const desc_v = entry.value_ptr.*;
-                const inner = [_]Value{ heap_mod.taggedObject(obj), Value.fromString(k_str), desc_v };
-                _ = try objectDefineProperty(realm, Value.undefined_, &inner);
-            }
-            var ait = props_fn.accessors.iterator();
-            while (ait.next()) |entry| {
-                const key = entry.key_ptr.*;
-                if (seen.contains(key)) continue;
-                const flags = props_fn.property_flags.get(key) orelse continue;
-                if (!flags.enumerable) continue;
-                const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                // Fire the accessor (if any) to read the descriptor.
-                var desc_v: Value = Value.undefined_;
-                if (entry.value_ptr.getter) |getter| {
-                    const interpreter = @import("../interpreter.zig");
-                    const outcome = interpreter.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(props_fn), &.{}) catch |err| switch (err) {
-                        error.OutOfMemory => return error.OutOfMemory,
-                        else => return error.NativeThrew,
-                    };
-                    desc_v = switch (outcome) {
-                        .value, .yielded => |v| v,
-                        .thrown => |ex| {
-                            realm.pending_exception = ex;
-                            return error.NativeThrew;
-                        },
-                    };
-                }
-                const inner = [_]Value{ heap_mod.taggedObject(obj), Value.fromString(k_str), desc_v };
-                _ = try objectDefineProperty(realm, Value.undefined_, &inner);
-            }
-        }
-        // Primitives ToObject-wrap and the wrapper has no own enumerable
-        // keys: observably a no-op (Boolean/Number/String wrappers'
-        // few own keys are non-enumerable; Symbol/BigInt have none).
+        const dp_args = [_]Value{ heap_mod.taggedObject(obj), args[1] };
+        _ = try objectDefineProperties(realm, Value.undefined_, &dp_args);
     }
     return heap_mod.taggedObject(obj);
 }
@@ -3357,8 +3363,14 @@ pub fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value
             // `built-ins/NativeErrors/<X>/prototype/not-error-object.js`)
             // so the bare prototype falls through to "Object".
             if (obj.has_error_data) break :blk "Error";
-            // Date / arguments: rely on @@toStringTag walked in
-            // step 15 below. Default falls through.
+            // §20.1.3.6 step 14 — `[[DateValue]]` (Cynic's `date_ms`
+            // slot) drives the "Date" tag. Doing this from the slot
+            // rather than a `Date.prototype[@@toStringTag]` entry
+            // lets user code install an own toStringTag on a Date
+            // instance (the inherited descriptor would otherwise be
+            // writable:false and block the assignment per §10.1.9.2;
+            // `built-ins/Object/prototype/toString/symbol-tag-override-instances.js`).
+            if (obj.date_ms != null) break :blk "Date";
             break :blk "Object";
         }
         break :blk "Object";
