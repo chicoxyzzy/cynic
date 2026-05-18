@@ -752,9 +752,11 @@ pub fn objectGetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
     const raw = argOr(args, 0, Value.undefined_);
     // §20.1.2.13 step 1 — `Let obj be ? ToObject(O)`. ES2015+
     // accepts primitives; the wrapper's [[Prototype]] is the
-    // matching `<Type>.prototype`. Without this, `Object.getPrototypeOf(0)`
-    // throws instead of returning `Number.prototype`.
-    const arg = if (raw.isInt32() or raw.isDouble() or raw.isString() or raw.isBool()) blk: {
+    // matching `<Type>.prototype`. Without this,
+    // `Object.getPrototypeOf(0)` throws instead of returning
+    // `Number.prototype`, and `Object.getPrototypeOf(Symbol())`
+    // misses `Symbol.prototype` (built-ins/Symbol/constructor.js).
+    const arg = if (raw.isInt32() or raw.isDouble() or raw.isString() or raw.isBool() or heap_mod.isSymbol(raw) or heap_mod.isBigInt(raw)) blk: {
         const w = try intrinsics.toObjectThis(realm, raw);
         break :blk heap_mod.taggedObject(w);
     } else raw;

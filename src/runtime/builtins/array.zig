@@ -142,7 +142,10 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethod(realm, arr_ctor, "from", arrayFrom, 1);
         try installNativeMethod(realm, arr_ctor, "fromAsync", arrayFromAsync, 1);
         // §22.1.2.5 get Array [ @@species ] returns this.
-        const species_getter = try realm.heap.allocateFunctionNative(arraySpeciesGetter, 0, "[Symbol.species]");
+        // §10.2.9 SetFunctionName step 7 — a getter's name is
+        // prefixed with `"get "`. `Object.getOwnPropertyDescriptor
+        // (Array, Symbol.species).get.name === "get [Symbol.species]"`.
+        const species_getter = try realm.heap.allocateFunctionNative(arraySpeciesGetter, 0, "get [Symbol.species]");
         species_getter.proto = realm.intrinsics.function_prototype;
         const entry = try arr_ctor.accessors.getOrPut(realm.allocator, "@@species");
         entry.value_ptr.* = .{ .getter = species_getter };

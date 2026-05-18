@@ -233,7 +233,8 @@ pub fn install(realm: *Realm) !void {
     // unless the user overrides it; subclasses pick up the
     // inherited getter and resolve to the subclass.
     {
-        const species_getter = try realm.heap.allocateFunctionNative(typedArraySpeciesGetter, 0, "[Symbol.species]");
+        // §10.2.9 step 7 — getter names carry the `"get "` prefix.
+        const species_getter = try realm.heap.allocateFunctionNative(typedArraySpeciesGetter, 0, "get [Symbol.species]");
         species_getter.proto = realm.intrinsics.function_prototype;
         const entry = try ta_ctor.accessors.getOrPut(realm.allocator, "@@species");
         entry.value_ptr.* = .{ .getter = species_getter };

@@ -38,7 +38,10 @@ pub fn install(realm: *Realm) !void {
     const r = try installConstructor(realm, .{
         .name = "Symbol",
         .ctor = symbolConstructor,
-        .arity = 1,
+        // §20.4.1 — `Symbol`'s `length` is 0; the description
+        // parameter is optional and §17 length-counts only the
+        // arguments before the first optional / rest / destructure.
+        .arity = 0,
         .is_class = false,
         .set_home_object = false,
         .to_string_tag = "Symbol",
