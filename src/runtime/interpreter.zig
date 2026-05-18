@@ -2621,7 +2621,37 @@ pub fn resolvePromiseWithValue(realm: *Realm, target: *JSObject, v: Value) !void
             return;
         }
         if (v_obj.isPromise()) {
-            try chainPromiseToInner(realm, v_obj, target);
+            // §27.2.1.3.2 step 11-13 — when `v` is a Promise, the spec
+            // queues a PromiseResolveThenableJob that invokes
+            // `v.then(resolveFn, rejectFn)`. Each `.then` call allocates
+            // a fresh NewPromiseCapability via SpeciesConstructor, which
+            // is observable when `v` (or `target`) is a user subclass of
+            // Promise, or when `Promise.prototype.then` has been
+            // monkey-patched. For vanilla Promise-to-vanilla-Promise
+            // adoption the count is unobservable and the inline
+            // reaction shortcut (`chainPromiseToInner`) is the
+            // equivalent fast path — that's the hot `await` /
+            // chain case so we keep the shortcut there.
+            if (isVanillaPromiseChain(realm, target, v_obj)) {
+                try chainPromiseToInner(realm, v_obj, target);
+                return;
+            }
+            const intrinsics2 = @import("intrinsics.zig");
+            const then_v2 = intrinsics2.getPropertyChain(realm, v_obj, "then") catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    const ex = realm.pending_exception orelse Value.undefined_;
+                    realm.pending_exception = null;
+                    try settlePromiseInternal(realm, target, .rejected, ex);
+                    return;
+                },
+            };
+            if (target.promise_state != .pending) return;
+            if (heap_mod.valueAsFunction(then_v2) == null) {
+                try settlePromiseInternal(realm, target, .fulfilled, v);
+                return;
+            }
+            try realm.enqueueThenableJob(heap_mod.taggedObject(target), v, then_v2);
             return;
         }
         const intrinsics = @import("intrinsics.zig");
@@ -2643,6 +2673,33 @@ pub fn resolvePromiseWithValue(realm: *Realm, target: *JSObject, v: Value) !void
         return;
     }
     try settlePromiseInternal(realm, target, .fulfilled, v);
+}
+
+/// Fast-path predicate for §27.2.1.3.2 Promise Resolve Functions —
+/// when both `target` and `v_obj` are vanilla Promise instances (their
+/// immediate prototype is the realm's %PromisePrototype%) AND the
+/// prototype's `then` slot still holds the built-in `Promise.prototype.
+/// then` (matched by native callback pointer), the spec-mandated
+/// `.then` invocation is observably equivalent to an inline
+/// reaction enqueue — keep the `chainPromiseToInner` shortcut.
+/// Subclasses and monkey-patched `Promise.prototype.then` need the
+/// spec path so each `.then` allocation surfaces (§27.2.5.3
+/// species-count fixtures).
+pub const isVanillaPromiseChainExported = isVanillaPromiseChain;
+
+fn isVanillaPromiseChain(realm: *Realm, target: *JSObject, v_obj: *JSObject) bool {
+    const proto = realm.intrinsics.promise_prototype orelse return false;
+    if (target.prototype != proto) return false;
+    if (v_obj.prototype != proto) return false;
+    // Inspect %PromisePrototype%.then — if it's not the original
+    // built-in `promiseThen`, the user replaced it and the spec's
+    // `.then` invocation is observable.
+    const then_v = proto.get("then");
+    const then_fn = heap_mod.valueAsFunction(then_v) orelse return false;
+    const promise_mod = @import("builtins/promise.zig");
+    const cb = then_fn.native_callback orelse return false;
+    if (cb != promise_mod.promiseThenExported) return false;
+    return true;
 }
 
 /// Chain `outer`'s settlement to `inner`'s — when `inner`

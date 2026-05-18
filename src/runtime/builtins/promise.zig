@@ -402,6 +402,11 @@ fn settlePromise(realm: *Realm, inst: *@import("../object.zig").JSObject, state:
 pub const promiseResolveImplExported = promiseResolveImpl;
 pub const promiseRejectImplExported = promiseRejectImpl;
 pub const boundResolveTrampolineExported = boundResolveTrampoline;
+/// Native-callback identity for `Promise.prototype.then` — read by
+/// `interpreter.isVanillaPromiseChain` to detect a monkey-patched
+/// `.then` (which would invalidate the chain-shortcut and require
+/// the spec PromiseResolveThenableJob path per §27.2.1.3.2 step 12).
+pub const promiseThenExported = promiseThen;
 
 fn promiseResolveImpl(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const target = heap_mod.valueAsPlainObject(this_value) orelse return Value.undefined_;
@@ -425,9 +430,21 @@ fn promiseResolveImpl(realm: *Realm, this_value: Value, args: []const Value) Nat
         // by the non-Object fall-through below).
         // Step 7 — Get(resolution, "then"). For a Cynic Promise we
         // already know `.then` is the built-in; chain inline.
+        //
+        // §27.2.1.3.2 step 11-13 fast-path: vanilla Promise-to-vanilla
+        // Promise adoption is observably equivalent to an inline
+        // reaction enqueue; subclass or monkey-patched-`then` cases
+        // must take the spec path so each `.then` allocates a fresh
+        // capability via SpeciesConstructor (§27.2.5.3 species-count
+        // fixtures).
         if (v_obj.isPromise()) {
-            chainPromiseToInner(realm, v_obj, target) catch return error.OutOfMemory;
-            return Value.undefined_;
+            const interp_mod = @import("../interpreter.zig");
+            if (interp_mod.isVanillaPromiseChainExported(realm, target, v_obj)) {
+                chainPromiseToInner(realm, v_obj, target) catch return error.OutOfMemory;
+                return Value.undefined_;
+            }
+            // Fall through to the generic thenable path below — it
+            // looks up `then` and enqueues a PromiseResolveThenableJob.
         }
         const then_v = intrinsics.getPropertyChain(realm, v_obj, "then") catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
