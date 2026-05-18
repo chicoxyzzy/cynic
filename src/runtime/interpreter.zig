@@ -799,20 +799,34 @@ fn asyncGeneratorResumeNext(
 
         // §27.6.3.4 steps 8-10: completed generator. Settle the
         // head with done=true (normal/return) or reject (throw).
+        //
+        // For `.return_value` we route through
+        // `awaitForReturnCompletion` first — §27.6.3.5 step 8
+        // says completed-state returns go through
+        // AsyncGeneratorAwaitReturn, whose step 6 PromiseResolve
+        // is observable (a poisoned `constructor` getter on a
+        // Promise argument surfaces as a rejection per step 7).
         if (gen.async_state == .completed) {
-            _ = gen.queue.orderedRemove(0);
             switch (req.completion) {
                 .normal => {
+                    _ = gen.queue.orderedRemove(0);
                     try settleAsyncGenRequest(realm, req.capability_promise, Value.undefined_, true);
+                    continue;
                 },
                 .return_value => |v| {
-                    try settleAsyncGenRequest(realm, req.capability_promise, v, true);
+                    // Leave the request at the head; the await
+                    // microtask resumes the drain after the
+                    // resolved value is in hand.
+                    gen.async_state = .suspended_await;
+                    try awaitForReturnCompletion(realm, gen, v);
+                    return;
                 },
                 .throw_value => |ex| {
+                    _ = gen.queue.orderedRemove(0);
                     try rejectAsyncGenRequest(realm, req.capability_promise, ex);
+                    continue;
                 },
             }
-            continue;
         }
 
         // §27.6.3.7 step 8.b / §27.6.3.4 AsyncGeneratorResumeNext
@@ -1095,6 +1109,29 @@ fn awaitForReturnCompletion(realm: *Realm, gen: *@import("generator.zig").JSGene
     // this path.
     if (heap_mod.valueAsPlainObject(v)) |obj| {
         if (obj.isPromise()) {
+            // §27.2.4.7 PromiseResolve step 1.a — when the
+            // resolution is already a Promise, the spec reads
+            // `value.constructor` to honour the species hook.
+            // Cynic doesn't actually species-dispatch (we always
+            // build a %Promise%), but the read is still
+            // observable: a poisoned `constructor` getter throws,
+            // and per §27.6.3.7 AsyncGeneratorAwaitReturn step 7 /
+            // §27.6.3.8 AsyncGeneratorYield step 13-14 the
+            // abrupt completion must surface — closing the
+            // request (suspendedStart / completed) or injecting
+            // the throw at the suspended yield site
+            // (suspendedYield) so the body's `try { yield }
+            // catch` can observe it.
+            const ctor_v = intrinsics_mod.getPropertyChain(realm, obj, "constructor") catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    const ex = realm.pending_exception orelse Value.undefined_;
+                    realm.pending_exception = null;
+                    try realm.enqueueAsyncGenReturnAfterAwait(gen, ex, true);
+                    return;
+                },
+            };
+            _ = ctor_v;
             if (obj.promise_state == .pending) {
                 // Register the gen as a waiter on the Promise,
                 // flagging it so `settlePromiseInternal` routes
@@ -2389,21 +2426,84 @@ pub fn drainMicrotasks(allocator: std.mem.Allocator, realm: *Realm) RunError!voi
                 // unwrapped any Promise / thenable before queueing
                 // this task).
                 const gen = task.async_gen orelse continue;
-                // If the gen was closed in the meantime, just
-                // surface the value through the queued-request
-                // drain (`asyncGeneratorResumeNext` handles
-                // .completed state).
+                // If the gen body is already closed, settle the
+                // head `.return_value` request with the awaited
+                // value (§27.6.3.7 step 10 — AsyncGenerator
+                // CompleteStep on a normal Await result).
+                // Re-dispatching through `asyncGeneratorResumeNext`
+                // would loop: the completed-state branch routes
+                // back through `awaitForReturnCompletion`.
                 if (gen.state == .completed) {
                     gen.async_state = .completed;
+                    if (gen.queue.items.len > 0) {
+                        const req = gen.queue.orderedRemove(0);
+                        if (task.async_throws) {
+                            try rejectAsyncGenRequest(realm, req.capability_promise, task.arg);
+                        } else {
+                            try settleAsyncGenRequest(realm, req.capability_promise, task.arg, true);
+                        }
+                    }
                     try asyncGeneratorResumeNext(allocator, realm, gen);
                     continue;
                 }
                 if (task.async_throws) {
-                    // Awaiting the return-value rejected (e.g. the
-                    // user passed a rejected Promise as the
-                    // .return() argument). Per §27.6.3.7 step
-                    // 8.b's IfAbruptCloseAsyncIterator → close
-                    // and surface the rejection.
+                    // Awaiting the return-value rejected (e.g.
+                    // the user passed a rejected Promise as the
+                    // .return() argument, or a poisoned
+                    // `constructor` getter on a Promise made
+                    // PromiseResolve abrupt). Spec path
+                    // branches on state:
+                    //
+                    //   • suspendedYield — §27.6.3.8 step 13-14:
+                    //     the abrupt Await surfaces as a throw
+                    //     completion at the yield site so the
+                    //     body's `try { yield } catch (e)` can
+                    //     observe it.
+                    //
+                    //   • suspendedStart / completed — §27.6.3.7
+                    //     AsyncGeneratorAwaitReturn step 7:
+                    //     close the gen, reject the request,
+                    //     drain.
+                    if (gen.state == .suspended) {
+                        if (gen.queue.items.len == 0) continue;
+                        const req = gen.queue.items[0];
+                        gen.async_state = .executing;
+                        const outcome = resumeAsyncGenBody(allocator, realm, gen, .{ .throw_value = task.arg }) catch |err| {
+                            return err;
+                        };
+                        if (gen.async_state == .suspended_await) {
+                            // Body re-suspended on another
+                            // await inside a catch / finally —
+                            // leave the request and let the
+                            // resume microtask continue.
+                            continue;
+                        }
+                        _ = gen.queue.orderedRemove(0);
+                        switch (outcome) {
+                            .yielded => |raw| {
+                                gen.async_state = .suspended_await;
+                                if (isSyncRejectedPromise(raw)) {
+                                    gen.state = .completed;
+                                    try realm.enqueueAsyncGenYield(gen, req.capability_promise, heap_mod.valueAsPlainObject(raw).?.promise_value, false, true);
+                                } else {
+                                    try realm.enqueueAsyncGenYield(gen, req.capability_promise, raw, false, false);
+                                }
+                            },
+                            .value => |v| {
+                                gen.state = .completed;
+                                gen.async_state = .completed;
+                                try settleAsyncGenRequest(realm, req.capability_promise, v, true);
+                                try asyncGeneratorResumeNext(allocator, realm, gen);
+                            },
+                            .thrown => |ex| {
+                                gen.state = .completed;
+                                gen.async_state = .completed;
+                                try rejectAsyncGenRequest(realm, req.capability_promise, ex);
+                                try asyncGeneratorResumeNext(allocator, realm, gen);
+                            },
+                        }
+                        continue;
+                    }
                     if (gen.queue.items.len > 0) {
                         const req = gen.queue.orderedRemove(0);
                         gen.state = .completed;
@@ -3166,6 +3266,15 @@ pub fn resumeGenerator(
             gen.state = .completed;
             return .{ .value = return_val };
         }
+    } else if (gen.pending_return_completion) |saved_val| {
+        // §14.15.3 step 4 — a prior `.return(v)` drove the body
+        // into a `finally { … }`, but the finally `yield`ed
+        // before completing. The body resumes here from that
+        // yield; consume the stashed value so the finally's
+        // synthetic `throw_` round-trip is recognised and the
+        // outcome surfaces as `.value = saved_val`.
+        gen.pending_return_completion = null;
+        return_completion_val = saved_val;
     }
 
     const result = try runFrames(allocator, realm, &frames);
@@ -3181,16 +3290,25 @@ pub fn resumeGenerator(
         // The flag should already be cleared (unwindThrow drops
         // it on finally entry); defensive belt-and-braces here.
         realm.gen_return_completion = null;
-        gen.state = .completed;
         switch (result) {
             .thrown => |ex| {
+                gen.state = .completed;
                 if (valuesIdentical(ex, return_val)) {
                     return .{ .value = return_val };
                 }
                 return .{ .thrown = ex };
             },
-            .value => return .{ .value = return_val },
+            .value => {
+                gen.state = .completed;
+                return .{ .value = return_val };
+            },
             .yielded => |v| {
+                // §14.15.3 step 4 — the finally body itself
+                // yielded before completing. Stash the saved
+                // return value so the next resume recognises
+                // the synthetic rethrow at the end of the
+                // finally and surfaces a clean `.value`.
+                gen.pending_return_completion = return_val;
                 gen.state = .suspended;
                 return .{ .yielded = v };
             },

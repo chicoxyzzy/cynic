@@ -192,6 +192,20 @@ pub const JSGenerator = struct {
     /// machinery sees a return-completion with the awaited
     /// value rather than treating it as a plain yield-resume.
     awaiting_return_completion: bool = false,
+    /// §14.15.3 step 4 + §27.5.1.3 — when a return-completion
+    /// drive lands on a `try { … } finally { F }` and `F`
+    /// suspends on a yield, the original return value would
+    /// otherwise be lost across the resume. We stash it here so
+    /// that the next `resumeGenerator` recognises the synthetic
+    /// rethrow at the end of `F` and surfaces the value as a
+    /// clean `.value` outcome rather than letting the sentinel
+    /// throw escape unchecked. The fixture
+    /// `built-ins/AsyncGeneratorPrototype/return/
+    /// return-suspendedYield-try-finally.js` exercises this —
+    /// `.return('sent-value')` resumes inside the finally,
+    /// which `yield 2`s out; the following `.next()` must
+    /// surface `{value: 'sent-value', done: true}`.
+    pending_return_completion: ?Value = null,
     /// Companion to `resume_kind`. For `.return_value` this is the
     /// `.return(v)` argument; for `.throw_value` it's the
     /// `.throw(e)` argument. The accumulator on resume already
