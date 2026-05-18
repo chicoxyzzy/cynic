@@ -2,7 +2,8 @@
 //! `intrinsics.zig`. All methods accept primitives + wrapper
 //! objects via `coerceThisToJSString` (§22.1.3
 //! RequireObjectCoercible + ToString). Cynic walks bytes; full
-//! UTF-16 surrogate-pair fidelity is later.
+//! UTF-16 surrogate-pair fidelity is later. Also wires the
+//! shared `%RegExpStringIteratorPrototype%` (§22.2.9.2).
 
 const std = @import("std");
 const lib_unicode = @import("c");
@@ -170,22 +171,23 @@ fn regexpStringIterNext(realm: *Realm, this_value: Value, args: []const Value) N
         it.set(realm.allocator, "__cynic_matchall_done__", Value.fromBool(true)) catch return error.OutOfMemory;
         return iterResult(realm, exec_result, false);
     }
-    // §22.2.9.2 step 1.f.iv — after a zero-width match the iterator
-    // must `AdvanceStringIndex(S, ToLength(? Get(R, "lastIndex")),
-    // fullUnicode)` and write that back via `Set(R, "lastIndex",
-    // nextIndex, true)`, otherwise the next pull re-matches at the
-    // same position forever.
+    // §22.2.9.2.1 step 11.a — `Let matchStr be ? ToString(? Get(match,
+    // "0"))`. Both the `Get` and the `ToString` are `?`-steps and run
+    // *before* the empty-string / advance-lastIndex branch, so a user
+    // getter on `0` that throws or a `toString` that throws must
+    // propagate verbatim (fixtures `custom-regexpexec-match-get-0-
+    // throws`, `custom-regexpexec-match-get-0-tostring-throws`). After
+    // ToString, step 11.a.ii drives the AdvanceStringIndex /
+    // Set(R, "lastIndex", …) update when the match string is empty.
     if (heap_mod.valueAsPlainObject(exec_result)) |match_arr| {
-        const whole_v = match_arr.get("0");
-        if (whole_v.isString()) {
-            const whole: *JSString = @ptrCast(@alignCast(whole_v.asString()));
-            if (whole.bytes.len == 0) {
-                const li_v = try intrinsics.getPropertyChain(realm, re_obj, "lastIndex");
-                const li_i64 = try intrinsics.toLengthValue(realm, li_v);
-                const li_unit: usize = if (li_i64 > 0) @intCast(li_i64) else 0;
-                const next_unit = if (full_unicode) advanceStringIndexUnicode(input.bytes, li_unit) else li_unit + 1;
-                re_obj.set(realm.allocator, "lastIndex", Value.fromInt32(@intCast(next_unit))) catch return error.OutOfMemory;
-            }
+        const whole_v = try intrinsics.getPropertyChain(realm, match_arr, "0");
+        const whole_str = try intrinsics.stringifyArg(realm, whole_v);
+        if (whole_str.bytes.len == 0) {
+            const li_v = try intrinsics.getPropertyChain(realm, re_obj, "lastIndex");
+            const li_i64 = try intrinsics.toLengthValue(realm, li_v);
+            const li_unit: usize = if (li_i64 > 0) @intCast(li_i64) else 0;
+            const next_unit = if (full_unicode) advanceStringIndexUnicode(input.bytes, li_unit) else li_unit + 1;
+            re_obj.set(realm.allocator, "lastIndex", Value.fromInt32(@intCast(next_unit))) catch return error.OutOfMemory;
         }
     }
     return iterResult(realm, exec_result, false);
@@ -1657,7 +1659,15 @@ fn regexExecCall(realm: *Realm, regex_obj: *JSObject, input: *JSString) NativeEr
     };
     const v: Value = switch (out) {
         .value, .yielded => |x| x,
-        .thrown => return error.NativeThrew,
+        // §22.2.7.1 RegExpExec step 4.a — `Call(exec, R, «S»)` is a
+        // `?` step, so a user `exec` that throws propagates verbatim.
+        // Surface the user's exception value via `pending_exception`
+        // so the native-error wrapper at the top of the call path
+        // doesn't substitute a generic TypeError.
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
     };
     if (!v.isNull() and heap_mod.valueAsPlainObject(v) == null) {
         return throwTypeError(realm, "RegExpExec: exec must return Object or null");
