@@ -8537,6 +8537,14 @@ pub const Compiler = struct {
         /// (with or without a label) but reject `continue` per
         /// §14.17.1 (target must be an *iteration* statement).
         is_switch: bool = false,
+        /// True for synthetic LoopContexts wrapping a labelled
+        /// Block / non-iteration body (`L: { … break L; }`).
+        /// Like `is_switch` these accept labelled `break` but
+        /// reject `continue` (§14.17.1 — continue target must be
+        /// an iteration statement). Unlabelled `break` ignores
+        /// these per §14.16.1 (break-from-outside-iteration-or-
+        /// switch is a SyntaxError).
+        is_block_label: bool = false,
 
         fn deinit(self: *LoopContext, allocator: std.mem.Allocator) void {
             self.break_patches.deinit(allocator);
@@ -8834,18 +8842,47 @@ pub const Compiler = struct {
     /// isn't supported yet, but the label is otherwise transparent.
     fn compileLabeled(self: *Compiler, lb: ast.statement.LabeledStmt) CompileError!void {
         const name = self.source[lb.label.start..lb.label.end];
-        try self.pending_labels.append(self.allocator, name);
-        // Best-effort cleanup: if the body's compile claims the
-        // pending label into a LoopContext, the list is already
-        // shorter (the loop drains everything). Only pop our own
-        // entry if it's still on top.
-        const len_before = self.pending_labels.items.len;
-        defer {
-            if (self.pending_labels.items.len == len_before) {
-                _ = self.pending_labels.pop();
+        // §14.13.4 — when the LabelledItem is itself a Statement
+        // that isn't an iteration / switch (e.g. `L: { … }` or
+        // `L: stmt;`), `break L;` from inside the body still has
+        // to find a target. Open a synthetic LoopContext whose
+        // sole purpose is to accept the labelled `break`; the
+        // post-body PC backfills every emitted break-patch.
+        // Iteration statements drain `pending_labels` themselves
+        // (so their LoopContext owns the label), but every other
+        // body shape gets the synthetic wrap.
+        const body_is_iteration = switch (lb.body.*) {
+            .for_, .for_in_of, .while_, .do_while => true,
+            else => false,
+        };
+        if (body_is_iteration) {
+            try self.pending_labels.append(self.allocator, name);
+            const len_before = self.pending_labels.items.len;
+            defer {
+                if (self.pending_labels.items.len == len_before) {
+                    _ = self.pending_labels.pop();
+                }
             }
+            try self.compileStatement(lb.body);
+            return;
         }
+        const labels_dup = try self.allocator.alloc([]const u8, 1);
+        labels_dup[0] = name;
+        var ctx: LoopContext = .{
+            .continue_target = 0,
+            .parent = self.current_loop,
+            .entry_finally_chain = self.finally_chain,
+            .labels = labels_dup,
+            .is_block_label = true,
+        };
+        defer ctx.deinit(self.allocator);
+        const saved_loop = self.current_loop;
+        self.current_loop = &ctx;
+        defer self.current_loop = saved_loop;
         try self.compileStatement(lb.body);
+        // §14.13.4 step 3 — break L lands here.
+        const end_pc = self.builder.here();
+        for (ctx.break_patches.items) |p| try self.builder.patchI16(p, end_pc);
     }
 
     /// Drain `pending_labels` into a freshly-allocated slice. Called
@@ -8877,7 +8914,14 @@ pub const Compiler = struct {
             }
             return null;
         }
-        return c;
+        // §14.16.1 — unlabelled `break` targets the innermost
+        // iteration / switch statement; a labelled `Block`
+        // synthetic LoopContext (`L: { … }`) doesn't satisfy
+        // the early-error so skip past it.
+        while (c) |ctx| : (c = ctx.parent) {
+            if (!ctx.is_block_label) return ctx;
+        }
+        return null;
     }
 
     /// §14.17.1 ContinueStatement — the target must be an iteration
@@ -8891,13 +8935,13 @@ pub const Compiler = struct {
         if (label_span) |sp| {
             const name = self.source[sp.start..sp.end];
             while (c) |ctx| : (c = ctx.parent) {
-                if (ctx.is_switch) continue;
+                if (ctx.is_switch or ctx.is_block_label) continue;
                 if (ctx.hasLabel(name)) return ctx;
             }
             return null;
         }
         while (c) |ctx| : (c = ctx.parent) {
-            if (!ctx.is_switch) return ctx;
+            if (!ctx.is_switch and !ctx.is_block_label) return ctx;
         }
         return null;
     }
