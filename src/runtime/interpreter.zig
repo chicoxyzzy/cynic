@@ -10271,6 +10271,29 @@ fn strictSetPropertyAnchored(
             }
             obj.properties.put(allocator, key, value) catch return error.OutOfMemory;
         } else {
+            // §10.1.9.2 OrdinarySetWithOwnDescriptor step 2 —
+            // when no own descriptor exists, the spec walks
+            // `parent.[[Set]]`. For an ordinary parent, that
+            // bottoms out at OrdinarySetWithOwnDescriptor with
+            // `existingDescriptor = parent.[[GetOwnProperty]](P)`:
+            // a non-writable data descriptor on any ancestor
+            // surfaces as a strict-mode TypeError on the
+            // receiver-side write (test262
+            // language/expressions/assignment/8.14.4-8-b_2.js).
+            if (!had_indexed) {
+                var cursor: ?*JSObject = obj.prototype;
+                while (cursor) |p| : (cursor = p.prototype) {
+                    if (p.accessors.contains(key)) break; // accessor already handled above
+                    if (p.properties.contains(key)) {
+                        const p_flags = p.flagsFor(key);
+                        if (!p_flags.writable) {
+                            const ex = try makeTypeError(realm, "Cannot assign to read-only property");
+                            return throwInSetter(realm, frames, f, ip, value, ex);
+                        }
+                        break;
+                    }
+                }
+            }
             // §10.1.9.2 OrdinarySetWithOwnDescriptor — when no own
             // descriptor exists for the key, the spec ultimately
             // calls [[DefineOwnProperty]], which fails (and so
