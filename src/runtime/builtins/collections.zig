@@ -1895,20 +1895,24 @@ fn setIntersection(realm: *Realm, this_value: Value, args: []const Value) Native
         }
     } else {
         // Iterate other.keys() and check whether each is in this.
+        // Use the accessor-aware `forEachSetLikeKey` so that
+        // `get next`/`get done`/`get value` accessors fire (per
+        // `set-like-class-order.js` observation order).
         const Ctx = struct {
             this_d: *@import("../object.zig").SetData,
             out: *@import("../object.zig").JSObject,
             realm: *Realm,
         };
         var ctx = Ctx{ .this_d = this_d, .out = out, .realm = realm };
-        try setLikeForEachKey(realm, sl, &ctx, struct {
-            fn cb(c: *Ctx, key: Value) NativeError!void {
+        const each = struct {
+            fn fn_(c: *Ctx, key: Value) (NativeError || IterStop)!void {
                 const k = canonicalizeKey(key);
                 if (setIndex(c.this_d, k) != null) {
                     setAddInternal(c.realm, c.out, k) catch return error.OutOfMemory;
                 }
             }
-        }.cb);
+        }.fn_;
+        try forEachSetLikeKey(realm, sl, &ctx, each);
     }
     return heap_mod.taggedObject(out);
 }
@@ -1922,69 +1926,52 @@ fn activeSetSize(d: *@import("../object.zig").SetData) usize {
     return n;
 }
 
-/// Iterate the keys of a set-like by calling its `keys()` and
-/// stepping the resulting iterator.
-fn setLikeForEachKey(
-    realm: *Realm,
-    sl: SetLike,
-    ctx: anytype,
-    callback: fn (@TypeOf(ctx), Value) NativeError!void,
-) NativeError!void {
-    // sl.keys is a JSFunction; call it with `this = sl.obj` to
-    // get the iterator. Then step via `.next()` until done.
-    const iter_v = blk: {
-        const cb_args = [_]Value{};
-        const outcome = interpreter.callJSFunction(
-            realm.allocator,
-            realm,
-            sl.keys,
-            sl.obj,
-            &cb_args,
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.NativeThrew,
-        };
-        break :blk switch (outcome) {
-            .value, .yielded => |v| v,
-            .thrown => return error.NativeThrew,
-        };
-    };
-    const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse return throwTypeError(realm, "set-like keys() did not return an Object");
-    const next_v = iter_obj.get("next");
-    const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "set-like iterator has no next");
-    while (true) {
-        const outcome = interpreter.callJSFunction(
-            realm.allocator,
-            realm,
-            next_fn,
-            iter_v,
-            &.{},
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.NativeThrew,
-        };
-        const step_v = switch (outcome) {
-            .value, .yielded => |v| v,
-            .thrown => return error.NativeThrew,
-        };
-        const step_obj = heap_mod.valueAsPlainObject(step_v) orelse return throwTypeError(realm, "iterator step did not return an Object");
-        if (intrinsics.toBoolean(step_obj.get("done"))) break;
-        try callback(ctx, step_obj.get("value"));
-    }
-}
 
 fn setDifference(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const this_d = setDataOf(this_value) orelse return throwTypeError(realm, "Set.prototype.difference called on non-Set");
     const sl = try validateSetLike(realm, "difference", argOr(args, 0, Value.undefined_));
 
     const out = try allocateEmptySet(realm);
+    // §24.2.4.5 step 5-7 — start from a copy of `this`, then branch
+    // on size. When `this` is smaller (or equal), call `other.has`
+    // for each `this` entry and drop matches. When `this` is larger,
+    // iterate `other.keys()` and remove each key from the result
+    // (avoids invoking `has` on a smaller `other` for every element).
+    const this_size = activeSetSize(this_d);
     var i: usize = 0;
     while (i < this_d.entries.items.len) : (i += 1) {
         const e = this_d.entries.items[i];
         if (e.deleted) continue;
-        if (!try setLikeHas(realm, sl, e.value)) {
-            setAddInternal(realm, out, e.value) catch return error.OutOfMemory;
+        setAddInternal(realm, out, e.value) catch return error.OutOfMemory;
+    }
+    const out_d = out.set_data.?;
+    if (this_size <= sl.size) {
+        // Iterate `this`; remove from result anything `other.has`.
+        i = 0;
+        while (i < this_d.entries.items.len) : (i += 1) {
+            const e = this_d.entries.items[i];
+            if (e.deleted) continue;
+            if (try setLikeHas(realm, sl, e.value)) {
+                if (setIndex(out_d, e.value)) |idx| {
+                    out_d.entries.items[idx].deleted = true;
+                }
+            }
         }
+    } else {
+        // Iterate `other.keys()`; remove each key from result.
+        const Ctx = struct {
+            out_d: *ObjMod.SetData,
+        };
+        var ctx = Ctx{ .out_d = out_d };
+        const each = struct {
+            fn fn_(c: *Ctx, raw: Value) (NativeError || IterStop)!void {
+                const v = canonicalizeKey(raw);
+                if (setIndex(c.out_d, v)) |idx| {
+                    c.out_d.entries.items[idx].deleted = true;
+                }
+            }
+        }.fn_;
+        try forEachSetLikeKey(realm, sl, &ctx, each);
     }
     return heap_mod.taggedObject(out);
 }
@@ -2111,14 +2098,21 @@ fn setIsDisjointFrom(realm: *Realm, this_value: Value, args: []const Value) Nati
     }
     // Larger receiver: iterate the set-like and check each
     // key against this. We carry the result via a stack-side
-    // boolean to keep the callback free of captures.
+    // boolean to keep the callback free of captures. Use the
+    // accessor-aware `forEachSetLikeKey` so that an iterator's
+    // `get next`/`get done`/`get value` accessors fire per
+    // §7.4.2 GetIteratorFromMethod / §7.4.6 IteratorStep.
     const Ctx = struct { this_d: *@import("../object.zig").SetData, found: *bool };
     var found = false;
     var ctx = Ctx{ .this_d = this_d, .found = &found };
-    try setLikeForEachKey(realm, sl, &ctx, struct {
-        fn cb(c: *Ctx, key: Value) NativeError!void {
-            if (setIndex(c.this_d, canonicalizeKey(key)) != null) c.found.* = true;
+    const each = struct {
+        fn fn_(c: *Ctx, key: Value) (NativeError || IterStop)!void {
+            if (setIndex(c.this_d, canonicalizeKey(key)) != null) {
+                c.found.* = true;
+                return error.IterStop;
+            }
         }
-    }.cb);
+    }.fn_;
+    try forEachSetLikeKey(realm, sl, &ctx, each);
     return Value.fromBool(!found);
 }
