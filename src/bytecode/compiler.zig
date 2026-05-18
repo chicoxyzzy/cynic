@@ -3757,6 +3757,7 @@ pub const Compiler = struct {
         // Peel `(target)` wrappers — `(x) = 1` is just `x = 1`
         // syntactically (§13.15.1 IsValidSimpleAssignmentTarget
         // walks through cover grammar transparently).
+        const lhs_parenthesised = a.target.* == .parenthesized;
         var target_ptr = a.target;
         while (target_ptr.* == .parenthesized) target_ptr = target_ptr.parenthesized.expression;
         if (target_ptr.* == .member) {
@@ -3859,8 +3860,18 @@ pub const Compiler = struct {
         if (a.op == .eq) {
             // §13.15.2 — for plain `x = e` where `e` is an
             // anonymous function-like, the binding identifier
-            // becomes the function's `.name`.
-            try self.compileNamedValue(a.value, name);
+            // becomes the function's `.name`. Note §13.15.2 step
+            // 1.c gates this on `IsIdentifierRef(LeftHandSide
+            // Expression) is true` — and per §13.2.8 the cover
+            // grammar's `IsIdentifierRef` returns *false* for
+            // `(x)`, so `(fn) = function() {}` must leave the
+            // function's `.name` as `""`. Use the unwrapped name
+            // only when the original LHS wasn't wrapped in parens.
+            if (lhs_parenthesised) {
+                try self.compileExpression(a.value);
+            } else {
+                try self.compileNamedValue(a.value, name);
+            }
         } else if (a.op == .amp_amp_eq or a.op == .pipe_pipe_eq or a.op == .question_question_eq) {
             // §13.15.4 Logical assignment — `x &&= y`, `x ||= y`,
             // `x ??= y`. Reads `x` once; if the gate fails, leaves
@@ -3899,7 +3910,14 @@ pub const Compiler = struct {
                 try self.builder.emitI16(0);
                 const rhs_target = self.builder.here();
                 try self.builder.patchI16(to_rhs, rhs_target);
-                try self.compileNamedValue(a.value, name);
+                // §13.15.4 — IsIdentifierRef gates name inference;
+                // a parenthesised LHS (`(x) ??= …`) is no longer
+                // an IdentifierRef per the cover grammar.
+                if (lhs_parenthesised) {
+                    try self.compileExpression(a.value);
+                } else {
+                    try self.compileNamedValue(a.value, name);
+                }
                 try self.emitStoreBinding(binding, a.span);
                 const end_target = self.builder.here();
                 try self.builder.patchI16(skip_rhs, end_target);
@@ -3910,7 +3928,11 @@ pub const Compiler = struct {
             try self.builder.emitOp(gate, a.span);
             const skip_patch = self.builder.here();
             try self.builder.emitI16(0);
-            try self.compileNamedValue(a.value, name);
+            if (lhs_parenthesised) {
+                try self.compileExpression(a.value);
+            } else {
+                try self.compileNamedValue(a.value, name);
+            }
             try self.emitStoreBinding(binding, a.span);
             const skip_target = self.builder.here();
             try self.builder.patchI16(skip_patch, skip_target);
