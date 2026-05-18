@@ -135,6 +135,18 @@ code construction (aligns with SES).
 
 **Recently landed (was in progress; now done).**
 
+- **"Everything but RegExp" sweep — May 2026** moved Cynic from
+  89.39 % to 91.48 % spec / 93.51 % to 98.52 % attempted (+847
+  pass). Buckets fully cleared: top-level-await, WeakSet,
+  Math.sumPrecise (Stage 4 shipped), JSON/isRawJSON (Stage 4
+  shipped), Object.prototype.valueOf, Object.fromEntries,
+  dynamic-import/catch, statements + expressions/async-
+  generator, compound-assignment, logical-assignment,
+  Array.from, Array.of, String.fromCharCode, built-ins/global,
+  class/elements, AsyncFromSyncIterator, Reflect.set,
+  Proxy.ownKeys, statements/break, Function.prototype,
+  language/types/string. Highlights below.
+
 - **Top-level `await` in modules — full bucket green** (250 → 251
   on `language/module-code/top-level-await`). Three-stage roll-
   out: always-defer `await` (§27.7.5.3 PromiseResolve+then),
@@ -149,6 +161,51 @@ code construction (aligns with SES).
   `current_module` (was clobbering to `null` on return);
   `publishExportedNamesFromDecl` walks BindingPattern leaves so
   `export const { x } = obj` publishes `x`.
+
+- **Proxy traps — full §9.5 invariant enforcement on proxy-of-
+  proxy** (built-ins/Proxy: 81.67 → 90.68 % attempted). All
+  five mutating traps (`get`, `set`, `has`, `deleteProperty`,
+  `getOwnPropertyDescriptor`) recurse through chained Proxy
+  ancestors; `Object.{keys, getOwnPropertyNames}` +
+  `Reflect.ownKeys` route through the trap; strict-mode
+  `delete` throws TypeError on trap-returned-false (§13.5.1.2
+  step 6); `defineProperty`-trap-falsy → Reflect-false fall-
+  through.
+
+- **`super.method(...rest)` compile** (§13.3.7.1) — added
+  `compileSuperSpreadMethodCall` as the apply-style parallel
+  of `compileSpreadMethodCall`. Lands the seven Set
+  `subclass-receiver-methods.js` fixtures plus collaterals.
+
+- **§7.3.21 EnumerableOwnProperties for Object.{values,
+  entries}** — Symbol + Proxy trap dispatch + per-key
+  descriptor accessor walk.
+
+- **§24 collection ctors — spec-faithful Map / WeakMap / Set
+  / WeakSet** (Map 91 → 99 %, WeakMap 100 %, WeakSet 100 %,
+  Set 91 → 97 %). `Get(set, "add")` consulted only when
+  iterable provided; AddValuesFromIterable invokes user-
+  installed `add`; IteratorClose on all abrupt paths.
+  Symbols-as-WeakSet/Map-keys (CanBeHeldWeakly) shipped.
+
+- **Math.sumPrecise (§21.3.2.21) + JSON.rawJSON + JSON.isRawJSON
+  (§25.5.{3,4})** — two ES2025 Stage-4 built-ins shipped
+  (Shewchuk exact-floating-point summation with overflow-
+  recovery, raw-JSON brand bit + stringify fast-path).
+
+- **§13.4 UpdateExpression BigInt-correct postfix / prefix**
+  — new zero-operand `inc` / `dec` opcodes dispatching on
+  numeric type. `0n++` no longer mixes BigInt + Number;
+  `obj[k]++` evaluates `ToPropertyKey(k)` once across
+  GetValue + PutValue.
+
+- **§12.8.6 Tagged-template freezing + receiver binding** —
+  template + raw arrays carry the §13.2.8.4 frozen
+  descriptors (indexed slots `{w:F,e:T,c:F}`, length / raw
+  `{w:F,e:F,c:F}`, extensible:false). Member-form tag
+  binds `this` to the receiver via `call_method`. Quasi
+  cooking handles `\xNN` / `\uNNNN` / `\u{N}` /
+  line-continuation per spec.
 - **§15.7.14 step 11 lexical private-name resolution across
   nested classes** — `#x` mangles with the *declaring* class's
   prefix, not the innermost. `ClassContext.private_names` +
