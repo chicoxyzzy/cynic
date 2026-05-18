@@ -90,6 +90,16 @@ pub const Op = enum(u8) {
     logical_not,
     /// acc = +acc (ToNumber). §13.5.4.
     to_number,
+    /// acc = ToString(acc). §7.1.17 — for an Object, runs
+    /// §7.1.1 ToPrimitive with hint "string" which consults
+    /// `Symbol.toPrimitive` / `toString` / `valueOf` in spec
+    /// order. Symbol primitives throw TypeError. Used by the
+    /// template-literal lowering so each substitution is
+    /// coerced via the "string" hint per §13.2.8.6 step 7,
+    /// not via the `+` operator's "default" hint (which
+    /// would call `valueOf` first and surface a wrapped
+    /// Symbol primitive that then crashes ToString).
+    to_string,
     /// acc = acc + Type(acc)::unit (§13.4 PostfixExpression /
     /// PrefixUpdateExpression). The accumulator is assumed to
     /// already be ToNumeric-coerced; the bump dispatches on
@@ -790,6 +800,7 @@ pub const Op = enum(u8) {
             .bit_not,
             .logical_not,
             .to_number,
+            .to_string,
             .inc,
             .dec,
             .typeof_,
@@ -919,6 +930,7 @@ pub const Op = enum(u8) {
             .bit_not => "BitNot",
             .logical_not => "LogicalNot",
             .to_number => "ToNumber",
+            .to_string => "ToString",
             .inc => "Inc",
             .dec => "Dec",
             .typeof_ => "TypeOf",

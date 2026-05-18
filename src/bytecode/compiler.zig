@@ -1722,15 +1722,27 @@ pub const Compiler = struct {
         try self.builder.emitU8(r_acc);
 
         for (lit.expressions, 0..) |*expr, i| {
-            // Evaluate the substitution; ToString is implicit on
-            // string + non-string Add (matches V8 / SM lowering).
+            // §13.2.8.6 step 7 — `Let middle be ? ToString(sub)`.
+            // Template literals coerce each substitution via
+            // ToString (hint "string"), NOT via the `+` operator
+            // (which uses ToPrimitive hint "default"). The two
+            // observably differ on Symbol wrappers: hint "string"
+            // calls `toString` first and produces "Symbol()",
+            // while hint "default" calls `valueOf` first and
+            // surfaces a Symbol primitive that ToString then
+            // rejects with TypeError (test262
+            // built-ins/Symbol/prototype/Symbol.toPrimitive/
+            // redefined-symbol-wrapper-ordinary-toprimitive.js,
+            // /removed-symbol-wrapper-ordinary-toprimitive.js).
             try self.compileExpression(expr);
+            try self.builder.emitOp(.to_string, lit.span);
             try self.builder.emitOp(.add, lit.span);
             try self.builder.emitU8(r_acc);
             try self.builder.emitOp(.star, lit.span);
             try self.builder.emitU8(r_acc);
 
-            // Trailing quasi after this substitution.
+            // Trailing quasi after this substitution — already a
+            // String literal, so no coercion needed before Add.
             try self.compileTemplateQuasi(lit.quasis[i + 1].span);
             try self.builder.emitOp(.add, lit.span);
             try self.builder.emitU8(r_acc);

@@ -4263,6 +4263,28 @@ fn runFrames(
                     continue;
                 }
             },
+            .to_string => {
+                // §7.1.17 ToString — for Object input, runs §7.1.1
+                // ToPrimitive(hint "string") which consults
+                // `Symbol.toPrimitive` then OrdinaryToPrimitive
+                // ("toString" before "valueOf"). Symbol primitives
+                // throw TypeError per §7.1.17 step 6. Powers the
+                // template-literal substitution lowering — see
+                // §13.2.8.6 step 7 / compileTemplateLiteral.
+                const s = intrinsics_mod.stringifyArg(realm, acc) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NativeThrew => {
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "ToString failed");
+                        realm.pending_exception = null;
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                        continue;
+                    },
+                };
+                acc = Value.fromString(s);
+            },
             .inc => {
                 if (try arith.incOrDec(realm, acc, 1)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "Update failed");
