@@ -4465,11 +4465,17 @@ fn runFrames(
                 // Native fast path — no frame, no register file,
                 // no env. The host fn reads args directly from the
                 // caller's register file and returns a value.
-                // Plain `Call` passes `this = undefined` (strict).
+                // Plain `Call` passes `this = undefined` (strict);
+                // §15.3.4 — arrow functions read `this` from their
+                // creation site (captured at MakeFunction time),
+                // not the call site.
                 if (callee_fn.native_callback) |native| {
                     const args_start = @as(usize, r_callee) + 1;
                     const args = registers[args_start .. args_start + argc];
-                    const native_this: Value = Value.undefined_;
+                    const native_this: Value = if (callee_fn.is_arrow)
+                        callee_fn.captured_this
+                    else
+                        Value.undefined_;
                     const result = native(realm, native_this, args) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.NativeThrew => {
@@ -4679,11 +4685,17 @@ fn runFrames(
                 }
 
                 // Native fast path — no frame, no register file.
-                // §13.3.6 — `obj.method()` binds `this = obj`.
+                // §13.3.6 — `obj.method()` binds `this = obj`,
+                // unless the method is an arrow function — §15.3.4
+                // arrows ignore the call-site receiver and use
+                // `captured_this` from their creation site.
                 if (callee_fn.native_callback) |native| {
                     const args_start = @as(usize, r_callee) + 1;
                     const args = registers[args_start .. args_start + argc];
-                    const native_this: Value = recv;
+                    const native_this: Value = if (callee_fn.is_arrow)
+                        callee_fn.captured_this
+                    else
+                        recv;
                     const result = native(realm, native_this, args) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.NativeThrew => {
