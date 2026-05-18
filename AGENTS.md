@@ -136,6 +136,7 @@ These are project rules — they apply to everyone.
 | See engine memory shape | `zig build test262 -- --filter=<x> --mem-summary --top-alloc=10` (engine-side counters) |
 | Profile allocations with call stacks (macOS) | `xcrun xctrace record --template Allocations --launch -- <path-to-test262-binary> --filter=<x>` |
 | Find spec text | [tc39.es/ecma262](https://tc39.es/ecma262/), or via the `tc39` MCP server in `.mcp.json` — `search_spec` / `get_spec_section` (also `list_proposals`, `search_notes`) |
+| Look up papers (compiler / GC / interpreter / JS impl literature) | [arxiv.org](https://arxiv.org/), or via the `arxiv` MCP server in `.mcp.json` — `search_papers` (by query + categories), `download_paper`, `read_paper`. Cache lives under `/tmp/cynic-arxiv-cache`. Use this step in [`handbook/prior-art.md`](docs/handbook/prior-art.md) §3 (academic literature). |
 | Inspect test262 fixtures | `vendor/test262/test/<area>` |
 | Propose a missing test262 fixture | [docs/test262-upstream-gaps.md](docs/test262-upstream-gaps.md) (bugs Cynic patched that no existing fixture catches) |
 | Propose an ECMA-262 spec clarification | [docs/ecma262-upstream-gaps.md](docs/ecma262-upstream-gaps.md) (spec-level observations from implementation — clarifications, hardenings, Annex B normalisation) |

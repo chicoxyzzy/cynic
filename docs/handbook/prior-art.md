@@ -63,7 +63,19 @@ For each non-trivial feature:
    Don't copy-paste — note what each does in a sentence each, so
    the design space is visible before we pick.
 
-3. **Relevant academic / design literature.** The classics:
+3. **Relevant academic / design literature.** Pause and search
+   before reaching for a default — the answer is usually in a
+   paper. Use the **`arxiv` MCP server** in `.mcp.json`
+   (`search_papers` with `categories: ["cs.PL"]` for compilers /
+   PL, `["cs.OS"]` for runtimes, or free-text queries against
+   the abstract index; `download_paper` + `read_paper` to fetch
+   and consult). Cache lives under `/tmp/cynic-arxiv-cache` so a
+   second hit on the same paper is instant. Cite the paper or
+   post inline when its idea drives a Cynic decision — a one-
+   line link in the relevant code comment or design doc is
+   enough.
+
+   The classics:
    - Self / V8 *shapes* (hidden classes) — Chambers / Ungar.
    - NaN-boxing vs pointer-tagged Smis — Pizlo, "Speculation in
      JavaScriptCore" (2020); V8 "Pointer compression" (2020).
@@ -81,10 +93,6 @@ For each non-trivial feature:
      blog posts, Self papers, Bebenita et al.
    - Baseline JITs from bytecode — V8 *Sparkplug* design (2021,
      V8 blog); JSC Baseline.
-
-   Cite the paper or post when its idea drives a Cynic decision —
-   a one-line link in the relevant code comment or design doc is
-   enough.
 
 4. **test262 coverage.** Every spec feature has corresponding
    tests in [tc39/test262](https://github.com/tc39/test262).

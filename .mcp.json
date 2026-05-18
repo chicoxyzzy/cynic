@@ -3,6 +3,10 @@
     "tc39": {
       "type": "http",
       "url": "https://tc39-spec-mcp.jasnell.workers.dev/mcp"
+    },
+    "arxiv": {
+      "command": "uvx",
+      "args": ["arxiv-mcp-server", "--storage-path", "/tmp/cynic-arxiv-cache"]
     }
   }
 }
