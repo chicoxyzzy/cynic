@@ -414,7 +414,6 @@ pub fn wrapGenerator(
     args: []const Value,
     home_object: ?*JSObject,
     home_function: ?*JSFunction,
-    callee: ?*JSFunction,
 ) RunError!RunResult {
     // Generator's register file must hold the function body's
     // declared registers AND any extra inbound argument values.
@@ -442,14 +441,7 @@ pub fn wrapGenerator(
     gen.argc = @intCast(@min(args.len, std.math.maxInt(u8)));
 
     const wrapper = realm.heap.allocateObject() catch return error.OutOfMemory;
-    // §27.5.1.2 GeneratorStart via OrdinaryCreateFromConstructor —
-    // the wrapper's [[Prototype]] is the calling GeneratorFunction's
-    // own `prototype` property (which itself inherits from
-    // %GeneratorPrototype%). Falling back to %GeneratorPrototype%
-    // directly would let `Object.getPrototypeOf(g) === fn.prototype`
-    // fail (test262 built-ins/Object/prototype/toString/
-    // symbol-tag-generators-builtin.js).
-    wrapper.prototype = if (callee) |c| (c.prototype orelse ensureGeneratorPrototype(realm) catch return error.OutOfMemory) else ensureGeneratorPrototype(realm) catch return error.OutOfMemory;
+    wrapper.prototype = ensureGeneratorPrototype(realm) catch return error.OutOfMemory;
     wrapper.generator_ref = gen;
 
     // The wrapper is the only handle linking the freshly allocated
@@ -490,7 +482,6 @@ pub fn wrapAsyncGenerator(
     args: []const Value,
     home_object: ?*JSObject,
     home_function: ?*JSFunction,
-    callee: ?*JSFunction,
 ) RunError!RunResult {
     const wanted: usize = @max(@as(usize, chunk.register_count), args.len);
     const reg_count: u8 = @intCast(@min(wanted, std.math.maxInt(u8)));
@@ -516,11 +507,7 @@ pub fn wrapAsyncGenerator(
     gen.argc = @intCast(@min(args.len, std.math.maxInt(u8)));
 
     const wrapper = realm.heap.allocateObject() catch return error.OutOfMemory;
-    // §27.6.3.2 AsyncGeneratorStart via OrdinaryCreateFromConstructor —
-    // mirror sync-gen wrapper: the wrapper inherits from the calling
-    // async-generator function's own `prototype` property, not
-    // %AsyncGeneratorPrototype% directly.
-    wrapper.prototype = if (callee) |c| (c.prototype orelse ensureAsyncGeneratorPrototype(realm) catch return error.OutOfMemory) else ensureAsyncGeneratorPrototype(realm) catch return error.OutOfMemory;
+    wrapper.prototype = ensureAsyncGeneratorPrototype(realm) catch return error.OutOfMemory;
     wrapper.generator_ref = gen;
 
     // Same wrapper-pin rationale as `wrapGenerator`: the eager
@@ -3605,8 +3592,8 @@ pub fn callJSFunction(
     // produce Promises.
     if (callee.is_generator) {
         if (callee.is_async)
-            return try wrapAsyncGenerator(allocator, realm, callee_chunk, callee.captured_env, this_value, args, callee.home_object, callee.home_function, callee);
-        return try wrapGenerator(allocator, realm, callee_chunk, callee.captured_env, this_value, args, callee.home_object, callee.home_function, callee);
+            return try wrapAsyncGenerator(allocator, realm, callee_chunk, callee.captured_env, this_value, args, callee.home_object, callee.home_function);
+        return try wrapGenerator(allocator, realm, callee_chunk, callee.captured_env, this_value, args, callee.home_object, callee.home_function);
     }
 
     // §27.7 — pure `async function` (no `*`): allocate a fresh
@@ -4572,9 +4559,9 @@ fn runFrames(
                     const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
                     const args_start = @as(usize, r_callee) + 1;
                     const wrap_result = if (callee_fn.is_async)
-                        try wrapAsyncGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, Value.undefined_, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function, callee_fn)
+                        try wrapAsyncGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, Value.undefined_, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function)
                     else
-                        try wrapGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, Value.undefined_, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function, callee_fn);
+                        try wrapGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, Value.undefined_, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function);
                     switch (wrap_result) {
                         .value, .yielded => |v| acc = v,
                         .thrown => |ex| {
@@ -4794,9 +4781,9 @@ fn runFrames(
                     const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
                     const args_start = @as(usize, r_callee) + 1;
                     const wrap_result = if (callee_fn.is_async)
-                        try wrapAsyncGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, recv, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function, callee_fn)
+                        try wrapAsyncGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, recv, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function)
                     else
-                        try wrapGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, recv, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function, callee_fn);
+                        try wrapGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, recv, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function);
                     switch (wrap_result) {
                         .value, .yielded => |v| acc = v,
                         .thrown => |ex| {
