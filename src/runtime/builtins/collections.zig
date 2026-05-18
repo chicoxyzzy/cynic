@@ -202,12 +202,19 @@ fn ensureArrayIteratorPrototype(realm: *Realm) !?*JSObject {
 }
 
 /// §22.1.5.2 %StringIteratorPrototype% — sibling of
-/// `ensureArrayIteratorPrototype`. Used by the string-iterator
-/// factory.
+/// `ensureArrayIteratorPrototype`. Hosts the shared `next` method
+/// (§22.1.5.2.1) and the `@@iterator` self-return; iterator
+/// instances built by `stringIteratorMethod` inherit both via the
+/// prototype chain instead of carrying own copies. Brand-checked
+/// `next` throws TypeError when the receiver lacks the
+/// [[IteratedString]] slot (modeled as the `array_like_iter`
+/// state pointer), matching `next-missing-internal-slots.js`.
 fn ensureStringIteratorPrototype(realm: *Realm) !?*JSObject {
     if (realm.intrinsics.string_iterator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
     proto.prototype = @import("../interpreter.zig").iteratorPrototypeOrObjectPrototypePub(realm);
+    try intrinsics.installNativeMethodOnProto(realm, proto, "next", stringIteratorProtoNext, 0);
+    try intrinsics.installNativeMethodOnProto(realm, proto, "@@iterator", iteratorReturnsSelf, 0);
     const tag_str = try realm.heap.allocateString("String Iterator");
     try proto.setWithFlags(realm.allocator, "@@toStringTag", Value.fromString(tag_str), .{
         .writable = false,
@@ -216,6 +223,26 @@ fn ensureStringIteratorPrototype(realm: *Realm) !?*JSObject {
     });
     realm.intrinsics.string_iterator_prototype = proto;
     return proto;
+}
+
+/// §22.1.5.2.1 %StringIteratorPrototype%.next — RequireInternalSlot
+/// on [[IteratedString]] / [[StringNextIndex]]. Cynic models the
+/// slot as the `array_like_iter` state pointer on a plain object;
+/// when absent (e.g. `Object.create(iter).next()` or the prototype
+/// itself), throw TypeError per the spec instead of silently
+/// returning `{done: true}`.
+fn stringIteratorProtoNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const it = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "%StringIteratorPrototype%.next called on non-object");
+    if (it.array_like_iter == null)
+        return throwTypeError(realm, "%StringIteratorPrototype%.next called on incompatible receiver");
+    switch (arrayLikeIterStep(realm, this_value)) {
+        .step => |s| return iterResult(realm, s.value, false) catch return error.OutOfMemory,
+        .typed_array_oob => return throwTypeError(realm, "string iterator on incompatible receiver"),
+        .propagated => return error.NativeThrew,
+        .done => return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory,
+    }
 }
 
 /// Array.prototype iterator factory. Reads the `length` of the
@@ -355,9 +382,16 @@ pub fn stringIteratorMethod(realm: *Realm, this_value: Value, args: []const Valu
     // %StringIteratorPrototype%, not %ArrayIteratorPrototype%.
     // Re-parent the freshly-built iterator (`makeArrayLikeIterator`
     // wires it under the array proto by default since the two
-    // paths share machinery).
+    // paths share machinery), and drop the own `next` / `@@iterator`
+    // that the shared factory installs — string iterators look both
+    // up on the prototype so `Object.create(it).next()` brand-checks
+    // (§22.1.5.2.1 step 1, `next-missing-internal-slots.js`).
     if (heap_mod.valueAsPlainObject(v)) |obj| {
         if (try ensureStringIteratorPrototype(realm)) |sip| obj.prototype = sip;
+        _ = obj.properties.swapRemove("next");
+        _ = obj.property_flags.swapRemove("next");
+        _ = obj.properties.swapRemove("@@iterator");
+        _ = obj.property_flags.swapRemove("@@iterator");
     }
     return v;
 }

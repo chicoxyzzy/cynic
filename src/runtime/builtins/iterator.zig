@@ -77,6 +77,28 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, proto, "reduce", iteratorReduce, 1);
     // Iterators are themselves iterable.
     try installNativeMethodOnProto(realm, proto, "@@iterator", iteratorSymbolIterator, 0);
+
+    // §22.2.9 / §27.1.3 — the RegExp-string iterator prototype is
+    // built eagerly inside `builtins/string.zig:install` (which runs
+    // before this one), so its `[[Prototype]]` was wired to
+    // `%Object.prototype%` as a placeholder. Now that
+    // `%IteratorPrototype%` exists, re-parent it so
+    // `Object.getPrototypeOf(%RegExpStringIteratorPrototype%) ===
+    // %IteratorPrototype%` (fixture `RegExpStringIteratorPrototype/
+    // ancestry.js`).
+    if (realm.intrinsics.regexp_string_iterator_prototype) |risp| {
+        risp.prototype = proto;
+    }
+    // The string-iterator prototype is built lazily by
+    // `ensureStringIteratorPrototype` (`builtins/collections.zig`),
+    // which already reads `iteratorPrototypeOrObjectPrototypePub` —
+    // but if `String.prototype[@@iterator]` was invoked before
+    // `Iterator` was installed (e.g. during an early bootstrap
+    // step) the lazy build would have cached `%Object.prototype%`.
+    // Re-parent defensively for the same shape as above.
+    if (realm.intrinsics.string_iterator_prototype) |sip| {
+        sip.prototype = proto;
+    }
 }
 
 fn iteratorConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
