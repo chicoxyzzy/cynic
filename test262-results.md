@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 92.09 % | 99.19 % | 36942 / 40115 | 36942 / 37245 |
+| **runtime** | 92.17 % | 99.28 % | 36976 / 40115 | 36976 / 37245 |
 
 
 ## Where the runtime stands, by area
@@ -26,12 +26,10 @@ browser-era built-ins …).
 | **_10–99 fails_** | | | | | |
 | `built-ins/Array` | 3013 | 22 | 36 | 98 % | 99 % |
 | `built-ins/ArrayBuffer` | 181 | 10 | 4 | 93 % | 95 % |
-| `built-ins/Iterator` | 407 | 18 | 6 | 94 % | 96 % |
-| `built-ins/Object` | 3303 | 16 | 80 | 97 % | 100 % |
 | `built-ins/RegExp` | 1518 | 84 | 161 | 86 % | 95 % |
 | `built-ins/TypedArray` | 1406 | 17 | 8 | 98 % | 99 % |
 | `built-ins/TypedArrayConstructors` | 649 | 11 | 16 | 96 % | 98 % |
-| `language/expressions` | 9718 | 53 | 972 | 90 % | 99 % |
+| `language/expressions` | 9722 | 49 | 972 | 90 % | 99 % |
 | `language/statements` | 8395 | 17 | 672 | 92 % | 100 % |
 | **_1–9 fails_** | | | | | |
 | `built-ins/AggregateError` | 22 | 1 | 0 | 96 % | 96 % |
@@ -42,13 +40,15 @@ browser-era built-ins …).
 | `built-ins/Error` | 52 | 3 | 0 | 95 % | 95 % |
 | `built-ins/GeneratorFunction` | 7 | 2 | 0 | 78 % | 78 % |
 | `built-ins/GeneratorPrototype` | 59 | 2 | 0 | 97 % | 97 % |
+| `built-ins/Iterator` | 424 | 1 | 6 | 98 % | 100 % |
 | `built-ins/Map` | 168 | 1 | 1 | 99 % | 99 % |
 | `built-ins/Number` | 334 | 5 | 0 | 99 % | 99 % |
+| `built-ins/Object` | 3315 | 4 | 80 | 98 % | 100 % |
 | `built-ins/Promise` | 626 | 2 | 38 | 94 % | 100 % |
 | `built-ins/Proxy` | 286 | 7 | 13 | 93 % | 98 % |
 | `built-ins/Reflect` | 151 | 1 | 0 | 99 % | 99 % |
 | `built-ins/Set` | 378 | 3 | 1 | 99 % | 99 % |
-| `built-ins/String` | 1198 | 5 | 5 | 99 % | 100 % |
+| `built-ins/String` | 1199 | 4 | 5 | 99 % | 100 % |
 | `built-ins/ThrowTypeError` | 12 | 1 | 0 | 92 % | 92 % |
 | `built-ins/decodeURI` | 54 | 1 | 0 | 98 % | 98 % |
 | `built-ins/decodeURIComponent` | 55 | 1 | 0 | 98 % | 98 % |
@@ -157,18 +157,18 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-18 — cynic `7de4179`, test262 `d0c1b455`
+### 2026-05-18 — cynic `debcfcf`, test262 `b1f9a0aea3`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 92.09 % | 99.19 % | 36942 / 40115 | 36942 / 37245 | +280 | 2m 00s |
+| **runtime** | 92.17 % | 99.28 % | 36976 / 40115 | 36976 / 37245 | +314 | 2m 41s |
 
 Biggest movers (runtime):
 
-- `built-ins/String` +8
-- `built-ins/TypedArrayConstructors` +5
-- `built-ins/Object` +3
-- `built-ins/Symbol` +2
+- `built-ins/Iterator` +17
+- `built-ins/Object` +12
+- `language/expressions` +4
+- `built-ins/String` +1
 
 ### 2026-05-17 — cynic `400fbae`, test262 `d0c1b455`
 
