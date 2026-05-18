@@ -1889,7 +1889,8 @@ fn classifyAndRun(
                 test_source,
                 &diags,
                 rel,
-            ) catch {
+            ) catch |err| {
+                std.debug.print("\nCOMPILE-FAIL {s}: {t}\n", .{ rel, err });
                 realm.allocator.destroy(chunk_ptr);
                 if (expected_negative) |_| return .{ .kind = .pass_negative };
                 return .{ .kind = .fail_false_reject };
@@ -1999,6 +2000,24 @@ fn classifyAndRun(
         return .{ .kind = .pass_positive };
     }
 
+    if (test_threw) {
+        const ex = if (run_result == .thrown) run_result.value else (realm.pending_exception orelse cynic.runtime.Value.undefined_);
+        if (cynic.runtime.heap.valueAsPlainObject(ex)) |o| {
+            if (o.properties.get("message")) |m| {
+                if (m.isString()) {
+                    const s: *cynic.runtime.JSString = @ptrCast(@alignCast(m.asString()));
+                    std.debug.print("\nFAIL {s}: {s}\n", .{ rel, s.bytes });
+                }
+            } else {
+                std.debug.print("\nFAIL {s}: object (no message)\n", .{rel});
+            }
+        } else if (ex.isString()) {
+            const s: *cynic.runtime.JSString = @ptrCast(@alignCast(ex.asString()));
+            std.debug.print("\nFAIL {s}: str: {s}\n", .{ rel, s.bytes });
+        } else {
+            std.debug.print("\nFAIL {s}: non-object\n", .{rel});
+        }
+    }
     return .{ .kind = if (test_threw) .fail_false_reject else .pass_positive };
 }
 

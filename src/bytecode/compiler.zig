@@ -4486,16 +4486,22 @@ pub const Compiler = struct {
                     try self.builder.emitOp(.module_load, ed.span);
                     try self.builder.emitU16(k_spec);
                     for (body.specifiers) |spec| {
+                        // §12.7 IdentifierName escape-decoding: both
+                        // sides are IdentifierName productions when
+                        // not a StringLiteral form. `μ` decodes
+                        // to `μ` so the redirect key matches the
+                        // canonical name in the source module's
+                        // namespace.
                         const local_text = self.source[spec.local_span.start..spec.local_span.end];
                         const local_name = if (local_text.len >= 2 and (local_text[0] == '"' or local_text[0] == '\''))
                             local_text[1 .. local_text.len - 1]
                         else
-                            local_text;
+                            try self.decodeIdentifierName(local_text);
                         const exported_text = self.source[spec.exported_span.start..spec.exported_span.end];
                         const exported_name = if (exported_text.len >= 2 and (exported_text[0] == '"' or exported_text[0] == '\''))
                             exported_text[1 .. exported_text.len - 1]
                         else
-                            exported_text;
+                            try self.decodeIdentifierName(exported_text);
                         const k_local = try self.internString(local_name);
                         const k_exp = try self.internString(exported_name);
                         try self.builder.emitOp(.module_reexport_named, spec.span);
@@ -4515,12 +4521,20 @@ pub const Compiler = struct {
                     // `"\"☿\""` six-byte token. The from-clause branch
                     // above already strips; this is the parallel fix
                     // for the local-export branch.
-                    const local_name = self.source[spec.local_span.start..spec.local_span.end];
+                    //
+                    // §12.7 IdentifierName — both sides are
+                    // IdentifierName productions (when not a
+                    // StringLiteral exported name), so `\uXXXX`
+                    // escapes must decode to their code-point
+                    // sequence. `export { x as μ }` registers
+                    // the export under `μ` (2-byte UTF-8), not the
+                    // literal `μ` token.
+                    const local_name = try self.bindingName(spec.local_span);
                     const exported_text = self.source[spec.exported_span.start..spec.exported_span.end];
                     const exported_name = if (exported_text.len >= 2 and (exported_text[0] == '"' or exported_text[0] == '\''))
                         exported_text[1 .. exported_text.len - 1]
                     else
-                        exported_text;
+                        try self.decodeIdentifierName(exported_text);
                     try self.emitBindingRead(local_name, spec.span);
                     const k = try self.internString(exported_name);
                     try self.builder.emitOp(.module_export, spec.span);
