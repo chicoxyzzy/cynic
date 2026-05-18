@@ -906,8 +906,13 @@ pub fn typeOf(realm: *Realm, v: Value) RunError!Value {
     else if (heap_mod.isBigInt(v))
         "bigint"
     else if (heap_mod.valueAsPlainObject(v)) |po|
-        // §10.5.x — a Proxy reports `typeof` as "function" iff
-        // its target is (or, post-revocation, was) callable.
+        // §13.5.3 — typeof on a plain JSObject is "object"
+        // unless the object carries callable-exotic semantics:
+        // §10.5.x — a Proxy reports "function" iff its target was
+        //   callable at construction time;
+        // §20.2.3 — %Function.prototype% is itself a built-in
+        //   function. Both cases ride the same `proxy_callable`
+        //   flag.
         if (po.proxy_callable) "function" else "object"
     else
         "undefined";

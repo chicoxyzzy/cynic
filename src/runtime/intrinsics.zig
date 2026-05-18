@@ -243,6 +243,12 @@ pub fn install(realm: *Realm) !void {
         "Function",
         obj_proto,
     );
+    // §20.2.3 — %Function.prototype% is itself a built-in
+    // function object that, when called, returns undefined.
+    // §13.5.3 typeof routes through the `proxy_callable` flag for
+    // plain JSObjects with callable exotic semantics, so flip it
+    // here to satisfy `typeof Function.prototype === "function"`.
+    if (realm.intrinsics.function_prototype) |fp| fp.proxy_callable = true;
 
     // Function.prototype.call /.apply /.bind
     try @import("builtins/function.zig").installPrototypeMethods(realm);
@@ -348,6 +354,17 @@ pub fn install(realm: *Realm) !void {
         const empty_str = realm.heap.allocateString("") catch return error.OutOfMemory;
         sp.boxed_primitive = Value.fromString(empty_str);
         sp.boxed_string = empty_str;
+        // §22.1.4 — `String.prototype` has a `length` data property
+        // whose initial value is 0 and whose attributes are
+        // `{ [[Writable]]: false, [[Enumerable]]: false,
+        //    [[Configurable]]: false }`. Without this `length`
+        // would shadow-lookup to `undefined`, breaking Sputnik
+        // `language/expressions/property-accessors/S11.2.1_A4_T5.js`.
+        try sp.setWithFlags(realm.allocator, "length", Value.fromInt32(0), .{
+            .writable = false,
+            .enumerable = false,
+            .configurable = false,
+        });
     }
 
     // Number prototype + statics + parseInt/parseFloat/isNaN/isFinite globals.

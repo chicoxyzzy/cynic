@@ -63,6 +63,7 @@ const asExactSmi = literals.asExactSmi;
 const parseNumericLiteral = literals.parseNumericLiteral;
 const parseBigIntLiteral = literals.parseBigIntLiteral;
 const decodeStringContent = literals.decodeStringContent;
+const normalizeTemplateLineTerminators = literals.normalizeTemplateLineTerminators;
 
 const arguments_scan = @import("arguments_scan.zig");
 const referencesArguments = arguments_scan.referencesArguments;
@@ -1905,7 +1906,11 @@ pub const Compiler = struct {
         raw_arr.is_array_exotic = true;
         for (lit.quasis, 0..) |q, i| {
             const raw_text = self.source[q.span.start..q.span.end];
-            const owned = self.realm.heap.allocateString(raw_text) catch return error.OutOfMemory;
+            // §12.8.6.1 TRV — raw `<CR>` / `<CR><LF>` collapse to a
+            // single `<LF>`. The `<LS>` / `<PS>` cases pass through.
+            const normalized_raw = normalizeTemplateLineTerminators(self.allocator, raw_text) catch return error.OutOfMemory;
+            defer self.allocator.free(normalized_raw);
+            const owned = self.realm.heap.allocateString(normalized_raw) catch return error.OutOfMemory;
             var ibuf: [16]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
             const idx_owned = self.realm.heap.allocateString(islice) catch return error.OutOfMemory;
@@ -1943,22 +1948,43 @@ pub const Compiler = struct {
     /// same decoding as a string literal would. Falls through to
     /// the shared `decodeStringContent` helper so the lexer's
     /// view stays the single source of truth.
+    ///
+    /// §12.8.6.1 also requires raw `<CR>` / `<CR><LF>` in the
+    /// quasi to cook to a single `<LF>` (the TV of a
+    /// LineTerminatorSequence). Run that normalization first so
+    /// the LineContinuation arm of `decodeStringContent` sees the
+    /// canonical `\<LF>` form.
     /// Returns owned bytes — caller frees.
     fn decodeQuasi(self: *Compiler, span: Span) ![]u8 {
         const raw = self.source[span.start..span.end];
-        // Common case: no escapes → just dup the slice.
-        if (std.mem.indexOfScalar(u8, raw, '\\') == null) {
+        // Common case: no escapes and no `<CR>` → just dup the slice.
+        const has_escape = std.mem.indexOfScalar(u8, raw, '\\') != null;
+        const has_cr = std.mem.indexOfScalar(u8, raw, '\r') != null;
+        if (!has_escape and !has_cr) {
             return self.allocator.dupe(u8, raw);
         }
-        return decodeStringContent(self.allocator, raw);
+        if (!has_escape) {
+            return normalizeTemplateLineTerminators(self.allocator, raw);
+        }
+        if (!has_cr) {
+            return decodeStringContent(self.allocator, raw);
+        }
+        const normalized = try normalizeTemplateLineTerminators(self.allocator, raw);
+        defer self.allocator.free(normalized);
+        return decodeStringContent(self.allocator, normalized);
     }
 
     /// Emit `LdaConstant` for the *raw* quasi text — preserves
     /// backslash escape sequences verbatim. Used for the `raw`
-    /// companion array of a tagged template.
+    /// companion array of a tagged template. Per §12.8.6.1 TRV,
+    /// raw `<CR>` / `<CR><LF>` still collapse to a single `<LF>`
+    /// (TRV(LineTerminatorSequence :: <CR>) = 0x000A; TRV(:: <CR>
+    /// <LF>) = 0x000A).
     fn compileTemplateQuasiRaw(self: *Compiler, span: Span) CompileError!void {
         const raw = self.source[span.start..span.end];
-        const s = self.realm.heap.allocateString(raw) catch return error.OutOfMemory;
+        const normalized = normalizeTemplateLineTerminators(self.allocator, raw) catch return error.OutOfMemory;
+        defer self.allocator.free(normalized);
+        const s = self.realm.heap.allocateString(normalized) catch return error.OutOfMemory;
         const k = try self.builder.addConstant(Value.fromString(s));
         try self.builder.emitOp(.lda_constant, span);
         try self.builder.emitU16(k);
@@ -1967,10 +1993,14 @@ pub const Compiler = struct {
     /// Emit `LdaConstant` for a template-literal quasi. The span
     /// covers raw text without surrounding markers (`` ` ``,
     /// `${`, `}`); reuse the standard escape-decoder so `\n`
-    /// etc. behave like in a regular string literal.
+    /// etc. behave like in a regular string literal. Per §12.8.6.1
+    /// raw `<CR>` / `<CR><LF>` collapse to a single `<LF>` in TV;
+    /// run that normalization before escape decoding.
     fn compileTemplateQuasi(self: *Compiler, span: Span) CompileError!void {
         const raw = self.source[span.start..span.end];
-        const decoded = decodeStringContent(self.allocator, raw) catch return error.UnsupportedExpression;
+        const normalized = normalizeTemplateLineTerminators(self.allocator, raw) catch return error.OutOfMemory;
+        defer self.allocator.free(normalized);
+        const decoded = decodeStringContent(self.allocator, normalized) catch return error.UnsupportedExpression;
         defer self.allocator.free(decoded);
         const s = self.realm.heap.allocateString(decoded) catch return error.OutOfMemory;
         const k = try self.builder.addConstant(Value.fromString(s));

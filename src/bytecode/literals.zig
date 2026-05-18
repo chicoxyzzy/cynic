@@ -105,6 +105,40 @@ pub fn parseRadix(text: []const u8, comptime base: u8) !f64 {
     return acc;
 }
 
+/// §12.8.6.1 TV / TRV — normalize raw LineTerminatorSequences in
+/// a template-literal quasi. The grammar says:
+///   • TRV of LineTerminatorSequence :: <LF>       is 0x000A
+///   • TRV of LineTerminatorSequence :: <CR>       is 0x000A
+///   • TRV of LineTerminatorSequence :: <CR><LF>   is 0x000A
+///   • TRV of LineTerminatorSequence :: <LS>       is 0x2028
+///   • TRV of LineTerminatorSequence :: <PS>       is 0x2029
+/// (TV agrees with TRV on these productions — see §12.8.6.1.) So
+/// every raw `<CR>` and `<CR><LF>` in a template body collapses to
+/// a single `<LF>` in both the cooked and raw views, while `<LS>`
+/// / `<PS>` pass through unchanged. String literals don't reach
+/// this path — they go straight to `decodeStringContent`, whose
+/// LineContinuation arm already handles `\<CR>` / `\<CR><LF>`.
+/// Callers must run this before any escape decoding so the
+/// LineContinuation arm of `decodeStringContent` sees the
+/// already-normalised `\<LF>` form.
+/// Caller-allocated; caller frees.
+pub fn normalizeTemplateLineTerminators(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, raw.len);
+    var i: usize = 0;
+    while (i < raw.len) : (i += 1) {
+        const c = raw[i];
+        if (c == '\r') {
+            try out.append(allocator, '\n');
+            if (i + 1 < raw.len and raw[i + 1] == '\n') i += 1; // skip the LF of CRLF
+        } else {
+            try out.append(allocator, c);
+        }
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
 /// Decode the inner content of a string literal per §12.8.4. The
 /// lexer already validated escape shape so anything unexpected
 /// here is an internal error.

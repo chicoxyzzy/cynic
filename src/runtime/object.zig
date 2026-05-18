@@ -507,11 +507,17 @@ pub const JSObject = struct {
     /// `[[ProxyHandler]]`. Every internal method on a revoked
     /// proxy throws TypeError per §10.5.x step 1.
     proxy_revoked: bool = false,
-    /// §10.5 ProxyCreate — when the original target was callable,
+    /// Callable-exotic flag on a plain JSObject. Set in two places:
+    /// (a) §10.5 ProxyCreate — when the original target was callable,
     /// `[[Call]]` is exposed on the proxy regardless of whether
     /// `proxy_target_fn` is currently set. After revocation the
     /// `proxy_target_fn` slot is null, but `typeof` and re-wraps
     /// still need to know the proxy is "callable".
+    /// (b) §20.2.3 — %Function.prototype% is itself a built-in
+    /// function object that returns undefined when called; the JS-
+    /// observable shape is "an object whose typeof is function",
+    /// which rides this same flag (since Cynic represents
+    /// `Function.prototype` as a JSObject, not a JSFunction).
     proxy_callable: bool = false,
     /// §22.2.7 RegExp instance — opaque pointer to the compiled
     /// libregexp bytecode (vendored QuickJS-NG engine). The first

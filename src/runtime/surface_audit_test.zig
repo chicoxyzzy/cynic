@@ -155,11 +155,15 @@ const expect_array_prototype = [_][]const u8{
     "@@unscopables",
 };
 
-// TODO(spec): String.prototype.length is the receiver's length on
-// a wrapped String. The §22 build-out otherwise tracks ECMA-262
-// 2024 — isWellFormed / toWellFormed are wired below.
+// §22.1.4 — String.prototype itself has a `length` data property
+// whose initial value is 0, attributes { w:false, e:false, c:false }.
+// (The §22.1.5 accessor-style `.length` on a String *instance* —
+// receiver-based code-unit count — is a separate path.) The §22
+// build-out otherwise tracks ECMA-262 2024 — isWellFormed /
+// toWellFormed are wired below.
 const expect_string_prototype = [_][]const u8{
     "constructor",
+    "length",
     "at",
     "charAt",
     "charCodeAt",
