@@ -539,6 +539,22 @@ pub const Compiler = struct {
             try self.builder.emitU16(k);
         } else {
             const depth = self.env_depth - binding.env_depth;
+            // §13.3.1 — non-init store to a `let` / `const` env
+            // slot must surface ReferenceError when the slot still
+            // holds the TDZ Hole sentinel. `var` slots are seeded
+            // `undefined` at hoist and never hold the Hole.
+            if (!is_init and binding.kind != .var_) {
+                const r_save = try self.reserveTemp();
+                defer self.releaseTemp();
+                try self.builder.emitOp(.star, span);
+                try self.builder.emitU8(r_save);
+                try self.builder.emitOp(.lda_env, span);
+                try self.builder.emitU8(depth);
+                try self.builder.emitU8(binding.env_slot);
+                try self.builder.emitOp(.throw_if_hole, span);
+                try self.builder.emitOp(.ldar, span);
+                try self.builder.emitU8(r_save);
+            }
             try self.builder.emitOp(.sta_env, span);
             try self.builder.emitU8(depth);
             try self.builder.emitU8(binding.env_slot);
@@ -4447,10 +4463,14 @@ pub const Compiler = struct {
             const ns_binding = try self.declareBindingFull(name, .const_, bid.span);
             // Reload namespace from `ns_slot` into the accumulator,
             // then store into the const binding's own env slot.
+            // §16.2.1.5 InitializeBinding for the namespace alias —
+            // use the init store so the post-Hole TDZ guard added to
+            // the assignment path doesn't fire on the very first
+            // write into the freshly-declared const slot.
             try self.builder.emitOp(.lda_env, bid.span);
             try self.builder.emitU8(0);
             try self.builder.emitU8(ns_slot);
-            try self.emitStoreBinding(ns_binding, bid.span);
+            try self.emitStoreBindingInit(ns_binding, bid.span);
         }
         if (id.default) |bid| {
             const name = try self.bindingName(bid.span);
@@ -5245,13 +5265,22 @@ pub const Compiler = struct {
         // member target, assignment pattern, or destructuring pattern
         // walk).
         if (pattern_target) |pt| {
-            try self.compileDestructure(pt);
+            // §14.7.5.7 — for-of with `let` / `const` / `var`
+            // declarator pattern is BindingInitialization
+            // (§14.3.3); leaves InitializeBinding the per-iteration
+            // slot, which may legitimately be the Hole sentinel.
+            try self.compileDestructure(pt, true);
         } else if (member_target) |m| {
             try self.compileForOfMemberAssign(m, s.span);
         } else if (assignment_pattern_target) |ap| {
             try self.compileAssignmentPattern(ap);
         } else {
-            try self.assignToBinding(bind_name, bind_span);
+            // §14.7.5.7 — `for (let x of …)` is
+            // BindingInitialization on the per-iteration slot.
+            // `for (x of …)` against an outer binding is plain
+            // PutValue (§13.15.2) and must respect TDZ.
+            const for_of_is_init = (bind_target_kind == .binding);
+            try self.assignToBinding(bind_name, bind_span, for_of_is_init);
         }
 
         var ctx: LoopContext = .{
@@ -7398,7 +7427,11 @@ pub const Compiler = struct {
                         } else {
                             try self.builder.emitOp(.lda_undefined, d.span);
                         }
-                        try self.compileDestructure(d.name);
+                        // §14.3.2 — `var {a} = obj` is
+                        // BindingInitialization (function-scoped),
+                        // but `var` slots never start as Hole so
+                        // the init flag is a no-op on this path.
+                        try self.compileDestructure(d.name, true);
                     },
                 }
             }
@@ -7436,7 +7469,11 @@ pub const Compiler = struct {
                         // so emit `undefined` and let defaults fire.
                         try self.builder.emitOp(.lda_undefined, d.span);
                     }
-                    try self.compileDestructure(d.name);
+                    // §14.3.3 — `let` / `const` declarator pattern
+                    // is BindingInitialization; leaf writes go
+                    // through InitializeBinding (§9.1.1.4) and may
+                    // legitimately overwrite the TDZ Hole.
+                    try self.compileDestructure(d.name, true);
                 },
             }
         }
@@ -7446,7 +7483,18 @@ pub const Compiler = struct {
     /// from the value currently in the accumulator. later
     /// supports shallow nesting; computed keys, rest elements, and
     /// rest-with-pattern are later.
-    fn compileDestructure(self: *Compiler, target: ast.statement.BindingTarget) CompileError!void {
+    ///
+    /// `is_init` distinguishes §14.3.3 BindingInitialization (a
+    /// declarator like `let {a} = obj` — the leaf is an
+    /// InitializeBinding §9.1.1.4 and legitimately overwrites the
+    /// TDZ Hole) from §13.15.5 DestructuringAssignmentEvaluation
+    /// (the LHS of `=` — the leaf is an ordinary PutValue and a
+    /// Hole-slotted let / const must surface ReferenceError per
+    /// §13.3.1). All current callers are declarator paths and pass
+    /// `is_init = true`; the assignment-pattern form lives in
+    /// `compileAssignmentPattern` and routes through
+    /// `emitStoreBinding` directly.
+    fn compileDestructure(self: *Compiler, target: ast.statement.BindingTarget, is_init: bool) CompileError!void {
         const r_src = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.star, target.span());
@@ -7460,7 +7508,7 @@ pub const Compiler = struct {
                 const name = try self.bindingName(id.span);
                 try self.builder.emitOp(.ldar, id.span);
                 try self.builder.emitU8(r_src);
-                try self.assignToBinding(name, id.span);
+                try self.assignToBinding(name, id.span, is_init);
             },
             .array => |arr_pat| {
                 // §14.3.3.5 IteratorBindingInitialization for an
@@ -7485,7 +7533,7 @@ pub const Compiler = struct {
                         try self.builder.emitU8(r_iter);
                         try self.builder.emitU8(r_done);
                         try self.applyDefaultIfNeeded(elem);
-                        try self.assignPatternLeaf(elem.target);
+                        try self.assignPatternLeaf(elem.target, is_init);
                     } else {
                         // Elision — step the iter, discard the value.
                         try self.builder.emitOp(.iter_step, target.span());
@@ -7551,7 +7599,7 @@ pub const Compiler = struct {
                     // rest array → leaf
                     try self.builder.emitOp(.ldar, target.span());
                     try self.builder.emitU8(r_rest);
-                    try self.assignPatternLeaf(rest_target.*);
+                    try self.assignPatternLeaf(rest_target.*, is_init);
                 } else {
                     // §7.4.10 IteratorClose — if the iter is not yet
                     // done (e.g. `[a, b] = source` where source has
@@ -7588,7 +7636,7 @@ pub const Compiler = struct {
                         try self.builder.emitOp(.lda_computed, prop.span);
                         try self.builder.emitU8(r_src);
                         try self.applyDefaultIfNeeded(prop.value);
-                        try self.assignPatternLeaf(prop.value.target);
+                        try self.assignPatternLeaf(prop.value.target, is_init);
                         continue;
                     }
                     const key_span: Span = switch (prop.key) {
@@ -7614,7 +7662,7 @@ pub const Compiler = struct {
                     try self.builder.emitOp(.lda_property, prop.span);
                     try self.builder.emitU16(k);
                     try self.applyDefaultIfNeeded(prop.value);
-                    try self.assignPatternLeaf(prop.value.target);
+                    try self.assignPatternLeaf(prop.value.target, is_init);
                 }
                 if (obj_pat.rest) |rest_id| {
                     // §14.3.3.4 RestElement on ObjectPattern — collect
@@ -7664,7 +7712,7 @@ pub const Compiler = struct {
                     try self.builder.emitU8(r_src);
                     try self.builder.emitU8(r_excl);
                     const rest_name = self.source[rest_id.span.start..rest_id.span.end];
-                    try self.assignToBinding(rest_name, rest_id.span);
+                    try self.assignToBinding(rest_name, rest_id.span, is_init);
                 }
             },
         }
@@ -8416,7 +8464,9 @@ pub const Compiler = struct {
             try self.declarePatternBindings(rp.target, .let_);
             try self.builder.emitOp(.rest_args_from, rp.span);
             try self.builder.emitU8(start_index);
-            try self.compileDestructure(rp.target);
+            // §10.2.3 — rest-parameter binding is
+            // InitializeBinding on the freshly-declared param slots.
+            try self.compileDestructure(rp.target, true);
         }
     }
 
@@ -8454,7 +8504,9 @@ pub const Compiler = struct {
             if (sp.default) |*default_expr| {
                 try self.applyDefaultExprNamed(default_expr, sp.span, null);
             }
-            try self.compileDestructure(sp.target);
+            // §15.2 — simple-param destructuring is
+            // InitializeBinding on the param slots.
+            try self.compileDestructure(sp.target, true);
         }
         // Account for the param register so the chunk's register
         // file sizing covers them.
@@ -8480,18 +8532,18 @@ pub const Compiler = struct {
         }
     }
 
-    fn assignPatternLeaf(self: *Compiler, target: ast.statement.BindingTarget) CompileError!void {
+    fn assignPatternLeaf(self: *Compiler, target: ast.statement.BindingTarget, is_init: bool) CompileError!void {
         switch (target) {
             .identifier => |id| {
                 // §12.7 — bind by StringValue.
                 const name = try self.bindingName(id.span);
-                try self.assignToBinding(name, id.span);
+                try self.assignToBinding(name, id.span, is_init);
             },
-            .array, .object => try self.compileDestructure(target),
+            .array, .object => try self.compileDestructure(target, is_init),
         }
     }
 
-    fn assignToBinding(self: *Compiler, name: []const u8, span: Span) CompileError!void {
+    fn assignToBinding(self: *Compiler, name: []const u8, span: Span, is_init: bool) CompileError!void {
         const scope = self.scope orelse return error.UnresolvedReference;
         // §13.7.5.13 ForIn/OfBodyEvaluation step 5.h.i — `Let lhsRef be
         // ? Evaluation of lhs`. For an unresolved bare identifier, the
@@ -8509,7 +8561,11 @@ pub const Compiler = struct {
             .span = span,
             .is_global = true,
         };
-        try self.emitStoreBinding(binding, span);
+        if (is_init) {
+            try self.emitStoreBindingInit(binding, span);
+        } else {
+            try self.emitStoreBinding(binding, span);
+        }
     }
 
     /// Returns the binding name slice for a `BindingTarget` if it is
@@ -9208,7 +9264,10 @@ pub const Compiler = struct {
                         try self.builder.emitOp(.lda_env, target.span());
                         try self.builder.emitU8(0);
                         try self.builder.emitU8(synth_slot);
-                        try self.compileDestructure(target);
+                        // §14.15.10 step 5 — catch parameter
+                        // destructuring is BindingInitialization on
+                        // freshly-declared let slots.
+                        try self.compileDestructure(target, true);
                     },
                 }
             }

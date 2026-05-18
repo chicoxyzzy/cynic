@@ -524,6 +524,30 @@ test "later: catch reaches non-thrown values via assignment" {
     );
 }
 
+test "later: TDZ — destructuring assignment leaf to let-in-TDZ throws (object pattern)" {
+    // §13.15.5 DestructuringAssignmentEvaluation routes each
+    // leaf through PutValue, which under §6.2.5.5 + §9.1.1.1.4
+    // SetMutableBinding step 9 throws ReferenceError when the
+    // bound value is still the §13.3.1 TDZ Hole. The leaf is
+    // ASSIGNMENT, not InitializeBinding — even if the slot
+    // currently holds the Hole sentinel.
+    try expectScriptThrows("({ y } = { y: 1 }); let y;");
+}
+
+test "later: TDZ — destructuring assignment leaf to let-in-TDZ throws (array pattern)" {
+    // §13.15.5 ArrayAssignmentPattern element — same
+    // ReferenceError as the object-pattern case.
+    try expectScriptThrows("[z] = [1]; let z;");
+}
+
+test "later: TDZ — declarator destructuring still initializes (object pattern)" {
+    // §14.3.3 destructuring binding for a `let` declarator is
+    // an InitializeBinding (§9.1.1.4), not an assignment — it
+    // legitimately writes through the Hole. Regression guard
+    // for the assignment-vs-declarator split.
+    try expectScriptInt("let { a } = { a: 7 }; a;", 7);
+}
+
 test "later: TDZ exception is catchable" {
     try expectScriptInt(
         "let caught = 0; try { x; let x = 1; } catch { caught = 1; } caught;",

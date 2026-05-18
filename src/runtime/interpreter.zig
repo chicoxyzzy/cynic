@@ -8210,34 +8210,38 @@ fn runFrames(
                     continue;
                 }
                 // §9.1.1.4 SetMutableBinding — declarative env-
-                // record first. If the binding is `const`, §13.3.1 /
-                // §13.15.2 step 1.f.iii throws TypeError, BUT only
-                // for re-assignment — the spec routes the very first
-                // write to a `const` slot through InitializeBinding,
-                // not SetMutableBinding. Cynic's identifier `let` /
-                // `const` declarator emits the dedicated
-                // `sta_global_init` opcode for that, but the
-                // destructuring path (`const [x] = iter;`,
-                // `const {a} = obj;`) lowers each leaf through the
-                // shared `assignToBinding` → `emitStoreBinding`
-                // helper which lands here. Detect "first init" by
-                // checking the current slot for the TDZ Hole; if so
-                // the write IS the InitializeBinding and the
-                // immutability gate doesn't fire. Otherwise it's a
-                // user-visible reassignment and we throw.
+                // record first. `sta_global` is the non-init store:
+                // the compiler picks `sta_global_init` for every
+                // declarator path (including destructuring
+                // declarators after `is_init` was threaded through
+                // `compileDestructure`). Reaching here for a lex
+                // binding means a §13.15.5 destructuring-assignment
+                // leaf, an assignment expression, or a for-of LHS
+                // against an outer-scope binding — all of which are
+                // PutValue (§6.2.5.5) and must surface the §13.3.1
+                // TDZ ReferenceError when the slot still holds the
+                // Hole sentinel.
                 if (realm.globals.hasLexicalDeclaration(key_s.bytes)) {
-                    if (realm.globals.isLexConst(key_s.bytes)) {
-                        const cur = realm.globals.getDecl(key_s.bytes) orelse Value.hole_;
-                        if (!cur.isHole()) {
-                            const ex = try makeTypeError(realm, "Assignment to constant variable");
-                            f.ip = ip;
-                            f.accumulator = acc;
-                            committed = true;
-                            if (!try unwindThrow(allocator, realm, frames, ex)) {
-                                return .{ .thrown = ex };
-                            }
-                            continue;
+                    const cur = realm.globals.getDecl(key_s.bytes) orelse Value.hole_;
+                    if (cur.isHole()) {
+                        const ex = try makeReferenceError(realm, "Cannot access binding before initialisation");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
                         }
+                        continue;
+                    }
+                    if (realm.globals.isLexConst(key_s.bytes)) {
+                        const ex = try makeTypeError(realm, "Assignment to constant variable");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
                     }
                     try realm.globals.putDecl(realm.allocator, key_s.bytes, acc);
                 } else {
@@ -8328,6 +8332,23 @@ fn runFrames(
                 // after the capture but before the store still
                 // routes correctly to the declarative record here.
                 if (realm.globals.hasLexicalDeclaration(key_s.bytes)) {
+                    // §13.3.1 — `sta_global_strict` is reached only
+                    // from assignment-expression code paths (never
+                    // a declarator init), so a Hole-valued slot
+                    // here is a §13.3.1 TDZ ReferenceError, not a
+                    // first-init. Mirrors the matching check in
+                    // `sta_global` above.
+                    const cur = realm.globals.getDecl(key_s.bytes) orelse Value.hole_;
+                    if (cur.isHole()) {
+                        const ex = try makeReferenceError(realm, "Cannot access binding before initialisation");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
+                    }
                     if (realm.globals.isLexConst(key_s.bytes)) {
                         const ex = try makeTypeError(realm, "Assignment to constant variable");
                         f.ip = ip;
