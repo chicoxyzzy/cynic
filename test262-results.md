@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 91.93 % | 99.01 % | 36876 / 40115 | 36876 / 37245 |
+| **runtime** | 91.93 % | 99.02 % | 36879 / 40115 | 36879 / 37245 |
 
 
 ## Where the runtime stands, by area
@@ -27,7 +27,7 @@ browser-era built-ins …).
 | `built-ins/Array` | 3005 | 30 | 36 | 98 % | 99 % |
 | `built-ins/ArrayBuffer` | 181 | 10 | 4 | 93 % | 95 % |
 | `built-ins/Iterator` | 403 | 22 | 6 | 94 % | 95 % |
-| `built-ins/Object` | 3292 | 27 | 80 | 97 % | 99 % |
+| `built-ins/Object` | 3293 | 26 | 80 | 97 % | 99 % |
 | `built-ins/RegExp` | 1518 | 84 | 161 | 86 % | 95 % |
 | `built-ins/String` | 1190 | 13 | 5 | 99 % | 99 % |
 | `built-ins/TypedArray` | 1398 | 25 | 8 | 98 % | 98 % |
@@ -38,12 +38,12 @@ browser-era built-ins …).
 | `built-ins/AggregateError` | 22 | 1 | 0 | 96 % | 96 % |
 | `built-ins/AsyncFunction` | 12 | 2 | 0 | 86 % | 86 % |
 | `built-ins/AsyncGeneratorFunction` | 7 | 2 | 0 | 78 % | 78 % |
-| `built-ins/AsyncGeneratorPrototype` | 43 | 5 | 0 | 90 % | 90 % |
+| `built-ins/AsyncGeneratorPrototype` | 44 | 4 | 0 | 92 % | 92 % |
 | `built-ins/BigInt` | 71 | 5 | 0 | 93 % | 93 % |
 | `built-ins/DataView` | 465 | 1 | 55 | 89 % | 100 % |
 | `built-ins/Error` | 52 | 3 | 0 | 95 % | 95 % |
 | `built-ins/GeneratorFunction` | 7 | 2 | 0 | 78 % | 78 % |
-| `built-ins/GeneratorPrototype` | 58 | 3 | 0 | 95 % | 95 % |
+| `built-ins/GeneratorPrototype` | 59 | 2 | 0 | 97 % | 97 % |
 | `built-ins/Map` | 168 | 1 | 1 | 99 % | 99 % |
 | `built-ins/Number` | 334 | 5 | 0 | 99 % | 99 % |
 | `built-ins/Promise` | 620 | 8 | 38 | 93 % | 99 % |
@@ -157,19 +157,17 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-18 — cynic `652e08e`, test262 `d0c1b455`
+### 2026-05-18 — cynic `e6c959d`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 91.93 % | 99.01 % | 36876 / 40115 | 36876 / 37245 | +214 | 1m 57s |
+| **runtime** | 91.93 % | 99.02 % | 36879 / 40115 | 36879 / 37245 | +217 | 1m 56s |
 
 Biggest movers (runtime):
 
-- `built-ins/Set` +7
-- `built-ins/Promise` +6
-- `language/statements` +4
-- `built-ins/Array` +3
-- `built-ins/Proxy` +3
+- `built-ins/AsyncGeneratorPrototype` +1
+- `built-ins/GeneratorPrototype` +1
+- `built-ins/Object` +1
 
 ### 2026-05-17 — cynic `400fbae`, test262 `d0c1b455`
 
