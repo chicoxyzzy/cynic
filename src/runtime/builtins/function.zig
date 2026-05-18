@@ -472,6 +472,14 @@ pub fn wireVariantInstancePrototypes(realm: *Realm) !void {
             .enumerable = false,
             .configurable = false,
         });
+        // §27.5.1.1 — `%GeneratorPrototype%.constructor` is
+        // `%GeneratorFunction.prototype%` (== `%Generator%`) with
+        // attributes { w:false, e:false, c:true }.
+        try gp.setWithFlags(realm.allocator, "constructor", heap_mod.taggedObject(gfp), .{
+            .writable = false,
+            .enumerable = false,
+            .configurable = true,
+        });
     }
     if (realm.intrinsics.async_generator_function_prototype) |agfp| {
         const agp = try interp.ensureAsyncGeneratorPrototype(realm);
@@ -479,6 +487,14 @@ pub fn wireVariantInstancePrototypes(realm: *Realm) !void {
             .writable = false,
             .enumerable = false,
             .configurable = false,
+        });
+        // §27.6.1.1 — `%AsyncGeneratorPrototype%.constructor` is
+        // `%AsyncGeneratorFunction.prototype%` (== `%AsyncGenerator%`)
+        // with attributes { w:false, e:false, c:true }.
+        try agp.setWithFlags(realm.allocator, "constructor", heap_mod.taggedObject(agfp), .{
+            .writable = false,
+            .enumerable = false,
+            .configurable = true,
         });
     }
 }
