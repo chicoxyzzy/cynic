@@ -3190,6 +3190,13 @@ fn objectHasOwnProperty(realm: *Realm, this_value: Value, args: []const Value) N
 /// `true` iff `key` is an own property of the receiver and its
 /// [[Enumerable]] attribute is `true`.
 fn objectProtoPropertyIsEnumerable(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §20.1.3.4 step 2 — `Let O be ? ToObject(this value)`. Null
+    // and undefined throw TypeError BEFORE ToPropertyKey runs on
+    // the argument (Sputnik S15.2.4.7_A12 / _A13 encode the
+    // order). Boxed primitives wrap to their matching wrapper.
+    if (this_value.isNull() or this_value.isUndefined()) {
+        return throwTypeError(realm, "Object.prototype.propertyIsEnumerable called on null or undefined");
+    }
     const key = try descriptorKey(realm, argOr(args, 0, Value.undefined_));
     if (heap_mod.valueAsPlainObject(this_value)) |obj| {
         // §20.1.3.4 step 3 composes `O.[[GetOwnProperty]](P)`. For a
