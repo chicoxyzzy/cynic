@@ -445,13 +445,55 @@ pub fn numberFromI64(n: i64) Value {
 /// only accessor). The setter itself can throw — that exception
 /// also propagates through `error.NativeThrew`.
 pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, value: Value) NativeError!void {
+    // §10.5.9 [[Set]] — Proxy receiver dispatches the `set` trap;
+    // when the trap is absent fall through to `target.[[Set]](P, V,
+    // Receiver)` with Receiver = the outer proxy. For a plain
+    // target, that's OrdinarySet, which calls
+    // `Receiver.[[GetOwnProperty]]` then `Receiver.[[DefineOwnProperty]]`
+    // — both fire proxy traps. Emulate that ordering by dispatching
+    // `getOwnPropertyDescriptor` + `defineProperty` traps directly
+    // when `set` falls through (test262 Array.prototype.splice/
+    // property-traps-order-with-species).
+    const proxy_mod = @import("proxy.zig");
+    var cur = obj;
+    while (cur.proxy_target != null or cur.proxy_revoked) {
+        const set_r = try proxy_mod.nativeProxySet(realm, cur, key, value, heap_mod.taggedObject(cur));
+        switch (set_r) {
+            .boolean => |b| {
+                if (!b) return throwTypeError(realm, "Set: 'set' trap returned false");
+                return;
+            },
+            .fallthrough => {
+                // §10.1.9.2 step 2.d (when reached via target.[[Set]]
+                // on a plain target with Receiver = outer proxy):
+                // `Receiver.[[GetOwnProperty]](P)` fires the
+                // outer proxy's `getOwnPropertyDescriptor` trap.
+                _ = try proxy_mod.nativeProxyGetOwnPropertyDescriptor(realm, cur, key);
+                // §10.1.9.2 step 2.e.iv —
+                // `Receiver.[[DefineOwnProperty]](P, valueDesc)`
+                // fires the outer proxy's `defineProperty` trap.
+                const dp_r = try proxy_mod.nativeProxyDefineProperty(realm, cur, key, value);
+                switch (dp_r) {
+                    .boolean => |b| {
+                        if (!b) return throwTypeError(realm, "Set: 'defineProperty' trap returned false");
+                        return;
+                    },
+                    .fallthrough => |t2| {
+                        if (t2 == cur) break;
+                        cur = t2;
+                    },
+                }
+            },
+        }
+    }
     // §10.1.9.1 OrdinarySet — walk the prototype chain for an
     // accessor setter; own data on the way shadows the inherited
     // accessor (`lookupAccessor` handles that contract).
-    if (interpreter.lookupAccessor(obj, key)) |acc_pair| {
+    const o = cur;
+    if (interpreter.lookupAccessor(o, key)) |acc_pair| {
         if (acc_pair.setter) |setter| {
             const args = [_]Value{value};
-            const outcome = interpreter.callJSFunction(realm.allocator, realm, setter, heap_mod.taggedObject(obj), &args) catch |err| switch (err) {
+            const outcome = interpreter.callJSFunction(realm.allocator, realm, setter, heap_mod.taggedObject(o), &args) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };
@@ -470,8 +512,8 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, value: Value) 
     // exotic (or anything in the array-prototype chain) coerces
     // to u32, throws RangeError on invalid value, and truncates
     // descending indexed slots. Non-writable length blocks.
-    if (std.mem.eql(u8, key, "length") and obj.is_array_exotic) {
-        if (obj.property_flags.get("length")) |flags| {
+    if (std.mem.eql(u8, key, "length") and o.is_array_exotic) {
+        if (o.property_flags.get("length")) |flags| {
             if (!flags.writable) {
                 return throwTypeError(realm, "Cannot assign to read-only property 'length'");
             }
@@ -484,13 +526,13 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, value: Value) 
         };
         // Re-check writability — a user valueOf could have flipped
         // `length: { writable: false }` between the two coercions.
-        if (obj.property_flags.get("length")) |flags| {
+        if (o.property_flags.get("length")) |flags| {
             if (!flags.writable) {
                 return throwTypeError(realm, "Cannot assign to read-only property 'length'");
             }
         }
-        const tr = interpreter.truncateArrayAtLength(realm.allocator, obj, new_len);
-        obj.setArrayLength(realm.allocator, tr.final_length) catch return error.OutOfMemory;
+        const tr = interpreter.truncateArrayAtLength(realm.allocator, o, new_len);
+        o.setArrayLength(realm.allocator, tr.final_length) catch return error.OutOfMemory;
         if (tr.blocked) {
             return throwTypeError(realm, "Cannot delete non-configurable array index");
         }
@@ -499,19 +541,19 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, value: Value) 
     // §10.4.2.1 [[DefineOwnProperty]] — Array exotic indexed
     // writes go through `setIndexed`. Auto-extend length-gate
     // applies when `length: {writable:false}`.
-    if (obj.is_array_exotic) {
+    if (o.is_array_exotic) {
         if (JSObject.canonicalIntegerIndex(key)) |idx| {
-            if (!obj.properties.contains(key)) {
-                if (obj.property_flags.get("length")) |flags| {
+            if (!o.properties.contains(key)) {
+                if (o.property_flags.get("length")) |flags| {
                     if (!flags.writable) {
-                        const cur_len_v = obj.properties.get("length") orelse Value.fromInt32(0);
+                        const cur_len_v = o.properties.get("length") orelse Value.fromInt32(0);
                         const cur_len: u32 = if (cur_len_v.isInt32()) @intCast(@max(0, cur_len_v.asInt32())) else 0;
                         if (idx >= cur_len) {
                             return throwTypeError(realm, "Cannot extend non-writable array length");
                         }
                     }
                 }
-                obj.setIndexed(realm.allocator, idx, value) catch return error.OutOfMemory;
+                o.setIndexed(realm.allocator, idx, value) catch return error.OutOfMemory;
                 return;
             }
         }
@@ -519,21 +561,21 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, value: Value) 
     // §10.1.9.2 OrdinarySetWithOwnDescriptor — own data wins; if
     // absent, [[DefineOwnProperty]] fails (and so strict-mode
     // [[Set]] throws TypeError) when the receiver is non-extensible.
-    const had_entry = obj.properties.contains(key);
+    const had_entry = o.properties.contains(key);
     if (had_entry) {
-        const flags = obj.flagsFor(key);
+        const flags = o.flagsFor(key);
         if (!flags.writable) {
             return throwTypeError(realm, "Cannot assign to read-only property");
         }
         // §6.1.6.1 NumberValue — length is a Number; preserve the
         // value bit-pattern (don't down-cast a double to int32).
-        obj.properties.put(realm.allocator, key, value) catch return error.OutOfMemory;
+        o.properties.put(realm.allocator, key, value) catch return error.OutOfMemory;
         return;
     }
-    if (!obj.extensible) {
+    if (!o.extensible) {
         return throwTypeError(realm, "Cannot add property, object is not extensible");
     }
-    obj.set(realm.allocator, key, value) catch return error.OutOfMemory;
+    o.set(realm.allocator, key, value) catch return error.OutOfMemory;
 }
 
 /// Spec-faithful `Set(O, "length", F(len), true)` — routes
@@ -1996,7 +2038,13 @@ fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     //   19. ? Set(O, "length", len - actualDeleteCount + insertCount, true)
     //   20. Return A
     const obj = try toObjectThis(realm, this_value);
-    var len = try toLengthOf(realm, obj);
+    // §23.1.3.30 step 2 — `len = ? LengthOfArrayLike(O)`. Route
+    // through the proxy-aware path so a `get` trap on `length`
+    // fires (test262
+    // built-ins/Array/prototype/splice/create-species-undef-invalid-len,
+    // create-species-length-exceeding-integer-limit).
+    const len_v = try getPropertyAny(realm, heap_mod.taggedObject(obj), "length");
+    var len = try intrinsics.toLengthValue(realm, len_v);
     const safe_max: i64 = (1 << 53) - 1;
     if (len > safe_max) len = safe_max;
 
@@ -2055,12 +2103,17 @@ fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     // §23.1.3.29 step 12-13 — copy O[start..start+actualDeleteCount-1]
     // into A. Uses HasProperty for hole-aware copy + CreateDataPropertyOrThrow
     // so existing accessor props on `A` don't intercept the per-index write.
+    // Dispatch HasProperty and Get through the proxy-aware helpers
+    // so a Proxy `O` fires its `has` / `get` traps and the
+    // `defineProperty` trap on `A` fires per the spec ordering
+    // (test262 splice/create-species-length-exceeding-integer-limit,
+    // splice/property-traps-order-with-species).
     var i: i64 = 0;
     while (i < delete_count) : (i += 1) {
         var rbuf: [24]u8 = undefined;
         const rslice = std.fmt.bufPrint(&rbuf, "{d}", .{start + i}) catch unreachable;
-        if (!obj.hasProperty(rslice)) continue;
-        const v = try getPropertyChain(realm, obj, rslice);
+        if (!(try hasPropertyP(realm, obj, rslice))) continue;
+        const v = try getPropertyAny(realm, heap_mod.taggedObject(obj), rslice);
         var wbuf: [24]u8 = undefined;
         const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{i}) catch unreachable;
         const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
@@ -2141,13 +2194,35 @@ fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
 /// receivers and non-configurable redefines with TypeError.
 fn createDataPropertyOrThrowGeneric(realm: *Realm, obj: *JSObject, key: []const u8, value: Value) NativeError!void {
     const ObjMod = @import("../object.zig");
-    const had_own = obj.hasOwn(key);
-    if (!had_own and !obj.extensible) {
+    // §7.3.6 CreateDataPropertyOrThrow — for a Proxy receiver,
+    // OrdinaryDefineOwnProperty becomes the proxy `defineProperty`
+    // trap. Trap-thrown abrupt completions surface here; a falsy
+    // trap return is lifted to TypeError per §7.3.6 step 3.
+    // (test262 Array.prototype.splice
+    // property-traps-order-with-species,
+    // create-species-length-exceeding-integer-limit).
+    const proxy_mod = @import("proxy.zig");
+    var cur = obj;
+    while (cur.proxy_target != null or cur.proxy_revoked) {
+        const r = try proxy_mod.nativeProxyDefineProperty(realm, cur, key, value);
+        switch (r) {
+            .boolean => |b| {
+                if (!b) return throwTypeError(realm, "CreateDataPropertyOrThrow: 'defineProperty' trap returned false");
+                return;
+            },
+            .fallthrough => |t| {
+                if (t == cur) break;
+                cur = t;
+            },
+        }
+    }
+    const had_own = cur.hasOwn(key);
+    if (!had_own and !cur.extensible) {
         return throwTypeError(realm, "Cannot define property on non-extensible object");
     }
     if (had_own) {
-        const cur = obj.flagsFor(key);
-        if (!cur.configurable) {
+        const cur_flags = cur.flagsFor(key);
+        if (!cur_flags.configurable) {
             return throwTypeError(realm, "Cannot redefine non-configurable property");
         }
         // §10.1.6.3 OrdinaryDefineOwnProperty — a configurable slot
@@ -2155,10 +2230,10 @@ fn createDataPropertyOrThrowGeneric(realm: *Realm, obj: *JSObject, key: []const 
         // demoted indexed-slot entry from `properties` so the
         // subsequent `setWithFlags(default)` lands in `elements`
         // again rather than leaving the bag-promoted descriptor.
-        _ = obj.properties.swapRemove(key);
-        _ = obj.property_flags.swapRemove(key);
+        _ = cur.properties.swapRemove(key);
+        _ = cur.property_flags.swapRemove(key);
     }
-    obj.setWithFlags(realm.allocator, key, value, ObjMod.PropertyFlags.default) catch return error.OutOfMemory;
+    cur.setWithFlags(realm.allocator, key, value, ObjMod.PropertyFlags.default) catch return error.OutOfMemory;
 }
 
 fn arrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -2171,7 +2246,13 @@ fn arrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) Native
     // and a fixture with `length: 2^53-1` and a 3-element range
     // must not RangeError.
     const safe_max: i64 = (1 << 53) - 1;
-    var len = try toLengthOf(realm, obj);
+    // §23.1.3.4 step 2 — `LengthOfArrayLike(O)`. Proxy-aware so a
+    // `get` trap on `length` fires before coercion (test262
+    // built-ins/Array/prototype/copyWithin/
+    // return-abrupt-from-has-start.js uses a Proxy without a `has`
+    // trap fire path unless `length` is observed first).
+    const len_v = try getPropertyAny(realm, heap_mod.taggedObject(obj), "length");
+    var len = try intrinsics.toLengthValue(realm, len_v);
     if (len > safe_max) len = safe_max;
     // §23.1.3.4 steps 4-8 — ToIntegerOrInfinity on target / start /
     // end. Each can be an object with a throwing `valueOf` /

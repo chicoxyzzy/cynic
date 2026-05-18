@@ -158,7 +158,58 @@ fn emptyFunctionBody(realm: *Realm, this_value: Value, args: []const Value) Nati
 fn functionHasInstance(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const v = if (args.len > 0) args[0] else Value.undefined_;
 
-    var target_fn = heap_mod.valueAsFunction(this_value) orelse return Value.false_;
+    // §7.3.20 OrdinaryHasInstance step 1 — `If IsCallable(C) is
+    // false, return false`. Cynic stores most callables as
+    // `JSFunction`; the lone exception is `%Function.prototype%`
+    // itself, which is allocated as a plain `JSObject` (the proto
+    // produced by `installStubConstructor`) but is callable per
+    // §10.2.3 (a no-op returning undefined). Honour the spec
+    // contract by routing JSObject `this` through the accessor-
+    // aware property-lookup helper so a user-installed getter on
+    // `Function.prototype.prototype` fires (test262
+    // language/expressions/instanceof/prototype-getter-with-object,
+    // prototype-getter-with-object-throws,
+    // primitive-prototype-with-object).
+    if (heap_mod.valueAsFunction(this_value) == null) {
+        const obj = heap_mod.valueAsPlainObject(this_value) orelse return Value.false_;
+        if (realm.intrinsics.function_prototype) |fn_proto| {
+            if (obj == fn_proto) {
+                // §7.3.20 step 3 — if `v` is not an Object,
+                // short-circuit to `false` BEFORE step 4 fires
+                // `Get(C, "prototype")` (test262
+                // prototype-getter-with-primitive,
+                // primitive-prototype-with-primitive: the getter
+                // must NOT be observed for primitive LHS).
+                const v_is_obj = heap_mod.valueAsPlainObject(v) != null or heap_mod.valueAsFunction(v) != null;
+                if (!v_is_obj) return Value.false_;
+                const intrinsics_mod = @import("../intrinsics.zig");
+                const proto_v = intrinsics_mod.getPropertyChain(realm, obj, "prototype") catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                const proto_obj: *JSObject = heap_mod.valueAsPlainObject(proto_v) orelse {
+                    return throwTypeError(realm, "Function has non-object prototype in instanceof check");
+                };
+                // §7.3.20 step 7 — walk the LHS prototype chain.
+                if (heap_mod.valueAsPlainObject(v)) |lhs_obj| {
+                    var cursor: ?*JSObject = lhs_obj.prototype;
+                    while (cursor) |p| : (cursor = p.prototype) {
+                        if (p == proto_obj) return Value.true_;
+                    }
+                    return Value.false_;
+                } else if (heap_mod.valueAsFunction(v)) |lhs_fn| {
+                    var cursor: ?*JSObject = lhs_fn.proto;
+                    while (cursor) |p| : (cursor = p.prototype) {
+                        if (p == proto_obj) return Value.true_;
+                    }
+                    return Value.false_;
+                }
+                return Value.false_;
+            }
+        }
+        return Value.false_;
+    }
+    var target_fn = heap_mod.valueAsFunction(this_value).?;
     while (target_fn.bound_target) |inner| target_fn = inner;
 
     // §7.3.20 OrdinaryHasInstance step 4 — `Let P be ? Get(C,

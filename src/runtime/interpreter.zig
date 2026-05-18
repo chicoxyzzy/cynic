@@ -10661,7 +10661,7 @@ fn strictSetPropertyAnchored(
         // at the first non-configurable element; the spec sets
         // length to that index + 1 and throws TypeError in
         // strict mode (§10.4.2.4 step 17.b.ii).
-        if (std.mem.eql(u8, key, "length") and obj.prototype != null and obj.prototype == realm.intrinsics.array_prototype) {
+        if (std.mem.eql(u8, key, "length") and obj.is_array_exotic) {
             // Check the existing length is writable. If a prior
             // `Object.defineProperty(arr, "length", {writable:false})`
             // froze it, any future length-write must throw.

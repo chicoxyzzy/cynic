@@ -147,6 +147,24 @@ fn raiseRevoked(realm: *Realm, op: []const u8) NativeError {
     return error.NativeThrew;
 }
 
+/// §7.3.11 GetMethod(handler, "name") — proxy-aware. The handler
+/// is itself an Object and may be a Proxy; per spec each trap
+/// fetch goes through [[Get]], which fires nested handlers'
+/// `get` traps. Without this dispatch, a fixture like
+/// `new Proxy({}, {get(t,pk,r) { log.push(pk); }})` used as a
+/// handler never logs the trap-name lookups
+/// (test262 splice/property-traps-order-with-species).
+fn getTrap(realm: *Realm, handler: *JSObject, key: []const u8) NativeError!Value {
+    if (handler.proxy_target != null or handler.proxy_revoked) {
+        const r = try nativeProxyGet(realm, handler, key, heap_mod.taggedObject(handler));
+        switch (r) {
+            .value => |v| return v,
+            .fallthrough => |t| return intrinsics.getPropertyChain(realm, t, key),
+        }
+    }
+    return handler.get(key);
+}
+
 fn callTrap(realm: *Realm, trap_fn: *@import("../function.zig").JSFunction, handler: *JSObject, args: []const Value) NativeError!Value {
     const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -219,7 +237,11 @@ pub fn nativeProxySet(realm: *Realm, proxy: *JSObject, key: []const u8, value: V
     if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'set' on a proxy that has been revoked");
     const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
     const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
-    const trap_v = handler.get("set");
+    // §10.5.9 step 5 — `Let trap be ? GetMethod(handler, "set")`.
+    // GetMethod chains through [[Get]], firing nested-Proxy handler
+    // get traps (test262 Array.prototype.splice/
+    // property-traps-order-with-species).
+    const trap_v = try getTrap(realm, handler, "set");
     if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'set' trap is not callable");
     const key_v = try trapKeyValue(realm, key);
@@ -275,6 +297,66 @@ pub fn nativeProxyHas(realm: *Realm, proxy: *JSObject, key: []const u8) NativeEr
         }
     }
     return .{ .boolean = b };
+}
+
+/// §10.5.5 [[GetOwnProperty]] (P) — native dispatcher (trap-fetch
+/// only). Returns `.value` when the trap was called (the trap's
+/// raw return), `.fallthrough` when no `getOwnPropertyDescriptor`
+/// trap is installed.
+///
+/// Cynic only consumes the trap return for its presence-check (the
+/// caller cares about whether a descriptor exists). A full
+/// PropertyDescriptor-shaped return is left for callers that need
+/// it; today we only use it from `setOrThrow` to fire the trap
+/// lookup so the handler-as-Proxy `get` trap logs the access
+/// (test262 Array.prototype.splice/property-traps-order-with-species).
+pub fn nativeProxyGetOwnPropertyDescriptor(realm: *Realm, proxy: *JSObject, key: []const u8) NativeError!union(enum) { value: Value, fallthrough: *JSObject } {
+    if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'getOwnPropertyDescriptor' on a proxy that has been revoked");
+    const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
+    const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
+    const trap_v = try getTrap(realm, handler, "getOwnPropertyDescriptor");
+    if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
+    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'getOwnPropertyDescriptor' trap is not callable");
+    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+    const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str) };
+    const v = try callTrap(realm, trap_fn, handler, &args);
+    return .{ .value = v };
+}
+
+/// §10.5.6 [[DefineOwnProperty]] (P, Desc) — native dispatcher.
+/// Returns `.boolean` for trap-handled outcomes (true/false per
+/// the trap's ToBoolean), `.fallthrough` when no `defineProperty`
+/// trap is installed and the caller should perform the ordinary
+/// [[DefineOwnProperty]] against the returned target.
+///
+/// `value` is the data-property value to install with
+/// `{writable: true, enumerable: true, configurable: true}` flags
+/// — the descriptor shape CreateDataPropertyOrThrow requires (§7.3.6).
+pub fn nativeProxyDefineProperty(realm: *Realm, proxy: *JSObject, key: []const u8, value: Value) NativeError!union(enum) { boolean: bool, fallthrough: *JSObject } {
+    if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'defineProperty' on a proxy that has been revoked");
+    const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
+    const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
+    // §10.5.6 step 5 — GetMethod(handler, "defineProperty"), which
+    // is §7.3.11 over §7.3.10 Get(handler, "defineProperty"). When
+    // `handler` is itself a Proxy, its `get` trap fires
+    // (test262 Array.prototype.splice/property-traps-order-with-species).
+    const trap_v = try getTrap(realm, handler, "defineProperty");
+    if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
+    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'defineProperty' trap is not callable");
+    // Build the FromPropertyDescriptor object for the trap arg.
+    // §6.2.5.4 / §10.5.6 — for CreateDataPropertyOrThrow callers,
+    // the descriptor is the §7.3.6 all-true data descriptor.
+    const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
+    desc.prototype = realm.intrinsics.object_prototype;
+    desc.set(realm.allocator, "value", value) catch return error.OutOfMemory;
+    desc.set(realm.allocator, "writable", Value.true_) catch return error.OutOfMemory;
+    desc.set(realm.allocator, "enumerable", Value.true_) catch return error.OutOfMemory;
+    desc.set(realm.allocator, "configurable", Value.true_) catch return error.OutOfMemory;
+    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+    const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str), heap_mod.taggedObject(desc) };
+    const v = try callTrap(realm, trap_fn, handler, &args);
+    const arith = @import("../interpreter_arith.zig");
+    return .{ .boolean = arith.toBoolean(v) };
 }
 
 /// §10.5.10 [[Delete]] (P) — native dispatcher.
