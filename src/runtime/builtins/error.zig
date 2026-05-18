@@ -145,12 +145,24 @@ fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) N
     };
     instance.has_error_data = true;
 
+    // §20.5.7.1.1 step 3 — if message ≠ undefined, ToString(message)
+    // BEFORE step 4's IterableToList(errors). The fixture
+    // `order-of-args-evaluation.js` encodes this: `message.toString`
+    // must fire before `errors[@@iterator]`.
+    if (args.len > 1 and !args[1].isUndefined()) {
+        const msg_str = try stringifyArg(realm, args[1]);
+        instance.setWithFlags(realm.allocator, "message", Value.fromString(msg_str), .{
+            .writable = true,
+            .enumerable = false,
+            .configurable = true,
+        }) catch return error.OutOfMemory;
+    }
+
     // §20.5.7.1.1 step 4 — IteratorToList(GetIterator(errors)).
-    // Cynic doesn't have a generic GetIterator helper at this
-    // layer, so we accept the two shapes that test262 throws at
-    // us: real iterables (array-like with `@@iterator`) and bare
-    // array-likes (`length` + indexed get). For array-likes we
-    // materialise to an Array; for iterables we walk the protocol.
+    // A non-iterable here MUST throw — `new AggregateError({})` is
+    // a TypeError, not a silent zero-element instance. Likewise a
+    // non-callable `[Symbol.iterator]` returned by an accessor is a
+    // TypeError per GetMethod.
     const errors_v = if (args.len > 0) args[0] else Value.undefined_;
     const errors_arr = aggregateErrorMaterialiseErrors(realm, errors_v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -163,18 +175,6 @@ fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) N
         .enumerable = false,
         .configurable = true,
     }) catch return error.OutOfMemory;
-
-    // §20.5.7.1.1 step 2 — message is the second arg; if defined,
-    // ToString and pin as own with `{ w:true, e:false, c:true }`
-    // per `CreateNonEnumerableDataPropertyOrThrow`.
-    if (args.len > 1 and !args[1].isUndefined()) {
-        const msg_str = try stringifyArg(realm, args[1]);
-        instance.setWithFlags(realm.allocator, "message", Value.fromString(msg_str), .{
-            .writable = true,
-            .enumerable = false,
-            .configurable = true,
-        }) catch return error.OutOfMemory;
-    }
     // §20.5.8.1 InstallErrorCause — third arg is an options object;
     // own `cause` key (if present) copies to instance with the
     // same `{ w:true, e:false, c:true }` shape.
@@ -206,8 +206,16 @@ fn aggregateErrorMaterialiseErrors(realm: *Realm, errors_v: Value) NativeError!V
         return intrinsics.throwTypeError(realm, "AggregateError: errors argument is not iterable");
     };
 
-    // Iterable path first.
+    // §7.4.6 GetMethod(errors, @@iterator). Accessor-aware
+    // (`getPropertyChain` fires the getter, so a `get [Symbol.iterator]`
+    // throw propagates). If the read returns something non-callable
+    // AND non-nullish, §7.3.10 step 3 throws TypeError.
     const iter_method_v = try intrinsics.getPropertyChain(realm, src, "@@iterator");
+    if (!iter_method_v.isUndefined() and !iter_method_v.isNull() and
+        heap_mod.valueAsFunction(iter_method_v) == null)
+    {
+        return intrinsics.throwTypeError(realm, "AggregateError: @@iterator is not callable");
+    }
     if (heap_mod.valueAsFunction(iter_method_v)) |iter_method| {
         const iter_outcome = interpreter.callJSFunction(realm.allocator, realm, iter_method, errors_v, &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
