@@ -410,7 +410,39 @@ pub const skip_ses_substrings = [_][]const u8{
 /// a clean prefix or suffix.
 pub const skip_ses_exact_paths = [_][]const u8{
     "built-ins/Boolean/S9.2_A1_T1.js",
+    // §9.3.3 / §9.5.4 — `$262.createRealm()`-using cross-realm
+    // fixtures spread across `Array.prototype.{slice,map,filter,
+    // splice,concat}/create-proto-from-ctor-realm-array.js`,
+    // `Proxy/{apply,construct,get-fn-realm,get-fn-realm-recursive}`,
+    // `Function/internals/Construct/derived-{return-val,this-
+    // uninitialized}-realm.js`, the `non-generic-realm` siblings on
+    // `String.prototype.{toString,valueOf}`, `JSON/stringify/value-
+    // bigint-cross-realm`, `Error/isError/errors-other-realm`, and
+    // `language/expressions/super/realm.js`. Each is tagged
+    // `features: [cross-realm]` and bottoms out on
+    // `$262.createRealm().global` — Cynic ships a single-realm host
+    // (see existing `/cross-realm.` / `/proto-from-ctor-realm`
+    // skip_planned_path_contains entries; these basenames don't
+    // match either pattern, so list them exact). Permanent single-
+    // realm carve-out per AGENTS.md. 17 fixtures.
+    "built-ins/Array/prototype/concat/create-proto-from-ctor-realm-array.js",
+    "built-ins/Array/prototype/filter/create-proto-from-ctor-realm-array.js",
+    "built-ins/Array/prototype/map/create-proto-from-ctor-realm-array.js",
+    "built-ins/Array/prototype/slice/create-proto-from-ctor-realm-array.js",
+    "built-ins/Array/prototype/splice/create-proto-from-ctor-realm-array.js",
+    "built-ins/Error/isError/errors-other-realm.js",
     "built-ins/Error/isError/non-error-objects-other-realm.js",
+    "built-ins/Function/internals/Construct/derived-return-val-realm.js",
+    "built-ins/Function/internals/Construct/derived-this-uninitialized-realm.js",
+    "built-ins/JSON/stringify/value-bigint-cross-realm.js",
+    "built-ins/Proxy/apply/arguments-realm.js",
+    "built-ins/Proxy/construct/arguments-realm.js",
+    "built-ins/Proxy/construct/trap-is-undefined-proto-from-newtarget-realm.js",
+    "built-ins/Proxy/get-fn-realm-recursive.js",
+    "built-ins/Proxy/get-fn-realm.js",
+    "built-ins/String/prototype/toString/non-generic-realm.js",
+    "built-ins/String/prototype/valueOf/non-generic-realm.js",
+    "language/expressions/super/realm.js",
     "built-ins/Function/15.3.5.4_2-11gs.js",
     "built-ins/Function/15.3.5.4_2-7gs.js",
     "built-ins/Function/15.3.5.4_2-9gs.js",
