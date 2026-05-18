@@ -3146,6 +3146,13 @@ pub fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value
             // internal slot present on the receiver. Order
             // matters per the spec table.
             if (obj.prototype != null and obj.prototype == realm.intrinsics.array_prototype) break :blk "Array";
+            // §20.2.3 — %Function.prototype% is itself a Function
+            // exotic object whose [[Class]] is "Function".
+            // Cynic stashes it as a JSObject (not a JSFunction)
+            // for now (see intrinsics.zig); recognise it here so
+            // `Object.prototype.toString.call(Function.prototype)`
+            // returns "[object Function]" per Sputnik S15.3.4_A1.
+            if (obj == realm.intrinsics.function_prototype) break :blk "Function";
             // §10.4.4 / §22.1.3.6 step 4 "Arguments" case.
             if (obj.is_arguments_exotic) break :blk "Arguments";
             // §10.5 Proxy — when the wrapped target is callable

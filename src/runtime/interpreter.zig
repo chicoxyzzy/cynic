@@ -5043,9 +5043,31 @@ fn runFrames(
                     continue;
                 }
                 // §13.10.2 step 2 — `GetMethod(target, @@hasInstance)`.
-                // Walks the prototype chain. If present and not null /
-                // undefined, invoke it as the handler.
-                const hi_v: Value = if (rhs_obj_opt) |o| o.get("@@hasInstance") else if (rhs_fn_opt) |fn_obj| fn_obj.get("@@hasInstance") else Value.undefined_;
+                // Walks the prototype chain via the accessor-aware
+                // `getPropertyChain` so a `defineProperty(rhs,
+                // Symbol.hasInstance, {get…})` fires its getter
+                // (test262 language/expressions/instanceof/symbol-
+                // hasinstance-get-err.js, -to-boolean.js).
+                const hi_v: Value = blk_hi: {
+                    if (rhs_obj_opt) |o| {
+                        break :blk_hi intrinsics_mod.getPropertyChain(realm, o, "@@hasInstance") catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            error.NativeThrew => {
+                                const ex = realm.pending_exception orelse Value.undefined_;
+                                realm.pending_exception = null;
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue;
+                            },
+                        };
+                    } else if (rhs_fn_opt) |fn_obj| {
+                        break :blk_hi fn_obj.get("@@hasInstance");
+                    } else break :blk_hi Value.undefined_;
+                };
                 if (heap_mod.valueAsFunction(hi_v)) |hi_fn| {
                     const hi_args = [_]Value{lhs};
                     const outcome = try callJSFunction(allocator, realm, hi_fn, rhs, &hi_args);
