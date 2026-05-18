@@ -464,6 +464,38 @@ pub fn unaryToNumber(realm: *Realm, v: Value) RunError!?Value {
     return Value.fromDouble(d);
 }
 
+/// §13.4 PostfixExpression / PrefixUpdateExpression evaluation —
+/// `Type(oldValue)::add(oldValue, Type(oldValue)::unit)`. The unit
+/// is `1n` for BigInts and `1` for Numbers, so the bump operator
+/// must dispatch on the operand's numeric type rather than mixing
+/// it with a Number-typed `1`. `delta` is `+1` (increment) or
+/// `−1` (decrement). The input is assumed to be already coerced
+/// via ToNumeric (the compiler emits a `to_number` immediately
+/// before the bump).
+pub fn incOrDec(realm: *Realm, v: Value, delta: i32) RunError!?Value {
+    if (heap_mod.valueAsBigInt(v)) |bi| {
+        // §6.1.6.2.7 BigInt::add(x, 1n) — i128 with overflow trap.
+        const sum = std.math.add(i128, bi.value, @as(i128, delta)) catch {
+            realm.pending_exception = try makeRangeError(realm, "BigInt arithmetic overflow");
+            return null;
+        };
+        const out = realm.heap.allocateBigInt(sum) catch return error.OutOfMemory;
+        return heap_mod.taggedBigInt(out);
+    }
+    if (v.isInt32()) {
+        const ov = @addWithOverflow(v.asInt32(), delta);
+        if (ov[1] == 0) return Value.fromInt32(ov[0]);
+        return Value.fromDouble(@as(f64, @floatFromInt(v.asInt32())) + @as(f64, @floatFromInt(delta)));
+    }
+    if (v.isDouble()) {
+        return Value.fromDouble(v.asDouble() + @as(f64, @floatFromInt(delta)));
+    }
+    // ToNumeric on an exotic that returned NaN-y value: treat as
+    // NaN-arithmetic — the `to_number` op already produced this
+    // shape, so just push NaN through.
+    return Value.fromDouble(std.math.nan(f64));
+}
+
 /// §7.1.6 / §6.1.6.1 — addition is the only operator with the
 /// string-concatenation shortcut. Returns null when an exception
 /// is pending on the realm so the caller can unwind through the

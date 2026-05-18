@@ -1298,13 +1298,21 @@ pub const Compiler = struct {
     /// (prefix ? acc_new : acc_old)`. Both identifier and
     /// member-access targets are supported.
     fn compileUpdate(self: *Compiler, u: ast.expression.UpdateExpr) CompileError!void {
-        if (u.operand.* == .member) {
-            return self.compileUpdateMember(u);
+        // §13.4 / §13.15.3 — `(x)++` is a CoverParenthesizedExpression
+        // covering an IdentifierReference. IsValidSimpleAssignmentTarget
+        // sees through parentheses, so unwrap any layers before
+        // dispatching to the identifier vs member path.
+        var operand: *const ast.expression.Expression = u.operand;
+        while (operand.* == .parenthesized) operand = operand.parenthesized.expression;
+        if (operand.* == .member) {
+            var unwrapped = u;
+            unwrapped.operand = @constCast(operand);
+            return self.compileUpdateMember(unwrapped);
         }
-        if (u.operand.* != .identifier_reference) {
+        if (operand.* != .identifier_reference) {
             return error.UnsupportedExpression;
         }
-        const span = u.operand.identifier_reference.span;
+        const span = operand.identifier_reference.span;
         // §12.7 — resolve against the StringValue (decoded escapes).
         const name = try self.bindingName(span);
         const scope = self.scope orelse return error.UnresolvedReference;
@@ -1339,20 +1347,18 @@ pub const Compiler = struct {
         // §13.4.4.1 step 2.b — ToNumeric.
         try self.builder.emitOp(.to_number, span);
 
-        // Save the coerced original for the result-of-postfix
-        // and the lhs of the bump.
+        // Save the coerced original for the result-of-postfix.
         const r_orig = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.star, span);
         try self.builder.emitU8(r_orig);
 
-        // bumped = orig ± 1. With our convention `add/sub r` is
-        // `acc = r OP acc`, so put 1 in acc and reference r_orig.
-        try self.builder.emitOp(.lda_smi, u.span);
-        try self.builder.emitI32(1);
-        const op: Op = if (u.op == .increment) .add else .sub;
+        // §13.4 bump = oldValue + Type(oldValue)::unit. Inc / Dec
+        // dispatch on Number vs BigInt so the unit matches; the
+        // older `lda_smi 1; add r` shape mixed BigInt + Number
+        // and rejected `0n++` as a TypeError.
+        const op: Op = if (u.op == .increment) .inc else .dec;
         try self.builder.emitOp(op, u.span);
-        try self.builder.emitU8(r_orig);
         try self.emitStoreBinding(binding, u.span);
 
         if (u.prefix) {
@@ -1429,12 +1435,11 @@ pub const Compiler = struct {
         try self.builder.emitOp(.star, u.span);
         try self.builder.emitU8(r_orig);
 
-        // bumped = orig ± 1.
-        try self.builder.emitOp(.lda_smi, u.span);
-        try self.builder.emitI32(1);
-        const op: Op = if (u.op == .increment) .add else .sub;
+        // §13.4 bump = oldValue + Type(oldValue)::unit. Inc / Dec
+        // dispatch on Number vs BigInt so BigInt members
+        // (`obj.x++` with `x = 0n`) don't TypeError.
+        const op: Op = if (u.op == .increment) .inc else .dec;
         try self.builder.emitOp(op, u.span);
-        try self.builder.emitU8(r_orig);
 
         // Store back — acc holds the bumped value.
         switch (mode) {
@@ -1516,12 +1521,11 @@ pub const Compiler = struct {
         try self.builder.emitOp(.star, u.span);
         try self.builder.emitU8(r_orig);
 
-        // bumped = orig ± 1.
-        try self.builder.emitOp(.lda_smi, u.span);
-        try self.builder.emitI32(1);
-        const op: Op = if (u.op == .increment) .add else .sub;
+        // §13.4 bump = oldValue + Type(oldValue)::unit. Inc / Dec
+        // dispatch on Number vs BigInt so BigInt members
+        // (`obj.x++` with `x = 0n`) don't TypeError.
+        const op: Op = if (u.op == .increment) .inc else .dec;
         try self.builder.emitOp(op, u.span);
-        try self.builder.emitU8(r_orig);
 
         // Store via super.<key> = bumped.
         const r_val = try self.reserveTemp();

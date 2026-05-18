@@ -3965,6 +3965,24 @@ fn runFrames(
                     continue;
                 }
             },
+            .inc => {
+                if (try arith.incOrDec(realm, acc, 1)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "Update failed");
+                    realm.pending_exception = null;
+                    f.ip = ip; f.accumulator = acc; committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
+                }
+            },
+            .dec => {
+                if (try arith.incOrDec(realm, acc, -1)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "Update failed");
+                    realm.pending_exception = null;
+                    f.ip = ip; f.accumulator = acc; committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
+                }
+            },
             .typeof_ => acc = try typeOf(realm, acc),
 
             // ── Comparison ──────────────────────────────────────────────

@@ -90,6 +90,13 @@ pub const Op = enum(u8) {
     logical_not,
     /// acc = +acc (ToNumber). §13.5.4.
     to_number,
+    /// acc = acc + Type(acc)::unit (§13.4 PostfixExpression /
+    /// PrefixUpdateExpression). The accumulator is assumed to
+    /// already be ToNumeric-coerced; the bump dispatches on
+    /// Number vs BigInt so the unit matches the operand's type.
+    inc,
+    /// acc = acc − Type(acc)::unit. Mirror of `inc`.
+    dec,
     /// acc = typeof acc → JSString. §13.5.3.
     typeof_,
 
@@ -783,6 +790,8 @@ pub const Op = enum(u8) {
             .bit_not,
             .logical_not,
             .to_number,
+            .inc,
+            .dec,
             .typeof_,
             .throw_,
             .throw_if_hole,
@@ -910,6 +919,8 @@ pub const Op = enum(u8) {
             .bit_not => "BitNot",
             .logical_not => "LogicalNot",
             .to_number => "ToNumber",
+            .inc => "Inc",
+            .dec => "Dec",
             .typeof_ => "TypeOf",
             .eq => "Eq",
             .strict_eq => "StrictEq",
