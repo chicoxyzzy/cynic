@@ -1408,7 +1408,23 @@ pub const Compiler = struct {
             },
             .computed => |key_expr| {
                 try self.compileExpression(key_expr);
+                // §13.4 — the operand expression evaluates *once*.
+                // For computed access that means ToPropertyKey fires
+                // once across the read + write, not twice. Stash
+                // the raw key first, then do the spec-ordered
+                // RequireObjectCoercible(base) → ToPropertyKey(key)
+                // sequence, mirroring what `lda_computed` does at
+                // runtime so `null[obj]++` still TypeErrors before
+                // `obj.toString` runs.
                 r_key = try self.reserveTemp();
+                try self.builder.emitOp(.star, u.span);
+                try self.builder.emitU8(r_key);
+                try self.builder.emitOp(.ldar, u.span);
+                try self.builder.emitU8(r_obj);
+                try self.builder.emitOp(.require_object_coercible, u.span);
+                try self.builder.emitOp(.ldar, u.span);
+                try self.builder.emitU8(r_key);
+                try self.builder.emitOp(.to_property_key, u.span);
                 try self.builder.emitOp(.star, u.span);
                 try self.builder.emitU8(r_key);
                 mode = .computed;
