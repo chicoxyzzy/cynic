@@ -153,6 +153,20 @@ fn mathRound(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     if (std.math.isNan(x) or std.math.isInf(x)) return mathDouble(x);
     if (x == 0) return mathDouble(x); // preserves sign of 0
     if (x < 0 and x >= -0.5) return mathDouble(-0.0);
+    // §21.3.2.27 — values in (0, 0.5) round to +0. The naïve
+    // `floor(x + 0.5)` rounds, e.g., `0.5 - Number.EPSILON/4`
+    // (which is < 0.5 but very close) up to 1 because
+    // `0.5 - 2^-54 + 0.5` is IEEE-rounded to exactly 1.0
+    // (Sputnik `S15.8.2.15_A7` CHECK#4).
+    if (x > 0 and x < 0.5) return Value.fromInt32(0);
+    // §21.3.2.27 — "If x is an integer, the result is x." For
+    // large-magnitude integers near 2^53, the naïve `floor(x + 0.5)`
+    // loses the last bit of precision in the addition and rounds odd
+    // integers to the next even value (Sputnik `S15.8.2.15_A7` checks
+    // values like `2 / Number.EPSILON - 1` = 2^53 - 1, which would
+    // collapse to 2^53). Short-circuit when `x` is already an
+    // integral float.
+    if (@floor(x) == x) return mathDouble(x);
     return mathDouble(@floor(x + 0.5));
 }
 fn mathTrunc(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
