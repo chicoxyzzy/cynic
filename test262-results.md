@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 91.99 % | 99.08 % | 36901 / 40115 | 36901 / 37245 |
+| **runtime** | 92.05 % | 99.14 % | 36924 / 40115 | 36924 / 37245 |
 
 
 ## Where the runtime stands, by area
@@ -24,15 +24,15 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_10–99 fails_** | | | | | |
-| `built-ins/Array` | 3005 | 30 | 36 | 98 % | 99 % |
+| `built-ins/Array` | 3013 | 22 | 36 | 98 % | 99 % |
 | `built-ins/ArrayBuffer` | 181 | 10 | 4 | 93 % | 95 % |
-| `built-ins/Iterator` | 403 | 22 | 6 | 94 % | 95 % |
-| `built-ins/Object` | 3293 | 26 | 80 | 97 % | 99 % |
+| `built-ins/Iterator` | 407 | 18 | 6 | 94 % | 96 % |
+| `built-ins/Object` | 3300 | 19 | 80 | 97 % | 99 % |
 | `built-ins/RegExp` | 1518 | 84 | 161 | 86 % | 95 % |
 | `built-ins/String` | 1190 | 13 | 5 | 99 % | 99 % |
 | `built-ins/TypedArray` | 1406 | 17 | 8 | 98 % | 99 % |
 | `built-ins/TypedArrayConstructors` | 644 | 16 | 16 | 95 % | 98 % |
-| `language/expressions` | 9715 | 56 | 972 | 90 % | 99 % |
+| `language/expressions` | 9718 | 53 | 972 | 90 % | 99 % |
 | `language/statements` | 8395 | 17 | 672 | 92 % | 100 % |
 | **_1–9 fails_** | | | | | |
 | `built-ins/AggregateError` | 22 | 1 | 0 | 96 % | 96 % |
@@ -46,7 +46,7 @@ browser-era built-ins …).
 | `built-ins/Map` | 168 | 1 | 1 | 99 % | 99 % |
 | `built-ins/Number` | 334 | 5 | 0 | 99 % | 99 % |
 | `built-ins/Promise` | 626 | 2 | 38 | 94 % | 100 % |
-| `built-ins/Proxy` | 285 | 8 | 13 | 93 % | 97 % |
+| `built-ins/Proxy` | 286 | 7 | 13 | 93 % | 98 % |
 | `built-ins/Reflect` | 151 | 1 | 0 | 99 % | 99 % |
 | `built-ins/Set` | 378 | 3 | 1 | 99 % | 99 % |
 | `built-ins/Symbol` | 73 | 2 | 6 | 90 % | 97 % |
@@ -133,7 +133,7 @@ features ship in mainline ECMA-262.
 
 | feature | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
-| `joint-iteration` | 53 | 25 | 0 | 68 % | 68 % |
+| `joint-iteration` | 54 | 24 | 0 | 69 % | 69 % |
 | `upsert` | 72 | 0 | 0 | 100 % | 100 % |
 
 
@@ -157,17 +157,19 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-18 — cynic `50ef120`, test262 `d0c1b455`
+### 2026-05-18 — cynic `2b13718`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 91.99 % | 99.08 % | 36901 / 40115 | 36901 / 37245 | +239 | 2m 24s |
+| **runtime** | 92.05 % | 99.14 % | 36924 / 40115 | 36924 / 37245 | +262 | 1m 56s |
 
 Biggest movers (runtime):
 
-- `built-ins/TypedArray` +8
-- `built-ins/Promise` +6
-- `built-ins/AsyncGeneratorPrototype` +4
+- `built-ins/Array` +8
+- `built-ins/Object` +7
+- `built-ins/Iterator` +4
+- `language/expressions` +3
+- `built-ins/Proxy` +1
 
 ### 2026-05-17 — cynic `400fbae`, test262 `d0c1b455`
 
