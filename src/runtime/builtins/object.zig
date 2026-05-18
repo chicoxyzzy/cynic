@@ -2039,20 +2039,78 @@ fn objectCreate(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         return throwTypeError(realm, "Object.create prototype must be an Object or null");
     }
     // Optional second arg: properties descriptor.
+    // §20.1.2.2 Object.create step 3 → ObjectDefineProperties step 2:
+    // `Let props be ? ToObject(Properties)`. Primitives (numbers,
+    // strings, booleans, BigInts, Symbols) wrap into their boxed
+    // form, which carries no own enumerable keys — observably a
+    // no-op define-properties walk. Functions ARE objects and must
+    // route through the function-keyed lookup so a `props.prop`
+    // accessor / data descriptor fires.
     if (args.len > 1 and !args[1].isUndefined()) {
-        const props = heap_mod.valueAsPlainObject(args[1]) orelse return throwTypeError(realm, "Object.create properties must be an object");
-        // §20.1.2.2 Object.create step 3 → ObjectDefineProperties:
-        // walk OwnPropertyKeys in spec order; include accessor-backed
-        // own keys so step 5.b.ii getters fire.
-        const keys = try ownPropertyKeysOrdered(realm, props);
-        defer realm.allocator.free(keys);
-        for (keys) |key| {
-            if (!props.flagsFor(key).enumerable) continue;
-            const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-            const desc_v = try getPropertyChain(realm, props, key);
-            const inner = [_]Value{ heap_mod.taggedObject(obj), Value.fromString(k_str), desc_v };
-            _ = try objectDefineProperty(realm, Value.undefined_, &inner);
+        const props_v = args[1];
+        if (heap_mod.valueAsPlainObject(props_v)) |props| {
+            const keys = try ownPropertyKeysOrdered(realm, props);
+            defer realm.allocator.free(keys);
+            for (keys) |key| {
+                if (!props.flagsFor(key).enumerable) continue;
+                const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                const desc_v = try getPropertyChain(realm, props, key);
+                const inner = [_]Value{ heap_mod.taggedObject(obj), Value.fromString(k_str), desc_v };
+                _ = try objectDefineProperty(realm, Value.undefined_, &inner);
+            }
+        } else if (heap_mod.valueAsFunction(props_v)) |props_fn| {
+            // Function carries its own property/accessor bag — walk
+            // the same enumerable keys the spec asks for. (No
+            // ownPropertyKeysOrdered helper for JSFunction; iterate
+            // .properties + .accessors directly.)
+            var seen: std.StringHashMapUnmanaged(void) = .empty;
+            defer seen.deinit(realm.allocator);
+            var pit = props_fn.properties.iterator();
+            while (pit.next()) |entry| {
+                const key = entry.key_ptr.*;
+                _ = seen.put(realm.allocator, key, {}) catch return error.OutOfMemory;
+                // No explicit flags entry ⇒ default to a writable /
+                // enumerable / configurable data descriptor (the same
+                // default JSObject.flagsFor returns for an unknown
+                // key). A user `fn.prop = …` write doesn't pin
+                // flags, so the spec-default applies.
+                const flags = props_fn.property_flags.get(key) orelse @import("../object.zig").PropertyFlags{};
+                if (!flags.enumerable) continue;
+                const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                const desc_v = entry.value_ptr.*;
+                const inner = [_]Value{ heap_mod.taggedObject(obj), Value.fromString(k_str), desc_v };
+                _ = try objectDefineProperty(realm, Value.undefined_, &inner);
+            }
+            var ait = props_fn.accessors.iterator();
+            while (ait.next()) |entry| {
+                const key = entry.key_ptr.*;
+                if (seen.contains(key)) continue;
+                const flags = props_fn.property_flags.get(key) orelse continue;
+                if (!flags.enumerable) continue;
+                const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                // Fire the accessor (if any) to read the descriptor.
+                var desc_v: Value = Value.undefined_;
+                if (entry.value_ptr.getter) |getter| {
+                    const interpreter = @import("../interpreter.zig");
+                    const outcome = interpreter.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(props_fn), &.{}) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => return error.NativeThrew,
+                    };
+                    desc_v = switch (outcome) {
+                        .value, .yielded => |v| v,
+                        .thrown => |ex| {
+                            realm.pending_exception = ex;
+                            return error.NativeThrew;
+                        },
+                    };
+                }
+                const inner = [_]Value{ heap_mod.taggedObject(obj), Value.fromString(k_str), desc_v };
+                _ = try objectDefineProperty(realm, Value.undefined_, &inner);
+            }
         }
+        // Primitives ToObject-wrap and the wrapper has no own enumerable
+        // keys: observably a no-op (Boolean/Number/String wrappers'
+        // few own keys are non-enumerable; Symbol/BigInt have none).
     }
     return heap_mod.taggedObject(obj);
 }
