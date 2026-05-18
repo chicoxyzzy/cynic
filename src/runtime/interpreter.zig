@@ -9715,6 +9715,19 @@ pub fn lookupAccessor(obj: *JSObject, key: []const u8) ?@import("object.zig").Ac
     while (cursor) |c| : (cursor = c.prototype) {
         if (c.accessors.get(key)) |a| return a;
         if (c.hasOwn(key)) return null;
+        // §10.4.5.4 Integer-Indexed Exotic Object [[GetOwnProperty]]:
+        // a typed array owns every canonical numeric index in
+        // [0, length) as a writable data descriptor, even though the
+        // slot isn't in `properties` / `accessors`. Treat as
+        // shadowing — a setter installed on the typed-array
+        // prototype must NOT fire for inherited writes via
+        // `Object.create(ta)[0] = v` (§10.4.5.5 IIE [[Set]] falls
+        // through to OrdinarySet which sees the IIE data
+        // descriptor and creates the property on the receiver).
+        if (c.typed_view != null) {
+            const ta_mod = @import("builtins/typed_array.zig");
+            if (ta_mod.canonicalNumericIndex(key)) |_| return null;
+        }
     }
     return null;
 }
@@ -10583,6 +10596,23 @@ fn setThroughChain(
                     // receiver-side write.
                     return .{ .handled_set = false };
                 }
+            }
+        }
+        // §10.4.5.5 Integer-Indexed Exotic Object [[Set]] step 2.b —
+        // when the cursor is a typed-array AND the key is a canonical
+        // numeric index in-bounds, the IIE's [[GetOwnProperty]]
+        // (§10.4.5.4) returns a writable data descriptor for that
+        // slot. That stops the proto-chain walk for accessor lookup:
+        // a setter installed on a typed array's prototype (e.g.
+        // `Object.defineProperty(Int32Array.prototype, 0, { set: … })`)
+        // is shadowed by the typed array's own integer-indexed slot
+        // and MUST NOT fire when the receiver inherits from the
+        // typed array. Match `is_array_exotic` above — short-circuit
+        // so the caller creates a property on the receiver instead.
+        if (c.typed_view != null) {
+            const ta_mod = @import("builtins/typed_array.zig");
+            if (ta_mod.canonicalNumericIndex(key)) |_| {
+                return .{ .handled_set = false };
             }
         }
         cursor = c.prototype;
