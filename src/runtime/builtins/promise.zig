@@ -1539,8 +1539,33 @@ fn aggregatorAllProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, i
     const ctx: *AggIterCtx = @ptrCast(@alignCast(ctx_ptr));
     // §27.2.4.1.2 step 8.j-l — append `undefined` to values,
     // bump remaining, then `Invoke(nextPromise, "then",
-    // « resolveElement, rejectElement »)`. The element closures
-    // own per-item index + state via their bound_this wrapper.
+    // « resolveElement, resultCapability.[[Reject]] »)`. The
+    // element resolve closure owns per-item index + state via
+    // its bound_this wrapper. The reject argument is the shared
+    // `resultCapability.[[Reject]]` — every element passes the
+    // same function (§27.2.4.1.2 step 8.k) so a thenable that
+    // inspects its second argument observes one identity across
+    // every input. Promise.allSettled differs here (§27.2.4.2.1
+    // step 8.x — `rejectElement` is freshly allocated per item,
+    // sharing the `alreadyCalled` slot with `resolveElement`),
+    // handled via `aggregatorAllSettledProcess` below.
+    const values = heap_mod.valueAsPlainObject(ctx.state.get(k_values)) orelse return .continue_;
+    try setIndexedOnArray(realm, values, @intCast(idx), Value.undefined_);
+    setLength(realm, values, @intCast(@as(u32, @intCast(idx + 1)))) catch return error.OutOfMemory;
+    const cur = ctx.state.get(k_remaining).asInt32();
+    ctx.state.set(realm.allocator, k_remaining, Value.fromInt32(cur + 1)) catch return error.OutOfMemory;
+    const closures = try allocElementClosures(realm, ctx.state, @intCast(idx));
+    return invokeThenWithClosures(realm, resolved, closures.resolve, ctx.cap.reject);
+}
+
+fn aggregatorAllSettledProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, idx: usize, resolved: Value) NativeError!IterStepAction {
+    _ = ctor;
+    const ctx: *AggIterCtx = @ptrCast(@alignCast(ctx_ptr));
+    // §27.2.4.2.1 PerformPromiseAllSettled step 8 — both element
+    // closures are per-item and SHARE the `alreadyCalled` slot via
+    // the wrapper passed as `bound_this` to both. A thenable that
+    // calls `onResolved()` then `onRejected()` (or vice versa) sees
+    // the second call no-op.
     const values = heap_mod.valueAsPlainObject(ctx.state.get(k_values)) orelse return .continue_;
     try setIndexedOnArray(realm, values, @intCast(idx), Value.undefined_);
     setLength(realm, values, @intCast(@as(u32, @intCast(idx + 1)))) catch return error.OutOfMemory;
@@ -1598,12 +1623,21 @@ fn promiseAll(realm: *Realm, this_value: Value, args: []const Value) NativeError
         error.OutOfMemory => return error.OutOfMemory,
         error.NativeThrew => return aggregatorRejectThroughCap(realm, ctor, cap),
     };
-    // §27.2.4.1.2 step 9 — decrement the synchronous "+1"
-    // counter once iteration completes; if no items resolved
-    // synchronously, this hits 0 and resolves with the empty
-    // values array. Otherwise the per-element closures finish
-    // the work asynchronously.
-    _ = try decrementRemaining(realm, state);
+    // §27.2.4.1 Promise.all step 8 — `If result is an abrupt
+    // completion, then if iteratorRecord.[[Done]] is false, let
+    // result be IteratorClose(iterator, result). IfAbruptReject-
+    // Promise(result, promiseCapability).`
+    //
+    // The synchronous-"+1" decrement below can fire `cap.resolve`
+    // (when every input settled synchronously) which may throw
+    // (subclass executor's resolve closure threw at top level).
+    // The iterator is already exhausted at this point — done is
+    // true — so IteratorClose is suppressed; we just funnel the
+    // abrupt completion through `cap.reject` per the macro.
+    _ = decrementRemaining(realm, state) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NativeThrew => return aggregatorRejectThroughCap(realm, ctor, cap),
+    };
     return cap.promise;
 }
 
@@ -1684,11 +1718,19 @@ fn promiseAllSettled(realm: *Realm, this_value: Value, args: []const Value) Nati
     values.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     const state = try allocAggState(realm, .all_settled, cap, values);
     var ctx = AggIterCtx{ .state = state, .cap = cap };
-    iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, aggregatorAllProcess) catch |err| switch (err) {
+    iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, aggregatorAllSettledProcess) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NativeThrew => return aggregatorRejectThroughCap(realm, ctor, cap),
     };
-    _ = try decrementRemaining(realm, state);
+    // §27.2.4.2 Promise.allSettled step 7 — same IteratorClose-
+    // suppressed-on-done IfAbruptRejectPromise as Promise.all.
+    // The synchronous-"+1" decrement may call `cap.resolve` which
+    // can throw (e.g. a subclass that overrides the resolve
+    // closure); funnel through `cap.reject`.
+    _ = decrementRemaining(realm, state) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NativeThrew => return aggregatorRejectThroughCap(realm, ctor, cap),
+    };
     return cap.promise;
 }
 
@@ -1767,7 +1809,15 @@ fn promiseAny(realm: *Realm, this_value: Value, args: []const Value) NativeError
         error.OutOfMemory => return error.OutOfMemory,
         error.NativeThrew => return aggregatorRejectThroughCap(realm, ctor, cap),
     };
-    _ = try decrementRemaining(realm, state);
+    // §27.2.4.3 Promise.any step 7 — same IfAbruptRejectPromise
+    // shape: a synchronous final decrement that triggers the
+    // AggregateError-build-and-`cap.reject` path can throw if
+    // the user's cap.reject closure is poisoned. Funnel via
+    // cap.reject so the macro semantics hold.
+    _ = decrementRemaining(realm, state) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NativeThrew => return aggregatorRejectThroughCap(realm, ctor, cap),
+    };
     return cap.promise;
 }
 
