@@ -1932,7 +1932,14 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
             if (elem.isString()) {
                 const key_str: *@import("string.zig").JSString = @ptrCast(@alignCast(elem.asString()));
                 if (heap_mod.valueAsPlainObject(state.for_in_source)) |src| {
-                    if (!src.hasProperty(key_str.bytes)) {
+                    // Proxy [[HasProperty]] would dispatch the `has`
+                    // trap with side effects; the live-deletion check
+                    // is an optimisation that doesn't survive trap
+                    // observability. Trust the snapshot for proxies —
+                    // user code can't safely delete-during-for-in on
+                    // a proxy anyway (the trap controls visibility).
+                    const is_proxy = src.proxy_target != null or src.proxy_target_fn != null or src.proxy_revoked;
+                    if (!is_proxy and !src.hasProperty(key_str.bytes)) {
                         cursor += 1;
                         continue;
                     }
