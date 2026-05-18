@@ -389,6 +389,17 @@ gap. Every entry should include:
 Bugs that *are* covered by an existing test262 fixture don't go
 in the log — the harness already exercises them.
 
+A companion log,
+[docs/ecma262-upstream-gaps.md](docs/ecma262-upstream-gaps.md),
+tracks **specification-level** observations — places where the
+spec wording is technically correct but invited bugs while we
+were implementing it (clarifications, hardenings,
+simplifications, normative/Annex B boundary corrections). The
+test262 log is for fixture contributions; the ecma262 log is
+for editorial or normative suggestions to TC39. Same threshold:
+an entry belongs there when we'd genuinely propose the change,
+not just because we found the section confusing.
+
 ## Repeatable workflows
 
 For Claude Code users these are slash commands under
