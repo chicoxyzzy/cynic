@@ -443,6 +443,21 @@ pub const skip_ses_exact_paths = [_][]const u8{
     "built-ins/String/prototype/toString/non-generic-realm.js",
     "built-ins/String/prototype/valueOf/non-generic-realm.js",
     "language/expressions/super/realm.js",
+    // §15.3.2 `new Function()` / §19.2.1 `eval(string)` — five
+    // long-tail fixtures across scattered buckets that each build
+    // a Function-shape via the zero-arg `new Function()` form or
+    // observe direct eval. The zero-arg constructor still routes
+    // through §15.3.2 CreateDynamicFunction so it's the same
+    // permanent SES carve-out (AGENTS.md "eval and runtime code
+    // construction"). The eval-spread fixtures probe the §13.3.6
+    // direct-eval call-form (spread args / leading empty spread)
+    // and `language/types/reference/8.7.2-1-s.js` asserts the
+    // strict-mode ReferenceError reach for `eval("_ref = 11;")`.
+    "built-ins/AggregateError/newtarget-proto-fallback.js",
+    "built-ins/Reflect/apply/arguments-list-is-not-array-like-but-still-valid.js",
+    "language/expressions/call/eval-spread-empty-leading.js",
+    "language/expressions/call/eval-spread.js",
+    "language/types/reference/8.7.2-1-s.js",
     "built-ins/Function/15.3.5.4_2-11gs.js",
     "built-ins/Function/15.3.5.4_2-7gs.js",
     "built-ins/Function/15.3.5.4_2-9gs.js",
