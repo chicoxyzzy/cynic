@@ -192,16 +192,7 @@ pub const Token = struct {
 /// reserved words as their `kw_*` discriminant.
 pub fn isReservedWord(k: TokenKind) bool {
     return switch (k) {
-        .kw_await, .kw_break, .kw_case, .kw_catch, .kw_class,
-        .kw_const, .kw_continue, .kw_debugger, .kw_default,
-        .kw_delete, .kw_do, .kw_else, .kw_enum, .kw_export,
-        .kw_extends, .kw_false, .kw_finally, .kw_for, .kw_function,
-        .kw_if, .kw_import, .kw_in, .kw_instanceof, .kw_new,
-        .kw_null, .kw_return, .kw_super, .kw_switch, .kw_this,
-        .kw_throw, .kw_true, .kw_try, .kw_typeof, .kw_var,
-        .kw_void, .kw_while, .kw_with, .kw_yield,
-        .kw_implements, .kw_interface, .kw_let, .kw_package,
-        .kw_private, .kw_protected, .kw_public, .kw_static => true,
+        .kw_await, .kw_break, .kw_case, .kw_catch, .kw_class, .kw_const, .kw_continue, .kw_debugger, .kw_default, .kw_delete, .kw_do, .kw_else, .kw_enum, .kw_export, .kw_extends, .kw_false, .kw_finally, .kw_for, .kw_function, .kw_if, .kw_import, .kw_in, .kw_instanceof, .kw_new, .kw_null, .kw_return, .kw_super, .kw_switch, .kw_this, .kw_throw, .kw_true, .kw_try, .kw_typeof, .kw_var, .kw_void, .kw_while, .kw_with, .kw_yield, .kw_implements, .kw_interface, .kw_let, .kw_package, .kw_private, .kw_protected, .kw_public, .kw_static => true,
         else => false,
     };
 }

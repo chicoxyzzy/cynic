@@ -30,7 +30,9 @@ const argOr = intrinsics.argOr;
 
 pub fn install(realm: *Realm) !void {
     const r = try installConstructor(realm, .{
-        .name = "WeakRef", .ctor = weakRefConstructor, .arity = 1,
+        .name = "WeakRef",
+        .ctor = weakRefConstructor,
+        .arity = 1,
         .to_string_tag = "WeakRef",
     });
     _ = r.ctor;

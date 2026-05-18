@@ -618,7 +618,9 @@ pub fn ensureAsyncIteratorPrototype(realm: *Realm) !*JSObject {
     const sym_iter_fn = try realm.heap.allocateFunctionNative(genSymbolIterator, 0, "[Symbol.asyncIterator]");
     sym_iter_fn.proto = realm.intrinsics.function_prototype;
     try proto.setWithFlags(realm.allocator, "@@asyncIterator", heap_mod.taggedFunction(sym_iter_fn), .{
-        .writable = true, .enumerable = false, .configurable = true,
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
     });
     realm.intrinsics.async_iterator_prototype = proto;
     return proto;
@@ -3807,7 +3809,9 @@ fn runFrames(
                 if (try addValues(realm, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
-                    f.ip = ip; f.accumulator = acc; committed = true;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                     continue;
                 }
@@ -3818,7 +3822,9 @@ fn runFrames(
                 if (try numericBinary(realm, .sub, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
-                    f.ip = ip; f.accumulator = acc; committed = true;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                     continue;
                 }
@@ -3829,7 +3835,9 @@ fn runFrames(
                 if (try numericBinary(realm, .mul, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
-                    f.ip = ip; f.accumulator = acc; committed = true;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                     continue;
                 }
@@ -3840,7 +3848,9 @@ fn runFrames(
                 if (try numericBinary(realm, .div, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
-                    f.ip = ip; f.accumulator = acc; committed = true;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                     continue;
                 }
@@ -3851,7 +3861,9 @@ fn runFrames(
                 if (try numericBinary(realm, .mod, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
-                    f.ip = ip; f.accumulator = acc; committed = true;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                     continue;
                 }
@@ -3862,7 +3874,9 @@ fn runFrames(
                 if (try numericBinary(realm, .pow, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
-                    f.ip = ip; f.accumulator = acc; committed = true;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                     continue;
                 }
@@ -3875,7 +3889,9 @@ fn runFrames(
                 if (try bitwiseBinary(realm, .bit_and, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
-                    f.ip = ip; f.accumulator = acc; committed = true;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                     continue;
                 }
@@ -3886,7 +3902,9 @@ fn runFrames(
                 if (try bitwiseBinary(realm, .bit_or, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
-                    f.ip = ip; f.accumulator = acc; committed = true;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                     continue;
                 }
@@ -3897,7 +3915,9 @@ fn runFrames(
                 if (try bitwiseBinary(realm, .bit_xor, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
-                    f.ip = ip; f.accumulator = acc; committed = true;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                     continue;
                 }
@@ -3908,7 +3928,9 @@ fn runFrames(
                 if (try bitwiseBinary(realm, .shl, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
-                    f.ip = ip; f.accumulator = acc; committed = true;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                     continue;
                 }
@@ -3919,7 +3941,9 @@ fn runFrames(
                 if (try bitwiseBinary(realm, .shr, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
-                    f.ip = ip; f.accumulator = acc; committed = true;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                     continue;
                 }
@@ -3930,7 +3954,9 @@ fn runFrames(
                 if (try bitwiseBinary(realm, .shr_u, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
-                    f.ip = ip; f.accumulator = acc; committed = true;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                     continue;
                 }
@@ -3941,7 +3967,9 @@ fn runFrames(
                 if (try unaryNegate(realm, acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
-                    f.ip = ip; f.accumulator = acc; committed = true;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                     continue;
                 }
@@ -3950,7 +3978,9 @@ fn runFrames(
                 if (try unaryBitNot(realm, acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
-                    f.ip = ip; f.accumulator = acc; committed = true;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                     continue;
                 }
@@ -3960,7 +3990,9 @@ fn runFrames(
                 if (try unaryToNumber(realm, acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
-                    f.ip = ip; f.accumulator = acc; committed = true;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                     continue;
                 }
@@ -3969,7 +4001,9 @@ fn runFrames(
                 if (try arith.incOrDec(realm, acc, 1)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "Update failed");
                     realm.pending_exception = null;
-                    f.ip = ip; f.accumulator = acc; committed = true;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                     continue;
                 }
@@ -3978,7 +4012,9 @@ fn runFrames(
                 if (try arith.incOrDec(realm, acc, -1)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "Update failed");
                     realm.pending_exception = null;
-                    f.ip = ip; f.accumulator = acc; committed = true;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                     continue;
                 }
@@ -5660,35 +5696,35 @@ fn runFrames(
                 // below.
                 if (f.home_object == null) {
                     if (f.home_function) |hf| {
-                    if (hf.static_parent) |parent_fn| {
-                        // §10.1.8.1 OrdinaryGet — accessor descriptor
-                        // wins; getter fires with `this` =
-                        // f.this_value (the current class).
-                        if (parent_fn.accessors.get(key_s.bytes)) |acc_pair| {
-                            if (acc_pair.getter) |getter| {
-                                const outcome = try callJSFunction(allocator, realm, getter, f.this_value, &.{});
-                                switch (outcome) {
-                                    .value, .yielded => |v| acc = v,
-                                    .thrown => |ex| {
-                                        f.ip = ip;
-                                        f.accumulator = acc;
-                                        committed = true;
-                                        if (!try unwindThrow(allocator, realm, frames, ex)) {
-                                            return .{ .thrown = ex };
-                                        }
-                                        continue;
-                                    },
+                        if (hf.static_parent) |parent_fn| {
+                            // §10.1.8.1 OrdinaryGet — accessor descriptor
+                            // wins; getter fires with `this` =
+                            // f.this_value (the current class).
+                            if (parent_fn.accessors.get(key_s.bytes)) |acc_pair| {
+                                if (acc_pair.getter) |getter| {
+                                    const outcome = try callJSFunction(allocator, realm, getter, f.this_value, &.{});
+                                    switch (outcome) {
+                                        .value, .yielded => |v| acc = v,
+                                        .thrown => |ex| {
+                                            f.ip = ip;
+                                            f.accumulator = acc;
+                                            committed = true;
+                                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                                return .{ .thrown = ex };
+                                            }
+                                            continue;
+                                        },
+                                    }
+                                } else {
+                                    acc = Value.undefined_;
                                 }
                             } else {
-                                acc = Value.undefined_;
+                                acc = parent_fn.get(key_s.bytes);
                             }
                         } else {
-                            acc = parent_fn.get(key_s.bytes);
+                            acc = Value.undefined_;
                         }
-                    } else {
-                        acc = Value.undefined_;
-                    }
-                    continue;
+                        continue;
                     }
                 }
                 const home = f.home_object orelse {
@@ -5750,49 +5786,49 @@ fn runFrames(
                 // is in scope (a class ctor frame carries both).
                 if (f.home_object == null) {
                     if (f.home_function) |hf| {
-                    const key_v_static = switch (try coerceToPropertyKey(allocator, realm, frames, f, ip, acc)) {
-                        .ok => |v| v,
-                        .handled => {
-                            committed = true;
-                            continue;
-                        },
-                        .uncaught => |ex| return .{ .thrown = ex },
-                    };
-                    var key_buf_s: [64]u8 = undefined;
-                    const key_slice_s = computedKeyToString(key_v_static, &key_buf_s);
-                    if (hf.static_parent) |parent_fn| {
-                        // §10.1.8.1 OrdinaryGet step 4 — accessor
-                        // dispatch runs through the getter, not the
-                        // data slot. `JSFunction.get` only resolves
-                        // data; honour an own accessor on the parent
-                        // function before falling back so e.g.
-                        // `static get K() { ... }` on B reads via the
-                        // getter when `super[K]` walks up.
-                        if (parent_fn.ownAccessor(key_slice_s)) |acc_pair| {
-                            if (acc_pair.getter) |getter| {
-                                const outcome = try callJSFunction(allocator, realm, getter, f.this_value, &.{});
-                                switch (outcome) {
-                                    .value, .yielded => |v| acc = v,
-                                    .thrown => |ex| {
-                                        f.ip = ip;
-                                        f.accumulator = acc;
-                                        committed = true;
-                                        if (!try unwindThrow(allocator, realm, frames, ex)) {
-                                            return .{ .thrown = ex };
-                                        }
-                                        continue;
-                                    },
+                        const key_v_static = switch (try coerceToPropertyKey(allocator, realm, frames, f, ip, acc)) {
+                            .ok => |v| v,
+                            .handled => {
+                                committed = true;
+                                continue;
+                            },
+                            .uncaught => |ex| return .{ .thrown = ex },
+                        };
+                        var key_buf_s: [64]u8 = undefined;
+                        const key_slice_s = computedKeyToString(key_v_static, &key_buf_s);
+                        if (hf.static_parent) |parent_fn| {
+                            // §10.1.8.1 OrdinaryGet step 4 — accessor
+                            // dispatch runs through the getter, not the
+                            // data slot. `JSFunction.get` only resolves
+                            // data; honour an own accessor on the parent
+                            // function before falling back so e.g.
+                            // `static get K() { ... }` on B reads via the
+                            // getter when `super[K]` walks up.
+                            if (parent_fn.ownAccessor(key_slice_s)) |acc_pair| {
+                                if (acc_pair.getter) |getter| {
+                                    const outcome = try callJSFunction(allocator, realm, getter, f.this_value, &.{});
+                                    switch (outcome) {
+                                        .value, .yielded => |v| acc = v,
+                                        .thrown => |ex| {
+                                            f.ip = ip;
+                                            f.accumulator = acc;
+                                            committed = true;
+                                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                                return .{ .thrown = ex };
+                                            }
+                                            continue;
+                                        },
+                                    }
+                                } else {
+                                    acc = Value.undefined_;
                                 }
-                            } else {
-                                acc = Value.undefined_;
+                                continue;
                             }
-                            continue;
+                            acc = parent_fn.get(key_slice_s);
+                        } else {
+                            acc = Value.undefined_;
                         }
-                        acc = parent_fn.get(key_slice_s);
-                    } else {
-                        acc = Value.undefined_;
-                    }
-                    continue;
+                        continue;
                     }
                 }
                 const home = f.home_object orelse {
@@ -5891,37 +5927,37 @@ fn runFrames(
                 // walk instead.
                 if (f.home_object == null) {
                     if (f.home_function) |hf| {
-                    if (hf.static_parent) |parent_fn| {
-                        if (parent_fn.accessors.get(key_s.bytes)) |acc_pair| {
-                            if (acc_pair.setter) |setter| {
-                                const args_one = [_]Value{value};
-                                const outcome = try callJSFunction(allocator, realm, setter, f.this_value, &args_one);
-                                switch (outcome) {
-                                    .value, .yielded => {},
-                                    .thrown => |ex| {
-                                        f.ip = ip;
-                                        f.accumulator = acc;
-                                        committed = true;
-                                        if (!try unwindThrow(allocator, realm, frames, ex)) {
-                                            return .{ .thrown = ex };
-                                        }
-                                        continue;
-                                    },
+                        if (hf.static_parent) |parent_fn| {
+                            if (parent_fn.accessors.get(key_s.bytes)) |acc_pair| {
+                                if (acc_pair.setter) |setter| {
+                                    const args_one = [_]Value{value};
+                                    const outcome = try callJSFunction(allocator, realm, setter, f.this_value, &args_one);
+                                    switch (outcome) {
+                                        .value, .yielded => {},
+                                        .thrown => |ex| {
+                                            f.ip = ip;
+                                            f.accumulator = acc;
+                                            committed = true;
+                                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                                return .{ .thrown = ex };
+                                            }
+                                            continue;
+                                        },
+                                    }
+                                    acc = value;
+                                    continue;
                                 }
-                                acc = value;
-                                continue;
                             }
                         }
-                    }
-                    // Fall back to writing on `this` (the
-                    // current constructor, since this is static).
-                    if (heap_mod.valueAsFunction(f.this_value)) |this_fn| {
-                        this_fn.set(allocator, key_s.bytes, value) catch return error.OutOfMemory;
-                    } else if (heap_mod.valueAsPlainObject(f.this_value)) |this_obj| {
-                        this_obj.set(allocator, key_s.bytes, value) catch return error.OutOfMemory;
-                    }
-                    acc = value;
-                    continue;
+                        // Fall back to writing on `this` (the
+                        // current constructor, since this is static).
+                        if (heap_mod.valueAsFunction(f.this_value)) |this_fn| {
+                            this_fn.set(allocator, key_s.bytes, value) catch return error.OutOfMemory;
+                        } else if (heap_mod.valueAsPlainObject(f.this_value)) |this_obj| {
+                            this_obj.set(allocator, key_s.bytes, value) catch return error.OutOfMemory;
+                        }
+                        acc = value;
+                        continue;
                     }
                 }
                 const home = f.home_object orelse {
@@ -7384,7 +7420,9 @@ fn runFrames(
                 // `set` lands at all-true, so `Object.keys(arguments)`
                 // surfaced "length" as an enumerable own key.
                 obj.setWithFlags(allocator, "length", Value.fromInt32(@intCast(f.argc)), .{
-                    .writable = true, .enumerable = false, .configurable = true,
+                    .writable = true,
+                    .enumerable = false,
+                    .configurable = true,
                 }) catch return error.OutOfMemory;
                 // §10.4.4.7 step 5 — strict-mode unmapped arguments
                 // installs a `callee` accessor whose [[Get]] and
@@ -7413,7 +7451,9 @@ fn runFrames(
                     const values_v = arr_proto.get("values");
                     if (heap_mod.valueAsFunction(values_v) != null) {
                         obj.setWithFlags(allocator, "@@iterator", values_v, .{
-                            .writable = true, .enumerable = false, .configurable = true,
+                            .writable = true,
+                            .enumerable = false,
+                            .configurable = true,
                         }) catch return error.OutOfMemory;
                     }
                 }
@@ -11399,4 +11439,3 @@ fn applyOffset(ip: usize, off: i16) usize {
 }
 
 // ── Coercions (§7.1) ────────────────────────────────────────────────────
-

@@ -102,7 +102,9 @@ pub fn install(realm: *Realm) !void {
         // === Array.prototype.values`.
         const values_v = arr_proto.get("values");
         arr_proto.setWithFlags(realm.allocator, "@@iterator", values_v, .{
-            .writable = true, .enumerable = false, .configurable = true,
+            .writable = true,
+            .enumerable = false,
+            .configurable = true,
         }) catch return error.OutOfMemory;
         // §23.1.3.36 Array.prototype [ @@unscopables ] — a null-
         // prototype object listing the post-ES5 methods to exclude
@@ -114,19 +116,21 @@ pub fn install(realm: *Realm) !void {
         const ObjMod = @import("../object.zig");
         const dflt = ObjMod.PropertyFlags.default;
         const names = [_][]const u8{
-            "copyWithin", "entries", "fill", "find", "findIndex",
+            "copyWithin", "entries",       "fill",       "find",     "findIndex",
             // §1.1 of the `array-find-from-last` proposal.
-            "findLast", "findLastIndex",
-            "flat", "flatMap", "includes", "keys", "values",
+            "findLast",   "findLastIndex", "flat",       "flatMap",  "includes",
+            "keys",       "values",
             // `change-array-by-copy` adds these three but
             // intentionally NOT `with`.
-            "toReversed", "toSorted", "toSpliced",
+                   "toReversed", "toSorted", "toSpliced",
         };
         for (names) |n| {
             u.setWithFlags(realm.allocator, n, Value.true_, dflt) catch return error.OutOfMemory;
         }
         arr_proto.setWithFlags(realm.allocator, "@@unscopables", heap_mod.taggedObject(u), .{
-            .writable = false, .enumerable = false, .configurable = true,
+            .writable = false,
+            .enumerable = false,
+            .configurable = true,
         }) catch return error.OutOfMemory;
     }
     if (heap_mod.valueAsFunction(realm.globals.get("Array").?)) |arr_ctor| {
@@ -143,7 +147,9 @@ pub fn install(realm: *Realm) !void {
         const entry = try arr_ctor.accessors.getOrPut(realm.allocator, "@@species");
         entry.value_ptr.* = .{ .getter = species_getter };
         try arr_ctor.property_flags.put(realm.allocator, "@@species", .{
-            .writable = false, .enumerable = false, .configurable = true,
+            .writable = false,
+            .enumerable = false,
+            .configurable = true,
         });
     }
 }
@@ -1743,7 +1749,9 @@ fn reduceRightOwnIndicesDescending(
         keys.append(realm.allocator, idx) catch return error.OutOfMemory;
     }
     std.mem.sort(i64, keys.items, {}, struct {
-        fn descending(_: void, a: i64, b: i64) bool { return a > b; }
+        fn descending(_: void, a: i64, b: i64) bool {
+            return a > b;
+        }
     }.descending);
     var acc = initial_acc;
     var have_acc = have_initial;
@@ -1955,7 +1963,7 @@ fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
         } else {
             const t = @trunc(d);
             if (t < 0) {
-                const candidate = len + @as(i64, @intFromFloat(@max(t, -@as(f64, @floatFromInt(safe_max))))) ;
+                const candidate = len + @as(i64, @intFromFloat(@max(t, -@as(f64, @floatFromInt(safe_max)))));
                 start = @max(candidate, 0);
             } else {
                 start = @min(@as(i64, @intFromFloat(@min(t, @as(f64, @floatFromInt(safe_max))))), len);
@@ -2183,9 +2191,7 @@ fn arraySort(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     const cmp_v = argOr(args, 0, Value.undefined_);
     const cmp_fn: ?*JSFunction = if (cmp_v.isUndefined())
         null
-    else if (heap_mod.valueAsFunction(cmp_v)) |f| f
-    else
-        return throwTypeError(realm, "comparefn must be a function or undefined");
+    else if (heap_mod.valueAsFunction(cmp_v)) |f| f else return throwTypeError(realm, "comparefn must be a function or undefined");
     const obj = try toObjectThis(realm, this_value);
     const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     if (len <= 1) return heap_mod.taggedObject(obj);
@@ -2702,7 +2708,6 @@ pub fn invokeCallback(
     index: i64,
     array: *JSObject,
 ) NativeError!Value {
-
     const cb_args = [_]Value{ elem, numberFromI64(index), heap_mod.taggedObject(array) };
     const outcome = interpreter.callJSFunction(realm.allocator, realm, callback, this_arg, &cb_args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,

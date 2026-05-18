@@ -78,7 +78,7 @@ pub fn main(init: std.process.Init) !void {
         \\//!
         \\
     );
-    try buf.print(allocator, "//! Unicode version: {s}\n\n",.{unicode_version});
+    try buf.print(allocator, "//! Unicode version: {s}\n\n", .{unicode_version});
     try buf.appendSlice(allocator,
         \\pub const Range = struct {
         \\    start: u21,

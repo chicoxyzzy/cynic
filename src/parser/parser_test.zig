@@ -61,7 +61,6 @@ fn hasErr(items: []const cynic_diag.Diagnostic) bool {
     return false;
 }
 
-
 test "Parser: empty source -> empty program" {
     try expectAst("", "(program script [0..0])");
 }

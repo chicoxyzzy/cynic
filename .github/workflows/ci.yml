@@ -38,6 +38,28 @@ jobs:
       - name: Unit tests
         run: zig build test --summary all
 
+  fmt-check:
+    name: zig fmt (advisory)
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    # Advisory: a fail means `zig fmt` would rewrite something
+    # under `src/` or `tools/`. Drift slips in from agent edits
+    # and patch-by-bash workarounds; surfacing it in PR review is
+    # enough today. Local fix: `zig build fmt` rewrites in place.
+    # Lift to gating when the source tree is reliably hand-edited.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0-dev.305+bdfbf432d
+
+      - name: zig build fmt-check
+        continue-on-error: true
+        run: zig build fmt-check
+
   test262:
     name: test262 conformance (advisory)
     runs-on: ubuntu-latest

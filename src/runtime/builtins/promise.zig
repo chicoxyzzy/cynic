@@ -58,7 +58,9 @@ pub fn install(realm: *Realm) !void {
     // cap.resolve, cap.reject »)` — a microtask schedule, so
     // downstream `.then` chains see the spec-required order.
     const r = try installConstructor(realm, .{
-        .name = "Promise", .ctor = promiseConstructor, .arity = 1,
+        .name = "Promise",
+        .ctor = promiseConstructor,
+        .arity = 1,
         .to_string_tag = "Promise",
     });
     const fn_obj = r.ctor;
@@ -93,7 +95,9 @@ pub fn install(realm: *Realm) !void {
     const sp_entry = try fn_obj.accessors.getOrPut(realm.allocator, "@@species");
     sp_entry.value_ptr.* = .{ .getter = species_getter };
     try fn_obj.property_flags.put(realm.allocator, "@@species", .{
-        .writable = false, .enumerable = false, .configurable = true,
+        .writable = false,
+        .enumerable = false,
+        .configurable = true,
     });
 
     // Cynic-only host hook: lets tests + the CLI explicitly
@@ -1836,4 +1840,3 @@ fn promiseWithResolvers(realm: *Realm, this_value: Value, args: []const Value) N
     obj.set(realm.allocator, "reject", heap_mod.taggedFunction(reject_fn)) catch return error.OutOfMemory;
     return heap_mod.taggedObject(obj);
 }
-

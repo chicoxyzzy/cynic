@@ -29,7 +29,9 @@ const throwTypeError = intrinsics.throwTypeError;
 
 pub fn install(realm: *Realm) !void {
     const installed = try installConstructor(realm, .{
-        .name = "Proxy", .ctor = proxyConstructor, .arity = 2,
+        .name = "Proxy",
+        .ctor = proxyConstructor,
+        .arity = 2,
         .set_home_object = false,
     });
     // §28.2 — the Proxy constructor does NOT have a `prototype`

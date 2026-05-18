@@ -41,7 +41,9 @@ const throwRangeError = intrinsics.throwRangeError;
 
 pub fn install(realm: *Realm) !void {
     const r = try installConstructor(realm, .{
-        .name = "Iterator", .ctor = iteratorConstructor, .arity = 0,
+        .name = "Iterator",
+        .ctor = iteratorConstructor,
+        .arity = 0,
         .set_home_object = false,
         .to_string_tag = "Iterator",
     });
@@ -176,14 +178,18 @@ fn ensureWrapForValidIteratorPrototype(realm: *Realm) !*JSObject {
     next_fn.has_construct = false;
     next_fn.proto = realm.intrinsics.function_prototype;
     try proto.setWithFlags(realm.allocator, "next", heap_mod.taggedFunction(next_fn), .{
-        .writable = true, .enumerable = false, .configurable = true,
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
     });
 
     const return_fn = try realm.heap.allocateFunctionNative(wrappedReturn, 0, "return");
     return_fn.has_construct = false;
     return_fn.proto = realm.intrinsics.function_prototype;
     try proto.setWithFlags(realm.allocator, "return", heap_mod.taggedFunction(return_fn), .{
-        .writable = true, .enumerable = false, .configurable = true,
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
     });
 
     realm.intrinsics.wrap_for_valid_iterator_prototype = proto;

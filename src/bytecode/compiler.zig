@@ -4272,3236 +4272,3193 @@ pub const Compiler = struct {
         // its result in acc.
     }
 
-/// Map a compound-assignment op token to the bytecode op that
-/// computes `acc = lhs <op> rhs`. The bytecode-binary convention
-/// (LHS-in-reg, RHS-in-acc) lines up directly with the existing
-/// arithmetic opcodes; we just dispatch on the assignment op.
-fn compoundOp(op: AssignmentOp) ?Op {
-    return switch (op) {
-        .eq => null, // simple assignment — caller handles
-        .plus_eq => .add,
-        .minus_eq => .sub,
-        .star_eq => .mul,
-        .slash_eq => .div,
-        .percent_eq => .mod,
-        .star_star_eq => .pow,
-        .lt_lt_eq => .shl,
-        .gt_gt_eq => .shr,
-        .gt_gt_gt_eq => .shr_u,
-        .amp_eq => .bit_and,
-        .pipe_eq => .bit_or,
-        .caret_eq => .bit_xor,
-        // `&&=` / `||=` / `??=` short-circuit; later leaves them
-        // as future work alongside the later `??` op.
-        .amp_amp_eq, .pipe_pipe_eq, .question_question_eq => null,
-    };
-}
-
-// ── Statement compilation ──────────────────────────────────────────────
-
-pub fn compileStatement(self: *Compiler, stmt: *const Statement) CompileError!void {
-    switch (stmt.*) {
-        .expression => |es| {
-            try self.compileExpression(&es.expression);
-            // The expression's value lands in acc and stays there
-            // until the next statement overwrites it. Top-level
-            // `Return` reads whatever the last statement leaves.
-        },
-        .empty => {},
-        .block => |b| try self.compileBlock(b.body, b.span),
-        .lexical => |ld| try self.compileLexicalDecl(ld),
-        .if_ => |s| try self.compileIf(s),
-        .while_ => |s| try self.compileWhile(s),
-        .do_while => |s| try self.compileDoWhile(s),
-        .for_ => |s| try self.compileFor(s),
-        .break_ => |s| try self.compileBreak(s),
-        .continue_ => |s| try self.compileContinue(s),
-        .throw_ => |s| try self.compileThrow(s),
-        .try_ => |s| try self.compileTry(s),
-        .return_ => |s| try self.compileReturn(s),
-        .function_decl => |fd| try self.compileFunctionDecl(fd),
-        .class_decl => |cd| try self.compileClassDecl(cd),
-        .for_in_of => |s| try self.compileForInOf(s),
-        .switch_ => |s| try self.compileSwitch(s),
-        .debugger_ => {}, // no-op for later — V8 / d8 also no-op without a debugger attached
-        .labeled => |lb| try self.compileLabeled(lb),
-        .import_decl => |id| try self.compileImportDecl(id),
-        .export_decl => |ed| try self.compileExportDecl(ed),
-    }
-}
-
-/// §16.2.2 ImportDeclaration. In module mode emits a
-/// `module_load` for the source specifier and stores the
-/// resulting namespace in a per-import-decl env slot, then
-/// records each imported name as an indirect alias for
-/// `(namespace_slot, exported_name)`. Reads at use sites then
-/// dereference through the namespace at access time — matching
-/// §8.1.1.5.5 CreateImportBinding's live-binding semantics
-/// (every production engine implements imports this way: V8 /
-/// JSC / SpiderMonkey use the same env-slot-points-at-namespace
-/// shape). In script mode the bindings are declared but stay in
-/// TDZ (no actual import resolution in script mode).
-fn compileImportDecl(self: *Compiler, id: ast.statement.ImportDecl) CompileError!void {
-    if (!self.is_module) {
-        // Script mode — declare the binding names so a later
-        // reference doesn't `UnresolvedReference`, but no module
-        // loading happens. §12.7: bindings key off StringValue.
-        if (id.default) |bid| {
-            const name = try self.bindingName(bid.span);
-            _ = try self.declareBinding(name, .let_, bid.span);
-        }
-        if (id.namespace) |bid| {
-            const name = try self.bindingName(bid.span);
-            _ = try self.declareBinding(name, .let_, bid.span);
-        }
-        for (id.named) |spec| {
-            const name = try self.bindingName(spec.local.span);
-            _ = try self.declareBinding(name, .let_, spec.local.span);
-        }
-        return;
+    /// Map a compound-assignment op token to the bytecode op that
+    /// computes `acc = lhs <op> rhs`. The bytecode-binary convention
+    /// (LHS-in-reg, RHS-in-acc) lines up directly with the existing
+    /// arithmetic opcodes; we just dispatch on the assignment op.
+    fn compoundOp(op: AssignmentOp) ?Op {
+        return switch (op) {
+            .eq => null, // simple assignment — caller handles
+            .plus_eq => .add,
+            .minus_eq => .sub,
+            .star_eq => .mul,
+            .slash_eq => .div,
+            .percent_eq => .mod,
+            .star_star_eq => .pow,
+            .lt_lt_eq => .shl,
+            .gt_gt_eq => .shr,
+            .gt_gt_gt_eq => .shr_u,
+            .amp_eq => .bit_and,
+            .pipe_eq => .bit_or,
+            .caret_eq => .bit_xor,
+            // `&&=` / `||=` / `??=` short-circuit; later leaves them
+            // as future work alongside the later `??` op.
+            .amp_amp_eq, .pipe_pipe_eq, .question_question_eq => null,
+        };
     }
 
-    // Strip surrounding quotes from the StringLiteral span.
-    const raw = self.source[id.source.start..id.source.end];
-    if (raw.len < 2) return error.UnsupportedStatement;
-    const spec_text = raw[1 .. raw.len - 1];
-    const k_spec = try self.internString(spec_text);
-    try self.builder.emitOp(.module_load, id.span);
-    try self.builder.emitU16(k_spec);
+    // ── Statement compilation ──────────────────────────────────────────────
 
-    // Reserve a persistent env slot for the namespace — one per
-    // import-decl. All indirect bindings declared by this decl
-    // dereference through this slot. We use an env slot (not a
-    // temp register) so closures created later in the module body
-    // can reach the namespace via `lda_env` — temps are
-    // accumulator-only.
-    const ns_slot = try self.newEnvSlot();
-    try self.builder.emitOp(.sta_env, id.span);
-    try self.builder.emitU8(0);
-    try self.builder.emitU8(ns_slot);
+    pub fn compileStatement(self: *Compiler, stmt: *const Statement) CompileError!void {
+        switch (stmt.*) {
+            .expression => |es| {
+                try self.compileExpression(&es.expression);
+                // The expression's value lands in acc and stays there
+                // until the next statement overwrites it. Top-level
+                // `Return` reads whatever the last statement leaves.
+            },
+            .empty => {},
+            .block => |b| try self.compileBlock(b.body, b.span),
+            .lexical => |ld| try self.compileLexicalDecl(ld),
+            .if_ => |s| try self.compileIf(s),
+            .while_ => |s| try self.compileWhile(s),
+            .do_while => |s| try self.compileDoWhile(s),
+            .for_ => |s| try self.compileFor(s),
+            .break_ => |s| try self.compileBreak(s),
+            .continue_ => |s| try self.compileContinue(s),
+            .throw_ => |s| try self.compileThrow(s),
+            .try_ => |s| try self.compileTry(s),
+            .return_ => |s| try self.compileReturn(s),
+            .function_decl => |fd| try self.compileFunctionDecl(fd),
+            .class_decl => |cd| try self.compileClassDecl(cd),
+            .for_in_of => |s| try self.compileForInOf(s),
+            .switch_ => |s| try self.compileSwitch(s),
+            .debugger_ => {}, // no-op for later — V8 / d8 also no-op without a debugger attached
+            .labeled => |lb| try self.compileLabeled(lb),
+            .import_decl => |id| try self.compileImportDecl(id),
+            .export_decl => |ed| try self.compileExportDecl(ed),
+        }
+    }
 
-    // §13.3.1 ImportClause — the namespace binding (`import * as
-    // ns from ...`) IS the namespace itself, so model it as a
-    // regular `const` slot pointing at the namespace value. The
-    // module_load above already left the namespace in the
-    // accumulator and we've stored it; create a const binding
-    // that aliases that slot. We can't share `ns_slot` directly
-    // (it's "owned" by the import decl for indirect dereference)
-    // so reload via the existing emit machinery.
-    if (id.namespace) |bid| {
-        const name = try self.bindingName(bid.span);
-        const ns_binding = try self.declareBindingFull(name, .const_, bid.span);
-        // Reload namespace from `ns_slot` into the accumulator,
-        // then store into the const binding's own env slot.
-        try self.builder.emitOp(.lda_env, bid.span);
+    /// §16.2.2 ImportDeclaration. In module mode emits a
+    /// `module_load` for the source specifier and stores the
+    /// resulting namespace in a per-import-decl env slot, then
+    /// records each imported name as an indirect alias for
+    /// `(namespace_slot, exported_name)`. Reads at use sites then
+    /// dereference through the namespace at access time — matching
+    /// §8.1.1.5.5 CreateImportBinding's live-binding semantics
+    /// (every production engine implements imports this way: V8 /
+    /// JSC / SpiderMonkey use the same env-slot-points-at-namespace
+    /// shape). In script mode the bindings are declared but stay in
+    /// TDZ (no actual import resolution in script mode).
+    fn compileImportDecl(self: *Compiler, id: ast.statement.ImportDecl) CompileError!void {
+        if (!self.is_module) {
+            // Script mode — declare the binding names so a later
+            // reference doesn't `UnresolvedReference`, but no module
+            // loading happens. §12.7: bindings key off StringValue.
+            if (id.default) |bid| {
+                const name = try self.bindingName(bid.span);
+                _ = try self.declareBinding(name, .let_, bid.span);
+            }
+            if (id.namespace) |bid| {
+                const name = try self.bindingName(bid.span);
+                _ = try self.declareBinding(name, .let_, bid.span);
+            }
+            for (id.named) |spec| {
+                const name = try self.bindingName(spec.local.span);
+                _ = try self.declareBinding(name, .let_, spec.local.span);
+            }
+            return;
+        }
+
+        // Strip surrounding quotes from the StringLiteral span.
+        const raw = self.source[id.source.start..id.source.end];
+        if (raw.len < 2) return error.UnsupportedStatement;
+        const spec_text = raw[1 .. raw.len - 1];
+        const k_spec = try self.internString(spec_text);
+        try self.builder.emitOp(.module_load, id.span);
+        try self.builder.emitU16(k_spec);
+
+        // Reserve a persistent env slot for the namespace — one per
+        // import-decl. All indirect bindings declared by this decl
+        // dereference through this slot. We use an env slot (not a
+        // temp register) so closures created later in the module body
+        // can reach the namespace via `lda_env` — temps are
+        // accumulator-only.
+        const ns_slot = try self.newEnvSlot();
+        try self.builder.emitOp(.sta_env, id.span);
         try self.builder.emitU8(0);
         try self.builder.emitU8(ns_slot);
-        try self.emitStoreBinding(ns_binding, bid.span);
-    }
-    if (id.default) |bid| {
-        const name = try self.bindingName(bid.span);
-        const binding: Binding = .{
-            .name = name,
-            .env_slot = 0,
-            .env_depth = self.env_depth,
-            .kind = .const_,
-            .span = bid.span,
-            .is_import = true,
-            .import_ns_slot = ns_slot,
-            .import_name = "default",
-        };
-        const target = self.scope.?;
-        if (target.lookupLocal(name)) |_| {
-            try self.report(.unexpected_token, bid.span);
-            return error.DuplicateBinding;
-        }
-        try target.bindings.append(self.allocator, binding);
-    }
-    for (id.named) |spec| {
-        const imported_text = self.source[spec.imported_span.start..spec.imported_span.end];
-        const imported_name = if (imported_text.len >= 2 and (imported_text[0] == '"' or imported_text[0] == '\''))
-            imported_text[1 .. imported_text.len - 1]
-        else
-            try self.decodeIdentifierName(imported_text);
-        const local_name = try self.bindingName(spec.local.span);
-        const binding: Binding = .{
-            .name = local_name,
-            .env_slot = 0,
-            .env_depth = self.env_depth,
-            .kind = .const_,
-            .span = spec.local.span,
-            .is_import = true,
-            .import_ns_slot = ns_slot,
-            .import_name = imported_name,
-        };
-        const target = self.scope.?;
-        if (target.lookupLocal(local_name)) |_| {
-            try self.report(.unexpected_token, spec.local.span);
-            return error.DuplicateBinding;
-        }
-        try target.bindings.append(self.allocator, binding);
-    }
-}
 
-/// §16.2.3 ExportDeclaration. In module mode emits
-/// `module_export` opcodes that publish bindings to the
-/// executing module's namespace.
-fn compileExportDecl(self: *Compiler, ed: ast.statement.ExportDecl) CompileError!void {
-    switch (ed.body) {
-        .declaration => |stmt| {
-            try self.compileStatement(stmt);
-            if (self.is_module) try self.publishExportedNamesFromDecl(stmt);
-        },
-        .default_value => |e| {
-            try self.compileExpression(&e);
-            if (self.is_module) {
-                const k_default = try self.internString("default");
-                try self.builder.emitOp(.module_export, ed.span);
-                try self.builder.emitU16(k_default);
+        // §13.3.1 ImportClause — the namespace binding (`import * as
+        // ns from ...`) IS the namespace itself, so model it as a
+        // regular `const` slot pointing at the namespace value. The
+        // module_load above already left the namespace in the
+        // accumulator and we've stored it; create a const binding
+        // that aliases that slot. We can't share `ns_slot` directly
+        // (it's "owned" by the import decl for indirect dereference)
+        // so reload via the existing emit machinery.
+        if (id.namespace) |bid| {
+            const name = try self.bindingName(bid.span);
+            const ns_binding = try self.declareBindingFull(name, .const_, bid.span);
+            // Reload namespace from `ns_slot` into the accumulator,
+            // then store into the const binding's own env slot.
+            try self.builder.emitOp(.lda_env, bid.span);
+            try self.builder.emitU8(0);
+            try self.builder.emitU8(ns_slot);
+            try self.emitStoreBinding(ns_binding, bid.span);
+        }
+        if (id.default) |bid| {
+            const name = try self.bindingName(bid.span);
+            const binding: Binding = .{
+                .name = name,
+                .env_slot = 0,
+                .env_depth = self.env_depth,
+                .kind = .const_,
+                .span = bid.span,
+                .is_import = true,
+                .import_ns_slot = ns_slot,
+                .import_name = "default",
+            };
+            const target = self.scope.?;
+            if (target.lookupLocal(name)) |_| {
+                try self.report(.unexpected_token, bid.span);
+                return error.DuplicateBinding;
             }
-        },
-        .named => |body| {
-            if (!self.is_module) return;
-            if (body.source) |src_span| {
-                // §16.2.3.7 ExportDeclaration : `export NamedExports
-                // FromClause` — re-export from another module.
-                // Lower to `module_load <spec>` (which leaves the
-                // source namespace in `acc`) followed by a
-                // `module_reexport_named` per specifier. The
-                // single-purpose op forwards the source key's raw
-                // value — Hole included — to the importer's
-                // namespace under the renamed key, sidestepping
-                // the §9.4.6.7 GetBindingValue Hole-throw that
-                // `lda_property` applies to module namespaces.
-                // Throwing at re-export time would surface a
-                // ReferenceError when the source body is mid-cycle
-                // even if the importer never reads the binding
-                // (e.g. `instn-iee-bndng-*`); forwarding the Hole
-                // defers the throw to the importer's read site,
-                // matching spec semantics.
-                const raw = self.source[src_span.start..src_span.end];
-                if (raw.len < 2) return error.UnsupportedStatement;
-                const spec_text = raw[1 .. raw.len - 1];
-                const k_spec = try self.internString(spec_text);
-                try self.builder.emitOp(.module_load, ed.span);
-                try self.builder.emitU16(k_spec);
-                for (body.specifiers) |spec| {
-                    const local_text = self.source[spec.local_span.start..spec.local_span.end];
-                    const local_name = if (local_text.len >= 2 and (local_text[0] == '"' or local_text[0] == '\''))
-                        local_text[1 .. local_text.len - 1]
-                    else
-                        local_text;
-                    const exported_text = self.source[spec.exported_span.start..spec.exported_span.end];
-                    const exported_name = if (exported_text.len >= 2 and (exported_text[0] == '"' or exported_text[0] == '\''))
-                        exported_text[1 .. exported_text.len - 1]
-                    else
-                        exported_text;
-                    const k_local = try self.internString(local_name);
-                    const k_exp = try self.internString(exported_name);
-                    try self.builder.emitOp(.module_reexport_named, spec.span);
-                    try self.builder.emitU16(k_local);
-                    try self.builder.emitU16(k_exp);
+            try target.bindings.append(self.allocator, binding);
+        }
+        for (id.named) |spec| {
+            const imported_text = self.source[spec.imported_span.start..spec.imported_span.end];
+            const imported_name = if (imported_text.len >= 2 and (imported_text[0] == '"' or imported_text[0] == '\''))
+                imported_text[1 .. imported_text.len - 1]
+            else
+                try self.decodeIdentifierName(imported_text);
+            const local_name = try self.bindingName(spec.local.span);
+            const binding: Binding = .{
+                .name = local_name,
+                .env_slot = 0,
+                .env_depth = self.env_depth,
+                .kind = .const_,
+                .span = spec.local.span,
+                .is_import = true,
+                .import_ns_slot = ns_slot,
+                .import_name = imported_name,
+            };
+            const target = self.scope.?;
+            if (target.lookupLocal(local_name)) |_| {
+                try self.report(.unexpected_token, spec.local.span);
+                return error.DuplicateBinding;
+            }
+            try target.bindings.append(self.allocator, binding);
+        }
+    }
+
+    /// §16.2.3 ExportDeclaration. In module mode emits
+    /// `module_export` opcodes that publish bindings to the
+    /// executing module's namespace.
+    fn compileExportDecl(self: *Compiler, ed: ast.statement.ExportDecl) CompileError!void {
+        switch (ed.body) {
+            .declaration => |stmt| {
+                try self.compileStatement(stmt);
+                if (self.is_module) try self.publishExportedNamesFromDecl(stmt);
+            },
+            .default_value => |e| {
+                try self.compileExpression(&e);
+                if (self.is_module) {
+                    const k_default = try self.internString("default");
+                    try self.builder.emitOp(.module_export, ed.span);
+                    try self.builder.emitU16(k_default);
                 }
-                return;
-            }
-            for (body.specifiers) |spec| {
-                // §16.2.3.5 ExportSpecifier — the *local* side is
-                // always an IdentifierName (no string-literal form);
-                // the *exported* side is a ModuleExportName which
-                // §16.2.2 also lets be a StringLiteral. Strip the
-                // surrounding quotes for the exported key so
-                // `export { f as "☿" }` registers under the bare
-                // code-point key on the namespace, not the literal
-                // `"\"☿\""` six-byte token. The from-clause branch
-                // above already strips; this is the parallel fix
-                // for the local-export branch.
-                const local_name = self.source[spec.local_span.start..spec.local_span.end];
-                const exported_text = self.source[spec.exported_span.start..spec.exported_span.end];
-                const exported_name = if (exported_text.len >= 2 and (exported_text[0] == '"' or exported_text[0] == '\''))
-                    exported_text[1 .. exported_text.len - 1]
-                else
-                    exported_text;
-                try self.emitBindingRead(local_name, spec.span);
-                const k = try self.internString(exported_name);
-                try self.builder.emitOp(.module_export, spec.span);
-                try self.builder.emitU16(k);
-            }
-        },
-        .all => |all_body| {
-            if (!self.is_module) return;
-            // §16.2.3.7 ExportDeclaration : `export * as ns from
-            // "src"` — load the source module's namespace and bind
-            // it on our own namespace under `ns`. The
-            // ModuleExportName may be a StringLiteral (§16.2.2);
-            // strip surrounding quotes so the key is the bare code-
-            // point sequence rather than the raw token. Lifetime
-            // of `spec_text` and `ns_name` mirrors every other
-            // module_export key: borrowed from `self.source`, which
-            // outlives the chunk.
-            //
-            // `export * from "src"` (no `as`) is the namespace-
-            // merge form — every non-`default` export from `src`
-            // is forwarded onto our own namespace. Lower this to
-            // `module_load <k_spec>; module_reexport_star` so the
-            // runtime grabs the source namespace and copies its
-            // exported keys onto the executing module's namespace.
-            const src_span = all_body.source;
-            const raw = self.source[src_span.start..src_span.end];
-            if (raw.len < 2) return;
-            const spec_text = raw[1 .. raw.len - 1];
-            const k_spec = try self.internString(spec_text);
-            if (all_body.namespace_local) |ns_span| {
-                try self.builder.emitOp(.module_load, ed.span);
-                try self.builder.emitU16(k_spec);
-                const ns_text = self.source[ns_span.start..ns_span.end];
-                const ns_name = if (ns_text.len >= 2 and (ns_text[0] == '"' or ns_text[0] == '\''))
-                    ns_text[1 .. ns_text.len - 1]
-                else
-                    ns_text;
-                const k_ns = try self.internString(ns_name);
-                try self.builder.emitOp(.module_export, ed.span);
-                try self.builder.emitU16(k_ns);
-            } else {
-                try self.builder.emitOp(.module_load, ed.span);
-                try self.builder.emitU16(k_spec);
-                try self.builder.emitOp(.module_reexport_star, ed.span);
-            }
-        },
-    }
-}
-
-/// After compiling an `export <decl>`, re-read each declared
-/// name and emit a `module_export` for it.
-fn publishExportedNamesFromDecl(self: *Compiler, stmt: *const Statement) CompileError!void {
-    switch (stmt.*) {
-        .lexical => |ld| {
-            for (ld.declarators) |d| {
-                // §14.3.3 BindingPattern — `export const {a, b} = obj;`
-                // / `export const [x, y] = arr;` introduce one binding
-                // per pattern leaf. Walk the pattern and publish each
-                // bound identifier; identifier-only targets short-
-                // circuit through the same helper.
-                try self.publishExportedTargetNames(d.name, d.span);
-            }
-        },
-        .function_decl => |fd| {
-            const name = try self.bindingName(fd.name.span);
-            try self.emitBindingRead(name, fd.name.span);
-            const k = try self.internString(name);
-            try self.builder.emitOp(.module_export, fd.name.span);
-            try self.builder.emitU16(k);
-        },
-        .class_decl => |cd| {
-            const name = try self.bindingName(cd.name.span);
-            try self.emitBindingRead(name, cd.name.span);
-            const k = try self.internString(name);
-            try self.builder.emitOp(.module_export, cd.name.span);
-            try self.builder.emitU16(k);
-        },
-        else => {},
-    }
-}
-
-/// Walk a `BindingTarget` and emit a `module_export` for every
-/// bound identifier — covers identifier targets (the trivial
-/// case) and §14.3.3 destructuring patterns (`{ a }`, `[x, y]`,
-/// `[, ...rest]`, nested combinations). Used by
-/// `publishExportedNamesFromDecl` so a pattern-shaped `export
-/// const { a } = obj` publishes `a` on the module namespace
-/// alongside the simple-identifier case.
-fn publishExportedTargetNames(self: *Compiler, target: ast.statement.BindingTarget, span: Span) CompileError!void {
-    switch (target) {
-        .identifier => |id| {
-            const name = self.source[id.span.start..id.span.end];
-            try self.emitBindingRead(name, span);
-            const k = try self.internString(name);
-            try self.builder.emitOp(.module_export, span);
-            try self.builder.emitU16(k);
-        },
-        .object => |op| {
-            for (op.properties) |prop| {
-                try self.publishExportedTargetNames(prop.value.target, prop.span);
-            }
-            if (op.rest) |rest| {
-                const name = self.source[rest.span.start..rest.span.end];
-                try self.emitBindingRead(name, rest.span);
-                const k = try self.internString(name);
-                try self.builder.emitOp(.module_export, rest.span);
-                try self.builder.emitU16(k);
-            }
-        },
-        .array => |ap| {
-            for (ap.elements) |maybe_el| {
-                const el = maybe_el orelse continue; // elision
-                try self.publishExportedTargetNames(el.target, el.span);
-            }
-            if (ap.rest) |rest| try self.publishExportedTargetNames(rest.*, span);
-        },
-    }
-}
-
-fn emitBindingRead(self: *Compiler, name: []const u8, span: Span) CompileError!void {
-    const scope = self.scope orelse return error.UnresolvedReference;
-    const binding = scope.resolve(name) orelse return error.UnresolvedReference;
-    const depth = self.env_depth - binding.env_depth;
-    try self.builder.emitOp(.lda_env, span);
-    try self.builder.emitU8(depth);
-    try self.builder.emitU8(binding.env_slot);
-}
-
-/// At module instantiation, pre-seed the namespace with `Hole`
-/// for every exported TDZ-tracked binding so an importing module
-/// reading the binding before the source body initialises it
-/// triggers ReferenceError via `throw_if_hole` on the indirect
-/// import read. Spec basis: §8.1.1.5.5 CreateImportBinding's
-/// "the binding is initialized" record interacting with the
-/// importer's GetBindingValue (§8.1.1.1.6) — accessing an
-/// uninitialised binding throws ReferenceError, which we surface
-/// via the Hole sentinel.
-///
-/// Covers: `export let X`, `export const X`, `export class X`,
-/// `export default class { ... }`, `export default <expr>`. The
-/// `default` slot is also seeded — the value lands at body
-/// evaluation, when `module_export "default"` runs. Skipped:
-/// `export function` / `export function*` / `export async fn`
-/// (already initialised by the hoisted function-decl phase
-/// before this seed runs would be observably wrong; they reach
-/// `module_export` via `publishExportedNamesFromDecl` in the
-/// hoist phase), `export var` (initialised to undefined at
-/// hoist), `export { X }` / `export { X } from` / `export *`
-/// (re-exports are resolved indirectly; no own slot).
-fn seedTdzExportHoles(self: *Compiler, body: []ast.statement.Statement, span: Span) CompileError!void {
-    for (body) |s| {
-        switch (s) {
-            .export_decl => |ed| switch (ed.body) {
-                .declaration => |inner| switch (inner.*) {
-                    // `export var` is hoist-initialised to
-                    // `undefined`, not Hole — seeding Hole would
-                    // flip pre-init importer reads from the spec
-                    // `undefined` to a spurious ReferenceError.
-                    // Only `let` / `const` participate in TDZ — but
-                    // the namespace still has to *advertise* the
-                    // exported var name from the start of body
-                    // evaluation, otherwise `'attr' in ns` returns
-                    // false for a self-import that sees the partial
-                    // namespace before the `export var attr;` line
-                    // runs. Publish `undefined` at hoist time so
-                    // the property exists; the later var-init (if
-                    // any) overwrites via `compileExportDecl`.
-                    .lexical => |ld| if (ld.kind != .var_) {
-                        for (ld.declarators) |d| {
-                            if (identifierName(self.source, d.name)) |name| {
-                                try self.seedExportHole(name, d.span);
-                            }
-                        }
-                    } else {
-                        for (ld.declarators) |d| {
-                            if (identifierName(self.source, d.name)) |name| {
-                                const k = try self.internString(name);
-                                try self.builder.emitOp(.lda_undefined, d.span);
-                                try self.builder.emitOp(.module_export, d.span);
-                                try self.builder.emitU16(k);
-                            }
-                        }
-                    },
-                    .class_decl => |cd| {
-                        const name = try self.bindingName(cd.name.span);
-                        try self.seedExportHole(name, cd.name.span);
-                    },
-                    else => {},
-                },
-                .default_value => {
-                    // `export default <expr>` — the consumer
-                    // imports via "default". Seed Hole so an
-                    // importer reading default before the body
-                    // evaluates the expression gets the spec
-                    // ReferenceError.
-                    try self.seedExportHole("default", ed.span);
-                },
-                .named => |nb| {
-                    // §16.2.3.7 ExportDeclaration : `export
-                    // NamedExports` (no `from`) — `export { local
-                    // as exported }` resolves `exported` to the
-                    // local `let` / `const` / `class` binding's
-                    // value at module body evaluation. Per spec
-                    // §9.4.6.7 step 12-13 the importer's read
-                    // routes through GetBindingValue(localName,
-                    // true) which throws on the source TDZ-Hole.
-                    // Cynic publishes `exported` only when the
-                    // `export { ... }` statement actually runs, so
-                    // any cross-import read before then would see
-                    // an absent slot (`undefined`) instead of the
-                    // spec ReferenceError. Seed Hole for every
-                    // non-source named export whose local resolves
-                    // to a TDZ-tracked binding.
-                    //
-                    // §16.2.3.7 + `from` clause — re-exports
-                    // (`export { x } from "./y"`) get the same
-                    // Hole-seed: the publish runs only after the
-                    // source module loads + this body's re-export
-                    // statement executes, so without the seed
-                    // cross-module reads pre-evaluation would see
-                    // undefined. The compiler's re-export emit
-                    // (`compileExportDecl .named` with source) does
-                    // overwrite the Hole with the source's current
-                    // value at run time.
-                    for (nb.specifiers) |spec| {
-                        const exported_text = self.source[spec.exported_span.start..spec.exported_span.end];
-                        const exported_name = if (exported_text.len >= 2 and (exported_text[0] == '"' or exported_text[0] == '\''))
-                            exported_text[1 .. exported_text.len - 1]
-                        else
-                            exported_text;
-                        if (nb.source != null) {
-                            // Re-export — the local name is the
-                            // source's export, not a local binding;
-                            // seed Hole for the renamed key.
-                            try self.seedExportHole(exported_name, spec.span);
-                            continue;
-                        }
-                        // No `from`: skip when the local resolves
-                        // to a `var` / `function` (already
-                        // initialised at hoist) or doesn't resolve
-                        // (rare in a well-formed module — leave to
-                        // ResolveExport-time SyntaxError).
+            },
+            .named => |body| {
+                if (!self.is_module) return;
+                if (body.source) |src_span| {
+                    // §16.2.3.7 ExportDeclaration : `export NamedExports
+                    // FromClause` — re-export from another module.
+                    // Lower to `module_load <spec>` (which leaves the
+                    // source namespace in `acc`) followed by a
+                    // `module_reexport_named` per specifier. The
+                    // single-purpose op forwards the source key's raw
+                    // value — Hole included — to the importer's
+                    // namespace under the renamed key, sidestepping
+                    // the §9.4.6.7 GetBindingValue Hole-throw that
+                    // `lda_property` applies to module namespaces.
+                    // Throwing at re-export time would surface a
+                    // ReferenceError when the source body is mid-cycle
+                    // even if the importer never reads the binding
+                    // (e.g. `instn-iee-bndng-*`); forwarding the Hole
+                    // defers the throw to the importer's read site,
+                    // matching spec semantics.
+                    const raw = self.source[src_span.start..src_span.end];
+                    if (raw.len < 2) return error.UnsupportedStatement;
+                    const spec_text = raw[1 .. raw.len - 1];
+                    const k_spec = try self.internString(spec_text);
+                    try self.builder.emitOp(.module_load, ed.span);
+                    try self.builder.emitU16(k_spec);
+                    for (body.specifiers) |spec| {
                         const local_text = self.source[spec.local_span.start..spec.local_span.end];
                         const local_name = if (local_text.len >= 2 and (local_text[0] == '"' or local_text[0] == '\''))
                             local_text[1 .. local_text.len - 1]
                         else
                             local_text;
-                        const scope = self.scope orelse continue;
-                        const binding = scope.resolve(local_name) orelse continue;
-                        switch (binding.kind) {
-                            .let_, .const_ => try self.seedExportHole(exported_name, spec.span),
-                            .var_ => {},
-                        }
+                        const exported_text = self.source[spec.exported_span.start..spec.exported_span.end];
+                        const exported_name = if (exported_text.len >= 2 and (exported_text[0] == '"' or exported_text[0] == '\''))
+                            exported_text[1 .. exported_text.len - 1]
+                        else
+                            exported_text;
+                        const k_local = try self.internString(local_name);
+                        const k_exp = try self.internString(exported_name);
+                        try self.builder.emitOp(.module_reexport_named, spec.span);
+                        try self.builder.emitU16(k_local);
+                        try self.builder.emitU16(k_exp);
                     }
-                },
-                .all => {},
+                    return;
+                }
+                for (body.specifiers) |spec| {
+                    // §16.2.3.5 ExportSpecifier — the *local* side is
+                    // always an IdentifierName (no string-literal form);
+                    // the *exported* side is a ModuleExportName which
+                    // §16.2.2 also lets be a StringLiteral. Strip the
+                    // surrounding quotes for the exported key so
+                    // `export { f as "☿" }` registers under the bare
+                    // code-point key on the namespace, not the literal
+                    // `"\"☿\""` six-byte token. The from-clause branch
+                    // above already strips; this is the parallel fix
+                    // for the local-export branch.
+                    const local_name = self.source[spec.local_span.start..spec.local_span.end];
+                    const exported_text = self.source[spec.exported_span.start..spec.exported_span.end];
+                    const exported_name = if (exported_text.len >= 2 and (exported_text[0] == '"' or exported_text[0] == '\''))
+                        exported_text[1 .. exported_text.len - 1]
+                    else
+                        exported_text;
+                    try self.emitBindingRead(local_name, spec.span);
+                    const k = try self.internString(exported_name);
+                    try self.builder.emitOp(.module_export, spec.span);
+                    try self.builder.emitU16(k);
+                }
+            },
+            .all => |all_body| {
+                if (!self.is_module) return;
+                // §16.2.3.7 ExportDeclaration : `export * as ns from
+                // "src"` — load the source module's namespace and bind
+                // it on our own namespace under `ns`. The
+                // ModuleExportName may be a StringLiteral (§16.2.2);
+                // strip surrounding quotes so the key is the bare code-
+                // point sequence rather than the raw token. Lifetime
+                // of `spec_text` and `ns_name` mirrors every other
+                // module_export key: borrowed from `self.source`, which
+                // outlives the chunk.
+                //
+                // `export * from "src"` (no `as`) is the namespace-
+                // merge form — every non-`default` export from `src`
+                // is forwarded onto our own namespace. Lower this to
+                // `module_load <k_spec>; module_reexport_star` so the
+                // runtime grabs the source namespace and copies its
+                // exported keys onto the executing module's namespace.
+                const src_span = all_body.source;
+                const raw = self.source[src_span.start..src_span.end];
+                if (raw.len < 2) return;
+                const spec_text = raw[1 .. raw.len - 1];
+                const k_spec = try self.internString(spec_text);
+                if (all_body.namespace_local) |ns_span| {
+                    try self.builder.emitOp(.module_load, ed.span);
+                    try self.builder.emitU16(k_spec);
+                    const ns_text = self.source[ns_span.start..ns_span.end];
+                    const ns_name = if (ns_text.len >= 2 and (ns_text[0] == '"' or ns_text[0] == '\''))
+                        ns_text[1 .. ns_text.len - 1]
+                    else
+                        ns_text;
+                    const k_ns = try self.internString(ns_name);
+                    try self.builder.emitOp(.module_export, ed.span);
+                    try self.builder.emitU16(k_ns);
+                } else {
+                    try self.builder.emitOp(.module_load, ed.span);
+                    try self.builder.emitU16(k_spec);
+                    try self.builder.emitOp(.module_reexport_star, ed.span);
+                }
+            },
+        }
+    }
+
+    /// After compiling an `export <decl>`, re-read each declared
+    /// name and emit a `module_export` for it.
+    fn publishExportedNamesFromDecl(self: *Compiler, stmt: *const Statement) CompileError!void {
+        switch (stmt.*) {
+            .lexical => |ld| {
+                for (ld.declarators) |d| {
+                    // §14.3.3 BindingPattern — `export const {a, b} = obj;`
+                    // / `export const [x, y] = arr;` introduce one binding
+                    // per pattern leaf. Walk the pattern and publish each
+                    // bound identifier; identifier-only targets short-
+                    // circuit through the same helper.
+                    try self.publishExportedTargetNames(d.name, d.span);
+                }
+            },
+            .function_decl => |fd| {
+                const name = try self.bindingName(fd.name.span);
+                try self.emitBindingRead(name, fd.name.span);
+                const k = try self.internString(name);
+                try self.builder.emitOp(.module_export, fd.name.span);
+                try self.builder.emitU16(k);
+            },
+            .class_decl => |cd| {
+                const name = try self.bindingName(cd.name.span);
+                try self.emitBindingRead(name, cd.name.span);
+                const k = try self.internString(name);
+                try self.builder.emitOp(.module_export, cd.name.span);
+                try self.builder.emitU16(k);
             },
             else => {},
         }
     }
-    _ = span;
-}
 
-fn seedExportHole(self: *Compiler, name: []const u8, span: Span) CompileError!void {
-    const k = try self.internString(name);
-    try self.builder.emitOp(.lda_hole, span);
-    try self.builder.emitOp(.module_export, span);
-    try self.builder.emitU16(k);
-}
-
-/// §14.12 SwitchStatement.
-/// Layout: evaluate discriminant once, save in a temp; emit a
-/// linear chain of `===` checks each jumping to the matching
-/// case body; emit the bodies in source order, with fall-through
-/// between cases when there's no intervening `break`. `break`
-/// exits via the surrounding `LoopContext`'s break-patches list.
-/// `for (binding of iterable) body` (§14.7.5). later uses an
-/// array-like iteration protocol — walks `iterable.length` and
-/// numeric-index access. Real `Symbol.iterator` dispatch lands
-/// later once `Symbol` exists; for now this covers arrays
-/// + strings, which is the bulk of test262's for-of use.
-/// `for-in` and `for await` are deferred.
-fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!void {
-    // §14.7.5 `for await … of` — emits the same skeleton as
-    // `for-of` but opens an async iterator (`@@asyncIterator`
-    // first, sync fallback) and awaits each `next()` result.
-    // The surrounding function must be async (or async generator)
-    // for `await` to suspend; the parser already enforces that.
-    const labels = try self.drainPendingLabels();
-
-    // Determine the binding shape early — we need it before
-    // opening the loop scope so we know whether to mark it as
-    // `has_own_env` (closure-per-iteration semantics for
-    // `let`/`const`).
-    var bind_kind: BindingKind = .let_;
-    var bind_name: []const u8 = "";
-    var bind_span: Span = s.span;
-    var bind_target_kind: enum { binding, identifier_assign, pattern, member_assign, assignment_pattern } = .binding;
-    var pattern_target: ?ast.statement.BindingTarget = null;
-    var member_target: ?ast.expression.MemberExpr = null;
-    // §13.15.5 — for-of LHS shaped as an array/object literal is
-    // re-parsed as an AssignmentPattern (§14.7.5.1 step 6.h.iv).
-    // We hold the expression here and route through
-    // `compileAssignmentPattern` at body emit.
-    var assignment_pattern_target: ?ast.expression.Expression = null;
-    switch (s.left) {
-        .lexical => |ld| {
-            if (ld.kind == .var_) bind_kind = .var_ else if (ld.kind == .let_) bind_kind = .let_ else bind_kind = .const_;
-            if (ld.declarators.len != 1) return error.UnsupportedStatement;
-            const d = ld.declarators[0];
-            switch (d.name) {
-                .identifier => |id| {
-                    // §12.7 — bind by StringValue.
-                    bind_name = try self.bindingName(id.span);
-                    bind_span = id.span;
-                },
-                .array, .object => {
-                    pattern_target = d.name;
-                    bind_target_kind = .pattern;
-                    bind_span = d.span;
-                },
-            }
-        },
-        .expression => |e| {
-            // §14.7.5.1 / §13.15.3 — when the LHS is a
-            // ParenthesizedExpression and its inner refines to a
-            // valid AssignmentTarget (IdentifierReference or
-            // MemberExpression), the spec re-parses it under the
-            // refined grammar. Peel transparent paren wrappers so
-            // `for ((async) of …)` and `for ((x.y) of …)` reach the
-            // same code paths as their unparenthesised forms. Note
-            // we do NOT peel parens around array / object literals
-            // — `([a]) ` does not refine to AssignmentPattern per
-            // §13.15.5.1.
-            var lhs = e;
-            while (lhs == .parenthesized) {
-                const inner = lhs.parenthesized.expression.*;
-                switch (inner) {
-                    .identifier_reference, .member, .parenthesized => lhs = inner,
-                    else => break,
+    /// Walk a `BindingTarget` and emit a `module_export` for every
+    /// bound identifier — covers identifier targets (the trivial
+    /// case) and §14.3.3 destructuring patterns (`{ a }`, `[x, y]`,
+    /// `[, ...rest]`, nested combinations). Used by
+    /// `publishExportedNamesFromDecl` so a pattern-shaped `export
+    /// const { a } = obj` publishes `a` on the module namespace
+    /// alongside the simple-identifier case.
+    fn publishExportedTargetNames(self: *Compiler, target: ast.statement.BindingTarget, span: Span) CompileError!void {
+        switch (target) {
+            .identifier => |id| {
+                const name = self.source[id.span.start..id.span.end];
+                try self.emitBindingRead(name, span);
+                const k = try self.internString(name);
+                try self.builder.emitOp(.module_export, span);
+                try self.builder.emitU16(k);
+            },
+            .object => |op| {
+                for (op.properties) |prop| {
+                    try self.publishExportedTargetNames(prop.value.target, prop.span);
                 }
-            }
-            switch (lhs) {
-            .identifier_reference => |ir| {
-                // §12.7 — bind by StringValue.
-                bind_name = try self.bindingName(ir.span);
-                bind_span = ir.span;
-                bind_target_kind = .identifier_assign;
+                if (op.rest) |rest| {
+                    const name = self.source[rest.span.start..rest.span.end];
+                    try self.emitBindingRead(name, rest.span);
+                    const k = try self.internString(name);
+                    try self.builder.emitOp(.module_export, rest.span);
+                    try self.builder.emitU16(k);
+                }
             },
-            // §14.7.5.1 — for-of LHS may be any LeftHandSideExpression,
-            // including `x.y` / `x[k]` member access. The iteration
-            // value is assigned via the same machinery as
-            // `x.y = value`. (Optional chains on the LHS aren't
-            // valid receivers per the spec; reject them.)
-            .member => |m| {
-                if (m.optional) return error.UnsupportedStatement;
-                if (m.object.* == .super_) return error.UnsupportedStatement;
-                member_target = m;
-                bind_span = m.span;
-                bind_target_kind = .member_assign;
+            .array => |ap| {
+                for (ap.elements) |maybe_el| {
+                    const el = maybe_el orelse continue; // elision
+                    try self.publishExportedTargetNames(el.target, el.span);
+                }
+                if (ap.rest) |rest| try self.publishExportedTargetNames(rest.*, span);
             },
-            // Array / object literal LHS in a for-of head is the
-            // assignment-destructuring form: `for ([a,b] of …)`,
-            // `for ({x: a.b} of …)`. Per §14.7.5.1 the LHS is
-            // re-parsed as an AssignmentPattern. The parser already
-            // produces an array/object literal for these (since
-            // they're indistinguishable from expressions until we
-            // see the `of`); we route them through
-            // `compileAssignmentPattern`.
-            .array_literal, .object_literal => {
-                assignment_pattern_target = lhs;
-                bind_span = switch (lhs) {
-                    .array_literal => |al| al.span,
-                    .object_literal => |ol| ol.span,
-                    else => unreachable,
-                };
-                bind_target_kind = .assignment_pattern;
-            },
-            else => return error.UnsupportedStatement,
-            }
-        },
-    }
-
-    // §14.7.5.6 CreatePerIterationEnvironment — when the loop
-    // binding is `let` / `const`, every iteration runs in a
-    // fresh env so closures captured inside the body see the
-    // iteration-specific value. `var` and bare-identifier
-    // assignment fall through to the function env (the spec
-    // gives them the legacy single-binding behaviour). Pattern
-    // targets get the same treatment as identifier targets.
-    const per_iter_env = (bind_target_kind == .binding or bind_target_kind == .pattern) and
-        (bind_kind == .let_ or bind_kind == .const_);
-
-    var loop_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = per_iter_env };
-    defer loop_scope.deinit(self.allocator);
-    const saved_scope = self.scope;
-    self.scope = &loop_scope;
-    defer self.scope = saved_scope;
-
-    // env_depth is NOT bumped yet — the iterable expression
-    // evaluates in the OUTER env (per §14.7.5.6 step 1 of
-    // ForIn/OfHeadEvaluation, the iterable is read before
-    // CreatePerIterationEnvironment). The bump happens after
-    // the iterable+`iter_open` so only the body sees the
-    // per-iteration depth.
-    const saved_env_depth = self.env_depth;
-    defer self.env_depth = saved_env_depth;
-
-    // §13.7.5.6 ForIn/OfHeadEvaluation step 2 — when the
-    // ForDeclaration has BoundNames (i.e. `let` / `const`),
-    // create a fresh DeclarativeEnvironment, install every
-    // bound name as a TDZ (uninitialised lex binding), and
-    // evaluate the iterable expression inside it. Spec step 4
-    // pops the env back to the outer one before
-    // ForIn/OfBodyEvaluation. Closures created inside the
-    // iterable expression (e.g. `{ i: function() { typeof x } }`)
-    // capture the TDZ binding and observe a ReferenceError when
-    // invoked later — `scope-head-lex-{open,close}.js` and
-    // `head-{let,const}-bound-names-fordecl-tdz.js` assert this.
-    var head_tdz_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = true };
-    const head_tdz_env = per_iter_env;
-    var saved_head_slot_count: u8 = 0;
-    if (head_tdz_env) {
-        saved_head_slot_count = self.env_slot_count;
-        self.env_slot_count = 0;
-        self.scope = &head_tdz_scope;
-        self.env_depth = saved_env_depth + 1;
-        try self.builder.emitOp(.make_environment, s.span);
-        const head_size_patch = self.builder.code.items.len;
-        try self.builder.emitU8(0);
-        if (pattern_target) |pt| {
-            try self.declarePatternBindings(pt, bind_kind);
-        } else {
-            _ = try self.declareBinding(bind_name, bind_kind, bind_span);
         }
-        self.builder.code.items[head_size_patch] = self.env_slot_count;
     }
-    defer head_tdz_scope.deinit(self.allocator);
 
-    // §14.7.5.6 ForIn/OfBodyEvaluation. Eval the iterable, open
-    // an iterator (for-of: §7.4.1 GetIterator; for-in:
-    // §14.7.5.6 EnumerateObjectProperties), then drive
-    // `it.next()` until `result.done`.
-    try self.compileExpression(&s.right);
+    fn emitBindingRead(self: *Compiler, name: []const u8, span: Span) CompileError!void {
+        const scope = self.scope orelse return error.UnresolvedReference;
+        const binding = scope.resolve(name) orelse return error.UnresolvedReference;
+        const depth = self.env_depth - binding.env_depth;
+        try self.builder.emitOp(.lda_env, span);
+        try self.builder.emitU8(depth);
+        try self.builder.emitU8(binding.env_slot);
+    }
 
-    // §13.7.5.6 step 4 — close the head TDZ env before opening
-    // the iterator. The iterator's `next()` calls and the
-    // per-iteration body run in fresh envs parented to the OUTER
-    // env, not the TDZ env (the TDZ binding is unreachable from
-    // the body — only the iterable expression observed it).
-    if (head_tdz_env) {
-        try self.builder.emitOp(.pop_env, s.span);
+    /// At module instantiation, pre-seed the namespace with `Hole`
+    /// for every exported TDZ-tracked binding so an importing module
+    /// reading the binding before the source body initialises it
+    /// triggers ReferenceError via `throw_if_hole` on the indirect
+    /// import read. Spec basis: §8.1.1.5.5 CreateImportBinding's
+    /// "the binding is initialized" record interacting with the
+    /// importer's GetBindingValue (§8.1.1.1.6) — accessing an
+    /// uninitialised binding throws ReferenceError, which we surface
+    /// via the Hole sentinel.
+    ///
+    /// Covers: `export let X`, `export const X`, `export class X`,
+    /// `export default class { ... }`, `export default <expr>`. The
+    /// `default` slot is also seeded — the value lands at body
+    /// evaluation, when `module_export "default"` runs. Skipped:
+    /// `export function` / `export function*` / `export async fn`
+    /// (already initialised by the hoisted function-decl phase
+    /// before this seed runs would be observably wrong; they reach
+    /// `module_export` via `publishExportedNamesFromDecl` in the
+    /// hoist phase), `export var` (initialised to undefined at
+    /// hoist), `export { X }` / `export { X } from` / `export *`
+    /// (re-exports are resolved indirectly; no own slot).
+    fn seedTdzExportHoles(self: *Compiler, body: []ast.statement.Statement, span: Span) CompileError!void {
+        for (body) |s| {
+            switch (s) {
+                .export_decl => |ed| switch (ed.body) {
+                    .declaration => |inner| switch (inner.*) {
+                        // `export var` is hoist-initialised to
+                        // `undefined`, not Hole — seeding Hole would
+                        // flip pre-init importer reads from the spec
+                        // `undefined` to a spurious ReferenceError.
+                        // Only `let` / `const` participate in TDZ — but
+                        // the namespace still has to *advertise* the
+                        // exported var name from the start of body
+                        // evaluation, otherwise `'attr' in ns` returns
+                        // false for a self-import that sees the partial
+                        // namespace before the `export var attr;` line
+                        // runs. Publish `undefined` at hoist time so
+                        // the property exists; the later var-init (if
+                        // any) overwrites via `compileExportDecl`.
+                        .lexical => |ld| if (ld.kind != .var_) {
+                            for (ld.declarators) |d| {
+                                if (identifierName(self.source, d.name)) |name| {
+                                    try self.seedExportHole(name, d.span);
+                                }
+                            }
+                        } else {
+                            for (ld.declarators) |d| {
+                                if (identifierName(self.source, d.name)) |name| {
+                                    const k = try self.internString(name);
+                                    try self.builder.emitOp(.lda_undefined, d.span);
+                                    try self.builder.emitOp(.module_export, d.span);
+                                    try self.builder.emitU16(k);
+                                }
+                            }
+                        },
+                        .class_decl => |cd| {
+                            const name = try self.bindingName(cd.name.span);
+                            try self.seedExportHole(name, cd.name.span);
+                        },
+                        else => {},
+                    },
+                    .default_value => {
+                        // `export default <expr>` — the consumer
+                        // imports via "default". Seed Hole so an
+                        // importer reading default before the body
+                        // evaluates the expression gets the spec
+                        // ReferenceError.
+                        try self.seedExportHole("default", ed.span);
+                    },
+                    .named => |nb| {
+                        // §16.2.3.7 ExportDeclaration : `export
+                        // NamedExports` (no `from`) — `export { local
+                        // as exported }` resolves `exported` to the
+                        // local `let` / `const` / `class` binding's
+                        // value at module body evaluation. Per spec
+                        // §9.4.6.7 step 12-13 the importer's read
+                        // routes through GetBindingValue(localName,
+                        // true) which throws on the source TDZ-Hole.
+                        // Cynic publishes `exported` only when the
+                        // `export { ... }` statement actually runs, so
+                        // any cross-import read before then would see
+                        // an absent slot (`undefined`) instead of the
+                        // spec ReferenceError. Seed Hole for every
+                        // non-source named export whose local resolves
+                        // to a TDZ-tracked binding.
+                        //
+                        // §16.2.3.7 + `from` clause — re-exports
+                        // (`export { x } from "./y"`) get the same
+                        // Hole-seed: the publish runs only after the
+                        // source module loads + this body's re-export
+                        // statement executes, so without the seed
+                        // cross-module reads pre-evaluation would see
+                        // undefined. The compiler's re-export emit
+                        // (`compileExportDecl .named` with source) does
+                        // overwrite the Hole with the source's current
+                        // value at run time.
+                        for (nb.specifiers) |spec| {
+                            const exported_text = self.source[spec.exported_span.start..spec.exported_span.end];
+                            const exported_name = if (exported_text.len >= 2 and (exported_text[0] == '"' or exported_text[0] == '\''))
+                                exported_text[1 .. exported_text.len - 1]
+                            else
+                                exported_text;
+                            if (nb.source != null) {
+                                // Re-export — the local name is the
+                                // source's export, not a local binding;
+                                // seed Hole for the renamed key.
+                                try self.seedExportHole(exported_name, spec.span);
+                                continue;
+                            }
+                            // No `from`: skip when the local resolves
+                            // to a `var` / `function` (already
+                            // initialised at hoist) or doesn't resolve
+                            // (rare in a well-formed module — leave to
+                            // ResolveExport-time SyntaxError).
+                            const local_text = self.source[spec.local_span.start..spec.local_span.end];
+                            const local_name = if (local_text.len >= 2 and (local_text[0] == '"' or local_text[0] == '\''))
+                                local_text[1 .. local_text.len - 1]
+                            else
+                                local_text;
+                            const scope = self.scope orelse continue;
+                            const binding = scope.resolve(local_name) orelse continue;
+                            switch (binding.kind) {
+                                .let_, .const_ => try self.seedExportHole(exported_name, spec.span),
+                                .var_ => {},
+                            }
+                        }
+                    },
+                    .all => {},
+                },
+                else => {},
+            }
+        }
+        _ = span;
+    }
+
+    fn seedExportHole(self: *Compiler, name: []const u8, span: Span) CompileError!void {
+        const k = try self.internString(name);
+        try self.builder.emitOp(.lda_hole, span);
+        try self.builder.emitOp(.module_export, span);
+        try self.builder.emitU16(k);
+    }
+
+    /// §14.12 SwitchStatement.
+    /// Layout: evaluate discriminant once, save in a temp; emit a
+    /// linear chain of `===` checks each jumping to the matching
+    /// case body; emit the bodies in source order, with fall-through
+    /// between cases when there's no intervening `break`. `break`
+    /// exits via the surrounding `LoopContext`'s break-patches list.
+    /// `for (binding of iterable) body` (§14.7.5). later uses an
+    /// array-like iteration protocol — walks `iterable.length` and
+    /// numeric-index access. Real `Symbol.iterator` dispatch lands
+    /// later once `Symbol` exists; for now this covers arrays
+    /// + strings, which is the bulk of test262's for-of use.
+    /// `for-in` and `for await` are deferred.
+    fn compileForInOf(self: *Compiler, s: ast.statement.ForInOfStmt) CompileError!void {
+        // §14.7.5 `for await … of` — emits the same skeleton as
+        // `for-of` but opens an async iterator (`@@asyncIterator`
+        // first, sync fallback) and awaits each `next()` result.
+        // The surrounding function must be async (or async generator)
+        // for `await` to suspend; the parser already enforces that.
+        const labels = try self.drainPendingLabels();
+
+        // Determine the binding shape early — we need it before
+        // opening the loop scope so we know whether to mark it as
+        // `has_own_env` (closure-per-iteration semantics for
+        // `let`/`const`).
+        var bind_kind: BindingKind = .let_;
+        var bind_name: []const u8 = "";
+        var bind_span: Span = s.span;
+        var bind_target_kind: enum { binding, identifier_assign, pattern, member_assign, assignment_pattern } = .binding;
+        var pattern_target: ?ast.statement.BindingTarget = null;
+        var member_target: ?ast.expression.MemberExpr = null;
+        // §13.15.5 — for-of LHS shaped as an array/object literal is
+        // re-parsed as an AssignmentPattern (§14.7.5.1 step 6.h.iv).
+        // We hold the expression here and route through
+        // `compileAssignmentPattern` at body emit.
+        var assignment_pattern_target: ?ast.expression.Expression = null;
+        switch (s.left) {
+            .lexical => |ld| {
+                if (ld.kind == .var_) bind_kind = .var_ else if (ld.kind == .let_) bind_kind = .let_ else bind_kind = .const_;
+                if (ld.declarators.len != 1) return error.UnsupportedStatement;
+                const d = ld.declarators[0];
+                switch (d.name) {
+                    .identifier => |id| {
+                        // §12.7 — bind by StringValue.
+                        bind_name = try self.bindingName(id.span);
+                        bind_span = id.span;
+                    },
+                    .array, .object => {
+                        pattern_target = d.name;
+                        bind_target_kind = .pattern;
+                        bind_span = d.span;
+                    },
+                }
+            },
+            .expression => |e| {
+                // §14.7.5.1 / §13.15.3 — when the LHS is a
+                // ParenthesizedExpression and its inner refines to a
+                // valid AssignmentTarget (IdentifierReference or
+                // MemberExpression), the spec re-parses it under the
+                // refined grammar. Peel transparent paren wrappers so
+                // `for ((async) of …)` and `for ((x.y) of …)` reach the
+                // same code paths as their unparenthesised forms. Note
+                // we do NOT peel parens around array / object literals
+                // — `([a]) ` does not refine to AssignmentPattern per
+                // §13.15.5.1.
+                var lhs = e;
+                while (lhs == .parenthesized) {
+                    const inner = lhs.parenthesized.expression.*;
+                    switch (inner) {
+                        .identifier_reference, .member, .parenthesized => lhs = inner,
+                        else => break,
+                    }
+                }
+                switch (lhs) {
+                    .identifier_reference => |ir| {
+                        // §12.7 — bind by StringValue.
+                        bind_name = try self.bindingName(ir.span);
+                        bind_span = ir.span;
+                        bind_target_kind = .identifier_assign;
+                    },
+                    // §14.7.5.1 — for-of LHS may be any LeftHandSideExpression,
+                    // including `x.y` / `x[k]` member access. The iteration
+                    // value is assigned via the same machinery as
+                    // `x.y = value`. (Optional chains on the LHS aren't
+                    // valid receivers per the spec; reject them.)
+                    .member => |m| {
+                        if (m.optional) return error.UnsupportedStatement;
+                        if (m.object.* == .super_) return error.UnsupportedStatement;
+                        member_target = m;
+                        bind_span = m.span;
+                        bind_target_kind = .member_assign;
+                    },
+                    // Array / object literal LHS in a for-of head is the
+                    // assignment-destructuring form: `for ([a,b] of …)`,
+                    // `for ({x: a.b} of …)`. Per §14.7.5.1 the LHS is
+                    // re-parsed as an AssignmentPattern. The parser already
+                    // produces an array/object literal for these (since
+                    // they're indistinguishable from expressions until we
+                    // see the `of`); we route them through
+                    // `compileAssignmentPattern`.
+                    .array_literal, .object_literal => {
+                        assignment_pattern_target = lhs;
+                        bind_span = switch (lhs) {
+                            .array_literal => |al| al.span,
+                            .object_literal => |ol| ol.span,
+                            else => unreachable,
+                        };
+                        bind_target_kind = .assignment_pattern;
+                    },
+                    else => return error.UnsupportedStatement,
+                }
+            },
+        }
+
+        // §14.7.5.6 CreatePerIterationEnvironment — when the loop
+        // binding is `let` / `const`, every iteration runs in a
+        // fresh env so closures captured inside the body see the
+        // iteration-specific value. `var` and bare-identifier
+        // assignment fall through to the function env (the spec
+        // gives them the legacy single-binding behaviour). Pattern
+        // targets get the same treatment as identifier targets.
+        const per_iter_env = (bind_target_kind == .binding or bind_target_kind == .pattern) and
+            (bind_kind == .let_ or bind_kind == .const_);
+
+        var loop_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = per_iter_env };
+        defer loop_scope.deinit(self.allocator);
+        const saved_scope = self.scope;
         self.scope = &loop_scope;
-        self.env_depth = saved_env_depth;
-        self.env_slot_count = saved_head_slot_count;
-    }
-    const open_op: Op = if (s.kind == .in_)
-        .for_in_open
-    else if (s.is_await)
-        .async_iter_open
-    else
-        .iter_open;
-    try self.builder.emitOp(open_op, s.span);
-    const r_iter = try self.reserveTemp();
-    defer self.releaseTemp();
-    try self.builder.emitOp(.star, s.span);
-    try self.builder.emitU8(r_iter);
+        defer self.scope = saved_scope;
 
-    const k_next = try self.internString("next");
-    const k_value = try self.internString("value");
-    const k_done = try self.internString("done");
+        // env_depth is NOT bumped yet — the iterable expression
+        // evaluates in the OUTER env (per §14.7.5.6 step 1 of
+        // ForIn/OfHeadEvaluation, the iterable is read before
+        // CreatePerIterationEnvironment). The bump happens after
+        // the iterable+`iter_open` so only the body sees the
+        // per-iteration depth.
+        const saved_env_depth = self.env_depth;
+        defer self.env_depth = saved_env_depth;
 
-    // r_result is reused across iterations.
-    const r_result = try self.reserveTemp();
-    defer self.releaseTemp();
+        // §13.7.5.6 ForIn/OfHeadEvaluation step 2 — when the
+        // ForDeclaration has BoundNames (i.e. `let` / `const`),
+        // create a fresh DeclarativeEnvironment, install every
+        // bound name as a TDZ (uninitialised lex binding), and
+        // evaluate the iterable expression inside it. Spec step 4
+        // pops the env back to the outer one before
+        // ForIn/OfBodyEvaluation. Closures created inside the
+        // iterable expression (e.g. `{ i: function() { typeof x } }`)
+        // capture the TDZ binding and observe a ReferenceError when
+        // invoked later — `scope-head-lex-{open,close}.js` and
+        // `head-{let,const}-bound-names-fordecl-tdz.js` assert this.
+        var head_tdz_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = true };
+        const head_tdz_env = per_iter_env;
+        var saved_head_slot_count: u8 = 0;
+        if (head_tdz_env) {
+            saved_head_slot_count = self.env_slot_count;
+            self.env_slot_count = 0;
+            self.scope = &head_tdz_scope;
+            self.env_depth = saved_env_depth + 1;
+            try self.builder.emitOp(.make_environment, s.span);
+            const head_size_patch = self.builder.code.items.len;
+            try self.builder.emitU8(0);
+            if (pattern_target) |pt| {
+                try self.declarePatternBindings(pt, bind_kind);
+            } else {
+                _ = try self.declareBinding(bind_name, bind_kind, bind_span);
+            }
+            self.builder.code.items[head_size_patch] = self.env_slot_count;
+        }
+        defer head_tdz_scope.deinit(self.allocator);
 
-    // §7.4.5 GetIteratorDirect step 2 — `[[NextMethod]]` is
-    // captured ONCE at iterator open and re-used per step.
-    // Reading `iter.next` in the loop body would fire a user
-    // `get next()` accessor every iteration; the fixtures
-    // expect exactly one read (`iterator-next-reference.js`).
-    // for-in (\`for_in_open\`) returns a Cynic-internal iterator
-    // whose \`next\` is a fixed native method, so caching is
-    // semantically a no-op there but still safe.
-    const r_next_fn = try self.reserveTemp();
-    defer self.releaseTemp();
-    try self.builder.emitOp(.ldar, s.span);
-    try self.builder.emitU8(r_iter);
-    try self.builder.emitOp(.lda_property, s.span);
-    try self.builder.emitU16(k_next);
-    try self.builder.emitOp(.star, s.span);
-    try self.builder.emitU8(r_next_fn);
+        // §14.7.5.6 ForIn/OfBodyEvaluation. Eval the iterable, open
+        // an iterator (for-of: §7.4.1 GetIterator; for-in:
+        // §14.7.5.6 EnumerateObjectProperties), then drive
+        // `it.next()` until `result.done`.
+        try self.compileExpression(&s.right);
 
-    const loop_start = self.builder.here();
+        // §13.7.5.6 step 4 — close the head TDZ env before opening
+        // the iterator. The iterator's `next()` calls and the
+        // per-iteration body run in fresh envs parented to the OUTER
+        // env, not the TDZ env (the TDZ binding is unreachable from
+        // the body — only the iterable expression observed it).
+        if (head_tdz_env) {
+            try self.builder.emitOp(.pop_env, s.span);
+            self.scope = &loop_scope;
+            self.env_depth = saved_env_depth;
+            self.env_slot_count = saved_head_slot_count;
+        }
+        const open_op: Op = if (s.kind == .in_)
+            .for_in_open
+        else if (s.is_await)
+            .async_iter_open
+        else
+            .iter_open;
+        try self.builder.emitOp(open_op, s.span);
+        const r_iter = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, s.span);
+        try self.builder.emitU8(r_iter);
 
-    // r_result = r_iter.next() — uses the cached `next` from
-    // r_next_fn (read once above) instead of re-loading every
-    // iteration.
-    // call_method r_recv=r_iter, r_callee=r_next_fn, argc=0
-    try self.builder.emitOp(.call_method, s.span);
-    try self.builder.emitU8(r_iter);
-    try self.builder.emitU8(r_next_fn);
-    try self.builder.emitU8(0);
-    // §14.7.5 / §27.1.4.4 — for-await-of awaits each next()
-    // result. Sync iters return `{done, value}` directly;
-    // `await` on a non-Promise resolves to the value as-is, so
-    // the sync fallback in `async_iter_open` composes.
-    if (s.is_await) try self.builder.emitOp(.await_, s.span);
-    try self.builder.emitOp(.star, s.span);
-    try self.builder.emitU8(r_result);
+        const k_next = try self.internString("next");
+        const k_value = try self.internString("value");
+        const k_done = try self.internString("done");
 
-    // §7.4.2 IteratorNext step 4 — `If Type(result) is not Object, throw a TypeError`.
-    // Plain `for-of`: validate r_result; `for-in` is driven by
-    // the harness iterator (always Object), so skip the check.
-    if (s.kind != .in_) {
+        // r_result is reused across iterations.
+        const r_result = try self.reserveTemp();
+        defer self.releaseTemp();
+
+        // §7.4.5 GetIteratorDirect step 2 — `[[NextMethod]]` is
+        // captured ONCE at iterator open and re-used per step.
+        // Reading `iter.next` in the loop body would fire a user
+        // `get next()` accessor every iteration; the fixtures
+        // expect exactly one read (`iterator-next-reference.js`).
+        // for-in (\`for_in_open\`) returns a Cynic-internal iterator
+        // whose \`next\` is a fixed native method, so caching is
+        // semantically a no-op there but still safe.
+        const r_next_fn = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.ldar, s.span);
+        try self.builder.emitU8(r_iter);
+        try self.builder.emitOp(.lda_property, s.span);
+        try self.builder.emitU16(k_next);
+        try self.builder.emitOp(.star, s.span);
+        try self.builder.emitU8(r_next_fn);
+
+        const loop_start = self.builder.here();
+
+        // r_result = r_iter.next() — uses the cached `next` from
+        // r_next_fn (read once above) instead of re-loading every
+        // iteration.
+        // call_method r_recv=r_iter, r_callee=r_next_fn, argc=0
+        try self.builder.emitOp(.call_method, s.span);
+        try self.builder.emitU8(r_iter);
+        try self.builder.emitU8(r_next_fn);
+        try self.builder.emitU8(0);
+        // §14.7.5 / §27.1.4.4 — for-await-of awaits each next()
+        // result. Sync iters return `{done, value}` directly;
+        // `await` on a non-Promise resolves to the value as-is, so
+        // the sync fallback in `async_iter_open` composes.
+        if (s.is_await) try self.builder.emitOp(.await_, s.span);
+        try self.builder.emitOp(.star, s.span);
+        try self.builder.emitU8(r_result);
+
+        // §7.4.2 IteratorNext step 4 — `If Type(result) is not Object, throw a TypeError`.
+        // Plain `for-of`: validate r_result; `for-in` is driven by
+        // the harness iterator (always Object), so skip the check.
+        if (s.kind != .in_) {
+            try self.builder.emitOp(.ldar, s.span);
+            try self.builder.emitU8(r_result);
+            try self.builder.emitOp(.throw_if_not_object, s.span);
+        }
+
+        // if (r_result.done) jmp exit
         try self.builder.emitOp(.ldar, s.span);
         try self.builder.emitU8(r_result);
-        try self.builder.emitOp(.throw_if_not_object, s.span);
-    }
-
-    // if (r_result.done) jmp exit
-    try self.builder.emitOp(.ldar, s.span);
-    try self.builder.emitU8(r_result);
-    try self.builder.emitOp(.lda_property, s.span);
-    try self.builder.emitU16(k_done);
-    try self.builder.emitOp(.jmp_if_true, s.span);
-    const exit_patch = self.builder.here();
-    try self.builder.emitI16(0);
-
-    // §14.7.5.6 CreatePerIterationEnvironment — push a fresh
-    // env per iteration so closures captured inside the body
-    // see this iteration's binding value. The compile-time
-    // env_depth is bumped here so the body's binding accesses
-    // pick up the +1 depth.
-    //
-    // Slot allocation note: the per-iter env has its OWN slot
-    // pool, separate from the enclosing function's. We borrow
-    // the global `env_slot_count` for it (reset to 0 here, the
-    // body's lexicals append to it, restored on the way out)
-    // and patch the `make_environment` size operand at the end
-    // so it matches the actual count. Without this the loop
-    // variable and the body's first `const` collide on slot 0.
-    var per_iter_size_patch: usize = 0;
-    var saved_per_iter_slot_count: u8 = 0;
-    if (per_iter_env) {
-        saved_per_iter_slot_count = self.env_slot_count;
-        self.env_slot_count = 0;
-        try self.builder.emitOp(.make_environment, s.span);
-        per_iter_size_patch = self.builder.code.items.len;
-        try self.builder.emitU8(0); // placeholder; patched below
-        self.env_depth = saved_env_depth + 1;
-        if (pattern_target) |pt| {
-            try self.declarePatternBindings(pt, bind_kind);
-        } else {
-            // Use the regular slot allocator so the body's
-            // inner lexicals know where to land.
-            _ = try self.declareBinding(bind_name, bind_kind, bind_span);
-        }
-    } else if (bind_target_kind == .binding) {
-        // var / non-let binding lives in the function env.
-        _ = try self.declareBinding(bind_name, bind_kind, bind_span);
-    } else if (bind_target_kind == .pattern) {
-        // var-pattern: declare each leaf in the function env.
-        try self.declarePatternBindings(pattern_target.?, bind_kind);
-    }
-
-    // §14.7.5.7 / §7.4.6 — handler range starts BEFORE the LHS
-    // assignment so a throw inside the per-iteration target
-    // (poisoned setter on `for (x.attr of …)`, TDZ on `let` /
-    // `const`, destructuring failure) calls IteratorClose.
-    // §14.7.5.7 step 4 covers `lhsRef is abrupt` explicitly.
-    // `for-in` is excluded (no IteratorClose contract).
-
-    // value = r_result.value → bind
-    try self.builder.emitOp(.ldar, s.span);
-    try self.builder.emitU8(r_result);
-    try self.builder.emitOp(.lda_property, s.span);
-    try self.builder.emitU16(k_value);
-
-
-    // §14.7.5.7 / §7.4.6 — handler range starts AFTER `lda_property
-    // "value"` (§7.4.7 IteratorValue runs before LHS assignment; a
-    // thrown getter does NOT trigger IteratorClose per spec) but
-    // BEFORE the LHS assignment so a throw inside the per-iteration
-    // target (poisoned setter on `for (x.attr of …)`, TDZ on `let`
-    // /`const`, destructuring failure) calls IteratorClose.
-    // §14.7.5.7 step 4 covers `lhsRef is abrupt` explicitly.
-    // `for-in` is excluded (no IteratorClose contract).
-    const body_start_pc = self.builder.here();
-    // Assign to the binding (lexical, identifier-assign target,
-    // member target, assignment pattern, or destructuring pattern
-    // walk).
-    if (pattern_target) |pt| {
-        try self.compileDestructure(pt);
-    } else if (member_target) |m| {
-        try self.compileForOfMemberAssign(m, s.span);
-    } else if (assignment_pattern_target) |ap| {
-        try self.compileAssignmentPattern(ap);
-    } else {
-        try self.assignToBinding(bind_name, bind_span);
-    }
-
-    var ctx: LoopContext = .{
-        .continue_target = 0,
-        .needs_env_pop = per_iter_env,
-        // §7.4.6 IteratorClose — `for-of` only. `for-in` walks
-        // own keys directly and has no `.return()` contract.
-        .iter_register = if (s.kind == .in_) null else r_iter,
-        .parent = self.current_loop,
-        .entry_finally_chain = self.finally_chain,
-        .labels = labels,
-    };
-    defer ctx.deinit(self.allocator);
-    const saved_loop = self.current_loop;
-    self.current_loop = &ctx;
-    defer self.current_loop = saved_loop;
-
-    // §14.7.5.7 / §7.4.6 — wrap the body in an implicit handler
-    // that calls IteratorClose(iter) on abrupt completion (throw).
-    // `break` / `return` already close via compileBreak /
-    // compileReturn; `continue` exits the body normally. The
-    // handler isn't installed for `for-in` (no IteratorClose
-    // contract).
-    try self.compileStatement(s.body);
-    const body_end_pc = self.builder.here();
-    if (s.kind != .in_) {
-        // Skip the synthetic handler on normal completion.
-        try self.builder.emitOp(.jmp, s.span);
-        const skip_handler_patch = self.builder.here();
+        try self.builder.emitOp(.lda_property, s.span);
+        try self.builder.emitU16(k_done);
+        try self.builder.emitOp(.jmp_if_true, s.span);
+        const exit_patch = self.builder.here();
         try self.builder.emitI16(0);
-        const handler_pc = self.builder.here();
-        // The thrown value is deposited in `acc` (catch_register =
-        // null). Save, close the iterator (preserves acc per the
-        // op's contract), then rethrow.
-        const r_caught = try self.reserveTemp();
-        defer self.releaseTemp();
-        try self.builder.emitOp(.star, s.span);
-        try self.builder.emitU8(r_caught);
-        try self.builder.emitOp(.iter_close, s.span);
-        try self.builder.emitU8(r_iter);
-        // §7.4.6 step 7 — original throw wins; swallow any inner
-        // throw from `return()` and skip the non-Object check.
-        try self.builder.emitU8(1);
-        try self.builder.emitOp(.ldar, s.span);
-        try self.builder.emitU8(r_caught);
-        try self.builder.emitOp(.throw_, s.span);
-        const after_handler_pc = self.builder.here();
-        try self.builder.patchI16(skip_handler_patch, after_handler_pc);
-        try self.builder.addHandler(.{
-            .start_pc = body_start_pc,
-            .end_pc = body_end_pc,
-            .handler_pc = handler_pc,
-            .catch_register = null,
-        });
-    }
 
-    // `continue` jumps to the per-iter env teardown.
-    const incr_target = self.builder.here();
-    for (ctx.continue_patches.items) |p| try self.builder.patchI16(p, incr_target);
-    ctx.continue_target = incr_target;
-
-    // Pop the per-iter env before jumping back so the next
-    // iteration parents to the same outer env.
-    if (per_iter_env) {
-        try self.builder.emitOp(.pop_env, s.span);
-    }
-
-    // jmp loop_start
-    try self.builder.emitOp(.jmp, s.span);
-    const back_patch = self.builder.here();
-    try self.builder.emitI16(0);
-    try self.builder.patchI16(back_patch, loop_start);
-
-    const exit_target = self.builder.here();
-    try self.builder.patchI16(exit_patch, exit_target);
-    for (ctx.break_patches.items) |p| try self.builder.patchI16(p, exit_target);
-
-    // Patch the per-iter `make_environment` size to whatever
-    // env_slot_count grew to (iteration var + body lexicals),
-    // and restore the enclosing function's slot counter.
-    if (per_iter_env) {
-        self.builder.code.items[per_iter_size_patch] = self.env_slot_count;
-        self.env_slot_count = saved_per_iter_slot_count;
-    }
-}
-
-/// Assign `acc` (the current iteration's value) to a
-/// member-expression target (`x.y` / `x[k]`) — the same
-/// shape as `compileMemberAssignment` but driven from the
-/// for-of loop body where the value is already in `acc`.
-fn compileForOfMemberAssign(self: *Compiler, m: ast.expression.MemberExpr, span: Span) CompileError!void {
-    const r_value = try self.reserveTemp();
-    defer self.releaseTemp();
-    try self.builder.emitOp(.star, span);
-    try self.builder.emitU8(r_value);
-
-    try self.compileExpression(m.object);
-    const r_obj = try self.reserveTemp();
-    defer self.releaseTemp();
-    try self.builder.emitOp(.star, span);
-    try self.builder.emitU8(r_obj);
-
-    switch (m.property) {
-        .ident => |kspan| {
-            const raw = self.source[kspan.start..kspan.end];
-            if (raw.len > 0 and raw[0] == '#') {
-                // §13.2.7 / §7.3.30 PrivateFieldSet — `for (this.#x of …)`
-                // and `for (this.#x in …)` assign each iteration value
-                // through the private slot. Mangle the identifier with
-                // the enclosing class's private prefix and emit
-                // `sta_private`, which runs the §7.3.31 PrivateFieldFind
-                // brand check at runtime (throwing TypeError when the
-                // receiver is missing the slot).
-                if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
-                const decoded = try self.decodeIdentifierName(raw[1..]);
-                const mangled = try self.manglePrivateRef(decoded);
-                const k = try self.internString(mangled);
-                try self.builder.emitOp(.ldar, span);
-                try self.builder.emitU8(r_value);
-                try self.builder.emitOp(.sta_private, span);
-                try self.builder.emitU16(k);
-                try self.builder.emitU8(r_obj);
-                return;
+        // §14.7.5.6 CreatePerIterationEnvironment — push a fresh
+        // env per iteration so closures captured inside the body
+        // see this iteration's binding value. The compile-time
+        // env_depth is bumped here so the body's binding accesses
+        // pick up the +1 depth.
+        //
+        // Slot allocation note: the per-iter env has its OWN slot
+        // pool, separate from the enclosing function's. We borrow
+        // the global `env_slot_count` for it (reset to 0 here, the
+        // body's lexicals append to it, restored on the way out)
+        // and patch the `make_environment` size operand at the end
+        // so it matches the actual count. Without this the loop
+        // variable and the body's first `const` collide on slot 0.
+        var per_iter_size_patch: usize = 0;
+        var saved_per_iter_slot_count: u8 = 0;
+        if (per_iter_env) {
+            saved_per_iter_slot_count = self.env_slot_count;
+            self.env_slot_count = 0;
+            try self.builder.emitOp(.make_environment, s.span);
+            per_iter_size_patch = self.builder.code.items.len;
+            try self.builder.emitU8(0); // placeholder; patched below
+            self.env_depth = saved_env_depth + 1;
+            if (pattern_target) |pt| {
+                try self.declarePatternBindings(pt, bind_kind);
+            } else {
+                // Use the regular slot allocator so the body's
+                // inner lexicals know where to land.
+                _ = try self.declareBinding(bind_name, bind_kind, bind_span);
             }
-            const key = try self.decodeIdentifierName(raw);
-            const k = try self.internString(key);
-            try self.builder.emitOp(.ldar, span);
-            try self.builder.emitU8(r_value);
-            try self.builder.emitOp(.sta_property, span);
-            try self.builder.emitU16(k);
-            try self.builder.emitU8(r_obj);
-        },
-        .computed => |key_expr| {
-            try self.compileExpression(key_expr);
-            const r_key = try self.reserveTemp();
-            defer self.releaseTemp();
-            try self.builder.emitOp(.star, span);
-            try self.builder.emitU8(r_key);
-            try self.builder.emitOp(.ldar, span);
-            try self.builder.emitU8(r_value);
-            try self.builder.emitOp(.sta_computed, span);
-            try self.builder.emitU8(r_obj);
-            try self.builder.emitU8(r_key);
-        },
-    }
-}
+        } else if (bind_target_kind == .binding) {
+            // var / non-let binding lives in the function env.
+            _ = try self.declareBinding(bind_name, bind_kind, bind_span);
+        } else if (bind_target_kind == .pattern) {
+            // var-pattern: declare each leaf in the function env.
+            try self.declarePatternBindings(pattern_target.?, bind_kind);
+        }
 
-fn compileSwitch(self: *Compiler, s: ast.statement.SwitchStmt) CompileError!void {
-    // §14.13 — `LABEL : SwitchStatement` lets `break LABEL ;`
-    // inside the cases exit the switch.
-    const labels = try self.drainPendingLabels();
-    // A new block scope wraps the switch so `let`/`const` in case
-    // bodies are scoped to the switch (§14.12.4 step 3).
-    var switch_scope: Scope = .{ .parent = self.scope, .kind = .block };
-    defer switch_scope.deinit(self.allocator);
-    const saved_scope = self.scope;
-    self.scope = &switch_scope;
-    defer self.scope = saved_scope;
+        // §14.7.5.7 / §7.4.6 — handler range starts BEFORE the LHS
+        // assignment so a throw inside the per-iteration target
+        // (poisoned setter on `for (x.attr of …)`, TDZ on `let` /
+        // `const`, destructuring failure) calls IteratorClose.
+        // §14.7.5.7 step 4 covers `lhsRef is abrupt` explicitly.
+        // `for-in` is excluded (no IteratorClose contract).
 
-    // §14.12.4 CaseBlock — the whole CaseBlock shares one lexical
-    // scope; LexicallyDeclaredNames(CaseBlock) is the union of the
-    // lexically-declared names from every case + the default.
-    // Hoist `let` / `const` slots from every case body up-front so
-    // a `switch (x) { case 1: let y = 1; }` (or `default: let y;`)
-    // can resolve its binding when the body runs. Without this the
-    // resolver fails as `UnresolvedReference` at compile time
-    // (test262 language/statements/let/syntax/{without,with}-
-    // initialisers-in-statement-positions-{default,case-expression}-
-    // statement-list).
-    for (s.cases) |case| {
-        try self.hoistLetConst(case.body);
-    }
+        // value = r_result.value → bind
+        try self.builder.emitOp(.ldar, s.span);
+        try self.builder.emitU8(r_result);
+        try self.builder.emitOp(.lda_property, s.span);
+        try self.builder.emitU16(k_value);
 
-    try self.compileExpression(&s.discriminant);
-    const r_disc = try self.reserveTemp();
-    defer self.releaseTemp();
-    try self.builder.emitOp(.star, s.span);
-    try self.builder.emitU8(r_disc);
+        // §14.7.5.7 / §7.4.6 — handler range starts AFTER `lda_property
+        // "value"` (§7.4.7 IteratorValue runs before LHS assignment; a
+        // thrown getter does NOT trigger IteratorClose per spec) but
+        // BEFORE the LHS assignment so a throw inside the per-iteration
+        // target (poisoned setter on `for (x.attr of …)`, TDZ on `let`
+        // /`const`, destructuring failure) calls IteratorClose.
+        // §14.7.5.7 step 4 covers `lhsRef is abrupt` explicitly.
+        // `for-in` is excluded (no IteratorClose contract).
+        const body_start_pc = self.builder.here();
+        // Assign to the binding (lexical, identifier-assign target,
+        // member target, assignment pattern, or destructuring pattern
+        // walk).
+        if (pattern_target) |pt| {
+            try self.compileDestructure(pt);
+        } else if (member_target) |m| {
+            try self.compileForOfMemberAssign(m, s.span);
+        } else if (assignment_pattern_target) |ap| {
+            try self.compileAssignmentPattern(ap);
+        } else {
+            try self.assignToBinding(bind_name, bind_span);
+        }
 
-    // Per-case forward-jump patches into the body region.
-    var body_patches = try self.allocator.alloc(u32, s.cases.len);
-    defer self.allocator.free(body_patches);
+        var ctx: LoopContext = .{
+            .continue_target = 0,
+            .needs_env_pop = per_iter_env,
+            // §7.4.6 IteratorClose — `for-of` only. `for-in` walks
+            // own keys directly and has no `.return()` contract.
+            .iter_register = if (s.kind == .in_) null else r_iter,
+            .parent = self.current_loop,
+            .entry_finally_chain = self.finally_chain,
+            .labels = labels,
+        };
+        defer ctx.deinit(self.allocator);
+        const saved_loop = self.current_loop;
+        self.current_loop = &ctx;
+        defer self.current_loop = saved_loop;
 
-    // 1. Dispatch: for each case (skipping default) emit
-    // `eval test → acc; strict_eq r_disc; jmp_if_true patch_i`.
-    var default_idx: ?usize = null;
-    for (s.cases, 0..) |case, i| {
-        if (case.test_) |*test_expr| {
-            try self.compileExpression(test_expr);
-            try self.builder.emitOp(.strict_eq, case.span);
-            try self.builder.emitU8(r_disc);
-            try self.builder.emitOp(.jmp_if_true, case.span);
-            body_patches[i] = self.builder.here();
+        // §14.7.5.7 / §7.4.6 — wrap the body in an implicit handler
+        // that calls IteratorClose(iter) on abrupt completion (throw).
+        // `break` / `return` already close via compileBreak /
+        // compileReturn; `continue` exits the body normally. The
+        // handler isn't installed for `for-in` (no IteratorClose
+        // contract).
+        try self.compileStatement(s.body);
+        const body_end_pc = self.builder.here();
+        if (s.kind != .in_) {
+            // Skip the synthetic handler on normal completion.
+            try self.builder.emitOp(.jmp, s.span);
+            const skip_handler_patch = self.builder.here();
             try self.builder.emitI16(0);
-        } else {
-            if (default_idx != null) return error.UnsupportedStatement;
-            default_idx = i;
-            // Reserve a slot we can later overwrite with the
-            // jump-to-default; we patch this in the fallback below.
-            body_patches[i] = std.math.maxInt(u32); // sentinel
-        }
-    }
-
-    // 2. After all tests fail: jump to the default body if any,
-    // else past the bodies to the exit.
-    try self.builder.emitOp(.jmp, s.span);
-    const fallback_patch = self.builder.here();
-    try self.builder.emitI16(0);
-
-    // Set up a loop context for `break` inside the switch.
-    var ctx: LoopContext = .{
-        .continue_target = 0,
-        .parent = self.current_loop,
-        .entry_finally_chain = self.finally_chain,
-        .labels = labels,
-        .is_switch = true,
-    };
-    defer ctx.deinit(self.allocator);
-    const saved_loop = self.current_loop;
-    self.current_loop = &ctx;
-    defer self.current_loop = saved_loop;
-
-    // 3. Emit bodies. The case body's start is the patch target
-    // for its dispatch jump (or the fallback jump for default).
-    var default_body_pc: ?u32 = null;
-    for (s.cases, 0..) |case, i| {
-        const body_pc = self.builder.here();
-        if (case.test_ == null) {
-            default_body_pc = body_pc;
-        } else {
-            try self.builder.patchI16(body_patches[i], body_pc);
-        }
-        for (case.body) |*body_stmt| {
-            try self.compileStatement(body_stmt);
-        }
-        // Fall-through to the next case body unless a `break`
-        // already redirected us — the LoopContext break-patches
-        // are queued for the post-switch exit.
-    }
-
-    const exit_pc = self.builder.here();
-    if (default_body_pc) |pc| {
-        try self.builder.patchI16(fallback_patch, pc);
-    } else {
-        try self.builder.patchI16(fallback_patch, exit_pc);
-    }
-    for (ctx.break_patches.items) |p| try self.builder.patchI16(p, exit_pc);
-}
-
-fn compileReturn(self: *Compiler, s: ast.statement.ReturnStmt) CompileError!void {
-    // §13.10.1 ReturnStatement Runtime Semantics:
-    //   • `return;`                — exprValue is implicitly
-    //     `undefined`, NO Await (step 1: return Completion with
-    //     value undefined).
-    //   • `return Expression;`     — evaluate Expression; if the
-    //     enclosing function is async (regular async or async
-    //     generator), `Await(exprValue)` before completing. The
-    //     observable difference: explicit-form returns defer one
-    //     microtask; bare `return;` settles synchronously inside
-    //     the current task. (`return-undefined-implicit-and-
-    //     explicit.js` asserts the tick gap.)
-    const has_expr = s.argument != null;
-    if (s.argument) |*arg| {
-        try self.compileExpression(arg);
-    } else {
-        try self.builder.emitOp(.lda_undefined, s.span);
-    }
-    if (has_expr and self.current_is_async) {
-        try self.builder.emitOp(.await_, s.span);
-    }
-    // §7.4.6 IteratorClose — close every active for-of iterator
-    // on the way out. Walks the loop chain stopping at the
-    // enclosing function (the function entry resets
-    // `current_loop` to null). Iterator close runs with `acc`
-    // holding the return value; `iter_close` preserves `acc`.
-    var ctx_iter = self.current_loop;
-    while (ctx_iter) |c| : (ctx_iter = c.parent) {
-        if (c.iter_register) |r_iter| {
+            const handler_pc = self.builder.here();
+            // The thrown value is deposited in `acc` (catch_register =
+            // null). Save, close the iterator (preserves acc per the
+            // op's contract), then rethrow.
+            const r_caught = try self.reserveTemp();
+            defer self.releaseTemp();
+            try self.builder.emitOp(.star, s.span);
+            try self.builder.emitU8(r_caught);
             try self.builder.emitOp(.iter_close, s.span);
             try self.builder.emitU8(r_iter);
-            // §7.4.6 — completion type here is `return`, not
-            // `throw`: an inner throw from `return()` propagates;
-            // a non-Object return value throws TypeError.
-            try self.builder.emitU8(0);
+            // §7.4.6 step 7 — original throw wins; swallow any inner
+            // throw from `return()` and skip the non-Object check.
+            try self.builder.emitU8(1);
+            try self.builder.emitOp(.ldar, s.span);
+            try self.builder.emitU8(r_caught);
+            try self.builder.emitOp(.throw_, s.span);
+            const after_handler_pc = self.builder.here();
+            try self.builder.patchI16(skip_handler_patch, after_handler_pc);
+            try self.builder.addHandler(.{
+                .start_pc = body_start_pc,
+                .end_pc = body_end_pc,
+                .handler_pc = handler_pc,
+                .catch_register = null,
+            });
+        }
+
+        // `continue` jumps to the per-iter env teardown.
+        const incr_target = self.builder.here();
+        for (ctx.continue_patches.items) |p| try self.builder.patchI16(p, incr_target);
+        ctx.continue_target = incr_target;
+
+        // Pop the per-iter env before jumping back so the next
+        // iteration parents to the same outer env.
+        if (per_iter_env) {
+            try self.builder.emitOp(.pop_env, s.span);
+        }
+
+        // jmp loop_start
+        try self.builder.emitOp(.jmp, s.span);
+        const back_patch = self.builder.here();
+        try self.builder.emitI16(0);
+        try self.builder.patchI16(back_patch, loop_start);
+
+        const exit_target = self.builder.here();
+        try self.builder.patchI16(exit_patch, exit_target);
+        for (ctx.break_patches.items) |p| try self.builder.patchI16(p, exit_target);
+
+        // Patch the per-iter `make_environment` size to whatever
+        // env_slot_count grew to (iteration var + body lexicals),
+        // and restore the enclosing function's slot counter.
+        if (per_iter_env) {
+            self.builder.code.items[per_iter_size_patch] = self.env_slot_count;
+            self.env_slot_count = saved_per_iter_slot_count;
         }
     }
-    // §14.15 — run every active finally block before returning.
-    // Stash the return value in a temp so the finally bodies
-    // can clobber `acc` freely, then restore it. The helper
-    // rewinds `finally_chain` past each `f` before compiling
-    // its body so an abrupt `return` / `break` / `continue`
-    // inside it doesn't re-inline `f` (per §14.15.3 step 4 an
-    // abrupt completion in finally replaces the outer one).
-    if (self.finally_chain != null) {
-        const r_save = try self.reserveTemp();
+
+    /// Assign `acc` (the current iteration's value) to a
+    /// member-expression target (`x.y` / `x[k]`) — the same
+    /// shape as `compileMemberAssignment` but driven from the
+    /// for-of loop body where the value is already in `acc`.
+    fn compileForOfMemberAssign(self: *Compiler, m: ast.expression.MemberExpr, span: Span) CompileError!void {
+        const r_value = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, span);
+        try self.builder.emitU8(r_value);
+
+        try self.compileExpression(m.object);
+        const r_obj = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, span);
+        try self.builder.emitU8(r_obj);
+
+        switch (m.property) {
+            .ident => |kspan| {
+                const raw = self.source[kspan.start..kspan.end];
+                if (raw.len > 0 and raw[0] == '#') {
+                    // §13.2.7 / §7.3.30 PrivateFieldSet — `for (this.#x of …)`
+                    // and `for (this.#x in …)` assign each iteration value
+                    // through the private slot. Mangle the identifier with
+                    // the enclosing class's private prefix and emit
+                    // `sta_private`, which runs the §7.3.31 PrivateFieldFind
+                    // brand check at runtime (throwing TypeError when the
+                    // receiver is missing the slot).
+                    if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
+                    const decoded = try self.decodeIdentifierName(raw[1..]);
+                    const mangled = try self.manglePrivateRef(decoded);
+                    const k = try self.internString(mangled);
+                    try self.builder.emitOp(.ldar, span);
+                    try self.builder.emitU8(r_value);
+                    try self.builder.emitOp(.sta_private, span);
+                    try self.builder.emitU16(k);
+                    try self.builder.emitU8(r_obj);
+                    return;
+                }
+                const key = try self.decodeIdentifierName(raw);
+                const k = try self.internString(key);
+                try self.builder.emitOp(.ldar, span);
+                try self.builder.emitU8(r_value);
+                try self.builder.emitOp(.sta_property, span);
+                try self.builder.emitU16(k);
+                try self.builder.emitU8(r_obj);
+            },
+            .computed => |key_expr| {
+                try self.compileExpression(key_expr);
+                const r_key = try self.reserveTemp();
+                defer self.releaseTemp();
+                try self.builder.emitOp(.star, span);
+                try self.builder.emitU8(r_key);
+                try self.builder.emitOp(.ldar, span);
+                try self.builder.emitU8(r_value);
+                try self.builder.emitOp(.sta_computed, span);
+                try self.builder.emitU8(r_obj);
+                try self.builder.emitU8(r_key);
+            },
+        }
+    }
+
+    fn compileSwitch(self: *Compiler, s: ast.statement.SwitchStmt) CompileError!void {
+        // §14.13 — `LABEL : SwitchStatement` lets `break LABEL ;`
+        // inside the cases exit the switch.
+        const labels = try self.drainPendingLabels();
+        // A new block scope wraps the switch so `let`/`const` in case
+        // bodies are scoped to the switch (§14.12.4 step 3).
+        var switch_scope: Scope = .{ .parent = self.scope, .kind = .block };
+        defer switch_scope.deinit(self.allocator);
+        const saved_scope = self.scope;
+        self.scope = &switch_scope;
+        defer self.scope = saved_scope;
+
+        // §14.12.4 CaseBlock — the whole CaseBlock shares one lexical
+        // scope; LexicallyDeclaredNames(CaseBlock) is the union of the
+        // lexically-declared names from every case + the default.
+        // Hoist `let` / `const` slots from every case body up-front so
+        // a `switch (x) { case 1: let y = 1; }` (or `default: let y;`)
+        // can resolve its binding when the body runs. Without this the
+        // resolver fails as `UnresolvedReference` at compile time
+        // (test262 language/statements/let/syntax/{without,with}-
+        // initialisers-in-statement-positions-{default,case-expression}-
+        // statement-list).
+        for (s.cases) |case| {
+            try self.hoistLetConst(case.body);
+        }
+
+        try self.compileExpression(&s.discriminant);
+        const r_disc = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.star, s.span);
-        try self.builder.emitU8(r_save);
-        try self.emitFinalliesUntil(null, s.span);
-        try self.builder.emitOp(.ldar, s.span);
-        try self.builder.emitU8(r_save);
-    }
-    try self.builder.emitOp(.return_, s.span);
-}
+        try self.builder.emitU8(r_disc);
 
-fn compileFunctionDecl(self: *Compiler, fd: ast.statement.FunctionDecl) CompileError!void {
-    // §12.7 — bind by StringValue (decoded `\u…` escapes).
-    const name_slice = try self.bindingName(fd.name.span);
-    // Declare the binding FIRST so the function body can resolve
-    // its own name (e.g. for recursion). With env-based scoping
-    // the body sees `name` at depth=1, slot=this-slot.
-    //
-    // §14.2.5 / §14.12.4 — in strict mode (Cynic is strict-only)
-    // ANY function declaration sitting inside a Block or
-    // SwitchStatement case body is lex-scoped to that enclosing
-    // block, not hoisted to the surrounding function / script.
-    // Annex B B.3.3 web-compat hoisting (which would let plain
-    // `function` leak out) is excluded by the strict-only target.
-    const inside_block = self.scope.? != self.functionScope();
-    const block_lex = inside_block;
-    const binding_kind: BindingKind = if (block_lex) .let_ else .var_;
-    var binding = try self.declareBindingFull(name_slice, binding_kind, fd.name.span);
-    // §9.1.1.4.19 — top-level function decls overwrite the
-    // descriptor on emit (data + writable+enumerable+non-
-    // configurable). Block-lex function decls (binding_kind=.let_)
-    // keep the ordinary lex init path.
-    if (binding.is_global and binding_kind == .var_) {
-        binding.is_function_decl = true;
-    }
-    const k = try compileFunctionTemplateExt(
-        self,
-        fd.params,
-        FunctionBody{ .block = fd.body.body },
-        name_slice,
-        false,
-        fd.is_generator,
-        fd.is_async,
-        fd.span,
-    );
-    try self.builder.emitOp(.make_function, fd.span);
-    try self.builder.emitU16(k);
-    // §9.1.1.4 InitializeBinding — function-decl hoist is the
-    // initializer for its bound name. For block-lex function
-    // decls (which use `.let_`) at the script top level the
-    // global-init opcode applies; var-style function decls
-    // route to the ordinary store path (they're hoisted as
-    // var, which `emitStoreBindingInit` treats identically to
-    // a regular `sta_global` write).
-    try self.emitStoreBindingInit(binding, fd.span);
-}
+        // Per-case forward-jump patches into the body region.
+        var body_patches = try self.allocator.alloc(u32, s.cases.len);
+        defer self.allocator.free(body_patches);
 
-fn compileClassDecl(self: *Compiler, cd: ast.statement.ClassDecl) CompileError!void {
-    // §12.7 — bind by StringValue.
-    const name_slice = try self.bindingName(cd.name.span);
-    // §15.7.1 / §13.2.1 — `class C {}` is a LexicallyScopedDeclaration:
-    // the binding slot is pre-allocated by `hoistLetConst` so an
-    // earlier-in-source-order inner function closing over `C` can
-    // resolve to the binding and observe its TDZ Hole.
-    // `lookupLocal` finds the hoisted binding; if the hoist
-    // skipped this scope (Cynic also reaches `compileClassDecl`
-    // from non-hoisting paths like switch-case bodies), fall
-    // through to a fresh declare.
-    const binding = self.scope.?.lookupLocal(name_slice) orelse
-        try self.declareBindingFull(name_slice, .let_, cd.name.span);
-    try self.emitClassBuild(name_slice, if (cd.superclass) |s| &s else null, cd.body, cd.span);
-    try self.emitStoreBindingInit(binding, cd.span);
-}
+        // 1. Dispatch: for each case (skipping default) emit
+        // `eval test → acc; strict_eq r_disc; jmp_if_true patch_i`.
+        var default_idx: ?usize = null;
+        for (s.cases, 0..) |case, i| {
+            if (case.test_) |*test_expr| {
+                try self.compileExpression(test_expr);
+                try self.builder.emitOp(.strict_eq, case.span);
+                try self.builder.emitU8(r_disc);
+                try self.builder.emitOp(.jmp_if_true, case.span);
+                body_patches[i] = self.builder.here();
+                try self.builder.emitI16(0);
+            } else {
+                if (default_idx != null) return error.UnsupportedStatement;
+                default_idx = i;
+                // Reserve a slot we can later overwrite with the
+                // jump-to-default; we patch this in the fallback below.
+                body_patches[i] = std.math.maxInt(u32); // sentinel
+            }
+        }
 
-fn compileClassExpr(self: *Compiler, ce: ast.expression.ClassExpr) CompileError!void {
-    // §12.7 — bind by StringValue when a name is present.
-    const name_slice: ?[]const u8 = if (ce.name) |n| try self.bindingName(n.span) else null;
-    try self.emitClassBuild(name_slice, ce.superclass, ce.body, ce.span);
-}
+        // 2. After all tests fail: jump to the default body if any,
+        // else past the bodies to the exit.
+        try self.builder.emitOp(.jmp, s.span);
+        const fallback_patch = self.builder.here();
+        try self.builder.emitI16(0);
 
-/// Count `[expr]` computed keys across every method / field in
-/// `body` — must match the index-assignment walk in
-/// `compileClassTemplate`. Static blocks never contribute.
-fn countComputedKeys(body: []ast.statement.ClassMember) usize {
-    var n: usize = 0;
-    for (body) |member| switch (member) {
-        .method => |m| if (m.key == .computed) {
-            n += 1;
-        },
-        .field => |fd| if (fd.key == .computed) {
-            n += 1;
-        },
-        .static_block => {},
-    };
-    return n;
-}
+        // Set up a loop context for `break` inside the switch.
+        var ctx: LoopContext = .{
+            .continue_target = 0,
+            .parent = self.current_loop,
+            .entry_finally_chain = self.finally_chain,
+            .labels = labels,
+            .is_switch = true,
+        };
+        defer ctx.deinit(self.allocator);
+        const saved_loop = self.current_loop;
+        self.current_loop = &ctx;
+        defer self.current_loop = saved_loop;
 
-/// §13.2.5 ComputedPropertyName + §15.7.14 ClassDefinitionEvaluation
-/// step 25 — emit the full make_class opcode sequence, including
-/// any `[expr]` computed-key evaluations and the heritage
-/// expression. Behaviour summary by class shape:
-///
-///   no heritage, no keys: `make_class k 0`
-///   heritage, no keys:    `<heritage>; make_class k 0`
-///   no heritage, keys:    `<key₀>; ToPropertyKey; star r₀; …;
-///                          make_class k r₀`
-///   heritage, keys:       `<heritage>; star r_h;
-///                          <key₀>; ToPropertyKey; star r₀; …;
-///                          ldar r_h; make_class k r₀`
-///
-/// Key expressions emit inline in the enclosing function's
-/// bytecode (not a sub-chunk), so `yield` / `await` inside a
-/// computed key suspend the enclosing generator / async function —
-/// §27.5.3.7 GeneratorYield requires `f.generator != null`, which
-/// would not hold inside a sub-chunk's fresh frame.
-///
-/// Returns the count of contiguous temps reserved (heritage stash
-/// + key block); caller must release them in the same order via
-/// `releaseTemp` once `make_class` has consumed them.
-fn emitMakeClass(
-    self: *Compiler,
-    template_idx: u16,
-    superclass: ?*const Expression,
-    body: []ast.statement.ClassMember,
-    span: Span,
-    /// §15.7.14 step 27.b — inner classScopeEnvRec slot index for
-    /// the class binding (`C` in `class C { … }`). The interpreter
-    /// uses this to publish the constructor into the inner env
-    /// BEFORE static fields / blocks run, so a static initializer
-    /// referencing `C` sees the binding live instead of in TDZ.
-    /// Sentinel `0xFF` for anonymous classes (no inner env).
-    inner_class_slot: u8,
-) CompileError!usize {
-    const key_count = countComputedKeys(body);
+        // 3. Emit bodies. The case body's start is the patch target
+        // for its dispatch jump (or the fallback jump for default).
+        var default_body_pc: ?u32 = null;
+        for (s.cases, 0..) |case, i| {
+            const body_pc = self.builder.here();
+            if (case.test_ == null) {
+                default_body_pc = body_pc;
+            } else {
+                try self.builder.patchI16(body_patches[i], body_pc);
+            }
+            for (case.body) |*body_stmt| {
+                try self.compileStatement(body_stmt);
+            }
+            // Fall-through to the next case body unless a `break`
+            // already redirected us — the LoopContext break-patches
+            // are queued for the post-switch exit.
+        }
 
-    // Fast path: no computed keys. Heritage lands in acc;
-    // make_class ignores `r_keys_base` (template's `has_heritage`
-    // gates acc).
-    if (key_count == 0) {
-        if (superclass) |s| try self.compileExpression(s);
-        try self.builder.emitOp(.make_class, span);
-        try self.builder.emitU16(template_idx);
-        try self.builder.emitU8(0);
-        try self.builder.emitU8(inner_class_slot);
-        return 0;
+        const exit_pc = self.builder.here();
+        if (default_body_pc) |pc| {
+            try self.builder.patchI16(fallback_patch, pc);
+        } else {
+            try self.builder.patchI16(fallback_patch, exit_pc);
+        }
+        for (ctx.break_patches.items) |p| try self.builder.patchI16(p, exit_pc);
     }
 
-    // §15.7.14 step 6 — heritage evaluates before the
-    // ClassElementList. Observable order matters when both have
-    // side effects: `class extends side() { [other()](){} }`
-    // calls `side` first, then `other`. Materialise heritage to
-    // a temp so the per-key emit doesn't clobber it.
-    var r_heritage: ?u8 = null;
-    var reserved_count: usize = 0;
-    if (superclass) |s| {
-        try self.compileExpression(s);
-        const r = try self.reserveTemp();
-        reserved_count += 1;
-        r_heritage = r;
-        try self.builder.emitOp(.star, span);
-        try self.builder.emitU8(r);
+    fn compileReturn(self: *Compiler, s: ast.statement.ReturnStmt) CompileError!void {
+        // §13.10.1 ReturnStatement Runtime Semantics:
+        //   • `return;`                — exprValue is implicitly
+        //     `undefined`, NO Await (step 1: return Completion with
+        //     value undefined).
+        //   • `return Expression;`     — evaluate Expression; if the
+        //     enclosing function is async (regular async or async
+        //     generator), `Await(exprValue)` before completing. The
+        //     observable difference: explicit-form returns defer one
+        //     microtask; bare `return;` settles synchronously inside
+        //     the current task. (`return-undefined-implicit-and-
+        //     explicit.js` asserts the tick gap.)
+        const has_expr = s.argument != null;
+        if (s.argument) |*arg| {
+            try self.compileExpression(arg);
+        } else {
+            try self.builder.emitOp(.lda_undefined, s.span);
+        }
+        if (has_expr and self.current_is_async) {
+            try self.builder.emitOp(.await_, s.span);
+        }
+        // §7.4.6 IteratorClose — close every active for-of iterator
+        // on the way out. Walks the loop chain stopping at the
+        // enclosing function (the function entry resets
+        // `current_loop` to null). Iterator close runs with `acc`
+        // holding the return value; `iter_close` preserves `acc`.
+        var ctx_iter = self.current_loop;
+        while (ctx_iter) |c| : (ctx_iter = c.parent) {
+            if (c.iter_register) |r_iter| {
+                try self.builder.emitOp(.iter_close, s.span);
+                try self.builder.emitU8(r_iter);
+                // §7.4.6 — completion type here is `return`, not
+                // `throw`: an inner throw from `return()` propagates;
+                // a non-Object return value throws TypeError.
+                try self.builder.emitU8(0);
+            }
+        }
+        // §14.15 — run every active finally block before returning.
+        // Stash the return value in a temp so the finally bodies
+        // can clobber `acc` freely, then restore it. The helper
+        // rewinds `finally_chain` past each `f` before compiling
+        // its body so an abrupt `return` / `break` / `continue`
+        // inside it doesn't re-inline `f` (per §14.15.3 step 4 an
+        // abrupt completion in finally replaces the outer one).
+        if (self.finally_chain != null) {
+            const r_save = try self.reserveTemp();
+            defer self.releaseTemp();
+            try self.builder.emitOp(.star, s.span);
+            try self.builder.emitU8(r_save);
+            try self.emitFinalliesUntil(null, s.span);
+            try self.builder.emitOp(.ldar, s.span);
+            try self.builder.emitU8(r_save);
+        }
+        try self.builder.emitOp(.return_, s.span);
     }
 
-    // Reserve a contiguous run of temps for the key block.
-    // `reserveTemp` is monotonic; the run is addressable as
-    // `r_keys_base + i`.
-    const r_keys_base = try self.reserveTemp();
-    reserved_count += 1;
-    {
-        var i: usize = 1;
-        while (i < key_count) : (i += 1) {
+    fn compileFunctionDecl(self: *Compiler, fd: ast.statement.FunctionDecl) CompileError!void {
+        // §12.7 — bind by StringValue (decoded `\u…` escapes).
+        const name_slice = try self.bindingName(fd.name.span);
+        // Declare the binding FIRST so the function body can resolve
+        // its own name (e.g. for recursion). With env-based scoping
+        // the body sees `name` at depth=1, slot=this-slot.
+        //
+        // §14.2.5 / §14.12.4 — in strict mode (Cynic is strict-only)
+        // ANY function declaration sitting inside a Block or
+        // SwitchStatement case body is lex-scoped to that enclosing
+        // block, not hoisted to the surrounding function / script.
+        // Annex B B.3.3 web-compat hoisting (which would let plain
+        // `function` leak out) is excluded by the strict-only target.
+        const inside_block = self.scope.? != self.functionScope();
+        const block_lex = inside_block;
+        const binding_kind: BindingKind = if (block_lex) .let_ else .var_;
+        var binding = try self.declareBindingFull(name_slice, binding_kind, fd.name.span);
+        // §9.1.1.4.19 — top-level function decls overwrite the
+        // descriptor on emit (data + writable+enumerable+non-
+        // configurable). Block-lex function decls (binding_kind=.let_)
+        // keep the ordinary lex init path.
+        if (binding.is_global and binding_kind == .var_) {
+            binding.is_function_decl = true;
+        }
+        const k = try compileFunctionTemplateExt(
+            self,
+            fd.params,
+            FunctionBody{ .block = fd.body.body },
+            name_slice,
+            false,
+            fd.is_generator,
+            fd.is_async,
+            fd.span,
+        );
+        try self.builder.emitOp(.make_function, fd.span);
+        try self.builder.emitU16(k);
+        // §9.1.1.4 InitializeBinding — function-decl hoist is the
+        // initializer for its bound name. For block-lex function
+        // decls (which use `.let_`) at the script top level the
+        // global-init opcode applies; var-style function decls
+        // route to the ordinary store path (they're hoisted as
+        // var, which `emitStoreBindingInit` treats identically to
+        // a regular `sta_global` write).
+        try self.emitStoreBindingInit(binding, fd.span);
+    }
+
+    fn compileClassDecl(self: *Compiler, cd: ast.statement.ClassDecl) CompileError!void {
+        // §12.7 — bind by StringValue.
+        const name_slice = try self.bindingName(cd.name.span);
+        // §15.7.1 / §13.2.1 — `class C {}` is a LexicallyScopedDeclaration:
+        // the binding slot is pre-allocated by `hoistLetConst` so an
+        // earlier-in-source-order inner function closing over `C` can
+        // resolve to the binding and observe its TDZ Hole.
+        // `lookupLocal` finds the hoisted binding; if the hoist
+        // skipped this scope (Cynic also reaches `compileClassDecl`
+        // from non-hoisting paths like switch-case bodies), fall
+        // through to a fresh declare.
+        const binding = self.scope.?.lookupLocal(name_slice) orelse
+            try self.declareBindingFull(name_slice, .let_, cd.name.span);
+        try self.emitClassBuild(name_slice, if (cd.superclass) |s| &s else null, cd.body, cd.span);
+        try self.emitStoreBindingInit(binding, cd.span);
+    }
+
+    fn compileClassExpr(self: *Compiler, ce: ast.expression.ClassExpr) CompileError!void {
+        // §12.7 — bind by StringValue when a name is present.
+        const name_slice: ?[]const u8 = if (ce.name) |n| try self.bindingName(n.span) else null;
+        try self.emitClassBuild(name_slice, ce.superclass, ce.body, ce.span);
+    }
+
+    /// Count `[expr]` computed keys across every method / field in
+    /// `body` — must match the index-assignment walk in
+    /// `compileClassTemplate`. Static blocks never contribute.
+    fn countComputedKeys(body: []ast.statement.ClassMember) usize {
+        var n: usize = 0;
+        for (body) |member| switch (member) {
+            .method => |m| if (m.key == .computed) {
+                n += 1;
+            },
+            .field => |fd| if (fd.key == .computed) {
+                n += 1;
+            },
+            .static_block => {},
+        };
+        return n;
+    }
+
+    /// §13.2.5 ComputedPropertyName + §15.7.14 ClassDefinitionEvaluation
+    /// step 25 — emit the full make_class opcode sequence, including
+    /// any `[expr]` computed-key evaluations and the heritage
+    /// expression. Behaviour summary by class shape:
+    ///
+    ///   no heritage, no keys: `make_class k 0`
+    ///   heritage, no keys:    `<heritage>; make_class k 0`
+    ///   no heritage, keys:    `<key₀>; ToPropertyKey; star r₀; …;
+    ///                          make_class k r₀`
+    ///   heritage, keys:       `<heritage>; star r_h;
+    ///                          <key₀>; ToPropertyKey; star r₀; …;
+    ///                          ldar r_h; make_class k r₀`
+    ///
+    /// Key expressions emit inline in the enclosing function's
+    /// bytecode (not a sub-chunk), so `yield` / `await` inside a
+    /// computed key suspend the enclosing generator / async function —
+    /// §27.5.3.7 GeneratorYield requires `f.generator != null`, which
+    /// would not hold inside a sub-chunk's fresh frame.
+    ///
+    /// Returns the count of contiguous temps reserved (heritage stash
+    /// + key block); caller must release them in the same order via
+    /// `releaseTemp` once `make_class` has consumed them.
+    fn emitMakeClass(
+        self: *Compiler,
+        template_idx: u16,
+        superclass: ?*const Expression,
+        body: []ast.statement.ClassMember,
+        span: Span,
+        /// §15.7.14 step 27.b — inner classScopeEnvRec slot index for
+        /// the class binding (`C` in `class C { … }`). The interpreter
+        /// uses this to publish the constructor into the inner env
+        /// BEFORE static fields / blocks run, so a static initializer
+        /// referencing `C` sees the binding live instead of in TDZ.
+        /// Sentinel `0xFF` for anonymous classes (no inner env).
+        inner_class_slot: u8,
+    ) CompileError!usize {
+        const key_count = countComputedKeys(body);
+
+        // Fast path: no computed keys. Heritage lands in acc;
+        // make_class ignores `r_keys_base` (template's `has_heritage`
+        // gates acc).
+        if (key_count == 0) {
+            if (superclass) |s| try self.compileExpression(s);
+            try self.builder.emitOp(.make_class, span);
+            try self.builder.emitU16(template_idx);
+            try self.builder.emitU8(0);
+            try self.builder.emitU8(inner_class_slot);
+            return 0;
+        }
+
+        // §15.7.14 step 6 — heritage evaluates before the
+        // ClassElementList. Observable order matters when both have
+        // side effects: `class extends side() { [other()](){} }`
+        // calls `side` first, then `other`. Materialise heritage to
+        // a temp so the per-key emit doesn't clobber it.
+        var r_heritage: ?u8 = null;
+        var reserved_count: usize = 0;
+        if (superclass) |s| {
+            try self.compileExpression(s);
             const r = try self.reserveTemp();
             reserved_count += 1;
-            std.debug.assert(r == r_keys_base + i);
+            r_heritage = r;
+            try self.builder.emitOp(.star, span);
+            try self.builder.emitU8(r);
         }
+
+        // Reserve a contiguous run of temps for the key block.
+        // `reserveTemp` is monotonic; the run is addressable as
+        // `r_keys_base + i`.
+        const r_keys_base = try self.reserveTemp();
+        reserved_count += 1;
+        {
+            var i: usize = 1;
+            while (i < key_count) : (i += 1) {
+                const r = try self.reserveTemp();
+                reserved_count += 1;
+                std.debug.assert(r == r_keys_base + i);
+            }
+        }
+
+        var next_idx: usize = 0;
+        for (body) |member| switch (member) {
+            .method => |m| if (m.key == .computed) {
+                try self.compileExpression(m.key.computed);
+                try self.builder.emitOp(.to_property_key, m.span);
+                try self.builder.emitOp(.star, m.span);
+                try self.builder.emitU8(@intCast(r_keys_base + next_idx));
+                next_idx += 1;
+            },
+            .field => |fd| if (fd.key == .computed) {
+                try self.compileExpression(fd.key.computed);
+                try self.builder.emitOp(.to_property_key, fd.span);
+                try self.builder.emitOp(.star, fd.span);
+                try self.builder.emitU8(@intCast(r_keys_base + next_idx));
+                next_idx += 1;
+            },
+            .static_block => {},
+        };
+        std.debug.assert(next_idx == key_count);
+
+        if (r_heritage) |rh| {
+            try self.builder.emitOp(.ldar, span);
+            try self.builder.emitU8(rh);
+        }
+        try self.builder.emitOp(.make_class, span);
+        try self.builder.emitU16(template_idx);
+        try self.builder.emitU8(r_keys_base);
+        try self.builder.emitU8(inner_class_slot);
+        return reserved_count;
     }
 
-    var next_idx: usize = 0;
-    for (body) |member| switch (member) {
-        .method => |m| if (m.key == .computed) {
-            try self.compileExpression(m.key.computed);
-            try self.builder.emitOp(.to_property_key, m.span);
-            try self.builder.emitOp(.star, m.span);
-            try self.builder.emitU8(@intCast(r_keys_base + next_idx));
-            next_idx += 1;
-        },
-        .field => |fd| if (fd.key == .computed) {
-            try self.compileExpression(fd.key.computed);
-            try self.builder.emitOp(.to_property_key, fd.span);
-            try self.builder.emitOp(.star, fd.span);
-            try self.builder.emitU8(@intCast(r_keys_base + next_idx));
-            next_idx += 1;
-        },
-        .static_block => {},
-    };
-    std.debug.assert(next_idx == key_count);
-
-    if (r_heritage) |rh| {
-        try self.builder.emitOp(.ldar, span);
-        try self.builder.emitU8(rh);
+    /// Pair with `emitMakeClass`: release the temps reserved for the
+    /// heritage stash and the key block, in LIFO order.
+    fn releaseMakeClassTemps(self: *Compiler, reserved: usize) void {
+        var i: usize = 0;
+        while (i < reserved) : (i += 1) self.releaseTemp();
     }
-    try self.builder.emitOp(.make_class, span);
-    try self.builder.emitU16(template_idx);
-    try self.builder.emitU8(r_keys_base);
-    try self.builder.emitU8(inner_class_slot);
-    return reserved_count;
-}
 
-/// Pair with `emitMakeClass`: release the temps reserved for the
-/// heritage stash and the key block, in LIFO order.
-fn releaseMakeClassTemps(self: *Compiler, reserved: usize) void {
-    var i: usize = 0;
-    while (i < reserved) : (i += 1) self.releaseTemp();
-}
+    /// §15.7.1 ClassDefinitionEvaluation steps 8 / 27 — establish an
+    /// inner declarative environment around the class body so methods
+    /// close over a single, *immutable* `C` binding that's distinct
+    /// from any outer mutable `C`. Without this scaffolding, a method
+    /// like `class C { m() { return C; } }` resolves `C` to whatever
+    /// the outer binding happens to hold at call time — and the
+    /// outer is mutable, so `C = null; instance.m()` would surface
+    /// `null` instead of the original class.
+    ///
+    /// Runtime layout (named-class case, no computed keys):
+    ///
+    ///     make_environment 1          // push class-env with 1 slot
+    ///     [heritage] (if any)         // acc = parent ctor
+    ///     make_class k 0              // methods capture class-env
+    ///     sta_env 0 0                 // class fn → inner C slot
+    ///     pop_env                     // back to enclosing env
+    ///
+    /// Anonymous class expression: no inner binding to create, so we
+    /// skip the env push/pop entirely.
+    fn emitClassBuild(
+        self: *Compiler,
+        name_slice: ?[]const u8,
+        superclass: ?*const Expression,
+        body: []ast.statement.ClassMember,
+        span: Span,
+    ) CompileError!void {
+        const has_inner_name = name_slice != null;
+        if (!has_inner_name) {
+            // Anonymous `class { … }` expression. No `C` to see
+            // from inside — `Function.prototype.toString` gives
+            // the empty name. Skip the inner-env scaffolding and
+            // pass the sentinel `0xFF` so make_class doesn't try
+            // to publish into a non-existent inner binding.
+            const k = try compileClassTemplate(self, name_slice, superclass, body, span);
+            const reserved = try self.emitMakeClass(k, superclass, body, span, 0xFF);
+            self.releaseMakeClassTemps(reserved);
+            // §15.7.14 step 16 — the class's PrivateEnvironment spans
+            // the full ClassTail eval; `compileClassTemplate` pushed
+            // the class_stack frame and left it live for the computed-
+            // key walk in `emitMakeClass`. Pop here.
+            _ = self.class_stack.pop();
+            return;
+        }
+        const name = name_slice.?;
 
-/// §15.7.1 ClassDefinitionEvaluation steps 8 / 27 — establish an
-/// inner declarative environment around the class body so methods
-/// close over a single, *immutable* `C` binding that's distinct
-/// from any outer mutable `C`. Without this scaffolding, a method
-/// like `class C { m() { return C; } }` resolves `C` to whatever
-/// the outer binding happens to hold at call time — and the
-/// outer is mutable, so `C = null; instance.m()` would surface
-/// `null` instead of the original class.
-///
-/// Runtime layout (named-class case, no computed keys):
-///
-///     make_environment 1          // push class-env with 1 slot
-///     [heritage] (if any)         // acc = parent ctor
-///     make_class k 0              // methods capture class-env
-///     sta_env 0 0                 // class fn → inner C slot
-///     pop_env                     // back to enclosing env
-///
-/// Anonymous class expression: no inner binding to create, so we
-/// skip the env push/pop entirely.
-fn emitClassBuild(
-    self: *Compiler,
-    name_slice: ?[]const u8,
-    superclass: ?*const Expression,
-    body: []ast.statement.ClassMember,
-    span: Span,
-) CompileError!void {
-    const has_inner_name = name_slice != null;
-    if (!has_inner_name) {
-        // Anonymous `class { … }` expression. No `C` to see
-        // from inside — `Function.prototype.toString` gives
-        // the empty name. Skip the inner-env scaffolding and
-        // pass the sentinel `0xFF` so make_class doesn't try
-        // to publish into a non-existent inner binding.
+        // Push the inner class scope. `has_own_env=true` so this
+        // scope owns its own slot pool; methods bound inside it
+        // get `env_depth = enclosing+1` and resolve `C` to the
+        // single slot here. Save & reset the function-level
+        // env_slot_count so the slot allocator counts WITHIN the
+        // class env, then restore the outer counter on exit.
+        var class_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = true };
+        defer class_scope.deinit(self.allocator);
+        const saved_scope = self.scope;
+        self.scope = &class_scope;
+        defer self.scope = saved_scope;
+        const saved_env_depth = self.env_depth;
+        defer self.env_depth = saved_env_depth;
+        const saved_slot_count = self.env_slot_count;
+        self.env_slot_count = 0;
+        defer self.env_slot_count = saved_slot_count;
+
+        // §15.7.1 step 8 — `classScopeEnvRec.CreateImmutableBinding
+        // (className, true)`. We model the immutable-ness via the
+        // `const_` BindingKind so the compiler rejects `C = …`
+        // *from inside the class body* at compile time.
+        self.env_depth = saved_env_depth + 1;
+        const inner_slot = try self.declareBinding(name, .const_, span);
+
+        try self.builder.emitOp(.make_environment, span);
+        try self.builder.emitU8(1);
+
+        // Wrap the class-build (heritage eval, make_class with its
+        // field-initializer + computed-key user-code re-entries)
+        // in a synthetic handler that pops the inner env on throw
+        // before rethrowing. Without this, a throwing static-field
+        // initializer (or a throwing computed-key) would propagate
+        // out of the make_class call with `f.env` still pointing
+        // at the inner class env — leaking that env into the
+        // enclosing handler's scope. The handler is emitted with
+        // `is_finally=true` so it doesn't trip the `genReturn`
+        // return-completion path (it's just bookkeeping).
+        const build_start_pc = self.builder.here();
+        // Compile every method / field template inside the inner
+        // scope so they pick `C` up via Scope.resolve.
         const k = try compileClassTemplate(self, name_slice, superclass, body, span);
-        const reserved = try self.emitMakeClass(k, superclass, body, span, 0xFF);
+        // §15.7.14 step 27.b — pass the inner-env slot index for `C`
+        // so make_class publishes the constructor into the binding
+        // BEFORE static fields and static blocks run. The `inner_slot`
+        // is always 0 here (the inner env has a single slot), but
+        // make_class accepts the index symbolically for future-proofing.
+        const reserved = try self.emitMakeClass(k, superclass, body, span, inner_slot);
+        const build_end_pc = self.builder.here();
         self.releaseMakeClassTemps(reserved);
-        // §15.7.14 step 16 — the class's PrivateEnvironment spans
-        // the full ClassTail eval; `compileClassTemplate` pushed
-        // the class_stack frame and left it live for the computed-
-        // key walk in `emitMakeClass`. Pop here.
+        // §15.7.14 step 16 — pop the class_stack frame left live by
+        // `compileClassTemplate` for the computed-key walk above.
         _ = self.class_stack.pop();
-        return;
+        // The inner `C` slot was already published by make_class
+        // (step 27.b) BEFORE static fields ran. The trailing
+        // `sta_env` here is a no-op rewrite of the same slot to
+        // the same value, kept for symmetry / robustness against
+        // a future refactor that splits the publish step out of
+        // make_class. Depth 0, slot `inner_slot` (always 0 today).
+        try self.builder.emitOp(.sta_env, span);
+        try self.builder.emitU8(0);
+        try self.builder.emitU8(inner_slot);
+        // Pop the class env. Methods captured the env at
+        // `make_class` time; the JSEnvironment is kept alive
+        // through that capture, so the pop only unlinks the
+        // current frame.
+        try self.builder.emitOp(.pop_env, span);
+        // Jump past the synthetic-throw cleanup handler on the
+        // normal-completion path.
+        try self.builder.emitOp(.jmp, span);
+        const skip_cleanup_patch = self.builder.here();
+        try self.builder.emitI16(0);
+
+        const cleanup_pc = self.builder.here();
+        // The thrown value is deposited in `acc` (catch_register =
+        // null). Pop the leaked inner env first, then rethrow.
+        try self.builder.emitOp(.pop_env, span);
+        try self.builder.emitOp(.throw_, span);
+        try self.builder.addHandler(.{
+            .start_pc = build_start_pc,
+            .end_pc = build_end_pc,
+            .handler_pc = cleanup_pc,
+            .catch_register = null,
+            // Marked `is_finally` so a generator's return-completion
+            // (§27.5.1.3) doesn't get steered AWAY from this cleanup
+            // — the env-pop must always run on the way out.
+            .is_finally = true,
+        });
+        try self.builder.patchI16(skip_cleanup_patch, self.builder.here());
     }
-    const name = name_slice.?;
 
-    // Push the inner class scope. `has_own_env=true` so this
-    // scope owns its own slot pool; methods bound inside it
-    // get `env_depth = enclosing+1` and resolve `C` to the
-    // single slot here. Save & reset the function-level
-    // env_slot_count so the slot allocator counts WITHIN the
-    // class env, then restore the outer counter on exit.
-    var class_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = true };
-    defer class_scope.deinit(self.allocator);
-    const saved_scope = self.scope;
-    self.scope = &class_scope;
-    defer self.scope = saved_scope;
-    const saved_env_depth = self.env_depth;
-    defer self.env_depth = saved_env_depth;
-    const saved_slot_count = self.env_slot_count;
-    self.env_slot_count = 0;
-    defer self.env_slot_count = saved_slot_count;
+    /// Compile a class body — constructor + methods + static methods +
+    /// fields + static blocks + private members — into a
+    /// `ClassTemplate` and register it on the enclosing chunk.
+    fn compileClassTemplate(
+        self: *Compiler,
+        name: ?[]const u8,
+        superclass: ?*const Expression,
+        body: []ast.statement.ClassMember,
+        span: Span,
+    ) CompileError!u16 {
+        const is_derived = superclass != null;
+        const ChunkMod = @import("chunk.zig");
 
-    // §15.7.1 step 8 — `classScopeEnvRec.CreateImmutableBinding
-    // (className, true)`. We model the immutable-ness via the
-    // `const_` BindingKind so the compiler rejects `C = …`
-    // *from inside the class body* at compile time.
-    self.env_depth = saved_env_depth + 1;
-    const inner_slot = try self.declareBinding(name, .const_, span);
+        // Allocate this class's private-name prefix in the realm's
+        // class arena so it outlives the compiler. The prefix is
+        // class-unique so two unrelated classes that both declare
+        // `#x` get distinct private slots.
+        const class_uid = self.class_uid_counter;
+        self.class_uid_counter += 1;
+        const arena = self.realm.classAllocator();
+        const private_prefix = std.fmt.allocPrint(arena, "P{d}#", .{class_uid}) catch return error.OutOfMemory;
 
-    try self.builder.emitOp(.make_environment, span);
-    try self.builder.emitU8(1);
-
-    // Wrap the class-build (heritage eval, make_class with its
-    // field-initializer + computed-key user-code re-entries)
-    // in a synthetic handler that pops the inner env on throw
-    // before rethrowing. Without this, a throwing static-field
-    // initializer (or a throwing computed-key) would propagate
-    // out of the make_class call with `f.env` still pointing
-    // at the inner class env — leaking that env into the
-    // enclosing handler's scope. The handler is emitted with
-    // `is_finally=true` so it doesn't trip the `genReturn`
-    // return-completion path (it's just bookkeeping).
-    const build_start_pc = self.builder.here();
-    // Compile every method / field template inside the inner
-    // scope so they pick `C` up via Scope.resolve.
-    const k = try compileClassTemplate(self, name_slice, superclass, body, span);
-    // §15.7.14 step 27.b — pass the inner-env slot index for `C`
-    // so make_class publishes the constructor into the binding
-    // BEFORE static fields and static blocks run. The `inner_slot`
-    // is always 0 here (the inner env has a single slot), but
-    // make_class accepts the index symbolically for future-proofing.
-    const reserved = try self.emitMakeClass(k, superclass, body, span, inner_slot);
-    const build_end_pc = self.builder.here();
-    self.releaseMakeClassTemps(reserved);
-    // §15.7.14 step 16 — pop the class_stack frame left live by
-    // `compileClassTemplate` for the computed-key walk above.
-    _ = self.class_stack.pop();
-    // The inner `C` slot was already published by make_class
-    // (step 27.b) BEFORE static fields ran. The trailing
-    // `sta_env` here is a no-op rewrite of the same slot to
-    // the same value, kept for symmetry / robustness against
-    // a future refactor that splits the publish step out of
-    // make_class. Depth 0, slot `inner_slot` (always 0 today).
-    try self.builder.emitOp(.sta_env, span);
-    try self.builder.emitU8(0);
-    try self.builder.emitU8(inner_slot);
-    // Pop the class env. Methods captured the env at
-    // `make_class` time; the JSEnvironment is kept alive
-    // through that capture, so the pop only unlinks the
-    // current frame.
-    try self.builder.emitOp(.pop_env, span);
-    // Jump past the synthetic-throw cleanup handler on the
-    // normal-completion path.
-    try self.builder.emitOp(.jmp, span);
-    const skip_cleanup_patch = self.builder.here();
-    try self.builder.emitI16(0);
-
-    const cleanup_pc = self.builder.here();
-    // The thrown value is deposited in `acc` (catch_register =
-    // null). Pop the leaked inner env first, then rethrow.
-    try self.builder.emitOp(.pop_env, span);
-    try self.builder.emitOp(.throw_, span);
-    try self.builder.addHandler(.{
-        .start_pc = build_start_pc,
-        .end_pc = build_end_pc,
-        .handler_pc = cleanup_pc,
-        .catch_register = null,
-        // Marked `is_finally` so a generator's return-completion
-        // (§27.5.1.3) doesn't get steered AWAY from this cleanup
-        // — the env-pop must always run on the way out.
-        .is_finally = true,
-    });
-    try self.builder.patchI16(skip_cleanup_patch, self.builder.here());
-}
-
-/// Compile a class body — constructor + methods + static methods +
-/// fields + static blocks + private members — into a
-/// `ClassTemplate` and register it on the enclosing chunk.
-fn compileClassTemplate(
-    self: *Compiler,
-    name: ?[]const u8,
-    superclass: ?*const Expression,
-    body: []ast.statement.ClassMember,
-    span: Span,
-) CompileError!u16 {
-    const is_derived = superclass != null;
-    const ChunkMod = @import("chunk.zig");
-
-    // Allocate this class's private-name prefix in the realm's
-    // class arena so it outlives the compiler. The prefix is
-    // class-unique so two unrelated classes that both declare
-    // `#x` get distinct private slots.
-    const class_uid = self.class_uid_counter;
-    self.class_uid_counter += 1;
-    const arena = self.realm.classAllocator();
-    const private_prefix = std.fmt.allocPrint(arena, "P{d}#", .{class_uid}) catch return error.OutOfMemory;
-
-    // §15.7.14 step 11 — gather decoded `#name`s declared by this
-    // class so private-name refs inside nested classes can walk
-    // outward and find the *declaring* class's prefix.
-    var private_names_buf: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer private_names_buf.deinit(self.allocator);
-    for (body) |member| switch (member) {
-        .method => |m| {
-            const raw = switch (m.key) {
-                .private => |s| self.source[s.start..s.end],
-                .ident => |s| self.source[s.start..s.end],
-                else => continue,
-            };
-            if (raw.len == 0 or raw[0] != '#') continue;
-            const decoded = try self.decodeIdentifierName(raw[1..]);
-            var dup = false;
-            for (private_names_buf.items) |n| if (std.mem.eql(u8, n, decoded)) {
-                dup = true;
-                break;
-            };
-            if (!dup) {
-                const owned = arena.dupe(u8, decoded) catch return error.OutOfMemory;
-                try private_names_buf.append(self.allocator, owned);
-            }
-        },
-        .field => |fd| {
-            if (fd.key != .private) continue;
-            const raw = methodKeyName(self.source, fd.key) orelse continue;
-            const decoded = try self.decodeIdentifierName(raw);
-            var dup = false;
-            for (private_names_buf.items) |n| if (std.mem.eql(u8, n, decoded)) {
-                dup = true;
-                break;
-            };
-            if (!dup) {
-                const owned = arena.dupe(u8, decoded) catch return error.OutOfMemory;
-                try private_names_buf.append(self.allocator, owned);
-            }
-        },
-        .static_block => {},
-    };
-    const private_names_slice = arena.dupe([]const u8, private_names_buf.items) catch return error.OutOfMemory;
-
-    // §15.7.14 step 16 — push onto the class stack so method
-    // bodies / field initializers AND any `[expr]` computed keys
-    // emitted by the caller's later `emitMakeClass` can resolve
-    // `#name` references via `manglePrivateRef`. The compile-time
-    // ClassPrivateEnvironment spans the whole ClassTail evaluation
-    // — including the computed-key expressions that emit in the
-    // enclosing function's bytecode (see emitMakeClass). The
-    // caller is responsible for popping after make_class has been
-    // emitted; we leave the frame live across `compileClassTemplate`'s
-    // return so the computed-key walk in `emitMakeClass` still sees
-    // this class's `#name` declarations. Without the spanning push,
-    // a `[self.#f]` computed key would bail at `manglePrivateRef`'s
-    // `class_stack.items.len > 0` assertion (empty stack) and the
-    // surrounding `compileExpression` would return UnsupportedExpression.
-    self.class_stack.append(self.allocator, .{
-        .private_prefix = private_prefix,
-        .is_derived = is_derived,
-        .private_names = private_names_slice,
-    }) catch return error.OutOfMemory;
-
-    // Extract constructor + bucket the rest.
-    var ctor_def: ?ast.statement.MethodDef = null;
-    var instance_method_count: usize = 0;
-    var static_method_count: usize = 0;
-    var instance_field_count: usize = 0;
-    var static_field_count: usize = 0;
-    var static_block_count: usize = 0;
-    for (body) |member| switch (member) {
-        .method => |m| {
-            // Generator and async methods are runtime concerns —
-            // the body compiles the same; the `is_generator` /
-            // `is_async` flags propagate to the JSFunction at
-            // MakeClass time so the call site allocates a
-            // generator / wraps in a Promise as appropriate.
-            const is_priv = m.key == .private;
-            _ = is_priv;
-            // §13.2.5 — computed-key methods can't be the
-            // constructor (the name "constructor" isn't a
-            // ComputedPropertyName the parser would route through
-            // the static-name path). Count and emit; class.zig
-            // resolves the runtime key.
-            if (m.key == .computed) {
-                if (m.is_static) static_method_count += 1 else instance_method_count += 1;
-                continue;
-            }
-            const key_name = methodKeyName(self.source, m.key) orelse return error.UnsupportedStatement;
-            if (!m.is_static and std.mem.eql(u8, key_name, "constructor")) {
-                if (ctor_def != null) return error.UnsupportedStatement; // duplicate
-                ctor_def = m;
-                continue;
-            }
-            if (m.is_static) static_method_count += 1 else instance_method_count += 1;
-        },
-        .field => |fd| {
-            if (fd.is_static) static_field_count += 1 else instance_field_count += 1;
-        },
-        .static_block => static_block_count += 1,
-    };
-
-    // Compile field initializers FIRST so they can be carried
-    // alongside the method/constructor bodies in the template.
-    // Each field initializer is a tiny chunk that evaluates the
-    // init expression with `this` bound; if the expression is
-    // missing (`class C { x; }`), `init_chunk = null`.
-    var instance_fields = try self.allocator.alloc(ChunkMod.FieldTemplate, instance_field_count);
-    errdefer self.allocator.free(instance_fields);
-    var static_fields = try self.allocator.alloc(ChunkMod.FieldTemplate, static_field_count);
-    errdefer self.allocator.free(static_fields);
-    var static_blocks = try self.allocator.alloc(ChunkMod.Chunk, static_block_count);
-    errdefer self.allocator.free(static_blocks);
-    // §15.7.14 step 34 — record the interleaved source order of
-    // static fields + static blocks so the runtime evaluates them
-    // in the spec-defined sequence (e.g. `static a = 1; static
-    // { … } static b = 2;` runs field → block → field, not
-    // field → field → block).
-    var static_element_order = try self.allocator.alloc(u16, static_field_count + static_block_count);
-    errdefer self.allocator.free(static_element_order);
-
-    // §13.2.5 ComputedPropertyName — pre-walk `body` in source
-    // order, assigning a sequential index to every method/field
-    // whose key is `[expr]`. The emit walk in `emitClassBuild`
-    // evaluates each key expression in the enclosing frame's
-    // bytecode, `to_property_key`-coerces, and stashes the result
-    // in a contiguous block of temps; both walks agree on the
-    // slot per member through this side array.
-    //
-    // §15.7.14 step 25 PropertyDefinitionEvaluation iterates the
-    // ClassElementList in source order, so this matches spec.
-    //
-    // Why inline rather than a sub-chunk: a key expression like
-    // `[yield 9]` inside `function* g() { class C { [yield 9](){} } }`
-    // must suspend the enclosing generator, not a private function
-    // frame. Compiling the key into its own chunk (the previous
-    // approach) put `gen_yield` in a non-generator frame and tripped
-    // §27.5.3.7's `f.generator != null` assertion at runtime. Same
-    // story for `await` in an async-module top-level class.
-    var key_idx_for_pos = try self.allocator.alloc(i16, body.len);
-    defer self.allocator.free(key_idx_for_pos);
-    @memset(key_idx_for_pos, -1);
-    var next_key_idx: i16 = 0;
-    for (body, 0..) |member, pos| switch (member) {
-        .method => |m| if (m.key == .computed) {
-            key_idx_for_pos[pos] = next_key_idx;
-            next_key_idx += 1;
-        },
-        .field => |fd| if (fd.key == .computed) {
-            key_idx_for_pos[pos] = next_key_idx;
-            next_key_idx += 1;
-        },
-        .static_block => {},
-    };
-
-    var i_if: usize = 0;
-    var i_sf: usize = 0;
-    var i_sb: usize = 0;
-    var i_so: usize = 0;
-    for (body, 0..) |member, pos| switch (member) {
-        .field => |fd| {
-            const fkey_index: i16 = key_idx_for_pos[pos];
-            const key_name = blk: {
-                if (fd.key == .computed) {
-                    break :blk "__cynic_computed__";
-                }
-                if (fd.key == .private) {
-                    // `#x` — prefix with the class identity. Decode
-                    // §12.7.1 escapes so `#\u{6F}` and `#o` share a
-                    // single mangled key.
-                    const raw = methodKeyName(self.source, fd.key) orelse return error.UnsupportedStatement;
-                    const decoded_raw = try self.decodeIdentifierName(raw);
-                    break :blk std.fmt.allocPrint(arena, "{s}{s}", .{ private_prefix, decoded_raw }) catch return error.OutOfMemory;
-                }
-                // Identifier / string-literal / numeric-literal
-                // class field name — decode escapes / canonicalize
-                // per §6.1.6.1.13 so `class C { 0x10 = 1 }` lives
-                // at `"16"`, `class C { "a\tb" = 1 }` at `"a<TAB>b"`.
-                break :blk try self.decodePropertyKeyName(fd.key);
-            };
-            // §15.7.10 / §IsAnonymousFunctionDefinition — for a
-            // field initializer whose init is an anonymous function
-            // / arrow / anonymous class, SetFunctionName uses the
-            // field's textual key. For `#x` the name is `"#x"`
-            // (the # prefix is part of the user-visible identifier
-            // per §15.7's PrivateName treatment). Computed keys
-            // would need a runtime `set_fn_name_from` — leave them
-            // unnamed for now (this fixture only exercises static
-            // text-keyed fields). The harness sees the spec
-            // function name on `static #field = () => …` etc.
-            const init_name: ?[]const u8 = blk_n: {
-                if (fd.key == .computed) break :blk_n null;
-                if (fd.key == .private) {
-                    const raw = methodKeyName(self.source, fd.key) orelse break :blk_n null;
-                    const decoded = try self.decodeIdentifierName(raw);
-                    break :blk_n std.fmt.allocPrint(arena, "#{s}", .{decoded}) catch break :blk_n null;
-                }
-                break :blk_n try self.decodePropertyKeyName(fd.key);
-            };
-            const init_chunk: ?ChunkMod.Chunk = if (fd.init) |*init_expr|
-                try compileFieldInitChunk(self, init_expr, fd.span, init_name)
-            else
-                null;
-            const tmpl = ChunkMod.FieldTemplate{
-                .name = key_name,
-                .init_chunk = init_chunk,
-                .computed_key_index = fkey_index,
-            };
-            if (fd.is_static) {
-                // Record in source-order list. Low 15 bits hold
-                // the index into `static_fields`; high bit clear
-                // means "field".
-                static_element_order[i_so] = @intCast(i_sf);
-                i_so += 1;
-                static_fields[i_sf] = tmpl;
-                i_sf += 1;
-            } else {
-                instance_fields[i_if] = tmpl;
-                i_if += 1;
-            }
-        },
-        .static_block => |sb| {
-            // Record in source-order list with high bit set
-            // (block marker), low 15 bits = index into
-            // `static_blocks`.
-            static_element_order[i_so] = 0x8000 | @as(u16, @intCast(i_sb));
-            i_so += 1;
-            static_blocks[i_sb] = try compileStaticBlockChunk(self, sb.body, sb.span);
-            i_sb += 1;
-        },
-        .method => {},
-    };
-    std.debug.assert(i_so == static_field_count + static_block_count);
-
-    // Detect any per-instance init work — fields OR private
-    // methods need init_instance_fields to fire.
-    var has_private_methods = false;
-    for (body) |member| switch (member) {
-        .method => |m| {
-            if (!m.is_static and m.key == .private) {
-                has_private_methods = true;
-                break;
-            }
-            // `.ident` whose source slice starts with `#`
-            const raw = methodKeyName(self.source, m.key) orelse continue;
-            _ = raw;
-        },
-        else => {},
-    };
-    // Also catch `#name` parsed as `.ident` with leading '#'.
-    if (!has_private_methods) {
+        // §15.7.14 step 11 — gather decoded `#name`s declared by this
+        // class so private-name refs inside nested classes can walk
+        // outward and find the *declaring* class's prefix.
+        var private_names_buf: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer private_names_buf.deinit(self.allocator);
         for (body) |member| switch (member) {
             .method => |m| {
-                if (m.is_static) continue;
                 const raw = switch (m.key) {
+                    .private => |s| self.source[s.start..s.end],
                     .ident => |s| self.source[s.start..s.end],
                     else => continue,
                 };
-                if (raw.len > 0 and raw[0] == '#') {
+                if (raw.len == 0 or raw[0] != '#') continue;
+                const decoded = try self.decodeIdentifierName(raw[1..]);
+                var dup = false;
+                for (private_names_buf.items) |n| if (std.mem.eql(u8, n, decoded)) {
+                    dup = true;
+                    break;
+                };
+                if (!dup) {
+                    const owned = arena.dupe(u8, decoded) catch return error.OutOfMemory;
+                    try private_names_buf.append(self.allocator, owned);
+                }
+            },
+            .field => |fd| {
+                if (fd.key != .private) continue;
+                const raw = methodKeyName(self.source, fd.key) orelse continue;
+                const decoded = try self.decodeIdentifierName(raw);
+                var dup = false;
+                for (private_names_buf.items) |n| if (std.mem.eql(u8, n, decoded)) {
+                    dup = true;
+                    break;
+                };
+                if (!dup) {
+                    const owned = arena.dupe(u8, decoded) catch return error.OutOfMemory;
+                    try private_names_buf.append(self.allocator, owned);
+                }
+            },
+            .static_block => {},
+        };
+        const private_names_slice = arena.dupe([]const u8, private_names_buf.items) catch return error.OutOfMemory;
+
+        // §15.7.14 step 16 — push onto the class stack so method
+        // bodies / field initializers AND any `[expr]` computed keys
+        // emitted by the caller's later `emitMakeClass` can resolve
+        // `#name` references via `manglePrivateRef`. The compile-time
+        // ClassPrivateEnvironment spans the whole ClassTail evaluation
+        // — including the computed-key expressions that emit in the
+        // enclosing function's bytecode (see emitMakeClass). The
+        // caller is responsible for popping after make_class has been
+        // emitted; we leave the frame live across `compileClassTemplate`'s
+        // return so the computed-key walk in `emitMakeClass` still sees
+        // this class's `#name` declarations. Without the spanning push,
+        // a `[self.#f]` computed key would bail at `manglePrivateRef`'s
+        // `class_stack.items.len > 0` assertion (empty stack) and the
+        // surrounding `compileExpression` would return UnsupportedExpression.
+        self.class_stack.append(self.allocator, .{
+            .private_prefix = private_prefix,
+            .is_derived = is_derived,
+            .private_names = private_names_slice,
+        }) catch return error.OutOfMemory;
+
+        // Extract constructor + bucket the rest.
+        var ctor_def: ?ast.statement.MethodDef = null;
+        var instance_method_count: usize = 0;
+        var static_method_count: usize = 0;
+        var instance_field_count: usize = 0;
+        var static_field_count: usize = 0;
+        var static_block_count: usize = 0;
+        for (body) |member| switch (member) {
+            .method => |m| {
+                // Generator and async methods are runtime concerns —
+                // the body compiles the same; the `is_generator` /
+                // `is_async` flags propagate to the JSFunction at
+                // MakeClass time so the call site allocates a
+                // generator / wraps in a Promise as appropriate.
+                const is_priv = m.key == .private;
+                _ = is_priv;
+                // §13.2.5 — computed-key methods can't be the
+                // constructor (the name "constructor" isn't a
+                // ComputedPropertyName the parser would route through
+                // the static-name path). Count and emit; class.zig
+                // resolves the runtime key.
+                if (m.key == .computed) {
+                    if (m.is_static) static_method_count += 1 else instance_method_count += 1;
+                    continue;
+                }
+                const key_name = methodKeyName(self.source, m.key) orelse return error.UnsupportedStatement;
+                if (!m.is_static and std.mem.eql(u8, key_name, "constructor")) {
+                    if (ctor_def != null) return error.UnsupportedStatement; // duplicate
+                    ctor_def = m;
+                    continue;
+                }
+                if (m.is_static) static_method_count += 1 else instance_method_count += 1;
+            },
+            .field => |fd| {
+                if (fd.is_static) static_field_count += 1 else instance_field_count += 1;
+            },
+            .static_block => static_block_count += 1,
+        };
+
+        // Compile field initializers FIRST so they can be carried
+        // alongside the method/constructor bodies in the template.
+        // Each field initializer is a tiny chunk that evaluates the
+        // init expression with `this` bound; if the expression is
+        // missing (`class C { x; }`), `init_chunk = null`.
+        var instance_fields = try self.allocator.alloc(ChunkMod.FieldTemplate, instance_field_count);
+        errdefer self.allocator.free(instance_fields);
+        var static_fields = try self.allocator.alloc(ChunkMod.FieldTemplate, static_field_count);
+        errdefer self.allocator.free(static_fields);
+        var static_blocks = try self.allocator.alloc(ChunkMod.Chunk, static_block_count);
+        errdefer self.allocator.free(static_blocks);
+        // §15.7.14 step 34 — record the interleaved source order of
+        // static fields + static blocks so the runtime evaluates them
+        // in the spec-defined sequence (e.g. `static a = 1; static
+        // { … } static b = 2;` runs field → block → field, not
+        // field → field → block).
+        var static_element_order = try self.allocator.alloc(u16, static_field_count + static_block_count);
+        errdefer self.allocator.free(static_element_order);
+
+        // §13.2.5 ComputedPropertyName — pre-walk `body` in source
+        // order, assigning a sequential index to every method/field
+        // whose key is `[expr]`. The emit walk in `emitClassBuild`
+        // evaluates each key expression in the enclosing frame's
+        // bytecode, `to_property_key`-coerces, and stashes the result
+        // in a contiguous block of temps; both walks agree on the
+        // slot per member through this side array.
+        //
+        // §15.7.14 step 25 PropertyDefinitionEvaluation iterates the
+        // ClassElementList in source order, so this matches spec.
+        //
+        // Why inline rather than a sub-chunk: a key expression like
+        // `[yield 9]` inside `function* g() { class C { [yield 9](){} } }`
+        // must suspend the enclosing generator, not a private function
+        // frame. Compiling the key into its own chunk (the previous
+        // approach) put `gen_yield` in a non-generator frame and tripped
+        // §27.5.3.7's `f.generator != null` assertion at runtime. Same
+        // story for `await` in an async-module top-level class.
+        var key_idx_for_pos = try self.allocator.alloc(i16, body.len);
+        defer self.allocator.free(key_idx_for_pos);
+        @memset(key_idx_for_pos, -1);
+        var next_key_idx: i16 = 0;
+        for (body, 0..) |member, pos| switch (member) {
+            .method => |m| if (m.key == .computed) {
+                key_idx_for_pos[pos] = next_key_idx;
+                next_key_idx += 1;
+            },
+            .field => |fd| if (fd.key == .computed) {
+                key_idx_for_pos[pos] = next_key_idx;
+                next_key_idx += 1;
+            },
+            .static_block => {},
+        };
+
+        var i_if: usize = 0;
+        var i_sf: usize = 0;
+        var i_sb: usize = 0;
+        var i_so: usize = 0;
+        for (body, 0..) |member, pos| switch (member) {
+            .field => |fd| {
+                const fkey_index: i16 = key_idx_for_pos[pos];
+                const key_name = blk: {
+                    if (fd.key == .computed) {
+                        break :blk "__cynic_computed__";
+                    }
+                    if (fd.key == .private) {
+                        // `#x` — prefix with the class identity. Decode
+                        // §12.7.1 escapes so `#\u{6F}` and `#o` share a
+                        // single mangled key.
+                        const raw = methodKeyName(self.source, fd.key) orelse return error.UnsupportedStatement;
+                        const decoded_raw = try self.decodeIdentifierName(raw);
+                        break :blk std.fmt.allocPrint(arena, "{s}{s}", .{ private_prefix, decoded_raw }) catch return error.OutOfMemory;
+                    }
+                    // Identifier / string-literal / numeric-literal
+                    // class field name — decode escapes / canonicalize
+                    // per §6.1.6.1.13 so `class C { 0x10 = 1 }` lives
+                    // at `"16"`, `class C { "a\tb" = 1 }` at `"a<TAB>b"`.
+                    break :blk try self.decodePropertyKeyName(fd.key);
+                };
+                // §15.7.10 / §IsAnonymousFunctionDefinition — for a
+                // field initializer whose init is an anonymous function
+                // / arrow / anonymous class, SetFunctionName uses the
+                // field's textual key. For `#x` the name is `"#x"`
+                // (the # prefix is part of the user-visible identifier
+                // per §15.7's PrivateName treatment). Computed keys
+                // would need a runtime `set_fn_name_from` — leave them
+                // unnamed for now (this fixture only exercises static
+                // text-keyed fields). The harness sees the spec
+                // function name on `static #field = () => …` etc.
+                const init_name: ?[]const u8 = blk_n: {
+                    if (fd.key == .computed) break :blk_n null;
+                    if (fd.key == .private) {
+                        const raw = methodKeyName(self.source, fd.key) orelse break :blk_n null;
+                        const decoded = try self.decodeIdentifierName(raw);
+                        break :blk_n std.fmt.allocPrint(arena, "#{s}", .{decoded}) catch break :blk_n null;
+                    }
+                    break :blk_n try self.decodePropertyKeyName(fd.key);
+                };
+                const init_chunk: ?ChunkMod.Chunk = if (fd.init) |*init_expr|
+                    try compileFieldInitChunk(self, init_expr, fd.span, init_name)
+                else
+                    null;
+                const tmpl = ChunkMod.FieldTemplate{
+                    .name = key_name,
+                    .init_chunk = init_chunk,
+                    .computed_key_index = fkey_index,
+                };
+                if (fd.is_static) {
+                    // Record in source-order list. Low 15 bits hold
+                    // the index into `static_fields`; high bit clear
+                    // means "field".
+                    static_element_order[i_so] = @intCast(i_sf);
+                    i_so += 1;
+                    static_fields[i_sf] = tmpl;
+                    i_sf += 1;
+                } else {
+                    instance_fields[i_if] = tmpl;
+                    i_if += 1;
+                }
+            },
+            .static_block => |sb| {
+                // Record in source-order list with high bit set
+                // (block marker), low 15 bits = index into
+                // `static_blocks`.
+                static_element_order[i_so] = 0x8000 | @as(u16, @intCast(i_sb));
+                i_so += 1;
+                static_blocks[i_sb] = try compileStaticBlockChunk(self, sb.body, sb.span);
+                i_sb += 1;
+            },
+            .method => {},
+        };
+        std.debug.assert(i_so == static_field_count + static_block_count);
+
+        // Detect any per-instance init work — fields OR private
+        // methods need init_instance_fields to fire.
+        var has_private_methods = false;
+        for (body) |member| switch (member) {
+            .method => |m| {
+                if (!m.is_static and m.key == .private) {
                     has_private_methods = true;
                     break;
                 }
+                // `.ident` whose source slice starts with `#`
+                const raw = methodKeyName(self.source, m.key) orelse continue;
+                _ = raw;
             },
             else => {},
         };
-    }
-    const has_init_work = instance_field_count > 0 or has_private_methods;
-
-    // Compile the constructor (explicit or synthesised).
-    const ctor_param_count: u8 = if (ctor_def) |c| @intCast(c.params.len) else 0;
-    const ctor_spec_length: u8 = if (ctor_def) |c| computeSpecLength(c.params) else 0;
-    const ctor_chunk = if (ctor_def) |c|
-        try compileConstructorBody(self, c.params, c.body.body, is_derived, has_init_work, span)
-    else
-        try compileSynthDefaultConstructor(self, is_derived, has_init_work, span);
-
-    // Compile each method into its own chunk.
-    var instance_methods = try self.allocator.alloc(ChunkMod.MethodTemplate, instance_method_count);
-    errdefer self.allocator.free(instance_methods);
-    var static_methods = try self.allocator.alloc(ChunkMod.MethodTemplate, static_method_count);
-    errdefer self.allocator.free(static_methods);
-
-    var i_inst: usize = 0;
-    var i_stat: usize = 0;
-    for (body, 0..) |member, pos| switch (member) {
-        .method => |m| {
-            // §13.2.5 ComputedPropertyName — `class C { [expr]() {} }`.
-            // The key expression has already been allocated a slot
-            // index in `key_idx_for_pos` above; `emitClassBuild`
-            // evaluates the expression inline in the enclosing
-            // frame and `make_class` reads the coerced value from
-            // the register file at runtime.
-            const method_key_index: i16 = key_idx_for_pos[pos];
-            const key_name: []const u8 = if (m.key == .computed) blk: {
-                break :blk "__cynic_computed__";
-            } else blk: {
-                const raw_key = methodKeyName(self.source, m.key) orelse return error.UnsupportedStatement;
-                if (!m.is_static and std.mem.eql(u8, raw_key, "constructor")) {
-                    // Constructor — skip (already compiled separately).
-                    continue;
-                }
-                break :blk switch (m.key) {
-                    .private => blk2: {
-                        // §12.7.1 escapes decode for private names
-                        // too — `#\u{6F}()` declares the same slot
-                        // as `#o()`.
-                        const decoded_raw = try self.decodeIdentifierName(raw_key);
-                        break :blk2 std.fmt.allocPrint(arena, "{s}{s}", .{ private_prefix, decoded_raw }) catch return error.OutOfMemory;
-                    },
-                    // §12.7.1 — `\u…` escapes in IdentifierName decode
-                    // to the source character, so `class C { if(){} }`
-                    // installs `if`. §12.8.4 escapes in string-literal
-                    // keys decode here too, and numeric literals route
-                    // through §6.1.6.1.13 Number::toString — so
-                    // `class C { get 0x10() {} }` installs `"16"`.
-                    else => try self.decodePropertyKeyName(m.key),
-                };
-            };
-            // Computed-key constructor check needs to wait for
-            // runtime; the static-name path handles it above.
-            const method_chunk = try compileMethodBody(self, m.params, m.body.body, false, false, m.is_async, m.is_generator, m.span);
-            const tmpl = ChunkMod.MethodTemplate{
-                .name = key_name,
-                .chunk = method_chunk,
-                .param_count = @intCast(m.params.len),
-                .spec_length = computeSpecLength(m.params),
-                .kind = switch (m.kind) {
-                    .method => .method,
-                    .getter => .getter,
-                    .setter => .setter,
+        // Also catch `#name` parsed as `.ident` with leading '#'.
+        if (!has_private_methods) {
+            for (body) |member| switch (member) {
+                .method => |m| {
+                    if (m.is_static) continue;
+                    const raw = switch (m.key) {
+                        .ident => |s| self.source[s.start..s.end],
+                        else => continue,
+                    };
+                    if (raw.len > 0 and raw[0] == '#') {
+                        has_private_methods = true;
+                        break;
+                    }
                 },
-                .is_generator = m.is_generator,
-                .is_async = m.is_async,
-                // §20.2.3.5 — borrow the MethodDefinition's source
-                // span for `Function.prototype.toString`. `source_start`
-                // points after the `static` modifier when present, so
-                // the slice matches the spec's MethodDefinition source.
-                .source = if (m.source_start <= m.span.end and m.span.end <= self.source.len)
-                    self.source[m.source_start..m.span.end]
-                else
-                    null,
-                .computed_key_index = method_key_index,
+                else => {},
             };
-            if (m.is_static) {
-                static_methods[i_stat] = tmpl;
-                i_stat += 1;
-            } else {
-                instance_methods[i_inst] = tmpl;
-                i_inst += 1;
-            }
-        },
-        .field, .static_block => {},
-    };
+        }
+        const has_init_work = instance_field_count > 0 or has_private_methods;
 
-    return self.builder.addClassTemplate(.{
-        .name = name,
-        .span = span,
-        .source = if (span.start <= span.end and span.end <= self.source.len)
-            self.source[span.start..span.end]
+        // Compile the constructor (explicit or synthesised).
+        const ctor_param_count: u8 = if (ctor_def) |c| @intCast(c.params.len) else 0;
+        const ctor_spec_length: u8 = if (ctor_def) |c| computeSpecLength(c.params) else 0;
+        const ctor_chunk = if (ctor_def) |c|
+            try compileConstructorBody(self, c.params, c.body.body, is_derived, has_init_work, span)
         else
-            null,
-        .has_heritage = is_derived,
-        .private_prefix = private_prefix,
-        .constructor_chunk = ctor_chunk,
-        .constructor_param_count = ctor_param_count,
-        .constructor_spec_length = ctor_spec_length,
-        .instance_methods = instance_methods,
-        .static_methods = static_methods,
-        .instance_fields = instance_fields,
-        .static_fields = static_fields,
-        .static_blocks = static_blocks,
-        .static_element_order = static_element_order,
-    });
-}
+            try compileSynthDefaultConstructor(self, is_derived, has_init_work, span);
 
-/// Resolve a class member's PropertyKey to the key string.
-fn methodKeyName(source: []const u8, key: ast.expression.PropertyKey) ?[]const u8 {
-    return switch (key) {
-        .ident => |s| source[s.start..s.end],
-        .string => |s| blk: {
-            const raw = source[s.start..s.end];
-            if (raw.len < 2) break :blk raw;
-            break :blk raw[1 .. raw.len - 1];
-        },
-        .private => |s| blk: {
-            // `#name` — strip the `#`. The compiler later mangles
-            // with the class's private_prefix.
-            const raw = source[s.start..s.end];
-            if (raw.len > 0 and raw[0] == '#') break :blk raw[1..];
-            break :blk raw;
-        },
-        // §13.2.5 — numeric-literal class field names like
-        // `class C { 0 = "bar"; 1.5 = "x"; }`. The slot key is
-        // the source text's literal form (e.g. "0", "1.5"); the
-        // ECMA-262 canonical-numeric-index normalisation happens
-        // elsewhere (only for Array exotics).
-        .numeric => |s| source[s.start..s.end],
-        else => null,
-    };
-}
+        // Compile each method into its own chunk.
+        var instance_methods = try self.allocator.alloc(ChunkMod.MethodTemplate, instance_method_count);
+        errdefer self.allocator.free(instance_methods);
+        var static_methods = try self.allocator.alloc(ChunkMod.MethodTemplate, static_method_count);
+        errdefer self.allocator.free(static_methods);
 
-/// Compile `class C { x = init; }` field-initializer expression
-/// into a parameterless function-shape chunk. Body:
-/// MakeEnvironment 0
-/// <init_expr> → acc
-/// Return
-/// `this` is provided by the caller via the frame's this_value.
-fn compileFieldInitChunk(
-    self: *Compiler,
-    init_expr: *const Expression,
-    span: Span,
-    /// §IsAnonymousFunctionDefinition + §15.7.10 DefineField step
-    /// 7 — when supplied, the init expression compiles through
-    /// `compileNamedValue` so an anonymous function / arrow /
-    /// anonymous class adopts the field's name (`#field` /
-    /// `field` / etc.). `null` for computed keys (the runtime
-    /// would need a `set_fn_name_from`-equivalent for those).
-    init_name: ?[]const u8,
-) CompileError!@import("chunk.zig").Chunk {
-    const saved_builder = self.builder;
-    const saved_scope = self.scope;
-    const saved_env_slot_count = self.env_slot_count;
-    const saved_temps_in_use = self.temps_in_use;
-    const saved_env_depth = self.env_depth;
-    const saved_current_loop = self.current_loop;
+        var i_inst: usize = 0;
+        var i_stat: usize = 0;
+        for (body, 0..) |member, pos| switch (member) {
+            .method => |m| {
+                // §13.2.5 ComputedPropertyName — `class C { [expr]() {} }`.
+                // The key expression has already been allocated a slot
+                // index in `key_idx_for_pos` above; `emitClassBuild`
+                // evaluates the expression inline in the enclosing
+                // frame and `make_class` reads the coerced value from
+                // the register file at runtime.
+                const method_key_index: i16 = key_idx_for_pos[pos];
+                const key_name: []const u8 = if (m.key == .computed) blk: {
+                    break :blk "__cynic_computed__";
+                } else blk: {
+                    const raw_key = methodKeyName(self.source, m.key) orelse return error.UnsupportedStatement;
+                    if (!m.is_static and std.mem.eql(u8, raw_key, "constructor")) {
+                        // Constructor — skip (already compiled separately).
+                        continue;
+                    }
+                    break :blk switch (m.key) {
+                        .private => blk2: {
+                            // §12.7.1 escapes decode for private names
+                            // too — `#\u{6F}()` declares the same slot
+                            // as `#o()`.
+                            const decoded_raw = try self.decodeIdentifierName(raw_key);
+                            break :blk2 std.fmt.allocPrint(arena, "{s}{s}", .{ private_prefix, decoded_raw }) catch return error.OutOfMemory;
+                        },
+                        // §12.7.1 — `\u…` escapes in IdentifierName decode
+                        // to the source character, so `class C { if(){} }`
+                        // installs `if`. §12.8.4 escapes in string-literal
+                        // keys decode here too, and numeric literals route
+                        // through §6.1.6.1.13 Number::toString — so
+                        // `class C { get 0x10() {} }` installs `"16"`.
+                        else => try self.decodePropertyKeyName(m.key),
+                    };
+                };
+                // Computed-key constructor check needs to wait for
+                // runtime; the static-name path handles it above.
+                const method_chunk = try compileMethodBody(self, m.params, m.body.body, false, false, m.is_async, m.is_generator, m.span);
+                const tmpl = ChunkMod.MethodTemplate{
+                    .name = key_name,
+                    .chunk = method_chunk,
+                    .param_count = @intCast(m.params.len),
+                    .spec_length = computeSpecLength(m.params),
+                    .kind = switch (m.kind) {
+                        .method => .method,
+                        .getter => .getter,
+                        .setter => .setter,
+                    },
+                    .is_generator = m.is_generator,
+                    .is_async = m.is_async,
+                    // §20.2.3.5 — borrow the MethodDefinition's source
+                    // span for `Function.prototype.toString`. `source_start`
+                    // points after the `static` modifier when present, so
+                    // the slice matches the spec's MethodDefinition source.
+                    .source = if (m.source_start <= m.span.end and m.span.end <= self.source.len)
+                        self.source[m.source_start..m.span.end]
+                    else
+                        null,
+                    .computed_key_index = method_key_index,
+                };
+                if (m.is_static) {
+                    static_methods[i_stat] = tmpl;
+                    i_stat += 1;
+                } else {
+                    instance_methods[i_inst] = tmpl;
+                    i_inst += 1;
+                }
+            },
+            .field, .static_block => {},
+        };
 
-    self.builder = @import("chunk.zig").Builder.init(self.allocator);
-    var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
-    self.scope = &fn_scope;
-    self.env_slot_count = 0;
-    self.temps_in_use = 0;
-    self.env_depth = saved_env_depth + 1;
-    self.current_loop = null;
-
-    var inner_finished = false;
-    defer {
-        if (!inner_finished) {
-            self.builder.deinit();
-            fn_scope.deinit(self.allocator);
-            self.builder = saved_builder;
-            self.scope = saved_scope;
-            self.env_slot_count = saved_env_slot_count;
-            self.temps_in_use = saved_temps_in_use;
-            self.env_depth = saved_env_depth;
-            self.current_loop = saved_current_loop;
-        }
+        return self.builder.addClassTemplate(.{
+            .name = name,
+            .span = span,
+            .source = if (span.start <= span.end and span.end <= self.source.len)
+                self.source[span.start..span.end]
+            else
+                null,
+            .has_heritage = is_derived,
+            .private_prefix = private_prefix,
+            .constructor_chunk = ctor_chunk,
+            .constructor_param_count = ctor_param_count,
+            .constructor_spec_length = ctor_spec_length,
+            .instance_methods = instance_methods,
+            .static_methods = static_methods,
+            .instance_fields = instance_fields,
+            .static_fields = static_fields,
+            .static_blocks = static_blocks,
+            .static_element_order = static_element_order,
+        });
     }
 
-    try self.builder.emitOp(.make_environment, span);
-    try self.builder.emitU8(0);
-    if (init_name) |n| {
-        try self.compileNamedValue(init_expr, n);
-    } else {
-        try self.compileExpression(init_expr);
-    }
-    try self.builder.emitOp(.return_, span);
-
-    self.builder.code.items[1] = self.env_slot_count;
-    const inner_chunk = try self.builder.finish();
-    inner_finished = true;
-    fn_scope.deinit(self.allocator);
-
-    self.builder = saved_builder;
-    self.scope = saved_scope;
-    self.env_slot_count = saved_env_slot_count;
-    self.temps_in_use = saved_temps_in_use;
-    self.env_depth = saved_env_depth;
-    self.current_loop = saved_current_loop;
-
-    return inner_chunk;
-}
-
-/// Compile a `static { … }` block body into a function-shape
-/// chunk that runs once at class definition time with `this`
-/// bound to the class.
-fn compileStaticBlockChunk(
-    self: *Compiler,
-    body: []ast.statement.Statement,
-    span: Span,
-) CompileError!@import("chunk.zig").Chunk {
-    const saved_builder = self.builder;
-    const saved_scope = self.scope;
-    const saved_env_slot_count = self.env_slot_count;
-    const saved_temps_in_use = self.temps_in_use;
-    const saved_env_depth = self.env_depth;
-    const saved_current_loop = self.current_loop;
-
-    self.builder = @import("chunk.zig").Builder.init(self.allocator);
-    var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
-    self.scope = &fn_scope;
-    self.env_slot_count = 0;
-    self.temps_in_use = 0;
-    self.env_depth = saved_env_depth + 1;
-    self.current_loop = null;
-
-    var inner_finished = false;
-    defer {
-        if (!inner_finished) {
-            self.builder.deinit();
-            fn_scope.deinit(self.allocator);
-            self.builder = saved_builder;
-            self.scope = saved_scope;
-            self.env_slot_count = saved_env_slot_count;
-            self.temps_in_use = saved_temps_in_use;
-            self.env_depth = saved_env_depth;
-            self.current_loop = saved_current_loop;
-        }
+    /// Resolve a class member's PropertyKey to the key string.
+    fn methodKeyName(source: []const u8, key: ast.expression.PropertyKey) ?[]const u8 {
+        return switch (key) {
+            .ident => |s| source[s.start..s.end],
+            .string => |s| blk: {
+                const raw = source[s.start..s.end];
+                if (raw.len < 2) break :blk raw;
+                break :blk raw[1 .. raw.len - 1];
+            },
+            .private => |s| blk: {
+                // `#name` — strip the `#`. The compiler later mangles
+                // with the class's private_prefix.
+                const raw = source[s.start..s.end];
+                if (raw.len > 0 and raw[0] == '#') break :blk raw[1..];
+                break :blk raw;
+            },
+            // §13.2.5 — numeric-literal class field names like
+            // `class C { 0 = "bar"; 1.5 = "x"; }`. The slot key is
+            // the source text's literal form (e.g. "0", "1.5"); the
+            // ECMA-262 canonical-numeric-index normalisation happens
+            // elsewhere (only for Array exotics).
+            .numeric => |s| source[s.start..s.end],
+            else => null,
+        };
     }
 
-    try self.builder.emitOp(.make_environment, span);
-    const slot_count_patch = self.builder.here();
-    try self.builder.emitU8(0);
-    try self.hoistLetConst(body);
-    try self.hoistVarAndFunctions(body);
-    try self.emitVarInits(span);
-    for (body) |*s| if (s.* == .function_decl) try self.compileStatement(s);
-    for (body) |*s| if (s.* != .function_decl) try self.compileStatement(s);
-    try self.builder.emitOp(.lda_undefined, span);
-    try self.builder.emitOp(.return_, span);
+    /// Compile `class C { x = init; }` field-initializer expression
+    /// into a parameterless function-shape chunk. Body:
+    /// MakeEnvironment 0
+    /// <init_expr> → acc
+    /// Return
+    /// `this` is provided by the caller via the frame's this_value.
+    fn compileFieldInitChunk(
+        self: *Compiler,
+        init_expr: *const Expression,
+        span: Span,
+        /// §IsAnonymousFunctionDefinition + §15.7.10 DefineField step
+        /// 7 — when supplied, the init expression compiles through
+        /// `compileNamedValue` so an anonymous function / arrow /
+        /// anonymous class adopts the field's name (`#field` /
+        /// `field` / etc.). `null` for computed keys (the runtime
+        /// would need a `set_fn_name_from`-equivalent for those).
+        init_name: ?[]const u8,
+    ) CompileError!@import("chunk.zig").Chunk {
+        const saved_builder = self.builder;
+        const saved_scope = self.scope;
+        const saved_env_slot_count = self.env_slot_count;
+        const saved_temps_in_use = self.temps_in_use;
+        const saved_env_depth = self.env_depth;
+        const saved_current_loop = self.current_loop;
 
-    self.builder.code.items[slot_count_patch] = self.env_slot_count;
-    const inner_chunk = try self.builder.finish();
-    inner_finished = true;
-    fn_scope.deinit(self.allocator);
+        self.builder = @import("chunk.zig").Builder.init(self.allocator);
+        var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
+        self.scope = &fn_scope;
+        self.env_slot_count = 0;
+        self.temps_in_use = 0;
+        self.env_depth = saved_env_depth + 1;
+        self.current_loop = null;
 
-    self.builder = saved_builder;
-    self.scope = saved_scope;
-    self.env_slot_count = saved_env_slot_count;
-    self.temps_in_use = saved_temps_in_use;
-    self.env_depth = saved_env_depth;
-    self.current_loop = saved_current_loop;
-
-    return inner_chunk;
-}
-
-/// Like compileMethodBody but with prologue tweaks for class
-/// constructors: base classes get `init_instance_fields` at the
-/// start of the user body; derived classes leave it to the
-/// `super_call` op to trigger (we patch it post-hoc by detecting
-/// super_call ops emitted from the body).
-fn compileConstructorBody(
-    self: *Compiler,
-    params: []ast.statement.FunctionParam,
-    body_stmts: []ast.statement.Statement,
-    is_derived: bool,
-    has_fields: bool,
-    span: Span,
-) CompileError!@import("chunk.zig").Chunk {
-    const saved_builder = self.builder;
-    const saved_scope = self.scope;
-    const saved_env_slot_count = self.env_slot_count;
-    const saved_temps_in_use = self.temps_in_use;
-    const saved_env_depth = self.env_depth;
-    const saved_current_loop = self.current_loop;
-
-    self.builder = @import("chunk.zig").Builder.init(self.allocator);
-    var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
-    self.scope = &fn_scope;
-    self.env_slot_count = 0;
-    self.temps_in_use = 0;
-    self.env_depth = saved_env_depth + 1;
-    self.current_loop = null;
-
-    var inner_finished = false;
-    defer {
-        if (!inner_finished) {
-            self.builder.deinit();
-            fn_scope.deinit(self.allocator);
-            self.builder = saved_builder;
-            self.scope = saved_scope;
-            self.env_slot_count = saved_env_slot_count;
-            self.temps_in_use = saved_temps_in_use;
-            self.env_depth = saved_env_depth;
-            self.current_loop = saved_current_loop;
-        }
-    }
-
-    try self.builder.emitOp(.make_environment, span);
-    const slot_count_patch = self.builder.here();
-    try self.builder.emitU8(0);
-
-    // §10.4.4 + §10.2.10 step 22/27 — install `arguments`
-    // BEFORE the param prologue so default expressions like
-    // `constructor(x = arguments[2])` observe the full caller
-    // argumentsList. See `compileFunctionTemplateExt` for the
-    // spec citation.
-    if (paramsReferenceArguments(self.source, params) or
-        referencesArguments(self.source, body_stmts))
-    {
-        const slot = try self.declareBinding("arguments", .let_, span);
-        try self.builder.emitOp(.lda_arguments, span);
-        try self.builder.emitOp(.sta_env, span);
-        try self.builder.emitU8(0);
-        try self.builder.emitU8(slot);
-    }
-
-    // §10.2.4 IteratorBindingInitialization — reserve the leading
-    // register slots so temps allocated by default-expression
-    // compilation don't clobber caller-supplied arg registers.
-    // See `compileFunctionTemplateExt` for the failure mode.
-    const saved_ctor_prologue_temps = self.temps_in_use;
-    self.temps_in_use = @intCast(@min(params.len, std.math.maxInt(u8)));
-    if (self.temps_in_use > self.builder.register_count) {
-        self.builder.register_count = self.temps_in_use;
-    }
-    for (params, 0..) |*p, i| {
-        switch (p.*) {
-            .simple => |*sp| try self.emitParamPrologue(sp, @intCast(i)),
-            .rest => |*rp| try self.emitRestParamPrologue(rp, @intCast(i)),
-        }
-    }
-    self.temps_in_use = saved_ctor_prologue_temps;
-
-    // Base class: run field initializers at the start of the
-    // user body. Derived classes wait for super_call to trigger.
-    if (!is_derived and has_fields) {
-        try self.builder.emitOp(.init_instance_fields, span);
-    }
-
-    // §13.3.2 — same pre-body sequence as `compileMethodBody`:
-    // pre-declare let/const slots (TDZ), pre-declare every `var`
-    // and `function` binding reachable through nested blocks, then
-    // initialise every `var` to undefined so a forward `read`
-    // never falls through to a parent scope. Without
-    // hoistVarAndFunctions + emitVarInits, `class C { constructor() {
-    // var x = 1; this.x = x; } }` raised CompileError because `x`
-    // was undeclared at the use site.
-    try self.hoistLetConst(body_stmts);
-    try self.hoistVarAndFunctions(body_stmts);
-    try self.emitVarInits(span);
-    // Same two-pass order as the function path: function
-    // declarations first (so later code can call them), then the
-    // remaining statements.
-    for (body_stmts) |*s| if (s.* == .function_decl) try self.compileStatement(s);
-    for (body_stmts) |*s| if (s.* != .function_decl) try self.compileStatement(s);
-    try self.builder.emitOp(.lda_undefined, span);
-    try self.builder.emitOp(.return_, span);
-
-    self.builder.code.items[slot_count_patch] = self.env_slot_count;
-    const inner_chunk = try self.builder.finish();
-    inner_finished = true;
-    fn_scope.deinit(self.allocator);
-
-    self.builder = saved_builder;
-    self.scope = saved_scope;
-    self.env_slot_count = saved_env_slot_count;
-    self.temps_in_use = saved_temps_in_use;
-    self.env_depth = saved_env_depth;
-    self.current_loop = saved_current_loop;
-
-    return inner_chunk;
-}
-
-/// Compile a method body — same pipeline as compileFunctionTemplate
-/// minus the outer chunk registration. `is_constructor` makes
-/// the prologue end with `lda_this; return_` instead of
-/// `lda_undefined; return_` (so `new C()` returns `this` even
-/// without explicit return — handled by the construct frame).
-/// `derived` synthesises a `super(...)` for default-derived
-/// constructors when `is_constructor` is also true and the body
-/// is empty (the caller signals this by passing an empty stmts
-/// slice).
-fn compileMethodBody(
-    self: *Compiler,
-    params: []ast.statement.FunctionParam,
-    body_stmts: []ast.statement.Statement,
-    is_constructor: bool,
-    derived: bool,
-    is_async: bool,
-    is_generator: bool,
-    span: Span,
-) CompileError!@import("chunk.zig").Chunk {
-    _ = is_constructor;
-    _ = derived;
-
-    const saved_builder = self.builder;
-    const saved_scope = self.scope;
-    const saved_env_slot_count = self.env_slot_count;
-    const saved_temps_in_use = self.temps_in_use;
-    const saved_env_depth = self.env_depth;
-    const saved_current_loop = self.current_loop;
-    const saved_is_async = self.current_is_async;
-
-    self.builder = @import("chunk.zig").Builder.init(self.allocator);
-    var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
-    self.scope = &fn_scope;
-    self.env_slot_count = 0;
-    self.temps_in_use = 0;
-    self.env_depth = saved_env_depth + 1;
-    self.current_loop = null;
-    self.current_is_async = is_async;
-
-    var inner_finished = false;
-    defer {
-        if (!inner_finished) {
-            self.builder.deinit();
-            fn_scope.deinit(self.allocator);
-            self.builder = saved_builder;
-            self.scope = saved_scope;
-            self.env_slot_count = saved_env_slot_count;
-            self.temps_in_use = saved_temps_in_use;
-            self.env_depth = saved_env_depth;
-            self.current_loop = saved_current_loop;
-        }
-    }
-
-    try self.builder.emitOp(.make_environment, span);
-    const slot_count_patch = self.builder.here();
-    try self.builder.emitU8(0);
-
-    // §10.4.4 + §10.2.10 step 22/27 — install `arguments`
-    // BEFORE the param prologue so default expressions like
-    // `m(x = arguments[2])` observe the full caller
-    // argumentsList. See `compileFunctionTemplateExt` for the
-    // spec citation.
-    if (paramsReferenceArguments(self.source, params) or
-        referencesArguments(self.source, body_stmts))
-    {
-        const slot = try self.declareBinding("arguments", .let_, span);
-        try self.builder.emitOp(.lda_arguments, span);
-        try self.builder.emitOp(.sta_env, span);
-        try self.builder.emitU8(0);
-        try self.builder.emitU8(slot);
-    }
-
-    // Param prologue, same as compileFunctionTemplate. The
-    // leading register slots are reserved so default-expression
-    // temps don't clobber caller-supplied arg registers — see
-    // `compileFunctionTemplateExt`.
-    const saved_method_prologue_temps = self.temps_in_use;
-    self.temps_in_use = @intCast(@min(params.len, std.math.maxInt(u8)));
-    if (self.temps_in_use > self.builder.register_count) {
-        self.builder.register_count = self.temps_in_use;
-    }
-    for (params, 0..) |*p, i| {
-        switch (p.*) {
-            .simple => |*sp| try self.emitParamPrologue(sp, @intCast(i)),
-            .rest => |*rp| try self.emitRestParamPrologue(rp, @intCast(i)),
-        }
-    }
-    self.temps_in_use = saved_method_prologue_temps;
-
-    // §27.5 / §27.6 — generator methods suspend here so
-    // `wrapGenerator` returns the wrapper after param init.
-    if (is_generator) {
-        try self.builder.emitOp(.gen_initial_suspend, span);
-    }
-
-    // Body.
-    try self.hoistLetConst(body_stmts);
-    try self.hoistVarAndFunctions(body_stmts);
-    try self.emitVarInits(span);
-    for (body_stmts) |*s| if (s.* == .function_decl) try self.compileStatement(s);
-    for (body_stmts) |*s| if (s.* != .function_decl) try self.compileStatement(s);
-    try self.builder.emitOp(.lda_undefined, span);
-    try self.builder.emitOp(.return_, span);
-
-    self.builder.code.items[slot_count_patch] = self.env_slot_count;
-    const inner_chunk = try self.builder.finish();
-    inner_finished = true;
-    fn_scope.deinit(self.allocator);
-
-    self.builder = saved_builder;
-    self.scope = saved_scope;
-    self.env_slot_count = saved_env_slot_count;
-    self.temps_in_use = saved_temps_in_use;
-    self.env_depth = saved_env_depth;
-    self.current_loop = saved_current_loop;
-    self.current_is_async = saved_is_async;
-
-    return inner_chunk;
-}
-
-/// Synthesise the default constructor body (§15.7.14 step 14):
-/// • base class: `constructor() {}` → emit `LdaUndefined; Return`.
-/// • derived class: `constructor(...args) { super(...args); }` →
-/// emit `MakeEnvironment 0; SuperCallForward; LdaUndefined;
-/// Return`.
-fn compileSynthDefaultConstructor(
-    self: *Compiler,
-    is_derived: bool,
-    has_fields: bool,
-    span: Span,
-) CompileError!@import("chunk.zig").Chunk {
-    const saved_builder = self.builder;
-    const saved_scope = self.scope;
-    const saved_env_slot_count = self.env_slot_count;
-    const saved_temps_in_use = self.temps_in_use;
-    const saved_env_depth = self.env_depth;
-    const saved_current_loop = self.current_loop;
-
-    self.builder = @import("chunk.zig").Builder.init(self.allocator);
-    var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
-    self.scope = &fn_scope;
-    self.env_slot_count = 0;
-    self.temps_in_use = 0;
-    self.env_depth = saved_env_depth + 1;
-    self.current_loop = null;
-
-    var inner_finished = false;
-    defer {
-        if (!inner_finished) {
-            self.builder.deinit();
-            fn_scope.deinit(self.allocator);
-            self.builder = saved_builder;
-            self.scope = saved_scope;
-            self.env_slot_count = saved_env_slot_count;
-            self.temps_in_use = saved_temps_in_use;
-            self.env_depth = saved_env_depth;
-            self.current_loop = saved_current_loop;
-        }
-    }
-
-    try self.builder.emitOp(.make_environment, span);
-    try self.builder.emitU8(0);
-    if (is_derived) {
-        try self.builder.emitOp(.super_call_forward, span);
-    }
-    if (has_fields) {
-        try self.builder.emitOp(.init_instance_fields, span);
-    }
-    try self.builder.emitOp(.lda_undefined, span);
-    try self.builder.emitOp(.return_, span);
-
-    const inner_chunk = try self.builder.finish();
-    inner_finished = true;
-    fn_scope.deinit(self.allocator);
-
-    self.builder = saved_builder;
-    self.scope = saved_scope;
-    self.env_slot_count = saved_env_slot_count;
-    self.temps_in_use = saved_temps_in_use;
-    self.env_depth = saved_env_depth;
-    self.current_loop = saved_current_loop;
-
-    return inner_chunk;
-}
-
-fn compileBlock(self: *Compiler, body: []ast.statement.Statement, span: Span) CompileError!void {
-    _ = span;
-    var block_scope: Scope = .{ .parent = self.scope, .kind = .block };
-    defer block_scope.deinit(self.allocator);
-    const saved = self.scope;
-    self.scope = &block_scope;
-    defer self.scope = saved;
-
-    // Pre-pass: hoist `let` / `const` slots so any reference
-    // inside the block (including from forward declarations)
-    // sees the binding in the TDZ rather than as undeclared.
-    try self.hoistLetConst(body);
-
-    for (body) |*s| try self.compileStatement(s);
-}
-
-/// Walk `body` and pre-allocate env slots for every `let` /
-/// `const` BindingIdentifier so subsequent reads in this scope
-/// see the binding (initially the TDZ Hole installed by
-/// `MakeEnvironment`) instead of failing to resolve. Block
-/// scopes share their enclosing function's env later; the
-/// pre-pass therefore adds slots without emitting any per-block
-/// runtime initialisation — the function-entry MakeEnvironment
-/// already filled the env with `hole` values.
-fn hoistLetConst(self: *Compiler, body: []ast.statement.Statement) CompileError!void {
-    for (body) |*s| {
-        // sec-moduledeclarationinstantiation step 17 -- export <lexical-decl>
-        // participates in the module's LexicallyScopedDeclarations the same way
-        // the unwrapped form does. Recurse one level into
-        // export_decl.body.declaration so `export let` / `export const`
-        // get hoisted into the top-level lex env.
-        const target: *const ast.statement.Statement = if (s.* == .export_decl) blk: {
-            switch (s.export_decl.body) {
-                .declaration => |inner| break :blk inner,
-                else => continue,
+        var inner_finished = false;
+        defer {
+            if (!inner_finished) {
+                self.builder.deinit();
+                fn_scope.deinit(self.allocator);
+                self.builder = saved_builder;
+                self.scope = saved_scope;
+                self.env_slot_count = saved_env_slot_count;
+                self.temps_in_use = saved_temps_in_use;
+                self.env_depth = saved_env_depth;
+                self.current_loop = saved_current_loop;
             }
-        } else s;
-        // §15.7.1 ClassDeclaration — `class C {}` introduces a
-        // mutable lexical binding for `C` in the enclosing scope.
-        // §13.2.1 LexicallyScopedDeclarations counts it alongside
-        // `let` / `const` for hoisting, so the binding is *visible*
-        // (as a TDZ-Hole sentinel) before the class statement runs.
-        // Module top-level `class C {}` must therefore behave the
-        // same way `let C` does: an inner function `() => typeof C`
-        // closing over `C` resolves to the lex binding and throws
-        // ReferenceError on read instead of falling through to the
-        // global-undef miss path. Treat class-decl as a let hoist.
-        if (target.* == .class_decl) {
-            const cd = target.class_decl;
-            const name = try self.bindingName(cd.name.span);
-            _ = try self.declareBindingFull(name, .let_, cd.name.span);
-            continue;
         }
-        if (target.* != .lexical) continue;
-        const ld = target.lexical;
-        if (ld.kind == .var_) continue;
-        const kind: BindingKind = if (ld.kind == .let_) .let_ else .const_;
-        for (ld.declarators) |d| {
-            try self.declarePatternBindings(d.name, kind);
+
+        try self.builder.emitOp(.make_environment, span);
+        try self.builder.emitU8(0);
+        if (init_name) |n| {
+            try self.compileNamedValue(init_expr, n);
+        } else {
+            try self.compileExpression(init_expr);
+        }
+        try self.builder.emitOp(.return_, span);
+
+        self.builder.code.items[1] = self.env_slot_count;
+        const inner_chunk = try self.builder.finish();
+        inner_finished = true;
+        fn_scope.deinit(self.allocator);
+
+        self.builder = saved_builder;
+        self.scope = saved_scope;
+        self.env_slot_count = saved_env_slot_count;
+        self.temps_in_use = saved_temps_in_use;
+        self.env_depth = saved_env_depth;
+        self.current_loop = saved_current_loop;
+
+        return inner_chunk;
+    }
+
+    /// Compile a `static { … }` block body into a function-shape
+    /// chunk that runs once at class definition time with `this`
+    /// bound to the class.
+    fn compileStaticBlockChunk(
+        self: *Compiler,
+        body: []ast.statement.Statement,
+        span: Span,
+    ) CompileError!@import("chunk.zig").Chunk {
+        const saved_builder = self.builder;
+        const saved_scope = self.scope;
+        const saved_env_slot_count = self.env_slot_count;
+        const saved_temps_in_use = self.temps_in_use;
+        const saved_env_depth = self.env_depth;
+        const saved_current_loop = self.current_loop;
+
+        self.builder = @import("chunk.zig").Builder.init(self.allocator);
+        var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
+        self.scope = &fn_scope;
+        self.env_slot_count = 0;
+        self.temps_in_use = 0;
+        self.env_depth = saved_env_depth + 1;
+        self.current_loop = null;
+
+        var inner_finished = false;
+        defer {
+            if (!inner_finished) {
+                self.builder.deinit();
+                fn_scope.deinit(self.allocator);
+                self.builder = saved_builder;
+                self.scope = saved_scope;
+                self.env_slot_count = saved_env_slot_count;
+                self.temps_in_use = saved_temps_in_use;
+                self.env_depth = saved_env_depth;
+                self.current_loop = saved_current_loop;
+            }
+        }
+
+        try self.builder.emitOp(.make_environment, span);
+        const slot_count_patch = self.builder.here();
+        try self.builder.emitU8(0);
+        try self.hoistLetConst(body);
+        try self.hoistVarAndFunctions(body);
+        try self.emitVarInits(span);
+        for (body) |*s| if (s.* == .function_decl) try self.compileStatement(s);
+        for (body) |*s| if (s.* != .function_decl) try self.compileStatement(s);
+        try self.builder.emitOp(.lda_undefined, span);
+        try self.builder.emitOp(.return_, span);
+
+        self.builder.code.items[slot_count_patch] = self.env_slot_count;
+        const inner_chunk = try self.builder.finish();
+        inner_finished = true;
+        fn_scope.deinit(self.allocator);
+
+        self.builder = saved_builder;
+        self.scope = saved_scope;
+        self.env_slot_count = saved_env_slot_count;
+        self.temps_in_use = saved_temps_in_use;
+        self.env_depth = saved_env_depth;
+        self.current_loop = saved_current_loop;
+
+        return inner_chunk;
+    }
+
+    /// Like compileMethodBody but with prologue tweaks for class
+    /// constructors: base classes get `init_instance_fields` at the
+    /// start of the user body; derived classes leave it to the
+    /// `super_call` op to trigger (we patch it post-hoc by detecting
+    /// super_call ops emitted from the body).
+    fn compileConstructorBody(
+        self: *Compiler,
+        params: []ast.statement.FunctionParam,
+        body_stmts: []ast.statement.Statement,
+        is_derived: bool,
+        has_fields: bool,
+        span: Span,
+    ) CompileError!@import("chunk.zig").Chunk {
+        const saved_builder = self.builder;
+        const saved_scope = self.scope;
+        const saved_env_slot_count = self.env_slot_count;
+        const saved_temps_in_use = self.temps_in_use;
+        const saved_env_depth = self.env_depth;
+        const saved_current_loop = self.current_loop;
+
+        self.builder = @import("chunk.zig").Builder.init(self.allocator);
+        var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
+        self.scope = &fn_scope;
+        self.env_slot_count = 0;
+        self.temps_in_use = 0;
+        self.env_depth = saved_env_depth + 1;
+        self.current_loop = null;
+
+        var inner_finished = false;
+        defer {
+            if (!inner_finished) {
+                self.builder.deinit();
+                fn_scope.deinit(self.allocator);
+                self.builder = saved_builder;
+                self.scope = saved_scope;
+                self.env_slot_count = saved_env_slot_count;
+                self.temps_in_use = saved_temps_in_use;
+                self.env_depth = saved_env_depth;
+                self.current_loop = saved_current_loop;
+            }
+        }
+
+        try self.builder.emitOp(.make_environment, span);
+        const slot_count_patch = self.builder.here();
+        try self.builder.emitU8(0);
+
+        // §10.4.4 + §10.2.10 step 22/27 — install `arguments`
+        // BEFORE the param prologue so default expressions like
+        // `constructor(x = arguments[2])` observe the full caller
+        // argumentsList. See `compileFunctionTemplateExt` for the
+        // spec citation.
+        if (paramsReferenceArguments(self.source, params) or
+            referencesArguments(self.source, body_stmts))
+        {
+            const slot = try self.declareBinding("arguments", .let_, span);
+            try self.builder.emitOp(.lda_arguments, span);
+            try self.builder.emitOp(.sta_env, span);
+            try self.builder.emitU8(0);
+            try self.builder.emitU8(slot);
+        }
+
+        // §10.2.4 IteratorBindingInitialization — reserve the leading
+        // register slots so temps allocated by default-expression
+        // compilation don't clobber caller-supplied arg registers.
+        // See `compileFunctionTemplateExt` for the failure mode.
+        const saved_ctor_prologue_temps = self.temps_in_use;
+        self.temps_in_use = @intCast(@min(params.len, std.math.maxInt(u8)));
+        if (self.temps_in_use > self.builder.register_count) {
+            self.builder.register_count = self.temps_in_use;
+        }
+        for (params, 0..) |*p, i| {
+            switch (p.*) {
+                .simple => |*sp| try self.emitParamPrologue(sp, @intCast(i)),
+                .rest => |*rp| try self.emitRestParamPrologue(rp, @intCast(i)),
+            }
+        }
+        self.temps_in_use = saved_ctor_prologue_temps;
+
+        // Base class: run field initializers at the start of the
+        // user body. Derived classes wait for super_call to trigger.
+        if (!is_derived and has_fields) {
+            try self.builder.emitOp(.init_instance_fields, span);
+        }
+
+        // §13.3.2 — same pre-body sequence as `compileMethodBody`:
+        // pre-declare let/const slots (TDZ), pre-declare every `var`
+        // and `function` binding reachable through nested blocks, then
+        // initialise every `var` to undefined so a forward `read`
+        // never falls through to a parent scope. Without
+        // hoistVarAndFunctions + emitVarInits, `class C { constructor() {
+        // var x = 1; this.x = x; } }` raised CompileError because `x`
+        // was undeclared at the use site.
+        try self.hoistLetConst(body_stmts);
+        try self.hoistVarAndFunctions(body_stmts);
+        try self.emitVarInits(span);
+        // Same two-pass order as the function path: function
+        // declarations first (so later code can call them), then the
+        // remaining statements.
+        for (body_stmts) |*s| if (s.* == .function_decl) try self.compileStatement(s);
+        for (body_stmts) |*s| if (s.* != .function_decl) try self.compileStatement(s);
+        try self.builder.emitOp(.lda_undefined, span);
+        try self.builder.emitOp(.return_, span);
+
+        self.builder.code.items[slot_count_patch] = self.env_slot_count;
+        const inner_chunk = try self.builder.finish();
+        inner_finished = true;
+        fn_scope.deinit(self.allocator);
+
+        self.builder = saved_builder;
+        self.scope = saved_scope;
+        self.env_slot_count = saved_env_slot_count;
+        self.temps_in_use = saved_temps_in_use;
+        self.env_depth = saved_env_depth;
+        self.current_loop = saved_current_loop;
+
+        return inner_chunk;
+    }
+
+    /// Compile a method body — same pipeline as compileFunctionTemplate
+    /// minus the outer chunk registration. `is_constructor` makes
+    /// the prologue end with `lda_this; return_` instead of
+    /// `lda_undefined; return_` (so `new C()` returns `this` even
+    /// without explicit return — handled by the construct frame).
+    /// `derived` synthesises a `super(...)` for default-derived
+    /// constructors when `is_constructor` is also true and the body
+    /// is empty (the caller signals this by passing an empty stmts
+    /// slice).
+    fn compileMethodBody(
+        self: *Compiler,
+        params: []ast.statement.FunctionParam,
+        body_stmts: []ast.statement.Statement,
+        is_constructor: bool,
+        derived: bool,
+        is_async: bool,
+        is_generator: bool,
+        span: Span,
+    ) CompileError!@import("chunk.zig").Chunk {
+        _ = is_constructor;
+        _ = derived;
+
+        const saved_builder = self.builder;
+        const saved_scope = self.scope;
+        const saved_env_slot_count = self.env_slot_count;
+        const saved_temps_in_use = self.temps_in_use;
+        const saved_env_depth = self.env_depth;
+        const saved_current_loop = self.current_loop;
+        const saved_is_async = self.current_is_async;
+
+        self.builder = @import("chunk.zig").Builder.init(self.allocator);
+        var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
+        self.scope = &fn_scope;
+        self.env_slot_count = 0;
+        self.temps_in_use = 0;
+        self.env_depth = saved_env_depth + 1;
+        self.current_loop = null;
+        self.current_is_async = is_async;
+
+        var inner_finished = false;
+        defer {
+            if (!inner_finished) {
+                self.builder.deinit();
+                fn_scope.deinit(self.allocator);
+                self.builder = saved_builder;
+                self.scope = saved_scope;
+                self.env_slot_count = saved_env_slot_count;
+                self.temps_in_use = saved_temps_in_use;
+                self.env_depth = saved_env_depth;
+                self.current_loop = saved_current_loop;
+            }
+        }
+
+        try self.builder.emitOp(.make_environment, span);
+        const slot_count_patch = self.builder.here();
+        try self.builder.emitU8(0);
+
+        // §10.4.4 + §10.2.10 step 22/27 — install `arguments`
+        // BEFORE the param prologue so default expressions like
+        // `m(x = arguments[2])` observe the full caller
+        // argumentsList. See `compileFunctionTemplateExt` for the
+        // spec citation.
+        if (paramsReferenceArguments(self.source, params) or
+            referencesArguments(self.source, body_stmts))
+        {
+            const slot = try self.declareBinding("arguments", .let_, span);
+            try self.builder.emitOp(.lda_arguments, span);
+            try self.builder.emitOp(.sta_env, span);
+            try self.builder.emitU8(0);
+            try self.builder.emitU8(slot);
+        }
+
+        // Param prologue, same as compileFunctionTemplate. The
+        // leading register slots are reserved so default-expression
+        // temps don't clobber caller-supplied arg registers — see
+        // `compileFunctionTemplateExt`.
+        const saved_method_prologue_temps = self.temps_in_use;
+        self.temps_in_use = @intCast(@min(params.len, std.math.maxInt(u8)));
+        if (self.temps_in_use > self.builder.register_count) {
+            self.builder.register_count = self.temps_in_use;
+        }
+        for (params, 0..) |*p, i| {
+            switch (p.*) {
+                .simple => |*sp| try self.emitParamPrologue(sp, @intCast(i)),
+                .rest => |*rp| try self.emitRestParamPrologue(rp, @intCast(i)),
+            }
+        }
+        self.temps_in_use = saved_method_prologue_temps;
+
+        // §27.5 / §27.6 — generator methods suspend here so
+        // `wrapGenerator` returns the wrapper after param init.
+        if (is_generator) {
+            try self.builder.emitOp(.gen_initial_suspend, span);
+        }
+
+        // Body.
+        try self.hoistLetConst(body_stmts);
+        try self.hoistVarAndFunctions(body_stmts);
+        try self.emitVarInits(span);
+        for (body_stmts) |*s| if (s.* == .function_decl) try self.compileStatement(s);
+        for (body_stmts) |*s| if (s.* != .function_decl) try self.compileStatement(s);
+        try self.builder.emitOp(.lda_undefined, span);
+        try self.builder.emitOp(.return_, span);
+
+        self.builder.code.items[slot_count_patch] = self.env_slot_count;
+        const inner_chunk = try self.builder.finish();
+        inner_finished = true;
+        fn_scope.deinit(self.allocator);
+
+        self.builder = saved_builder;
+        self.scope = saved_scope;
+        self.env_slot_count = saved_env_slot_count;
+        self.temps_in_use = saved_temps_in_use;
+        self.env_depth = saved_env_depth;
+        self.current_loop = saved_current_loop;
+        self.current_is_async = saved_is_async;
+
+        return inner_chunk;
+    }
+
+    /// Synthesise the default constructor body (§15.7.14 step 14):
+    /// • base class: `constructor() {}` → emit `LdaUndefined; Return`.
+    /// • derived class: `constructor(...args) { super(...args); }` →
+    /// emit `MakeEnvironment 0; SuperCallForward; LdaUndefined;
+    /// Return`.
+    fn compileSynthDefaultConstructor(
+        self: *Compiler,
+        is_derived: bool,
+        has_fields: bool,
+        span: Span,
+    ) CompileError!@import("chunk.zig").Chunk {
+        const saved_builder = self.builder;
+        const saved_scope = self.scope;
+        const saved_env_slot_count = self.env_slot_count;
+        const saved_temps_in_use = self.temps_in_use;
+        const saved_env_depth = self.env_depth;
+        const saved_current_loop = self.current_loop;
+
+        self.builder = @import("chunk.zig").Builder.init(self.allocator);
+        var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
+        self.scope = &fn_scope;
+        self.env_slot_count = 0;
+        self.temps_in_use = 0;
+        self.env_depth = saved_env_depth + 1;
+        self.current_loop = null;
+
+        var inner_finished = false;
+        defer {
+            if (!inner_finished) {
+                self.builder.deinit();
+                fn_scope.deinit(self.allocator);
+                self.builder = saved_builder;
+                self.scope = saved_scope;
+                self.env_slot_count = saved_env_slot_count;
+                self.temps_in_use = saved_temps_in_use;
+                self.env_depth = saved_env_depth;
+                self.current_loop = saved_current_loop;
+            }
+        }
+
+        try self.builder.emitOp(.make_environment, span);
+        try self.builder.emitU8(0);
+        if (is_derived) {
+            try self.builder.emitOp(.super_call_forward, span);
+        }
+        if (has_fields) {
+            try self.builder.emitOp(.init_instance_fields, span);
+        }
+        try self.builder.emitOp(.lda_undefined, span);
+        try self.builder.emitOp(.return_, span);
+
+        const inner_chunk = try self.builder.finish();
+        inner_finished = true;
+        fn_scope.deinit(self.allocator);
+
+        self.builder = saved_builder;
+        self.scope = saved_scope;
+        self.env_slot_count = saved_env_slot_count;
+        self.temps_in_use = saved_temps_in_use;
+        self.env_depth = saved_env_depth;
+        self.current_loop = saved_current_loop;
+
+        return inner_chunk;
+    }
+
+    fn compileBlock(self: *Compiler, body: []ast.statement.Statement, span: Span) CompileError!void {
+        _ = span;
+        var block_scope: Scope = .{ .parent = self.scope, .kind = .block };
+        defer block_scope.deinit(self.allocator);
+        const saved = self.scope;
+        self.scope = &block_scope;
+        defer self.scope = saved;
+
+        // Pre-pass: hoist `let` / `const` slots so any reference
+        // inside the block (including from forward declarations)
+        // sees the binding in the TDZ rather than as undeclared.
+        try self.hoistLetConst(body);
+
+        for (body) |*s| try self.compileStatement(s);
+    }
+
+    /// Walk `body` and pre-allocate env slots for every `let` /
+    /// `const` BindingIdentifier so subsequent reads in this scope
+    /// see the binding (initially the TDZ Hole installed by
+    /// `MakeEnvironment`) instead of failing to resolve. Block
+    /// scopes share their enclosing function's env later; the
+    /// pre-pass therefore adds slots without emitting any per-block
+    /// runtime initialisation — the function-entry MakeEnvironment
+    /// already filled the env with `hole` values.
+    fn hoistLetConst(self: *Compiler, body: []ast.statement.Statement) CompileError!void {
+        for (body) |*s| {
+            // sec-moduledeclarationinstantiation step 17 -- export <lexical-decl>
+            // participates in the module's LexicallyScopedDeclarations the same way
+            // the unwrapped form does. Recurse one level into
+            // export_decl.body.declaration so `export let` / `export const`
+            // get hoisted into the top-level lex env.
+            const target: *const ast.statement.Statement = if (s.* == .export_decl) blk: {
+                switch (s.export_decl.body) {
+                    .declaration => |inner| break :blk inner,
+                    else => continue,
+                }
+            } else s;
+            // §15.7.1 ClassDeclaration — `class C {}` introduces a
+            // mutable lexical binding for `C` in the enclosing scope.
+            // §13.2.1 LexicallyScopedDeclarations counts it alongside
+            // `let` / `const` for hoisting, so the binding is *visible*
+            // (as a TDZ-Hole sentinel) before the class statement runs.
+            // Module top-level `class C {}` must therefore behave the
+            // same way `let C` does: an inner function `() => typeof C`
+            // closing over `C` resolves to the lex binding and throws
+            // ReferenceError on read instead of falling through to the
+            // global-undef miss path. Treat class-decl as a let hoist.
+            if (target.* == .class_decl) {
+                const cd = target.class_decl;
+                const name = try self.bindingName(cd.name.span);
+                _ = try self.declareBindingFull(name, .let_, cd.name.span);
+                continue;
+            }
+            if (target.* != .lexical) continue;
+            const ld = target.lexical;
+            if (ld.kind == .var_) continue;
+            const kind: BindingKind = if (ld.kind == .let_) .let_ else .const_;
+            for (ld.declarators) |d| {
+                try self.declarePatternBindings(d.name, kind);
+            }
         }
     }
-}
 
-/// §13.3.2 — pre-declare every `var` binding (and the names of
-/// every function declaration) reachable in the function body
-/// without crossing a nested function / class / arrow boundary.
-/// Walks into blocks, control-flow bodies, switch cases, try /
-/// catch / finally, and the heads / bodies of `for` / `for-in` /
-/// `for-of` (where `var` is allowed), so that
-///
-///     console.log(x); var x = 1;
-///     f();           function f(){}
-///
-/// resolve their forward references against a binding that
-/// already exists at scope-entry. `var` bindings still need to
-/// be initialised to `undefined` ahead of any reachable read —
-/// `emitVarInits` handles that immediately after `make_environment`.
-fn hoistVarAndFunctions(self: *Compiler, body: []ast.statement.Statement) CompileError!void {
-    // The body passed at the top-level call IS the function /
-    // script body — statements at the function-top level get
-    // regular var-style hoisting (including `function` decls).
-    for (body) |*s| try self.hoistStatement(s, false);
-}
+    /// §13.3.2 — pre-declare every `var` binding (and the names of
+    /// every function declaration) reachable in the function body
+    /// without crossing a nested function / class / arrow boundary.
+    /// Walks into blocks, control-flow bodies, switch cases, try /
+    /// catch / finally, and the heads / bodies of `for` / `for-in` /
+    /// `for-of` (where `var` is allowed), so that
+    ///
+    ///     console.log(x); var x = 1;
+    ///     f();           function f(){}
+    ///
+    /// resolve their forward references against a binding that
+    /// already exists at scope-entry. `var` bindings still need to
+    /// be initialised to `undefined` ahead of any reachable read —
+    /// `emitVarInits` handles that immediately after `make_environment`.
+    fn hoistVarAndFunctions(self: *Compiler, body: []ast.statement.Statement) CompileError!void {
+        // The body passed at the top-level call IS the function /
+        // script body — statements at the function-top level get
+        // regular var-style hoisting (including `function` decls).
+        for (body) |*s| try self.hoistStatement(s, false);
+    }
 
-/// §16.1.7 GlobalDeclarationInstantiation step 5-7 +
-/// CanDeclareGlobalVar / CanDeclareGlobalFunction (§9.1.1.4.15 /
-/// .16). Pure-validation walk over a Script body — does NOT
-/// mutate the realm. Reports duplicate / collision via
-/// `duplicate_lexical_binding` (SyntaxError) and sets
-/// `pending_global_decl_error` for canDeclare failures
-/// (deferred TypeError emitted in place of the script body).
-///
-/// Walks the same shape as `hoistStatement` for var collection —
-/// recurses through Block / If / While / DoWhile / For /
-/// ForInOf / Try / Switch / ExportDecl — but doesn't follow into
-/// nested function / class bodies (those have their own scopes).
-fn validateGlobalDeclarations(self: *Compiler, body: []ast.statement.Statement) CompileError!void {
-    if (self.is_module) return;
+    /// §16.1.7 GlobalDeclarationInstantiation step 5-7 +
+    /// CanDeclareGlobalVar / CanDeclareGlobalFunction (§9.1.1.4.15 /
+    /// .16). Pure-validation walk over a Script body — does NOT
+    /// mutate the realm. Reports duplicate / collision via
+    /// `duplicate_lexical_binding` (SyntaxError) and sets
+    /// `pending_global_decl_error` for canDeclare failures
+    /// (deferred TypeError emitted in place of the script body).
+    ///
+    /// Walks the same shape as `hoistStatement` for var collection —
+    /// recurses through Block / If / While / DoWhile / For /
+    /// ForInOf / Try / Switch / ExportDecl — but doesn't follow into
+    /// nested function / class bodies (those have their own scopes).
+    fn validateGlobalDeclarations(self: *Compiler, body: []ast.statement.Statement) CompileError!void {
+        if (self.is_module) return;
 
-    // Collected names. Both sets are small in practice (a handful
-    // of decls per script), so a linear-scan ArrayList beats the
-    // bookkeeping cost of a HashSet.
-    var lex_names: std.ArrayListUnmanaged(NameAtSpan) = .empty;
-    defer lex_names.deinit(self.allocator);
-    var var_names: std.ArrayListUnmanaged(NameAtSpan) = .empty;
-    defer var_names.deinit(self.allocator);
-    var fn_names: std.ArrayListUnmanaged(NameAtSpan) = .empty;
-    defer fn_names.deinit(self.allocator);
+        // Collected names. Both sets are small in practice (a handful
+        // of decls per script), so a linear-scan ArrayList beats the
+        // bookkeeping cost of a HashSet.
+        var lex_names: std.ArrayListUnmanaged(NameAtSpan) = .empty;
+        defer lex_names.deinit(self.allocator);
+        var var_names: std.ArrayListUnmanaged(NameAtSpan) = .empty;
+        defer var_names.deinit(self.allocator);
+        var fn_names: std.ArrayListUnmanaged(NameAtSpan) = .empty;
+        defer fn_names.deinit(self.allocator);
 
-    try collectScriptDeclNames(self, body, &lex_names, &var_names, &fn_names, false);
+        try collectScriptDeclNames(self, body, &lex_names, &var_names, &fn_names, false);
 
-    // §16.1.7 step 5.b — lex-vs-lex duplicates. (lex-vs-var
-    // covered by step 5.a below.) Tracked separately so a
-    // pre-existing realm lex binding from a prior `evalScript`
-    // also flags the duplicate per §9.1.1.4.18.
-    for (lex_names.items, 0..) |a, i| {
-        for (lex_names.items[i + 1 ..]) |b| {
-            if (std.mem.eql(u8, a.name, b.name)) {
-                try self.report(.duplicate_lexical_binding, b.span);
+        // §16.1.7 step 5.b — lex-vs-lex duplicates. (lex-vs-var
+        // covered by step 5.a below.) Tracked separately so a
+        // pre-existing realm lex binding from a prior `evalScript`
+        // also flags the duplicate per §9.1.1.4.18.
+        for (lex_names.items, 0..) |a, i| {
+            for (lex_names.items[i + 1 ..]) |b| {
+                if (std.mem.eql(u8, a.name, b.name)) {
+                    try self.report(.duplicate_lexical_binding, b.span);
+                    return error.DuplicateBinding;
+                }
+            }
+        }
+        for (lex_names.items) |ln| {
+            // §16.1.7 step 5.a — HasVarDeclaration: lex vs var on the
+            // realm. The realm only tracks names through the object
+            // env-record, so any prior `var` / `function` collides.
+            if (self.realm.globals.hasVarDeclaration(ln.name)) {
+                try self.report(.duplicate_lexical_binding, ln.span);
+                return error.DuplicateBinding;
+            }
+            // §16.1.7 step 5.b — HasLexicalDeclaration: lex vs prior
+            // lex on the realm.
+            if (self.realm.globals.hasLexicalDeclaration(ln.name)) {
+                try self.report(.duplicate_lexical_binding, ln.span);
+                return error.DuplicateBinding;
+            }
+            // §16.1.7 step 5.c — HasRestrictedGlobalProperty: lex vs
+            // non-configurable global property (e.g. `undefined`,
+            // `NaN`, host-installed `Object.defineProperty(this, …,
+            // {configurable:false})`).
+            if (self.realm.globals.hasRestrictedGlobalProperty(ln.name) or
+                isRestrictedGlobalName(ln.name))
+            {
+                try self.report(.duplicate_lexical_binding, ln.span);
+                return error.DuplicateBinding;
+            }
+            // lex vs same-script var / function.
+            for (var_names.items) |vn| if (std.mem.eql(u8, ln.name, vn.name)) {
+                try self.report(.duplicate_lexical_binding, vn.span);
+                return error.DuplicateBinding;
+            };
+            for (fn_names.items) |fn_n| if (std.mem.eql(u8, ln.name, fn_n.name)) {
+                try self.report(.duplicate_lexical_binding, fn_n.span);
+                return error.DuplicateBinding;
+            };
+        }
+
+        // §16.1.7 step 6.a — vars (and function names) vs realm lex.
+        for (var_names.items) |vn| {
+            if (self.realm.globals.hasLexicalDeclaration(vn.name)) {
+                try self.report(.duplicate_lexical_binding, vn.span);
                 return error.DuplicateBinding;
             }
         }
-    }
-    for (lex_names.items) |ln| {
-        // §16.1.7 step 5.a — HasVarDeclaration: lex vs var on the
-        // realm. The realm only tracks names through the object
-        // env-record, so any prior `var` / `function` collides.
-        if (self.realm.globals.hasVarDeclaration(ln.name)) {
-            try self.report(.duplicate_lexical_binding, ln.span);
-            return error.DuplicateBinding;
+        for (fn_names.items) |fn_n| {
+            if (self.realm.globals.hasLexicalDeclaration(fn_n.name)) {
+                try self.report(.duplicate_lexical_binding, fn_n.span);
+                return error.DuplicateBinding;
+            }
         }
-        // §16.1.7 step 5.b — HasLexicalDeclaration: lex vs prior
-        // lex on the realm.
-        if (self.realm.globals.hasLexicalDeclaration(ln.name)) {
-            try self.report(.duplicate_lexical_binding, ln.span);
-            return error.DuplicateBinding;
-        }
-        // §16.1.7 step 5.c — HasRestrictedGlobalProperty: lex vs
-        // non-configurable global property (e.g. `undefined`,
-        // `NaN`, host-installed `Object.defineProperty(this, …,
-        // {configurable:false})`).
-        if (self.realm.globals.hasRestrictedGlobalProperty(ln.name) or
-            isRestrictedGlobalName(ln.name))
-        {
-            try self.report(.duplicate_lexical_binding, ln.span);
-            return error.DuplicateBinding;
-        }
-        // lex vs same-script var / function.
-        for (var_names.items) |vn| if (std.mem.eql(u8, ln.name, vn.name)) {
-            try self.report(.duplicate_lexical_binding, vn.span);
-            return error.DuplicateBinding;
-        };
-        for (fn_names.items) |fn_n| if (std.mem.eql(u8, ln.name, fn_n.name)) {
-            try self.report(.duplicate_lexical_binding, fn_n.span);
-            return error.DuplicateBinding;
-        };
-    }
 
-    // §16.1.7 step 6.a — vars (and function names) vs realm lex.
-    for (var_names.items) |vn| {
-        if (self.realm.globals.hasLexicalDeclaration(vn.name)) {
-            try self.report(.duplicate_lexical_binding, vn.span);
-            return error.DuplicateBinding;
+        // §9.1.1.4.16 CanDeclareGlobalFunction for every function
+        // declaration. Check this BEFORE the var canDeclare so the
+        // `script-decl-func-err-non-configurable.js` fixture (which
+        // pairs `var x; function data1() {}`) sees the function
+        // failure win — though either order produces TypeError, the
+        // failing-name carried into the error message matches V8's
+        // when functions go first.
+        for (fn_names.items) |fn_n| {
+            if (!self.realm.globals.canDeclareGlobalFunction(fn_n.name)) {
+                self.pending_global_decl_error = fn_n.name;
+                return;
+            }
         }
-    }
-    for (fn_names.items) |fn_n| {
-        if (self.realm.globals.hasLexicalDeclaration(fn_n.name)) {
-            try self.report(.duplicate_lexical_binding, fn_n.span);
-            return error.DuplicateBinding;
+
+        // §9.1.1.4.15 CanDeclareGlobalVar — only meaningful when the
+        // global object is non-extensible AND the name isn't already
+        // a property. Skip names that also appear in `fn_names`: the
+        // function-decl path handles them.
+        for (var_names.items) |vn| {
+            var is_func = false;
+            for (fn_names.items) |fn_n| if (std.mem.eql(u8, vn.name, fn_n.name)) {
+                is_func = true;
+                break;
+            };
+            if (is_func) continue;
+            if (!self.realm.globals.canDeclareGlobalVar(vn.name)) {
+                self.pending_global_decl_error = vn.name;
+                return;
+            }
         }
     }
 
-    // §9.1.1.4.16 CanDeclareGlobalFunction for every function
-    // declaration. Check this BEFORE the var canDeclare so the
-    // `script-decl-func-err-non-configurable.js` fixture (which
-    // pairs `var x; function data1() {}`) sees the function
-    // failure win — though either order produces TypeError, the
-    // failing-name carried into the error message matches V8's
-    // when functions go first.
-    for (fn_names.items) |fn_n| {
-        if (!self.realm.globals.canDeclareGlobalFunction(fn_n.name)) {
-            self.pending_global_decl_error = fn_n.name;
-            return;
-        }
+    const NameAtSpan = struct { name: []const u8, span: Span };
+
+    fn collectScriptDeclNames(
+        self: *Compiler,
+        body: []ast.statement.Statement,
+        lex_names: *std.ArrayListUnmanaged(NameAtSpan),
+        var_names: *std.ArrayListUnmanaged(NameAtSpan),
+        fn_names: *std.ArrayListUnmanaged(NameAtSpan),
+        inside_block: bool,
+    ) CompileError!void {
+        for (body) |*s| try collectScriptDeclNamesOne(self, s, lex_names, var_names, fn_names, inside_block);
     }
 
-    // §9.1.1.4.15 CanDeclareGlobalVar — only meaningful when the
-    // global object is non-extensible AND the name isn't already
-    // a property. Skip names that also appear in `fn_names`: the
-    // function-decl path handles them.
-    for (var_names.items) |vn| {
-        var is_func = false;
-        for (fn_names.items) |fn_n| if (std.mem.eql(u8, vn.name, fn_n.name)) {
-            is_func = true;
-            break;
-        };
-        if (is_func) continue;
-        if (!self.realm.globals.canDeclareGlobalVar(vn.name)) {
-            self.pending_global_decl_error = vn.name;
-            return;
-        }
-    }
-}
-
-const NameAtSpan = struct { name: []const u8, span: Span };
-
-fn collectScriptDeclNames(
-    self: *Compiler,
-    body: []ast.statement.Statement,
-    lex_names: *std.ArrayListUnmanaged(NameAtSpan),
-    var_names: *std.ArrayListUnmanaged(NameAtSpan),
-    fn_names: *std.ArrayListUnmanaged(NameAtSpan),
-    inside_block: bool,
-) CompileError!void {
-    for (body) |*s| try collectScriptDeclNamesOne(self, s, lex_names, var_names, fn_names, inside_block);
-}
-
-fn collectScriptDeclNamesOne(
-    self: *Compiler,
-    s: *ast.statement.Statement,
-    lex_names: *std.ArrayListUnmanaged(NameAtSpan),
-    var_names: *std.ArrayListUnmanaged(NameAtSpan),
-    fn_names: *std.ArrayListUnmanaged(NameAtSpan),
-    inside_block: bool,
-) CompileError!void {
-    switch (s.*) {
-        .lexical => |ld| {
-            if (ld.kind == .var_) {
+    fn collectScriptDeclNamesOne(
+        self: *Compiler,
+        s: *ast.statement.Statement,
+        lex_names: *std.ArrayListUnmanaged(NameAtSpan),
+        var_names: *std.ArrayListUnmanaged(NameAtSpan),
+        fn_names: *std.ArrayListUnmanaged(NameAtSpan),
+        inside_block: bool,
+    ) CompileError!void {
+        switch (s.*) {
+            .lexical => |ld| {
+                if (ld.kind == .var_) {
+                    if (inside_block) {
+                        for (ld.declarators) |d|
+                            try appendPatternVarNames(self, d.name, var_names);
+                    } else {
+                        for (ld.declarators) |d|
+                            try appendPatternVarNames(self, d.name, var_names);
+                    }
+                } else if (!inside_block) {
+                    // Only top-level lex binds reach the global lex
+                    // record. Block-scoped `let` lives in the
+                    // ordinary env and isn't validated here.
+                    for (ld.declarators) |d|
+                        try appendPatternLexNames(self, d.name, lex_names);
+                }
+            },
+            .class_decl => |cd| {
+                if (!inside_block) {
+                    const name = try self.bindingName(cd.name.span);
+                    try lex_names.append(self.allocator, .{ .name = name, .span = cd.name.span });
+                }
+            },
+            .function_decl => |fd| {
+                if (inside_block and (fd.is_async or fd.is_generator)) {
+                    // §14.2.5 / §14.12.4 — async/gen function decls in
+                    // nested blocks are lex-scoped to the block, not
+                    // hoisted. Don't count toward global decls.
+                    return;
+                }
                 if (inside_block) {
-                    for (ld.declarators) |d|
-                        try appendPatternVarNames(self, d.name, var_names);
-                } else {
-                    for (ld.declarators) |d|
-                        try appendPatternVarNames(self, d.name, var_names);
+                    // §B.3.3 — Cynic is strict-only, so block-nested
+                    // `function` doesn't hoist either. Skip global-
+                    // decl tracking.
+                    return;
                 }
-            } else if (!inside_block) {
-                // Only top-level lex binds reach the global lex
-                // record. Block-scoped `let` lives in the
-                // ordinary env and isn't validated here.
-                for (ld.declarators) |d|
-                    try appendPatternLexNames(self, d.name, lex_names);
-            }
-        },
-        .class_decl => |cd| {
-            if (!inside_block) {
-                const name = try self.bindingName(cd.name.span);
-                try lex_names.append(self.allocator, .{ .name = name, .span = cd.name.span });
-            }
-        },
-        .function_decl => |fd| {
-            if (inside_block and (fd.is_async or fd.is_generator)) {
-                // §14.2.5 / §14.12.4 — async/gen function decls in
-                // nested blocks are lex-scoped to the block, not
-                // hoisted. Don't count toward global decls.
-                return;
-            }
-            if (inside_block) {
-                // §B.3.3 — Cynic is strict-only, so block-nested
-                // `function` doesn't hoist either. Skip global-
-                // decl tracking.
-                return;
-            }
-            const name = try self.bindingName(fd.name.span);
-            try fn_names.append(self.allocator, .{ .name = name, .span = fd.name.span });
-        },
-        .export_decl => |ed| switch (ed.body) {
-            .declaration => |inner| try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, inside_block),
+                const name = try self.bindingName(fd.name.span);
+                try fn_names.append(self.allocator, .{ .name = name, .span = fd.name.span });
+            },
+            .export_decl => |ed| switch (ed.body) {
+                .declaration => |inner| try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, inside_block),
+                else => {},
+            },
+            .block => |b| {
+                for (b.body) |*inner|
+                    try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, true);
+            },
+            .if_ => |i| {
+                try collectScriptDeclNamesOne(self, i.consequent, lex_names, var_names, fn_names, true);
+                if (i.alternate) |alt|
+                    try collectScriptDeclNamesOne(self, alt, lex_names, var_names, fn_names, true);
+            },
+            .while_ => |w| try collectScriptDeclNamesOne(self, w.body, lex_names, var_names, fn_names, true),
+            .do_while => |dw| try collectScriptDeclNamesOne(self, dw.body, lex_names, var_names, fn_names, true),
+            .for_ => |f| {
+                if (f.init) |head| switch (head) {
+                    .lexical => |ld| if (ld.kind == .var_) {
+                        for (ld.declarators) |d|
+                            try appendPatternVarNames(self, d.name, var_names);
+                    },
+                    .expression => {},
+                };
+                try collectScriptDeclNamesOne(self, f.body, lex_names, var_names, fn_names, true);
+            },
+            .for_in_of => |f| {
+                switch (f.left) {
+                    .lexical => |ld| if (ld.kind == .var_) {
+                        for (ld.declarators) |d|
+                            try appendPatternVarNames(self, d.name, var_names);
+                    },
+                    .expression => {},
+                }
+                try collectScriptDeclNamesOne(self, f.body, lex_names, var_names, fn_names, true);
+            },
+            .try_ => |t| {
+                for (t.block.body) |*inner|
+                    try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, true);
+                if (t.handler) |h| for (h.body.body) |*inner|
+                    try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, true);
+                if (t.finalizer) |fin| for (fin.body) |*inner|
+                    try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, true);
+            },
+            .switch_ => |sw| {
+                for (sw.cases) |case| for (case.body) |*inner|
+                    try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, true);
+            },
+            // §14.13 LabelledStatement — transparent to declaration
+            // collection; recurse into the wrapped body so a `var`
+            // inside `lbl: do { … } while (0)` still reaches the
+            // global-decl tally.
+            .labeled => |lb| try collectScriptDeclNamesOne(self, lb.body, lex_names, var_names, fn_names, true),
             else => {},
-        },
-        .block => |b| {
-            for (b.body) |*inner|
-                try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, true);
-        },
-        .if_ => |i| {
-            try collectScriptDeclNamesOne(self, i.consequent, lex_names, var_names, fn_names, true);
-            if (i.alternate) |alt|
-                try collectScriptDeclNamesOne(self, alt, lex_names, var_names, fn_names, true);
-        },
-        .while_ => |w| try collectScriptDeclNamesOne(self, w.body, lex_names, var_names, fn_names, true),
-        .do_while => |dw| try collectScriptDeclNamesOne(self, dw.body, lex_names, var_names, fn_names, true),
-        .for_ => |f| {
-            if (f.init) |head| switch (head) {
-                .lexical => |ld| if (ld.kind == .var_) {
-                    for (ld.declarators) |d|
-                        try appendPatternVarNames(self, d.name, var_names);
-                },
-                .expression => {},
-            };
-            try collectScriptDeclNamesOne(self, f.body, lex_names, var_names, fn_names, true);
-        },
-        .for_in_of => |f| {
-            switch (f.left) {
-                .lexical => |ld| if (ld.kind == .var_) {
-                    for (ld.declarators) |d|
-                        try appendPatternVarNames(self, d.name, var_names);
-                },
-                .expression => {},
-            }
-            try collectScriptDeclNamesOne(self, f.body, lex_names, var_names, fn_names, true);
-        },
-        .try_ => |t| {
-            for (t.block.body) |*inner|
-                try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, true);
-            if (t.handler) |h| for (h.body.body) |*inner|
-                try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, true);
-            if (t.finalizer) |fin| for (fin.body) |*inner|
-                try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, true);
-        },
-        .switch_ => |sw| {
-            for (sw.cases) |case| for (case.body) |*inner|
-                try collectScriptDeclNamesOne(self, inner, lex_names, var_names, fn_names, true);
-        },
-        // §14.13 LabelledStatement — transparent to declaration
-        // collection; recurse into the wrapped body so a `var`
-        // inside `lbl: do { … } while (0)` still reaches the
-        // global-decl tally.
-        .labeled => |lb| try collectScriptDeclNamesOne(self, lb.body, lex_names, var_names, fn_names, true),
-        else => {},
-    }
-}
-
-fn appendPatternVarNames(
-    self: *Compiler,
-    target: ast.statement.BindingTarget,
-    var_names: *std.ArrayListUnmanaged(NameAtSpan),
-) CompileError!void {
-    switch (target) {
-        .identifier => |id| {
-            const name = try self.bindingName(id.span);
-            try var_names.append(self.allocator, .{ .name = name, .span = id.span });
-        },
-        .array => |arr| {
-            for (arr.elements) |maybe_elem| {
-                if (maybe_elem) |elem| try appendPatternVarNames(self, elem.target, var_names);
-            }
-            if (arr.rest) |rest| try appendPatternVarNames(self, rest.*, var_names);
-        },
-        .object => |obj| {
-            for (obj.properties) |prop| try appendPatternVarNames(self, prop.value.target, var_names);
-            if (obj.rest) |rest_id| {
-                const name = try self.bindingName(rest_id.span);
-                try var_names.append(self.allocator, .{ .name = name, .span = rest_id.span });
-            }
-        },
-    }
-}
-
-fn appendPatternLexNames(
-    self: *Compiler,
-    target: ast.statement.BindingTarget,
-    lex_names: *std.ArrayListUnmanaged(NameAtSpan),
-) CompileError!void {
-    switch (target) {
-        .identifier => |id| {
-            const name = try self.bindingName(id.span);
-            try lex_names.append(self.allocator, .{ .name = name, .span = id.span });
-        },
-        .array => |arr| {
-            for (arr.elements) |maybe_elem| {
-                if (maybe_elem) |elem| try appendPatternLexNames(self, elem.target, lex_names);
-            }
-            if (arr.rest) |rest| try appendPatternLexNames(self, rest.*, lex_names);
-        },
-        .object => |obj| {
-            for (obj.properties) |prop| try appendPatternLexNames(self, prop.value.target, lex_names);
-            if (obj.rest) |rest_id| {
-                const name = try self.bindingName(rest_id.span);
-                try lex_names.append(self.allocator, .{ .name = name, .span = rest_id.span });
-            }
-        },
-    }
-}
-
-/// Emit a runtime `throw new TypeError(message)` sequence — used
-/// when §9.1.1.4.15 / .16 CanDeclareGlobalVar / CanDeclareGlobal
-/// Function returned false during validation. The chunk
-/// otherwise contains no user code, so any reachable observation
-/// from script source is suppressed.
-fn emitGlobalDeclThrow(self: *Compiler, name: []const u8, span: Span) CompileError!void {
-    _ = name;
-    const k_type_error = try self.internString("TypeError");
-    const r_callee = try self.reserveTemp();
-    defer self.releaseTemp();
-    try self.builder.emitOp(.lda_global, span);
-    try self.builder.emitU16(k_type_error);
-    try self.builder.emitOp(.star, span);
-    try self.builder.emitU8(r_callee);
-    try self.builder.emitOp(.new_call, span);
-    try self.builder.emitU8(r_callee);
-    try self.builder.emitU8(0);
-    try self.builder.emitOp(.throw_, span);
-}
-
-/// §9.1.1.4.5 HasRestrictedGlobalProperty — names whose global
-/// binding is created non-configurable by the host (`undefined`,
-/// `NaN`, `Infinity`). A script-mode `let` / `const` / `class`
-/// trying to bind one of these is a §16.1.7 step 5.c SyntaxError.
-fn isRestrictedGlobalName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "undefined") or
-        std.mem.eql(u8, name, "NaN") or
-        std.mem.eql(u8, name, "Infinity");
-}
-
-/// `inside_nested_block` is true when this statement is reached by
-/// recursive descent through a Block / SwitchCase / IfBranch / loop
-/// body / try-block / etc. — i.e. it's NOT a direct child of the
-/// enclosing function / script body. The flag gates strict-mode-
-/// only block scoping for `async` / `generator` / `async generator`
-/// function declarations (§14.2.5 / §14.12.4): those forms have
-/// never participated in Annex B web-compat hoisting, so even when
-/// the surrounding code might rely on legacy `var` visibility for
-/// plain `function`, the three async/gen forms in a nested block
-/// must NOT hoist to the enclosing function/script scope.
-fn hoistStatement(self: *Compiler, s: *ast.statement.Statement, inside_nested_block: bool) CompileError!void {
-    switch (s.*) {
-        .lexical => |ld| {
-            if (ld.kind != .var_) return;
-            for (ld.declarators) |d| {
-                try self.declarePatternVarBindings(d.name);
-            }
-        },
-        .function_decl => |fd| {
-            if (inside_nested_block) {
-                // §14.2.5 / §14.12.4 strict-mode block scope.
-                // ALL function-decl forms (plain, async, generator,
-                // async-generator) are lex-scoped to the enclosing
-                // block in strict mode — Cynic is strict-only and
-                // doesn't ship Annex B B.3.3 web-compat hoisting,
-                // so a `{ function f() {} }` at script top level
-                // must NOT make `f` visible outside the block.
-                // Leave it to `compileFunctionDecl` (which lex-
-                // binds via the current Scope) to install the
-                // binding at emission time.
-                return;
-            }
-            // §12.7 — declare against StringValue.
-            const name = try self.bindingName(fd.name.span);
-            _ = try self.declareBindingFull(name, .var_, fd.name.span);
-        },
-        // sec-moduledeclarationinstantiation step 17 -- function /
-        // generator / async-function declarations exported via
-        // `export <decl>` get hoisted into the module's lexical env
-        // identically to the plain unwrapped forms. Without this, the
-        // bound name lazily appears in source order and module cycles
-        // observe `undefined` for the cross-reference.
-        .export_decl => |ed| switch (ed.body) {
-            .declaration => |inner| try self.hoistStatement(inner, inside_nested_block),
-            else => {},
-        },
-        .block => |b| for (b.body) |*inner| try self.hoistStatement(inner, true),
-        .if_ => |i| {
-            try self.hoistStatement(i.consequent, true);
-            if (i.alternate) |alt| try self.hoistStatement(alt, true);
-        },
-        .while_ => |w| try self.hoistStatement(w.body, true),
-        .do_while => |dw| try self.hoistStatement(dw.body, true),
-        .for_ => |f| {
-            if (f.init) |head| switch (head) {
-                .lexical => |ld| if (ld.kind == .var_) {
-                    for (ld.declarators) |d| try self.declarePatternVarBindings(d.name);
-                },
-                .expression => {},
-            };
-            try self.hoistStatement(f.body, true);
-        },
-        .for_in_of => |f| {
-            switch (f.left) {
-                .lexical => |ld| if (ld.kind == .var_) {
-                    for (ld.declarators) |d| try self.declarePatternVarBindings(d.name);
-                },
-                .expression => {},
-            }
-            try self.hoistStatement(f.body, true);
-        },
-        .try_ => |t| {
-            for (t.block.body) |*inner| try self.hoistStatement(inner, true);
-            if (t.handler) |h| for (h.body.body) |*inner| try self.hoistStatement(inner, true);
-            if (t.finalizer) |fin| for (fin.body) |*inner| try self.hoistStatement(inner, true);
-        },
-        .switch_ => |sw| {
-            for (sw.cases) |case| for (case.body) |*inner| try self.hoistStatement(inner, true);
-        },
-        // §14.13 LabelledStatement — `LABEL : Statement` is
-        // transparent to var-hoisting; the wrapped iteration /
-        // block / etc. still contributes its `var` and function
-        // declarations to the enclosing function / script scope.
-        // Without this recursion, `lbl: do { var x; } while (0)`
-        // would fail compileLexicalDecl's resolve() lookup with
-        // UnresolvedReference because hoistStatement skipped the
-        // body.
-        .labeled => |lb| try self.hoistStatement(lb.body, true),
-        // Nested function / class / arrow bodies have their own
-        // function-like scope and are handled by their own
-        // `hoistVarAndFunctions` call. Other statement shapes
-        // (expression, return, throw, break, continue, debugger,
-        // import / export) carry no `var` / function-decl
-        // children we need to walk.
-        else => {},
-    }
-}
-
-fn declarePatternVarBindings(self: *Compiler, target: ast.statement.BindingTarget) CompileError!void {
-    switch (target) {
-        .identifier => |id| {
-            const name = try self.bindingName(id.span);
-            _ = try self.declareBindingFull(name, .var_, id.span);
-        },
-        .array => |arr| {
-            for (arr.elements) |maybe_elem| {
-                if (maybe_elem) |elem| try self.declarePatternVarBindings(elem.target);
-            }
-            if (arr.rest) |rest| try self.declarePatternVarBindings(rest.*);
-        },
-        .object => |obj| {
-            for (obj.properties) |prop| try self.declarePatternVarBindings(prop.value.target);
-            if (obj.rest) |rest_id| {
-                const name = try self.bindingName(rest_id.span);
-                _ = try self.declareBindingFull(name, .var_, rest_id.span);
-            }
-        },
-    }
-}
-
-/// Emit `lda_undefined; sta_env 0 slot` for every non-global
-/// `var` binding currently in the function-like scope.
-/// `make_environment` allocates slots filled with the TDZ Hole;
-/// reading a hoisted `var` before its initialiser would otherwise
-/// see Hole and trip `throw_if_hole`. Globals are pre-initialised
-/// to `undefined` in the realm map by `declareBindingFull` so
-/// they don't need bytecode here.
-fn emitVarInits(self: *Compiler, span: Span) CompileError!void {
-    const fn_scope = self.functionScope();
-    var emitted_undef = false;
-    for (fn_scope.bindings.items) |b| {
-        if (b.kind != .var_ or b.is_global) continue;
-        if (!emitted_undef) {
-            try self.builder.emitOp(.lda_undefined, span);
-            emitted_undef = true;
         }
-        try self.builder.emitOp(.sta_env, span);
-        try self.builder.emitU8(0); // depth=0 — the freshly-pushed env
-        try self.builder.emitU8(b.env_slot);
     }
-}
 
-/// Count every BindingIdentifier produced by `target`. Used by
-/// for-of with a destructuring lhs to size the per-iteration
-/// environment ahead of `make_environment`.
-fn countPatternBindings(target: ast.statement.BindingTarget) u8 {
-    return switch (target) {
-        .identifier => 1,
-        .array => |arr_pat| blk: {
-            var n: u8 = 0;
-            for (arr_pat.elements) |maybe_elem| {
-                if (maybe_elem) |elem| n +|= countPatternBindings(elem.target);
+    fn appendPatternVarNames(
+        self: *Compiler,
+        target: ast.statement.BindingTarget,
+        var_names: *std.ArrayListUnmanaged(NameAtSpan),
+    ) CompileError!void {
+        switch (target) {
+            .identifier => |id| {
+                const name = try self.bindingName(id.span);
+                try var_names.append(self.allocator, .{ .name = name, .span = id.span });
+            },
+            .array => |arr| {
+                for (arr.elements) |maybe_elem| {
+                    if (maybe_elem) |elem| try appendPatternVarNames(self, elem.target, var_names);
+                }
+                if (arr.rest) |rest| try appendPatternVarNames(self, rest.*, var_names);
+            },
+            .object => |obj| {
+                for (obj.properties) |prop| try appendPatternVarNames(self, prop.value.target, var_names);
+                if (obj.rest) |rest_id| {
+                    const name = try self.bindingName(rest_id.span);
+                    try var_names.append(self.allocator, .{ .name = name, .span = rest_id.span });
+                }
+            },
+        }
+    }
+
+    fn appendPatternLexNames(
+        self: *Compiler,
+        target: ast.statement.BindingTarget,
+        lex_names: *std.ArrayListUnmanaged(NameAtSpan),
+    ) CompileError!void {
+        switch (target) {
+            .identifier => |id| {
+                const name = try self.bindingName(id.span);
+                try lex_names.append(self.allocator, .{ .name = name, .span = id.span });
+            },
+            .array => |arr| {
+                for (arr.elements) |maybe_elem| {
+                    if (maybe_elem) |elem| try appendPatternLexNames(self, elem.target, lex_names);
+                }
+                if (arr.rest) |rest| try appendPatternLexNames(self, rest.*, lex_names);
+            },
+            .object => |obj| {
+                for (obj.properties) |prop| try appendPatternLexNames(self, prop.value.target, lex_names);
+                if (obj.rest) |rest_id| {
+                    const name = try self.bindingName(rest_id.span);
+                    try lex_names.append(self.allocator, .{ .name = name, .span = rest_id.span });
+                }
+            },
+        }
+    }
+
+    /// Emit a runtime `throw new TypeError(message)` sequence — used
+    /// when §9.1.1.4.15 / .16 CanDeclareGlobalVar / CanDeclareGlobal
+    /// Function returned false during validation. The chunk
+    /// otherwise contains no user code, so any reachable observation
+    /// from script source is suppressed.
+    fn emitGlobalDeclThrow(self: *Compiler, name: []const u8, span: Span) CompileError!void {
+        _ = name;
+        const k_type_error = try self.internString("TypeError");
+        const r_callee = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.lda_global, span);
+        try self.builder.emitU16(k_type_error);
+        try self.builder.emitOp(.star, span);
+        try self.builder.emitU8(r_callee);
+        try self.builder.emitOp(.new_call, span);
+        try self.builder.emitU8(r_callee);
+        try self.builder.emitU8(0);
+        try self.builder.emitOp(.throw_, span);
+    }
+
+    /// §9.1.1.4.5 HasRestrictedGlobalProperty — names whose global
+    /// binding is created non-configurable by the host (`undefined`,
+    /// `NaN`, `Infinity`). A script-mode `let` / `const` / `class`
+    /// trying to bind one of these is a §16.1.7 step 5.c SyntaxError.
+    fn isRestrictedGlobalName(name: []const u8) bool {
+        return std.mem.eql(u8, name, "undefined") or
+            std.mem.eql(u8, name, "NaN") or
+            std.mem.eql(u8, name, "Infinity");
+    }
+
+    /// `inside_nested_block` is true when this statement is reached by
+    /// recursive descent through a Block / SwitchCase / IfBranch / loop
+    /// body / try-block / etc. — i.e. it's NOT a direct child of the
+    /// enclosing function / script body. The flag gates strict-mode-
+    /// only block scoping for `async` / `generator` / `async generator`
+    /// function declarations (§14.2.5 / §14.12.4): those forms have
+    /// never participated in Annex B web-compat hoisting, so even when
+    /// the surrounding code might rely on legacy `var` visibility for
+    /// plain `function`, the three async/gen forms in a nested block
+    /// must NOT hoist to the enclosing function/script scope.
+    fn hoistStatement(self: *Compiler, s: *ast.statement.Statement, inside_nested_block: bool) CompileError!void {
+        switch (s.*) {
+            .lexical => |ld| {
+                if (ld.kind != .var_) return;
+                for (ld.declarators) |d| {
+                    try self.declarePatternVarBindings(d.name);
+                }
+            },
+            .function_decl => |fd| {
+                if (inside_nested_block) {
+                    // §14.2.5 / §14.12.4 strict-mode block scope.
+                    // ALL function-decl forms (plain, async, generator,
+                    // async-generator) are lex-scoped to the enclosing
+                    // block in strict mode — Cynic is strict-only and
+                    // doesn't ship Annex B B.3.3 web-compat hoisting,
+                    // so a `{ function f() {} }` at script top level
+                    // must NOT make `f` visible outside the block.
+                    // Leave it to `compileFunctionDecl` (which lex-
+                    // binds via the current Scope) to install the
+                    // binding at emission time.
+                    return;
+                }
+                // §12.7 — declare against StringValue.
+                const name = try self.bindingName(fd.name.span);
+                _ = try self.declareBindingFull(name, .var_, fd.name.span);
+            },
+            // sec-moduledeclarationinstantiation step 17 -- function /
+            // generator / async-function declarations exported via
+            // `export <decl>` get hoisted into the module's lexical env
+            // identically to the plain unwrapped forms. Without this, the
+            // bound name lazily appears in source order and module cycles
+            // observe `undefined` for the cross-reference.
+            .export_decl => |ed| switch (ed.body) {
+                .declaration => |inner| try self.hoistStatement(inner, inside_nested_block),
+                else => {},
+            },
+            .block => |b| for (b.body) |*inner| try self.hoistStatement(inner, true),
+            .if_ => |i| {
+                try self.hoistStatement(i.consequent, true);
+                if (i.alternate) |alt| try self.hoistStatement(alt, true);
+            },
+            .while_ => |w| try self.hoistStatement(w.body, true),
+            .do_while => |dw| try self.hoistStatement(dw.body, true),
+            .for_ => |f| {
+                if (f.init) |head| switch (head) {
+                    .lexical => |ld| if (ld.kind == .var_) {
+                        for (ld.declarators) |d| try self.declarePatternVarBindings(d.name);
+                    },
+                    .expression => {},
+                };
+                try self.hoistStatement(f.body, true);
+            },
+            .for_in_of => |f| {
+                switch (f.left) {
+                    .lexical => |ld| if (ld.kind == .var_) {
+                        for (ld.declarators) |d| try self.declarePatternVarBindings(d.name);
+                    },
+                    .expression => {},
+                }
+                try self.hoistStatement(f.body, true);
+            },
+            .try_ => |t| {
+                for (t.block.body) |*inner| try self.hoistStatement(inner, true);
+                if (t.handler) |h| for (h.body.body) |*inner| try self.hoistStatement(inner, true);
+                if (t.finalizer) |fin| for (fin.body) |*inner| try self.hoistStatement(inner, true);
+            },
+            .switch_ => |sw| {
+                for (sw.cases) |case| for (case.body) |*inner| try self.hoistStatement(inner, true);
+            },
+            // §14.13 LabelledStatement — `LABEL : Statement` is
+            // transparent to var-hoisting; the wrapped iteration /
+            // block / etc. still contributes its `var` and function
+            // declarations to the enclosing function / script scope.
+            // Without this recursion, `lbl: do { var x; } while (0)`
+            // would fail compileLexicalDecl's resolve() lookup with
+            // UnresolvedReference because hoistStatement skipped the
+            // body.
+            .labeled => |lb| try self.hoistStatement(lb.body, true),
+            // Nested function / class / arrow bodies have their own
+            // function-like scope and are handled by their own
+            // `hoistVarAndFunctions` call. Other statement shapes
+            // (expression, return, throw, break, continue, debugger,
+            // import / export) carry no `var` / function-decl
+            // children we need to walk.
+            else => {},
+        }
+    }
+
+    fn declarePatternVarBindings(self: *Compiler, target: ast.statement.BindingTarget) CompileError!void {
+        switch (target) {
+            .identifier => |id| {
+                const name = try self.bindingName(id.span);
+                _ = try self.declareBindingFull(name, .var_, id.span);
+            },
+            .array => |arr| {
+                for (arr.elements) |maybe_elem| {
+                    if (maybe_elem) |elem| try self.declarePatternVarBindings(elem.target);
+                }
+                if (arr.rest) |rest| try self.declarePatternVarBindings(rest.*);
+            },
+            .object => |obj| {
+                for (obj.properties) |prop| try self.declarePatternVarBindings(prop.value.target);
+                if (obj.rest) |rest_id| {
+                    const name = try self.bindingName(rest_id.span);
+                    _ = try self.declareBindingFull(name, .var_, rest_id.span);
+                }
+            },
+        }
+    }
+
+    /// Emit `lda_undefined; sta_env 0 slot` for every non-global
+    /// `var` binding currently in the function-like scope.
+    /// `make_environment` allocates slots filled with the TDZ Hole;
+    /// reading a hoisted `var` before its initialiser would otherwise
+    /// see Hole and trip `throw_if_hole`. Globals are pre-initialised
+    /// to `undefined` in the realm map by `declareBindingFull` so
+    /// they don't need bytecode here.
+    fn emitVarInits(self: *Compiler, span: Span) CompileError!void {
+        const fn_scope = self.functionScope();
+        var emitted_undef = false;
+        for (fn_scope.bindings.items) |b| {
+            if (b.kind != .var_ or b.is_global) continue;
+            if (!emitted_undef) {
+                try self.builder.emitOp(.lda_undefined, span);
+                emitted_undef = true;
             }
-            if (arr_pat.rest) |rest_target| n +|= countPatternBindings(rest_target.*);
-            break :blk n;
-        },
-        .object => |obj_pat| blk: {
-            var n: u8 = 0;
-            for (obj_pat.properties) |prop| n +|= countPatternBindings(prop.value.target);
-            if (obj_pat.rest) |_| n +|= 1;
-            break :blk n;
-        },
-    };
-}
+            try self.builder.emitOp(.sta_env, span);
+            try self.builder.emitU8(0); // depth=0 — the freshly-pushed env
+            try self.builder.emitU8(b.env_slot);
+        }
+    }
 
-/// Recursively declare every BindingIdentifier inside a
-/// destructuring pattern. later only supports shallow
-/// patterns — nested patterns / rest elements with patterns
-/// are later.
-fn declarePatternBindings(self: *Compiler, target: ast.statement.BindingTarget, kind: BindingKind) CompileError!void {
-    switch (target) {
-        .identifier => |id| {
-            const name = try self.bindingName(id.span);
-            _ = try self.declareBinding(name, kind, id.span);
-        },
-        .array => |arr_pat| {
-            for (arr_pat.elements) |maybe_elem| {
-                if (maybe_elem) |elem| {
-                    try self.declarePatternBindings(elem.target, kind);
+    /// Count every BindingIdentifier produced by `target`. Used by
+    /// for-of with a destructuring lhs to size the per-iteration
+    /// environment ahead of `make_environment`.
+    fn countPatternBindings(target: ast.statement.BindingTarget) u8 {
+        return switch (target) {
+            .identifier => 1,
+            .array => |arr_pat| blk: {
+                var n: u8 = 0;
+                for (arr_pat.elements) |maybe_elem| {
+                    if (maybe_elem) |elem| n +|= countPatternBindings(elem.target);
+                }
+                if (arr_pat.rest) |rest_target| n +|= countPatternBindings(rest_target.*);
+                break :blk n;
+            },
+            .object => |obj_pat| blk: {
+                var n: u8 = 0;
+                for (obj_pat.properties) |prop| n +|= countPatternBindings(prop.value.target);
+                if (obj_pat.rest) |_| n +|= 1;
+                break :blk n;
+            },
+        };
+    }
+
+    /// Recursively declare every BindingIdentifier inside a
+    /// destructuring pattern. later only supports shallow
+    /// patterns — nested patterns / rest elements with patterns
+    /// are later.
+    fn declarePatternBindings(self: *Compiler, target: ast.statement.BindingTarget, kind: BindingKind) CompileError!void {
+        switch (target) {
+            .identifier => |id| {
+                const name = try self.bindingName(id.span);
+                _ = try self.declareBinding(name, kind, id.span);
+            },
+            .array => |arr_pat| {
+                for (arr_pat.elements) |maybe_elem| {
+                    if (maybe_elem) |elem| {
+                        try self.declarePatternBindings(elem.target, kind);
+                    }
+                }
+                if (arr_pat.rest) |rest_target| {
+                    try self.declarePatternBindings(rest_target.*, kind);
+                }
+            },
+            .object => |obj_pat| {
+                for (obj_pat.properties) |prop| {
+                    try self.declarePatternBindings(prop.value.target, kind);
+                }
+                if (obj_pat.rest) |rest_id| {
+                    const name = try self.bindingName(rest_id.span);
+                    _ = try self.declareBinding(name, kind, rest_id.span);
+                }
+            },
+        }
+    }
+
+    fn compileLexicalDecl(self: *Compiler, ld: ast.statement.LexicalDecl) CompileError!void {
+        if (ld.kind == .var_) {
+            // `var` bindings (and their function-scope slots) were
+            // pre-declared and pre-initialised to `undefined` by
+            // `hoistVarAndFunctions` + `emitVarInits` at function /
+            // script entry. The work here is just running the
+            // initialiser when one's present.
+            for (ld.declarators) |d| {
+                switch (d.name) {
+                    .identifier => |id| {
+                        // §12.7 — `var` binding name is the StringValue.
+                        const name = try self.bindingName(id.span);
+                        if (d.init) |*init_expr| {
+                            // §14.3.1.2 — anonymous function-likes
+                            // adopt the binding identifier as `.name`.
+                            try self.compileNamedValue(init_expr, name);
+                            const binding = self.scope.?.resolve(name) orelse blk: {
+                                // Hoist always declares; the only way to
+                                // miss is a cross-realm shadow on the
+                                // global object (treat as global write).
+                                if (self.realm.globals.contains(name)) {
+                                    break :blk Binding{
+                                        .name = name,
+                                        .env_slot = 0,
+                                        .env_depth = 0,
+                                        .kind = .var_,
+                                        .span = d.span,
+                                        .is_global = true,
+                                    };
+                                }
+                                std.debug.print("DEBUG: UnresolvedReference for var '{s}'\n", .{name});
+                                return error.UnresolvedReference;
+                            };
+                            try self.emitStoreBinding(binding, d.span);
+                        }
+                        // No init: hoist already wrote undefined.
+                    },
+                    else => {
+                        if (d.init) |*init_expr| {
+                            try self.compileExpression(init_expr);
+                        } else {
+                            try self.builder.emitOp(.lda_undefined, d.span);
+                        }
+                        try self.compileDestructure(d.name);
+                    },
                 }
             }
-            if (arr_pat.rest) |rest_target| {
-                try self.declarePatternBindings(rest_target.*, kind);
-            }
-        },
-        .object => |obj_pat| {
-            for (obj_pat.properties) |prop| {
-                try self.declarePatternBindings(prop.value.target, kind);
-            }
-            if (obj_pat.rest) |rest_id| {
-                const name = try self.bindingName(rest_id.span);
-                _ = try self.declareBinding(name, kind, rest_id.span);
-            }
-        },
-    }
-}
-
-fn compileLexicalDecl(self: *Compiler, ld: ast.statement.LexicalDecl) CompileError!void {
-    if (ld.kind == .var_) {
-        // `var` bindings (and their function-scope slots) were
-        // pre-declared and pre-initialised to `undefined` by
-        // `hoistVarAndFunctions` + `emitVarInits` at function /
-        // script entry. The work here is just running the
-        // initialiser when one's present.
+            return;
+        }
+        // `let` / `const` slots were pre-allocated by hoistLetConst
+        // in the enclosing scope. Evaluate the initialiser and store.
         for (ld.declarators) |d| {
             switch (d.name) {
                 .identifier => |id| {
-                    // §12.7 — `var` binding name is the StringValue.
+                    // §12.7 — `let`/`const` binding name is the StringValue.
                     const name = try self.bindingName(id.span);
+                    const binding = self.scope.?.lookupLocal(name) orelse return error.UnresolvedReference;
                     if (d.init) |*init_expr| {
-                        // §14.3.1.2 — anonymous function-likes
-                        // adopt the binding identifier as `.name`.
+                        // §14.3.1.2 — anonymous function-likes adopt
+                        // the binding identifier as their `.name`.
                         try self.compileNamedValue(init_expr, name);
-                        const binding = self.scope.?.resolve(name) orelse blk: {
-                            // Hoist always declares; the only way to
-                            // miss is a cross-realm shadow on the
-                            // global object (treat as global write).
-                            if (self.realm.globals.contains(name)) {
-                                break :blk Binding{
-                                    .name = name,
-                                    .env_slot = 0,
-                                    .env_depth = 0,
-                                    .kind = .var_,
-                                    .span = d.span,
-                                    .is_global = true,
-                                };
-                            }
-                            std.debug.print("DEBUG: UnresolvedReference for var '{s}'\n", .{name});
-                            return error.UnresolvedReference;
-                        };
-                        try self.emitStoreBinding(binding, d.span);
+                    } else {
+                        // §14.3.1 — `const x;` is a SyntaxError (already
+                        // rejected by the parser via `const_without_initializer`).
+                        // For `let x;` (no init), the binding becomes
+                        // `undefined` once the declaration is reached.
+                        try self.builder.emitOp(.lda_undefined, d.span);
                     }
-                    // No init: hoist already wrote undefined.
+                    // §9.1.1.4 InitializeBinding — initializer write,
+                    // not assignment.
+                    try self.emitStoreBindingInit(binding, d.span);
                 },
                 else => {
                     if (d.init) |*init_expr| {
                         try self.compileExpression(init_expr);
                     } else {
+                        // Pattern targets require an initialiser per
+                        // spec; the parser may not have caught it,
+                        // so emit `undefined` and let defaults fire.
                         try self.builder.emitOp(.lda_undefined, d.span);
                     }
                     try self.compileDestructure(d.name);
                 },
             }
         }
-        return;
     }
-    // `let` / `const` slots were pre-allocated by hoistLetConst
-    // in the enclosing scope. Evaluate the initialiser and store.
-    for (ld.declarators) |d| {
-        switch (d.name) {
+
+    /// Walk a destructuring pattern, assigning each leaf binding
+    /// from the value currently in the accumulator. later
+    /// supports shallow nesting; computed keys, rest elements, and
+    /// rest-with-pattern are later.
+    fn compileDestructure(self: *Compiler, target: ast.statement.BindingTarget) CompileError!void {
+        const r_src = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, target.span());
+        try self.builder.emitU8(r_src);
+
+        switch (target) {
             .identifier => |id| {
-                // §12.7 — `let`/`const` binding name is the StringValue.
+                // Tolerated path for nested cases — declarators with
+                // a plain ident name have already taken the direct
+                // sta_env path above. §12.7 — bind by StringValue.
                 const name = try self.bindingName(id.span);
-                const binding = self.scope.?.lookupLocal(name) orelse return error.UnresolvedReference;
-                if (d.init) |*init_expr| {
-                    // §14.3.1.2 — anonymous function-likes adopt
-                    // the binding identifier as their `.name`.
-                    try self.compileNamedValue(init_expr, name);
-                } else {
-                    // §14.3.1 — `const x;` is a SyntaxError (already
-                    // rejected by the parser via `const_without_initializer`).
-                    // For `let x;` (no init), the binding becomes
-                    // `undefined` once the declaration is reached.
-                    try self.builder.emitOp(.lda_undefined, d.span);
-                }
-                // §9.1.1.4 InitializeBinding — initializer write,
-                // not assignment.
-                try self.emitStoreBindingInit(binding, d.span);
+                try self.builder.emitOp(.ldar, id.span);
+                try self.builder.emitU8(r_src);
+                try self.assignToBinding(name, id.span);
             },
-            else => {
-                if (d.init) |*init_expr| {
-                    try self.compileExpression(init_expr);
-                } else {
-                    // Pattern targets require an initialiser per
-                    // spec; the parser may not have caught it,
-                    // so emit `undefined` and let defaults fire.
-                    try self.builder.emitOp(.lda_undefined, d.span);
+            .array => |arr_pat| {
+                // §14.3.3.5 IteratorBindingInitialization for an
+                // ArrayBindingPattern — open an iterator on `src`,
+                // step it once per pattern element (binding the
+                // result, or `undefined` on done), collect any rest
+                // through repeated `iter_step`, and close the iter
+                // afterwards if it didn't fully drain (§7.4.10).
+                try self.builder.emitOp(.ldar, target.span());
+                try self.builder.emitU8(r_src);
+                try self.builder.emitOp(.iter_open, target.span());
+                const r_iter = try self.reserveTemp();
+                defer self.releaseTemp();
+                try self.builder.emitOp(.star, target.span());
+                try self.builder.emitU8(r_iter);
+                const r_done = try self.reserveTemp();
+                defer self.releaseTemp();
+
+                for (arr_pat.elements) |maybe_elem| {
+                    if (maybe_elem) |elem| {
+                        try self.builder.emitOp(.iter_step, elem.span);
+                        try self.builder.emitU8(r_iter);
+                        try self.builder.emitU8(r_done);
+                        try self.applyDefaultIfNeeded(elem);
+                        try self.assignPatternLeaf(elem.target);
+                    } else {
+                        // Elision — step the iter, discard the value.
+                        try self.builder.emitOp(.iter_step, target.span());
+                        try self.builder.emitU8(r_iter);
+                        try self.builder.emitU8(r_done);
+                    }
                 }
-                try self.compileDestructure(d.name);
-            },
-        }
-    }
-}
 
-/// Walk a destructuring pattern, assigning each leaf binding
-/// from the value currently in the accumulator. later
-/// supports shallow nesting; computed keys, rest elements, and
-/// rest-with-pattern are later.
-fn compileDestructure(self: *Compiler, target: ast.statement.BindingTarget) CompileError!void {
-    const r_src = try self.reserveTemp();
-    defer self.releaseTemp();
-    try self.builder.emitOp(.star, target.span());
-    try self.builder.emitU8(r_src);
+                if (arr_pat.rest) |rest_target| {
+                    // §14.3.3.4 BindingRestElement — drain the iter
+                    // into a fresh Array. `iter_step` marks the iter
+                    // done when it surfaces `done: true`, so the
+                    // closing `iter_close` below is a no-op for the
+                    // rest case.
+                    const r_rest = try self.reserveTemp();
+                    defer self.releaseTemp();
+                    const r_idx = try self.reserveTemp();
+                    defer self.releaseTemp();
+                    try self.builder.emitOp(.make_array, target.span());
+                    try self.builder.emitOp(.star, target.span());
+                    try self.builder.emitU8(r_rest);
+                    try self.builder.emitOp(.lda_smi, target.span());
+                    try self.builder.emitI32(0);
+                    try self.builder.emitOp(.star, target.span());
+                    try self.builder.emitU8(r_idx);
 
-    switch (target) {
-        .identifier => |id| {
-            // Tolerated path for nested cases — declarators with
-            // a plain ident name have already taken the direct
-            // sta_env path above. §12.7 — bind by StringValue.
-            const name = try self.bindingName(id.span);
-            try self.builder.emitOp(.ldar, id.span);
-            try self.builder.emitU8(r_src);
-            try self.assignToBinding(name, id.span);
-        },
-        .array => |arr_pat| {
-            // §14.3.3.5 IteratorBindingInitialization for an
-            // ArrayBindingPattern — open an iterator on `src`,
-            // step it once per pattern element (binding the
-            // result, or `undefined` on done), collect any rest
-            // through repeated `iter_step`, and close the iter
-            // afterwards if it didn't fully drain (§7.4.10).
-            try self.builder.emitOp(.ldar, target.span());
-            try self.builder.emitU8(r_src);
-            try self.builder.emitOp(.iter_open, target.span());
-            const r_iter = try self.reserveTemp();
-            defer self.releaseTemp();
-            try self.builder.emitOp(.star, target.span());
-            try self.builder.emitU8(r_iter);
-            const r_done = try self.reserveTemp();
-            defer self.releaseTemp();
-
-            for (arr_pat.elements) |maybe_elem| {
-                if (maybe_elem) |elem| {
-                    try self.builder.emitOp(.iter_step, elem.span);
-                    try self.builder.emitU8(r_iter);
-                    try self.builder.emitU8(r_done);
-                    try self.applyDefaultIfNeeded(elem);
-                    try self.assignPatternLeaf(elem.target);
-                } else {
-                    // Elision — step the iter, discard the value.
+                    const r_val = try self.reserveTemp();
+                    defer self.releaseTemp();
+                    const loop_start = self.builder.here();
                     try self.builder.emitOp(.iter_step, target.span());
                     try self.builder.emitU8(r_iter);
                     try self.builder.emitU8(r_done);
+                    // Snapshot the stepped value — the `ldar r_done`
+                    // below clobbers `acc`.
+                    try self.builder.emitOp(.star, target.span());
+                    try self.builder.emitU8(r_val);
+                    // if (r_done) jmp loop_end
+                    try self.builder.emitOp(.ldar, target.span());
+                    try self.builder.emitU8(r_done);
+                    try self.builder.emitOp(.jmp_if_true, target.span());
+                    const exit_patch = self.builder.here();
+                    try self.builder.emitI16(0);
+                    // rest[idx] = value
+                    try self.builder.emitOp(.ldar, target.span());
+                    try self.builder.emitU8(r_val);
+                    try self.builder.emitOp(.sta_computed, target.span());
+                    try self.builder.emitU8(r_rest);
+                    try self.builder.emitU8(r_idx);
+                    // idx += 1 — `add r` is `acc = registers[r] + acc`.
+                    try self.builder.emitOp(.lda_smi, target.span());
+                    try self.builder.emitI32(1);
+                    try self.builder.emitOp(.add, target.span());
+                    try self.builder.emitU8(r_idx);
+                    try self.builder.emitOp(.star, target.span());
+                    try self.builder.emitU8(r_idx);
+                    try self.builder.emitOp(.jmp, target.span());
+                    const back_patch = self.builder.here();
+                    try self.builder.emitI16(0);
+                    try self.builder.patchI16(back_patch, loop_start);
+                    const exit_target = self.builder.here();
+                    try self.builder.patchI16(exit_patch, exit_target);
+
+                    // rest array → leaf
+                    try self.builder.emitOp(.ldar, target.span());
+                    try self.builder.emitU8(r_rest);
+                    try self.assignPatternLeaf(rest_target.*);
+                } else {
+                    // §7.4.10 IteratorClose — if the iter is not yet
+                    // done (e.g. `[a, b] = source` where source has
+                    // more than two elements), call `.return()`.
+                    try self.builder.emitOp(.iter_close, target.span());
+                    try self.builder.emitU8(r_iter);
+                    // §7.4.6 — normal completion; propagate inner
+                    // throws and TypeError on non-Object return.
+                    try self.builder.emitU8(0);
                 }
-            }
-
-            if (arr_pat.rest) |rest_target| {
-                // §14.3.3.4 BindingRestElement — drain the iter
-                // into a fresh Array. `iter_step` marks the iter
-                // done when it surfaces `done: true`, so the
-                // closing `iter_close` below is a no-op for the
-                // rest case.
-                const r_rest = try self.reserveTemp();
-                defer self.releaseTemp();
-                const r_idx = try self.reserveTemp();
-                defer self.releaseTemp();
-                try self.builder.emitOp(.make_array, target.span());
-                try self.builder.emitOp(.star, target.span());
-                try self.builder.emitU8(r_rest);
-                try self.builder.emitOp(.lda_smi, target.span());
-                try self.builder.emitI32(0);
-                try self.builder.emitOp(.star, target.span());
-                try self.builder.emitU8(r_idx);
-
-                const r_val = try self.reserveTemp();
-                defer self.releaseTemp();
-                const loop_start = self.builder.here();
-                try self.builder.emitOp(.iter_step, target.span());
-                try self.builder.emitU8(r_iter);
-                try self.builder.emitU8(r_done);
-                // Snapshot the stepped value — the `ldar r_done`
-                // below clobbers `acc`.
-                try self.builder.emitOp(.star, target.span());
-                try self.builder.emitU8(r_val);
-                // if (r_done) jmp loop_end
+            },
+            .object => |obj_pat| {
+                // §13.15.5.4 / §14.3.3 — destructuring an object
+                // pattern starts with RequireObjectCoercible on the
+                // source. `const {} = null` must throw TypeError before
+                // any (zero) property reads happen.
                 try self.builder.emitOp(.ldar, target.span());
-                try self.builder.emitU8(r_done);
-                try self.builder.emitOp(.jmp_if_true, target.span());
-                const exit_patch = self.builder.here();
-                try self.builder.emitI16(0);
-                // rest[idx] = value
-                try self.builder.emitOp(.ldar, target.span());
-                try self.builder.emitU8(r_val);
-                try self.builder.emitOp(.sta_computed, target.span());
-                try self.builder.emitU8(r_rest);
-                try self.builder.emitU8(r_idx);
-                // idx += 1 — `add r` is `acc = registers[r] + acc`.
-                try self.builder.emitOp(.lda_smi, target.span());
-                try self.builder.emitI32(1);
-                try self.builder.emitOp(.add, target.span());
-                try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.star, target.span());
-                try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.jmp, target.span());
-                const back_patch = self.builder.here();
-                try self.builder.emitI16(0);
-                try self.builder.patchI16(back_patch, loop_start);
-                const exit_target = self.builder.here();
-                try self.builder.patchI16(exit_patch, exit_target);
-
-                // rest array → leaf
-                try self.builder.emitOp(.ldar, target.span());
-                try self.builder.emitU8(r_rest);
-                try self.assignPatternLeaf(rest_target.*);
-            } else {
-                // §7.4.10 IteratorClose — if the iter is not yet
-                // done (e.g. `[a, b] = source` where source has
-                // more than two elements), call `.return()`.
-                try self.builder.emitOp(.iter_close, target.span());
-                try self.builder.emitU8(r_iter);
-                // §7.4.6 — normal completion; propagate inner
-                // throws and TypeError on non-Object return.
-                try self.builder.emitU8(0);
-            }
-        },
-        .object => |obj_pat| {
-            // §13.15.5.4 / §14.3.3 — destructuring an object
-            // pattern starts with RequireObjectCoercible on the
-            // source. `const {} = null` must throw TypeError before
-            // any (zero) property reads happen.
-            try self.builder.emitOp(.ldar, target.span());
-            try self.builder.emitU8(r_src);
-            try self.builder.emitOp(.require_object_coercible, target.span());
-            for (obj_pat.properties) |prop| {
-                if (prop.key == .computed) {
-                    // §14.3.3 BindingProperty : ComputedPropertyName
-                    // BindingElement. Step 1: evaluate the key,
-                    // ToPropertyKey-coerce. Step 2: GetV on
-                    // `r_src` via `lda_computed [r_obj]` (key in
-                    // acc, receiver in `r_obj`). The key
-                    // expression is evaluated BEFORE the value
-                    // is read, so a throwing `thrower()` key
-                    // propagates without ever touching the
-                    // value side (test262
-                    // `obj-ptrn-prop-eval-err.case`).
-                    try self.compileExpression(prop.key.computed);
-                    try self.builder.emitOp(.to_property_key, prop.span);
-                    try self.builder.emitOp(.lda_computed, prop.span);
-                    try self.builder.emitU8(r_src);
-                    try self.applyDefaultIfNeeded(prop.value);
-                    try self.assignPatternLeaf(prop.value.target);
-                    continue;
-                }
-                const key_span: Span = switch (prop.key) {
-                    .ident => |s| s,
-                    .string => |s| s,
-                    .numeric => |s| s,
-                    else => return error.UnsupportedStatement,
-                };
-                const key_slice: []const u8 = blk: {
-                    if (prop.key == .string) {
-                        const raw = self.source[key_span.start..key_span.end];
-                        if (raw.len < 2) break :blk raw;
-                        break :blk raw[1 .. raw.len - 1];
-                    }
-                    if (prop.key == .ident) {
-                        break :blk try self.decodeIdentifierName(self.source[key_span.start..key_span.end]);
-                    }
-                    break :blk self.source[key_span.start..key_span.end];
-                };
-                const k = try self.internString(key_slice);
-                try self.builder.emitOp(.ldar, prop.span);
                 try self.builder.emitU8(r_src);
-                try self.builder.emitOp(.lda_property, prop.span);
-                try self.builder.emitU16(k);
-                try self.applyDefaultIfNeeded(prop.value);
-                try self.assignPatternLeaf(prop.value.target);
-            }
-            if (obj_pat.rest) |rest_id| {
-                // §14.3.3.4 RestElement on ObjectPattern — collect
-                // every own enumerable property of `r_src` not in
-                // the excluded list (the previously-bound keys)
-                // into a fresh object.
-                const r_excl = try self.reserveTemp();
-                defer self.releaseTemp();
-                try self.builder.emitOp(.make_array, target.span());
-                try self.builder.emitOp(.star, target.span());
-                try self.builder.emitU8(r_excl);
-                const k_length = try self.internString("length");
-                try self.builder.emitOp(.lda_smi, target.span());
-                try self.builder.emitI32(@intCast(obj_pat.properties.len));
-                try self.builder.emitOp(.sta_property, target.span());
-                try self.builder.emitU16(k_length);
-                try self.builder.emitU8(r_excl);
-                for (obj_pat.properties, 0..) |prop, idx| {
+                try self.builder.emitOp(.require_object_coercible, target.span());
+                for (obj_pat.properties) |prop| {
+                    if (prop.key == .computed) {
+                        // §14.3.3 BindingProperty : ComputedPropertyName
+                        // BindingElement. Step 1: evaluate the key,
+                        // ToPropertyKey-coerce. Step 2: GetV on
+                        // `r_src` via `lda_computed [r_obj]` (key in
+                        // acc, receiver in `r_obj`). The key
+                        // expression is evaluated BEFORE the value
+                        // is read, so a throwing `thrower()` key
+                        // propagates without ever touching the
+                        // value side (test262
+                        // `obj-ptrn-prop-eval-err.case`).
+                        try self.compileExpression(prop.key.computed);
+                        try self.builder.emitOp(.to_property_key, prop.span);
+                        try self.builder.emitOp(.lda_computed, prop.span);
+                        try self.builder.emitU8(r_src);
+                        try self.applyDefaultIfNeeded(prop.value);
+                        try self.assignPatternLeaf(prop.value.target);
+                        continue;
+                    }
                     const key_span: Span = switch (prop.key) {
                         .ident => |s| s,
                         .string => |s| s,
@@ -7520,326 +7477,386 @@ fn compileDestructure(self: *Compiler, target: ast.statement.BindingTarget) Comp
                         break :blk self.source[key_span.start..key_span.end];
                     };
                     const k = try self.internString(key_slice);
-                    try self.builder.emitOp(.lda_constant, target.span());
+                    try self.builder.emitOp(.ldar, prop.span);
+                    try self.builder.emitU8(r_src);
+                    try self.builder.emitOp(.lda_property, prop.span);
                     try self.builder.emitU16(k);
-                    var idx_buf: [16]u8 = undefined;
-                    const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch unreachable;
-                    const idx_k = try self.internString(idx_slice);
-                    try self.builder.emitOp(.sta_property, target.span());
-                    try self.builder.emitU16(idx_k);
-                    try self.builder.emitU8(r_excl);
+                    try self.applyDefaultIfNeeded(prop.value);
+                    try self.assignPatternLeaf(prop.value.target);
                 }
-                try self.builder.emitOp(.object_rest_from, target.span());
-                try self.builder.emitU8(r_src);
-                try self.builder.emitU8(r_excl);
-                const rest_name = self.source[rest_id.span.start..rest_id.span.end];
-                try self.assignToBinding(rest_name, rest_id.span);
-            }
-        },
+                if (obj_pat.rest) |rest_id| {
+                    // §14.3.3.4 RestElement on ObjectPattern — collect
+                    // every own enumerable property of `r_src` not in
+                    // the excluded list (the previously-bound keys)
+                    // into a fresh object.
+                    const r_excl = try self.reserveTemp();
+                    defer self.releaseTemp();
+                    try self.builder.emitOp(.make_array, target.span());
+                    try self.builder.emitOp(.star, target.span());
+                    try self.builder.emitU8(r_excl);
+                    const k_length = try self.internString("length");
+                    try self.builder.emitOp(.lda_smi, target.span());
+                    try self.builder.emitI32(@intCast(obj_pat.properties.len));
+                    try self.builder.emitOp(.sta_property, target.span());
+                    try self.builder.emitU16(k_length);
+                    try self.builder.emitU8(r_excl);
+                    for (obj_pat.properties, 0..) |prop, idx| {
+                        const key_span: Span = switch (prop.key) {
+                            .ident => |s| s,
+                            .string => |s| s,
+                            .numeric => |s| s,
+                            else => return error.UnsupportedStatement,
+                        };
+                        const key_slice: []const u8 = blk: {
+                            if (prop.key == .string) {
+                                const raw = self.source[key_span.start..key_span.end];
+                                if (raw.len < 2) break :blk raw;
+                                break :blk raw[1 .. raw.len - 1];
+                            }
+                            if (prop.key == .ident) {
+                                break :blk try self.decodeIdentifierName(self.source[key_span.start..key_span.end]);
+                            }
+                            break :blk self.source[key_span.start..key_span.end];
+                        };
+                        const k = try self.internString(key_slice);
+                        try self.builder.emitOp(.lda_constant, target.span());
+                        try self.builder.emitU16(k);
+                        var idx_buf: [16]u8 = undefined;
+                        const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch unreachable;
+                        const idx_k = try self.internString(idx_slice);
+                        try self.builder.emitOp(.sta_property, target.span());
+                        try self.builder.emitU16(idx_k);
+                        try self.builder.emitU8(r_excl);
+                    }
+                    try self.builder.emitOp(.object_rest_from, target.span());
+                    try self.builder.emitU8(r_src);
+                    try self.builder.emitU8(r_excl);
+                    const rest_name = self.source[rest_id.span.start..rest_id.span.end];
+                    try self.assignToBinding(rest_name, rest_id.span);
+                }
+            },
+        }
     }
-}
 
-/// §13.15.5 DestructuringAssignment — walk an array_literal or
-/// object_literal AST as an assignment pattern. Source value
-/// is in `acc` on entry; this function consumes it. Leaves can
-/// be IdentifierReference, MemberExpression, nested patterns,
-/// or `target = default`. Spread (`[...rest]` / `{...rest}`)
-/// is a rest element; defaults flow through `applyDefaultExpr`.
-fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) CompileError!void {
-    const r_src = try self.reserveTemp();
-    defer self.releaseTemp();
-    try self.builder.emitOp(.star, target.span());
-    try self.builder.emitU8(r_src);
+    /// §13.15.5 DestructuringAssignment — walk an array_literal or
+    /// object_literal AST as an assignment pattern. Source value
+    /// is in `acc` on entry; this function consumes it. Leaves can
+    /// be IdentifierReference, MemberExpression, nested patterns,
+    /// or `target = default`. Spread (`[...rest]` / `{...rest}`)
+    /// is a rest element; defaults flow through `applyDefaultExpr`.
+    fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) CompileError!void {
+        const r_src = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, target.span());
+        try self.builder.emitU8(r_src);
 
-    switch (target) {
-        .array_literal => |al| {
-            // §13.15.5.5 ArrayAssignmentPattern — open an
-            // iterator on `src` and step it per non-elision
-            // element, then drain (if there's a rest) or close.
-            // Spread (`[...rest]`) can only appear as the last
-            // element per the parser.
-            var rest_arg: ?*ast.expression.Expression = null;
-            var elem_count = al.elements.len;
-            if (al.elements.len > 0) {
-                if (al.elements[al.elements.len - 1]) |last| {
-                    if (last == .spread) {
-                        rest_arg = last.spread.argument;
-                        elem_count -= 1;
+        switch (target) {
+            .array_literal => |al| {
+                // §13.15.5.5 ArrayAssignmentPattern — open an
+                // iterator on `src` and step it per non-elision
+                // element, then drain (if there's a rest) or close.
+                // Spread (`[...rest]`) can only appear as the last
+                // element per the parser.
+                var rest_arg: ?*ast.expression.Expression = null;
+                var elem_count = al.elements.len;
+                if (al.elements.len > 0) {
+                    if (al.elements[al.elements.len - 1]) |last| {
+                        if (last == .spread) {
+                            rest_arg = last.spread.argument;
+                            elem_count -= 1;
+                        }
                     }
                 }
-            }
 
-            try self.builder.emitOp(.ldar, target.span());
-            try self.builder.emitU8(r_src);
-            try self.builder.emitOp(.iter_open, target.span());
-            const r_iter = try self.reserveTemp();
-            defer self.releaseTemp();
-            try self.builder.emitOp(.star, target.span());
-            try self.builder.emitU8(r_iter);
-            const r_done = try self.reserveTemp();
-            defer self.releaseTemp();
-
-            // §13.15.5.2 ArrayAssignmentPattern step 5 — if any
-            // abrupt completion (throw OR return-completion in a
-            // generator) escapes the destructure walk and the
-            // iterator is not yet [[Done]], IteratorClose must run.
-            // Wrap from just after iter_open through the trailing
-            // close/drain in a synthetic handler that calls
-            // iter_close r_iter in throw mode and rethrows.
-            const handler_start_pc = self.builder.here();
-
-            for (al.elements[0..elem_count]) |maybe_elt| {
-                if (maybe_elt) |elt| {
-                    // §13.15.5.4 IteratorDestructuringAssignmentEval
-                    // step 5 — when AssignmentElement.target is not
-                    // an Object/ArrayLiteral, evaluate the LHS
-                    // reference BEFORE pulling the next value from
-                    // the iterator. Mirror of the object-pattern
-                    // pre-eval above.
-                    const leaf_target = destructureLeafTarget(elt);
-                    const prepared = try self.prepareAssignmentLeaf(leaf_target);
-                    try self.builder.emitOp(.iter_step, target.span());
-                    try self.builder.emitU8(r_iter);
-                    try self.builder.emitU8(r_done);
-                    try self.assignAssignmentPatternElemPrepared(elt, prepared);
-                    self.releasePreparedLeaf(prepared);
-                } else {
-                    // Elision — step and discard.
-                    try self.builder.emitOp(.iter_step, target.span());
-                    try self.builder.emitU8(r_iter);
-                    try self.builder.emitU8(r_done);
-                }
-            }
-
-            if (rest_arg) |arg| {
-                // §13.15.5.3 AssignmentRestElement step 1 — when the
-                // rest target is neither an ObjectLiteral nor an
-                // ArrayLiteral, evaluate its LHS reference BEFORE
-                // draining the iterator (so a throwing lref —
-                // `[...{}[thrower()]]` — fires before any further
-                // iter_step). Inner pattern leaves walk through the
-                // assignAssignmentPatternLeaf branch and don't need
-                // pre-eval here.
-                const rest_inner = blk: {
-                    var t = arg.*;
-                    while (t == .parenthesized) t = t.parenthesized.expression.*;
-                    break :blk t;
-                };
-                const rest_is_pattern = rest_inner == .array_literal or rest_inner == .object_literal;
-                const rest_prepared: PreparedLeaf = if (rest_is_pattern)
-                    .none
-                else
-                    try self.prepareAssignmentLeaf(arg.*);
-
-                // Drain the iterator into a fresh Array, then
-                // bind it to the rest leaf.
-                const r_rest = try self.reserveTemp();
+                try self.builder.emitOp(.ldar, target.span());
+                try self.builder.emitU8(r_src);
+                try self.builder.emitOp(.iter_open, target.span());
+                const r_iter = try self.reserveTemp();
                 defer self.releaseTemp();
-                const r_idx = try self.reserveTemp();
-                defer self.releaseTemp();
-                const r_val = try self.reserveTemp();
-                defer self.releaseTemp();
-                try self.builder.emitOp(.make_array, target.span());
                 try self.builder.emitOp(.star, target.span());
-                try self.builder.emitU8(r_rest);
-                try self.builder.emitOp(.lda_smi, target.span());
-                try self.builder.emitI32(0);
-                try self.builder.emitOp(.star, target.span());
-                try self.builder.emitU8(r_idx);
-
-                const loop_start = self.builder.here();
-                try self.builder.emitOp(.iter_step, target.span());
                 try self.builder.emitU8(r_iter);
-                try self.builder.emitU8(r_done);
-                try self.builder.emitOp(.star, target.span());
-                try self.builder.emitU8(r_val);
-                try self.builder.emitOp(.ldar, target.span());
-                try self.builder.emitU8(r_done);
-                try self.builder.emitOp(.jmp_if_true, target.span());
-                const exit_patch = self.builder.here();
-                try self.builder.emitI16(0);
-                try self.builder.emitOp(.ldar, target.span());
-                try self.builder.emitU8(r_val);
-                try self.builder.emitOp(.sta_computed, target.span());
-                try self.builder.emitU8(r_rest);
-                try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.lda_smi, target.span());
-                try self.builder.emitI32(1);
-                try self.builder.emitOp(.add, target.span());
-                try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.star, target.span());
-                try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.jmp, target.span());
-                const back_patch = self.builder.here();
-                try self.builder.emitI16(0);
-                try self.builder.patchI16(back_patch, loop_start);
-                const exit_target = self.builder.here();
-                try self.builder.patchI16(exit_patch, exit_target);
+                const r_done = try self.reserveTemp();
+                defer self.releaseTemp();
 
-                try self.builder.emitOp(.ldar, target.span());
-                try self.builder.emitU8(r_rest);
-                if (rest_is_pattern) {
-                    try self.assignAssignmentPatternLeaf(arg.*);
-                } else {
-                    try self.assignAssignmentPatternElemPrepared(arg.*, rest_prepared);
-                    self.releasePreparedLeaf(rest_prepared);
+                // §13.15.5.2 ArrayAssignmentPattern step 5 — if any
+                // abrupt completion (throw OR return-completion in a
+                // generator) escapes the destructure walk and the
+                // iterator is not yet [[Done]], IteratorClose must run.
+                // Wrap from just after iter_open through the trailing
+                // close/drain in a synthetic handler that calls
+                // iter_close r_iter in throw mode and rethrows.
+                const handler_start_pc = self.builder.here();
+
+                for (al.elements[0..elem_count]) |maybe_elt| {
+                    if (maybe_elt) |elt| {
+                        // §13.15.5.4 IteratorDestructuringAssignmentEval
+                        // step 5 — when AssignmentElement.target is not
+                        // an Object/ArrayLiteral, evaluate the LHS
+                        // reference BEFORE pulling the next value from
+                        // the iterator. Mirror of the object-pattern
+                        // pre-eval above.
+                        const leaf_target = destructureLeafTarget(elt);
+                        const prepared = try self.prepareAssignmentLeaf(leaf_target);
+                        try self.builder.emitOp(.iter_step, target.span());
+                        try self.builder.emitU8(r_iter);
+                        try self.builder.emitU8(r_done);
+                        try self.assignAssignmentPatternElemPrepared(elt, prepared);
+                        self.releasePreparedLeaf(prepared);
+                    } else {
+                        // Elision — step and discard.
+                        try self.builder.emitOp(.iter_step, target.span());
+                        try self.builder.emitU8(r_iter);
+                        try self.builder.emitU8(r_done);
+                    }
                 }
-            }
 
-            // Mark the end of the handler region BEFORE emitting the
-            // trailing normal-completion `iter_close`. The normal
-            // close itself propagates inner throws (mode=0); having
-            // it covered by our synthetic handler would double-close
-            // — `return()` would fire twice (test262
-            // array-empty-iter-close-err.js asserts returnCount=1).
-            const handler_end_pc = self.builder.here();
-            if (rest_arg == null) {
-                // §7.4.10 — close iter if still open.
+                if (rest_arg) |arg| {
+                    // §13.15.5.3 AssignmentRestElement step 1 — when the
+                    // rest target is neither an ObjectLiteral nor an
+                    // ArrayLiteral, evaluate its LHS reference BEFORE
+                    // draining the iterator (so a throwing lref —
+                    // `[...{}[thrower()]]` — fires before any further
+                    // iter_step). Inner pattern leaves walk through the
+                    // assignAssignmentPatternLeaf branch and don't need
+                    // pre-eval here.
+                    const rest_inner = blk: {
+                        var t = arg.*;
+                        while (t == .parenthesized) t = t.parenthesized.expression.*;
+                        break :blk t;
+                    };
+                    const rest_is_pattern = rest_inner == .array_literal or rest_inner == .object_literal;
+                    const rest_prepared: PreparedLeaf = if (rest_is_pattern)
+                        .none
+                    else
+                        try self.prepareAssignmentLeaf(arg.*);
+
+                    // Drain the iterator into a fresh Array, then
+                    // bind it to the rest leaf.
+                    const r_rest = try self.reserveTemp();
+                    defer self.releaseTemp();
+                    const r_idx = try self.reserveTemp();
+                    defer self.releaseTemp();
+                    const r_val = try self.reserveTemp();
+                    defer self.releaseTemp();
+                    try self.builder.emitOp(.make_array, target.span());
+                    try self.builder.emitOp(.star, target.span());
+                    try self.builder.emitU8(r_rest);
+                    try self.builder.emitOp(.lda_smi, target.span());
+                    try self.builder.emitI32(0);
+                    try self.builder.emitOp(.star, target.span());
+                    try self.builder.emitU8(r_idx);
+
+                    const loop_start = self.builder.here();
+                    try self.builder.emitOp(.iter_step, target.span());
+                    try self.builder.emitU8(r_iter);
+                    try self.builder.emitU8(r_done);
+                    try self.builder.emitOp(.star, target.span());
+                    try self.builder.emitU8(r_val);
+                    try self.builder.emitOp(.ldar, target.span());
+                    try self.builder.emitU8(r_done);
+                    try self.builder.emitOp(.jmp_if_true, target.span());
+                    const exit_patch = self.builder.here();
+                    try self.builder.emitI16(0);
+                    try self.builder.emitOp(.ldar, target.span());
+                    try self.builder.emitU8(r_val);
+                    try self.builder.emitOp(.sta_computed, target.span());
+                    try self.builder.emitU8(r_rest);
+                    try self.builder.emitU8(r_idx);
+                    try self.builder.emitOp(.lda_smi, target.span());
+                    try self.builder.emitI32(1);
+                    try self.builder.emitOp(.add, target.span());
+                    try self.builder.emitU8(r_idx);
+                    try self.builder.emitOp(.star, target.span());
+                    try self.builder.emitU8(r_idx);
+                    try self.builder.emitOp(.jmp, target.span());
+                    const back_patch = self.builder.here();
+                    try self.builder.emitI16(0);
+                    try self.builder.patchI16(back_patch, loop_start);
+                    const exit_target = self.builder.here();
+                    try self.builder.patchI16(exit_patch, exit_target);
+
+                    try self.builder.emitOp(.ldar, target.span());
+                    try self.builder.emitU8(r_rest);
+                    if (rest_is_pattern) {
+                        try self.assignAssignmentPatternLeaf(arg.*);
+                    } else {
+                        try self.assignAssignmentPatternElemPrepared(arg.*, rest_prepared);
+                        self.releasePreparedLeaf(rest_prepared);
+                    }
+                }
+
+                // Mark the end of the handler region BEFORE emitting the
+                // trailing normal-completion `iter_close`. The normal
+                // close itself propagates inner throws (mode=0); having
+                // it covered by our synthetic handler would double-close
+                // — `return()` would fire twice (test262
+                // array-empty-iter-close-err.js asserts returnCount=1).
+                const handler_end_pc = self.builder.here();
+                if (rest_arg == null) {
+                    // §7.4.10 — close iter if still open.
+                    try self.builder.emitOp(.iter_close, target.span());
+                    try self.builder.emitU8(r_iter);
+                    // §7.4.6 — normal completion; propagate inner
+                    // throws and TypeError on non-Object return.
+                    try self.builder.emitU8(0);
+                }
+
+                // §13.15.5.2 step 5 / §27.5.1.3 — abrupt completion
+                // escaping the destructure walk while the iterator is
+                // not [[Done]] must IteratorClose. Two handlers cover
+                // the same region:
+                //
+                //   • Throw-mode (`is_finally=false`, iter_close mode=1)
+                //     — outer throw wins per §7.4.6 step 7; inner
+                //     return() errors are swallowed.
+                //   • Return-mode (`is_finally=true`, iter_close mode=0)
+                //     — `unwindThrow` routes generator-return completions
+                //     here (it skips non-finally handlers while
+                //     `gen_return_completion` is set). Treat the
+                //     completion as normal/return per §7.4.6 step 8/9:
+                //     inner throws propagate, non-Object return result
+                //     surfaces TypeError.
+                //
+                // Order matters — the non-finally entry must come first
+                // so a true throw lands on it (without `is_finally`
+                // discrimination throws would match either handler).
+                try self.builder.emitOp(.jmp, target.span());
+                const skip_handlers_patch = self.builder.here();
+                try self.builder.emitI16(0);
+
+                const throw_handler_pc = self.builder.here();
+                const r_caught_throw = try self.reserveTemp();
+                try self.builder.emitOp(.star, target.span());
+                try self.builder.emitU8(r_caught_throw);
                 try self.builder.emitOp(.iter_close, target.span());
                 try self.builder.emitU8(r_iter);
-                // §7.4.6 — normal completion; propagate inner
-                // throws and TypeError on non-Object return.
+                try self.builder.emitU8(1);
+                try self.builder.emitOp(.ldar, target.span());
+                try self.builder.emitU8(r_caught_throw);
+                try self.builder.emitOp(.throw_, target.span());
+                self.releaseTemp();
+
+                const return_handler_pc = self.builder.here();
+                const r_caught_ret = try self.reserveTemp();
+                try self.builder.emitOp(.star, target.span());
+                try self.builder.emitU8(r_caught_ret);
+                try self.builder.emitOp(.iter_close, target.span());
+                try self.builder.emitU8(r_iter);
                 try self.builder.emitU8(0);
-            }
+                try self.builder.emitOp(.ldar, target.span());
+                try self.builder.emitU8(r_caught_ret);
+                try self.builder.emitOp(.throw_, target.span());
+                self.releaseTemp();
 
-            // §13.15.5.2 step 5 / §27.5.1.3 — abrupt completion
-            // escaping the destructure walk while the iterator is
-            // not [[Done]] must IteratorClose. Two handlers cover
-            // the same region:
-            //
-            //   • Throw-mode (`is_finally=false`, iter_close mode=1)
-            //     — outer throw wins per §7.4.6 step 7; inner
-            //     return() errors are swallowed.
-            //   • Return-mode (`is_finally=true`, iter_close mode=0)
-            //     — `unwindThrow` routes generator-return completions
-            //     here (it skips non-finally handlers while
-            //     `gen_return_completion` is set). Treat the
-            //     completion as normal/return per §7.4.6 step 8/9:
-            //     inner throws propagate, non-Object return result
-            //     surfaces TypeError.
-            //
-            // Order matters — the non-finally entry must come first
-            // so a true throw lands on it (without `is_finally`
-            // discrimination throws would match either handler).
-            try self.builder.emitOp(.jmp, target.span());
-            const skip_handlers_patch = self.builder.here();
-            try self.builder.emitI16(0);
+                try self.builder.patchI16(skip_handlers_patch, self.builder.here());
+                try self.builder.addHandler(.{
+                    .start_pc = handler_start_pc,
+                    .end_pc = handler_end_pc,
+                    .handler_pc = throw_handler_pc,
+                    .catch_register = null,
+                    .is_finally = false,
+                });
+                try self.builder.addHandler(.{
+                    .start_pc = handler_start_pc,
+                    .end_pc = handler_end_pc,
+                    .handler_pc = return_handler_pc,
+                    .catch_register = null,
+                    .is_finally = true,
+                });
+            },
+            .object_literal => |ol| {
+                // §13.15.5.4 — assignment to an object pattern
+                // requires the source be ToObject-coercible. `({} = null)`
+                // throws TypeError; emit the guard before any property
+                // reads (and before the empty-pattern early exit).
+                try self.builder.emitOp(.ldar, target.span());
+                try self.builder.emitU8(r_src);
+                try self.builder.emitOp(.require_object_coercible, target.span());
 
-            const throw_handler_pc = self.builder.here();
-            const r_caught_throw = try self.reserveTemp();
-            try self.builder.emitOp(.star, target.span());
-            try self.builder.emitU8(r_caught_throw);
-            try self.builder.emitOp(.iter_close, target.span());
-            try self.builder.emitU8(r_iter);
-            try self.builder.emitU8(1);
-            try self.builder.emitOp(.ldar, target.span());
-            try self.builder.emitU8(r_caught_throw);
-            try self.builder.emitOp(.throw_, target.span());
-            self.releaseTemp();
+                // Pre-allocate the rest exclusion array when the pattern
+                // ends in `...rest`. We populate it during the first
+                // pass so a computed key's *runtime* value (post-
+                // ToPropertyKey) is what excludes — not the source-text
+                // form. V8 / JSC do the same via CopyDataPropertiesWith-
+                // ExcludedProperties: each bound key contributes one
+                // exclusion entry resolved when it's evaluated.
+                var rest_arg: ?*ast.expression.Expression = null;
+                var rest_span: Span = target.span();
+                var bound_count: i32 = 0;
+                for (ol.properties) |p2| switch (p2) {
+                    .property => bound_count += 1,
+                    .spread => |sp| {
+                        rest_arg = sp.argument;
+                        rest_span = sp.span;
+                    },
+                    .method => return error.UnsupportedExpression,
+                };
 
-            const return_handler_pc = self.builder.here();
-            const r_caught_ret = try self.reserveTemp();
-            try self.builder.emitOp(.star, target.span());
-            try self.builder.emitU8(r_caught_ret);
-            try self.builder.emitOp(.iter_close, target.span());
-            try self.builder.emitU8(r_iter);
-            try self.builder.emitU8(0);
-            try self.builder.emitOp(.ldar, target.span());
-            try self.builder.emitU8(r_caught_ret);
-            try self.builder.emitOp(.throw_, target.span());
-            self.releaseTemp();
+                const r_excl_opt: ?u8 = if (rest_arg != null) try self.reserveTemp() else null;
+                defer if (r_excl_opt != null) self.releaseTemp();
+                if (r_excl_opt) |r_excl| {
+                    try self.builder.emitOp(.make_array, rest_span);
+                    try self.builder.emitOp(.star, rest_span);
+                    try self.builder.emitU8(r_excl);
+                    const k_length = try self.internString("length");
+                    try self.builder.emitOp(.lda_smi, rest_span);
+                    try self.builder.emitI32(bound_count);
+                    try self.builder.emitOp(.sta_property, rest_span);
+                    try self.builder.emitU16(k_length);
+                    try self.builder.emitU8(r_excl);
+                }
 
-            try self.builder.patchI16(skip_handlers_patch, self.builder.here());
-            try self.builder.addHandler(.{
-                .start_pc = handler_start_pc,
-                .end_pc = handler_end_pc,
-                .handler_pc = throw_handler_pc,
-                .catch_register = null,
-                .is_finally = false,
-            });
-            try self.builder.addHandler(.{
-                .start_pc = handler_start_pc,
-                .end_pc = handler_end_pc,
-                .handler_pc = return_handler_pc,
-                .catch_register = null,
-                .is_finally = true,
-            });
-        },
-        .object_literal => |ol| {
-            // §13.15.5.4 — assignment to an object pattern
-            // requires the source be ToObject-coercible. `({} = null)`
-            // throws TypeError; emit the guard before any property
-            // reads (and before the empty-pattern early exit).
-            try self.builder.emitOp(.ldar, target.span());
-            try self.builder.emitU8(r_src);
-            try self.builder.emitOp(.require_object_coercible, target.span());
-
-            // Pre-allocate the rest exclusion array when the pattern
-            // ends in `...rest`. We populate it during the first
-            // pass so a computed key's *runtime* value (post-
-            // ToPropertyKey) is what excludes — not the source-text
-            // form. V8 / JSC do the same via CopyDataPropertiesWith-
-            // ExcludedProperties: each bound key contributes one
-            // exclusion entry resolved when it's evaluated.
-            var rest_arg: ?*ast.expression.Expression = null;
-            var rest_span: Span = target.span();
-            var bound_count: i32 = 0;
-            for (ol.properties) |p2| switch (p2) {
-                .property => bound_count += 1,
-                .spread => |sp| {
-                    rest_arg = sp.argument;
-                    rest_span = sp.span;
-                },
-                .method => return error.UnsupportedExpression,
-            };
-
-            const r_excl_opt: ?u8 = if (rest_arg != null) try self.reserveTemp() else null;
-            defer if (r_excl_opt != null) self.releaseTemp();
-            if (r_excl_opt) |r_excl| {
-                try self.builder.emitOp(.make_array, rest_span);
-                try self.builder.emitOp(.star, rest_span);
-                try self.builder.emitU8(r_excl);
-                const k_length = try self.internString("length");
-                try self.builder.emitOp(.lda_smi, rest_span);
-                try self.builder.emitI32(bound_count);
-                try self.builder.emitOp(.sta_property, rest_span);
-                try self.builder.emitU16(k_length);
-                try self.builder.emitU8(r_excl);
-            }
-
-            // Object pattern leaves can include `{...rest}` —
-            // the parser parses that as a `.spread` property
-            // member with an identifier_reference argument.
-            var excl_idx: u32 = 0;
-            for (ol.properties) |prop| switch (prop) {
-                .property => |op| {
-                    // §13.15.5.5 AssignmentProperty : PropertyName :
-                    // AssignmentElement — step 1 evaluates PropertyName
-                    // FIRST (so a computed key's side effects fire
-                    // before the AssignmentElement's lref-eval below),
-                    // step 3 forwards to KeyedDestructuringAssignment-
-                    // Evaluation. For a computed key we stash the
-                    // ToPropertyKey'd value into a temp; for a plain
-                    // ident / string / numeric key the key is a
-                    // compile-time string constant.
-                    var src_key_r: ?u8 = null;
-                    if (op.key == .computed) {
-                        try self.compileExpression(op.key.computed);
-                        try self.builder.emitOp(.to_property_key, op.span);
-                        const r = try self.reserveTemp();
-                        try self.builder.emitOp(.star, op.span);
-                        try self.builder.emitU8(r);
-                        src_key_r = r;
-                        // Pin the computed key (its post-ToPropertyKey
-                        // value) into the rest exclusion list. The
-                        // runtime side honours string entries; symbol
-                        // keys aren't copied by `object_rest_from`
-                        // anyway, so a symbol key in the list is
-                        // harmless (the matching property won't be
-                        // copied either).
-                        if (r_excl_opt) |r_excl| {
-                            try self.builder.emitOp(.ldar, op.span);
+                // Object pattern leaves can include `{...rest}` —
+                // the parser parses that as a `.spread` property
+                // member with an identifier_reference argument.
+                var excl_idx: u32 = 0;
+                for (ol.properties) |prop| switch (prop) {
+                    .property => |op| {
+                        // §13.15.5.5 AssignmentProperty : PropertyName :
+                        // AssignmentElement — step 1 evaluates PropertyName
+                        // FIRST (so a computed key's side effects fire
+                        // before the AssignmentElement's lref-eval below),
+                        // step 3 forwards to KeyedDestructuringAssignment-
+                        // Evaluation. For a computed key we stash the
+                        // ToPropertyKey'd value into a temp; for a plain
+                        // ident / string / numeric key the key is a
+                        // compile-time string constant.
+                        var src_key_r: ?u8 = null;
+                        if (op.key == .computed) {
+                            try self.compileExpression(op.key.computed);
+                            try self.builder.emitOp(.to_property_key, op.span);
+                            const r = try self.reserveTemp();
+                            try self.builder.emitOp(.star, op.span);
                             try self.builder.emitU8(r);
+                            src_key_r = r;
+                            // Pin the computed key (its post-ToPropertyKey
+                            // value) into the rest exclusion list. The
+                            // runtime side honours string entries; symbol
+                            // keys aren't copied by `object_rest_from`
+                            // anyway, so a symbol key in the list is
+                            // harmless (the matching property won't be
+                            // copied either).
+                            if (r_excl_opt) |r_excl| {
+                                try self.builder.emitOp(.ldar, op.span);
+                                try self.builder.emitU8(r);
+                                var ibuf: [16]u8 = undefined;
+                                const islice = std.fmt.bufPrint(&ibuf, "{d}", .{excl_idx}) catch unreachable;
+                                const ik = try self.internString(islice);
+                                try self.builder.emitOp(.sta_property, op.span);
+                                try self.builder.emitU16(ik);
+                                try self.builder.emitU8(r_excl);
+                                excl_idx += 1;
+                            }
+                        } else if (r_excl_opt) |r_excl| {
+                            // Static key — record by its decoded textual
+                            // key. Done at first-pass time so the rest
+                            // sees the same exclusions regardless of any
+                            // user-getter side effects fired by the
+                            // matching `lda_property` below.
+                            const ks = try self.assignmentPatternKey(op.key);
+                            const kk = try self.internString(ks);
+                            try self.builder.emitOp(.lda_constant, op.span);
+                            try self.builder.emitU16(kk);
                             var ibuf: [16]u8 = undefined;
                             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{excl_idx}) catch unreachable;
                             const ik = try self.internString(islice);
@@ -7848,1276 +7865,1258 @@ fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) 
                             try self.builder.emitU8(r_excl);
                             excl_idx += 1;
                         }
-                    } else if (r_excl_opt) |r_excl| {
-                        // Static key — record by its decoded textual
-                        // key. Done at first-pass time so the rest
-                        // sees the same exclusions regardless of any
-                        // user-getter side effects fired by the
-                        // matching `lda_property` below.
-                        const ks = try self.assignmentPatternKey(op.key);
-                        const kk = try self.internString(ks);
-                        try self.builder.emitOp(.lda_constant, op.span);
-                        try self.builder.emitU16(kk);
-                        var ibuf: [16]u8 = undefined;
-                        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{excl_idx}) catch unreachable;
-                        const ik = try self.internString(islice);
-                        try self.builder.emitOp(.sta_property, op.span);
-                        try self.builder.emitU16(ik);
-                        try self.builder.emitU8(r_excl);
-                        excl_idx += 1;
-                    }
-                    // §13.15.5.6 KeyedDestructuringAssignmentEval
-                    // step 1 — when the inner DestructuringAssignment-
-                    // Target is neither an Object/ArrayLiteral,
-                    // evaluate its LHS reference BEFORE the source
-                    // `GetV`. For `({a: this.#field} = src)` this
-                    // resolves `this` (throws in a pre-`super()`
-                    // derived ctor) and the private-name slot before
-                    // the `src.a` getter runs.
-                    const leaf_target = destructureLeafTarget(op.value);
-                    const prepared = try self.prepareAssignmentLeaf(leaf_target);
-                    if (src_key_r) |kr| {
-                        // step 2 — GetV(value, propertyName).
+                        // §13.15.5.6 KeyedDestructuringAssignmentEval
+                        // step 1 — when the inner DestructuringAssignment-
+                        // Target is neither an Object/ArrayLiteral,
+                        // evaluate its LHS reference BEFORE the source
+                        // `GetV`. For `({a: this.#field} = src)` this
+                        // resolves `this` (throws in a pre-`super()`
+                        // derived ctor) and the private-name slot before
+                        // the `src.a` getter runs.
+                        const leaf_target = destructureLeafTarget(op.value);
+                        const prepared = try self.prepareAssignmentLeaf(leaf_target);
+                        if (src_key_r) |kr| {
+                            // step 2 — GetV(value, propertyName).
+                            try self.builder.emitOp(.ldar, op.span);
+                            try self.builder.emitU8(kr);
+                            try self.builder.emitOp(.lda_computed, op.span);
+                            try self.builder.emitU8(r_src);
+                            try self.assignAssignmentPatternElemPrepared(op.value, prepared);
+                            self.releasePreparedLeaf(prepared);
+                            self.releaseTemp(); // src_key_r
+                            continue;
+                        }
+                        const key_slice = try self.assignmentPatternKey(op.key);
+                        const k = try self.internString(key_slice);
                         try self.builder.emitOp(.ldar, op.span);
-                        try self.builder.emitU8(kr);
-                        try self.builder.emitOp(.lda_computed, op.span);
                         try self.builder.emitU8(r_src);
+                        try self.builder.emitOp(.lda_property, op.span);
+                        try self.builder.emitU16(k);
+                        // Shorthand `{a}` is target `a` (assign back to a).
+                        // `{a = 1}` is shorthand with default — the parser
+                        // wraps the value as `assignment(eq, identifier_reference, default)`.
+                        // `{x: a = 1}` puts the same `assignment(...)` node
+                        // under a renamed key. Either shape is handled by
+                        // `assignAssignmentPatternElemPrepared`.
                         try self.assignAssignmentPatternElemPrepared(op.value, prepared);
                         self.releasePreparedLeaf(prepared);
-                        self.releaseTemp(); // src_key_r
-                        continue;
-                    }
-                    const key_slice = try self.assignmentPatternKey(op.key);
-                    const k = try self.internString(key_slice);
-                    try self.builder.emitOp(.ldar, op.span);
+                    },
+                    .spread => {},
+                    .method => return error.UnsupportedExpression,
+                };
+
+                if (rest_arg) |rt| {
+                    // §13.15.5 RestElement on object pattern — collect
+                    // every own enumerable property of `r_src` not in
+                    // the excluded list (`r_excl`) into a fresh object.
+                    try self.builder.emitOp(.object_rest_from, rest_span);
                     try self.builder.emitU8(r_src);
-                    try self.builder.emitOp(.lda_property, op.span);
-                    try self.builder.emitU16(k);
-                    // Shorthand `{a}` is target `a` (assign back to a).
-                    // `{a = 1}` is shorthand with default — the parser
-                    // wraps the value as `assignment(eq, identifier_reference, default)`.
-                    // `{x: a = 1}` puts the same `assignment(...)` node
-                    // under a renamed key. Either shape is handled by
-                    // `assignAssignmentPatternElemPrepared`.
-                    try self.assignAssignmentPatternElemPrepared(op.value, prepared);
-                    self.releasePreparedLeaf(prepared);
-                },
-                .spread => {},
-                .method => return error.UnsupportedExpression,
+                    try self.builder.emitU8(r_excl_opt.?);
+                    try self.assignAssignmentPatternLeaf(rt.*);
+                }
+            },
+            else => return error.UnsupportedExpression,
+        }
+        // §13.15.2 / §13.15.4 — DestructuringAssignmentEvaluation
+        // returns the RHS value (the source we destructured). Caller
+        // (expression context) reads `acc` for the assignment-expression
+        // result, so restore it here. Statement / for-of callers
+        // overwrite `acc` immediately and don't care.
+        try self.builder.emitOp(.ldar, target.span());
+        try self.builder.emitU8(r_src);
+    }
+
+    /// Assignment-pattern element handling. The element AST is
+    /// `assignment(eq, target, default)` for defaults, otherwise
+    /// the bare target Expression. Acc holds the property value
+    /// already loaded by the caller.
+    fn assignAssignmentPatternElem(self: *Compiler, elt: ast.expression.Expression) CompileError!void {
+        if (elt == .assignment and elt.assignment.op == .eq) {
+            // §13.15.5.5 — when the destructuring target is a plain
+            // identifier reference and the initializer is anonymous,
+            // `SetFunctionName` adopts the identifier as the name.
+            const named_target: ?[]const u8 = blk: {
+                var t = elt.assignment.target;
+                while (t.* == .parenthesized) t = t.parenthesized.expression;
+                if (t.* == .identifier_reference) {
+                    // §12.7 — `SetFunctionName` uses the StringValue.
+                    break :blk try self.bindingName(t.identifier_reference.span);
+                }
+                break :blk null;
             };
+            try self.applyDefaultExprNamed(elt.assignment.value, elt.assignment.span, named_target);
+            try self.assignAssignmentPatternLeaf(elt.assignment.target.*);
+            return;
+        }
+        try self.assignAssignmentPatternLeaf(elt);
+    }
 
-            if (rest_arg) |rt| {
-                // §13.15.5 RestElement on object pattern — collect
-                // every own enumerable property of `r_src` not in
-                // the excluded list (`r_excl`) into a fresh object.
-                try self.builder.emitOp(.object_rest_from, rest_span);
-                try self.builder.emitU8(r_src);
-                try self.builder.emitU8(r_excl_opt.?);
-                try self.assignAssignmentPatternLeaf(rt.*);
-            }
+    /// §13.15.5.4 / §13.15.5.6 step 1 — when a DestructuringAssignment
+    /// target is neither an ObjectLiteral nor an ArrayLiteral, its LHS
+    /// reference must be evaluated BEFORE the source value is read.
+    /// For `({a: this.#field} = src)` that resolves the receiver and
+    /// the private name first; in a derived ctor before `super()`,
+    /// reading `this` throws ReferenceError per §9.1.1.3.4 before the
+    /// `src.a` getter ever runs.
+    const PreparedMember = struct {
+        span: Span,
+        r_obj: u8,
+        /// `r_key` is set iff `key` is `.computed`; the key was
+        /// evaluated and stored in this temp BEFORE the source read.
+        r_key: ?u8,
+        key: union(enum) {
+            name: u16,
+            private: u16,
+            computed: void,
         },
-        else => return error.UnsupportedExpression,
+    };
+
+    const PreparedLeaf = union(enum) {
+        /// Leaf has no observable LHS side effects until store time —
+        /// identifier_reference targets (just a binding write) and
+        /// nested patterns (their own evaluation order is spec-
+        /// correct) fall through to the regular leaf-write path.
+        none,
+        /// Member-target leaf with the receiver (and possibly key)
+        /// already evaluated and stashed in `r_obj` (+ `r_key`).
+        member: PreparedMember,
+    };
+
+    /// Evaluate the LHS reference of a destructuring leaf eagerly,
+    /// stashing the receiver (and key for computed members) in fresh
+    /// temps. Returns a `PreparedLeaf` whose temps must be released
+    /// by `releasePreparedLeaf` after the matching `storePreparedLeaf`
+    /// call. Per §13.15.5.6 step 1.a / §13.15.5.4 step 5 this MUST
+    /// run before the source side is touched.
+    fn prepareAssignmentLeaf(self: *Compiler, target: ast.expression.Expression) CompileError!PreparedLeaf {
+        var t = target;
+        while (t == .parenthesized) t = t.parenthesized.expression.*;
+        switch (t) {
+            .member => |m| {
+                if (m.optional) return error.UnsupportedExpression;
+                if (m.object.* == .super_) return error.UnsupportedExpression;
+                // §13.3.2 — evaluate the object expression and pin
+                // the receiver before anything else.
+                try self.compileExpression(m.object);
+                const r_obj = try self.reserveTemp();
+                try self.builder.emitOp(.star, m.span);
+                try self.builder.emitU8(r_obj);
+                switch (m.property) {
+                    .ident => |kspan| {
+                        const raw = self.source[kspan.start..kspan.end];
+                        if (raw.len > 0 and raw[0] == '#') {
+                            // §13.2.7.3 — mangle the private identifier
+                            // against the current class's private
+                            // prefix at compile time. The brand check
+                            // happens later, at `sta_private` time.
+                            if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
+                            // §15.7.14 step 11 — lexical lookup.
+                            const decoded = try self.decodeIdentifierName(raw[1..]);
+                            const mangled = try self.manglePrivateRef(decoded);
+                            const k = try self.internString(mangled);
+                            return .{ .member = .{ .span = m.span, .r_obj = r_obj, .r_key = null, .key = .{ .private = k } } };
+                        }
+                        const key_slice = try self.decodeIdentifierName(raw);
+                        const k = try self.internString(key_slice);
+                        return .{ .member = .{ .span = m.span, .r_obj = r_obj, .r_key = null, .key = .{ .name = k } } };
+                    },
+                    .computed => |key_expr| {
+                        // §13.3.3 — the computed-key expression is
+                        // part of the LHS reference and is evaluated
+                        // as part of step 1. Stash before source read.
+                        try self.compileExpression(key_expr);
+                        const r_key = try self.reserveTemp();
+                        try self.builder.emitOp(.star, m.span);
+                        try self.builder.emitU8(r_key);
+                        return .{ .member = .{ .span = m.span, .r_obj = r_obj, .r_key = r_key, .key = .computed } };
+                    },
+                }
+            },
+            else => return .none,
+        }
     }
-    // §13.15.2 / §13.15.4 — DestructuringAssignmentEvaluation
-    // returns the RHS value (the source we destructured). Caller
-    // (expression context) reads `acc` for the assignment-expression
-    // result, so restore it here. Statement / for-of callers
-    // overwrite `acc` immediately and don't care.
-    try self.builder.emitOp(.ldar, target.span());
-    try self.builder.emitU8(r_src);
-}
 
-/// Assignment-pattern element handling. The element AST is
-/// `assignment(eq, target, default)` for defaults, otherwise
-/// the bare target Expression. Acc holds the property value
-/// already loaded by the caller.
-fn assignAssignmentPatternElem(self: *Compiler, elt: ast.expression.Expression) CompileError!void {
-    if (elt == .assignment and elt.assignment.op == .eq) {
-        // §13.15.5.5 — when the destructuring target is a plain
-        // identifier reference and the initializer is anonymous,
-        // `SetFunctionName` adopts the identifier as the name.
-        const named_target: ?[]const u8 = blk: {
-            var t = elt.assignment.target;
-            while (t.* == .parenthesized) t = t.parenthesized.expression;
-            if (t.* == .identifier_reference) {
-                // §12.7 — `SetFunctionName` uses the StringValue.
-                break :blk try self.bindingName(t.identifier_reference.span);
-            }
-            break :blk null;
-        };
-        try self.applyDefaultExprNamed(elt.assignment.value, elt.assignment.span, named_target);
-        try self.assignAssignmentPatternLeaf(elt.assignment.target.*);
-        return;
+    /// Emit the store half of a prepared leaf: `acc` holds the final
+    /// value (post-default-application). For `.none` leaves we route
+    /// back through the regular leaf-write helper.
+    fn storePreparedLeaf(self: *Compiler, target: ast.expression.Expression, prepared: PreparedLeaf) CompileError!void {
+        switch (prepared) {
+            .none => try self.assignAssignmentPatternLeaf(target),
+            .member => |pm| {
+                // `acc` = value. Stash, then re-load to feed the
+                // store op (the named/private/computed store ops take
+                // value in `acc`).
+                const r_value = try self.reserveTemp();
+                defer self.releaseTemp();
+                try self.builder.emitOp(.star, pm.span);
+                try self.builder.emitU8(r_value);
+                try self.builder.emitOp(.ldar, pm.span);
+                try self.builder.emitU8(r_value);
+                switch (pm.key) {
+                    .name => |k| {
+                        try self.builder.emitOp(.sta_property, pm.span);
+                        try self.builder.emitU16(k);
+                        try self.builder.emitU8(pm.r_obj);
+                    },
+                    .private => |k| {
+                        try self.builder.emitOp(.sta_private, pm.span);
+                        try self.builder.emitU16(k);
+                        try self.builder.emitU8(pm.r_obj);
+                    },
+                    .computed => {
+                        try self.builder.emitOp(.sta_computed, pm.span);
+                        try self.builder.emitU8(pm.r_obj);
+                        try self.builder.emitU8(pm.r_key.?);
+                    },
+                }
+            },
+        }
     }
-    try self.assignAssignmentPatternLeaf(elt);
-}
 
-/// §13.15.5.4 / §13.15.5.6 step 1 — when a DestructuringAssignment
-/// target is neither an ObjectLiteral nor an ArrayLiteral, its LHS
-/// reference must be evaluated BEFORE the source value is read.
-/// For `({a: this.#field} = src)` that resolves the receiver and
-/// the private name first; in a derived ctor before `super()`,
-/// reading `this` throws ReferenceError per §9.1.1.3.4 before the
-/// `src.a` getter ever runs.
-const PreparedMember = struct {
-    span: Span,
-    r_obj: u8,
-    /// `r_key` is set iff `key` is `.computed`; the key was
-    /// evaluated and stored in this temp BEFORE the source read.
-    r_key: ?u8,
-    key: union(enum) {
-        name: u16,
-        private: u16,
-        computed: void,
-    },
-};
-
-const PreparedLeaf = union(enum) {
-    /// Leaf has no observable LHS side effects until store time —
-    /// identifier_reference targets (just a binding write) and
-    /// nested patterns (their own evaluation order is spec-
-    /// correct) fall through to the regular leaf-write path.
-    none,
-    /// Member-target leaf with the receiver (and possibly key)
-    /// already evaluated and stashed in `r_obj` (+ `r_key`).
-    member: PreparedMember,
-};
-
-/// Evaluate the LHS reference of a destructuring leaf eagerly,
-/// stashing the receiver (and key for computed members) in fresh
-/// temps. Returns a `PreparedLeaf` whose temps must be released
-/// by `releasePreparedLeaf` after the matching `storePreparedLeaf`
-/// call. Per §13.15.5.6 step 1.a / §13.15.5.4 step 5 this MUST
-/// run before the source side is touched.
-fn prepareAssignmentLeaf(self: *Compiler, target: ast.expression.Expression) CompileError!PreparedLeaf {
-    var t = target;
-    while (t == .parenthesized) t = t.parenthesized.expression.*;
-    switch (t) {
-        .member => |m| {
-            if (m.optional) return error.UnsupportedExpression;
-            if (m.object.* == .super_) return error.UnsupportedExpression;
-            // §13.3.2 — evaluate the object expression and pin
-            // the receiver before anything else.
-            try self.compileExpression(m.object);
-            const r_obj = try self.reserveTemp();
-            try self.builder.emitOp(.star, m.span);
-            try self.builder.emitU8(r_obj);
-            switch (m.property) {
-                .ident => |kspan| {
-                    const raw = self.source[kspan.start..kspan.end];
-                    if (raw.len > 0 and raw[0] == '#') {
-                        // §13.2.7.3 — mangle the private identifier
-                        // against the current class's private
-                        // prefix at compile time. The brand check
-                        // happens later, at `sta_private` time.
-                        if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
-                        // §15.7.14 step 11 — lexical lookup.
-                        const decoded = try self.decodeIdentifierName(raw[1..]);
-                        const mangled = try self.manglePrivateRef(decoded);
-                        const k = try self.internString(mangled);
-                        return .{ .member = .{ .span = m.span, .r_obj = r_obj, .r_key = null, .key = .{ .private = k } } };
-                    }
-                    const key_slice = try self.decodeIdentifierName(raw);
-                    const k = try self.internString(key_slice);
-                    return .{ .member = .{ .span = m.span, .r_obj = r_obj, .r_key = null, .key = .{ .name = k } } };
-                },
-                .computed => |key_expr| {
-                    // §13.3.3 — the computed-key expression is
-                    // part of the LHS reference and is evaluated
-                    // as part of step 1. Stash before source read.
-                    try self.compileExpression(key_expr);
-                    const r_key = try self.reserveTemp();
-                    try self.builder.emitOp(.star, m.span);
-                    try self.builder.emitU8(r_key);
-                    return .{ .member = .{ .span = m.span, .r_obj = r_obj, .r_key = r_key, .key = .computed } };
-                },
-            }
-        },
-        else => return .none,
+    /// Release the temps reserved by `prepareAssignmentLeaf`, in
+    /// reverse order. Must be called after the matching
+    /// `storePreparedLeaf`.
+    fn releasePreparedLeaf(self: *Compiler, prepared: PreparedLeaf) void {
+        switch (prepared) {
+            .none => {},
+            .member => |pm| {
+                if (pm.r_key != null) self.releaseTemp();
+                self.releaseTemp();
+            },
+        }
     }
-}
 
-/// Emit the store half of a prepared leaf: `acc` holds the final
-/// value (post-default-application). For `.none` leaves we route
-/// back through the regular leaf-write helper.
-fn storePreparedLeaf(self: *Compiler, target: ast.expression.Expression, prepared: PreparedLeaf) CompileError!void {
-    switch (prepared) {
-        .none => try self.assignAssignmentPatternLeaf(target),
-        .member => |pm| {
-            // `acc` = value. Stash, then re-load to feed the
-            // store op (the named/private/computed store ops take
-            // value in `acc`).
-            const r_value = try self.reserveTemp();
-            defer self.releaseTemp();
-            try self.builder.emitOp(.star, pm.span);
-            try self.builder.emitU8(r_value);
-            try self.builder.emitOp(.ldar, pm.span);
-            try self.builder.emitU8(r_value);
-            switch (pm.key) {
-                .name => |k| {
-                    try self.builder.emitOp(.sta_property, pm.span);
-                    try self.builder.emitU16(k);
-                    try self.builder.emitU8(pm.r_obj);
-                },
-                .private => |k| {
-                    try self.builder.emitOp(.sta_private, pm.span);
-                    try self.builder.emitU16(k);
-                    try self.builder.emitU8(pm.r_obj);
-                },
-                .computed => {
-                    try self.builder.emitOp(.sta_computed, pm.span);
-                    try self.builder.emitU8(pm.r_obj);
-                    try self.builder.emitU8(pm.r_key.?);
-                },
-            }
-        },
-    }
-}
-
-/// Release the temps reserved by `prepareAssignmentLeaf`, in
-/// reverse order. Must be called after the matching
-/// `storePreparedLeaf`.
-fn releasePreparedLeaf(self: *Compiler, prepared: PreparedLeaf) void {
-    switch (prepared) {
-        .none => {},
-        .member => |pm| {
-            if (pm.r_key != null) self.releaseTemp();
-            self.releaseTemp();
-        },
-    }
-}
-
-/// Variant of `assignAssignmentPatternElem` that integrates with
-/// a pre-evaluated LHS reference. `acc` holds the property value
-/// read from the source; apply any default, then store into the
-/// prepared ref.
-fn assignAssignmentPatternElemPrepared(
-    self: *Compiler,
-    elt: ast.expression.Expression,
-    prepared: PreparedLeaf,
-) CompileError!void {
-    if (elt == .assignment and elt.assignment.op == .eq) {
-        const named_target: ?[]const u8 = blk: {
-            var t = elt.assignment.target;
-            while (t.* == .parenthesized) t = t.parenthesized.expression;
-            if (t.* == .identifier_reference) {
-                // §12.7 — `SetFunctionName` uses the StringValue.
-                break :blk try self.bindingName(t.identifier_reference.span);
-            }
-            break :blk null;
-        };
-        try self.applyDefaultExprNamed(elt.assignment.value, elt.assignment.span, named_target);
-        try self.storePreparedLeaf(elt.assignment.target.*, prepared);
-        return;
-    }
-    try self.storePreparedLeaf(elt, prepared);
-}
-
-/// Extract the underlying assignment-target from an element node.
-/// The parser wraps `{x: target = default}` as
-/// `assignment(eq, target, default)`; the LHS-eval-order rule
-/// applies to `target`, not to the synthetic assignment node.
-fn destructureLeafTarget(elt: ast.expression.Expression) ast.expression.Expression {
-    if (elt == .assignment and elt.assignment.op == .eq) {
-        return elt.assignment.target.*;
-    }
-    return elt;
-}
-
-/// Assign `acc` to the LHS-shaped Expression. Leaves may be
-/// identifier_reference, member, parenthesized, or further
-/// destructuring patterns.
-fn assignAssignmentPatternLeaf(self: *Compiler, target: ast.expression.Expression) CompileError!void {
-    switch (target) {
-        .identifier_reference => |ir| {
-            // §12.7 — assignment-pattern leaf resolves by StringValue.
-            const name = try self.bindingName(ir.span);
-            const scope = self.scope orelse return error.UnresolvedReference;
-            // §13.15.5.3 — fall through to a global write when the
-            // identifier doesn't resolve in any user-visible scope.
-            // Matches the regular-assignment fallback (sloppy-mode
-            // "create on assign"); strict-mode `ReferenceError` is a
-            // runtime check `sta_global` will own once `globalThis`
-            // grows a sentinel.
-            const binding: Binding = scope.resolve(name) orelse Binding{
-                .name = name,
-                .env_slot = 0,
-                .env_depth = 0,
-                .kind = .var_,
-                .span = ir.span,
-                .is_global = true,
+    /// Variant of `assignAssignmentPatternElem` that integrates with
+    /// a pre-evaluated LHS reference. `acc` holds the property value
+    /// read from the source; apply any default, then store into the
+    /// prepared ref.
+    fn assignAssignmentPatternElemPrepared(
+        self: *Compiler,
+        elt: ast.expression.Expression,
+        prepared: PreparedLeaf,
+    ) CompileError!void {
+        if (elt == .assignment and elt.assignment.op == .eq) {
+            const named_target: ?[]const u8 = blk: {
+                var t = elt.assignment.target;
+                while (t.* == .parenthesized) t = t.parenthesized.expression;
+                if (t.* == .identifier_reference) {
+                    // §12.7 — `SetFunctionName` uses the StringValue.
+                    break :blk try self.bindingName(t.identifier_reference.span);
+                }
+                break :blk null;
             };
-            try self.emitStoreBinding(binding, ir.span);
-        },
-        .member => |m| {
-            if (m.optional) return error.UnsupportedExpression;
-            if (m.object.* == .super_) return error.UnsupportedExpression;
-            try self.assignToMember(m, m.span);
-        },
-        .parenthesized => |paren| try self.assignAssignmentPatternLeaf(paren.expression.*),
-        .array_literal, .object_literal => try self.compileAssignmentPattern(target),
-        else => return error.UnsupportedExpression,
+            try self.applyDefaultExprNamed(elt.assignment.value, elt.assignment.span, named_target);
+            try self.storePreparedLeaf(elt.assignment.target.*, prepared);
+            return;
+        }
+        try self.storePreparedLeaf(elt, prepared);
     }
-}
 
-/// Same shape as `compileForOfMemberAssign`'s body — emit a
-/// member-target assignment with `acc` as the value.
-fn assignToMember(self: *Compiler, m: ast.expression.MemberExpr, span: Span) CompileError!void {
-    const r_value = try self.reserveTemp();
-    defer self.releaseTemp();
-    try self.builder.emitOp(.star, span);
-    try self.builder.emitU8(r_value);
+    /// Extract the underlying assignment-target from an element node.
+    /// The parser wraps `{x: target = default}` as
+    /// `assignment(eq, target, default)`; the LHS-eval-order rule
+    /// applies to `target`, not to the synthetic assignment node.
+    fn destructureLeafTarget(elt: ast.expression.Expression) ast.expression.Expression {
+        if (elt == .assignment and elt.assignment.op == .eq) {
+            return elt.assignment.target.*;
+        }
+        return elt;
+    }
 
-    try self.compileExpression(m.object);
-    const r_obj = try self.reserveTemp();
-    defer self.releaseTemp();
-    try self.builder.emitOp(.star, span);
-    try self.builder.emitU8(r_obj);
+    /// Assign `acc` to the LHS-shaped Expression. Leaves may be
+    /// identifier_reference, member, parenthesized, or further
+    /// destructuring patterns.
+    fn assignAssignmentPatternLeaf(self: *Compiler, target: ast.expression.Expression) CompileError!void {
+        switch (target) {
+            .identifier_reference => |ir| {
+                // §12.7 — assignment-pattern leaf resolves by StringValue.
+                const name = try self.bindingName(ir.span);
+                const scope = self.scope orelse return error.UnresolvedReference;
+                // §13.15.5.3 — fall through to a global write when the
+                // identifier doesn't resolve in any user-visible scope.
+                // Matches the regular-assignment fallback (sloppy-mode
+                // "create on assign"); strict-mode `ReferenceError` is a
+                // runtime check `sta_global` will own once `globalThis`
+                // grows a sentinel.
+                const binding: Binding = scope.resolve(name) orelse Binding{
+                    .name = name,
+                    .env_slot = 0,
+                    .env_depth = 0,
+                    .kind = .var_,
+                    .span = ir.span,
+                    .is_global = true,
+                };
+                try self.emitStoreBinding(binding, ir.span);
+            },
+            .member => |m| {
+                if (m.optional) return error.UnsupportedExpression;
+                if (m.object.* == .super_) return error.UnsupportedExpression;
+                try self.assignToMember(m, m.span);
+            },
+            .parenthesized => |paren| try self.assignAssignmentPatternLeaf(paren.expression.*),
+            .array_literal, .object_literal => try self.compileAssignmentPattern(target),
+            else => return error.UnsupportedExpression,
+        }
+    }
 
-    switch (m.property) {
-        .ident => |kspan| {
-            const raw = self.source[kspan.start..kspan.end];
-            if (raw.len > 0 and raw[0] == '#') {
-                // §13.2.7 / §7.3.30 PrivateFieldSet — destructuring
-                // LHS like `({...this.#x} = src)` or `({a: this.#x} = src)`
-                // routes the store through the runtime brand check.
-                // Without this branch, the compiler bails on the
-                // member walk and the fixture surfaces a CompileError
-                // instead of the spec's runtime TypeError.
-                if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
-                const decoded = try self.decodeIdentifierName(raw[1..]);
-                const mangled = try self.manglePrivateRef(decoded);
-                const k = try self.internString(mangled);
+    /// Same shape as `compileForOfMemberAssign`'s body — emit a
+    /// member-target assignment with `acc` as the value.
+    fn assignToMember(self: *Compiler, m: ast.expression.MemberExpr, span: Span) CompileError!void {
+        const r_value = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, span);
+        try self.builder.emitU8(r_value);
+
+        try self.compileExpression(m.object);
+        const r_obj = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, span);
+        try self.builder.emitU8(r_obj);
+
+        switch (m.property) {
+            .ident => |kspan| {
+                const raw = self.source[kspan.start..kspan.end];
+                if (raw.len > 0 and raw[0] == '#') {
+                    // §13.2.7 / §7.3.30 PrivateFieldSet — destructuring
+                    // LHS like `({...this.#x} = src)` or `({a: this.#x} = src)`
+                    // routes the store through the runtime brand check.
+                    // Without this branch, the compiler bails on the
+                    // member walk and the fixture surfaces a CompileError
+                    // instead of the spec's runtime TypeError.
+                    if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
+                    const decoded = try self.decodeIdentifierName(raw[1..]);
+                    const mangled = try self.manglePrivateRef(decoded);
+                    const k = try self.internString(mangled);
+                    try self.builder.emitOp(.ldar, span);
+                    try self.builder.emitU8(r_value);
+                    try self.builder.emitOp(.sta_private, span);
+                    try self.builder.emitU16(k);
+                    try self.builder.emitU8(r_obj);
+                    return;
+                }
+                const key = try self.decodeIdentifierName(raw);
+                const k = try self.internString(key);
                 try self.builder.emitOp(.ldar, span);
                 try self.builder.emitU8(r_value);
-                try self.builder.emitOp(.sta_private, span);
+                try self.builder.emitOp(.sta_property, span);
                 try self.builder.emitU16(k);
                 try self.builder.emitU8(r_obj);
-                return;
-            }
-            const key = try self.decodeIdentifierName(raw);
-            const k = try self.internString(key);
-            try self.builder.emitOp(.ldar, span);
-            try self.builder.emitU8(r_value);
-            try self.builder.emitOp(.sta_property, span);
-            try self.builder.emitU16(k);
-            try self.builder.emitU8(r_obj);
-        },
-        .computed => |key_expr| {
-            try self.compileExpression(key_expr);
-            const r_key = try self.reserveTemp();
-            defer self.releaseTemp();
-            try self.builder.emitOp(.star, span);
-            try self.builder.emitU8(r_key);
-            try self.builder.emitOp(.ldar, span);
-            try self.builder.emitU8(r_value);
-            try self.builder.emitOp(.sta_computed, span);
-            try self.builder.emitU8(r_obj);
-            try self.builder.emitU8(r_key);
-        },
-    }
-}
-
-/// Decode the property-key shape for an assignment-pattern
-/// `.property` element. Mirrors the rules in compileObjectLiteral
-/// (ident decode + string-literal trim).
-fn assignmentPatternKey(self: *Compiler, key: ast.expression.PropertyKey) CompileError![]const u8 {
-    return self.decodePropertyKeyName(key);
-}
-
-/// `acc = (acc === undefined) ? <default-expr> : acc`.
-/// Assignment-pattern variant that takes the default as an
-/// already-parsed Expression pointer (not a BindingElement).
-fn applyDefaultExpr(self: *Compiler, default_expr: *const ast.expression.Expression, span: Span) CompileError!void {
-    return applyDefaultExprNamed(self, default_expr, span, null);
-}
-
-/// `applyDefaultExpr` with optional `binding_name` — when
-/// supplied and the default expression is an anonymous
-/// function-like, the function adopts that name (§13.15.5.5).
-fn applyDefaultExprNamed(self: *Compiler, default_expr: *const ast.expression.Expression, span: Span, binding_name: ?[]const u8) CompileError!void {
-    const r_val = try self.reserveTemp();
-    defer self.releaseTemp();
-    try self.builder.emitOp(.star, span);
-    try self.builder.emitU8(r_val);
-
-    try self.builder.emitOp(.lda_undefined, span);
-    try self.builder.emitOp(.strict_neq, span);
-    try self.builder.emitU8(r_val);
-    try self.builder.emitOp(.jmp_if_true, span);
-    const keep_patch = self.builder.here();
-    try self.builder.emitI16(0);
-
-    if (binding_name) |name| {
-        try self.compileNamedValue(default_expr, name);
-    } else {
-        try self.compileExpression(default_expr);
-    }
-    try self.builder.emitOp(.jmp, span);
-    const end_patch = self.builder.here();
-    try self.builder.emitI16(0);
-
-    const keep_target = self.builder.here();
-    try self.builder.patchI16(keep_patch, keep_target);
-    try self.builder.emitOp(.ldar, span);
-    try self.builder.emitU8(r_val);
-
-    const end_target = self.builder.here();
-    try self.builder.patchI16(end_patch, end_target);
-}
-
-/// §10.2.3 — rest parameter prologue: collect the trailing args
-/// (the ones beyond the explicit params) into a fresh Array via
-/// `rest_args_from start`, and bind that array to the rest
-/// target's slot. Destructuring rest targets walk the resulting
-/// array through `compileDestructure`.
-fn emitRestParamPrologue(self: *Compiler, rp: *const ast.statement.RestParam, start_index: u8) CompileError!void {
-    if (rp.target == .identifier) {
-        // §12.7 — bind by StringValue.
-        const param_name = try self.bindingName(rp.target.identifier.span);
-        const slot = try self.declareParam(param_name, rp.span);
-        try self.builder.emitOp(.rest_args_from, rp.span);
-        try self.builder.emitU8(start_index);
-        try self.builder.emitOp(.sta_env, rp.span);
-        try self.builder.emitU8(0);
-        try self.builder.emitU8(slot);
-    } else {
-        try self.declarePatternBindings(rp.target, .let_);
-        try self.builder.emitOp(.rest_args_from, rp.span);
-        try self.builder.emitU8(start_index);
-        try self.compileDestructure(rp.target);
-    }
-}
-
-/// §10.2.3 prologue for a single non-rest parameter — declare
-/// the binding, copy the caller-supplied register `i` into the
-/// function's env slot, and apply a default expression when the
-/// arg is `undefined` (§15.2.4 IteratorBindingInitialization).
-/// Destructuring patterns route through `compileDestructure`
-/// after the default is in `acc`.
-fn emitParamPrologue(self: *Compiler, sp: *const ast.statement.SimpleParam, i: u8) CompileError!void {
-    if (sp.target == .identifier) {
-        // §12.7 — bind by StringValue.
-        const param_name = try self.bindingName(sp.target.identifier.span);
-        const slot = try self.declareParam(param_name, sp.span);
-        // Load the caller-supplied register into acc.
-        try self.builder.emitOp(.ldar, sp.span);
-        try self.builder.emitU8(i);
-        // §15.2.4 step 8 — `function f(x = expr)`: when the
-        // argument is `undefined`, evaluate `expr` (with the
-        // already-bound earlier params visible) and use its
-        // value. Anonymous function-likes pick up the param
-        // name (§15.5.6.4).
-        if (sp.default) |*default_expr| {
-            try self.applyDefaultExprNamed(default_expr, sp.span, param_name);
+            },
+            .computed => |key_expr| {
+                try self.compileExpression(key_expr);
+                const r_key = try self.reserveTemp();
+                defer self.releaseTemp();
+                try self.builder.emitOp(.star, span);
+                try self.builder.emitU8(r_key);
+                try self.builder.emitOp(.ldar, span);
+                try self.builder.emitU8(r_value);
+                try self.builder.emitOp(.sta_computed, span);
+                try self.builder.emitU8(r_obj);
+                try self.builder.emitU8(r_key);
+            },
         }
-        try self.builder.emitOp(.sta_env, sp.span);
-        try self.builder.emitU8(0);
-        try self.builder.emitU8(slot);
-    } else {
-        // §15.2 Destructuring parameter — declare each leaf
-        // binding, then walk the pattern over the arg in `acc`.
-        try self.declarePatternBindings(sp.target, .let_);
-        try self.builder.emitOp(.ldar, sp.span);
-        try self.builder.emitU8(i);
-        if (sp.default) |*default_expr| {
-            try self.applyDefaultExprNamed(default_expr, sp.span, null);
+    }
+
+    /// Decode the property-key shape for an assignment-pattern
+    /// `.property` element. Mirrors the rules in compileObjectLiteral
+    /// (ident decode + string-literal trim).
+    fn assignmentPatternKey(self: *Compiler, key: ast.expression.PropertyKey) CompileError![]const u8 {
+        return self.decodePropertyKeyName(key);
+    }
+
+    /// `acc = (acc === undefined) ? <default-expr> : acc`.
+    /// Assignment-pattern variant that takes the default as an
+    /// already-parsed Expression pointer (not a BindingElement).
+    fn applyDefaultExpr(self: *Compiler, default_expr: *const ast.expression.Expression, span: Span) CompileError!void {
+        return applyDefaultExprNamed(self, default_expr, span, null);
+    }
+
+    /// `applyDefaultExpr` with optional `binding_name` — when
+    /// supplied and the default expression is an anonymous
+    /// function-like, the function adopts that name (§13.15.5.5).
+    fn applyDefaultExprNamed(self: *Compiler, default_expr: *const ast.expression.Expression, span: Span, binding_name: ?[]const u8) CompileError!void {
+        const r_val = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, span);
+        try self.builder.emitU8(r_val);
+
+        try self.builder.emitOp(.lda_undefined, span);
+        try self.builder.emitOp(.strict_neq, span);
+        try self.builder.emitU8(r_val);
+        try self.builder.emitOp(.jmp_if_true, span);
+        const keep_patch = self.builder.here();
+        try self.builder.emitI16(0);
+
+        if (binding_name) |name| {
+            try self.compileNamedValue(default_expr, name);
+        } else {
+            try self.compileExpression(default_expr);
         }
-        try self.compileDestructure(sp.target);
-    }
-    // Account for the param register so the chunk's register
-    // file sizing covers them.
-    if (i + 1 > self.builder.register_count) {
-        self.builder.register_count = i + 1;
-    }
-}
-
-/// `acc = (acc === undefined) ? default : acc`. No-op if no
-/// default is attached.
-fn applyDefaultIfNeeded(self: *Compiler, elem: ast.statement.BindingElement) CompileError!void {
-    if (elem.default) |*default_expr| {
-        // §13.15.5.5 — when the destructure target is a plain
-        // BindingIdentifier and the initializer is anonymous,
-        // SetFunctionName adopts the binding name. Routing
-        // through `applyDefaultExprNamed` lets the caller skip
-        // explicit re-encoding here.
-        const inferred_name: ?[]const u8 = switch (elem.target) {
-            .identifier => |id| self.source[id.span.start..id.span.end],
-            else => null,
-        };
-        try self.applyDefaultExprNamed(default_expr, elem.span, inferred_name);
-    }
-}
-
-fn assignPatternLeaf(self: *Compiler, target: ast.statement.BindingTarget) CompileError!void {
-    switch (target) {
-        .identifier => |id| {
-            // §12.7 — bind by StringValue.
-            const name = try self.bindingName(id.span);
-            try self.assignToBinding(name, id.span);
-        },
-        .array, .object => try self.compileDestructure(target),
-    }
-}
-
-fn assignToBinding(self: *Compiler, name: []const u8, span: Span) CompileError!void {
-    const scope = self.scope orelse return error.UnresolvedReference;
-    // §13.7.5.13 ForIn/OfBodyEvaluation step 5.h.i — `Let lhsRef be
-    // ? Evaluation of lhs`. For an unresolved bare identifier, the
-    // spec resolves to an unresolvable Reference and `PutValue`
-    // throws ReferenceError at runtime (strict mode). Cynic-side:
-    // synthesise a global binding so the for-of/for-in LHS emits the
-    // same `sta_global_strict` shape as `x = e` does — fixtures with
-    // a never-entered loop (e.g. `for (k in undefined)`) compile and
-    // run without raising the runtime ReferenceError.
-    const binding = scope.resolve(name) orelse Binding{
-        .name = name,
-        .env_slot = 0,
-        .env_depth = 0,
-        .kind = .var_,
-        .span = span,
-        .is_global = true,
-    };
-    try self.emitStoreBinding(binding, span);
-}
-
-/// Returns the binding name slice for a `BindingTarget` if it is
-/// a single bare identifier. Destructuring (object / array
-/// patterns) is later+post; until then we surface
-/// `UnsupportedStatement` for those forms.
-fn identifierName(source: []const u8, target: ast.statement.BindingTarget) ?[]const u8 {
-    return switch (target) {
-        .identifier => |id| source[id.span.start..id.span.end],
-        else => null,
-    };
-}
-
-/// §12.7 IdentifierName — variant of `identifierName` that decodes
-/// `\u…` escapes via the compiler's `bindingName` helper. Callers
-/// that need the canonical StringValue for binding declare / resolve
-/// (rather than the raw source slice for diagnostics or printing)
-/// should prefer this form.
-fn identifierBindingName(self: *Compiler, target: ast.statement.BindingTarget) CompileError!?[]const u8 {
-    return switch (target) {
-        .identifier => |id| try self.bindingName(id.span),
-        else => null,
-    };
-}
-
-fn compileIf(self: *Compiler, s: ast.statement.IfStmt) CompileError!void {
-    try self.compileExpression(&s.test_);
-    try self.builder.emitOp(.jmp_if_false, s.span);
-    const else_patch = self.builder.here();
-    try self.builder.emitI16(0);
-
-    try self.compileStatement(s.consequent);
-
-    if (s.alternate) |alt| {
-        try self.builder.emitOp(.jmp, s.span);
+        try self.builder.emitOp(.jmp, span);
         const end_patch = self.builder.here();
         try self.builder.emitI16(0);
-        const else_target = self.builder.here();
-        try self.builder.patchI16(else_patch, else_target);
-        try self.compileStatement(alt);
+
+        const keep_target = self.builder.here();
+        try self.builder.patchI16(keep_patch, keep_target);
+        try self.builder.emitOp(.ldar, span);
+        try self.builder.emitU8(r_val);
+
         const end_target = self.builder.here();
         try self.builder.patchI16(end_patch, end_target);
-    } else {
-        const end_target = self.builder.here();
-        try self.builder.patchI16(else_patch, end_target);
-    }
-}
-
-/// Frame on `Compiler.class_stack` — pushed when entering a
-/// class body so method / field bodies can find the surrounding
-/// class's `private_prefix`. The prefix is owned by the realm's
-/// `class_arena`, so it outlives the compiler.
-const ClassContext = struct {
-    private_prefix: []const u8,
-    is_derived: bool,
-    /// §15.7.14 step 11 — the *decoded* `#name`s declared by this
-    /// class (instance + static, fields + methods + accessors).
-    /// Walked outward from `class_stack` at every private-name
-    /// reference site so the mangle prefix is the *declaring*
-    /// class's, not just the innermost. Allocated in the realm's
-    /// class arena.
-    private_names: []const []const u8 = &.{},
-};
-
-/// §14.15 active try-finally context. Linked list, innermost
-/// first. `compileReturn` walks it to emit each finally body
-/// before issuing `return_`.
-const FinallyContext = struct {
-    body: []ast.statement.Statement,
-    span: Span,
-    parent: ?*FinallyContext = null,
-};
-
-const LoopContext = struct {
-    /// PC where `continue` jumps. For `while` / `do-while` this
-    /// is the test re-entry; for C-style `for` it's the update
-    /// expression.
-    continue_target: u32,
-    /// Pending `break` patches — backfilled with the post-loop
-    /// PC at loop exit.
-    break_patches: std.ArrayListUnmanaged(u32) = .empty,
-    /// Pending `continue` patches when the continue target isn't
-    /// known at the time the `continue` statement is compiled
-    /// (rare later — `for` resolves it at update-emit time).
-    continue_patches: std.ArrayListUnmanaged(u32) = .empty,
-    /// True for `for-of` / `for-in` loops over `let` / `const`
-    /// — the body runs in a per-iteration env that must be
-    /// popped before any cross-loop jump (`break` skips past
-    /// the natural `pop_env`; `continue` jumps to a target
-    /// that emits one).
-    needs_env_pop: bool = false,
-    /// For `for-of` loops, the register holding the open
-    /// iterator. `break` and `return` from inside the body
-    /// must invoke §7.4.6 IteratorClose on this iterator before
-    /// jumping out. `null` for `for`, `while`, `do-while`, and
-    /// `for-in` (the latter doesn't follow the iterator
-    /// protocol).
-    iter_register: ?u8 = null,
-    /// Surrounding loop within the same function frame, or
-    /// `null` at the outermost. `return` walks this chain to
-    /// close every active `for-of` iterator on the way out.
-    /// Function boundaries reset to `null` (each function gets
-    /// its own loop chain).
-    parent: ?*LoopContext = null,
-    /// Snapshot of `finally_chain` at the moment the loop was
-    /// entered. `break` and `continue` walk the chain from the
-    /// current head down to (but not including) this anchor,
-    /// inlining each finally body so abrupt exits from inside a
-    /// `try { … } finally { F }` nested in the loop body still
-    /// run F. §14.15.3 step 4: an abrupt finally completion
-    /// replaces the outer one outright.
-    entry_finally_chain: ?*FinallyContext = null,
-    /// §14.13 LabelledStatement label set — the IdentifierNames
-    /// that an enclosing `LABEL : LoopStatement` wrapped this
-    /// loop with. `break LABEL ;` / `continue LABEL ;` walks the
-    /// `parent` chain to find the loop whose `labels` contains
-    /// the target. Empty (`&.{}`) for unlabelled loops. Borrowed
-    /// from the source buffer; lifetime is the parse arena.
-    labels: []const []const u8 = &.{},
-    /// True for `switch` LoopContexts — they accept `break`
-    /// (with or without a label) but reject `continue` per
-    /// §14.17.1 (target must be an *iteration* statement).
-    is_switch: bool = false,
-
-    fn deinit(self: *LoopContext, allocator: std.mem.Allocator) void {
-        self.break_patches.deinit(allocator);
-        self.continue_patches.deinit(allocator);
-        if (self.labels.len > 0) allocator.free(self.labels);
     }
 
-    fn hasLabel(self: *const LoopContext, name: []const u8) bool {
-        for (self.labels) |l| {
-            if (std.mem.eql(u8, l, name)) return true;
-        }
-        return false;
-    }
-};
-
-fn compileWhile(self: *Compiler, s: ast.statement.WhileStmt) CompileError!void {
-    // §14.13 — claim any `LABEL :` that wrapped us BEFORE we
-    // emit the loop body, so `break LABEL ;` inside the body
-    // resolves to *this* LoopContext.
-    const labels = try self.drainPendingLabels();
-    const loop_start = self.builder.here();
-    try self.compileExpression(&s.test_);
-    try self.builder.emitOp(.jmp_if_false, s.span);
-    const exit_patch = self.builder.here();
-    try self.builder.emitI16(0);
-
-    var ctx: LoopContext = .{
-        .continue_target = loop_start,
-        .parent = self.current_loop,
-        .entry_finally_chain = self.finally_chain,
-        .labels = labels,
-    };
-    defer ctx.deinit(self.allocator);
-    const saved = self.current_loop;
-    self.current_loop = &ctx;
-    defer self.current_loop = saved;
-
-    try self.compileStatement(s.body);
-    try self.builder.emitOp(.jmp, s.span);
-    const back_patch = self.builder.here();
-    try self.builder.emitI16(0);
-    try self.builder.patchI16(back_patch, loop_start);
-
-    const exit_target = self.builder.here();
-    try self.builder.patchI16(exit_patch, exit_target);
-    for (ctx.break_patches.items) |p| try self.builder.patchI16(p, exit_target);
-    // `while`'s continue target is `loop_start` — but
-    // `compileContinue` deferred the patch in case the loop
-    // shape resolved its target later. Patch them now.
-    for (ctx.continue_patches.items) |p| try self.builder.patchI16(p, loop_start);
-}
-
-fn compileDoWhile(self: *Compiler, s: ast.statement.DoWhileStmt) CompileError!void {
-    const labels = try self.drainPendingLabels();
-    const loop_start = self.builder.here();
-    var ctx: LoopContext = .{
-        .continue_target = 0,
-        .parent = self.current_loop,
-        .entry_finally_chain = self.finally_chain,
-        .labels = labels,
-    }; // patched after body
-    defer ctx.deinit(self.allocator);
-    const saved = self.current_loop;
-    self.current_loop = &ctx;
-    defer self.current_loop = saved;
-
-    try self.compileStatement(s.body);
-    const test_pc = self.builder.here();
-    ctx.continue_target = test_pc;
-    try self.compileExpression(&s.test_);
-    try self.builder.emitOp(.jmp_if_true, s.span);
-    const back_patch = self.builder.here();
-    try self.builder.emitI16(0);
-    try self.builder.patchI16(back_patch, loop_start);
-
-    const exit_target = self.builder.here();
-    for (ctx.break_patches.items) |p| try self.builder.patchI16(p, exit_target);
-    for (ctx.continue_patches.items) |p| try self.builder.patchI16(p, test_pc);
-}
-
-fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
-    // §14.7.4 ForStatement (C-style — for-in / for-of compile
-    // separately). For a single `let`/`const` head binding,
-    // §14.7.4.1 ForBodyEvaluation step 2 + CreatePerIterationEnvironment
-    // require a fresh declarative environment per iteration so
-    // closures captured inside the body see iteration-specific
-    // values. later handles the single-binding case (the
-    // overwhelming majority of for-let loops); multi-declarator
-    // heads and `var` heads stay on the legacy single-slot
-    // path.
-    const labels = try self.drainPendingLabels();
-
-    // Detect the single-let/const-binding case.
-    var per_iter_env = false;
-    var single_name: []const u8 = "";
-    var single_span: Span = s.span;
-    var single_kind: BindingKind = .let_;
-    if (s.init) |head| switch (head) {
-        .lexical => |ld| if (ld.kind != .var_ and ld.declarators.len == 1) {
-            const d = ld.declarators[0];
-            // §12.7 — per-iter env binding uses the StringValue.
-            if (d.name == .identifier) {
-                const name = try self.bindingName(d.name.identifier.span);
-                per_iter_env = true;
-                single_name = name;
-                single_span = d.span;
-                single_kind = if (ld.kind == .let_) .let_ else .const_;
-            }
-        },
-        else => {},
-    };
-
-    var for_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = per_iter_env };
-    defer for_scope.deinit(self.allocator);
-    const saved = self.scope;
-    self.scope = &for_scope;
-    defer self.scope = saved;
-
-    const saved_env_depth = self.env_depth;
-    defer self.env_depth = saved_env_depth;
-
-    // Carry-forward register: holds the binding's value across
-    // env swaps. Seeded from the init expression; later updated
-    // from the per-iter env's slot before each fresh-env push.
-    var r_carry: u8 = 0;
-    var per_iter_size_patch: usize = 0;
-    var saved_per_iter_slot_count: u8 = 0;
-    if (per_iter_env) {
-        r_carry = try self.reserveTemp();
-
-        // Evaluate the init expression in the OUTER env. The
-        // declarator's init RHS can reference outer bindings;
-        // it cannot reference the loop binding itself (TDZ).
-        if (s.init.?.lexical.declarators[0].init) |*init_expr| {
-            try self.compileExpression(init_expr);
+    /// §10.2.3 — rest parameter prologue: collect the trailing args
+    /// (the ones beyond the explicit params) into a fresh Array via
+    /// `rest_args_from start`, and bind that array to the rest
+    /// target's slot. Destructuring rest targets walk the resulting
+    /// array through `compileDestructure`.
+    fn emitRestParamPrologue(self: *Compiler, rp: *const ast.statement.RestParam, start_index: u8) CompileError!void {
+        if (rp.target == .identifier) {
+            // §12.7 — bind by StringValue.
+            const param_name = try self.bindingName(rp.target.identifier.span);
+            const slot = try self.declareParam(param_name, rp.span);
+            try self.builder.emitOp(.rest_args_from, rp.span);
+            try self.builder.emitU8(start_index);
+            try self.builder.emitOp(.sta_env, rp.span);
+            try self.builder.emitU8(0);
+            try self.builder.emitU8(slot);
         } else {
-            try self.builder.emitOp(.lda_undefined, single_span);
+            try self.declarePatternBindings(rp.target, .let_);
+            try self.builder.emitOp(.rest_args_from, rp.span);
+            try self.builder.emitU8(start_index);
+            try self.compileDestructure(rp.target);
         }
-        try self.builder.emitOp(.star, single_span);
-        try self.builder.emitU8(r_carry);
+    }
 
-        // Per-iter env owns its own slot pool (loop var + body
-        // lexicals). Borrow `env_slot_count`, reset it, restore
-        // at loop teardown — see compileForInOf for the same
-        // shape. Without this, body's first `const` aliases the
-        // loop variable.
-        saved_per_iter_slot_count = self.env_slot_count;
-        self.env_slot_count = 0;
-        // Push the initial per-iter env (E_0) and seed it.
-        try self.builder.emitOp(.make_environment, s.span);
-        per_iter_size_patch = self.builder.code.items.len;
-        try self.builder.emitU8(0); // placeholder; patched below
-        self.env_depth = saved_env_depth + 1;
-        _ = try self.declareBinding(single_name, single_kind, single_span);
-        try self.builder.emitOp(.ldar, single_span);
-        try self.builder.emitU8(r_carry);
-        try self.builder.emitOp(.sta_env, single_span);
-        try self.builder.emitU8(0);
-        try self.builder.emitU8(0);
-    } else if (s.init) |head| switch (head) {
-        .lexical => |ld| {
-            if (ld.kind != .var_) {
-                const kind: BindingKind = if (ld.kind == .let_) .let_ else .const_;
-                for (ld.declarators) |d| {
-                    // §13.3.1 — declare every leaf binding (or
-                    // the single ident) for `let`/`const`. Patterns
-                    // are walked via `declarePatternBindings`; the
-                    // assignment / destructure happens later via
-                    // `compileLexicalDecl`.
-                    try self.declarePatternBindings(d.name, kind);
-                }
+    /// §10.2.3 prologue for a single non-rest parameter — declare
+    /// the binding, copy the caller-supplied register `i` into the
+    /// function's env slot, and apply a default expression when the
+    /// arg is `undefined` (§15.2.4 IteratorBindingInitialization).
+    /// Destructuring patterns route through `compileDestructure`
+    /// after the default is in `acc`.
+    fn emitParamPrologue(self: *Compiler, sp: *const ast.statement.SimpleParam, i: u8) CompileError!void {
+        if (sp.target == .identifier) {
+            // §12.7 — bind by StringValue.
+            const param_name = try self.bindingName(sp.target.identifier.span);
+            const slot = try self.declareParam(param_name, sp.span);
+            // Load the caller-supplied register into acc.
+            try self.builder.emitOp(.ldar, sp.span);
+            try self.builder.emitU8(i);
+            // §15.2.4 step 8 — `function f(x = expr)`: when the
+            // argument is `undefined`, evaluate `expr` (with the
+            // already-bound earlier params visible) and use its
+            // value. Anonymous function-likes pick up the param
+            // name (§15.5.6.4).
+            if (sp.default) |*default_expr| {
+                try self.applyDefaultExprNamed(default_expr, sp.span, param_name);
             }
-            try self.compileLexicalDecl(ld);
-        },
-        .expression => |e| try self.compileExpression(&e),
-    };
-
-    const loop_start = self.builder.here();
-
-    var exit_patch: ?u32 = null;
-    if (s.test_) |*t| {
-        try self.compileExpression(t);
-        try self.builder.emitOp(.jmp_if_false, s.span);
-        exit_patch = self.builder.here();
-        try self.builder.emitI16(0);
-    }
-
-    var ctx: LoopContext = .{
-        .continue_target = 0,
-        .needs_env_pop = per_iter_env,
-        .parent = self.current_loop,
-        .entry_finally_chain = self.finally_chain,
-        .labels = labels,
-    };
-    defer ctx.deinit(self.allocator);
-    const saved_loop = self.current_loop;
-    self.current_loop = &ctx;
-    defer self.current_loop = saved_loop;
-
-    try self.compileStatement(s.body);
-
-    // §14.7.4.1 ForBodyEvaluation step 2.d/2.e —
-    // CreatePerIterationEnvironment runs AFTER the body, BEFORE
-    // the update. The closures captured in the body must keep
-    // referring to *their* iteration's env (which is left
-    // alive only via those closures); the update mutates the
-    // FRESH env that becomes the next iteration's view.
-    const update_pc = self.builder.here();
-    ctx.continue_target = update_pc;
-    var per_iter_size_patch_2: usize = 0;
-    if (per_iter_env) {
-        // r_carry ← value from current per-iter env
-        try self.builder.emitOp(.lda_env, s.span);
-        try self.builder.emitU8(0);
-        try self.builder.emitU8(0);
-        try self.builder.emitOp(.star, s.span);
-        try self.builder.emitU8(r_carry);
-        // Pop current env and push a fresh one.
-        try self.builder.emitOp(.pop_env, s.span);
-        try self.builder.emitOp(.make_environment, s.span);
-        per_iter_size_patch_2 = self.builder.code.items.len;
-        try self.builder.emitU8(0); // placeholder; patched below
-        try self.builder.emitOp(.ldar, s.span);
-        try self.builder.emitU8(r_carry);
-        try self.builder.emitOp(.sta_env, s.span);
-        try self.builder.emitU8(0);
-        try self.builder.emitU8(0);
-    }
-    if (s.update) |*u| {
-        try self.compileExpression(u);
-    }
-
-    try self.builder.emitOp(.jmp, s.span);
-    const back_patch = self.builder.here();
-    try self.builder.emitI16(0);
-    try self.builder.patchI16(back_patch, loop_start);
-
-    // Exit: pop the lingering per-iter env on test-failed exit.
-    // `break` pops via compileBreak; the natural test-fail path
-    // needs an explicit pop here.
-    if (per_iter_env) {
-        if (exit_patch) |p| {
-            const fail_pc = self.builder.here();
-            try self.builder.patchI16(p, fail_pc);
-            try self.builder.emitOp(.pop_env, s.span);
-        }
-    } else if (exit_patch) |p| {
-        try self.builder.patchI16(p, self.builder.here());
-    }
-    const real_exit = self.builder.here();
-    for (ctx.break_patches.items) |patch| try self.builder.patchI16(patch, real_exit);
-    for (ctx.continue_patches.items) |patch| try self.builder.patchI16(patch, update_pc);
-
-    if (per_iter_env) {
-        // Patch both per-iter `make_environment` size operands
-        // (initial seed + per-iteration refresh) to whatever
-        // env_slot_count grew to. Restore the enclosing
-        // function's slot counter.
-        self.builder.code.items[per_iter_size_patch] = self.env_slot_count;
-        self.builder.code.items[per_iter_size_patch_2] = self.env_slot_count;
-        self.env_slot_count = saved_per_iter_slot_count;
-        self.releaseTemp(); // r_carry
-    }
-}
-
-/// Inline every finally body whose try-statement was opened
-/// after `anchor` (i.e. lies between the abrupt-completion site
-/// and `anchor` in lexical order). Used by `break` / `continue`
-/// to honour §14.15.3 step 4: a `try { … break; } finally { F }`
-/// must run F before the loop exit. The chain is rewound past
-/// each `f` before its body is compiled so an abrupt `return` /
-/// `break` / `continue` inside F doesn't re-inline F itself.
-fn emitFinalliesUntil(
-    self: *Compiler,
-    anchor: ?*FinallyContext,
-    span: Span,
-) CompileError!void {
-    if (self.finally_chain == anchor) return;
-    const saved_chain = self.finally_chain;
-    defer self.finally_chain = saved_chain;
-    var fctx = self.finally_chain;
-    while (fctx) |f| : (fctx = f.parent) {
-        if (f == anchor) break;
-        self.finally_chain = f.parent;
-        try self.compileBlock(f.body, span);
-    }
-}
-
-/// §14.13 LabelledStatement — `IDENTIFIER : Statement`. Push the
-/// label onto `pending_labels` so the *first* iteration statement
-/// encountered while compiling the body claims it as one of its
-/// `LoopContext.labels`. The label is popped on exit; a body that
-/// isn't an iteration statement (e.g. `LABEL: { … }`) silently
-/// drops the label — `break LABEL ;` from inside such a block
-/// isn't supported yet, but the label is otherwise transparent.
-fn compileLabeled(self: *Compiler, lb: ast.statement.LabeledStmt) CompileError!void {
-    const name = self.source[lb.label.start..lb.label.end];
-    try self.pending_labels.append(self.allocator, name);
-    // Best-effort cleanup: if the body's compile claims the
-    // pending label into a LoopContext, the list is already
-    // shorter (the loop drains everything). Only pop our own
-    // entry if it's still on top.
-    const len_before = self.pending_labels.items.len;
-    defer {
-        if (self.pending_labels.items.len == len_before) {
-            _ = self.pending_labels.pop();
-        }
-    }
-    try self.compileStatement(lb.body);
-}
-
-/// Drain `pending_labels` into a freshly-allocated slice. Called
-/// at the top of each iteration-statement's compile routine; the
-/// returned slice is owned by the LoopContext and freed via
-/// `LoopContext.deinit`. Returns an empty slice (sharing the
-/// const `&.{}` static) when no labels are pending — that
-/// preserves the deinit-time `len > 0` guard.
-fn drainPendingLabels(self: *Compiler) CompileError![]const []const u8 {
-    const n = self.pending_labels.items.len;
-    if (n == 0) return &.{};
-    const dup = try self.allocator.alloc([]const u8, n);
-    @memcpy(dup, self.pending_labels.items);
-    self.pending_labels.clearRetainingCapacity();
-    return dup;
-}
-
-/// Locate the `LoopContext` that `break LABEL ;` should exit. If
-/// `label_span` is `null` (unlabelled `break ;`) returns the
-/// innermost loop. Otherwise walks `current_loop.parent*` for the
-/// loop whose `labels` includes the target. Returns `null` if no
-/// match — caller reports the diagnostic.
-fn findBreakTarget(self: *Compiler, label_span: ?Span) ?*LoopContext {
-    var c = self.current_loop;
-    if (label_span) |sp| {
-        const name = self.source[sp.start..sp.end];
-        while (c) |ctx| : (c = ctx.parent) {
-            if (ctx.hasLabel(name)) return ctx;
-        }
-        return null;
-    }
-    return c;
-}
-
-/// §14.17.1 ContinueStatement — the target must be an iteration
-/// statement (not a switch). Walks `current_loop.parent*` for a
-/// loop whose `labels` contains the target name; `is_switch`
-/// contexts are skipped over (a `continue` inside a switch
-/// targets the enclosing loop) and unlabelled `continue` lands
-/// on the innermost non-switch loop.
-fn findContinueTarget(self: *Compiler, label_span: ?Span) ?*LoopContext {
-    var c = self.current_loop;
-    if (label_span) |sp| {
-        const name = self.source[sp.start..sp.end];
-        while (c) |ctx| : (c = ctx.parent) {
-            if (ctx.is_switch) continue;
-            if (ctx.hasLabel(name)) return ctx;
-        }
-        return null;
-    }
-    while (c) |ctx| : (c = ctx.parent) {
-        if (!ctx.is_switch) return ctx;
-    }
-    return null;
-}
-
-fn compileBreak(self: *Compiler, s: ast.statement.BreakStmt) CompileError!void {
-    const target = self.findBreakTarget(s.label) orelse {
-        try self.report(.unexpected_token, s.span);
-        return error.UnsupportedStatement;
-    };
-    // §7.4.6 IteratorClose — every for-of loop strictly between
-    // this `break` and the target loop must have its iterator
-    // closed before we leave it. Walk the chain inner→outer up
-    // to *and including* the target.
-    var c: ?*LoopContext = self.current_loop;
-    while (c) |ctx| : (c = ctx.parent) {
-        if (ctx.iter_register) |r_iter| {
-            try self.builder.emitOp(.iter_close, s.span);
-            try self.builder.emitU8(r_iter);
-            // §7.4.6 — completion type is `break`; propagate
-            // inner throw, TypeError on non-Object return.
+            try self.builder.emitOp(.sta_env, sp.span);
             try self.builder.emitU8(0);
+            try self.builder.emitU8(slot);
+        } else {
+            // §15.2 Destructuring parameter — declare each leaf
+            // binding, then walk the pattern over the arg in `acc`.
+            try self.declarePatternBindings(sp.target, .let_);
+            try self.builder.emitOp(.ldar, sp.span);
+            try self.builder.emitU8(i);
+            if (sp.default) |*default_expr| {
+                try self.applyDefaultExprNamed(default_expr, sp.span, null);
+            }
+            try self.compileDestructure(sp.target);
         }
-        if (ctx == target) break;
-    }
-    // §14.15 — run every finally block opened between this
-    // `break` and the target loop entry before transferring
-    // control.
-    try self.emitFinalliesUntil(target.entry_finally_chain, s.span);
-    // `break` jumps past the natural `pop_env` site; emit one
-    // `pop_env` for every per-iter-env loop we skip out of
-    // (innermost → target inclusive).
-    c = self.current_loop;
-    while (c) |ctx| : (c = ctx.parent) {
-        if (ctx.needs_env_pop) try self.builder.emitOp(.pop_env, s.span);
-        if (ctx == target) break;
-    }
-    try self.builder.emitOp(.jmp, s.span);
-    const patch = self.builder.here();
-    try self.builder.emitI16(0);
-    try target.break_patches.append(self.allocator, patch);
-}
-
-fn compileContinue(self: *Compiler, s: ast.statement.ContinueStmt) CompileError!void {
-    // Defer the patch — `for` loops don't know their continue
-    // target (the update PC) until the body has been compiled,
-    // and `do-while` doesn't know its test PC until after the
-    // body. Loop-specific compile routines walk
-    // `continue_patches` at the end and patch each.
-    const target = self.findContinueTarget(s.label) orelse {
-        try self.report(.unexpected_token, s.span);
-        return error.UnsupportedStatement;
-    };
-    // §7.4.6 IteratorClose — every for-of loop strictly between
-    // this `continue` and the target loop must have its iterator
-    // closed (we're leaving those loops outright). The target
-    // loop itself is re-entered, so its iterator stays open.
-    var c: ?*LoopContext = self.current_loop;
-    while (c) |ctx| : (c = ctx.parent) {
-        if (ctx == target) break;
-        if (ctx.iter_register) |r_iter| {
-            try self.builder.emitOp(.iter_close, s.span);
-            try self.builder.emitU8(r_iter);
-            try self.builder.emitU8(0);
+        // Account for the param register so the chunk's register
+        // file sizing covers them.
+        if (i + 1 > self.builder.register_count) {
+            self.builder.register_count = i + 1;
         }
     }
-    // §14.15 — run every finally block opened between this
-    // `continue` and the target loop entry before transferring
-    // control.
-    try self.emitFinalliesUntil(target.entry_finally_chain, s.span);
-    // For every loop we skip OUTWARDS through (i.e. strictly
-    // inner to `target`), pop its per-iter env if it had one.
-    // The target loop's own per-iter env teardown is handled by
-    // its `continue_target` (which, for `for-of` over `let`,
-    // emits its own `pop_env`).
-    c = self.current_loop;
-    while (c) |ctx| : (c = ctx.parent) {
-        if (ctx == target) break;
-        if (ctx.needs_env_pop) try self.builder.emitOp(.pop_env, s.span);
+
+    /// `acc = (acc === undefined) ? default : acc`. No-op if no
+    /// default is attached.
+    fn applyDefaultIfNeeded(self: *Compiler, elem: ast.statement.BindingElement) CompileError!void {
+        if (elem.default) |*default_expr| {
+            // §13.15.5.5 — when the destructure target is a plain
+            // BindingIdentifier and the initializer is anonymous,
+            // SetFunctionName adopts the binding name. Routing
+            // through `applyDefaultExprNamed` lets the caller skip
+            // explicit re-encoding here.
+            const inferred_name: ?[]const u8 = switch (elem.target) {
+                .identifier => |id| self.source[id.span.start..id.span.end],
+                else => null,
+            };
+            try self.applyDefaultExprNamed(default_expr, elem.span, inferred_name);
+        }
     }
-    try self.builder.emitOp(.jmp, s.span);
-    const patch = self.builder.here();
-    try self.builder.emitI16(0);
-    try target.continue_patches.append(self.allocator, patch);
-}
 
-fn compileThrow(self: *Compiler, s: ast.statement.ThrowStmt) CompileError!void {
-    try self.compileExpression(&s.argument);
-    try self.builder.emitOp(.throw_, s.span);
-}
+    fn assignPatternLeaf(self: *Compiler, target: ast.statement.BindingTarget) CompileError!void {
+        switch (target) {
+            .identifier => |id| {
+                // §12.7 — bind by StringValue.
+                const name = try self.bindingName(id.span);
+                try self.assignToBinding(name, id.span);
+            },
+            .array, .object => try self.compileDestructure(target),
+        }
+    }
 
-fn compileTry(self: *Compiler, s: ast.statement.TryStmt) CompileError!void {
-    // §14.15 TryStatement.
-    //
-    // try { A } catch (e) { B } — A's handler runs B.
-    // try { A } finally { F } — Synthetic handler:
-    // A's throw lands on
-    // F, which re-throws
-    // at end.
-    // try { A } catch (e) { B } finally {} — A's handler runs B,
-    // F runs on every
-    // path (B's throws
-    // via a second
-    // synthetic handler).
-    //
-    // distinguish abrupt-return vs throw inside finally
-    // (currently both propagate as throws via the rethrow at the
-    // end of synthetic handlers).
-
-    // Push the finally context BEFORE compiling the try body so
-    // any `return` / `break` inside it knows to inline the
-    // finally before exiting.
-    var fctx_storage: FinallyContext = undefined;
-    var pushed_finally = false;
-    if (s.finalizer) |fb| {
-        fctx_storage = .{
-            .body = fb.body,
-            .span = fb.span,
-            .parent = self.finally_chain,
+    fn assignToBinding(self: *Compiler, name: []const u8, span: Span) CompileError!void {
+        const scope = self.scope orelse return error.UnresolvedReference;
+        // §13.7.5.13 ForIn/OfBodyEvaluation step 5.h.i — `Let lhsRef be
+        // ? Evaluation of lhs`. For an unresolved bare identifier, the
+        // spec resolves to an unresolvable Reference and `PutValue`
+        // throws ReferenceError at runtime (strict mode). Cynic-side:
+        // synthesise a global binding so the for-of/for-in LHS emits the
+        // same `sta_global_strict` shape as `x = e` does — fixtures with
+        // a never-entered loop (e.g. `for (k in undefined)`) compile and
+        // run without raising the runtime ReferenceError.
+        const binding = scope.resolve(name) orelse Binding{
+            .name = name,
+            .env_slot = 0,
+            .env_depth = 0,
+            .kind = .var_,
+            .span = span,
+            .is_global = true,
         };
-        self.finally_chain = &fctx_storage;
-        pushed_finally = true;
+        try self.emitStoreBinding(binding, span);
     }
 
-    const start_pc = self.builder.here();
-    try self.compileBlock(s.block.body, s.block.span);
-    const end_pc = self.builder.here();
+    /// Returns the binding name slice for a `BindingTarget` if it is
+    /// a single bare identifier. Destructuring (object / array
+    /// patterns) is later+post; until then we surface
+    /// `UnsupportedStatement` for those forms.
+    fn identifierName(source: []const u8, target: ast.statement.BindingTarget) ?[]const u8 {
+        return switch (target) {
+            .identifier => |id| source[id.span.start..id.span.end],
+            else => null,
+        };
+    }
 
-    // Jump past the catch landing on the normal-completion path.
-    try self.builder.emitOp(.jmp, s.span);
-    const skip_handler_patch = self.builder.here();
-    try self.builder.emitI16(0);
+    /// §12.7 IdentifierName — variant of `identifierName` that decodes
+    /// `\u…` escapes via the compiler's `bindingName` helper. Callers
+    /// that need the canonical StringValue for binding declare / resolve
+    /// (rather than the raw source slice for diagnostics or printing)
+    /// should prefer this form.
+    fn identifierBindingName(self: *Compiler, target: ast.statement.BindingTarget) CompileError!?[]const u8 {
+        return switch (target) {
+            .identifier => |id| try self.bindingName(id.span),
+            else => null,
+        };
+    }
 
-    // Track the catch body's PC range so a `finally` (if any) can
-    // also wrap a synthetic handler around it.
-    var catch_body_start: ?u32 = null;
-    var catch_body_end: ?u32 = null;
-    var catch_register: ?u8 = null;
-    if (s.handler) |h| {
-        const handler_pc = self.builder.here();
-        catch_body_start = handler_pc;
-        var catch_scope: Scope = .{ .parent = self.scope, .kind = .block };
-        defer catch_scope.deinit(self.allocator);
+    fn compileIf(self: *Compiler, s: ast.statement.IfStmt) CompileError!void {
+        try self.compileExpression(&s.test_);
+        try self.builder.emitOp(.jmp_if_false, s.span);
+        const else_patch = self.builder.here();
+        try self.builder.emitI16(0);
+
+        try self.compileStatement(s.consequent);
+
+        if (s.alternate) |alt| {
+            try self.builder.emitOp(.jmp, s.span);
+            const end_patch = self.builder.here();
+            try self.builder.emitI16(0);
+            const else_target = self.builder.here();
+            try self.builder.patchI16(else_patch, else_target);
+            try self.compileStatement(alt);
+            const end_target = self.builder.here();
+            try self.builder.patchI16(end_patch, end_target);
+        } else {
+            const end_target = self.builder.here();
+            try self.builder.patchI16(else_patch, end_target);
+        }
+    }
+
+    /// Frame on `Compiler.class_stack` — pushed when entering a
+    /// class body so method / field bodies can find the surrounding
+    /// class's `private_prefix`. The prefix is owned by the realm's
+    /// `class_arena`, so it outlives the compiler.
+    const ClassContext = struct {
+        private_prefix: []const u8,
+        is_derived: bool,
+        /// §15.7.14 step 11 — the *decoded* `#name`s declared by this
+        /// class (instance + static, fields + methods + accessors).
+        /// Walked outward from `class_stack` at every private-name
+        /// reference site so the mangle prefix is the *declaring*
+        /// class's, not just the innermost. Allocated in the realm's
+        /// class arena.
+        private_names: []const []const u8 = &.{},
+    };
+
+    /// §14.15 active try-finally context. Linked list, innermost
+    /// first. `compileReturn` walks it to emit each finally body
+    /// before issuing `return_`.
+    const FinallyContext = struct {
+        body: []ast.statement.Statement,
+        span: Span,
+        parent: ?*FinallyContext = null,
+    };
+
+    const LoopContext = struct {
+        /// PC where `continue` jumps. For `while` / `do-while` this
+        /// is the test re-entry; for C-style `for` it's the update
+        /// expression.
+        continue_target: u32,
+        /// Pending `break` patches — backfilled with the post-loop
+        /// PC at loop exit.
+        break_patches: std.ArrayListUnmanaged(u32) = .empty,
+        /// Pending `continue` patches when the continue target isn't
+        /// known at the time the `continue` statement is compiled
+        /// (rare later — `for` resolves it at update-emit time).
+        continue_patches: std.ArrayListUnmanaged(u32) = .empty,
+        /// True for `for-of` / `for-in` loops over `let` / `const`
+        /// — the body runs in a per-iteration env that must be
+        /// popped before any cross-loop jump (`break` skips past
+        /// the natural `pop_env`; `continue` jumps to a target
+        /// that emits one).
+        needs_env_pop: bool = false,
+        /// For `for-of` loops, the register holding the open
+        /// iterator. `break` and `return` from inside the body
+        /// must invoke §7.4.6 IteratorClose on this iterator before
+        /// jumping out. `null` for `for`, `while`, `do-while`, and
+        /// `for-in` (the latter doesn't follow the iterator
+        /// protocol).
+        iter_register: ?u8 = null,
+        /// Surrounding loop within the same function frame, or
+        /// `null` at the outermost. `return` walks this chain to
+        /// close every active `for-of` iterator on the way out.
+        /// Function boundaries reset to `null` (each function gets
+        /// its own loop chain).
+        parent: ?*LoopContext = null,
+        /// Snapshot of `finally_chain` at the moment the loop was
+        /// entered. `break` and `continue` walk the chain from the
+        /// current head down to (but not including) this anchor,
+        /// inlining each finally body so abrupt exits from inside a
+        /// `try { … } finally { F }` nested in the loop body still
+        /// run F. §14.15.3 step 4: an abrupt finally completion
+        /// replaces the outer one outright.
+        entry_finally_chain: ?*FinallyContext = null,
+        /// §14.13 LabelledStatement label set — the IdentifierNames
+        /// that an enclosing `LABEL : LoopStatement` wrapped this
+        /// loop with. `break LABEL ;` / `continue LABEL ;` walks the
+        /// `parent` chain to find the loop whose `labels` contains
+        /// the target. Empty (`&.{}`) for unlabelled loops. Borrowed
+        /// from the source buffer; lifetime is the parse arena.
+        labels: []const []const u8 = &.{},
+        /// True for `switch` LoopContexts — they accept `break`
+        /// (with or without a label) but reject `continue` per
+        /// §14.17.1 (target must be an *iteration* statement).
+        is_switch: bool = false,
+
+        fn deinit(self: *LoopContext, allocator: std.mem.Allocator) void {
+            self.break_patches.deinit(allocator);
+            self.continue_patches.deinit(allocator);
+            if (self.labels.len > 0) allocator.free(self.labels);
+        }
+
+        fn hasLabel(self: *const LoopContext, name: []const u8) bool {
+            for (self.labels) |l| {
+                if (std.mem.eql(u8, l, name)) return true;
+            }
+            return false;
+        }
+    };
+
+    fn compileWhile(self: *Compiler, s: ast.statement.WhileStmt) CompileError!void {
+        // §14.13 — claim any `LABEL :` that wrapped us BEFORE we
+        // emit the loop body, so `break LABEL ;` inside the body
+        // resolves to *this* LoopContext.
+        const labels = try self.drainPendingLabels();
+        const loop_start = self.builder.here();
+        try self.compileExpression(&s.test_);
+        try self.builder.emitOp(.jmp_if_false, s.span);
+        const exit_patch = self.builder.here();
+        try self.builder.emitI16(0);
+
+        var ctx: LoopContext = .{
+            .continue_target = loop_start,
+            .parent = self.current_loop,
+            .entry_finally_chain = self.finally_chain,
+            .labels = labels,
+        };
+        defer ctx.deinit(self.allocator);
+        const saved = self.current_loop;
+        self.current_loop = &ctx;
+        defer self.current_loop = saved;
+
+        try self.compileStatement(s.body);
+        try self.builder.emitOp(.jmp, s.span);
+        const back_patch = self.builder.here();
+        try self.builder.emitI16(0);
+        try self.builder.patchI16(back_patch, loop_start);
+
+        const exit_target = self.builder.here();
+        try self.builder.patchI16(exit_patch, exit_target);
+        for (ctx.break_patches.items) |p| try self.builder.patchI16(p, exit_target);
+        // `while`'s continue target is `loop_start` — but
+        // `compileContinue` deferred the patch in case the loop
+        // shape resolved its target later. Patch them now.
+        for (ctx.continue_patches.items) |p| try self.builder.patchI16(p, loop_start);
+    }
+
+    fn compileDoWhile(self: *Compiler, s: ast.statement.DoWhileStmt) CompileError!void {
+        const labels = try self.drainPendingLabels();
+        const loop_start = self.builder.here();
+        var ctx: LoopContext = .{
+            .continue_target = 0,
+            .parent = self.current_loop,
+            .entry_finally_chain = self.finally_chain,
+            .labels = labels,
+        }; // patched after body
+        defer ctx.deinit(self.allocator);
+        const saved = self.current_loop;
+        self.current_loop = &ctx;
+        defer self.current_loop = saved;
+
+        try self.compileStatement(s.body);
+        const test_pc = self.builder.here();
+        ctx.continue_target = test_pc;
+        try self.compileExpression(&s.test_);
+        try self.builder.emitOp(.jmp_if_true, s.span);
+        const back_patch = self.builder.here();
+        try self.builder.emitI16(0);
+        try self.builder.patchI16(back_patch, loop_start);
+
+        const exit_target = self.builder.here();
+        for (ctx.break_patches.items) |p| try self.builder.patchI16(p, exit_target);
+        for (ctx.continue_patches.items) |p| try self.builder.patchI16(p, test_pc);
+    }
+
+    fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
+        // §14.7.4 ForStatement (C-style — for-in / for-of compile
+        // separately). For a single `let`/`const` head binding,
+        // §14.7.4.1 ForBodyEvaluation step 2 + CreatePerIterationEnvironment
+        // require a fresh declarative environment per iteration so
+        // closures captured inside the body see iteration-specific
+        // values. later handles the single-binding case (the
+        // overwhelming majority of for-let loops); multi-declarator
+        // heads and `var` heads stay on the legacy single-slot
+        // path.
+        const labels = try self.drainPendingLabels();
+
+        // Detect the single-let/const-binding case.
+        var per_iter_env = false;
+        var single_name: []const u8 = "";
+        var single_span: Span = s.span;
+        var single_kind: BindingKind = .let_;
+        if (s.init) |head| switch (head) {
+            .lexical => |ld| if (ld.kind != .var_ and ld.declarators.len == 1) {
+                const d = ld.declarators[0];
+                // §12.7 — per-iter env binding uses the StringValue.
+                if (d.name == .identifier) {
+                    const name = try self.bindingName(d.name.identifier.span);
+                    per_iter_env = true;
+                    single_name = name;
+                    single_span = d.span;
+                    single_kind = if (ld.kind == .let_) .let_ else .const_;
+                }
+            },
+            else => {},
+        };
+
+        var for_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = per_iter_env };
+        defer for_scope.deinit(self.allocator);
         const saved = self.scope;
-        self.scope = &catch_scope;
+        self.scope = &for_scope;
         defer self.scope = saved;
 
-        if (h.param) |target| {
-            // §14.15 CatchParameter is a BindingIdentifier or
-            // BindingPattern. The dispatch in `unwindThrow` deposits
-            // the thrown value into the env slot recorded as
-            // `catch_register`. For a bare identifier we declare
-            // that identifier directly. For a pattern we allocate a
-            // synthetic let slot, declare each leaf binding inside
-            // the pattern, and deconstruct from the synthetic slot
-            // at the top of the handler body.
-            switch (target) {
-                .identifier => |cid| {
-                    // §12.7 — bind by StringValue.
-                    const name = try self.bindingName(cid.span);
-                    catch_register = try self.declareBinding(name, .let_, h.span);
-                },
-                .array, .object => {
-                    const synth_slot = try self.declareBinding("__cynic_catch_ex__", .let_, target.span());
-                    catch_register = synth_slot;
-                    try self.declarePatternBindings(target, .let_);
-                    // Load the deposited exception into acc and run
-                    // BindingInitialization (§14.15.10 step 5).
-                    try self.builder.emitOp(.lda_env, target.span());
-                    try self.builder.emitU8(0);
-                    try self.builder.emitU8(synth_slot);
-                    try self.compileDestructure(target);
-                },
-            }
-        }
-        try self.compileBlock(h.body.body, h.body.span);
-        catch_body_end = self.builder.here();
-
-        try self.builder.addHandler(.{
-            .start_pc = start_pc,
-            .end_pc = end_pc,
-            .handler_pc = handler_pc,
-            .catch_register = catch_register,
-        });
-    }
-
-    // Pop the finally context — the merge / synthetic-handler
-    // emission below should NOT see it (so a `return` inside
-    // the finally block doesn't recurse into itself).
-    if (pushed_finally) self.finally_chain = fctx_storage.parent;
-
-    // §14.15.10 — when a finally block is present, wire two
-    // synthetic handlers so abrupt completions thread through it:
-    // 1. If `try` has NO catch: handler covers the try body and
-    // lands on an inline finally-then-rethrow snippet.
-    // 2. If `try` has BOTH catch and finally: the catch body
-    // itself gets a synthetic handler that runs finally and
-    // rethrows when the catch body throws.
-    if (s.finalizer) |fb| {
-        // Normal/caught path lands at merge_pc and runs finally.
-        // The finally chain was already popped above so a
-        // `return` inside fb won't recurse.
-        const merge_pc = self.builder.here();
-        try self.builder.patchI16(skip_handler_patch, merge_pc);
-        try self.compileBlock(fb.body, fb.span);
-        try self.builder.emitOp(.jmp, s.span);
-        const skip_synth_patch = self.builder.here();
-        try self.builder.emitI16(0);
-
-        // Synthetic abrupt-completion handler: receives the thrown
-        // value in a fresh slot, runs finally, then `throw`s the
-        // saved value to propagate.
-        const synth_pc = self.builder.here();
-        var synth_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = true };
-        defer synth_scope.deinit(self.allocator);
-        const saved_scope = self.scope;
-        self.scope = &synth_scope;
-        defer self.scope = saved_scope;
         const saved_env_depth = self.env_depth;
         defer self.env_depth = saved_env_depth;
-        const slot = try self.declareBinding("__cynic_finally_ex__", .let_, s.span);
-        // The handler dispatch deposits the thrown value via
-        // `catch_register` (an env slot at depth 0).
-        try self.compileBlock(fb.body, fb.span);
-        try self.builder.emitOp(.lda_env, s.span);
-        try self.builder.emitU8(0);
-        try self.builder.emitU8(slot);
-        try self.builder.emitOp(.throw_, s.span);
-        const after_finally_pc = self.builder.here();
-        try self.builder.patchI16(skip_synth_patch, after_finally_pc);
 
-        // No-catch case: cover the try body with the synthetic
-        // handler. With-catch case: cover the catch body too.
-        if (s.handler == null) {
+        // Carry-forward register: holds the binding's value across
+        // env swaps. Seeded from the init expression; later updated
+        // from the per-iter env's slot before each fresh-env push.
+        var r_carry: u8 = 0;
+        var per_iter_size_patch: usize = 0;
+        var saved_per_iter_slot_count: u8 = 0;
+        if (per_iter_env) {
+            r_carry = try self.reserveTemp();
+
+            // Evaluate the init expression in the OUTER env. The
+            // declarator's init RHS can reference outer bindings;
+            // it cannot reference the loop binding itself (TDZ).
+            if (s.init.?.lexical.declarators[0].init) |*init_expr| {
+                try self.compileExpression(init_expr);
+            } else {
+                try self.builder.emitOp(.lda_undefined, single_span);
+            }
+            try self.builder.emitOp(.star, single_span);
+            try self.builder.emitU8(r_carry);
+
+            // Per-iter env owns its own slot pool (loop var + body
+            // lexicals). Borrow `env_slot_count`, reset it, restore
+            // at loop teardown — see compileForInOf for the same
+            // shape. Without this, body's first `const` aliases the
+            // loop variable.
+            saved_per_iter_slot_count = self.env_slot_count;
+            self.env_slot_count = 0;
+            // Push the initial per-iter env (E_0) and seed it.
+            try self.builder.emitOp(.make_environment, s.span);
+            per_iter_size_patch = self.builder.code.items.len;
+            try self.builder.emitU8(0); // placeholder; patched below
+            self.env_depth = saved_env_depth + 1;
+            _ = try self.declareBinding(single_name, single_kind, single_span);
+            try self.builder.emitOp(.ldar, single_span);
+            try self.builder.emitU8(r_carry);
+            try self.builder.emitOp(.sta_env, single_span);
+            try self.builder.emitU8(0);
+            try self.builder.emitU8(0);
+        } else if (s.init) |head| switch (head) {
+            .lexical => |ld| {
+                if (ld.kind != .var_) {
+                    const kind: BindingKind = if (ld.kind == .let_) .let_ else .const_;
+                    for (ld.declarators) |d| {
+                        // §13.3.1 — declare every leaf binding (or
+                        // the single ident) for `let`/`const`. Patterns
+                        // are walked via `declarePatternBindings`; the
+                        // assignment / destructure happens later via
+                        // `compileLexicalDecl`.
+                        try self.declarePatternBindings(d.name, kind);
+                    }
+                }
+                try self.compileLexicalDecl(ld);
+            },
+            .expression => |e| try self.compileExpression(&e),
+        };
+
+        const loop_start = self.builder.here();
+
+        var exit_patch: ?u32 = null;
+        if (s.test_) |*t| {
+            try self.compileExpression(t);
+            try self.builder.emitOp(.jmp_if_false, s.span);
+            exit_patch = self.builder.here();
+            try self.builder.emitI16(0);
+        }
+
+        var ctx: LoopContext = .{
+            .continue_target = 0,
+            .needs_env_pop = per_iter_env,
+            .parent = self.current_loop,
+            .entry_finally_chain = self.finally_chain,
+            .labels = labels,
+        };
+        defer ctx.deinit(self.allocator);
+        const saved_loop = self.current_loop;
+        self.current_loop = &ctx;
+        defer self.current_loop = saved_loop;
+
+        try self.compileStatement(s.body);
+
+        // §14.7.4.1 ForBodyEvaluation step 2.d/2.e —
+        // CreatePerIterationEnvironment runs AFTER the body, BEFORE
+        // the update. The closures captured in the body must keep
+        // referring to *their* iteration's env (which is left
+        // alive only via those closures); the update mutates the
+        // FRESH env that becomes the next iteration's view.
+        const update_pc = self.builder.here();
+        ctx.continue_target = update_pc;
+        var per_iter_size_patch_2: usize = 0;
+        if (per_iter_env) {
+            // r_carry ← value from current per-iter env
+            try self.builder.emitOp(.lda_env, s.span);
+            try self.builder.emitU8(0);
+            try self.builder.emitU8(0);
+            try self.builder.emitOp(.star, s.span);
+            try self.builder.emitU8(r_carry);
+            // Pop current env and push a fresh one.
+            try self.builder.emitOp(.pop_env, s.span);
+            try self.builder.emitOp(.make_environment, s.span);
+            per_iter_size_patch_2 = self.builder.code.items.len;
+            try self.builder.emitU8(0); // placeholder; patched below
+            try self.builder.emitOp(.ldar, s.span);
+            try self.builder.emitU8(r_carry);
+            try self.builder.emitOp(.sta_env, s.span);
+            try self.builder.emitU8(0);
+            try self.builder.emitU8(0);
+        }
+        if (s.update) |*u| {
+            try self.compileExpression(u);
+        }
+
+        try self.builder.emitOp(.jmp, s.span);
+        const back_patch = self.builder.here();
+        try self.builder.emitI16(0);
+        try self.builder.patchI16(back_patch, loop_start);
+
+        // Exit: pop the lingering per-iter env on test-failed exit.
+        // `break` pops via compileBreak; the natural test-fail path
+        // needs an explicit pop here.
+        if (per_iter_env) {
+            if (exit_patch) |p| {
+                const fail_pc = self.builder.here();
+                try self.builder.patchI16(p, fail_pc);
+                try self.builder.emitOp(.pop_env, s.span);
+            }
+        } else if (exit_patch) |p| {
+            try self.builder.patchI16(p, self.builder.here());
+        }
+        const real_exit = self.builder.here();
+        for (ctx.break_patches.items) |patch| try self.builder.patchI16(patch, real_exit);
+        for (ctx.continue_patches.items) |patch| try self.builder.patchI16(patch, update_pc);
+
+        if (per_iter_env) {
+            // Patch both per-iter `make_environment` size operands
+            // (initial seed + per-iteration refresh) to whatever
+            // env_slot_count grew to. Restore the enclosing
+            // function's slot counter.
+            self.builder.code.items[per_iter_size_patch] = self.env_slot_count;
+            self.builder.code.items[per_iter_size_patch_2] = self.env_slot_count;
+            self.env_slot_count = saved_per_iter_slot_count;
+            self.releaseTemp(); // r_carry
+        }
+    }
+
+    /// Inline every finally body whose try-statement was opened
+    /// after `anchor` (i.e. lies between the abrupt-completion site
+    /// and `anchor` in lexical order). Used by `break` / `continue`
+    /// to honour §14.15.3 step 4: a `try { … break; } finally { F }`
+    /// must run F before the loop exit. The chain is rewound past
+    /// each `f` before its body is compiled so an abrupt `return` /
+    /// `break` / `continue` inside F doesn't re-inline F itself.
+    fn emitFinalliesUntil(
+        self: *Compiler,
+        anchor: ?*FinallyContext,
+        span: Span,
+    ) CompileError!void {
+        if (self.finally_chain == anchor) return;
+        const saved_chain = self.finally_chain;
+        defer self.finally_chain = saved_chain;
+        var fctx = self.finally_chain;
+        while (fctx) |f| : (fctx = f.parent) {
+            if (f == anchor) break;
+            self.finally_chain = f.parent;
+            try self.compileBlock(f.body, span);
+        }
+    }
+
+    /// §14.13 LabelledStatement — `IDENTIFIER : Statement`. Push the
+    /// label onto `pending_labels` so the *first* iteration statement
+    /// encountered while compiling the body claims it as one of its
+    /// `LoopContext.labels`. The label is popped on exit; a body that
+    /// isn't an iteration statement (e.g. `LABEL: { … }`) silently
+    /// drops the label — `break LABEL ;` from inside such a block
+    /// isn't supported yet, but the label is otherwise transparent.
+    fn compileLabeled(self: *Compiler, lb: ast.statement.LabeledStmt) CompileError!void {
+        const name = self.source[lb.label.start..lb.label.end];
+        try self.pending_labels.append(self.allocator, name);
+        // Best-effort cleanup: if the body's compile claims the
+        // pending label into a LoopContext, the list is already
+        // shorter (the loop drains everything). Only pop our own
+        // entry if it's still on top.
+        const len_before = self.pending_labels.items.len;
+        defer {
+            if (self.pending_labels.items.len == len_before) {
+                _ = self.pending_labels.pop();
+            }
+        }
+        try self.compileStatement(lb.body);
+    }
+
+    /// Drain `pending_labels` into a freshly-allocated slice. Called
+    /// at the top of each iteration-statement's compile routine; the
+    /// returned slice is owned by the LoopContext and freed via
+    /// `LoopContext.deinit`. Returns an empty slice (sharing the
+    /// const `&.{}` static) when no labels are pending — that
+    /// preserves the deinit-time `len > 0` guard.
+    fn drainPendingLabels(self: *Compiler) CompileError![]const []const u8 {
+        const n = self.pending_labels.items.len;
+        if (n == 0) return &.{};
+        const dup = try self.allocator.alloc([]const u8, n);
+        @memcpy(dup, self.pending_labels.items);
+        self.pending_labels.clearRetainingCapacity();
+        return dup;
+    }
+
+    /// Locate the `LoopContext` that `break LABEL ;` should exit. If
+    /// `label_span` is `null` (unlabelled `break ;`) returns the
+    /// innermost loop. Otherwise walks `current_loop.parent*` for the
+    /// loop whose `labels` includes the target. Returns `null` if no
+    /// match — caller reports the diagnostic.
+    fn findBreakTarget(self: *Compiler, label_span: ?Span) ?*LoopContext {
+        var c = self.current_loop;
+        if (label_span) |sp| {
+            const name = self.source[sp.start..sp.end];
+            while (c) |ctx| : (c = ctx.parent) {
+                if (ctx.hasLabel(name)) return ctx;
+            }
+            return null;
+        }
+        return c;
+    }
+
+    /// §14.17.1 ContinueStatement — the target must be an iteration
+    /// statement (not a switch). Walks `current_loop.parent*` for a
+    /// loop whose `labels` contains the target name; `is_switch`
+    /// contexts are skipped over (a `continue` inside a switch
+    /// targets the enclosing loop) and unlabelled `continue` lands
+    /// on the innermost non-switch loop.
+    fn findContinueTarget(self: *Compiler, label_span: ?Span) ?*LoopContext {
+        var c = self.current_loop;
+        if (label_span) |sp| {
+            const name = self.source[sp.start..sp.end];
+            while (c) |ctx| : (c = ctx.parent) {
+                if (ctx.is_switch) continue;
+                if (ctx.hasLabel(name)) return ctx;
+            }
+            return null;
+        }
+        while (c) |ctx| : (c = ctx.parent) {
+            if (!ctx.is_switch) return ctx;
+        }
+        return null;
+    }
+
+    fn compileBreak(self: *Compiler, s: ast.statement.BreakStmt) CompileError!void {
+        const target = self.findBreakTarget(s.label) orelse {
+            try self.report(.unexpected_token, s.span);
+            return error.UnsupportedStatement;
+        };
+        // §7.4.6 IteratorClose — every for-of loop strictly between
+        // this `break` and the target loop must have its iterator
+        // closed before we leave it. Walk the chain inner→outer up
+        // to *and including* the target.
+        var c: ?*LoopContext = self.current_loop;
+        while (c) |ctx| : (c = ctx.parent) {
+            if (ctx.iter_register) |r_iter| {
+                try self.builder.emitOp(.iter_close, s.span);
+                try self.builder.emitU8(r_iter);
+                // §7.4.6 — completion type is `break`; propagate
+                // inner throw, TypeError on non-Object return.
+                try self.builder.emitU8(0);
+            }
+            if (ctx == target) break;
+        }
+        // §14.15 — run every finally block opened between this
+        // `break` and the target loop entry before transferring
+        // control.
+        try self.emitFinalliesUntil(target.entry_finally_chain, s.span);
+        // `break` jumps past the natural `pop_env` site; emit one
+        // `pop_env` for every per-iter-env loop we skip out of
+        // (innermost → target inclusive).
+        c = self.current_loop;
+        while (c) |ctx| : (c = ctx.parent) {
+            if (ctx.needs_env_pop) try self.builder.emitOp(.pop_env, s.span);
+            if (ctx == target) break;
+        }
+        try self.builder.emitOp(.jmp, s.span);
+        const patch = self.builder.here();
+        try self.builder.emitI16(0);
+        try target.break_patches.append(self.allocator, patch);
+    }
+
+    fn compileContinue(self: *Compiler, s: ast.statement.ContinueStmt) CompileError!void {
+        // Defer the patch — `for` loops don't know their continue
+        // target (the update PC) until the body has been compiled,
+        // and `do-while` doesn't know its test PC until after the
+        // body. Loop-specific compile routines walk
+        // `continue_patches` at the end and patch each.
+        const target = self.findContinueTarget(s.label) orelse {
+            try self.report(.unexpected_token, s.span);
+            return error.UnsupportedStatement;
+        };
+        // §7.4.6 IteratorClose — every for-of loop strictly between
+        // this `continue` and the target loop must have its iterator
+        // closed (we're leaving those loops outright). The target
+        // loop itself is re-entered, so its iterator stays open.
+        var c: ?*LoopContext = self.current_loop;
+        while (c) |ctx| : (c = ctx.parent) {
+            if (ctx == target) break;
+            if (ctx.iter_register) |r_iter| {
+                try self.builder.emitOp(.iter_close, s.span);
+                try self.builder.emitU8(r_iter);
+                try self.builder.emitU8(0);
+            }
+        }
+        // §14.15 — run every finally block opened between this
+        // `continue` and the target loop entry before transferring
+        // control.
+        try self.emitFinalliesUntil(target.entry_finally_chain, s.span);
+        // For every loop we skip OUTWARDS through (i.e. strictly
+        // inner to `target`), pop its per-iter env if it had one.
+        // The target loop's own per-iter env teardown is handled by
+        // its `continue_target` (which, for `for-of` over `let`,
+        // emits its own `pop_env`).
+        c = self.current_loop;
+        while (c) |ctx| : (c = ctx.parent) {
+            if (ctx == target) break;
+            if (ctx.needs_env_pop) try self.builder.emitOp(.pop_env, s.span);
+        }
+        try self.builder.emitOp(.jmp, s.span);
+        const patch = self.builder.here();
+        try self.builder.emitI16(0);
+        try target.continue_patches.append(self.allocator, patch);
+    }
+
+    fn compileThrow(self: *Compiler, s: ast.statement.ThrowStmt) CompileError!void {
+        try self.compileExpression(&s.argument);
+        try self.builder.emitOp(.throw_, s.span);
+    }
+
+    fn compileTry(self: *Compiler, s: ast.statement.TryStmt) CompileError!void {
+        // §14.15 TryStatement.
+        //
+        // try { A } catch (e) { B } — A's handler runs B.
+        // try { A } finally { F } — Synthetic handler:
+        // A's throw lands on
+        // F, which re-throws
+        // at end.
+        // try { A } catch (e) { B } finally {} — A's handler runs B,
+        // F runs on every
+        // path (B's throws
+        // via a second
+        // synthetic handler).
+        //
+        // distinguish abrupt-return vs throw inside finally
+        // (currently both propagate as throws via the rethrow at the
+        // end of synthetic handlers).
+
+        // Push the finally context BEFORE compiling the try body so
+        // any `return` / `break` inside it knows to inline the
+        // finally before exiting.
+        var fctx_storage: FinallyContext = undefined;
+        var pushed_finally = false;
+        if (s.finalizer) |fb| {
+            fctx_storage = .{
+                .body = fb.body,
+                .span = fb.span,
+                .parent = self.finally_chain,
+            };
+            self.finally_chain = &fctx_storage;
+            pushed_finally = true;
+        }
+
+        const start_pc = self.builder.here();
+        try self.compileBlock(s.block.body, s.block.span);
+        const end_pc = self.builder.here();
+
+        // Jump past the catch landing on the normal-completion path.
+        try self.builder.emitOp(.jmp, s.span);
+        const skip_handler_patch = self.builder.here();
+        try self.builder.emitI16(0);
+
+        // Track the catch body's PC range so a `finally` (if any) can
+        // also wrap a synthetic handler around it.
+        var catch_body_start: ?u32 = null;
+        var catch_body_end: ?u32 = null;
+        var catch_register: ?u8 = null;
+        if (s.handler) |h| {
+            const handler_pc = self.builder.here();
+            catch_body_start = handler_pc;
+            var catch_scope: Scope = .{ .parent = self.scope, .kind = .block };
+            defer catch_scope.deinit(self.allocator);
+            const saved = self.scope;
+            self.scope = &catch_scope;
+            defer self.scope = saved;
+
+            if (h.param) |target| {
+                // §14.15 CatchParameter is a BindingIdentifier or
+                // BindingPattern. The dispatch in `unwindThrow` deposits
+                // the thrown value into the env slot recorded as
+                // `catch_register`. For a bare identifier we declare
+                // that identifier directly. For a pattern we allocate a
+                // synthetic let slot, declare each leaf binding inside
+                // the pattern, and deconstruct from the synthetic slot
+                // at the top of the handler body.
+                switch (target) {
+                    .identifier => |cid| {
+                        // §12.7 — bind by StringValue.
+                        const name = try self.bindingName(cid.span);
+                        catch_register = try self.declareBinding(name, .let_, h.span);
+                    },
+                    .array, .object => {
+                        const synth_slot = try self.declareBinding("__cynic_catch_ex__", .let_, target.span());
+                        catch_register = synth_slot;
+                        try self.declarePatternBindings(target, .let_);
+                        // Load the deposited exception into acc and run
+                        // BindingInitialization (§14.15.10 step 5).
+                        try self.builder.emitOp(.lda_env, target.span());
+                        try self.builder.emitU8(0);
+                        try self.builder.emitU8(synth_slot);
+                        try self.compileDestructure(target);
+                    },
+                }
+            }
+            try self.compileBlock(h.body.body, h.body.span);
+            catch_body_end = self.builder.here();
+
             try self.builder.addHandler(.{
                 .start_pc = start_pc,
                 .end_pc = end_pc,
-                .handler_pc = synth_pc,
-                .catch_register = slot,
-                .is_finally = true,
-            });
-        } else if (catch_body_start != null and catch_body_end != null) {
-            try self.builder.addHandler(.{
-                .start_pc = catch_body_start.?,
-                .end_pc = catch_body_end.?,
-                .handler_pc = synth_pc,
-                .catch_register = slot,
-                .is_finally = true,
+                .handler_pc = handler_pc,
+                .catch_register = catch_register,
             });
         }
-    } else {
-        // No finally — control just merges past the catch landing.
-        const merge_pc = self.builder.here();
-        try self.builder.patchI16(skip_handler_patch, merge_pc);
+
+        // Pop the finally context — the merge / synthetic-handler
+        // emission below should NOT see it (so a `return` inside
+        // the finally block doesn't recurse into itself).
+        if (pushed_finally) self.finally_chain = fctx_storage.parent;
+
+        // §14.15.10 — when a finally block is present, wire two
+        // synthetic handlers so abrupt completions thread through it:
+        // 1. If `try` has NO catch: handler covers the try body and
+        // lands on an inline finally-then-rethrow snippet.
+        // 2. If `try` has BOTH catch and finally: the catch body
+        // itself gets a synthetic handler that runs finally and
+        // rethrows when the catch body throws.
+        if (s.finalizer) |fb| {
+            // Normal/caught path lands at merge_pc and runs finally.
+            // The finally chain was already popped above so a
+            // `return` inside fb won't recurse.
+            const merge_pc = self.builder.here();
+            try self.builder.patchI16(skip_handler_patch, merge_pc);
+            try self.compileBlock(fb.body, fb.span);
+            try self.builder.emitOp(.jmp, s.span);
+            const skip_synth_patch = self.builder.here();
+            try self.builder.emitI16(0);
+
+            // Synthetic abrupt-completion handler: receives the thrown
+            // value in a fresh slot, runs finally, then `throw`s the
+            // saved value to propagate.
+            const synth_pc = self.builder.here();
+            var synth_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = true };
+            defer synth_scope.deinit(self.allocator);
+            const saved_scope = self.scope;
+            self.scope = &synth_scope;
+            defer self.scope = saved_scope;
+            const saved_env_depth = self.env_depth;
+            defer self.env_depth = saved_env_depth;
+            const slot = try self.declareBinding("__cynic_finally_ex__", .let_, s.span);
+            // The handler dispatch deposits the thrown value via
+            // `catch_register` (an env slot at depth 0).
+            try self.compileBlock(fb.body, fb.span);
+            try self.builder.emitOp(.lda_env, s.span);
+            try self.builder.emitU8(0);
+            try self.builder.emitU8(slot);
+            try self.builder.emitOp(.throw_, s.span);
+            const after_finally_pc = self.builder.here();
+            try self.builder.patchI16(skip_synth_patch, after_finally_pc);
+
+            // No-catch case: cover the try body with the synthetic
+            // handler. With-catch case: cover the catch body too.
+            if (s.handler == null) {
+                try self.builder.addHandler(.{
+                    .start_pc = start_pc,
+                    .end_pc = end_pc,
+                    .handler_pc = synth_pc,
+                    .catch_register = slot,
+                    .is_finally = true,
+                });
+            } else if (catch_body_start != null and catch_body_end != null) {
+                try self.builder.addHandler(.{
+                    .start_pc = catch_body_start.?,
+                    .end_pc = catch_body_end.?,
+                    .handler_pc = synth_pc,
+                    .catch_register = slot,
+                    .is_finally = true,
+                });
+            }
+        } else {
+            // No finally — control just merges past the catch landing.
+            const merge_pc = self.builder.here();
+            try self.builder.patchI16(skip_handler_patch, merge_pc);
+        }
     }
-}
 };
 
 /// Discriminator for the body shape passed to
@@ -9666,7 +9665,6 @@ pub fn compileExpressionAsChunk(
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
-
 const testing = std.testing;
 const parser_mod = @import("../parser/parser.zig");
 const disasm = @import("disasm.zig");
@@ -9716,4 +9714,3 @@ test "compiler: smoke — chunk has the leading MakeEnvironment" {
     try testing.expectEqual(@intFromEnum(@import("op.zig").Op.make_environment), chunk.code[0]);
     try testing.expectEqual(@intFromEnum(@import("op.zig").Op.return_), chunk.code[chunk.code.len - 1]);
 }
-

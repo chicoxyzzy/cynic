@@ -53,7 +53,9 @@ pub fn install(realm: *Realm) !void {
     // ArrayBuffer constructor.
     {
         const r = try installConstructor(realm, .{
-            .name = "ArrayBuffer", .ctor = arrayBufferConstructor, .arity = 1,
+            .name = "ArrayBuffer",
+            .ctor = arrayBufferConstructor,
+            .arity = 1,
             .set_home_object = false,
             .to_string_tag = "ArrayBuffer",
         });
@@ -94,7 +96,9 @@ pub fn install(realm: *Realm) !void {
             const entry = try ctor.accessors.getOrPut(realm.allocator, "@@species");
             entry.value_ptr.* = .{ .getter = species_getter };
             try ctor.property_flags.put(realm.allocator, "@@species", .{
-                .writable = false, .enumerable = false, .configurable = true,
+                .writable = false,
+                .enumerable = false,
+                .configurable = true,
             });
         }
     }
@@ -102,7 +106,9 @@ pub fn install(realm: *Realm) !void {
     // §25.3 DataView constructor + prototype.
     {
         const r = try installConstructor(realm, .{
-            .name = "DataView", .ctor = dataViewConstructor, .arity = 1,
+            .name = "DataView",
+            .ctor = dataViewConstructor,
+            .arity = 1,
             .set_home_object = false,
             .to_string_tag = "DataView",
         });
@@ -146,7 +152,9 @@ pub fn install(realm: *Realm) !void {
     // (test262's `testTypedArray.js` harness include) get the
     // intrinsic this way.
     const r_ta = try installConstructor(realm, .{
-        .name = "TypedArray", .ctor = typedArrayAbstractCtor, .arity = 0,
+        .name = "TypedArray",
+        .ctor = typedArrayAbstractCtor,
+        .arity = 0,
         .set_home_object = false,
         .install_global = false, // not exposed as a global per spec
     });
@@ -230,7 +238,9 @@ pub fn install(realm: *Realm) !void {
         const entry = try ta_ctor.accessors.getOrPut(realm.allocator, "@@species");
         entry.value_ptr.* = .{ .getter = species_getter };
         try ta_ctor.property_flags.put(realm.allocator, "@@species", .{
-            .writable = false, .enumerable = false, .configurable = true,
+            .writable = false,
+            .enumerable = false,
+            .configurable = true,
         });
     }
 
@@ -820,9 +830,9 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                         const result = switch (result_outcome) {
                             .value, .yielded => |v| v,
                             .thrown => |ex| {
-                            realm.pending_exception = ex;
-                            return error.NativeThrew;
-                        },
+                                realm.pending_exception = ex;
+                                return error.NativeThrew;
+                            },
                         };
                         const result_obj = heap_mod.valueAsPlainObject(result) orelse return throwTypeError(realm, "TypedArray: iterator next() did not return an object");
                         // §7.4.7 IteratorComplete / IteratorValue invoke
@@ -841,7 +851,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                     const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
                     @memset(buf_bytes, 0);
                     buf_obj.array_buffer = buf_bytes;
-                buf_obj.has_array_buffer_data = true;
+                    buf_obj.has_array_buffer_data = true;
                     inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name };
                     // §23.2.6.4 / §7.1.11 — Uint8ClampedArray's
                     // [[ContentType]] is still Number but writes
@@ -1208,7 +1218,6 @@ fn typedArrayBuffer(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray.prototype.buffer called on a non-TypedArray");
     return heap_mod.taggedObject(tv.viewed);
 }
-
 
 fn typedArrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const bigint_mod = @import("bigint.zig");
@@ -1582,7 +1591,6 @@ fn taCurrentLength(tv: ObjMod.TypedView) usize {
     return (buf.len - tv.byte_offset) / elem_size;
 }
 
-
 fn taBufOf(tv: ObjMod.TypedView) ?[]u8 {
     return tv.viewed.array_buffer;
 }
@@ -1682,7 +1690,7 @@ fn taMakeNewNamed(realm: *Realm, kind: ObjMod.TypedKind, length: usize, name_hin
     const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
     @memset(buf_bytes, 0);
     buf_obj.array_buffer = buf_bytes;
-                buf_obj.has_array_buffer_data = true;
+    buf_obj.has_array_buffer_data = true;
     inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ctor_name };
     return inst;
 }
@@ -2673,7 +2681,12 @@ fn dvToBigInt64(realm: *Realm, v: Value) NativeError!i64 {
         if (trimmed.len == 0) return 0;
         var negate = false;
         var rest = trimmed;
-        if (rest[0] == '-') { negate = true; rest = rest[1..]; } else if (rest[0] == '+') { rest = rest[1..]; }
+        if (rest[0] == '-') {
+            negate = true;
+            rest = rest[1..];
+        } else if (rest[0] == '+') {
+            rest = rest[1..];
+        }
         if (rest.len == 0) return throwTypeError(realm, "Cannot convert string to BigInt");
         const parsed = std.fmt.parseInt(i128, rest, 0) catch return throwTypeError(realm, "Cannot convert string to BigInt");
         const final: i128 = if (negate) -parsed else parsed;
@@ -3547,4 +3560,3 @@ pub fn readTypedElement(realm: *Realm, buf: []const u8, kind: ObjMod.TypedKind, 
         },
     }
 }
-

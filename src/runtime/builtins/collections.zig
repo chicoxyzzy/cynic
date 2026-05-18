@@ -54,7 +54,9 @@ fn installSpeciesGetter(realm: *Realm, ctor: *@import("../function.zig").JSFunct
     const entry = try ctor.accessors.getOrPut(realm.allocator, "@@species");
     entry.value_ptr.* = .{ .getter = getter };
     try ctor.property_flags.put(realm.allocator, "@@species", .{
-        .writable = false, .enumerable = false, .configurable = true,
+        .writable = false,
+        .enumerable = false,
+        .configurable = true,
     });
 }
 
@@ -65,7 +67,9 @@ pub fn installMap(realm: *Realm) !void {
     // arity per §15.1.3 ("the value of the length property of a
     // built-in function is the number of REQUIRED parameters").
     const r = try installConstructor(realm, .{
-        .name = "Map", .ctor = mapConstructor, .arity = 0,
+        .name = "Map",
+        .ctor = mapConstructor,
+        .arity = 0,
         .to_string_tag = "Map",
     });
     const ctor = r.ctor;
@@ -1070,7 +1074,9 @@ pub fn installWeakMap(realm: *Realm) !void {
     // optional and so is excluded from the [[Construct]] arity
     // per §15.1.3). Matches `WeakMap/length.js`.
     const r = try installConstructor(realm, .{
-        .name = "WeakMap", .ctor = weakMapConstructor, .arity = 0,
+        .name = "WeakMap",
+        .ctor = weakMapConstructor,
+        .arity = 0,
         .to_string_tag = "WeakMap",
     });
     _ = r.ctor;
@@ -1222,7 +1228,9 @@ pub fn installWeakSet(realm: *Realm) !void {
     // optional and so is excluded from the [[Construct]] arity
     // per §15.1.3). Matches `WeakSet/length.js`.
     const r = try installConstructor(realm, .{
-        .name = "WeakSet", .ctor = weakSetConstructor, .arity = 0,
+        .name = "WeakSet",
+        .ctor = weakSetConstructor,
+        .arity = 0,
         .to_string_tag = "WeakSet",
     });
     _ = r.ctor;
@@ -1377,7 +1385,9 @@ pub fn installSet(realm: *Realm) !void {
     // §24.2.1 — `Set.length` is 0 (`iterable` is optional, so the
     // [[Construct]] arity drops it from the count).
     const r = try installConstructor(realm, .{
-        .name = "Set", .ctor = setConstructor, .arity = 0,
+        .name = "Set",
+        .ctor = setConstructor,
+        .arity = 0,
         .to_string_tag = "Set",
     });
     const ctor = r.ctor;
@@ -2115,4 +2125,3 @@ fn setIsDisjointFrom(realm: *Realm, this_value: Value, args: []const Value) Nati
     }.cb);
     return Value.fromBool(!found);
 }
-

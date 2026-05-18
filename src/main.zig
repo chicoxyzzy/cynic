@@ -187,7 +187,8 @@ fn listFeatures(io: std.Io) !void {
 
 fn unknownFeature(io: std.Io, name: []const u8) !void {
     var buf: [256]u8 = undefined;
-    const msg = try std.fmt.bufPrint(&buf,
+    const msg = try std.fmt.bufPrint(
+        &buf,
         "error: unknown feature '{s}'. Run `cynic --list-features` for the available set.\n",
         .{name},
     );

@@ -69,10 +69,14 @@ pub fn install(realm: *Realm) !void {
     try realm.globals.put(realm.allocator, "parseFloat", heap_mod.taggedFunction(pf));
     if (heap_mod.valueAsFunction(realm.globals.get("Number").?)) |num_ctor| {
         try num_ctor.setWithFlags(realm.allocator, "parseInt", heap_mod.taggedFunction(pi), .{
-            .writable = true, .enumerable = false, .configurable = true,
+            .writable = true,
+            .enumerable = false,
+            .configurable = true,
         });
         try num_ctor.setWithFlags(realm.allocator, "parseFloat", heap_mod.taggedFunction(pf), .{
-            .writable = true, .enumerable = false, .configurable = true,
+            .writable = true,
+            .enumerable = false,
+            .configurable = true,
         });
     }
     const inn = try realm.heap.allocateFunctionNative(globalIsNaN, 1, "isNaN");
@@ -707,4 +711,3 @@ fn globalIsFinite(realm: *Realm, this_value: Value, args: []const Value) NativeE
     }
     return Value.false_;
 }
-

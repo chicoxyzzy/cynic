@@ -1300,30 +1300,29 @@ test "Lexer: empty source -> eof" {
 
 test "Lexer: simple punctuators" {
     try expectKinds("(){}[];,:?", &.{
-        .lparen,    .rparen,    .lbrace, .rbrace, .lbracket,
-        .rbracket,  .semicolon, .comma,  .colon,  .question,
+        .lparen,   .rparen,    .lbrace, .rbrace, .lbracket,
+        .rbracket, .semicolon, .comma,  .colon,  .question,
     });
 }
 
 test "Lexer: long-form punctuators" {
     try expectKinds("=== !== >>> >>>= **= ??= ?. ...", &.{
-        .eq_eq_eq,             .bang_eq_eq,    .gt_gt_gt, .gt_gt_gt_eq,
-        .star_star_eq,         .question_question_eq, .optional_chain,
-        .ellipsis,
+        .eq_eq_eq,     .bang_eq_eq,           .gt_gt_gt,       .gt_gt_gt_eq,
+        .star_star_eq, .question_question_eq, .optional_chain, .ellipsis,
     });
 }
 
 test "Lexer: identifiers and keywords" {
     try expectKinds("let x = 1; const y = 2;", &.{
-        .kw_let,   .identifier, .eq,        .numeric_literal, .semicolon,
-        .kw_const, .identifier, .eq,        .numeric_literal, .semicolon,
+        .kw_let,   .identifier, .eq, .numeric_literal, .semicolon,
+        .kw_const, .identifier, .eq, .numeric_literal, .semicolon,
     });
 }
 
 test "Lexer: strict-only future reserved words are reserved" {
     try expectKinds("interface package private public protected implements static yield", &.{
-        .kw_interface,  .kw_package, .kw_private,    .kw_public,
-        .kw_protected,  .kw_implements, .kw_static,  .kw_yield,
+        .kw_interface, .kw_package,    .kw_private, .kw_public,
+        .kw_protected, .kw_implements, .kw_static,  .kw_yield,
     });
 }
 

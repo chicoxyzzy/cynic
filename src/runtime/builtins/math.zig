@@ -802,4 +802,3 @@ fn cascadeDownWithInject(partials: []const f64, n_in: isize, hi_in: f64, injecte
     }
     return hi;
 }
-

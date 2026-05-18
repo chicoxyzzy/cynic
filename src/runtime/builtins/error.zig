@@ -125,7 +125,9 @@ fn installAggregateError(realm: *Realm, parent_proto: *JSObject) !*JSFunction {
     // default `{w:true, e:false, c:false}` from
     // `JSFunction.flagsForOwn`.
     try fn_obj.property_flags.put(realm.allocator, "prototype", .{
-        .writable = false, .enumerable = false, .configurable = false,
+        .writable = false,
+        .enumerable = false,
+        .configurable = false,
     });
     try realm.globals.put(realm.allocator, "AggregateError", heap_mod.taggedFunction(fn_obj));
     return fn_obj;
@@ -168,7 +170,9 @@ fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) N
     if (args.len > 1 and !args[1].isUndefined()) {
         const msg_str = try stringifyArg(realm, args[1]);
         instance.setWithFlags(realm.allocator, "message", Value.fromString(msg_str), .{
-            .writable = true, .enumerable = false, .configurable = true,
+            .writable = true,
+            .enumerable = false,
+            .configurable = true,
         }) catch return error.OutOfMemory;
     }
     // §20.5.8.1 InstallErrorCause — third arg is an options object;
@@ -178,7 +182,9 @@ fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) N
         if (heap_mod.valueAsPlainObject(args[2])) |opts| {
             if (opts.hasOwn("cause")) {
                 instance.setWithFlags(realm.allocator, "cause", opts.get("cause"), .{
-                    .writable = true, .enumerable = false, .configurable = true,
+                    .writable = true,
+                    .enumerable = false,
+                    .configurable = true,
                 }) catch return error.OutOfMemory;
             }
         }
@@ -285,7 +291,9 @@ pub fn installError(
     // constructors; install an override so test262 sees the
     // spec-mandated frozen shape.
     try fn_obj.property_flags.put(realm.allocator, "prototype", .{
-        .writable = false, .enumerable = false, .configurable = false,
+        .writable = false,
+        .enumerable = false,
+        .configurable = false,
     });
     try realm.globals.put(realm.allocator, name, heap_mod.taggedFunction(fn_obj));
     return fn_obj;
@@ -508,4 +516,3 @@ fn makeStringFallback(realm: *Realm, message: []const u8) !Value {
     const s = try realm.heap.allocateString(message);
     return Value.fromString(s);
 }
-

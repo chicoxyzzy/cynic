@@ -89,7 +89,9 @@ pub fn install(realm: *Realm) !void {
     // without `new`. The constructor body handles the no-NewTarget
     // path (it's an "if NewTarget is undefined" branch in spec).
     const r = try installConstructor(realm, .{
-        .name = "RegExp", .ctor = regexpConstructor, .arity = 2,
+        .name = "RegExp",
+        .ctor = regexpConstructor,
+        .arity = 2,
         .is_class = false,
         .set_home_object = false,
     });
@@ -151,7 +153,9 @@ pub fn install(realm: *Realm) !void {
     const species_entry = try fn_obj.accessors.getOrPut(realm.allocator, "@@species");
     species_entry.value_ptr.* = .{ .getter = species_getter };
     try fn_obj.property_flags.put(realm.allocator, "@@species", .{
-        .writable = false, .enumerable = false, .configurable = true,
+        .writable = false,
+        .enumerable = false,
+        .configurable = true,
     });
 }
 
@@ -1381,7 +1385,9 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     // Default `set` lands at all-true, so JSON.stringify({toJSON: /re/})
     // surfaced "lastIndex" as an enumerable own key.
     inst.setWithFlags(realm.allocator, "lastIndex", Value.fromInt32(0), .{
-        .writable = true, .enumerable = false, .configurable = false,
+        .writable = true,
+        .enumerable = false,
+        .configurable = false,
     }) catch return error.OutOfMemory;
     // §22.2.3.2 RegExpInitialize step 12 — compile the pattern
     // eagerly so syntactic errors raise SyntaxError at
@@ -2295,4 +2301,3 @@ fn isLineTerminator(cp: u21) bool {
 fn isSurrogate(cp: u21) bool {
     return cp >= 0xD800 and cp <= 0xDFFF;
 }
-

@@ -47,7 +47,9 @@ fn installMethod(realm: *Realm, proto: *JSObject, name: []const u8, native: anyt
     fn_obj.has_construct = false;
     fn_obj.proto = realm.intrinsics.function_prototype;
     try proto.setWithFlags(realm.allocator, name, heap_mod.taggedFunction(fn_obj), .{
-        .writable = true, .enumerable = false, .configurable = true,
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
     });
 }
 

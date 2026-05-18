@@ -30,7 +30,9 @@ pub fn install(realm: *Realm) !void {
     // `is_class_constructor` stays at its default — the
     // class-only-via-new check doesn't apply.
     const r = try installConstructor(realm, .{
-        .name = "Date", .ctor = dateConstructor, .arity = 7,
+        .name = "Date",
+        .ctor = dateConstructor,
+        .arity = 7,
         .is_class = false,
         // §21.4.4 — `[object Date]` via @@toStringTag.
         .to_string_tag = "Date",

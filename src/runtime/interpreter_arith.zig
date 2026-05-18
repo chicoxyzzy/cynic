@@ -25,7 +25,6 @@ const makeTypeError = @import("interpreter.zig").makeTypeError;
 const makeRangeError = @import("interpreter.zig").makeRangeError;
 const formatDoubleSafe = @import("interpreter.zig").formatDoubleSafe;
 
-
 pub fn toBoolean(v: Value) bool {
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));

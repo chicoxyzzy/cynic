@@ -1071,11 +1071,13 @@ fn runSweep(
         defer if (opts.leak_check) {
             const status = leak_check_alloc.deinit();
             if (status == .leak) {
-                std.Io.File.stderr().writeStreamingAll(io,
+                std.Io.File.stderr().writeStreamingAll(
+                    io,
                     "test262 --leak-check: DebugAllocator reported leaks (see trace above)\n",
                 ) catch {};
             } else {
-                std.Io.File.stderr().writeStreamingAll(io,
+                std.Io.File.stderr().writeStreamingAll(
+                    io,
                     "test262 --leak-check: clean — no leaked allocations\n",
                 ) catch {};
             }
@@ -1139,7 +1141,8 @@ fn runSweep(
                 const rss_now: u64 = currentRssMb() orelse 0;
                 if (rss_now >= opts.max_rss_mb) {
                     var line: [512]u8 = undefined;
-                    const msg = try std.fmt.bufPrint(&line,
+                    const msg = try std.fmt.bufPrint(
+                        &line,
                         "\ntest262 --max-rss tripped at fixture: {s}\n  RSS now: {d} MiB, budget: {d} MiB\n",
                         .{ rel, rss_now, opts.max_rss_mb },
                     );
@@ -2201,11 +2204,16 @@ fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
         \\
     , .{
         stats.total,
-        stats.pass(),  pass_pct,
+        stats.pass(),
+        pass_pct,
         stats.fail(),
         stats.skip,
-        stats.pos_attempted, stats.pass_pos, stats.fail_reject,
-        stats.neg_attempted, stats.pass_neg, stats.fail_accept,
+        stats.pos_attempted,
+        stats.pass_pos,
+        stats.fail_reject,
+        stats.neg_attempted,
+        stats.pass_neg,
+        stats.fail_accept,
         elapsed_ms,
     });
     try std.Io.File.stdout().writeStreamingAll(io, msg);
@@ -2343,7 +2351,8 @@ fn printMemSummary(io: std.Io, agg: *const MemAggregate, stats: *const Stats) !v
         (agg.gc_time_ns_total / agg.gc_cycles_total) / 1000
     else
         0;
-    const head = try std.fmt.bufPrint(&buf,
+    const head = try std.fmt.bufPrint(
+        &buf,
         "\nmemory summary (across {d} fixtures with engine activity, of {d} total):\n" ++
             "  cumulative bytes allocated:    {d} MiB\n" ++
             "  max per-fixture charged peak:  {d} MiB\n" ++

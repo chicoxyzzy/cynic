@@ -324,7 +324,6 @@ pub const Parser = struct {
         }
     }
 
-
     // ── Statements (§14) ────────────────────────────────────────────────
 
     /// §14.1 — for contexts that take a `Statement` (not
@@ -2519,7 +2518,6 @@ pub const Parser = struct {
             .init = init_expr,
         } };
     }
-
 
     const KeyAndEnd = struct {
         key: ast.expression.PropertyKey,

@@ -36,7 +36,9 @@ pub fn install(realm: *Realm) !void {
     // itself does carry a prototype object for `Object(sym)`
     // boxing.
     const r = try installConstructor(realm, .{
-        .name = "Symbol", .ctor = symbolConstructor, .arity = 1,
+        .name = "Symbol",
+        .ctor = symbolConstructor,
+        .arity = 1,
         .is_class = false,
         .set_home_object = false,
         .to_string_tag = "Symbol",
@@ -89,7 +91,9 @@ pub fn install(realm: *Realm) !void {
     to_prim.proto = realm.intrinsics.function_prototype;
     to_prim.has_construct = false;
     try proto.setWithFlags(realm.allocator, "@@toPrimitive", heap_mod.taggedFunction(to_prim), .{
-        .writable = false, .enumerable = false, .configurable = true,
+        .writable = false,
+        .enumerable = false,
+        .configurable = true,
     });
 }
 
@@ -162,7 +166,9 @@ fn installWellKnownSymbol(
     // §20.4.2 — well-known symbols on the Symbol constructor are
     // frozen data properties: `{ w:false, e:false, c:false }`.
     try ctor.setWithFlags(realm.allocator, name, heap_mod.taggedSymbol(sym), .{
-        .writable = false, .enumerable = false, .configurable = false,
+        .writable = false,
+        .enumerable = false,
+        .configurable = false,
     });
 }
 
@@ -213,4 +219,3 @@ fn symbolKeyFor(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     }
     return Value.undefined_;
 }
-

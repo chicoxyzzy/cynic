@@ -263,7 +263,9 @@ pub fn install(realm: *Realm) !void {
         // `configurable: false` for both on %ThrowTypeError%, so
         // override the default `configurable: true`.
         const frozen_flags: @import("object.zig").PropertyFlags = .{
-            .writable = false, .enumerable = false, .configurable = false,
+            .writable = false,
+            .enumerable = false,
+            .configurable = false,
         };
         try t.property_flags.put(realm.allocator, "length", frozen_flags);
         try t.property_flags.put(realm.allocator, "name", frozen_flags);
@@ -282,12 +284,16 @@ pub fn install(realm: *Realm) !void {
             const a_entry = fn_proto.accessors.getOrPut(realm.allocator, "arguments") catch return error.OutOfMemory;
             a_entry.value_ptr.* = .{ .getter = t, .setter = t };
             try fn_proto.property_flags.put(realm.allocator, "arguments", .{
-                .writable = false, .enumerable = false, .configurable = true,
+                .writable = false,
+                .enumerable = false,
+                .configurable = true,
             });
             const c_entry = fn_proto.accessors.getOrPut(realm.allocator, "caller") catch return error.OutOfMemory;
             c_entry.value_ptr.* = .{ .getter = t, .setter = t };
             try fn_proto.property_flags.put(realm.allocator, "caller", .{
-                .writable = false, .enumerable = false, .configurable = true,
+                .writable = false,
+                .enumerable = false,
+                .configurable = true,
             });
         }
     }
@@ -383,7 +389,9 @@ pub fn install(realm: *Realm) !void {
     // configurable: false }` per the table in §21.1.2.
     if (heap_mod.valueAsFunction(realm.globals.get("Number").?)) |num_ctor| {
         const num_const_flags: @import("object.zig").PropertyFlags = .{
-            .writable = false, .enumerable = false, .configurable = false,
+            .writable = false,
+            .enumerable = false,
+            .configurable = false,
         };
         try num_ctor.setWithFlags(realm.allocator, "NaN", Value.fromDouble(std.math.nan(f64)), num_const_flags);
         try num_ctor.setWithFlags(realm.allocator, "POSITIVE_INFINITY", Value.fromDouble(std.math.inf(f64)), num_const_flags);
@@ -1201,7 +1209,9 @@ fn stringConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
             // and indexed in UTF-16 code units, not WTF-8 bytes.
             const cu_len = utf16_mod.lengthInCodeUnits(ps.bytes);
             inst.setWithFlags(realm.allocator, "length", Value.fromInt32(@intCast(cu_len)), .{
-                .writable = false, .enumerable = false, .configurable = false,
+                .writable = false,
+                .enumerable = false,
+                .configurable = false,
             }) catch return error.OutOfMemory;
             var ibuf: [24]u8 = undefined;
             var ci: usize = 0;
@@ -1214,7 +1224,9 @@ fn stringConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
                 utf16_mod.appendCodeUnitAsWtf8(realm.allocator, &cu_buf, cu) catch return error.OutOfMemory;
                 const ch = realm.heap.allocateString(cu_buf.items) catch return error.OutOfMemory;
                 inst.setWithFlags(realm.allocator, owned.bytes, Value.fromString(ch), .{
-                    .writable = false, .enumerable = true, .configurable = false,
+                    .writable = false,
+                    .enumerable = true,
+                    .configurable = false,
                 }) catch return error.OutOfMemory;
             }
         }
@@ -1779,7 +1791,6 @@ pub const newURIError = @import("builtins/error.zig").newURIError;
 
 pub const PromiseState = @import("builtins/promise.zig").PromiseState;
 pub const allocatePromiseFor = @import("builtins/promise.zig").allocatePromiseFor;
-
 
 /// §19.2.1 eval(x). Cynic is strict-only and explicitly does NOT
 /// ship runtime code construction (per AGENTS.md — `eval()`,

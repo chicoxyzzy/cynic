@@ -118,6 +118,26 @@ pub fn build(b: *std.Build) void {
     const gen_step = b.step("gen-unicode", "Regenerate src/unicode/ident_tables.zig from UCD");
     gen_step.dependOn(&run_gen.step);
 
+    // `zig build fmt-check` runs `zig fmt --check` over `src/` and
+    // `tools/`. Advisory in CI (non-gating) — flags drift on PR
+    // review without blocking merges when an agent's Edit-tool
+    // shape doesn't quite match `zig fmt`. Local `zig fmt src
+    // tools` rewrites in place. Add new top-level dirs here as
+    // they appear.
+    const fmt_check = b.addFmt(.{
+        .paths = &.{ "src", "tools" },
+        .check = true,
+    });
+    const fmt_check_step = b.step("fmt-check", "Verify src/ + tools/ are zig-fmt clean");
+    fmt_check_step.dependOn(&fmt_check.step);
+
+    const fmt_fix = b.addFmt(.{
+        .paths = &.{ "src", "tools" },
+        .check = false,
+    });
+    const fmt_step = b.step("fmt", "Apply zig fmt to src/ + tools/ in place");
+    fmt_step.dependOn(&fmt_fix.step);
+
     // `zig build test262` runs the parser-only conformance harness over
     // the corpus at vendor/test262/test (or `--corpus=<path>`). Imports
     // the library as `cynic`. Forward args after `--`.

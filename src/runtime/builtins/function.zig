@@ -75,7 +75,9 @@ pub fn installPrototypeMethods(realm: *Realm) !void {
     _ = fn_proto.properties.swapRemove("name");
     _ = fn_proto.property_flags.swapRemove("name");
     const builtin_fn_flags: @import("../object.zig").PropertyFlags = .{
-        .writable = false, .enumerable = false, .configurable = true,
+        .writable = false,
+        .enumerable = false,
+        .configurable = true,
     };
     try fn_proto.setWithFlags(realm.allocator, "length", Value.fromInt32(0), builtin_fn_flags);
     const empty_name = try realm.heap.allocateString("");
@@ -93,7 +95,9 @@ pub fn installPrototypeMethods(realm: *Realm) !void {
     hi_fn.proto = fn_proto;
     hi_fn.has_construct = false;
     try fn_proto.setWithFlags(realm.allocator, "@@hasInstance", heap_mod.taggedFunction(hi_fn), .{
-        .writable = false, .enumerable = false, .configurable = false,
+        .writable = false,
+        .enumerable = false,
+        .configurable = false,
     });
 
     // Replace the Function constructor stub. Cynic permanently
@@ -129,7 +133,9 @@ fn functionConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     const proto = realm.heap.allocateObject() catch return error.OutOfMemory;
     proto.prototype = realm.intrinsics.object_prototype;
     proto.setWithFlags(realm.allocator, "constructor", heap_mod.taggedFunction(empty), .{
-        .writable = true, .enumerable = false, .configurable = true,
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
     }) catch return error.OutOfMemory;
     empty.prototype = proto;
     // If called via `new`, the interpreter pre-allocated `this`;
@@ -278,7 +284,7 @@ fn functionApply(realm: *Realm, this_value: Value, args: []const Value) NativeEr
             const raw_len: i64 = if (len_v.isInt32()) len_v.asInt32() else if (len_v.isDouble()) blk: {
                 const d = len_v.asDouble();
                 if (std.math.isNan(d)) break :blk 0;
-                break :blk @intFromFloat(@max(0.0, @min(d, @as(f64, @floatFromInt(@as(i64, std.math.maxInt(i64))))) ));
+                break :blk @intFromFloat(@max(0.0, @min(d, @as(f64, @floatFromInt(@as(i64, std.math.maxInt(i64)))))));
             } else 0;
             const len = try clampArrayLength(raw_len);
             var i: i64 = 0;
@@ -293,7 +299,6 @@ fn functionApply(realm: *Realm, this_value: Value, args: []const Value) NativeEr
             return error.NativeThrew;
         }
     }
-
 
     const outcome = interpreter.callValue(realm.allocator, realm, this_value, this_arg, apply_args.items) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -402,7 +407,9 @@ fn functionBind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // by `installFunctionLengthAndName` with the spec-computed
     // values. Flags stay `{w:false, e:false, c:true}`.
     const fn_flags: @import("../object.zig").PropertyFlags = .{
-        .writable = false, .enumerable = false, .configurable = true,
+        .writable = false,
+        .enumerable = false,
+        .configurable = true,
     };
     const len_v: Value = if (bound_length >= -2147483648.0 and bound_length <= 2147483647.0 and @trunc(bound_length) == bound_length)
         Value.fromInt32(@intFromFloat(bound_length))
@@ -581,4 +588,3 @@ fn functionToString(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const s = realm.heap.allocateString(formatted) catch return error.OutOfMemory;
     return Value.fromString(s);
 }
-

@@ -694,10 +694,10 @@ pub const Realm = struct {
         const parent_sym = heap_mod.valueAsFunction(parent.globals.get("Symbol") orelse return) orelse return;
         const child_sym = heap_mod.valueAsFunction(self.globals.get("Symbol") orelse return) orelse return;
         const names = [_][]const u8{
-            "iterator",       "asyncIterator", "hasInstance",
-            "toPrimitive",    "toStringTag",   "isConcatSpreadable",
-            "species",        "match",         "replace",
-            "search",         "split",         "matchAll",
+            "iterator",    "asyncIterator", "hasInstance",
+            "toPrimitive", "toStringTag",   "isConcatSpreadable",
+            "species",     "match",         "replace",
+            "search",      "split",         "matchAll",
             "unscopables",
         };
         for (names) |name| {

@@ -232,5 +232,3 @@ fn globalDecodeURIComponent(realm: *Realm, this_value: Value, args: []const Valu
     const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
     return decodeURIImpl(realm, s.bytes, false);
 }
-
-

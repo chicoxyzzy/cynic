@@ -747,7 +747,6 @@ fn objectEntries(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     return heap_mod.taggedObject(result);
 }
 
-
 pub fn objectGetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const raw = argOr(args, 0, Value.undefined_);
@@ -1225,7 +1224,10 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
                 );
                 switch (res) {
                     .applied => return target_v,
-                    .reject => { realm.define_own_property_rejected = true; return throwTypeError(realm, "Invalid TypedArray index descriptor"); },
+                    .reject => {
+                        realm.define_own_property_rejected = true;
+                        return throwTypeError(realm, "Invalid TypedArray index descriptor");
+                    },
                 }
             }
         }
@@ -3512,4 +3514,3 @@ fn objectProtoValueOf(realm: *Realm, this_value: Value, args: []const Value) Nat
     // still holds when the receiver is already an object.
     return heap_mod.taggedObject(try intrinsics.toObjectThis(realm, this_value));
 }
-

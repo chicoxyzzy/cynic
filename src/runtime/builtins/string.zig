@@ -2442,7 +2442,7 @@ fn stringCodePointAt(realm: *Realm, this_value: Value, args: []const Value) Nati
                 // §10.1.1 — for 1/2/3-byte WTF-8 the codepoint *is*
                 // a single UTF-16 code unit (BMP scalar or lone
                 // surrogate D800-DFFF). Decode it as a u16 value.
-                const cu = wtf8DecodeBmp(s.bytes[byte_pos..byte_pos + seq_len]) orelse return Value.undefined_;
+                const cu = wtf8DecodeBmp(s.bytes[byte_pos .. byte_pos + seq_len]) orelse return Value.undefined_;
                 return Value.fromInt32(@intCast(cu));
             }
             byte_pos += seq_len;
@@ -2605,4 +2605,3 @@ fn stringLocaleCompare(realm: *Realm, this_value: Value, args: []const Value) Na
         .gt => 1,
     });
 }
-

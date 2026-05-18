@@ -31,7 +31,9 @@ pub fn install(realm: *Realm) !void {
     // TypeError per §21.2.1 (the constructor is intentionally
     // not callable with `new`).
     const r = try installConstructor(realm, .{
-        .name = "BigInt", .ctor = bigintConstructor, .arity = 1,
+        .name = "BigInt",
+        .ctor = bigintConstructor,
+        .arity = 1,
         .is_class = false,
         .set_home_object = false,
         .to_string_tag = "BigInt",
@@ -318,4 +320,3 @@ fn bigintAsUintN(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const out = realm.heap.allocateBigInt(v) catch return error.OutOfMemory;
     return heap_mod.taggedBigInt(out);
 }
-
