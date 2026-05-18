@@ -167,9 +167,17 @@ pub const SetEntry = struct {
 /// from JS (the spec's [[IteratedObject]] / [[NextIndex]] are
 /// internal slots).
 pub const ArrayLikeIterState = struct {
+    pub const Kind = enum { values, keys, entries };
+
     target: Value,
     idx: u32 = 0,
     done: bool = false,
+    /// §23.1.5.1 CreateArrayIterator kind — selects whether each
+    /// yield is a `value`, an integer index, or a `[idx, value]`
+    /// pair. Defaults to `.values`; non-Array consumers (String
+    /// iterator, for-in snapshot) reuse the same state with this
+    /// field unread.
+    kind: Kind = .values,
     /// §14.7.5.6 EnumerateObjectProperties live-deletion check:
     /// for `for-in` only, the iterator skips any key from the
     /// snapshot that is no longer present on the original source

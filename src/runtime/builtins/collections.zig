@@ -195,6 +195,11 @@ fn ensureArrayIteratorPrototype(realm: *Realm) !?*JSObject {
     if (realm.intrinsics.array_iterator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
     proto.prototype = @import("../interpreter.zig").iteratorPrototypeOrObjectPrototypePub(realm);
+    // §23.1.5.3.1 %ArrayIteratorPrototype%.next — installed on the
+    // prototype (writable + configurable, non-enumerable) so the
+    // descriptor matches §17's "built-in Function object" shape.
+    // Per-instance kind selection lives on the iter state.
+    try intrinsics.installNativeMethodOnProto(realm, proto, "next", arrayIteratorProtoNext, 0);
     const tag_str = try realm.heap.allocateString("Array Iterator");
     try proto.setWithFlags(realm.allocator, "@@toStringTag", Value.fromString(tag_str), .{
         .writable = false,
@@ -203,6 +208,40 @@ fn ensureArrayIteratorPrototype(realm: *Realm) !?*JSObject {
     });
     realm.intrinsics.array_iterator_prototype = proto;
     return proto;
+}
+
+/// §23.1.5.3.1 %ArrayIteratorPrototype%.next — single dispatch
+/// point that reads `state.kind` (values / keys / entries) and
+/// shapes the yielded result accordingly. Brand-checks the
+/// [[IteratedArrayLike]] slot first so a non-iterator receiver
+/// (e.g. `Object.create(iter).next()` or the bare prototype)
+/// throws TypeError per `RequireInternalSlot`.
+fn arrayIteratorProtoNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const it = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "Array Iterator method called on incompatible receiver");
+    const state = it.array_like_iter orelse
+        return throwTypeError(realm, "Array Iterator method called on incompatible receiver");
+    switch (arrayLikeIterStep(realm, this_value)) {
+        .step => |s| {
+            switch (state.kind) {
+                .values => return iterResult(realm, s.value, false) catch return error.OutOfMemory,
+                .keys => return iterResult(realm, Value.fromInt32(s.idx), false) catch return error.OutOfMemory,
+                .entries => {
+                    const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
+                    arr.prototype = realm.intrinsics.array_prototype;
+                    arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+                    arr.set(realm.allocator, "0", Value.fromInt32(s.idx)) catch return error.OutOfMemory;
+                    arr.set(realm.allocator, "1", s.value) catch return error.OutOfMemory;
+                    arr.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
+                    return iterResult(realm, heap_mod.taggedObject(arr), false) catch return error.OutOfMemory;
+                },
+            }
+        },
+        .typed_array_oob => return throwTypeError(realm, "TypedArray iterator: backing buffer is out-of-bounds"),
+        .propagated => return error.NativeThrew,
+        .done => return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory,
+    }
 }
 
 /// §22.1.5.2 %StringIteratorPrototype% — sibling of
@@ -257,34 +296,23 @@ fn makeArrayLikeIterator(realm: *Realm, src: Value, kind: enum { entries, keys, 
     const it = try realm.heap.allocateObject();
     // §23.1.5.2 — Array iterators inherit from
     // %ArrayIteratorPrototype% which itself chains to
-    // %IteratorPrototype%. Test262 fixtures walk
-    // `Object.getPrototypeOf(Object.getPrototypeOf([][Symbol
-    // .iterator]())) === %IteratorPrototype%`, so the
-    // intermediate slot must really exist. Lazily allocate it
-    // and stash on the realm so every array iterator shares
-    // identity.
+    // %IteratorPrototype% and now hosts the brand-checked
+    // `next` method shared by every array iterator instance.
     it.prototype = try ensureArrayIteratorPrototype(realm);
-    const state = try realm.allocator.create(@import("../object.zig").ArrayLikeIterState);
-    state.* = .{ .target = src };
-    it.array_like_iter = state;
-    // Pin `it` for the rest of construction — `allocateFunctionNative`
-    // can trigger GC and `it` is only alive through this local var.
-    // `src` rides along via `state.target` once the GC walker
-    // reaches `it`.
-    const scope = try realm.heap.openScope();
-    defer scope.close();
-    try scope.push(heap_mod.taggedObject(it));
-    const native: @import("../function.zig").NativeFn = switch (kind) {
-        .entries => arrayLikeIterEntriesNext,
-        .keys => arrayLikeIterKeysNext,
-        .values => arrayLikeIterValuesNext,
+    const ArrayLikeIterState = @import("../object.zig").ArrayLikeIterState;
+    const state = try realm.allocator.create(ArrayLikeIterState);
+    state.* = .{
+        .target = src,
+        .kind = switch (kind) {
+            .entries => ArrayLikeIterState.Kind.entries,
+            .keys => ArrayLikeIterState.Kind.keys,
+            .values => ArrayLikeIterState.Kind.values,
+        },
     };
-    const next_fn = try realm.heap.allocateFunctionNative(native, 0, "next");
-    next_fn.proto = realm.intrinsics.function_prototype;
-    try it.set(realm.allocator, "next", heap_mod.taggedFunction(next_fn));
-    const self_fn = try realm.heap.allocateFunctionNative(iteratorReturnsSelf, 0, "[Symbol.iterator]");
-    self_fn.proto = realm.intrinsics.function_prototype;
-    try it.set(realm.allocator, "@@iterator", heap_mod.taggedFunction(self_fn));
+    it.array_like_iter = state;
+    // `next` lives on the prototype (see ensureArrayIteratorPrototype);
+    // `@@iterator` similarly inherits from %IteratorPrototype% so
+    // no own slots need to be wired here.
     return heap_mod.taggedObject(it);
 }
 
@@ -538,8 +566,21 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) StepOutcome {
     return .{ .step = .{ .idx = idx, .value = elem, .length = length } };
 }
 
+/// §23.1.5.3.1 ArrayIteratorPrototype.next brand check —
+/// `RequireInternalSlot(O, [[IteratedArrayLike]])`. Cynic stores
+/// the slot as the `array_like_iter` pointer; a receiver without
+/// it (e.g. `Object.create(iter).next()`) throws TypeError
+/// instead of returning a silent `{done: true}`.
+fn arrayIterRequireSlot(realm: *Realm, this_value: Value) NativeError!void {
+    const it = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "Array Iterator method called on incompatible receiver");
+    if (it.array_like_iter == null)
+        return throwTypeError(realm, "Array Iterator method called on incompatible receiver");
+}
+
 fn arrayLikeIterValuesNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
+    try arrayIterRequireSlot(realm, this_value);
     switch (arrayLikeIterStep(realm, this_value)) {
         .step => |s| return iterResult(realm, s.value, false) catch return error.OutOfMemory,
         .typed_array_oob => return throwTypeError(realm, "TypedArray iterator: backing buffer is out-of-bounds"),
@@ -549,6 +590,7 @@ fn arrayLikeIterValuesNext(realm: *Realm, this_value: Value, args: []const Value
 }
 fn arrayLikeIterKeysNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
+    try arrayIterRequireSlot(realm, this_value);
     switch (arrayLikeIterStep(realm, this_value)) {
         .step => |s| return iterResult(realm, Value.fromInt32(s.idx), false) catch return error.OutOfMemory,
         .typed_array_oob => return throwTypeError(realm, "TypedArray iterator: backing buffer is out-of-bounds"),
@@ -558,6 +600,7 @@ fn arrayLikeIterKeysNext(realm: *Realm, this_value: Value, args: []const Value) 
 }
 fn arrayLikeIterEntriesNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
+    try arrayIterRequireSlot(realm, this_value);
     switch (arrayLikeIterStep(realm, this_value)) {
         .step => |s| {
             const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
