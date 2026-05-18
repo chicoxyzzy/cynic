@@ -2691,6 +2691,14 @@ fn isVanillaPromiseChain(realm: *Realm, target: *JSObject, v_obj: *JSObject) boo
     const proto = realm.intrinsics.promise_prototype orelse return false;
     if (target.prototype != proto) return false;
     if (v_obj.prototype != proto) return false;
+    // §27.2.1.3.2 step 7 — Get(resolution, "then") is observable.
+    // An own `then` (data or accessor) on the inner Promise must
+    // route through the generic thenable path so user code sees
+    // the call. test262
+    // built-ins/Promise/prototype/then/resolve-*-cstm-then.js
+    // exercise this: a Promise instance with `.then = fn` set
+    // directly.
+    if (v_obj.hasOwn("then")) return false;
     // Inspect %PromisePrototype%.then — if it's not the original
     // built-in `promiseThen`, the user replaced it and the spec's
     // `.then` invocation is observable.
