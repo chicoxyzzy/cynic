@@ -1712,6 +1712,73 @@ pub const Compiler = struct {
         const lit = tt.quasi.template_literal;
         const k_strs = try self.buildTemplateObject(lit);
 
+        // §13.3.11.4 — when the tag is a member expression
+        // (`obj.fn\`…\``), the call must bind `this = obj` per
+        // §13.3.6.1 EvaluateCall (the MemberExpression form
+        // produces a Reference whose [[Base]] becomes the call's
+        // `this`). Emit call_method so the runtime sees the
+        // receiver. Plain identifier / paren / arbitrary
+        // expressions take the regular `call` path with
+        // `this = undefined`.
+        if (tt.tag.* == .member) {
+            const m = tt.tag.member;
+
+            // Receiver → r_recv.
+            try self.compileExpression(m.object);
+            if (m.optional) try self.emitOptionalShortCircuit(m.span);
+            const r_recv = try self.reserveTemp();
+            try self.builder.emitOp(.star, tt.span);
+            try self.builder.emitU8(r_recv);
+
+            // Property load → r_callee (adjacent to r_recv).
+            switch (m.property) {
+                .ident => |span| {
+                    const key_slice = self.source[span.start..span.end];
+                    const decoded = try self.decodeIdentifierName(key_slice);
+                    const k = try self.internString(decoded);
+                    try self.builder.emitOp(.ldar, tt.span);
+                    try self.builder.emitU8(r_recv);
+                    try self.builder.emitOp(.lda_property, tt.span);
+                    try self.builder.emitU16(k);
+                },
+                .computed => |key_expr| {
+                    try self.compileExpression(key_expr);
+                    try self.builder.emitOp(.lda_computed, tt.span);
+                    try self.builder.emitU8(r_recv);
+                },
+            }
+            const r_callee = try self.reserveTemp();
+            try self.builder.emitOp(.star, tt.span);
+            try self.builder.emitU8(r_callee);
+
+            // arg[0] = template strs object.
+            const r_strs = try self.reserveTemp();
+            try self.builder.emitOp(.lda_constant, tt.span);
+            try self.builder.emitU16(k_strs);
+            try self.builder.emitOp(.star, tt.span);
+            try self.builder.emitU8(r_strs);
+
+            var reserved: u8 = 1;
+            for (lit.expressions) |*e| {
+                try self.compileExpression(e);
+                const r_arg = try self.reserveTemp();
+                reserved += 1;
+                try self.builder.emitOp(.star, tt.span);
+                try self.builder.emitU8(r_arg);
+            }
+
+            try self.builder.emitOp(.call_method, tt.span);
+            try self.builder.emitU8(r_recv);
+            try self.builder.emitU8(r_callee);
+            try self.builder.emitU8(@intCast(1 + lit.expressions.len));
+
+            var k: u8 = 0;
+            while (k < reserved) : (k += 1) self.releaseTemp();
+            self.releaseTemp(); // r_callee
+            self.releaseTemp(); // r_recv
+            return;
+        }
+
         // Compile the tag → r_callee.
         try self.compileExpression(tt.tag);
         const r_callee = try self.reserveTemp();
@@ -1750,22 +1817,46 @@ pub const Compiler = struct {
     /// Object.freeze semantics for Arrays), and store the result
     /// as a chunk constant. Returns the constant index.
     fn buildTemplateObject(self: *Compiler, lit: ast.expression.TemplateLit) CompileError!u16 {
+        // §13.2.8.4 GetTemplateObject — the resulting `template`
+        // and its `.raw` companion are Array exotic objects, and
+        // both are frozen via SetIntegrityLevel(O, frozen):
+        // indexed elements are enumerable/non-writable/non-
+        // configurable, `length` and `raw` are non-enumerable/
+        // non-writable/non-configurable, and the objects
+        // themselves are non-extensible. Build that shape here so
+        // a tag function observing the array gets the spec-frozen
+        // descriptors (test262
+        // language/expressions/tagged-template/template-object*.js).
+        const indexed_frozen: @import("../runtime/object.zig").PropertyFlags = .{
+            .writable = false,
+            .enumerable = true,
+            .configurable = false,
+        };
+        const meta_frozen: @import("../runtime/object.zig").PropertyFlags = .{
+            .writable = false,
+            .enumerable = false,
+            .configurable = false,
+        };
+
         // Allocate the `raw` array.
         const raw_arr = self.realm.heap.allocateObject() catch return error.OutOfMemory;
         raw_arr.prototype = self.realm.intrinsics.array_prototype;
+        raw_arr.is_array_exotic = true;
         for (lit.quasis, 0..) |q, i| {
             const raw_text = self.source[q.span.start..q.span.end];
             const owned = self.realm.heap.allocateString(raw_text) catch return error.OutOfMemory;
             var ibuf: [16]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
             const idx_owned = self.realm.heap.allocateString(islice) catch return error.OutOfMemory;
-            raw_arr.set(self.allocator, idx_owned.bytes, Value.fromString(owned)) catch return error.OutOfMemory;
+            raw_arr.setWithFlags(self.allocator, idx_owned.bytes, Value.fromString(owned), indexed_frozen) catch return error.OutOfMemory;
         }
-        raw_arr.set(self.allocator, "length", Value.fromInt32(@intCast(lit.quasis.len))) catch return error.OutOfMemory;
+        raw_arr.setWithFlags(self.allocator, "length", Value.fromInt32(@intCast(lit.quasis.len)), meta_frozen) catch return error.OutOfMemory;
+        raw_arr.extensible = false;
 
         // Allocate the `strs` array (cooked).
         const strs_arr = self.realm.heap.allocateObject() catch return error.OutOfMemory;
         strs_arr.prototype = self.realm.intrinsics.array_prototype;
+        strs_arr.is_array_exotic = true;
         for (lit.quasis, 0..) |q, i| {
             const cooked = self.decodeQuasi(q.span) catch return error.OutOfMemory;
             const owned = self.realm.heap.allocateString(cooked) catch return error.OutOfMemory;
@@ -1776,10 +1867,11 @@ pub const Compiler = struct {
             var ibuf: [16]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
             const idx_owned = self.realm.heap.allocateString(islice) catch return error.OutOfMemory;
-            strs_arr.set(self.allocator, idx_owned.bytes, Value.fromString(owned)) catch return error.OutOfMemory;
+            strs_arr.setWithFlags(self.allocator, idx_owned.bytes, Value.fromString(owned), indexed_frozen) catch return error.OutOfMemory;
         }
-        strs_arr.set(self.allocator, "length", Value.fromInt32(@intCast(lit.quasis.len))) catch return error.OutOfMemory;
-        strs_arr.set(self.allocator, "raw", heap_mod.taggedObject(raw_arr)) catch return error.OutOfMemory;
+        strs_arr.setWithFlags(self.allocator, "length", Value.fromInt32(@intCast(lit.quasis.len)), meta_frozen) catch return error.OutOfMemory;
+        strs_arr.setWithFlags(self.allocator, "raw", heap_mod.taggedObject(raw_arr), meta_frozen) catch return error.OutOfMemory;
+        strs_arr.extensible = false;
 
         return self.builder.addConstant(heap_mod.taggedObject(strs_arr));
     }
