@@ -3165,28 +3165,46 @@ fn objectProtoPropertyIsEnumerable(realm: *Realm, this_value: Value, args: []con
     return Value.false_;
 }
 
-/// §20.1.3.3 Object.prototype.isPrototypeOf. Returns `true` iff
-/// `this_value` appears anywhere in `arg`'s prototype chain.
+/// §20.1.3.3 Object.prototype.isPrototypeOf. Spec walk:
+/// 1. If Type(V) is not Object, return false.
+/// 2. Let O be ? ToObject(this value).
+/// 3. Repeat: V = V.[[GetPrototypeOf]](); if V is null return
+///    false; if SameValue(O, V) return true.
+///
+/// The step-2 ToObject is what throws TypeError for `.call(null, …)`
+/// and `.call(undefined, …)` — and it must happen AFTER step 1
+/// rejects non-object args (Sputnik ordering tests rely on this).
+/// Step 3 dispatches through `objectGetPrototypeOf`, so Proxy
+/// `getPrototypeOf` traps fire correctly.
 fn objectProtoIsPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = realm;
     const target_v = argOr(args, 0, Value.undefined_);
-    // §20.1.3.4 — walk target's `[[Prototype]]` chain looking
-    // for `this`. The target can be a plain Object OR a Function
-    // (e.g. `Function.prototype.isPrototypeOf(boundFn)`); the
-    // function case used to short-circuit to `false` because
-    // `valueAsPlainObject` rejects function values. Seed the
-    // walk from `fn.proto` (a `*JSObject`) for callable targets.
-    var p: ?*@import("../object.zig").JSObject = blk: {
-        if (heap_mod.valueAsPlainObject(target_v)) |o| break :blk o.prototype;
-        if (heap_mod.valueAsFunction(target_v)) |fn_obj| break :blk fn_obj.proto;
+    // Step 1 — V must be an Object (plain or callable). A primitive
+    // here returns false BEFORE step 2's ToObject sees `this`, so
+    // `Object.prototype.isPrototypeOf.call(null, 42)` returns false,
+    // not TypeError (Sputnik fixtures encode this ordering).
+    if (heap_mod.valueAsPlainObject(target_v) == null and heap_mod.valueAsFunction(target_v) == null) {
         return Value.false_;
-    };
-    const this_obj = heap_mod.valueAsPlainObject(this_value) orelse return Value.false_;
-    while (p) |proto| {
-        if (proto == this_obj) return Value.true_;
-        p = proto.prototype;
     }
-    return Value.false_;
+    // Step 2 — ToObject(this). Throws for null / undefined.
+    const this_obj_v = blk: {
+        if (this_value.isUndefined() or this_value.isNull()) {
+            return intrinsics.throwTypeError(realm, "Object.prototype.isPrototypeOf called on null or undefined");
+        }
+        if (heap_mod.valueAsPlainObject(this_value)) |_| break :blk this_value;
+        if (heap_mod.valueAsFunction(this_value)) |_| break :blk this_value;
+        // Boxed primitive — wrap.
+        const w = try intrinsics.toObjectThis(realm, this_value);
+        break :blk heap_mod.taggedObject(w);
+    };
+    // Step 3 — walk via [[GetPrototypeOf]] so Proxy traps fire.
+    var current = target_v;
+    while (true) {
+        const next_args = [_]Value{current};
+        const proto_v = try objectGetPrototypeOf(realm, Value.undefined_, &next_args);
+        if (proto_v.isNull()) return Value.false_;
+        if (intrinsics.sameValue(this_obj_v, proto_v)) return Value.true_;
+        current = proto_v;
+    }
 }
 
 /// §20.1.3.6 Object.prototype.toString. Spec walk:
