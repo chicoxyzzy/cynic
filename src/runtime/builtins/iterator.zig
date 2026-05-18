@@ -345,12 +345,43 @@ fn cachedNextFn(realm: *Realm, wrapper: *JSObject, source: Value) NativeError!*J
 /// it with `this = recv` and surface any throw. Otherwise fall
 /// back to the plain data lookup. Used so a throwing `done` /
 /// `value` getter on a user IteratorResult propagates
-/// (§7.4.6 IteratorComplete / §7.4.5 IteratorValue).
+/// (§7.4.6 IteratorComplete / §7.4.5 IteratorValue). Proxy-aware
+/// — a `get` trap on the receiver (or anywhere on its target
+/// chain) fires, so the proxy-iterator fixtures in
+/// `built-ins/Iterator/from/*.js` observe each `Get(iter, …)`
+/// the spec mandates.
 fn iterGet(realm: *Realm, recv: Value, key: []const u8) NativeError!Value {
     const obj = heap_mod.valueAsPlainObject(recv) orelse return Value.undefined_;
+    if (obj.proxy_target != null or obj.proxy_revoked) {
+        const proxy_mod = @import("proxy.zig");
+        var cur = obj;
+        while (true) {
+            const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, recv);
+            switch (outcome) {
+                .value => |v| return v,
+                .fallthrough => |t| {
+                    if (t == cur) return Value.undefined_;
+                    if (t.proxy_target != null or t.proxy_revoked) {
+                        cur = t;
+                        continue;
+                    }
+                    return iterGetPlain(realm, t, key, recv);
+                },
+            }
+        }
+    }
+    return iterGetPlain(realm, obj, key, recv);
+}
+
+/// Helper for `iterGet`: accessor-aware ordinary [[Get]] on a
+/// non-Proxy object. Pulled out so the proxy-fallthrough path
+/// can share the lookup. `this_for_getter` is the original
+/// receiver — accessor getters fire with `this = recv` per
+/// §10.1.8.1 step 5.
+fn iterGetPlain(realm: *Realm, obj: *JSObject, key: []const u8, this_for_getter: Value) NativeError!Value {
     if (interpreter.lookupAccessor(obj, key)) |acc| {
         if (acc.getter) |getter| {
-            const out = interpreter.callJSFunction(realm.allocator, realm, getter, recv, &.{}) catch |err| switch (err) {
+            const out = interpreter.callJSFunction(realm.allocator, realm, getter, this_for_getter, &.{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };

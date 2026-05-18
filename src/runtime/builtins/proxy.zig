@@ -161,6 +161,20 @@ fn callTrap(realm: *Realm, trap_fn: *@import("../function.zig").JSFunction, hand
     }
 }
 
+/// Build the property-key Value passed to a Proxy trap. Internal
+/// symbol keys are stored as the literal string `"@@iterator"`
+/// etc; the trap, per §6.1.7.1, must receive a Symbol when the
+/// property key is a Symbol. Look up the registered Symbol
+/// (well-known or user-allocated) and pass it as a Symbol Value.
+/// Plain string keys round-trip as Strings.
+fn trapKeyValue(realm: *Realm, key: []const u8) NativeError!Value {
+    if (std.mem.startsWith(u8, key, "@@") or std.mem.startsWith(u8, key, "<sym:")) {
+        if (realm.heap.symbolForKey(key)) |sym| return heap_mod.taggedSymbol(sym);
+    }
+    const s = realm.heap.allocateString(key) catch return error.OutOfMemory;
+    return Value.fromString(s);
+}
+
 /// §10.5.5 [[Get]] (P, Receiver) — native dispatcher for callers
 /// that aren't bytecode-driven (Reflect.get, host code).
 pub fn nativeProxyGet(realm: *Realm, proxy: *JSObject, key: []const u8, receiver: Value) NativeError!NativeProxyOutcome {
@@ -170,8 +184,8 @@ pub fn nativeProxyGet(realm: *Realm, proxy: *JSObject, key: []const u8, receiver
     const trap_v = handler.get("get");
     if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'get' trap is not callable");
-    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-    const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str), receiver };
+    const key_v = try trapKeyValue(realm, key);
+    const args = [_]Value{ heap_mod.taggedObject(target), key_v, receiver };
     const v = try callTrap(realm, trap_fn, handler, &args);
     // §10.5.5 invariants: non-configurable non-writable data prop
     // must match; non-configurable accessor with undefined get
@@ -208,8 +222,8 @@ pub fn nativeProxySet(realm: *Realm, proxy: *JSObject, key: []const u8, value: V
     const trap_v = handler.get("set");
     if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'set' trap is not callable");
-    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-    const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str), value, receiver };
+    const key_v = try trapKeyValue(realm, key);
+    const args = [_]Value{ heap_mod.taggedObject(target), key_v, value, receiver };
     const v = try callTrap(realm, trap_fn, handler, &args);
     const arith = @import("../interpreter_arith.zig");
     if (!arith.toBoolean(v)) return .{ .boolean = false };
@@ -240,8 +254,8 @@ pub fn nativeProxyHas(realm: *Realm, proxy: *JSObject, key: []const u8) NativeEr
     const trap_v = handler.get("has");
     if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'has' trap is not callable");
-    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-    const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str) };
+    const key_v = try trapKeyValue(realm, key);
+    const args = [_]Value{ heap_mod.taggedObject(target), key_v };
     const v = try callTrap(realm, trap_fn, handler, &args);
     const arith = @import("../interpreter_arith.zig");
     const b = arith.toBoolean(v);
@@ -271,8 +285,8 @@ pub fn nativeProxyDelete(realm: *Realm, proxy: *JSObject, key: []const u8) Nativ
     const trap_v = handler.get("deleteProperty");
     if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'deleteProperty' trap is not callable");
-    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-    const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str) };
+    const key_v = try trapKeyValue(realm, key);
+    const args = [_]Value{ heap_mod.taggedObject(target), key_v };
     const v = try callTrap(realm, trap_fn, handler, &args);
     const arith = @import("../interpreter_arith.zig");
     const b = arith.toBoolean(v);

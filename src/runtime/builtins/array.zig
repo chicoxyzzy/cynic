@@ -1162,7 +1162,26 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         return heap_mod.taggedObject(out);
     }
 
-    const src = heap_mod.valueAsPlainObject(items) orelse return throwTypeError(realm, "Array.from: items is not iterable");
+    // §23.1.2.1 step 3 — `GetMethod(items, @@iterator)`. Per §7.3.11
+    // GetMethod → §7.3.2 GetV → §7.1.18 ToObject when the receiver
+    // is a primitive, so a Number / Boolean / BigInt / Symbol with
+    // an `@@iterator` reachable from its prototype chain still
+    // takes the iterator-protocol path. test262
+    // `Iterator/from/iterable-primitives.js` overrides
+    // `Number.prototype[Symbol.iterator]` and expects
+    // `Array.from(5)` to walk it. The iterator method is called
+    // with `this = items` (the original primitive), not the
+    // wrapper.
+    if (items.isNull() or items.isUndefined()) {
+        return throwTypeError(realm, "Array.from: items is null or undefined");
+    }
+    // For the @@iterator lookup we walk a *JSObject — either the
+    // raw object or the primitive's prototype (Number.prototype,
+    // Boolean.prototype, …). For the array-like fallback we still
+    // use this same `src`; the primitive prototype has no `length`
+    // or indexed entries, so the loop exits immediately, matching
+    // `arrayLike = ! ToObject(items)` with len=0.
+    const src: *JSObject = heap_mod.valueAsPlainObject(items) orelse (intrinsics.lookupPrimitivePrototype(realm, items) orelse return throwTypeError(realm, "Array.from: items is not iterable"));
 
     // Iterable path — preferred when present per §23.1.2.1 step 4.
     // GetMethod(items, @@iterator) walks the prototype chain; if
