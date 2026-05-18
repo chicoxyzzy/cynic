@@ -442,20 +442,12 @@ pub fn wrapGenerator(
     gen.argc = @intCast(@min(args.len, std.math.maxInt(u8)));
 
     const wrapper = realm.heap.allocateObject() catch return error.OutOfMemory;
-    // §27.5.1.2 GeneratorStart via OrdinaryCreateFromConstructor →
-    // §9.1.13 OrdinaryCreateFromConstructor → §9.1.14
-    // GetPrototypeFromConstructor: step 3 reads `Get(constructor,
-    // "prototype")`; step 4 falls back to %GeneratorPrototype% if
-    // that read isn't an Object. Reading the property (not the
-    // dedicated slot) matters because `g.prototype = null` records
-    // null in the property bag but V8-style keeps the slot — the
-    // spec wants the property read so the null user-assignment
-    // routes through the step-4 fallback.
-    const proto_val_g: Value = if (callee) |c| c.get("prototype") else Value.undefined_;
-    wrapper.prototype = if (heap_mod.valueAsPlainObject(proto_val_g)) |p|
-        p
-    else
-        ensureGeneratorPrototype(realm) catch return error.OutOfMemory;
+    // Seed a safe default [[Prototype]] for the duration of the
+    // prologue — `resumeGenerator` below runs default-param init
+    // which may mutate `callee.prototype` (`function*(a = (g.prototype =
+    // null)) {}`). The real wrapper.prototype is rebound after the
+    // prologue per the §9.1.14 read below.
+    wrapper.prototype = ensureGeneratorPrototype(realm) catch return error.OutOfMemory;
     wrapper.generator_ref = gen;
 
     // The wrapper is the only handle linking the freshly allocated
@@ -475,6 +467,19 @@ pub fn wrapGenerator(
     // chunk to that point, then unwinds. The yielded undefined
     // is discarded; the wrapper is what the caller sees.
     const initial = try resumeGenerator(allocator, realm, gen, Value.undefined_);
+    // §15.6.2 EvaluateGeneratorBody — the spec step order is
+    // 1) FunctionDeclarationInstantiation, 2) OrdinaryCreateFrom
+    // Constructor (which performs §9.1.14 GetPrototypeFromConstructor
+    // reading `Get(constructor, "prototype")`), 3) GeneratorStart.
+    // Rebind wrapper.prototype AFTER the prologue so a default-
+    // param `g.prototype = null` observably routes through the
+    // §9.1.14 step-4 intrinsic fallback. Reading the property
+    // bag (not the dedicated slot) matters because `g.prototype
+    // = null` updates the bag but V8-style keeps the slot.
+    const proto_val_g: Value = if (callee) |c| c.get("prototype") else Value.undefined_;
+    if (heap_mod.valueAsPlainObject(proto_val_g)) |p| {
+        wrapper.prototype = p;
+    }
     switch (initial) {
         .yielded => return .{ .value = heap_mod.taggedObject(wrapper) },
         .value => return .{ .value = heap_mod.taggedObject(wrapper) },
@@ -522,17 +527,11 @@ pub fn wrapAsyncGenerator(
     gen.argc = @intCast(@min(args.len, std.math.maxInt(u8)));
 
     const wrapper = realm.heap.allocateObject() catch return error.OutOfMemory;
-    // §27.6.3.2 AsyncGeneratorStart via OrdinaryCreateFromConstructor →
-    // §9.1.14 GetPrototypeFromConstructor: read `Get(constructor,
-    // "prototype")` (property bag, not the dedicated slot) and fall
-    // back to %AsyncGeneratorPrototype% when not an Object. Same
-    // reason as `wrapGenerator` — `g.prototype = null` updates the
-    // property bag but V8-style keeps the slot.
-    const proto_val_ag: Value = if (callee) |c| c.get("prototype") else Value.undefined_;
-    wrapper.prototype = if (heap_mod.valueAsPlainObject(proto_val_ag)) |p|
-        p
-    else
-        ensureAsyncGeneratorPrototype(realm) catch return error.OutOfMemory;
+    // Seed a safe default [[Prototype]] for the duration of the
+    // prologue — the §9.1.14 read below rebinds it after default-
+    // param evaluation runs (see `wrapGenerator` for the spec
+    // rationale).
+    wrapper.prototype = ensureAsyncGeneratorPrototype(realm) catch return error.OutOfMemory;
     wrapper.generator_ref = gen;
 
     // Same wrapper-pin rationale as `wrapGenerator`: the eager
@@ -546,6 +545,15 @@ pub fn wrapAsyncGenerator(
     // Mirror the sync-gen path: drive the chunk to
     // `gen_initial_suspend`, then hand back the wrapper.
     const initial = try resumeGenerator(allocator, realm, gen, Value.undefined_);
+    // §27.6.3.2 AsyncGeneratorStart spec step order matches sync
+    // generators — rebind wrapper.prototype after FDI runs so a
+    // default-param `g.prototype = null` routes through the
+    // §9.1.14 step-4 fallback. Property-bag read (not dedicated
+    // slot) for the same V8-style-keep reason.
+    const proto_val_ag: Value = if (callee) |c| c.get("prototype") else Value.undefined_;
+    if (heap_mod.valueAsPlainObject(proto_val_ag)) |p| {
+        wrapper.prototype = p;
+    }
     switch (initial) {
         .yielded => return .{ .value = heap_mod.taggedObject(wrapper) },
         .value => return .{ .value = heap_mod.taggedObject(wrapper) },
