@@ -5526,33 +5526,100 @@ pub const Compiler = struct {
         // §14.13 — `LABEL : SwitchStatement` lets `break LABEL ;`
         // inside the cases exit the switch.
         const labels = try self.drainPendingLabels();
-        // A new block scope wraps the switch so `let`/`const` in case
-        // bodies are scoped to the switch (§14.12.4 step 3).
-        var switch_scope: Scope = .{ .parent = self.scope, .kind = .block };
-        defer switch_scope.deinit(self.allocator);
-        const saved_scope = self.scope;
-        self.scope = &switch_scope;
-        defer self.scope = saved_scope;
 
-        // §14.12.4 CaseBlock — the whole CaseBlock shares one lexical
-        // scope; LexicallyDeclaredNames(CaseBlock) is the union of the
-        // lexically-declared names from every case + the default.
-        // Hoist `let` / `const` slots from every case body up-front so
-        // a `switch (x) { case 1: let y = 1; }` (or `default: let y;`)
-        // can resolve its binding when the body runs. Without this the
-        // resolver fails as `UnresolvedReference` at compile time
-        // (test262 language/statements/let/syntax/{without,with}-
-        // initialisers-in-statement-positions-{default,case-expression}-
-        // statement-list).
-        for (s.cases) |case| {
-            try self.hoistLetConst(case.body);
-        }
+        // §14.12.3 SwitchStatement Runtime Semantics:
+        //   1. Let exprRef be ? Evaluation of Expression.
+        //   2. Let switchValue be ? GetValue(exprRef).
+        //   3. Let oldEnv = running execution context's
+        //      LexicalEnvironment.
+        //   4. Let blockEnv = NewDeclarativeEnvironment(oldEnv).
+        //   5. Perform BlockDeclarationInstantiation(CaseBlock,
+        //      blockEnv).
+        //   6. Set the LexicalEnvironment to blockEnv.
+        //
+        // So the discriminant is evaluated in the OUTER environment;
+        // closures created during the discriminant capture that
+        // outer env. Only after `switchValue` is captured does the
+        // fresh CaseBlock env come into existence and pick up the
+        // hoisted `let`/`const` slots from the case bodies. A test
+        // expression / case body that mentions the same name as a
+        // `let` declared inside a later case binds against the
+        // inner CaseBlock binding (in TDZ until that case body
+        // evaluates the declarator); but anything in the
+        // discriminant resolves against `oldEnv`.
 
+        // Evaluate the discriminant FIRST, in the outer scope.
         try self.compileExpression(&s.discriminant);
         const r_disc = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.star, s.span);
         try self.builder.emitU8(r_disc);
+
+        // §14.12.3 — the CaseBlock gets a fresh DeclarativeEnvironment
+        // ONLY when there are lexical declarations inside it. Without
+        // any `let` / `const` / `class` in any case body, the spec
+        // optimisation (and §14.2 BlockDeclarationInstantiation step
+        // 1's empty-list early-out) means no env is created and the
+        // CaseBlock runs in the enclosing env. Skipping the env
+        // emission here keeps exception unwinding (which doesn't
+        // rebalance the env stack) consistent: a `throw` from inside
+        // a `switch (…) { case X: throw e; }` inside a `try` must
+        // land on the outer catch without leaving a stray switch
+        // env on the env chain.
+        const has_lex_decls = blk: {
+            for (s.cases) |case| {
+                for (case.body) |*stmt| {
+                    switch (stmt.*) {
+                        .lexical => |ld| if (ld.kind != .var_) break :blk true,
+                        .class_decl => break :blk true,
+                        // §14.12.4 LexicallyDeclaredNames also
+                        // includes function declarations in block
+                        // positions (§14.2 BlockDeclarationInstantiation
+                        // step 2.b). Cynic targets strict-only so
+                        // Annex B's legacy hoist-to-outer doesn't
+                        // apply — the function stays scoped to the
+                        // CaseBlock and must not be visible outside.
+                        .function_decl => break :blk true,
+                        else => {},
+                    }
+                }
+            }
+            break :blk false;
+        };
+
+        var switch_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = has_lex_decls };
+        defer switch_scope.deinit(self.allocator);
+        const saved_scope = self.scope;
+        self.scope = &switch_scope;
+        defer self.scope = saved_scope;
+
+        const saved_env_depth = self.env_depth;
+        defer self.env_depth = saved_env_depth;
+        const saved_slot_count = self.env_slot_count;
+        if (has_lex_decls) self.env_slot_count = 0;
+        defer self.env_slot_count = saved_slot_count;
+
+        // §14.12.4 CaseBlock — emit a `make_environment` for the
+        // fresh CaseBlock env when there are lexical declarations.
+        // Slot count is patched once all declarations have been
+        // hoisted.
+        var switch_env_size_patch: usize = 0;
+        if (has_lex_decls) {
+            try self.builder.emitOp(.make_environment, s.span);
+            switch_env_size_patch = self.builder.code.items.len;
+            try self.builder.emitU8(0);
+            self.env_depth = saved_env_depth + 1;
+
+            // §14.12.4 CaseBlock — the whole CaseBlock shares one
+            // lexical scope; LexicallyDeclaredNames(CaseBlock) is
+            // the union of the lexically-declared names from every
+            // case + the default. Hoist `let` / `const` slots from
+            // every case body so a `switch (x) { case 1: let y = 1; }`
+            // resolves when the body runs.
+            for (s.cases) |case| {
+                try self.hoistLetConst(case.body);
+            }
+        }
 
         // Per-case forward-jump patches into the body region.
         var body_patches = try self.allocator.alloc(u32, s.cases.len);
@@ -5585,12 +5652,15 @@ pub const Compiler = struct {
         try self.builder.emitI16(0);
 
         // Set up a loop context for `break` inside the switch.
+        // `needs_env_pop` matches the env we just emitted so a
+        // `break` walks out of the CaseBlock env on the way out.
         var ctx: LoopContext = .{
             .continue_target = 0,
             .parent = self.current_loop,
             .entry_finally_chain = self.finally_chain,
             .labels = labels,
             .is_switch = true,
+            .needs_env_pop = has_lex_decls,
         };
         defer ctx.deinit(self.allocator);
         const saved_loop = self.current_loop;
@@ -5615,13 +5685,30 @@ pub const Compiler = struct {
             // are queued for the post-switch exit.
         }
 
+        // §14.12.3 step 8 — pop the CaseBlock env on natural
+        // fall-through to the end of the switch (no case body
+        // hit a `break`). `break` inside a case body emits its
+        // own `pop_env` via `LoopContext.needs_env_pop`, then
+        // jumps past this site to `exit_pc`. When the switch
+        // didn't allocate an env, both paths just land on
+        // `exit_pc` directly.
+        const fallback_target_pc = self.builder.here();
+        if (has_lex_decls) {
+            try self.builder.emitOp(.pop_env, s.span);
+        }
+
         const exit_pc = self.builder.here();
         if (default_body_pc) |pc| {
             try self.builder.patchI16(fallback_patch, pc);
         } else {
-            try self.builder.patchI16(fallback_patch, exit_pc);
+            // No default: land on the natural-fall-through pop so
+            // the env teardown still runs (when we have one).
+            try self.builder.patchI16(fallback_patch, fallback_target_pc);
         }
         for (ctx.break_patches.items) |p| try self.builder.patchI16(p, exit_pc);
+        if (has_lex_decls) {
+            self.builder.code.items[switch_env_size_patch] = self.env_slot_count;
+        }
     }
 
     fn compileReturn(self: *Compiler, s: ast.statement.ReturnStmt) CompileError!void {
@@ -8885,31 +8972,44 @@ pub const Compiler = struct {
 
     fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
         // §14.7.4 ForStatement (C-style — for-in / for-of compile
-        // separately). For a single `let`/`const` head binding,
+        // separately). For `let`/`const` head bindings,
         // §14.7.4.1 ForBodyEvaluation step 2 + CreatePerIterationEnvironment
-        // require a fresh declarative environment per iteration so
-        // closures captured inside the body see iteration-specific
-        // values. later handles the single-binding case (the
-        // overwhelming majority of for-let loops); multi-declarator
-        // heads and `var` heads stay on the legacy single-slot
-        // path.
+        // (§14.7.4.4) require a fresh declarative environment per
+        // iteration so closures captured inside the body see
+        // iteration-specific values. We support both single-binding
+        // (the overwhelming majority) and multi-binding heads
+        // (`for (let i = 0, j = 10; …)`); `var` heads stay on the
+        // legacy single-slot path.
         const labels = try self.drainPendingLabels();
 
-        // Detect the single-let/const-binding case.
+        // Detect the `let`/`const`-binding case. Multi-binding is
+        // supported when every declarator binds a single identifier
+        // (pattern destructuring in a for-head is rare; falls back
+        // to the legacy path).
         var per_iter_env = false;
-        var single_name: []const u8 = "";
-        var single_span: Span = s.span;
-        var single_kind: BindingKind = .let_;
+        const PerIterBinding = struct { name: []const u8, span: Span, kind: BindingKind };
+        var per_iter_bindings: std.ArrayListUnmanaged(PerIterBinding) = .empty;
+        defer per_iter_bindings.deinit(self.allocator);
         if (s.init) |head| switch (head) {
-            .lexical => |ld| if (ld.kind != .var_ and ld.declarators.len == 1) {
-                const d = ld.declarators[0];
-                // §12.7 — per-iter env binding uses the StringValue.
-                if (d.name == .identifier) {
-                    const name = try self.bindingName(d.name.identifier.span);
+            .lexical => |ld| if (ld.kind != .var_) {
+                var all_ident = true;
+                for (ld.declarators) |d| {
+                    if (d.name != .identifier) {
+                        all_ident = false;
+                        break;
+                    }
+                }
+                if (all_ident and ld.declarators.len > 0) {
                     per_iter_env = true;
-                    single_name = name;
-                    single_span = d.span;
-                    single_kind = if (ld.kind == .let_) .let_ else .const_;
+                    const k: BindingKind = if (ld.kind == .let_) .let_ else .const_;
+                    for (ld.declarators) |d| {
+                        const name = try self.bindingName(d.name.identifier.span);
+                        try per_iter_bindings.append(self.allocator, .{
+                            .name = name,
+                            .span = d.span,
+                            .kind = k,
+                        });
+                    }
                 }
             },
             else => {},
@@ -8924,44 +9024,57 @@ pub const Compiler = struct {
         const saved_env_depth = self.env_depth;
         defer self.env_depth = saved_env_depth;
 
-        // Carry-forward register: holds the binding's value across
-        // env swaps. Seeded from the init expression; later updated
-        // from the per-iter env's slot before each fresh-env push.
-        var r_carry: u8 = 0;
+        // Carry-forward registers: one per binding. Hold the
+        // binding's value across env swaps; loaded out of the
+        // active per-iter env at the bottom of the body and used
+        // to seed the fresh env for the next iteration.
+        var carry_regs: std.ArrayListUnmanaged(u8) = .empty;
+        defer carry_regs.deinit(self.allocator);
         var per_iter_size_patch: usize = 0;
         var saved_per_iter_slot_count: u8 = 0;
         if (per_iter_env) {
-            r_carry = try self.reserveTemp();
-
-            // Evaluate the init expression in the OUTER env. The
-            // declarator's init RHS can reference outer bindings;
-            // it cannot reference the loop binding itself (TDZ).
-            if (s.init.?.lexical.declarators[0].init) |*init_expr| {
-                try self.compileExpression(init_expr);
-            } else {
-                try self.builder.emitOp(.lda_undefined, single_span);
+            const declarators = s.init.?.lexical.declarators;
+            for (declarators) |_| {
+                const r = try self.reserveTemp();
+                try carry_regs.append(self.allocator, r);
             }
-            try self.builder.emitOp(.star, single_span);
-            try self.builder.emitU8(r_carry);
 
-            // Per-iter env owns its own slot pool (loop var + body
+            // Per-iter env owns its own slot pool (loop vars + body
             // lexicals). Borrow `env_slot_count`, reset it, restore
             // at loop teardown — see compileForInOf for the same
             // shape. Without this, body's first `const` aliases the
             // loop variable.
             saved_per_iter_slot_count = self.env_slot_count;
             self.env_slot_count = 0;
-            // Push the initial per-iter env (E_0) and seed it.
+            // §13.3.2 LexicalDeclaration evaluation inside a for-
+            // head — create the loopEnv first, declare every
+            // binding as TDZ, then evaluate each init INSIDE the
+            // env. A closure constructed by a later init (e.g.
+            // `f = function(){ return i; }`) captures the env that
+            // holds `i`, so subsequent reads of `i` from the
+            // closure resolve correctly even after the env is
+            // swapped out per iteration.
             try self.builder.emitOp(.make_environment, s.span);
             per_iter_size_patch = self.builder.code.items.len;
             try self.builder.emitU8(0); // placeholder; patched below
             self.env_depth = saved_env_depth + 1;
-            _ = try self.declareBinding(single_name, single_kind, single_span);
-            try self.builder.emitOp(.ldar, single_span);
-            try self.builder.emitU8(r_carry);
-            try self.builder.emitOp(.sta_env, single_span);
-            try self.builder.emitU8(0);
-            try self.builder.emitU8(0);
+            // Declare every binding before any init runs (TDZ).
+            for (per_iter_bindings.items) |b| {
+                _ = try self.declareBinding(b.name, b.kind, b.span);
+            }
+            // Now evaluate each init inside the env and write into
+            // its slot.
+            for (declarators, 0..) |d, i| {
+                const b = per_iter_bindings.items[i];
+                if (d.init) |*init_expr| {
+                    try self.compileExpression(init_expr);
+                } else {
+                    try self.builder.emitOp(.lda_undefined, b.span);
+                }
+                try self.builder.emitOp(.sta_env, b.span);
+                try self.builder.emitU8(0);
+                try self.builder.emitU8(@intCast(i));
+            }
         } else if (s.init) |head| switch (head) {
             .lexical => |ld| {
                 if (ld.kind != .var_) {
@@ -8979,6 +9092,37 @@ pub const Compiler = struct {
             },
             .expression => |e| try self.compileExpression(&e),
         };
+
+        // §14.7.4.2 ForBodyEvaluation step 2 —
+        // CreatePerIterationEnvironment runs ONCE before the loop
+        // starts, swapping the init env (E_init) for the first
+        // iteration env (E_0). Closures captured during init keep
+        // pointing at E_init; E_init is detached from the live env
+        // chain so subsequent body writes can't reach back into it.
+        // The carry-and-swap dance mirrors the per-iteration step
+        // emitted below: snapshot the init values, pop E_init, push
+        // E_0, restore values.
+        var per_iter_size_patch_pre: usize = 0;
+        if (per_iter_env) {
+            for (carry_regs.items, 0..) |r, i| {
+                try self.builder.emitOp(.lda_env, s.span);
+                try self.builder.emitU8(0);
+                try self.builder.emitU8(@intCast(i));
+                try self.builder.emitOp(.star, s.span);
+                try self.builder.emitU8(r);
+            }
+            try self.builder.emitOp(.pop_env, s.span);
+            try self.builder.emitOp(.make_environment, s.span);
+            per_iter_size_patch_pre = self.builder.code.items.len;
+            try self.builder.emitU8(0); // placeholder; patched below
+            for (carry_regs.items, 0..) |r, i| {
+                try self.builder.emitOp(.ldar, s.span);
+                try self.builder.emitU8(r);
+                try self.builder.emitOp(.sta_env, s.span);
+                try self.builder.emitU8(0);
+                try self.builder.emitU8(@intCast(i));
+            }
+        }
 
         const loop_start = self.builder.here();
 
@@ -9014,22 +9158,28 @@ pub const Compiler = struct {
         ctx.continue_target = update_pc;
         var per_iter_size_patch_2: usize = 0;
         if (per_iter_env) {
-            // r_carry ← value from current per-iter env
-            try self.builder.emitOp(.lda_env, s.span);
-            try self.builder.emitU8(0);
-            try self.builder.emitU8(0);
-            try self.builder.emitOp(.star, s.span);
-            try self.builder.emitU8(r_carry);
-            // Pop current env and push a fresh one.
+            // Snapshot each binding's current value out of the
+            // per-iter env into its carry register.
+            for (carry_regs.items, 0..) |r, i| {
+                try self.builder.emitOp(.lda_env, s.span);
+                try self.builder.emitU8(0);
+                try self.builder.emitU8(@intCast(i));
+                try self.builder.emitOp(.star, s.span);
+                try self.builder.emitU8(r);
+            }
+            // Pop current env and push a fresh one with the
+            // carried-over values.
             try self.builder.emitOp(.pop_env, s.span);
             try self.builder.emitOp(.make_environment, s.span);
             per_iter_size_patch_2 = self.builder.code.items.len;
             try self.builder.emitU8(0); // placeholder; patched below
-            try self.builder.emitOp(.ldar, s.span);
-            try self.builder.emitU8(r_carry);
-            try self.builder.emitOp(.sta_env, s.span);
-            try self.builder.emitU8(0);
-            try self.builder.emitU8(0);
+            for (carry_regs.items, 0..) |r, i| {
+                try self.builder.emitOp(.ldar, s.span);
+                try self.builder.emitU8(r);
+                try self.builder.emitOp(.sta_env, s.span);
+                try self.builder.emitU8(0);
+                try self.builder.emitU8(@intCast(i));
+            }
         }
         if (s.update) |*u| {
             try self.compileExpression(u);
@@ -9057,14 +9207,18 @@ pub const Compiler = struct {
         for (ctx.continue_patches.items) |patch| try self.builder.patchI16(patch, update_pc);
 
         if (per_iter_env) {
-            // Patch both per-iter `make_environment` size operands
-            // (initial seed + per-iteration refresh) to whatever
-            // env_slot_count grew to. Restore the enclosing
-            // function's slot counter.
+            // Patch all three per-iter `make_environment` size
+            // operands (E_init / initial swap / per-iter refresh)
+            // to whatever env_slot_count grew to. Restore the
+            // enclosing function's slot counter.
             self.builder.code.items[per_iter_size_patch] = self.env_slot_count;
+            self.builder.code.items[per_iter_size_patch_pre] = self.env_slot_count;
             self.builder.code.items[per_iter_size_patch_2] = self.env_slot_count;
             self.env_slot_count = saved_per_iter_slot_count;
-            self.releaseTemp(); // r_carry
+            // Release each carry register in reverse order so the
+            // temp allocator's stack invariant holds.
+            var i: usize = carry_regs.items.len;
+            while (i > 0) : (i -= 1) self.releaseTemp();
         }
     }
 
@@ -9569,18 +9723,17 @@ pub const FunctionBody = union(enum) {
     expression: *const Expression,
 };
 
-/// §15.7.7 FunctionLength — count formal parameters BEFORE the
-/// first parameter that has an initializer, is a destructuring
-/// pattern, or is a rest element. This is the value `f.length`
-/// reports per the spec; engines that use the total declared
-/// count expose `f.length` incorrectly for any function with
-/// defaults / rest / patterns.
+/// §15.7.7 ExpectedArgumentCount — count formal parameters BEFORE
+/// the first one with an initializer (`=`) or the rest element.
+/// A bare BindingPattern (`[a,b]` / `{a}` with no `=`) has
+/// `HasInitializer = false` (§8.4.2 / §8.5.2), so it COUNTS toward
+/// the spec length just like a simple identifier param. Only an
+/// explicit initializer or the rest element terminates the count.
 fn computeSpecLength(params: []const ast.statement.FunctionParam) u8 {
     var n: u8 = 0;
     for (params) |p| switch (p) {
         .simple => |sp| {
             if (sp.default != null) break;
-            if (sp.target != .identifier) break;
             n += 1;
         },
         .rest => break,
