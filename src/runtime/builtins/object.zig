@@ -2203,33 +2203,57 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
         var len: i32 = 0;
         // §10.2.4 — built-in constructors expose `prototype` as
         // an own property; the slot is dedicated (`fn_obj.prototype`)
-        // and doesn't appear in the property bag iteration. Surface
-        // it in spec order — for a class / non-arrow function the
-        // prototype slot is wired at construction time, BEFORE any
-        // method or static field is installed, so `prototype` must
-        // appear immediately after `length`+`name` in the key list.
-        // A user `defineProperty(fn, "prototype", …)` re-routes
-        // through the property bag (the dedicated slot is read-only
-        // when the bag override exists), so check `!bag.contains`
-        // to avoid emitting a duplicate.
+        // and doesn't appear in the property bag iteration. The
+        // §10.1.11 OrdinaryOwnPropertyKeys partition still applies
+        // to functions: integer-index keys first (ascending
+        // numeric), then string keys in insertion order.
         const has_dedicated_prototype = fn_obj.prototype != null and !fn_obj.properties.contains("prototype");
-        var emitted_prototype = false;
+
+        // Partition the bag's keys into integer / string sections.
+        const FnKeyEntry = struct { idx: u32, key: []const u8 };
+        var fn_int_keys: std.ArrayListUnmanaged(FnKeyEntry) = .empty;
+        defer fn_int_keys.deinit(realm.allocator);
+        var fn_str_keys: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer fn_str_keys.deinit(realm.allocator);
         var fit = fn_obj.properties.iterator();
         while (fit.next()) |entry| {
             const key = entry.key_ptr.*;
             if (std.mem.startsWith(u8, key, "__cynic_")) continue;
             if (isSymbolKey(key)) continue;
+            if (canonicalIntegerIndex(key)) |i| {
+                fn_int_keys.append(realm.allocator, .{ .idx = i, .key = key }) catch return error.OutOfMemory;
+            } else {
+                fn_str_keys.append(realm.allocator, key) catch return error.OutOfMemory;
+            }
+        }
+        std.mem.sort(FnKeyEntry, fn_int_keys.items, {}, struct {
+            fn lessThan(_: void, a: FnKeyEntry, b: FnKeyEntry) bool {
+                return a.idx < b.idx;
+            }
+        }.lessThan);
+
+        // 1) Integer-indexed keys in ascending order.
+        for (fn_int_keys.items) |e| {
+            var ibuf: [16]u8 = undefined;
+            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
+            const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+            const k_owned = realm.heap.allocateString(e.key) catch return error.OutOfMemory;
+            out.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
+            len += 1;
+        }
+
+        // 2) String keys in insertion order, with `prototype`
+        // synthesised from the dedicated slot inserted right after
+        // `name` (matching SetFunctionLength / OrdinaryFunctionCreate
+        // step 11 ordering: length, name, prototype, then methods).
+        var emitted_prototype = false;
+        for (fn_str_keys.items) |key| {
             var ibuf: [16]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
             const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
             const k_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
             out.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
             len += 1;
-            // Emit `prototype` immediately after `name`, matching
-            // the spec order: `allocateFunction` installs
-            // `length` then `name`, then wires the prototype slot
-            // (steps 10-11 of CreateBuiltinFunction / step 11 of
-            // ClassDefinitionEvaluation), THEN methods land.
             if (!emitted_prototype and has_dedicated_prototype and std.mem.eql(u8, key, "name")) {
                 var ibuf2: [16]u8 = undefined;
                 const islice2 = std.fmt.bufPrint(&ibuf2, "{d}", .{len}) catch unreachable;
@@ -2240,10 +2264,8 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
                 emitted_prototype = true;
             }
         }
-        // Edge case: the function had no `name` in its bag (very
-        // unusual — `installFunctionLengthAndName` always puts it
-        // there, but a `delete fn.name` would remove it). Emit
-        // `prototype` at the end so it still surfaces.
+        // Edge case: `delete fn.name` removed the marker — surface
+        // prototype at the end so the slot still appears.
         if (!emitted_prototype and has_dedicated_prototype) {
             var ibuf: [16]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;

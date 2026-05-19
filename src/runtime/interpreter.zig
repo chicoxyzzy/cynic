@@ -1917,12 +1917,45 @@ pub fn openForInIterator(
             // `shadow_only` carries own-but-non-enumerable names so
             // they get added to `seen` after emission without ever
             // being yielded themselves.
+            //
+            // §10.1.11 OrdinaryOwnPropertyKeys orders String keys
+            // in *unified* property-creation order (data + accessor
+            // slots merged into one chronological list). Walk
+            // `own_key_order` first so a key whose descriptor flipped
+            // data ↔ accessor keeps its original slot — without this,
+            // iterating `properties` then `accessors` separately
+            // surfaced `b` (data) before `a` (accessor) even though
+            // `a` was created first (test262
+            // language/statements/for-in/order-after-define-property).
             var shadow_only: std.ArrayListUnmanaged([]const u8) = .empty;
             defer shadow_only.deinit(realm.allocator);
+            var emitted_str: std.StringHashMapUnmanaged(void) = .empty;
+            defer emitted_str.deinit(realm.allocator);
+            for (cur.own_key_order.items) |key| {
+                if (std.mem.startsWith(u8, key, "__cynic_")) continue;
+                // Liveness: skip if neither map carries the key
+                // anymore (a delete path could leave a phantom entry).
+                if (!cur.properties.contains(key) and !cur.accessors.contains(key)) continue;
+                if (!cur.flagsFor(key).enumerable) {
+                    shadow_only.append(realm.allocator, key) catch return error.OutOfMemory;
+                    continue;
+                }
+                if (canonicalIntegerIndexInterp(key)) |i| {
+                    int_keys.append(realm.allocator, .{ .idx = i, .key = key }) catch return error.OutOfMemory;
+                } else {
+                    str_keys.append(realm.allocator, key) catch return error.OutOfMemory;
+                }
+                emitted_str.put(realm.allocator, key, {}) catch return error.OutOfMemory;
+            }
+            // Defensive sweep — any properties / accessors entries
+            // not recorded in `own_key_order` (e.g. built-in
+            // installers that bypass `recordKey`). Map iteration is
+            // insertion-ordered for determinism.
             var it = cur.properties.iterator();
             while (it.next()) |entry| {
                 const key = entry.key_ptr.*;
                 if (std.mem.startsWith(u8, key, "__cynic_")) continue;
+                if (emitted_str.contains(key)) continue;
                 if (!cur.flagsFor(key).enumerable) {
                     shadow_only.append(realm.allocator, key) catch return error.OutOfMemory;
                     continue;
@@ -1933,13 +1966,12 @@ pub fn openForInIterator(
                     str_keys.append(realm.allocator, key) catch return error.OutOfMemory;
                 }
             }
-            // Accessor descriptors are still own properties for
-            // §14.7.5.6 EnumerateObjectProperties — they show up
-            // in `for-in` and `Object.keys` alongside data slots.
             var ait = cur.accessors.iterator();
             while (ait.next()) |entry| {
                 const key = entry.key_ptr.*;
                 if (std.mem.startsWith(u8, key, "__cynic_")) continue;
+                if (emitted_str.contains(key)) continue;
+                if (cur.properties.contains(key)) continue;
                 if (!cur.flagsFor(key).enumerable) {
                     shadow_only.append(realm.allocator, key) catch return error.OutOfMemory;
                     continue;
@@ -8807,15 +8839,27 @@ fn runFrames(
                 // `class`) catches the TDZ case.
                 if (realm.globals.get(key_s.bytes)) |v| {
                     acc = v;
-                } else {
-                    const ex = try makeReferenceError(realm, key_s.bytes);
-                    f.ip = ip;
-                    f.accumulator = acc;
-                    committed = true;
-                    if (!try unwindThrow(allocator, realm, frames, ex)) {
-                        return .{ .thrown = ex };
-                    }
-                    continue;
+                } else switch (try lookupGlobalAccessor(allocator, realm, key_s.bytes)) {
+                    .value => |v| acc = v,
+                    .thrown => |ex| {
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
+                    },
+                    .none => {
+                        const ex = try makeReferenceError(realm, key_s.bytes);
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
+                    },
                 }
             },
             .lda_global_or_undef => {
@@ -8823,14 +8867,32 @@ fn runFrames(
                 // Reference is "undefined", not a thrown
                 // ReferenceError. The compiler emits this op
                 // for `typeof Identifier` when `Identifier`
-                // doesn't bind to any known scope slot.
+                // doesn't bind to any known scope slot. Fires
+                // an accessor getter installed via
+                // `Object.defineProperty(globalThis, "y", {get: …})`
+                // so `typeof y` observes the side effect per
+                // §13.5.3 step 1 (`val = GetValue(val)`).
                 const k = readU16(code, ip);
                 ip += 2;
                 if (k >= local_chunk.constants.len) return error.InvalidOpcode;
                 const key_v = local_chunk.constants[k];
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-                acc = realm.globals.get(key_s.bytes) orelse Value.undefined_;
+                if (realm.globals.get(key_s.bytes)) |v| {
+                    acc = v;
+                } else switch (try lookupGlobalAccessor(allocator, realm, key_s.bytes)) {
+                    .value => |v| acc = v,
+                    .thrown => |ex| {
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
+                    },
+                    .none => acc = Value.undefined_,
+                }
             },
             .sta_global_init => {
                 // §9.1.1.4 InitializeBinding for a top-level
@@ -10546,6 +10608,52 @@ fn runFrames(
 ///
 /// Caller has already committed the current frame's `ip` and
 /// `accumulator` before calling.
+
+/// §9.1.1.4 GetBindingValue — object env-record fallback for
+/// accessor properties installed on the globalThis object
+/// (e.g. `Object.defineProperty(globalThis, "x", {get: …})`).
+/// `lda_global` / `lda_global_or_undef` consult this AFTER the
+/// declarative + data-property check fails, so a getter on
+/// globalThis fires when user code reads `x` (or `typeof x`)
+/// as a bare identifier. Returns `null` if no accessor is
+/// installed; the caller decides between ReferenceError
+/// (lda_global) and undefined (lda_global_or_undef).
+pub const GlobalAccessorLookup = union(enum) {
+    /// No accessor installed for `key` anywhere on the global
+    /// object's prototype chain.
+    none,
+    /// Accessor fired (or setter-only short-circuit) — value is
+    /// the result of the getter call.
+    value: Value,
+    /// Accessor's getter threw; the exception is already in
+    /// `realm.pending_exception`. The caller surfaces it via the
+    /// normal `unwindThrow` path so handler-walk semantics hold.
+    thrown: Value,
+};
+fn lookupGlobalAccessor(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    key: []const u8,
+) RunError!GlobalAccessorLookup {
+    const gt = realm.globals.target orelse return .none;
+    var cur: ?*JSObject = gt;
+    while (cur) |o| {
+        if (o.accessors.get(key)) |acc| {
+            if (acc.getter) |getter| {
+                const outcome = try callJSFunction(allocator, realm, getter, heap_mod.taggedObject(gt), &[_]Value{});
+                switch (outcome) {
+                    .value, .yielded => |v| return .{ .value = v },
+                    .thrown => |ex| return .{ .thrown = ex },
+                }
+            }
+            // Setter-only accessor → undefined per §10.1.8.1.
+            return .{ .value = Value.undefined_ };
+        }
+        cur = o.prototype;
+    }
+    return .none;
+}
+
 fn unwindThrow(
     allocator: std.mem.Allocator,
     realm: *Realm,

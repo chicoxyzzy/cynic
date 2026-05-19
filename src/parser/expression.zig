@@ -1014,6 +1014,13 @@ fn parseNewExpression(p: *Parser) ParseError!Expression {
         switch (p.peek().kind) {
             .dot => callee = try parseDotMember(p, callee, false),
             .lbracket => callee = try parseComputedMember(p, callee, false),
+            // §13.3 MemberExpression : MemberExpression TemplateLiteral —
+            // a tagged template binds tighter than `new`, so
+            // `new tag`x`` parses as `new (tag`x`)`. Without this,
+            // the backtick belonged to the surrounding chain and
+            // `new tag` ran with empty args, then `result`x`` tagged
+            // the just-constructed instance — wrong precedence.
+            .no_substitution_template, .template_head => callee = try parseTaggedTemplate(p, callee),
             else => break,
         }
     }

@@ -3159,10 +3159,45 @@ pub const Compiler = struct {
             return;
         }
 
+        // §13.2 ParenthesizedExpression is transparent — `(a.b)()`
+        // is a method call on `a.b` and must preserve `this = a`
+        // (§13.3.6.2 EvaluateCall uses the inner Reference's [[Base]]
+        // when the call's expression evaluates to a Reference Record).
+        // Peel `(…)` wrappers from the callee so a parenthesised
+        // member expression still routes through `compileMethodCall`.
+        // For `(a?.b)()` the parens wrap a `chain` that wraps the
+        // optional member; peel both, and if the inner is a member,
+        // set up a short-circuit context so `m.optional` still emits
+        // its jump-on-nullish landing — preserving `this = a` when
+        // `a` is non-nullish, and yielding `undefined` (call skipped)
+        // when it is.
+        var callee_peel = c.callee;
+        while (callee_peel.* == .parenthesized) callee_peel = callee_peel.parenthesized.expression;
+        var chained_member = false;
+        if (callee_peel.* == .chain) {
+            const inner_chain = callee_peel.chain.expression;
+            var inner_peel = inner_chain;
+            while (inner_peel.* == .parenthesized) inner_peel = inner_peel.parenthesized.expression;
+            if (inner_peel.* == .member) {
+                callee_peel = inner_peel;
+                chained_member = true;
+            }
+        }
+        // Set up a fresh chain-patches context for the
+        // chained-member case so the inner optional `?.` short-
+        // circuit (emitted inside `compileMethodCall`) jumps to
+        // *our* undefined landing, not into a stale outer chain.
+        var local_patches: std.ArrayListUnmanaged(u32) = .empty;
+        defer local_patches.deinit(self.allocator);
+        var prev_chain_patches: ?*std.ArrayListUnmanaged(u32) = null;
+        if (chained_member) {
+            prev_chain_patches = self.chain_patches;
+            self.chain_patches = &local_patches;
+        }
         // `super.method(...)` — read super property then call
         // with `this` = current `this` (NOT the home object).
-        if (c.callee.* == .member) {
-            const m = c.callee.member;
+        if (callee_peel.* == .member) {
+            const m = callee_peel.member;
             if (m.object.* == .super_) {
                 return self.compileSuperMethodCall(c, m);
             }
@@ -3189,13 +3224,32 @@ pub const Compiler = struct {
             // emits the short-circuit when the member is
             // optional.
             if (!has_spread_arg) {
-                return self.compileMethodCall(c, m);
+                try self.compileMethodCall(c, m);
+                if (chained_member) {
+                    // Close the local chain context: jmp past the
+                    // undefined-loader to the join, patch each
+                    // recorded short-circuit to land there.
+                    try self.builder.emitOp(.jmp, c.span);
+                    const skip_patch = self.builder.here();
+                    try self.builder.emitI16(0);
+                    const und_target = self.builder.here();
+                    try self.builder.emitOp(.lda_undefined, c.span);
+                    const join = self.builder.here();
+                    try self.builder.patchI16(skip_patch, join);
+                    for (local_patches.items) |patch| {
+                        try self.builder.patchI16(patch, und_target);
+                    }
+                    self.chain_patches = prev_chain_patches;
+                }
+                return;
             }
             // Spread + optional member is fine — `compileSpreadMethodCall`
             // doesn't yet special-case the optional flag, but
             // the common case (non-optional) is the win.
+            if (chained_member) self.chain_patches = prev_chain_patches;
             return self.compileSpreadMethodCall(c, m);
         }
+        if (chained_member) self.chain_patches = prev_chain_patches;
 
         // Spread in call args: build a runtime args array
         // (using the same array_spread machinery as array
