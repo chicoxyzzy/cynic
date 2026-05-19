@@ -163,10 +163,15 @@ fn reflectHas(realm: *Realm, this_value: Value, args: []const Value) NativeError
                 },
             }
         }
-        // §7.3.12 HasProperty — JSObject.hasProperty walks the
-        // chain and handles array-exotic + typed-array-exotic
-        // indexed slots (§10.4.5.2 Integer-Indexed [[HasProperty]]).
-        return Value.fromBool(cur.hasProperty(key_slice));
+        // §7.3.12 HasProperty — walk the proto chain ourselves
+        // so a Proxy installed via `Object.setPrototypeOf` fires
+        // its `has` trap. `JSObject.hasProperty` short-circuits
+        // proxies because it's a pure data-shape lookup (used in
+        // hot paths that can't reach back into JS). Test262
+        // `TypedArrayConstructors/internals/HasProperty/
+        // abrupt-from-ordinary-has-parent-hasproperty.js` and the
+        // BigInt variant rely on the proto-Proxy `has` trap firing.
+        return Value.fromBool(try hasPropertyProxyAware(realm, cur, key_slice));
     }
     if (heap_mod.valueAsFunction(arg)) |fn_obj| {
         if (fn_obj.properties.contains(key_slice)) return Value.true_;
@@ -187,6 +192,58 @@ fn reflectHas(realm: *Realm, this_value: Value, args: []const Value) NativeError
         if (c.accessors.contains(key_slice)) return Value.true_;
     }
     return Value.false_;
+}
+
+/// §7.3.12 HasProperty walking proxies on the prototype chain.
+/// Used by `Reflect.has` (and similar surfaces that need to fire
+/// proxy `has` traps when the chain reaches a Proxy node, not
+/// just when the receiver itself is one).
+fn hasPropertyProxyAware(realm: *Realm, root: *JSObject, key: []const u8) NativeError!bool {
+    // §10.4.5.2 Integer-Indexed Exotic [[HasProperty]] — when the
+    // receiver is a typed-array exotic AND the key is a canonical
+    // numeric index, the lookup terminates on the view (no proto
+    // fallthrough). Delegate to the on-shape helper for this case
+    // so all the OOB / detached / non-integer / -0 / negative
+    // sub-cases stay in one place.
+    if (root.typed_view != null) {
+        const ta_mod = @import("typed_array.zig");
+        if (ta_mod.canonicalNumericIndex(key) != null) {
+            return root.hasProperty(key);
+        }
+    }
+    var cur: ?*JSObject = root;
+    while (cur) |c| {
+        // §10.1.7.1 OrdinaryHasProperty step 2 — own property check.
+        if (c.properties.contains(key)) return true;
+        if (c.accessors.contains(key)) return true;
+        if (c.is_module_namespace and c.ambiguous_namespace_keys.contains(key)) return false;
+        if (c.is_module_namespace and c.namespace_redirects.contains(key)) return true;
+        if (c.is_array_exotic) {
+            if (@import("../object.zig").JSObject.canonicalIntegerIndex(key)) |idx| {
+                if (c.hasOwnIndexedSlot(idx)) return true;
+            }
+        }
+        // §10.1.7.1 step 4-5 — parent = [[GetPrototypeOf]]; if a
+        // Proxy, dispatch its `has` trap before descending.
+        const parent = c.prototype orelse return false;
+        if (parent.proxy_target != null or parent.proxy_revoked) {
+            var p = parent;
+            while (p.proxy_target != null or p.proxy_revoked) {
+                const r = try proxy_mod.nativeProxyHas(realm, p, key);
+                switch (r) {
+                    .boolean => |b| return b,
+                    .fallthrough => |t| {
+                        if (t == p) break;
+                        p = t;
+                    },
+                }
+            }
+            cur = p;
+            continue;
+        }
+        cur = parent;
+    }
+    return false;
 }
 
 fn reflectGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

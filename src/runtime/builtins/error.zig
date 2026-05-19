@@ -176,12 +176,17 @@ fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) N
         .configurable = true,
     }) catch return error.OutOfMemory;
     // §20.5.8.1 InstallErrorCause — third arg is an options object;
-    // own `cause` key (if present) copies to instance with the
-    // same `{ w:true, e:false, c:true }` shape.
+    // mirrors the Error constructor: HasProperty (proxy-trap aware) +
+    // Get (accessor-aware).
     if (args.len > 2) {
         if (heap_mod.valueAsPlainObject(args[2])) |opts| {
-            if (opts.hasOwn("cause")) {
-                instance.setWithFlags(realm.allocator, "cause", opts.get("cause"), .{
+            const has_cause = errorOptionsHasCause(realm, opts) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            if (has_cause) {
+                const cause_v = try intrinsics.getPropertyChain(realm, opts, "cause");
+                instance.setWithFlags(realm.allocator, "cause", cause_v, .{
                     .writable = true,
                     .enumerable = false,
                     .configurable = true,
@@ -361,29 +366,17 @@ fn installPrototypeMessage(realm: *Realm, proto: *JSObject) !void {
 /// 4. Let msg be ? Get(O, "message"); default to "" if undefined.
 /// 5. If name === "" return msg.
 /// §20.5.2.1 Error.isError(arg) — ES2025. Returns true iff arg
-/// is an Object whose prototype chain reaches an Error prototype.
+/// is an Object with an `[[ErrorData]]` internal slot. The
+/// brand check is on the slot, not the prototype chain — a
+/// user-built `{ __proto__: Error.prototype }` impostor with no
+/// `[[ErrorData]]` returns `false` (test262
+/// `built-ins/Error/isError/fake-errors.js`).
 fn errorIsError(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
     const obj = heap_mod.valueAsPlainObject(arg) orelse return Value.false_;
-    // Walk the prototype chain looking for any Error-family prototype.
-    const proto_set: [8]?*JSObject = .{
-        realm.intrinsics.error_prototype,
-        realm.intrinsics.type_error_prototype,
-        realm.intrinsics.range_error_prototype,
-        realm.intrinsics.reference_error_prototype,
-        realm.intrinsics.syntax_error_prototype,
-        realm.intrinsics.uri_error_prototype,
-        realm.intrinsics.eval_error_prototype,
-        realm.intrinsics.aggregate_error_prototype,
-    };
-    var cursor: ?*JSObject = obj;
-    while (cursor) |c| : (cursor = c.prototype) {
-        for (proto_set) |maybe_proto| {
-            if (maybe_proto) |p| if (c == p) return Value.true_;
-        }
-    }
-    return Value.false_;
+    return Value.fromBool(obj.has_error_data);
 }
 
 /// 6. If msg === "" return name.
@@ -453,16 +446,24 @@ fn constructErrorInstance(realm: *Realm, this_value: Value, proto: *JSObject, ar
             .configurable = true,
         }) catch return error.OutOfMemory;
     }
-    // §20.5.8.1 InstallErrorCause — ES2022 `error-cause`. The
-    // optional second argument is an options object; if it has
-    // an own `cause` property, copy that to `instance.cause` with
-    // `{w:true, e:false, c:true}` (CreateNonEnumerableDataPropertyOrThrow).
-    // `hasOwnProperty` honoured — `{}` with no `cause` key must
-    // NOT install one.
+    // §20.5.8.1 InstallErrorCause — ES2022 `error-cause`.
+    //   1. If options is Object AND ? HasProperty(options, "cause") then
+    //   2.   cause = ? Get(options, "cause")
+    //   3.   CreateNonEnumerableDataPropertyOrThrow(O, "cause", cause)
+    // HasProperty walks the prototype chain AND fires Proxy `has`
+    // traps; Get fires accessor getters. A bare `opts.hasOwn` would
+    // miss both (`cause_abrupt.js` exercises a Proxy with a `has`
+    // trap that throws; `constructor.js` checks ordering — `cause`
+    // is accessed after ToString(message)).
     if (args.len > 1) {
         if (heap_mod.valueAsPlainObject(args[1])) |opts| {
-            if (opts.hasOwn("cause")) {
-                instance.setWithFlags(realm.allocator, "cause", opts.get("cause"), .{
+            const has_cause = errorOptionsHasCause(realm, opts) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            if (has_cause) {
+                const cause_v = try intrinsics.getPropertyChain(realm, opts, "cause");
+                instance.setWithFlags(realm.allocator, "cause", cause_v, .{
                     .writable = true,
                     .enumerable = false,
                     .configurable = true,
@@ -471,6 +472,24 @@ fn constructErrorInstance(realm: *Realm, this_value: Value, proto: *JSObject, ar
         }
     }
     return heap_mod.taggedObject(instance);
+}
+
+/// §7.3.11 HasProperty on the error-cause options object. Walks
+/// proxy `has` traps then falls through to OrdinaryHasProperty.
+fn errorOptionsHasCause(realm: *Realm, opts: *JSObject) NativeError!bool {
+    const proxy_mod = @import("proxy.zig");
+    var cur = opts;
+    while (cur.proxy_target != null or cur.proxy_revoked) {
+        const r = try proxy_mod.nativeProxyHas(realm, cur, "cause");
+        switch (r) {
+            .boolean => |b| return b,
+            .fallthrough => |t| {
+                if (t == cur) return cur.hasProperty("cause");
+                cur = t;
+            },
+        }
+    }
+    return cur.hasProperty("cause");
 }
 
 /// `ToString` for the message argument of an Error constructor.

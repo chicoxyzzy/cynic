@@ -88,8 +88,17 @@ pub const Op = enum(u8) {
     bit_not,
     /// acc = !acc (ToBoolean then negate). §13.5.7.
     logical_not,
-    /// acc = +acc (ToNumber). §13.5.4.
+    /// acc = +acc (ToNumber). §13.5.4. Rejects BigInt with
+    /// TypeError (§7.1.4 ToNumber). Distinct from `to_numeric`,
+    /// which accepts BigInt and is used by the `++` / `--` bump
+    /// lowerings.
     to_number,
+    /// acc = ToNumeric(acc). §7.1.4.1 — emitted by `++` / `--`
+    /// to coerce the operand to a Number-or-BigInt primitive
+    /// before the `inc` / `dec` bump runs. Unlike `to_number`,
+    /// a BigInt operand passes through (so `0n++` doesn't
+    /// TypeError on the coerce step).
+    to_numeric,
     /// acc = ToString(acc). §7.1.17 — for an Object, runs
     /// §7.1.1 ToPrimitive with hint "string" which consults
     /// `Symbol.toPrimitive` / `toString` / `valueOf` in spec
@@ -813,6 +822,7 @@ pub const Op = enum(u8) {
             .bit_not,
             .logical_not,
             .to_number,
+            .to_numeric,
             .to_string,
             .inc,
             .dec,
@@ -944,6 +954,7 @@ pub const Op = enum(u8) {
             .bit_not => "BitNot",
             .logical_not => "LogicalNot",
             .to_number => "ToNumber",
+            .to_numeric => "ToNumeric",
             .to_string => "ToString",
             .inc => "Inc",
             .dec => "Dec",

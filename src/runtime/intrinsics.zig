@@ -275,10 +275,11 @@ pub fn install(realm: *Realm) !void {
         };
         try t.property_flags.put(realm.allocator, "length", frozen_flags);
         try t.property_flags.put(realm.allocator, "name", frozen_flags);
-        // `extensible` for JSFunction isn't a heap-side flag yet —
-        // `Object.isExtensible(fn)` already returns false because
-        // `valueAsPlainObject` rejects functions (§10.2.4 alignment
-        // is incidental but matches the spec for now).
+        // §10.2.4 — %ThrowTypeError% has [[Extensible]] = false.
+        // Test262 `built-ins/ThrowTypeError/extensible.js` reads
+        // it via `Object.isExtensible`. The JSFunction `extensible`
+        // flag flips it.
+        t.extensible = false;
         realm.intrinsics.throw_type_error = t;
 
         // §10.2.4 — Function.prototype.arguments and
@@ -653,6 +654,19 @@ pub fn installConstructor(realm: *Realm, spec: ConstructorSpec) !struct { ctor: 
     if (spec.to_string_tag) |t| try installToStringTag(realm, proto, t);
     fn_obj.prototype = proto;
     if (spec.set_home_object) fn_obj.home_object = proto;
+    // §17 — every built-in constructor's `prototype` slot is
+    // { w:false, e:false, c:false } regardless of whether the
+    // function itself is a class-style constructor (`new`-only,
+    // e.g. Map) or callable-without-new (BigInt, Symbol). The
+    // synthesized §10.2.4 default in `JSFunction.flagsForOwn`
+    // gives the callable-without-new branch `writable: true`,
+    // which is correct for ordinary user functions but not for
+    // built-in ctors — pin the §17 attributes explicitly here.
+    try fn_obj.property_flags.put(realm.allocator, "prototype", .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = false,
+    });
     if (spec.install_global) try realm.globals.put(realm.allocator, spec.name, heap_mod.taggedFunction(fn_obj));
     return .{ .ctor = fn_obj, .proto = proto };
 }

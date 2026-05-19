@@ -48,6 +48,7 @@ const bitwiseBinary = arith.bitwiseBinary;
 const unaryNegate = arith.unaryNegate;
 const unaryBitNot = arith.unaryBitNot;
 const unaryToNumber = arith.unaryToNumber;
+const unaryToNumeric = arith.unaryToNumeric;
 const addValues = arith.addValues;
 const valueToOwnedString = arith.valueToOwnedString;
 const strictEq = arith.strictEq;
@@ -1568,6 +1569,39 @@ pub fn openIteratorOpts(
     if (iterable.isString()) {
         if (realm.intrinsics.string_prototype) |sp| {
             const iter_fn_v = intrinsics_mod.getPropertyChain(realm, sp, "@@iterator") catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.Propagated,
+            };
+            if (!iter_fn_v.isUndefined() and !iter_fn_v.isNull()) {
+                const iter_fn = heap_mod.valueAsFunction(iter_fn_v) orelse return error.NotIterable;
+                const result = callJSFunction(realm.allocator, realm, iter_fn, iterable, &.{}) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.InvalidOpcode,
+                };
+                switch (result) {
+                    .value, .yielded => |v| {
+                        if (heap_mod.valueAsPlainObject(v) == null) return error.NotIterable;
+                        return v;
+                    },
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.Propagated;
+                    },
+                }
+            }
+        }
+    }
+    // §7.4.2 GetIterator on primitive Boolean / Number / BigInt /
+    // Symbol — the spec ToObject's the receiver, so a user-
+    // installed `Boolean.prototype[Symbol.iterator]` is reachable
+    // (test262 `language/expressions/yield/star-in-rltn-expr.js`).
+    // Mirror the String branch above: route the lookup through
+    // the wrapper prototype and call with the primitive as `this`.
+    if (iterable.isBool() or iterable.isInt32() or iterable.isDouble() or
+        heap_mod.isBigInt(iterable) or heap_mod.isSymbol(iterable))
+    {
+        if (intrinsics_mod.lookupPrimitivePrototype(realm, iterable)) |wp| {
+            const iter_fn_v = intrinsics_mod.getPropertyChain(realm, wp, "@@iterator") catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.Propagated,
             };
@@ -4367,6 +4401,17 @@ fn runFrames(
             .logical_not => acc = Value.fromBool(!toBoolean(acc)),
             .to_number => {
                 if (try unaryToNumber(realm, acc)) |res| acc = res else {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
+                }
+            },
+            .to_numeric => {
+                if (try unaryToNumeric(realm, acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
                     f.ip = ip;

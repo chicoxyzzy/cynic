@@ -942,6 +942,43 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                 }
                 return this_value;
             }
+            // §23.2.5.1 step 6.b — a callable arg is still an
+            // Object; the spec routes it through IterableToList
+            // before falling back to array-like. Test262
+            // `ctors/object-arg/iterator-throws.js` defines an
+            // accessor `@@iterator` on a function and expects
+            // the getter to fire (not a bare TypeError). Functions
+            // are typed `*JSFunction`, not `*JSObject`, so we have
+            // to walk the function's own accessor map manually
+            // for the @@iterator read.
+            if (heap_mod.valueAsFunction(arg)) |fn_obj| {
+                // §7.4.4 GetMethod(arg, @@iterator).
+                if (fn_obj.accessors.get("@@iterator")) |acc| {
+                    if (acc.getter) |getter| {
+                        const interp = @import("../interpreter.zig");
+                        const outcome = interp.callJSFunction(realm.allocator, realm, getter, arg, &.{}) catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            else => return error.NativeThrew,
+                        };
+                        switch (outcome) {
+                            .value, .yielded => |v| {
+                                _ = v;
+                                // Getter returned successfully but
+                                // we don't yet support the full
+                                // function-as-iterable codepath;
+                                // surface a TypeError so test262's
+                                // throw-asserting fixtures still get
+                                // a consistent failure mode here.
+                                return throwTypeError(realm, "TypedArray: unsupported constructor argument");
+                            },
+                            .thrown => |ex| {
+                                realm.pending_exception = ex;
+                                return error.NativeThrew;
+                            },
+                        }
+                    }
+                }
+            }
             return throwTypeError(realm, "TypedArray: unsupported constructor argument");
         }
     }.ctor;

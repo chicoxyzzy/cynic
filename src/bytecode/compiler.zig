@@ -1398,8 +1398,9 @@ pub const Compiler = struct {
         // Read x → acc (with TDZ check for let/const).
         try self.emitLoadBinding(binding, span);
 
-        // §13.4.4.1 step 2.b — ToNumeric.
-        try self.builder.emitOp(.to_number, span);
+        // §13.4.4.1 step 2.b — ToNumeric (BigInt-tolerant; the
+        // `inc` / `dec` bump dispatches on Number vs BigInt).
+        try self.builder.emitOp(.to_numeric, span);
 
         // Save the coerced original for the result-of-postfix.
         const r_orig = try self.reserveTemp();
@@ -1500,7 +1501,8 @@ pub const Compiler = struct {
                 try self.builder.emitU8(r_obj);
             },
         }
-        try self.builder.emitOp(.to_number, u.span);
+        // §13.4.4.1 step 2.b — ToNumeric (BigInt-tolerant).
+        try self.builder.emitOp(.to_numeric, u.span);
         const r_orig = try self.reserveTemp();
         try self.builder.emitOp(.star, u.span);
         try self.builder.emitU8(r_orig);
@@ -1585,8 +1587,8 @@ pub const Compiler = struct {
                 try self.builder.emitOp(.super_get_computed, m.span);
             },
         }
-        // §13.4.4.1 step 2.b — ToNumeric.
-        try self.builder.emitOp(.to_number, u.span);
+        // §13.4.4.1 step 2.b — ToNumeric (BigInt-tolerant).
+        try self.builder.emitOp(.to_numeric, u.span);
         const r_orig = try self.reserveTemp();
         try self.builder.emitOp(.star, u.span);
         try self.builder.emitU8(r_orig);

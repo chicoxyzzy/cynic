@@ -527,10 +527,13 @@ pub fn wireVariantInstancePrototypes(realm: *Realm) !void {
     const interp = @import("../interpreter.zig");
     if (realm.intrinsics.generator_function_prototype) |gfp| {
         const gp = try interp.ensureGeneratorPrototype(realm);
+        // §27.3.4.3 — GeneratorFunction.prototype.prototype attributes
+        // are { w:false, e:false, c:true } (configurable, unlike the
+        // ctor's own `prototype` slot).
         try gfp.setWithFlags(realm.allocator, "prototype", heap_mod.taggedObject(gp), .{
             .writable = false,
             .enumerable = false,
-            .configurable = false,
+            .configurable = true,
         });
         // §27.5.1.1 — `%GeneratorPrototype%.constructor` is
         // `%GeneratorFunction.prototype%` (== `%Generator%`) with
@@ -543,10 +546,12 @@ pub fn wireVariantInstancePrototypes(realm: *Realm) !void {
     }
     if (realm.intrinsics.async_generator_function_prototype) |agfp| {
         const agp = try interp.ensureAsyncGeneratorPrototype(realm);
+        // §27.4.3.4 — AsyncGeneratorFunction.prototype.prototype
+        // attributes are { w:false, e:false, c:true }.
         try agfp.setWithFlags(realm.allocator, "prototype", heap_mod.taggedObject(agp), .{
             .writable = false,
             .enumerable = false,
-            .configurable = false,
+            .configurable = true,
         });
         // §27.6.1.1 — `%AsyncGeneratorPrototype%.constructor` is
         // `%AsyncGeneratorFunction.prototype%` (== `%AsyncGenerator%`)
@@ -562,6 +567,21 @@ pub fn wireVariantInstancePrototypes(realm: *Realm) !void {
 fn installVariantCtor(realm: *Realm, name: []const u8) !*JSObject {
     const fn_obj = try realm.heap.allocateFunctionNative(variantCtorThrows, 1, name);
     fn_obj.proto = realm.intrinsics.function_prototype;
+    // §27.3.1 / §27.4.1 / §27.7.1 — GeneratorFunction /
+    // AsyncGeneratorFunction / AsyncFunction are subclasses of
+    // Function, so their [[Prototype]] is %Function% (the
+    // constructor), not %Function.prototype%. Test262
+    // `built-ins/AsyncFunction/AsyncFunction-is-subclass.js`
+    // walks `Object.getPrototypeOf(AsyncFunction) === Function`.
+    // `JSFunction.proto` is `?*JSObject` so it can't store a
+    // function — `static_parent` is the function-typed slot that
+    // `Object.getPrototypeOf` checks first (see
+    // `objectGetPrototypeOf` in builtins/object.zig).
+    if (realm.globals.get("Function")) |fn_ctor_v| {
+        if (heap_mod.valueAsFunction(fn_ctor_v)) |fn_ctor| {
+            fn_obj.static_parent = fn_ctor;
+        }
+    }
     const proto = try realm.heap.allocateObject();
     // §27.3 — these prototypes inherit from %Function.prototype%
     // (NOT %Object.prototype%) so e.g. `bind` / `call` resolve.
@@ -578,6 +598,17 @@ fn installVariantCtor(realm: *Realm, name: []const u8) !*JSObject {
     // §27.3.3 — GeneratorFunction.prototype[@@toStringTag] etc.
     try installToStringTag(realm, proto, name);
     fn_obj.prototype = proto;
+    // §17 — built-in constructor `prototype` slot is
+    // { w:false, e:false, c:false }. Same rationale as the
+    // installConstructor branch in `intrinsics.zig`; pin
+    // explicit flags rather than rely on the synthesized
+    // §10.2.4 default (which makes non-class-flagged ctors
+    // writable).
+    try fn_obj.property_flags.put(realm.allocator, "prototype", .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = false,
+    });
     // Not exposed as a global per spec (§27.3-27.5 — these
     // intrinsics are only reachable through introspection of
     // an instance). Test262 fixtures get there via

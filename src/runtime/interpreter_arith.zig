@@ -524,9 +524,32 @@ pub fn unaryBitNot(realm: *Realm, v: Value) RunError!?Value {
 pub fn unaryToNumber(realm: *Realm, v: Value) RunError!?Value {
     if (v.isInt32() or v.isDouble()) return v;
     const prim = (try toNumericPrimitive(realm, v)) orelse return null;
-    if (heap_mod.isBigInt(prim)) return prim;
+    // §13.5.4 Unary `+` — runs ToNumber on the operand. §7.1.4
+    // ToNumber rejects BigInt with a TypeError. Note this differs
+    // from prefix `++` / postfix `++` which dispatch via ToNumeric
+    // (see `unaryToNumeric`) and DO accept BigInt. Test262
+    // `language/expressions/unary-plus/bigint-throws.js`.
+    if (heap_mod.isBigInt(prim)) {
+        realm.pending_exception = try makeTypeError(realm, "Cannot convert a BigInt to a number");
+        return null;
+    }
     const d = toNumber(prim);
     // Try int32 fast path on the way out.
+    if (!std.math.isNan(d) and d == @trunc(d) and d >= std.math.minInt(i32) and d <= std.math.maxInt(i32)) {
+        return Value.fromInt32(@intFromFloat(d));
+    }
+    return Value.fromDouble(d);
+}
+
+/// §7.1.4.1 ToNumeric — like ToNumber but a BigInt operand
+/// passes through. Emitted by `++` / `--` so the subsequent
+/// `inc` / `dec` opcode can dispatch on the operand's numeric
+/// type without TypeError-ing a BigInt at the coerce step.
+pub fn unaryToNumeric(realm: *Realm, v: Value) RunError!?Value {
+    if (v.isInt32() or v.isDouble()) return v;
+    const prim = (try toNumericPrimitive(realm, v)) orelse return null;
+    if (heap_mod.isBigInt(prim)) return prim;
+    const d = toNumber(prim);
     if (!std.math.isNan(d) and d == @trunc(d) and d >= std.math.minInt(i32) and d <= std.math.maxInt(i32)) {
         return Value.fromInt32(@intFromFloat(d));
     }

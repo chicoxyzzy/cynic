@@ -1639,8 +1639,16 @@ fn setIndex(d: *@import("../object.zig").SetData, key: Value) ?usize {
 
 fn setAddInternal(realm: *Realm, inst: *@import("../object.zig").JSObject, value: Value) !void {
     const d = inst.set_data orelse return error.NativeThrew;
-    if (setIndex(d, value) == null) {
-        try d.entries.append(realm.allocator, .{ .value = value });
+    // §24.2.4.x — set composition methods (union, intersection,
+    // difference, symmetricDifference) normalise `-0𝔽` to `+0𝔽`
+    // on the inserted value per spec step "If nextValue is -0𝔽,
+    // set nextValue to +0𝔽". Routing every internal add through
+    // `canonicalizeKey` matches the public `setAdd` path and
+    // keeps the stored value observable as `+0` regardless of
+    // the entry point.
+    const k = canonicalizeKey(value);
+    if (setIndex(d, k) == null) {
+        try d.entries.append(realm.allocator, .{ .value = k });
     }
 }
 
@@ -1701,7 +1709,16 @@ fn setForEach(realm: *Realm, this_value: Value, args: []const Value) NativeError
         };
         switch (outcome) {
             .value, .yielded => {},
-            .thrown => return error.NativeThrew,
+            // §24.2.3.6 step 7.a.iii — ReturnIfAbrupt(funcResult).
+            // The callback's thrown value must propagate verbatim,
+            // not collapse to a generic TypeError. Pin
+            // `pending_exception` so the dispatcher sees the user's
+            // `Error` instance instead of the fallback
+            // "native error" filler.
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
         }
     }
     return Value.undefined_;
