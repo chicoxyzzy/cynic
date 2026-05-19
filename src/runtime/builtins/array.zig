@@ -707,16 +707,32 @@ fn arrayIncludes(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const target = argOr(args, 0, Value.undefined_);
     // §23.1.3.16 — `length` first, then `fromIndex` (so a
     // throwing `valueOf` on fromIndex propagates and matches
-    // V8/JSC ordering).
-    const raw_len = try toLengthOf(realm, obj);
+    // V8/JSC ordering). Route through `getPropertyAny` so a Proxy
+    // `get` trap on the receiver fires for the "length" lookup
+    // (`get-prop.js` observes the trap call sequence).
+    const safe_max: i64 = (1 << 53) - 1;
+    const len_v = try getPropertyAny(realm, heap_mod.taggedObject(obj), "length");
+    var raw_len = try intrinsics.toLengthValue(realm, len_v);
+    if (raw_len > safe_max) raw_len = safe_max;
     if (raw_len <= 0) return Value.false_;
     const start = (try startIndexFrom(realm, args, raw_len)) orelse return Value.false_;
-    const len = try intrinsics.clampArrayLengthR(realm, raw_len);
+    // Iterate from `start` to `len` (per §23.1.3.16 step 11). Cap
+    // the iteration *window* — not the absolute length — at the
+    // engine's max-iter ceiling so receivers with
+    // `length: 2 ** 53` and a high `fromIndex` (the
+    // `length-boundaries.js` fixture) still get scanned.
+    const len = raw_len;
+    if (len - start > intrinsics.max_iter_length) {
+        return throwRangeError(realm, "Array.prototype.includes scan window exceeds maximum supported");
+    }
     var i: i64 = start;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        const v = try getPropertyChain(realm, obj, islice);
+        // §23.1.3.16 step 12.a — `Get(O, ! ToString(F(k)))`. Use
+        // the Proxy-aware accessor so a `get` trap fires per
+        // index.
+        const v = try getPropertyAny(realm, heap_mod.taggedObject(obj), islice);
         if (sameValueZero(v, target)) return Value.true_;
     }
     return Value.false_;
@@ -733,7 +749,14 @@ fn arrayIncludes(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 fn arrayToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = try toObjectThis(realm, this_value);
-    const func_v = try getPropertyChain(realm, obj, "join");
+    // §23.1.3.36 step 2 — `Get(array, "join")`. Route through
+    // `getPropertyAny` so a Proxy `get` trap fires (the
+    // `non-callable-join-string-tag.js` fixture sets
+    // `proxyTarget.join = undefined` and expects the trap-returned
+    // `undefined` to trigger the §23.1.3.36 step 3 fallback to
+    // `%Object.prototype.toString%` — otherwise the bare
+    // proto-chain walk finds `Array.prototype.join` and calls it).
+    const func_v = try getPropertyAny(realm, heap_mod.taggedObject(obj), "join");
     if (heap_mod.valueAsFunction(func_v)) |func| {
         const outcome = interpreter.callJSFunction(realm.allocator, realm, func, heap_mod.taggedObject(obj), &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -808,17 +831,30 @@ fn arrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) Na
         // wrapper; the method itself lives on `<Wrapper>.prototype`,
         // so we must walk the proto chain (the bare `boxed.get`
         // only sees own slots — Boolean wrappers have none).
+        // §23.1.3.32 step 6.b — `Invoke(elt, "toLocaleString")`.
+        // §7.3.20 Invoke routes through GetV(V, P) (§7.3.18) which
+        // ToObject-wraps V purely for the property lookup, then
+        // calls the resulting function with `thisArgument = V` —
+        // the original (possibly primitive) value. Strict-mode
+        // fixtures (`primitive_this_value*.js`) observe `typeof
+        // this` inside an overridden `Boolean.prototype.toString`
+        // and expect the primitive (`"boolean"`), not the
+        // wrapper (`"object"`); passing the boxed wrapper as
+        // `this` would change the semantics in strict mode.
         const boxed = try intrinsics.toObjectThis(realm, v);
         const method_v = try getPropertyChain(realm, boxed, "toLocaleString");
         var str_v: Value = v;
         if (heap_mod.valueAsFunction(method_v)) |_| {
-            const outcome = interpreter.callValue(realm.allocator, realm, method_v, heap_mod.taggedObject(boxed), &.{}) catch |err| switch (err) {
+            const outcome = interpreter.callValue(realm.allocator, realm, method_v, v, &.{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };
             switch (outcome) {
                 .value, .yielded => |x| str_v = x,
-                .thrown => return error.NativeThrew,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
             }
         }
         const s = try stringifyArg(realm, str_v);
@@ -839,7 +875,12 @@ fn arraySlice(realm: *Realm, this_value: Value, args: []const Value) NativeError
     //       CreateDataPropertyOrThrow)
     //   12. ? Set(A, "length", n, true)
     const obj = try toObjectThis(realm, this_value);
-    var raw_len = try toLengthOf(realm, obj);
+    // §23.1.3.28 step 2 — `LengthOfArrayLike(O)`. Route through
+    // the Proxy-aware accessor so a `get` trap on the receiver
+    // fires (the `length-exceeding-integer-limit-proxied-array.js`
+    // fixture exposes a fake `length: 2 ** 53 + 2` via the trap).
+    const len_v = try getPropertyAny(realm, heap_mod.taggedObject(obj), "length");
+    var raw_len = try intrinsics.toLengthValue(realm, len_v);
     const safe_max: i64 = (1 << 53) - 1;
     if (raw_len > safe_max) raw_len = safe_max;
     const len = raw_len;
@@ -865,11 +906,15 @@ fn arraySlice(realm: *Realm, this_value: Value, args: []const Value) NativeError
     while (read_idx < end) : (read_idx += 1) {
         var rbuf: [24]u8 = undefined;
         const rslice = std.fmt.bufPrint(&rbuf, "{d}", .{read_idx}) catch unreachable;
-        if (!obj.hasProperty(rslice)) {
+        // §23.1.3.28 step 11.b — `HasProperty(O, Pk)`. Proxy-
+        // aware so a `has` trap fires and the per-index walk
+        // works against a proxied array that reports a high
+        // fake length.
+        if (!(try hasPropertyP(realm, obj, rslice))) {
             write_idx += 1;
             continue;
         }
-        const v = try getPropertyChain(realm, obj, rslice);
+        const v = try getPropertyAny(realm, heap_mod.taggedObject(obj), rslice);
         var wbuf: [24]u8 = undefined;
         const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{write_idx}) catch unreachable;
         const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
@@ -1203,7 +1248,10 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
                     const outcome = interpreter.callJSFunction(realm.allocator, realm, mf, this_arg, &cb_args) catch return error.NativeThrew;
                     switch (outcome) {
                         .value, .yielded => |v| break :blk v,
-                        .thrown => return error.NativeThrew,
+                        .thrown => |ex| {
+                            realm.pending_exception = ex;
+                            return error.NativeThrew;
+                        },
                     }
                 } else break :blk Value.fromString(ch);
             };
@@ -1770,7 +1818,10 @@ fn arrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) Nativ
             };
             switch (outcome) {
                 .value, .yielded => |v| acc = v,
-                .thrown => return error.NativeThrew,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
             }
         }
         return acc;
@@ -1815,7 +1866,10 @@ fn arrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) Nativ
         };
         switch (outcome) {
             .value, .yielded => |v| acc = v,
-            .thrown => return error.NativeThrew,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
         }
     }
     return acc;
@@ -1884,6 +1938,13 @@ fn reduceRightOwnIndicesDescending(
 
 fn arrayFlat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
+    // §23.1.3.10 step 2 — `sourceLen = LengthOfArrayLike(O)` runs
+    // BEFORE depth coercion and BEFORE ArraySpeciesCreate. Route
+    // through the Proxy-aware accessor so the `length` get trap
+    // fires first (the `proxy-access-count.js` fixture asserts the
+    // exact trap sequence `[length, constructor, 0, 1, ...]`).
+    const len_v = try getPropertyAny(realm, heap_mod.taggedObject(obj), "length");
+    const source_len = try intrinsics.clampArrayLengthR(realm, try intrinsics.toLengthValue(realm, len_v));
     // §23.1.3.10 step 3 — `depth = ? ToIntegerOrInfinity(args[0])`.
     // Undefined defaults to 1 BEFORE the coercion (so a missing
     // arg flattens one level). For an explicit `undefined` or
@@ -1920,27 +1981,39 @@ fn arrayFlat(realm: *Realm, this_value: Value, args: []const Value) NativeError!
             }
         }
     }
-    // §23.1.3.10 step 4 — ArraySpeciesCreate(O, 0).
+    // §23.1.3.10 step 4 — ArraySpeciesCreate(O, 0). Fires the
+    // "constructor" Get on the receiver after the "length" probe
+    // above; the Proxy-aware path inside arraySpeciesCreate
+    // surfaces both observably.
     const out_v = try arraySpeciesCreate(realm, obj, 0);
     const out = heap_mod.valueAsPlainObject(out_v) orelse return throwTypeError(realm, "ArraySpeciesCreate did not return an object");
     var write_idx: i64 = 0;
-    try flattenInto(realm, obj, depth, out, &write_idx);
+    try flattenInto(realm, obj, source_len, depth, out, &write_idx);
     setLength(realm, out, write_idx) catch return error.OutOfMemory;
     return out_v;
 }
 
-fn flattenInto(realm: *Realm, source: *JSObject, depth: i64, target: *JSObject, write_idx: *i64) NativeError!void {
-    const len = try intrinsics.clampArrayLengthR(realm, lengthOfArray(source));
+fn flattenInto(realm: *Realm, source: *JSObject, source_len: i64, depth: i64, target: *JSObject, write_idx: *i64) NativeError!void {
+    // §23.1.3.10.1 FlattenIntoArray step 3 — visit `sourceLen`
+    // indices using `HasProperty` + `Get` on the source. Route
+    // through the Proxy-aware helpers so traps fire per spec
+    // (`proxy-access-count.js` pins the exact sequence).
+    const len = source_len;
     var i: i64 = 0;
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        if (!source.hasOwn(islice)) continue;
-        const elem = source.get(islice);
+        if (!(try hasPropertyP(realm, source, islice))) continue;
+        const elem = try getPropertyAny(realm, heap_mod.taggedObject(source), islice);
         const should_flatten = depth > 0 and isArrayLike(elem);
         if (should_flatten) {
             const inner = heap_mod.valueAsPlainObject(elem).?;
-            try flattenInto(realm, inner, depth - 1, target, write_idx);
+            // §23.1.3.10.1 step 9.c.iv — `LengthOfArrayLike(element)`
+            // before recursing. Route through the Proxy-aware
+            // accessor so a nested proxy's `length` get trap fires.
+            const inner_len_v = try getPropertyAny(realm, elem, "length");
+            const inner_len = try intrinsics.clampArrayLengthR(realm, try intrinsics.toLengthValue(realm, inner_len_v));
+            try flattenInto(realm, inner, inner_len, depth - 1, target, write_idx);
         } else {
             // §23.1.3.10.1 FlattenIntoArray step 9.c.vi.2 —
             // CreateDataPropertyOrThrow. Non-writable own slot on
@@ -1975,11 +2048,12 @@ fn arrayFlatMap(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const obj = try toObjectThis(realm, this_value);
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.flatMap callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
-    // §23.1.3.10 — `LengthOfArrayLike(O)` + `Get(O, ! ToString(P))`
-    // walks the prototype chain (so a fixture that maps over
-    // `Array.prototype.flatMap.call(false, cb)` sees inherited
-    // accessors from `Boolean.prototype`).
-    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
+    // §23.1.3.11 step 2 — `LengthOfArrayLike(O)`. Route through
+    // the Proxy-aware accessor so a `get` trap on "length" fires
+    // (the `proxy-access-count.js` fixture pins the exact trap
+    // order `[length, constructor, ...]`).
+    const len_v = try getPropertyAny(realm, heap_mod.taggedObject(obj), "length");
+    const len = try intrinsics.clampArrayLengthR(realm, try intrinsics.toLengthValue(realm, len_v));
 
     // §23.1.3.11 step 5 — ArraySpeciesCreate(O, 0).
     const out_v = try arraySpeciesCreate(realm, obj, 0);
@@ -1989,17 +2063,27 @@ fn arrayFlatMap(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     while (i < len) : (i += 1) {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        if (!obj.hasProperty(islice)) continue;
-        const elem = try getPropertyChain(realm, obj, islice);
+        // §23.1.3.11.1 FlattenIntoArray step 3.b/c — Proxy-aware
+        // `HasProperty` + `Get` so the receiver's `has` / `get`
+        // traps fire per index.
+        if (!(try hasPropertyP(realm, obj, islice))) continue;
+        const elem = try getPropertyAny(realm, heap_mod.taggedObject(obj), islice);
         const mapped = try invokeCallback(realm, callback, this_arg, elem, i, obj);
         if (isArrayLike(mapped)) {
-            const inner = heap_mod.valueAsPlainObject(mapped).?;
-            const inner_len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, inner));
+            // §23.1.3.11.1 step 9.c.iv — `LengthOfArrayLike(element)`.
+            // Proxy-aware so a nested-proxy `length` get trap fires.
+            const inner_len_v = try getPropertyAny(realm, mapped, "length");
+            const inner_len = try intrinsics.clampArrayLengthR(realm, try intrinsics.toLengthValue(realm, inner_len_v));
+            const inner_obj = heap_mod.valueAsPlainObject(mapped) orelse return throwTypeError(realm, "Array.prototype.flatMap: flattened element is not an object");
             var j: i64 = 0;
             while (j < inner_len) : (j += 1) {
                 var jbuf: [24]u8 = undefined;
                 const jslice = std.fmt.bufPrint(&jbuf, "{d}", .{j}) catch unreachable;
-                const v = try getPropertyChain(realm, inner, jslice);
+                // §23.1.3.11.1 step 3.b — HasProperty on the
+                // inner element so holes are skipped and a Proxy
+                // `has` trap fires.
+                if (!(try hasPropertyP(realm, inner_obj, jslice))) continue;
+                const v = try getPropertyAny(realm, mapped, jslice);
                 var wbuf: [24]u8 = undefined;
                 const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{write_idx}) catch unreachable;
                 const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
@@ -2593,7 +2677,15 @@ fn arrayToReversed(realm: *Realm, this_value: Value, args: []const Value) Native
 /// mutating version but writes into a fresh array.
 fn arrayToSpliced(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = try toObjectThis(realm, this_value);
-    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
+    // §23.1.3.35 step 3 — `LengthOfArrayLike(O)`. Capture the raw
+    // i64-saturating length so the newLen overflow gate (step 12,
+    // §10.4.2.2 step 13) can fire for receivers with
+    // length > 2^32 - 1 — `length-exceeding-array-length-limit.js`
+    // pins receivers up to `length: 2 ** 53 + 1`.
+    const safe_max: i64 = (1 << 53) - 1;
+    var len_full = try toLengthOf(realm, obj);
+    if (len_full > safe_max) len_full = safe_max;
+    const len = len_full;
     var start: i64 = if (args.len > 0) toInt(args[0]) else 0;
     if (start < 0) start = @max(len + start, 0);
     start = @min(start, len);
@@ -2611,6 +2703,21 @@ fn arrayToSpliced(realm: *Realm, this_value: Value, args: []const Value) NativeE
     if (delete_count > len - start) delete_count = len - start;
     const insert_count: i64 = if (args.len > 2) @as(i64, @intCast(args.len - 2)) else 0;
     const new_len = len - delete_count + insert_count;
+    // §23.1.3.35 step 12 — `If newLen > 2 ** 53 - 1, throw TypeError`.
+    // Spec-faithful: TypeError here, RangeError only at the
+    // §10.4.2.2 ArrayCreate gate (newLen > 2^32 - 1) below.
+    if (new_len > safe_max) {
+        return throwTypeError(realm, "Array.prototype.toSpliced: result length exceeds maximum length");
+    }
+    // §23.1.3.35 step 13 — `A = ArrayCreate(newLen)`. Per §10.4.2.2
+    // step 3, `newLen > 2^32 - 1` throws RangeError.
+    if (new_len > 0xFFFFFFFF) {
+        return throwRangeError(realm, "Invalid array length");
+    }
+    // Cynic's own iteration cap — copy loops below are bounded.
+    if (new_len > intrinsics.max_iter_length) {
+        return throwRangeError(realm, "Array.prototype.toSpliced length exceeds maximum supported");
+    }
 
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
@@ -2727,9 +2834,13 @@ fn arrayReverse(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // `length-exceeding-integer-limit-with-object` set a length
     // beyond 2^53 with a poisoned getter near the top, and rely on
     // the loop starting (so the getter fires) — not on visiting
-    // every index.
+    // every index. Route the initial length read through
+    // `getPropertyAny` so a Proxy `get` trap fires for the
+    // observable "length" probe
+    // (`length-exceeding-integer-limit-with-proxy.js`).
     const safe_max: i64 = (1 << 53) - 1;
-    var len = try toLengthOf(realm, obj);
+    const len_v = try getPropertyAny(realm, heap_mod.taggedObject(obj), "length");
+    var len = try intrinsics.toLengthValue(realm, len_v);
     if (len > safe_max) len = safe_max;
     var i: i64 = 0;
     const half = @divFloor(len, 2);
@@ -2740,14 +2851,25 @@ fn arrayReverse(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         const j = len - 1 - i;
         const jslice = std.fmt.bufPrint(&jbuf, "{d}", .{j}) catch unreachable;
-        // §23.1.3.26 step 5 — HasProperty(O, lower) / HasProperty(O,
-        // upper) distinguish holes. The four cases (both present,
-        // only lower, only upper, neither) decide between Set and
-        // DeletePropertyOrThrow at each side.
-        const lower_exists = obj.hasProperty(islice);
-        const upper_exists = obj.hasProperty(jslice);
-        const lower_v = if (lower_exists) try getPropertyChain(realm, obj, islice) else Value.undefined_;
-        const upper_v = if (upper_exists) try getPropertyChain(realm, obj, jslice) else Value.undefined_;
+        // §23.1.3.26 step 6 — order matters: HasProperty(lower),
+        // then Get(lower) if present, then HasProperty(upper),
+        // then Get(upper) if present. A `get` accessor on `lower`
+        // can mutate the receiver in between (the
+        // `get_if_present_with_delete.js` fixture truncates
+        // `array.length = 0` from inside the lower getter so the
+        // upper slot disappears before its HasProperty fires).
+        // Route through the Proxy-aware helpers so a `has` / `get`
+        // trap is observable per spec.
+        const lower_exists = try hasPropertyP(realm, obj, islice);
+        const lower_v = if (lower_exists)
+            try getPropertyAny(realm, heap_mod.taggedObject(obj), islice)
+        else
+            Value.undefined_;
+        const upper_exists = try hasPropertyP(realm, obj, jslice);
+        const upper_v = if (upper_exists)
+            try getPropertyAny(realm, heap_mod.taggedObject(obj), jslice)
+        else
+            Value.undefined_;
         const owned_i = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         const owned_j = realm.heap.allocateString(jslice) catch return error.OutOfMemory;
         if (lower_exists and upper_exists) {
@@ -2920,16 +3042,28 @@ fn arrayForEach(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 
 fn arrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     // §23.1.3.19 — spec step order is ToObject → LengthOfArrayLike
-    // → callback IsCallable check, so a throwing length wins.
+    // → callback IsCallable check, so a throwing length wins. Route
+    // the length read through `getPropertyAny` so a Proxy `get`
+    // trap fires; pass the raw length to ArraySpeciesCreate so the
+    // §10.4.2.2 step 3 RangeError gate (`length > 2^32 - 1`) trips
+    // for fixtures that expose a fake huge length
+    // (`create-species-undef-invalid-len.js`).
     const obj = try toObjectThis(realm, this_value);
-    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
+    const safe_max: i64 = (1 << 53) - 1;
+    const len_v = try getPropertyAny(realm, heap_mod.taggedObject(obj), "length");
+    var raw_len = try intrinsics.toLengthValue(realm, len_v);
+    if (raw_len > safe_max) raw_len = safe_max;
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.map callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);
 
     // §23.1.3.19 step 5 — ArraySpeciesCreate(O, len) so `@@species`
-    // on the receiver's constructor controls the result type.
-    const out_v = try arraySpeciesCreate(realm, obj, len);
+    // on the receiver's constructor controls the result type. Pass
+    // the raw length so a `length > 2^32 - 1` reports RangeError
+    // before any callback fires.
+    const out_v = try arraySpeciesCreate(realm, obj, raw_len);
     const out = heap_mod.valueAsPlainObject(out_v) orelse return throwTypeError(realm, "ArraySpeciesCreate did not return an object");
+    // Bound the iteration loop at the engine's safety ceiling.
+    const len = try intrinsics.clampArrayLengthR(realm, raw_len);
     var i: i64 = 0;
     while (i < len) : (i += 1) {
         // Cooperative interrupt poll every 1024 elements so a
@@ -2939,8 +3073,8 @@ fn arrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
         if ((i & 0x3FF) == 0) try intrinsics.checkInterruptInNative(realm);
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        if (!obj.hasProperty(islice)) continue;
-        const elem = try getPropertyChain(realm, obj, islice);
+        if (!(try hasPropertyP(realm, obj, islice))) continue;
+        const elem = try getPropertyAny(realm, heap_mod.taggedObject(obj), islice);
         const v = try invokeCallback(realm, callback, this_arg, elem, i, obj);
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         // §23.1.3.19 step 6.c.iii — CreateDataPropertyOrThrow.

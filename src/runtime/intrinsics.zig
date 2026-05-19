@@ -1020,49 +1020,15 @@ fn toLengthValuePropagating(realm: *Realm, v: Value) NativeError!i64 {
     if (heap_mod.isBigInt(v)) return throwTypeError(realm, "Cannot convert a BigInt value to a number");
     // §7.1.4 ToNumber step 6 — Object: ToPrimitive(arg, hint
     // "number") which invokes `@@toPrimitive` / `valueOf` /
-    // `toString` in that order. Any throw propagates.
-    if (heap_mod.valueAsPlainObject(v)) |o| {
-        // Try valueOf first.
-        const value_of = try getPropertyChain(realm, o, "valueOf");
-        if (heap_mod.valueAsFunction(value_of)) |vfn| {
-            const interp = @import("interpreter.zig");
-            const outcome = interp.callJSFunction(realm.allocator, realm, vfn, v, &.{}) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.NativeThrew,
-            };
-            switch (outcome) {
-                .value, .yielded => |rv| {
-                    if (!rv.isUndefined() and heap_mod.valueAsPlainObject(rv) == null) {
-                        return toLengthValuePropagating(realm, rv);
-                    }
-                },
-                .thrown => |ex| {
-                    realm.pending_exception = ex;
-                    return error.NativeThrew;
-                },
-            }
-        }
-        const to_string = try getPropertyChain(realm, o, "toString");
-        if (heap_mod.valueAsFunction(to_string)) |tfn| {
-            const interp = @import("interpreter.zig");
-            const outcome = interp.callJSFunction(realm.allocator, realm, tfn, v, &.{}) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.NativeThrew,
-            };
-            switch (outcome) {
-                .value, .yielded => |rv| {
-                    if (!rv.isUndefined() and heap_mod.valueAsPlainObject(rv) == null) {
-                        return toLengthValuePropagating(realm, rv);
-                    }
-                    return throwTypeError(realm, "Cannot convert object to primitive value");
-                },
-                .thrown => |ex| {
-                    realm.pending_exception = ex;
-                    return error.NativeThrew;
-                },
-            }
-        }
-        return throwTypeError(realm, "Cannot convert object to primitive value");
+    // `toString` in that order. Any throw propagates. Routing
+    // through the shared `toPrimitive` helper ensures
+    // `@@toPrimitive` (with its hint-string argument) fires per
+    // spec rather than being skipped for the direct valueOf /
+    // toString fallback (the `array-like-objects-poisoned-length`
+    // family pins a `Symbol.toPrimitive` thrower).
+    if (heap_mod.valueAsPlainObject(v) != null) {
+        const prim = try toPrimitive(realm, v, .number);
+        return toLengthValuePropagating(realm, prim);
     }
     return 0;
 }

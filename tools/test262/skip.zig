@@ -548,6 +548,24 @@ pub const skip_ses_exact_paths = [_][]const u8{
     // §25.2 SharedArrayBuffer — not shipped. The fixture sets
     // up the SAB then calls `Object.seal` on it.
     "built-ins/Object/seal/seal-sharedarraybuffer.js",
+    // §25.1.5.x `ArrayBuffer.prototype.{byteLength, detached,
+    // maxByteLength, resizable, resize, slice, transfer,
+    // transferToFixedLength}` each step 2 says "If
+    // IsSharedArrayBuffer(O) is true, throw a TypeError". The
+    // `this-is-sharedarraybuffer*.js` fixtures all construct the
+    // receiver via `new SharedArrayBuffer(...)` — a global Cynic
+    // does not ship per AGENTS.md "shared memory… single-agent-
+    // per-isolate". Without the constructor the assertion can't
+    // be exercised. Permanent SES carve-out.
+    "built-ins/ArrayBuffer/prototype/byteLength/this-is-sharedarraybuffer.js",
+    "built-ins/ArrayBuffer/prototype/detached/this-is-sharedarraybuffer.js",
+    "built-ins/ArrayBuffer/prototype/detached/this-is-sharedarraybuffer-resizable.js",
+    "built-ins/ArrayBuffer/prototype/maxByteLength/this-is-sharedarraybuffer.js",
+    "built-ins/ArrayBuffer/prototype/resizable/this-is-sharedarraybuffer.js",
+    "built-ins/ArrayBuffer/prototype/resize/this-is-sharedarraybuffer.js",
+    "built-ins/ArrayBuffer/prototype/slice/this-is-sharedarraybuffer.js",
+    "built-ins/ArrayBuffer/prototype/transfer/this-is-sharedarraybuffer.js",
+    "built-ins/ArrayBuffer/prototype/transferToFixedLength/this-is-sharedarraybuffer.js",
     // §18.2.1 — global.eval is not shipped (AGENTS.md). The
     // ES5-era fixture iterates an expected-globals list that
     // includes `eval` and `Date` (duplicated), failing on a
