@@ -2134,8 +2134,22 @@ fn typedArrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nati
     // buffer is detached (mid-call via `fromIndex.valueOf`); the
     // spec's loop returns -1 in that case.
     if (tv.viewed.array_buffer == null) return Value.fromInt32(-1);
+    // §23.2.3.16 step 8 — iterate to the step-3 snapshot `len`,
+    // NOT a post-coercion length. HasProperty(O, F(k)) routes
+    // through IsValidIntegerIndex (§10.4.5 [[HasProperty]]),
+    // which checks against the LIVE length. Indices outside the
+    // live window are skipped (kPresent is false), NOT compared
+    // as undefined — that distinction matters when searchElement
+    // is `undefined` on a shrunk view (coerced-searchelement-
+    // fromindex-shrink.js fixedLength.indexOf(undefined, evil) → -1
+    // because every kPresent is false). Both shrink and grow
+    // share the same upper-bound rule: initial `len`.
+    const live_len = taCurrentLength(tv);
     var i: i64 = from;
     while (i < len) : (i += 1) {
+        // §10.4.5 IsValidIntegerIndex — k in [0, live_len). Outside
+        // → HasProperty false → skip.
+        if (i >= @as(i64, @intCast(live_len))) continue;
         const v = taSafeRead(realm, tv, i);
         if (strictEqualsLite(v, target)) return numberFromI64(i);
     }
@@ -2188,8 +2202,19 @@ fn typedArrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) 
     // (the `fromIndex.valueOf` may have triggered it), so the
     // loop returns -1 without inspecting elements.
     if (tv.viewed.array_buffer == null) return Value.fromInt32(-1);
+    // §23.2.3.18 step 8 — iterate down from `from` to 0 using the
+    // step-4 snapshot `len`. HasProperty(O, F(k)) goes through
+    // IsValidIntegerIndex (§10.4.5 [[HasProperty]]), which tests
+    // against the LIVE length. Indices outside the current
+    // window are skipped (NOT compared as undefined). When the
+    // view itself is OOB (fixed-length, rab shrunk below it),
+    // every kPresent is false → return -1 (coerced-position-
+    // shrink.js).
+    const live_len: i64 = @intCast(taCurrentLength(tv));
     var i: i64 = from;
     while (i >= 0) : (i -= 1) {
+        // §10.4.5 IsValidIntegerIndex — skip OOB indices.
+        if (i >= live_len) continue;
         const v = taSafeRead(realm, tv, i);
         if (strictEqualsLite(v, target)) return numberFromI64(i);
     }
@@ -3145,41 +3170,83 @@ fn taCompareNumeric(a: Value, b: Value) i32 {
 
 fn taSortInPlace(realm: *Realm, tv: ObjMod.TypedView, buf_in: []u8, comparator: ?*JSFunction) NativeError!void {
     const elem_size = tv.kind.elementSize();
-    // §23.2.3.30 — a user comparator can detach (or resize) the
-    // backing buffer mid-sort. The captured slice would dangle;
-    // re-resolve from `tv.viewed.array_buffer` after every
-    // comparator invocation and short-circuit out if detached.
-    // Bounds-check every direct buf read/write so a shrunk
-    // backing store doesn't slice past the live length.
+    // §23.2.3.30 TypedArray.prototype.sort —
+    //   3. Let len be TypedArrayLength(taRecord).
+    //   4. (SortCompare closure captures buffer + comparefn.)
+    //   5. Let sortedList be ? SortIndexedProperties(obj, len,
+    //      SortCompare, READ-THROUGH-HOLES).
+    //   7. Repeat j = 0..len: Set(obj, F(j), sortedList[j], true).
+    //
+    // The two-phase shape matters: a comparator may resize the
+    // backing rab (comparefn-shrink.js) or detach it
+    // (sort-tonumber.js). After SortIndexedProperties the writes
+    // in step 7 go through `[[Set]]` → IntegerIndexedElementSet,
+    // which silently no-ops when the view's slot is OOB
+    // (ES2024 align-detached-buffer-semantics). Doing an in-place
+    // insertion sort + bounds-checked memcpy doesn't model this —
+    // a resize between the comparator's `Get(prev)` and the next
+    // iteration would clobber the leading slots with stale data.
     //
     // §10.4.5 [[ArrayLength]] — must come from `taCurrentLength`
     // rather than `tv.length`. For a length-tracking view the
     // latter is the construction-time snapshot (typically 0) and
-    // lags every subsequent resize; using it would sort only a
-    // prefix when the buffer has grown.
-    var buf = buf_in;
+    // lags every subsequent resize.
     const sort_len = taCurrentLength(tv);
+    if (sort_len < 2) return;
+
+    // §23.2.3.30 step 5 — snapshot the element list before any
+    // comparator runs. The comparator only ever sees the values
+    // we captured here, not whatever lives in the rab after it
+    // resized.
+    const items = realm.allocator.alloc(Value, sort_len) catch return error.OutOfMemory;
+    defer realm.allocator.free(items);
+    // BigInt-element views (BigInt64Array / BigUint64Array) read
+    // each slot as a freshly-allocated heap JSBigInt; pin them
+    // through a HandleScope so a comparator-triggered GC can't
+    // collect anything we're holding in `items` across the loop.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    {
+        var k: usize = 0;
+        while (k < sort_len) : (k += 1) {
+            const off = tv.byte_offset + k * elem_size;
+            // The initial snapshot is taken before any comparator
+            // call, so the buffer is still buf_in here.
+            const v = readTypedElement(realm, buf_in, tv.kind, off);
+            items[k] = v;
+            scope.push(v) catch return error.OutOfMemory;
+        }
+    }
+
+    // §23.2.3.30 step 5 → SortIndexedProperties. Insertion sort
+    // over the snapshot. The comparator return value goes through
+    // ToNumber per §23.2.3.30 step 4.a / TypedArrayCompareElements
+    // — sort-tonumber.js asserts that a returned object's
+    // `Symbol.toPrimitive` fires.
     var i: usize = 1;
     while (i < sort_len) : (i += 1) {
-        const i_off = tv.byte_offset + i * elem_size;
-        if (i_off + elem_size > buf.len) return;
-        const cur = readTypedElement(realm, buf, tv.kind, i_off);
+        const cur = items[i];
         var j: i64 = @as(i64, @intCast(i)) - 1;
         while (j >= 0) : (j -= 1) {
-            const j_off = tv.byte_offset + @as(usize, @intCast(j)) * elem_size;
-            if (j_off + elem_size > buf.len) break;
-            const prev = readTypedElement(realm, buf, tv.kind, j_off);
+            const prev = items[@intCast(j)];
             const cmp: i32 = blk: {
                 if (comparator) |cf| {
                     const interpreter = @import("../interpreter.zig");
                     const cb_args = [_]Value{ prev, cur };
                     const outcome = interpreter.callJSFunction(realm.allocator, realm, cf, Value.undefined_, &cb_args) catch return error.NativeThrew;
-                    // The comparator may have detached the buffer;
-                    // re-resolve before the next direct access.
-                    buf = tv.viewed.array_buffer orelse return;
                     switch (outcome) {
                         .value, .yielded => |v| {
-                            const d: f64 = if (v.isInt32()) @floatFromInt(v.asInt32()) else if (v.isDouble()) v.asDouble() else 0;
+                            // §23.2.3.30 step 4.a — `Let v be
+                            // ? ToNumber(? Call(comparefn, …))`.
+                            // The comparator may return any value
+                            // (object with Symbol.toPrimitive,
+                            // string, BigInt would throw, etc.).
+                            // ToNumber dispatches via toPrimitive
+                            // so user hooks fire.
+                            const n = try intrinsics.toNumber(realm, v);
+                            const d: f64 = if (n.isInt32()) @floatFromInt(n.asInt32()) else if (n.isDouble()) n.asDouble() else 0;
+                            // §23.2.3.30 step 4.b — `If v is NaN,
+                            // return +0𝔽`.
                             if (std.math.isNan(d) or d == 0) break :blk 0;
                             break :blk if (d < 0) -1 else 1;
                         },
@@ -3192,14 +3259,30 @@ fn taSortInPlace(realm: *Realm, tv: ObjMod.TypedView, buf_in: []u8, comparator: 
                 break :blk taCompareNumeric(prev, cur);
             };
             if (cmp <= 0) break;
-            const a_off = tv.byte_offset + @as(usize, @intCast(j)) * elem_size;
-            const b_off = tv.byte_offset + (@as(usize, @intCast(j)) + 1) * elem_size;
-            if (b_off + elem_size > buf.len or a_off + elem_size > buf.len) break;
-            @memcpy(buf[b_off .. b_off + elem_size], buf[a_off .. a_off + elem_size]);
+            items[@intCast(j + 1)] = items[@intCast(j)];
         }
-        const place: usize = @intCast(j + 1);
-        const place_off = tv.byte_offset + place * elem_size;
-        if (place_off + elem_size <= buf.len) writeTypedElement(buf, tv.kind, place_off, cur);
+        items[@intCast(j + 1)] = cur;
+    }
+
+    // §23.2.3.30 step 7 — write the sorted list back via
+    // `Set(obj, F(j), sortedList[j], true)` → IntegerIndexedElementSet.
+    // Per §10.4.5.16 IntegerIndexedElementSet, EVERY write checks
+    // IsValidIntegerIndex(O, F(j)). When the view itself is OOB
+    // (e.g. a fixed-length view whose rab was shrunk past it),
+    // IsValidIntegerIndex returns false for every j, so NO writes
+    // happen — the slot data is preserved
+    // (comparefn-shrink.js: fixed-length view goes OOB → unchanged).
+    // For length-tracking views the bound is the new live length;
+    // OOB j just silently no-ops per-write.
+    if (taIsOutOfBounds(tv)) return;
+    const buf = tv.viewed.array_buffer orelse return;
+    const live_len = taCurrentLength(tv);
+    var j: usize = 0;
+    while (j < sort_len) : (j += 1) {
+        if (j >= live_len) break;
+        const off = tv.byte_offset + j * elem_size;
+        if (off + elem_size > buf.len) break;
+        writeTypedElement(buf, tv.kind, off, items[j]);
     }
 }
 
@@ -3292,14 +3375,25 @@ fn typedArrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeE
     };
 
     // §23.2.3.39 step 9 — IsValidIntegerIndex against current
-    // buffer witness (post-coercion). This is what makes
-    // `with(100, throwingValue)` propagate the value-coercion
-    // throw rather than RangeError.
+    // buffer witness (post-coercion). The coercion may have
+    // resized the rab; check actualIndex against the LIVE length
+    // (index-validated-against-current-length.js,
+    // valid-typedarray-index-checked-after-coercions.js). This
+    // is also what makes `with(100, throwingValue)` propagate
+    // the value-coercion throw rather than RangeError.
     const post_len: i64 = @intCast(taCurrentLength(tv));
     if (actual_index < 0 or actual_index >= post_len) {
         return throwRangeError(realm, "with: index out of range");
     }
-    const out_len_us: usize = @intCast(post_len);
+    // §23.2.3.39 step 10 — `Let A be ? TypedArrayCreateSameType(O,
+    // « 𝔽(len) »)` uses the step-3 snapshot, NOT the post-coercion
+    // length. A coercion that resized the rab does NOT change the
+    // size of the output; step 12 iterates k in 0..len, so any
+    // numericValue at actualIndex ≥ initial_len is silently
+    // dropped (index-validated-against-current-length.js: initial
+    // len=2, post len=5, actualIndex=4 → result.length === 2 and
+    // numericValue never lands).
+    const out_len_us: usize = @intCast(initial_len);
 
     // §23.2.3.39 step 10-11 — TypedArrayCreateSameType, then
     // copy + overwrite. SameType means default ctor for the
@@ -3317,9 +3411,16 @@ fn typedArrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeE
     if (copy_len > 0) {
         @memcpy(out_buf[0..copy_len], buf_now[tv.byte_offset .. tv.byte_offset + copy_len]);
     }
-    // `out` preserves [[TypedArrayName]] via taMakeNewNamed, so
-    // a clamped exemplar writes through ToUint8Clamp.
-    writeTypedElementForView(out_buf, out.typed_view.?, @as(usize, @intCast(actual_index)) * elem_size, numeric_value);
+    // §23.2.3.39 step 12.b — only write `numericValue` at
+    // `actualIndex` if it falls inside the output (k < initial_len).
+    // If a resize made the live view longer but the spec's `len`
+    // (initial) shorter, the inner branch never fires for k ==
+    // actualIndex when actualIndex ≥ initial_len.
+    if (actual_index < initial_len) {
+        // `out` preserves [[TypedArrayName]] via taMakeNewNamed, so
+        // a clamped exemplar writes through ToUint8Clamp.
+        writeTypedElementForView(out_buf, out.typed_view.?, @as(usize, @intCast(actual_index)) * elem_size, numeric_value);
+    }
     return heap_mod.taggedObject(out);
 }
 

@@ -1634,16 +1634,21 @@ pub fn toNumber(realm: *Realm, v: Value) NativeError!Value {
 // ── Equality helpers ────────────────────────────────────────────────────────
 
 pub fn strictEqualsLite(a: Value, b: Value) bool {
-    // §7.2.16 IsStrictlyEqual step 4 — Number::equal returns false
-    // when either operand is NaN, even when both are the same NaN
-    // (same bit pattern). Check this BEFORE the bits fast path.
-    if (a.isDouble() and std.math.isNan(a.asDouble())) return false;
-    if (b.isDouble() and std.math.isNan(b.asDouble())) return false;
-    if (a.bits == b.bits) return true;
-    // Cross-type int vs double comparison (§7.2.16 Number::equal
-    // operates on the mathematical value).
+    // §7.2.16 IsStrictlyEqual / §6.1.6.1.13 Number::equal —
+    // for two Numbers, defer to IEEE-754 `==`, which:
+    //   • returns false when either operand is NaN (even if both
+    //     are the same NaN bit pattern);
+    //   • returns true for `+0.0 == -0.0` despite differing sign
+    //     bits — this is the case the prior `a.bits == b.bits`
+    //     fast path got wrong on Float32Array / Float64Array
+    //     fixtures (indexOf/lastIndexOf strict-comparison.js).
+    if (a.isDouble() and b.isDouble()) return a.asDouble() == b.asDouble();
+    // Cross-type int vs double comparison (Number::equal operates
+    // on the mathematical value). IEEE `==` also handles the NaN
+    // case (the Double side may be NaN; comparison yields false).
     if (a.isInt32() and b.isDouble()) return @as(f64, @floatFromInt(a.asInt32())) == b.asDouble();
     if (a.isDouble() and b.isInt32()) return a.asDouble() == @as(f64, @floatFromInt(b.asInt32()));
+    if (a.bits == b.bits) return true;
     if (a.isString() and b.isString()) {
         const sa: *JSString = @ptrCast(@alignCast(a.asString()));
         const sb: *JSString = @ptrCast(@alignCast(b.asString()));
