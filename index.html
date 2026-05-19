@@ -385,11 +385,12 @@
   .compare-head > div:nth-child(2) { background: var(--bart); color: #fff; }
   .compare-row .feature-name { font: 700 15px var(--mono); }
   .check, .cross {
-    display: flex; align-items: center; gap: 10px;
+    display: flex; align-items: flex-start; gap: 10px;
     font: 20px var(--display);
     text-transform: uppercase;
   }
   .check::before, .cross::before {
+    flex: 0 0 28px;
     width: 28px; height: 28px;
     border: var(--bd);
     border-radius: 50%;
