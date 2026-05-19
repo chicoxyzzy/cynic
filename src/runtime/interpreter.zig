@@ -3504,6 +3504,18 @@ pub fn callValue(
     }
     // Plain function path.
     if (heap_mod.valueAsFunction(callee_v)) |fn_obj| {
+        // §10.2.1 step 2 — `[[Call]]` on a class constructor
+        // throws TypeError. The bytecode dispatch op checks this
+        // for direct calls; reflective callers
+        // (`Function.prototype.{call, apply}`, `Reflect.apply`,
+        // and host re-entry) route through here and must surface
+        // the same TypeError. Bound wrappers preserve the brand
+        // on the inner target; unwrap before checking.
+        var target_fn = fn_obj;
+        while (target_fn.bound_target) |inner| target_fn = inner;
+        if (target_fn.is_class_constructor) {
+            return .{ .thrown = try makeTypeError(realm, "Class constructor cannot be invoked without 'new'") };
+        }
         return callJSFunction(allocator, realm, fn_obj, this_value, args);
     }
     return .{ .thrown = try makeTypeError(realm, "value is not callable") };
@@ -4825,6 +4837,22 @@ fn runFrames(
                 // frame stack with the concatenated args). Plain
                 // calls pass `this = undefined` (strict).
                 if (callee_fn.bound_target != null) {
+                    // §10.2.1 step 2 — the bound wrapper's own
+                    // `is_class_constructor` is false, but the
+                    // inner target preserves the class-ctor brand.
+                    // `Subclass.bind(obj)(...)` must throw.
+                    var inner_target = callee_fn;
+                    while (inner_target.bound_target) |i_t| inner_target = i_t;
+                    if (inner_target.is_class_constructor) {
+                        const ex = try makeTypeError(realm, "Class constructor cannot be invoked without 'new'");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
+                    }
                     const args_start = @as(usize, r_callee) + 1;
                     const result = try callJSFunction(allocator, realm, callee_fn, Value.undefined_, registers[args_start .. args_start + argc]);
                     switch (result) {
@@ -5453,16 +5481,26 @@ fn runFrames(
                 // in a derived constructor, `this` is uninitialised
                 // until `super(...)` completes. A read before that
                 // point throws ReferenceError "Must call super
-                // constructor before accessing 'this'". Outside a
-                // derived ctor (base ctor, regular function, arrow
-                // bound via captured_this, generator, etc.) the
-                // binding is always initialised, so this gate runs
-                // only when `is_derived_ctor && !super_called`. The
-                // arrow / generator paths set is_derived_ctor=false
-                // on their own frame; `lda_this` runs in the host
-                // ctor frame for `super.x` / `super[x]` chains,
-                // which `super_get` / `super_set` gate separately.
-                if (f.is_derived_ctor and !f.super_called) {
+                // constructor before accessing 'this'".
+                //
+                // Two frame shapes can hit this gate:
+                //   • The derived ctor frame itself: own `is_derived_ctor`
+                //     flag plus `super_called` toggle.
+                //   • An arrow / nested arrow whose lexical `this` is
+                //     the derived ctor's: arrow frames carry
+                //     `super_called_cell` pointing at the ctor's cell,
+                //     and `is_derived_ctor = false`. The cell's
+                //     current value answers "has super run yet?".
+                const uninit = blk: {
+                    if (f.is_derived_ctor and !f.super_called) break :blk true;
+                    if (!f.is_derived_ctor) {
+                        if (f.super_called_cell) |cell| {
+                            if (!cell.*) break :blk true;
+                        }
+                    }
+                    break :blk false;
+                };
+                if (uninit) {
                     const ex = try makeReferenceError(realm, "Must call super constructor before accessing 'this'");
                     f.ip = ip;
                     f.accumulator = acc;

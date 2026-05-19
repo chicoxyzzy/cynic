@@ -254,7 +254,13 @@ pub fn buildClass(
     // route to the same per-evaluation identity.
     ctor.private_brand = brand_prefix;
     ctor.private_compile_prefix = template.private_prefix;
-    if (parent_ctor != null) ctor.constructor_kind = .derived;
+    // §15.7.14 step 11 — when a ClassHeritage clause is present
+    // (even `extends null`), the constructor's [[ConstructorKind]]
+    // is "derived". That keeps the `this` binding uninitialized
+    // entering the body (§10.2.2 step 7) so a derived ctor with
+    // no `super()` call leaves `GetThisBinding` failing with
+    // ReferenceError on body return.
+    if (has_heritage) ctor.constructor_kind = .derived;
     // Wire the ctor's [[Prototype]] for `Function.prototype.call`/`apply`/`bind`.
     ctor.proto = realm.intrinsics.function_prototype;
     ctor.source = template.source;
