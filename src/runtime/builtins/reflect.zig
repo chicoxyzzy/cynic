@@ -691,6 +691,15 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     if (receiver_obj.proxy_target != null or receiver_obj.proxy_revoked) {
         var proxy_cur = receiver_obj;
         while (proxy_cur.proxy_target != null or proxy_cur.proxy_revoked) {
+            // §10.1.9.2 step 3.b — `existingDescriptor =
+            // ? Receiver.[[GetOwnProperty]](P)`. When Receiver is a
+            // Proxy this MUST fire its `getOwnPropertyDescriptor`
+            // trap before the `defineProperty` trap; otherwise the
+            // observable trap log skips the `GetOwnPropertyDescriptor`
+            // tick (reverse/length-exceeding-integer-limit-with-proxy
+            // expects `Set:k`, `GetOwnPropertyDescriptor:k`,
+            // `DefineProperty:k` per slot).
+            _ = try proxy_mod.nativeProxyGetOwnPropertyDescriptor(realm, proxy_cur, key_slice);
             const r = try proxy_mod.nativeProxyDefineProperty(realm, proxy_cur, key_slice, v);
             switch (r) {
                 .boolean => |b| return Value.fromBool(b),
@@ -1170,13 +1179,43 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // wrapper (which has no `prototype` slot).
     var effective_target = target;
     while (effective_target.bound_target) |inner| : (effective_target = inner) {}
+    // §25.1.4.1 / §25.3.2.1 — native ctors that pre-validate args.
+    // Skip the proto lookup, stash newTarget on the realm, and
+    // let the native run its validation and OCFC itself. Preserve
+    // the original newTarget Value (which may be a callable
+    // Proxy) so the native's eventual `Get(newTarget, "prototype")`
+    // fires the proxy's `get` trap per §10.5.5.
+    if (effective_target.defers_proto_lookup and effective_target.native_callback != null) {
+        realm.pending_native_new_target = if (new_target_v.isUndefined()) target_v else new_target_v;
+        defer realm.pending_native_new_target = Value.undefined_;
+        const interp = @import("../interpreter.zig");
+        const outcome = interp.callJSFunction(realm.allocator, realm, effective_target, Value.undefined_, ctor_args.items) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        switch (outcome) {
+            .value, .yielded => |v| {
+                if (heap_mod.valueAsPlainObject(v) != null or heap_mod.valueAsFunction(v) != null) return v;
+                return throwTypeError(realm, "deferred-proto-lookup constructor did not return an object");
+            },
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        }
+    }
     // §10.1.13 OrdinaryCreateFromConstructor → §10.1.14
     // GetPrototypeFromConstructor — Get(newTarget, "prototype")
     // through the accessor path so a user-installed getter on a
     // bound NewTarget fires (per the WeakRef /
     // FinalizationRegistry / ArrayBuffer
-    // `prototype-from-newtarget-*.js` fixtures).
-    const proto_lookup = interpreter.getPrototypeFromConstructor(realm.allocator, realm, effective_new_target, effective_target.prototype) catch |err| switch (err) {
+    // `prototype-from-newtarget-*.js` fixtures). When the
+    // original newTarget is a callable Proxy, route through
+    // `getPrototypeFromConstructorValue` so the proxy's `get`
+    // trap on "prototype" fires (AggregateError/
+    // newtarget-proto-custom.js).
+    const new_target_for_proto: Value = if (new_target_v.isUndefined()) heap_mod.taggedFunction(effective_new_target) else new_target_v;
+    const proto_lookup = interpreter.getPrototypeFromConstructorValue(realm.allocator, realm, new_target_for_proto, effective_target.prototype) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };

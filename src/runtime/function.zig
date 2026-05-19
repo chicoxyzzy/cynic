@@ -189,6 +189,18 @@ pub const JSFunction = struct {
     /// `new_call` opcode and `Reflect.construct` consult it to
     /// decide whether to throw "is not a constructor".
     has_construct: bool = true,
+    /// Native constructors that must validate their arguments
+    /// (e.g. RangeError on `byteLength > maxByteLength`) BEFORE
+    /// the spec's OrdinaryCreateFromConstructor step (which
+    /// triggers a user-installed `prototype` getter on newTarget).
+    /// When set, `constructValue` / `reflectConstruct` skip the
+    /// proto lookup, stash newTarget on
+    /// `realm.pending_native_new_target`, and invoke the native
+    /// with `this_value = undefined`. The native runs validation,
+    /// then calls `getPrototypeFromConstructor` itself.
+    /// Set on ArrayBuffer / DataView constructors per §25.1.4.1
+    /// / §25.3.2.1.
+    defers_proto_lookup: bool = false,
     /// `function*` — calling allocates a `JSGenerator` instead
     /// of running the body. The generator's `.next()` method
     /// resumes the body via `interpreter.resumeGenerator`.

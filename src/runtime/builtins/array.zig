@@ -457,6 +457,42 @@ pub fn numberFromI64(n: i64) Value {
 /// only accessor). The setter itself can throw — that exception
 /// also propagates through `error.NativeThrew`.
 pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, value: Value) NativeError!void {
+    // §10.4.5.5 [[Set]] on a TypedArray exotic — when the key is a
+    // CanonicalNumericIndexString, route through TypedArraySetElement
+    // (§10.4.5.13). Coercion runs FIRST and may observably resize
+    // (rab) or detach the backing buffer; after the coercion settles
+    // we re-witness the live view and silently drop the write when
+    // the index is now invalid. The TA write itself never escapes to
+    // OrdinarySet's accessor / DefineOwnProperty fallback — TA
+    // [[DefineOwnProperty]] only handles numeric indices specially.
+    // (fill/typed-array-resize.js: Array.prototype.fill called on a
+    // TA whose `valueOf` shrinks the rab during coercion expects
+    // zero writes once the index falls OOB.)
+    if (obj.typed_view) |tv0| {
+        const ta_mod = @import("typed_array.zig");
+        if (ta_mod.canonicalNumericIndex(key)) |num| {
+            _ = tv0;
+            const bigint_mod = @import("bigint.zig");
+            const coerced: Value = if (obj.typed_view.?.kind.isBigInt())
+                bigint_mod.toBigIntValue(realm, value) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                }
+            else
+                try intrinsics.toNumber(realm, value);
+            // Re-witness — a user `valueOf` could have detached /
+            // resized the buffer between ToNumber and the write.
+            const live_tv = obj.typed_view orelse return;
+            if (!ta_mod.isValidIntegerIndexPub(live_tv, num)) return;
+            const buf = live_tv.viewed.array_buffer orelse return;
+            const elem_size = live_tv.kind.elementSize();
+            const idx: usize = @intFromFloat(num);
+            const byte_pos = live_tv.byte_offset + idx * elem_size;
+            if (byte_pos + elem_size > buf.len) return;
+            intrinsics.writeTypedElementForView(buf, live_tv, byte_pos, coerced);
+            return;
+        }
+    }
     // §10.5.9 [[Set]] — Proxy receiver dispatches the `set` trap;
     // when the trap is absent fall through to `target.[[Set]](P, V,
     // Receiver)` with Receiver = the outer proxy. For a plain
@@ -778,7 +814,13 @@ fn arrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     // §23.1.3.15 Array.prototype.join (separator):
     //   1. O = ToObject(this); 2. len = ? LengthOfArrayLike(O)
     //   3. If separator is undefined, sep = ","; else sep = ? ToString(separator)
+    // Read `length` BEFORE coercing `separator` per spec step
+    // ordering — `separator.toString` may resize a resizable
+    // ArrayBuffer backing the TA receiver, but the loop count
+    // is fixed at entry (coerced-separator-shrink.js,
+    // coerced-separator-grow.js).
     const obj = try toObjectThis(realm, this_value);
+    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const sep_v = argOr(args, 0, Value.undefined_);
     const sep_slice: []const u8 = if (sep_v.isUndefined())
         ","
@@ -790,7 +832,6 @@ fn arrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         const s = try stringifyArg(realm, sep_v);
         break :blk s.bytes;
     };
-    const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
     var i: i64 = 0;

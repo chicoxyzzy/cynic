@@ -125,6 +125,15 @@ pub const Intrinsics = struct {
     /// `slice`, `every`, `some`, `find`, etc.). Each concrete
     /// `<Kind>Array.prototype` chains here.
     typed_array_prototype: ?*JSObject = null,
+    /// `%ArrayBuffer.prototype%` (§25.1.5). Captured at install
+    /// time so the constructor's deferred-OCFC path (§25.1.4.1)
+    /// can resolve the intrinsic-default prototype from a native
+    /// without re-walking globals.
+    array_buffer_prototype: ?*JSObject = null,
+    /// `%DataView.prototype%` (§25.3.4). Same role as
+    /// `array_buffer_prototype` — supplies the intrinsic default
+    /// for §25.3.2.1's deferred OCFC.
+    data_view_prototype: ?*JSObject = null,
     /// `%RegExp.prototype%` — populated by `installRegExp`. The
     /// flag/source getters need to recognise it as a special
     /// receiver: `RegExp.prototype.source === "(?:)"` per

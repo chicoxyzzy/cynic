@@ -61,6 +61,13 @@ pub fn install(realm: *Realm) !void {
         });
         const ctor = r.ctor;
         const proto = r.proto;
+        // §25.1.4.1 — `byteLength` / `maxByteLength` are validated
+        // BEFORE OrdinaryCreateFromConstructor. Defer the proto
+        // lookup so the constructor can ToIndex / RangeError-check
+        // the args without firing a user `prototype` getter on
+        // newTarget first.
+        ctor.defers_proto_lookup = true;
+        realm.intrinsics.array_buffer_prototype = proto;
         try installNativeGetter(realm, proto, "byteLength", arrayBufferByteLength);
         try installNativeMethodOnProto(realm, proto, "slice", arrayBufferSlice, 2);
         // §25.1.5.{3,4} ArrayBuffer.prototype.{transfer, transferToFixedLength}
@@ -112,7 +119,11 @@ pub fn install(realm: *Realm) !void {
             .set_home_object = false,
             .to_string_tag = "DataView",
         });
+        // §25.3.2.1 — byteOffset validation against the initial
+        // buffer length precedes OCFC; defer the proto lookup.
+        r.ctor.defers_proto_lookup = true;
         const proto = r.proto;
+        realm.intrinsics.data_view_prototype = proto;
         try installNativeGetter(realm, proto, "byteLength", dataViewByteLength);
         try installNativeGetter(realm, proto, "byteOffset", dataViewByteOffset);
         try installNativeGetter(realm, proto, "buffer", dataViewBuffer);
@@ -348,7 +359,14 @@ fn typedArrayAbstractCtor(realm: *Realm, this_value: Value, args: []const Value)
 }
 
 fn arrayBufferConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "ArrayBuffer constructor requires 'new'");
+    _ = this_value; // §25.1.4.1 — OCFC is deferred (see install:
+    // `defers_proto_lookup`). The construct path stashes newTarget
+    // on `realm.pending_native_new_target`; absence means we were
+    // called without `new`.
+    const new_target = realm.pending_native_new_target;
+    if (new_target.isUndefined()) {
+        return throwTypeError(realm, "ArrayBuffer constructor requires 'new'");
+    }
     // §25.1.3.1 step 2 — `Let byteLength be ? ToIndex(length)`.
     const len = try toIndex(realm, argOr(args, 0, Value.fromInt32(0)));
 
@@ -357,18 +375,53 @@ fn arrayBufferConstructor(realm: *Realm, this_value: Value, args: []const Value)
     // observe the `valueOf` / `toString` calls on `maxByteLength`
     // *after* the length coercion (fixtures assert the log order).
     const max_byte_length_opt = try getMaxByteLengthOption(realm, argOr(args, 1, Value.undefined_));
+    // §25.1.4.1 step 5-6 — the `byteLength > maxByteLength`
+    // RangeError MUST fire before OrdinaryCreateFromConstructor
+    // (which would observe a throwing `prototype` getter on
+    // newTarget). See options-maxbytelength-compared-before-object-
+    // creation.js.
     if (max_byte_length_opt) |max_len| {
         if (len > max_len) {
             return throwRangeError(realm, "ArrayBuffer length exceeds maxByteLength");
         }
     }
 
-    // §25.1.3.1 step 7 — `new ArrayBuffer(len)` allocates `len`
-    // bytes (or `max_len` for resizable buffers so growing in
-    // place doesn't reallocate). Charge against the heap ceiling
-    // so a `new ArrayBuffer(2 ** 31)` call can't exhaust system
-    // memory; overshoot surfaces as `RangeError`.
+    // §10.1.13 OrdinaryCreateFromConstructor — performed AFTER
+    // arg validation but BEFORE CreateByteDataBlock. A throwing
+    // `prototype` getter on newTarget surfaces here as the user's
+    // exception (DummyError per data-allocation-after-object-
+    // creation.js) — the byte-block charge fires only if OCFC
+    // succeeded.
+    const interp = @import("../interpreter.zig");
+    const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, realm.intrinsics.array_buffer_prototype) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const proto: ?*JSObject = switch (proto_lookup) {
+        .proto => |p| p,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+    const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
+    inst.prototype = proto;
+
+    // §25.1.3.1 step 7 — CreateByteDataBlock(len). Allocates
+    // `len` bytes (or `max_len` for resizable buffers so growing
+    // in place doesn't reallocate). Cynic caps the host
+    // allocation at u32 max — allocations beyond that surface as
+    // RangeError per the spec's "if it is impossible to create
+    // such a Data Block" clause (§6.2.9.2 CreateByteDataBlock
+    // step 2). This step runs AFTER OCFC per spec — data-
+    // allocation-after-object-creation.js expects the proto
+    // getter's DummyError to fire BEFORE the size-related
+    // RangeError; options-maxbytelength-allocation-limit.js
+    // expects the RangeError after OCFC has had a chance to run.
     const capacity = max_byte_length_opt orelse len;
+    if (capacity > @as(usize, std.math.maxInt(u32))) {
+        return throwRangeError(realm, "ArrayBuffer allocation exceeds host limit");
+    }
     realm.heap.charge(capacity) catch
         return throwRangeError(realm, "ArrayBuffer length exceeds heap ceiling");
     const buf = realm.allocator.alloc(u8, len) catch return error.OutOfMemory;
@@ -376,7 +429,7 @@ fn arrayBufferConstructor(realm: *Realm, this_value: Value, args: []const Value)
     inst.array_buffer = buf;
     inst.has_array_buffer_data = true;
     inst.array_buffer_max_byte_length = max_byte_length_opt;
-    return this_value;
+    return heap_mod.taggedObject(inst);
 }
 
 /// §7.1.22 ToIndex — coerce `v` to an integer index in
@@ -391,7 +444,13 @@ fn toIndex(realm: *Realm, v: Value) NativeError!usize {
         return throwRangeError(realm, "value out of range");
     if (trunc < 0)
         return throwRangeError(realm, "value out of range");
-    if (trunc > @as(f64, @floatFromInt(std.math.maxInt(u32))))
+    // §7.1.22 ToIndex caps at 2^53 - 1 (Number.MAX_SAFE_INTEGER).
+    // Capping at u32 max here was a Cynic-side artifact that
+    // pre-empted the spec's downstream RangeError on
+    // CreateByteDataBlock (data-allocation-after-object-
+    // creation.js expects the proto getter's DummyError to fire
+    // first, which requires ToIndex to accept the 7 PiB value).
+    if (trunc > 9007199254740991.0)
         return throwRangeError(realm, "value out of range");
     return @intFromFloat(trunc);
 }
@@ -2811,7 +2870,13 @@ fn typedArrayFilter(realm: *Realm, this_value: Value, args: []const Value) Nativ
 // ── §25.3 DataView ──────────────────────────────────────────────────────────
 
 fn dataViewConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "DataView constructor requires 'new'");
+    _ = this_value; // §25.3.2.1 — OCFC is deferred so byteOffset
+    // validation against the live buffer length runs first; see
+    // byteOffset-validated-against-initial-buffer-length.js.
+    const new_target = realm.pending_native_new_target;
+    if (new_target.isUndefined()) {
+        return throwTypeError(realm, "DataView constructor requires 'new'");
+    }
     const buf_arg = argOr(args, 0, Value.undefined_);
     const buf_obj = heap_mod.valueAsPlainObject(buf_arg) orelse return throwTypeError(realm, "DataView: first argument must be an ArrayBuffer");
     // §25.3.2.1 step 2 — RequireInternalSlot(buffer, [[ArrayBufferData]]):
@@ -2851,8 +2916,38 @@ fn dataViewConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
         const buf2 = buf_obj.array_buffer orelse return throwTypeError(realm, "DataView: ArrayBuffer detached during construction");
         if (byte_offset > buf2.len or byte_length > buf2.len - byte_offset) return throwRangeError(realm, "DataView: byteLength exceeds buffer");
     }
+    // §25.3.2.1 step 10 — OrdinaryCreateFromConstructor, performed
+    // AFTER every validation gate so a throwing `prototype` getter
+    // on newTarget surfaces only if all the spec-mandated arg
+    // checks already passed (byteOffset-validated-against-initial-
+    // buffer-length.js).
+    const interp = @import("../interpreter.zig");
+    const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, realm.intrinsics.data_view_prototype) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const proto: ?*JSObject = switch (proto_lookup) {
+        .proto => |p| p,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+    // §25.3.2.1 step 12-13 — re-witness the buffer after OCFC.
+    // The `prototype` getter on newTarget may have detached the
+    // buffer (custom-proto-access-detaches-buffer.js) or resized
+    // it OOB (custom-proto-access-resizes-buffer-invalid-by-
+    // {offset,length}.js); either must surface as TypeError /
+    // RangeError before the fresh instance is returned.
+    const buf3 = buf_obj.array_buffer orelse return throwTypeError(realm, "DataView: ArrayBuffer detached during construction");
+    if (byte_offset > buf3.len) return throwRangeError(realm, "DataView: byteOffset exceeds buffer");
+    if (!length_tracking) {
+        if (byte_length > buf3.len - byte_offset) return throwRangeError(realm, "DataView: byteLength exceeds buffer");
+    }
+    const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
+    inst.prototype = proto;
     inst.data_view = .{ .viewed = buf_obj, .byte_offset = byte_offset, .byte_length = byte_length, .length_tracking = length_tracking };
-    return this_value;
+    return heap_mod.taggedObject(inst);
 }
 
 /// §7.1.17 ToIndex. Throws TypeError on Symbol/BigInt (via

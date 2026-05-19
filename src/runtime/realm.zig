@@ -514,6 +514,18 @@ pub const Realm = struct {
     /// exact constructor / message the spec mandates rather than
     /// the generic "native error".
     pending_exception: ?Value = null,
+    /// NewTarget for the next native constructor call when the
+    /// callee's `defers_proto_lookup` flag is set. The construct
+    /// path skips OrdinaryCreateFromConstructor and stashes the
+    /// resolved newTarget here so the native can perform its
+    /// spec-mandated argument validation BEFORE the proto lookup
+    /// (which may throw via a custom `prototype` getter — see
+    /// §25.1.4.1 / §25.3.2.1: ToIndex / RangeError on byteLength
+    /// vs maxByteLength precedes OCFC). The native consumes this
+    /// slot via `consumePendingNativeNewTarget` and is responsible
+    /// for calling `getPrototypeFromConstructor` itself before
+    /// allocating its instance.
+    pending_native_new_target: Value = Value.undefined_,
     /// Sticky flag set when [[DefineOwnProperty]] rejected a typed-
     /// array index (per §10.4.5.3 — returns false, not throws).
     /// Object.defineProperty translates the reject to TypeError;

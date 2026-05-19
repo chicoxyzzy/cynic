@@ -3658,6 +3658,41 @@ fn invokeProxyGetTrap(
     }
 }
 
+/// Value-typed counterpart of `getPrototypeFromConstructor` for
+/// native constructors with `defers_proto_lookup` set. Resolves
+/// the prototype slot from a NewTarget Value that may be a plain
+/// JSFunction, a callable Proxy, or — falling back — any other
+/// value (in which case the intrinsic default is returned). When
+/// NewTarget is a Proxy, `Get(newTarget, "prototype")` dispatches
+/// through the proxy's `get` trap per §10.5.5.
+pub fn getPrototypeFromConstructorValue(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    new_target: Value,
+    intrinsic_default: ?*JSObject,
+) RunError!ProtoLookup {
+    if (heap_mod.valueAsFunction(new_target)) |new_target_fn| {
+        return try getPrototypeFromConstructor(allocator, realm, new_target_fn, intrinsic_default);
+    }
+    if (heap_mod.valueAsPlainObject(new_target)) |nt_proxy| {
+        if (nt_proxy.proxy_target_fn != null or nt_proxy.proxy_target != null or nt_proxy.proxy_revoked) {
+            const get_v = try invokeProxyGetTrap(allocator, realm, nt_proxy, "prototype", new_target);
+            switch (get_v) {
+                .thrown => |ex| return .{ .thrown = ex },
+                .value => |v| {
+                    if (heap_mod.valueAsPlainObject(v)) |po| return .{ .proto = po };
+                    if (nt_proxy.proxy_revoked or nt_proxy.proxy_handler == null) {
+                        return .{ .thrown = try makeTypeError(realm, "Cannot retrieve realm from a revoked Proxy") };
+                    }
+                    return .{ .proto = intrinsic_default };
+                },
+            }
+        }
+        return .{ .proto = intrinsic_default };
+    }
+    return .{ .proto = intrinsic_default };
+}
+
 pub fn getPrototypeFromConstructor(
     allocator: std.mem.Allocator,
     realm: *Realm,
@@ -3753,6 +3788,24 @@ pub fn constructValue(
     };
     if (!target.has_construct or target.is_arrow) {
         return .{ .thrown = try makeTypeError(realm, "value is not a constructor") };
+    }
+    // §25.1.4.1 / §25.3.2.1 — native ctors that validate args
+    // before OrdinaryCreateFromConstructor. Skip the proto lookup
+    // here, stash newTarget on the realm, and invoke the native
+    // with `this_value = undefined`. The native handles its own
+    // OCFC after validation. ConstructResult: object return wins,
+    // else TypeError (no fallback `this`, since we never allocated).
+    if (target.defers_proto_lookup and target.native_callback != null) {
+        realm.pending_native_new_target = new_target;
+        defer realm.pending_native_new_target = Value.undefined_;
+        const outcome = try callJSFunction(allocator, realm, target, Value.undefined_, args);
+        switch (outcome) {
+            .value, .yielded => |v| {
+                if (heap_mod.valueAsPlainObject(v) != null or heap_mod.valueAsFunction(v) != null) return .{ .value = v };
+                return .{ .thrown = try makeTypeError(realm, "deferred-proto-lookup constructor did not return an object") };
+            },
+            .thrown => |ex| return .{ .thrown = ex },
+        }
     }
     // §10.1.14 GetPrototypeFromConstructor on new_target. When
     // new_target is a callable Proxy (not a plain function), the
@@ -3997,6 +4050,18 @@ pub fn callJSFunctionAsSuper(
         const unwrapped = try unwrapBoundCall(allocator, callee, this_value, args, true);
         defer if (unwrapped.owns_args) allocator.free(unwrapped.args);
         return callJSFunctionAsSuper(allocator, realm, unwrapped.target, this_value, unwrapped.args, effective_nt);
+    }
+    // §25.1.4.1 / §25.3.2.1 — native constructor that defers OCFC.
+    // From a derived class's `super(...)`, the `this_value` here is
+    // the uninitialised derived `this`; the native must allocate
+    // its own instance using newTarget's prototype. Stash newTarget
+    // on the realm, invoke with `this = undefined`, return whatever
+    // the native produced (caller applies ConstructResult).
+    if (callee.native_callback != null and callee.defers_proto_lookup) {
+        const prior_pnt = realm.pending_native_new_target;
+        realm.pending_native_new_target = new_target;
+        defer realm.pending_native_new_target = prior_pnt;
+        return callJSFunction(allocator, realm, callee, Value.undefined_, args);
     }
     // Native / generator / async paths don't observe new.target
     // via a frame slot — they receive `this` and args directly.
@@ -5446,6 +5511,48 @@ fn runFrames(
                     continue;
                 }
 
+                // §25.1.4.1 / §25.3.2.1 — native ctors that
+                // pre-validate args BEFORE OCFC. Stash newTarget,
+                // invoke with `this = undefined`, let the native
+                // run its own GetPrototypeFromConstructor after
+                // validation. ConstructResult requires an Object;
+                // a non-Object return throws TypeError (no
+                // fallback `this` since we never allocated one).
+                if (callee_fn.defers_proto_lookup and callee_fn.native_callback != null) {
+                    const args_start = @as(usize, r_callee) + 1;
+                    const args = registers[args_start .. args_start + argc];
+                    const prior_pnt = realm.pending_native_new_target;
+                    realm.pending_native_new_target = heap_mod.taggedFunction(callee_fn);
+                    defer realm.pending_native_new_target = prior_pnt;
+                    const result = callee_fn.native_callback.?(realm, Value.undefined_, args) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.NativeThrew => {
+                            const ex = consumePendingException(realm) orelse try makeTypeError(realm, "native error");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue;
+                        },
+                    };
+                    if (heap_mod.valueAsPlainObject(result) != null or
+                        heap_mod.valueAsFunction(result) != null)
+                    {
+                        acc = result;
+                    } else {
+                        const ex = try makeTypeError(realm, "deferred-proto-lookup constructor did not return an object");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue;
+                    }
+                    continue;
+                }
                 // §13.3.5.1.1 OrdinaryCallBindThis with NewTarget=callee.
                 // §10.1.14 GetPrototypeFromConstructor — read
                 // `prototype` through the accessor path so a

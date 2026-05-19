@@ -1606,9 +1606,20 @@ fn concatReturn(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Iterator return on non-object");
     const state = obj.iter_helper orelse return iterResult(realm, Value.undefined_, true);
+    // §27.1.2.1.2 %IteratorHelperPrototype%.return → GeneratorResumeAbrupt
+    // → GeneratorValidate step 6: if the generator is already executing,
+    // throw TypeError. The inner iterator's `return()` may re-enter the
+    // wrapper's `return()` mid-`next()`; that nested call must reject.
+    // (throws-typeerror-when-generator-is-running-return.js)
+    try checkNotRunning(realm, state);
     if (state.done) {
         return iterResult(realm, Value.undefined_, true);
     }
+    // Mark `running` BEFORE closing the inner iterator. A user
+    // `return()` on the inner can re-enter the outer `return()`;
+    // that nested call must observe the running flag and throw.
+    state.running = true;
+    defer state.running = false;
     state.done = true;
     const active = state.active;
     if (heap_mod.valueAsPlainObject(active) != null) {
