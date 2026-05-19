@@ -11784,8 +11784,20 @@ fn proxyGetTrap(
             if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
             return .handled;
         };
-        const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-        const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str), receiver };
+        // §7.1.19 ToPropertyKey — symbol keys flow into the
+        // trap as Symbol values, NOT as their `<sym:N>` /
+        // `@@xxx` prop-key string. A bare `fromString(key)` flips
+        // `typeof k === "symbol"` to `"string"` inside the
+        // handler and silently loses the brand match on
+        // well-known Symbols too.
+        const key_v: Value = blk_kv: {
+            if (std.mem.startsWith(u8, key, "@@") or std.mem.startsWith(u8, key, "<sym:")) {
+                if (realm.heap.symbolForKey(key)) |sym| break :blk_kv heap_mod.taggedSymbol(sym);
+            }
+            const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+            break :blk_kv Value.fromString(key_str);
+        };
+        const args = [_]Value{ heap_mod.taggedObject(target), key_v, receiver };
         const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);
         const v = switch (outcome) {
             .value, .yielded => |val| val,
@@ -12448,6 +12460,11 @@ pub fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, targe
 /// `intrinsics.zig` is module-private). Returns the u32 value
 /// when `s` is a canonical integer-index string, else null.
 fn canonicalIntegerIndexInterp(s: []const u8) ?u32 {
+    // §6.1.7 — an "array index" is a string whose canonical
+    // numeric value is in the inclusive range [+0, 2^32-2]. The
+    // value 2^32-1 is reserved as the maximum array length and
+    // is NOT an array index; "4294967295" must round-trip as a
+    // named property, not a slot in the indexed backing.
     if (s.len == 0) return null;
     if (s.len > 10) return null;
     if (s[0] == '0' and s.len > 1) return null;
@@ -12455,7 +12472,7 @@ fn canonicalIntegerIndexInterp(s: []const u8) ?u32 {
     for (s) |c| {
         if (c < '0' or c > '9') return null;
         n = n * 10 + (c - '0');
-        if (n > std.math.maxInt(u32)) return null;
+        if (n > 0xFFFFFFFE) return null;
     }
     return @intCast(n);
 }

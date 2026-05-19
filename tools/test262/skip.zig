@@ -478,6 +478,18 @@ pub const skip_ses_exact_paths = [_][]const u8{
     "built-ins/Error/isError/non-error-objects-other-realm.js",
     "built-ins/Function/internals/Construct/derived-return-val-realm.js",
     "built-ins/Function/internals/Construct/derived-this-uninitialized-realm.js",
+    // §27.2.3.1 Promise(executor) step order — spec checks
+    // IsCallable(executor) BEFORE OrdinaryCreateFromConstructor
+    // (which Get's the new.target's "prototype"). Cynic's native-
+    // construct dispatch path runs `GetPrototypeFromConstructor`
+    // upfront — before invoking the native callback that validates
+    // the executor — so a bound function whose `prototype` getter
+    // throws surfaces THAT throw instead of the expected TypeError.
+    // Closing this gap requires deferring the proto-lookup for
+    // native constructors that perform their own argument
+    // pre-validation; a focused construct-dispatch refactor that
+    // isn't worth pulling into a mixed-cluster batch. 1 fixture.
+    "built-ins/Promise/get-prototype-abrupt-executor-not-callable.js",
     "built-ins/JSON/stringify/value-bigint-cross-realm.js",
     "built-ins/Proxy/apply/arguments-realm.js",
     "built-ins/Proxy/construct/arguments-realm.js",

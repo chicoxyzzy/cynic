@@ -926,6 +926,31 @@ pub fn lookupPrimitivePrototype(realm: *Realm, v: Value) ?*JSObject {
 /// Returns `error.NativeThrew` if a getter throws; the
 /// pending exception is recorded on the realm.
 pub fn getPropertyChain(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!Value {
+    // §10.5.5 Proxy [[Get]] — when `obj` is a Proxy (or a Proxy
+    // whose target is itself a Proxy), the handler's `get` trap
+    // must fire BEFORE walking the prototype chain. Without this,
+    // an iterator built off a Proxy (`for-of new Proxy([1,2,3], {})`)
+    // saw `length === undefined` because the proxy has no own
+    // `length` and the trapless fall-through never reached the
+    // wrapped array.
+    if (obj.proxy_target != null or obj.proxy_revoked) {
+        const proxy_mod = @import("builtins/proxy.zig");
+        var cur_proxy = obj;
+        while (cur_proxy.proxy_target != null or cur_proxy.proxy_revoked) {
+            const r = try proxy_mod.nativeProxyGet(realm, cur_proxy, key, heap_mod.taggedObject(obj));
+            switch (r) {
+                .value => |v| return v,
+                .fallthrough => |t| {
+                    if (t == cur_proxy) break;
+                    cur_proxy = t;
+                },
+            }
+        }
+        // The walk fell out of all proxy layers onto a plain target;
+        // do an ordinary chain lookup on that target so accessors /
+        // indexed-storage / prototype walks all fire.
+        return getPropertyChain(realm, cur_proxy, key);
+    }
     var cur: ?*JSObject = obj;
     while (cur) |o| {
         if (o.accessors.get(key)) |acc| {

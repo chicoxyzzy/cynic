@@ -1584,12 +1584,18 @@ fn aggregatorAnyProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, i
     const cur = ctx.state.get(k_remaining).asInt32();
     ctx.state.set(realm.allocator, k_remaining, Value.fromInt32(cur + 1)) catch return error.OutOfMemory;
     const closures = try allocElementClosures(realm, ctx.state, @intCast(idx));
-    // For `any`, we still pass the cap-reject directly as the
-    // resolve closure — wait actually no: `any` resolves on the
-    // first fulfilled and rejects (per-element) into the errors
-    // list. So resolve = element-resolve (calls cap.resolve on
-    // first fulfill); reject = element-reject (records error).
-    return invokeThenWithClosures(realm, resolved, closures.resolve, closures.reject);
+    // §27.2.4.3.1 PerformPromiseAny step 8.j —
+    //   Perform ? Invoke(nextPromise, "then",
+    //     « resultCapability.[[Resolve]], onRejected »).
+    // Unlike Promise.all / allSettled, the `resolve` argument is
+    // the bare capability resolve — NOT a per-element closure
+    // with an alreadyCalled guard. A custom Constructor (test262
+    // built-ins/Promise/any/resolve-from-same-thenable.js) whose
+    // executor calls `resolve(v)` multiple times must observe each
+    // call; a per-element closure would no-op after the first.
+    // `onRejected` IS per-element so we can record the reason
+    // into the errors list and decide when to AggregateError.
+    return invokeThenWithClosures(realm, resolved, ctx.cap.resolve, closures.reject);
 }
 
 fn invokeThenWithClosures(realm: *Realm, resolved: Value, resolve_fn: *JSFunction, reject_fn: *JSFunction) NativeError!IterStepAction {

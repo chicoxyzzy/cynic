@@ -51,6 +51,22 @@ const getPropertyChain = intrinsics.getPropertyChain;
 /// return value if we return undefined).
 pub fn objectConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const arg = argOr(args, 0, Value.undefined_);
+    // §20.1.1.1 step 1 — `If NewTarget is neither undefined nor the
+    // active function (Object), return ? OrdinaryCreateFromConstructor(
+    // NewTarget, "%Object.prototype%")`. In Cynic, a subclass
+    // `class O extends Object { … }; new O(v)` arrives with
+    // `this_value` pre-allocated against `O.prototype` (not
+    // `%Object.prototype%`) — that pre-allocated instance IS the
+    // §10.1.14-derived object the spec asks for. Return it instead
+    // of falling through to step 3's `return arg` (which would
+    // hand back the unrelated user-supplied object and lose the
+    // subclass identity). The interpreter's construct path already
+    // builds `this_value` via `getPrototypeFromConstructor`.
+    if (heap_mod.valueAsPlainObject(this_value)) |this_obj| {
+        if (this_obj.prototype != realm.intrinsics.object_prototype) {
+            return this_value;
+        }
+    }
     // §20.1.1.1 step 3a — `Object(value)` returns the value
     // unchanged only when Type(value) is Object (§6.1.7).
     // `Value.isObject` is the *heap-tag* predicate which also
@@ -145,6 +161,11 @@ pub fn install(realm: *Realm) !void {
 /// number that round-trips. Returns the numeric value or
 /// `null` for non-integer keys.
 fn canonicalIntegerIndex(s: []const u8) ?u32 {
+    // §6.1.7 — an "array index" is a string whose canonical
+    // numeric value is in the inclusive range [+0, 2^32 - 2].
+    // 2^32 - 1 ("4294967295") is reserved as the array-length
+    // upper bound and is NOT an index — it round-trips as a
+    // named property, not a slot in the integer-key partition.
     if (s.len == 0) return null;
     if (s.len > 10) return null; // u32 max is 10 digits
     if (s[0] == '0' and s.len > 1) return null; // no leading zero
@@ -152,7 +173,7 @@ fn canonicalIntegerIndex(s: []const u8) ?u32 {
     for (s) |c| {
         if (c < '0' or c > '9') return null;
         n = n * 10 + (c - '0');
-        if (n > std.math.maxInt(u32)) return null;
+        if (n > 0xFFFFFFFE) return null;
     }
     return @intCast(n);
 }
@@ -1010,15 +1031,45 @@ fn objectIs(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
 
 fn objectHasOwn(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse {
-        return error.NativeThrew;
-    };
-    // §7.1.19 ToPropertyKey — the spec coerces non-string,
-    // non-symbol args; `descriptorKey` handles strings, symbols,
-    // and primitive ToString fallback. Surface a user-side
-    // ToPrimitive throw instead of masking it as OOM.
+    // §20.1.2.13 Object.hasOwn ( O, P )
+    //   1. Let obj be ? ToObject(O).  Functions, primitives, and
+    //      Proxies all coerce; only null/undefined throw TypeError.
+    //   2. Let key be ? ToPropertyKey(P).
+    //   3. Return ? HasOwnProperty(obj, key).
+    const o = argOr(args, 0, Value.undefined_);
+    if (o.isNull() or o.isUndefined()) {
+        return throwTypeError(realm, "Object.hasOwn called on null or undefined");
+    }
+    // §7.1.19 ToPropertyKey — surfaces user-side ToPrimitive throws.
     const key = try descriptorKey(realm, argOr(args, 1, Value.undefined_));
-    return Value.fromBool(obj.hasOwn(key));
+    if (heap_mod.valueAsPlainObject(o)) |obj| {
+        // §9.4.6 module namespace [[GetOwnProperty]] materialises a
+        // binding via [[Get]]; a TDZ-Hole export rethrows ReferenceError.
+        if (obj.is_module_namespace and obj.hasOwn(key) and !std.mem.startsWith(u8, key, "@@") and !std.mem.startsWith(u8, key, "<sym:")) {
+            _ = try @import("../module.zig").namespaceGetThrowingOnHole(realm, obj, key);
+        }
+        // §7.3.13 HasOwnProperty composes [[GetOwnProperty]]; for a
+        // Proxy that fires the `getOwnPropertyDescriptor` trap
+        // (§10.5.5). Reuse Object.getOwnPropertyDescriptor which
+        // walks the proxy chain and enforces target invariants.
+        if (obj.proxy_target != null or obj.proxy_revoked) {
+            const probe_args = [_]Value{ o, argOr(args, 1, Value.undefined_) };
+            const desc_v = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &probe_args);
+            return Value.fromBool(!desc_v.isUndefined());
+        }
+        return Value.fromBool(obj.hasOwn(key));
+    }
+    if (heap_mod.valueAsFunction(o)) |fn_obj| {
+        return Value.fromBool(fn_obj.hasOwn(key));
+    }
+    // §7.1.18 ToObject for string primitives boxes to String wrapper.
+    if (o.isString()) {
+        const s: *@import("../string.zig").JSString = @ptrCast(@alignCast(o.asString()));
+        if (std.mem.eql(u8, key, "length")) return Value.true_;
+        const i = std.fmt.parseInt(usize, key, 10) catch return Value.false_;
+        return Value.fromBool(i < s.bytes.len);
+    }
+    return Value.false_;
 }
 
 // ── Property descriptors (§20.1.2) ──────────────────────────────────────────
@@ -2404,6 +2455,27 @@ fn assignSetOrThrow(
         if (!flags.writable) {
             return throwTypeError(realm, "Cannot assign to read-only property");
         }
+        // §10.4.2.4 ArraySetLength — an Array exotic's "length"
+        // write is NOT a plain data update: shrinking it must
+        // delete the indexed slots beyond the new length, growing
+        // it must reserve holes. A bare `properties.put` bypasses
+        // the truncate and leaves stale element data behind, so a
+        // later index write past the old (smaller) length resurrects
+        // the dropped values (Object/assign/target-Array fixture
+        // observes this via `Object.assign(target, {length: 1})`).
+        if (target.is_array_exotic and std.mem.eql(u8, key, "length")) {
+            // §10.4.2.4 ArraySetLength — coerce to uint32 via §7.1.6
+            // ToUint32, then truncate / grow the indexed backing,
+            // then sync the `length` property.
+            const arith = @import("../interpreter_arith.zig");
+            const new_len: u32 = arith.toUint32(value);
+            const tr = interpreter.truncateArrayAtLength(allocator, target, new_len);
+            target.setArrayLength(allocator, tr.final_length) catch return error.OutOfMemory;
+            if (tr.blocked) {
+                return throwTypeError(realm, "Cannot delete non-configurable array index");
+            }
+            return;
+        }
         target.properties.put(allocator, key, value) catch return error.OutOfMemory;
         return;
     }
@@ -2463,8 +2535,24 @@ fn objectAssign(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             const enum_v = desc_obj.get("enumerable");
             if (!intrinsics.toBoolean(enum_v)) continue;
             // §20.1.2.1 step 4.a.iii.2.a — `propValue = ? Get(from, nextKey)`.
-            // This fires accessor getters AND Proxy `get` traps.
-            const v = try getPropertyChain(realm, src, key);
+            // This fires accessor getters AND Proxy `get` traps; the
+            // proxy chain must dispatch via the handler so e.g. an
+            // `ownKeys`-spoofing handler observes the read.
+            const v = blk_v: {
+                var cur_get: *JSObject = src;
+                while (cur_get.proxy_target != null or cur_get.proxy_revoked) {
+                    const proxy_mod = @import("proxy.zig");
+                    const r = try proxy_mod.nativeProxyGet(realm, cur_get, key, src_value);
+                    switch (r) {
+                        .value => |val| break :blk_v val,
+                        .fallthrough => |t| {
+                            if (t == cur_get) break;
+                            cur_get = t;
+                        },
+                    }
+                }
+                break :blk_v try getPropertyChain(realm, cur_get, key);
+            };
             // §20.1.2.1 step 4.a.iii.2.b — `Set(to, nextKey, propValue, true)`.
             // Strict-mode Set per §10.1.9 throws TypeError on any
             // failure (non-extensible + new key, non-writable own
