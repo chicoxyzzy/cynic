@@ -8970,6 +8970,661 @@ pub const Compiler = struct {
         for (ctx.continue_patches.items) |p| try self.builder.patchI16(p, test_pc);
     }
 
+    /// §14.7.4.4 CreatePerIterationEnvironment optimisation —
+    /// scan `body` for any *nested* function/arrow/method/class that
+    /// references one of `names`. The per-iteration environment is
+    /// only spec-observable when such a closure exists (it's what
+    /// distinguishes "each iteration's `i` is freshly allocated"
+    /// from "loop variable is mutated in-place"); when no closure
+    /// captures the binding, V8 / JSC / SpiderMonkey all elide the
+    /// per-iter env and run the loop body in the loop's single
+    /// outer scope. That's a >10× speedup on tight numeric loops
+    /// like the regex property-escapes helper
+    /// `for (let codePoint = start; codePoint <= end; codePoint++)
+    ///   { codePoints[length++] = codePoint; }`
+    /// which otherwise blow past the harness step budget once the
+    /// inner allocation runs every iteration.
+    ///
+    /// Conservative — match by spelling. Shadowing inside a nested
+    /// function (parameter or local `let X`) is treated as "captured"
+    /// even though it doesn't actually reach the loop binding;
+    /// over-approximation just keeps the spec-faithful slow path.
+    fn forLoopBindingsAreCaptured(
+        self: *Compiler,
+        body: *ast.statement.Statement,
+        names: []const []const u8,
+    ) CompileError!bool {
+        return self.stmtMentionsNamesInNestedFn(body, names);
+    }
+
+    fn stmtMentionsNamesInNestedFn(
+        self: *Compiler,
+        stmt: *const ast.statement.Statement,
+        names: []const []const u8,
+    ) CompileError!bool {
+        switch (stmt.*) {
+            .expression => |es| return self.exprMentionsNamesInNestedFn(&es.expression, names),
+            .block => |bs| return self.stmtsMentionsNamesInNestedFn(bs.body, names),
+            .empty, .debugger_, .break_, .continue_ => return false,
+            .lexical => |ld| {
+                for (ld.declarators) |d| {
+                    if (d.init) |*e| {
+                        if (try self.exprMentionsNamesInNestedFn(e, names)) return true;
+                    }
+                }
+                return false;
+            },
+            .if_ => |ifs| {
+                if (try self.exprMentionsNamesInNestedFn(&ifs.test_, names)) return true;
+                if (try self.stmtMentionsNamesInNestedFn(ifs.consequent, names)) return true;
+                if (ifs.alternate) |alt| return self.stmtMentionsNamesInNestedFn(alt, names);
+                return false;
+            },
+            .while_ => |ws| {
+                if (try self.exprMentionsNamesInNestedFn(&ws.test_, names)) return true;
+                return self.stmtMentionsNamesInNestedFn(ws.body, names);
+            },
+            .do_while => |dw| {
+                if (try self.stmtMentionsNamesInNestedFn(dw.body, names)) return true;
+                return self.exprMentionsNamesInNestedFn(&dw.test_, names);
+            },
+            .return_ => |rs| {
+                if (rs.argument) |*e| return self.exprMentionsNamesInNestedFn(e, names);
+                return false;
+            },
+            .throw_ => |ts| return self.exprMentionsNamesInNestedFn(&ts.argument, names),
+            .for_ => |fs| {
+                if (fs.init) |head| switch (head) {
+                    .lexical => |ld| {
+                        for (ld.declarators) |d| {
+                            if (d.init) |*e| {
+                                if (try self.exprMentionsNamesInNestedFn(e, names)) return true;
+                            }
+                        }
+                    },
+                    .expression => |e| {
+                        if (try self.exprMentionsNamesInNestedFn(&e, names)) return true;
+                    },
+                };
+                if (fs.test_) |*t| {
+                    if (try self.exprMentionsNamesInNestedFn(t, names)) return true;
+                }
+                if (fs.update) |*u| {
+                    if (try self.exprMentionsNamesInNestedFn(u, names)) return true;
+                }
+                return self.stmtMentionsNamesInNestedFn(fs.body, names);
+            },
+            .for_in_of => |fio| {
+                if (fio.left == .expression) {
+                    if (try self.exprMentionsNamesInNestedFn(&fio.left.expression, names)) return true;
+                } else {
+                    for (fio.left.lexical.declarators) |d| {
+                        if (d.init) |*e| {
+                            if (try self.exprMentionsNamesInNestedFn(e, names)) return true;
+                        }
+                    }
+                }
+                if (try self.exprMentionsNamesInNestedFn(&fio.right, names)) return true;
+                return self.stmtMentionsNamesInNestedFn(fio.body, names);
+            },
+            .try_ => |ts| {
+                if (try self.stmtsMentionsNamesInNestedFn(ts.block.body, names)) return true;
+                if (ts.handler) |h| {
+                    if (try self.stmtsMentionsNamesInNestedFn(h.body.body, names)) return true;
+                }
+                if (ts.finalizer) |f| {
+                    if (try self.stmtsMentionsNamesInNestedFn(f.body, names)) return true;
+                }
+                return false;
+            },
+            .switch_ => |sw| {
+                if (try self.exprMentionsNamesInNestedFn(&sw.discriminant, names)) return true;
+                for (sw.cases) |c| {
+                    if (c.test_) |*t| {
+                        if (try self.exprMentionsNamesInNestedFn(t, names)) return true;
+                    }
+                    if (try self.stmtsMentionsNamesInNestedFn(c.body, names)) return true;
+                }
+                return false;
+            },
+            .labeled => |ls| return self.stmtMentionsNamesInNestedFn(ls.body, names),
+            .function_decl => |fd| return self.fnBodyMentionsNames(fd.params, fd.body.body, names),
+            .class_decl => |cd| return self.classBodyMentionsNames(cd.superclass, cd.body, names),
+            .import_decl, .export_decl => return false,
+        }
+    }
+
+    fn stmtsMentionsNamesInNestedFn(
+        self: *Compiler,
+        stmts: []const ast.statement.Statement,
+        names: []const []const u8,
+    ) CompileError!bool {
+        for (stmts) |*st| {
+            if (try self.stmtMentionsNamesInNestedFn(st, names)) return true;
+        }
+        return false;
+    }
+
+    fn exprMentionsNamesInNestedFn(
+        self: *Compiler,
+        e: *const ast.expression.Expression,
+        names: []const []const u8,
+    ) CompileError!bool {
+        switch (e.*) {
+            .null_literal,
+            .boolean_literal,
+            .numeric_literal,
+            .bigint_literal,
+            .string_literal,
+            .regex_literal,
+            .this_expr,
+            .super_,
+            .import_meta,
+            .new_target,
+            .private_identifier,
+            .identifier_reference,
+            => return false,
+            .template_literal => |tl| {
+                for (tl.expressions) |*sub| {
+                    if (try self.exprMentionsNamesInNestedFn(sub, names)) return true;
+                }
+                return false;
+            },
+            .parenthesized => |p| return self.exprMentionsNamesInNestedFn(p.expression, names),
+            .unary => |u| return self.exprMentionsNamesInNestedFn(u.operand, names),
+            .binary => |b| {
+                if (try self.exprMentionsNamesInNestedFn(b.lhs, names)) return true;
+                return self.exprMentionsNamesInNestedFn(b.rhs, names);
+            },
+            .logical => |l| {
+                if (try self.exprMentionsNamesInNestedFn(l.lhs, names)) return true;
+                return self.exprMentionsNamesInNestedFn(l.rhs, names);
+            },
+            .conditional => |c| {
+                if (try self.exprMentionsNamesInNestedFn(c.test_, names)) return true;
+                if (try self.exprMentionsNamesInNestedFn(c.consequent, names)) return true;
+                return self.exprMentionsNamesInNestedFn(c.alternate, names);
+            },
+            .assignment => |a| {
+                if (try self.exprMentionsNamesInNestedFn(a.target, names)) return true;
+                return self.exprMentionsNamesInNestedFn(a.value, names);
+            },
+            .sequence => |sq| {
+                for (sq.expressions) |*sub| {
+                    if (try self.exprMentionsNamesInNestedFn(sub, names)) return true;
+                }
+                return false;
+            },
+            .member => |m| {
+                if (try self.exprMentionsNamesInNestedFn(m.object, names)) return true;
+                if (m.property == .computed) {
+                    return self.exprMentionsNamesInNestedFn(m.property.computed, names);
+                }
+                return false;
+            },
+            .call => |c| {
+                if (try self.exprMentionsNamesInNestedFn(c.callee, names)) return true;
+                for (c.arguments) |*arg| {
+                    if (try self.exprMentionsNamesInNestedFn(arg, names)) return true;
+                }
+                return false;
+            },
+            .new_expr => |n| {
+                if (try self.exprMentionsNamesInNestedFn(n.callee, names)) return true;
+                for (n.arguments) |*arg| {
+                    if (try self.exprMentionsNamesInNestedFn(arg, names)) return true;
+                }
+                return false;
+            },
+            .chain => |ch| return self.exprMentionsNamesInNestedFn(ch.expression, names),
+            .tagged_template => |tt| {
+                if (try self.exprMentionsNamesInNestedFn(tt.tag, names)) return true;
+                return self.exprMentionsNamesInNestedFn(tt.quasi, names);
+            },
+            .spread => |sp| return self.exprMentionsNamesInNestedFn(sp.argument, names),
+            .update => |up| return self.exprMentionsNamesInNestedFn(up.operand, names),
+            .function_expr => |fe| return self.fnBodyMentionsNames(fe.params, fe.body.body, names),
+            .arrow_function => |af| switch (af.body) {
+                .block => |bs| return self.fnBodyMentionsNames(af.params, bs.body, names),
+                .expression => |sub| {
+                    // Arrow concise body — params can also have defaults that
+                    // reference outer names. Check defaults via the params
+                    // walker, then walk the concise expression as if it's
+                    // inside a nested function body: any matching ident is a
+                    // capture.
+                    if (try self.paramsMentionNames(af.params, names)) return true;
+                    return self.scanInitForIdentRefs(sub, names);
+                },
+            },
+            .array_literal => |al| {
+                for (al.elements) |maybe| {
+                    if (maybe) |sub| {
+                        if (try self.exprMentionsNamesInNestedFn(&sub, names)) return true;
+                    }
+                }
+                return false;
+            },
+            .object_literal => |ol| {
+                for (ol.properties) |m| switch (m) {
+                    .property => |p| {
+                        if (p.key == .computed) {
+                            if (try self.exprMentionsNamesInNestedFn(p.key.computed, names)) return true;
+                        }
+                        if (try self.exprMentionsNamesInNestedFn(&p.value, names)) return true;
+                    },
+                    .spread => |sp| if (try self.exprMentionsNamesInNestedFn(sp.argument, names)) return true,
+                    .method => |om| {
+                        if (om.key == .computed) {
+                            if (try self.exprMentionsNamesInNestedFn(om.key.computed, names)) return true;
+                        }
+                        if (try self.fnBodyMentionsNames(om.params, om.body.body, names)) return true;
+                    },
+                };
+                return false;
+            },
+            .class_expr => |ce| return self.classBodyMentionsNames(
+                if (ce.superclass) |sc| sc.* else null,
+                ce.body,
+                names,
+            ),
+            .yield => |y| {
+                if (y.argument) |arg| return self.exprMentionsNamesInNestedFn(arg, names);
+                return false;
+            },
+            .await_ => |aw| return self.exprMentionsNamesInNestedFn(aw.argument, names),
+            .import_call => |ic| return self.exprMentionsNamesInNestedFn(ic.source, names),
+        }
+    }
+
+    /// Inside a nested function/method/arrow's params + body: any
+    /// identifier reference matching one of `names` is treated as a
+    /// capture of the outer loop binding (over-approximation: we
+    /// don't track inner shadowing). Param-default expressions are
+    /// checked too — they evaluate in an environment that sees the
+    /// outer loop binding.
+    fn fnBodyMentionsNames(
+        self: *Compiler,
+        params: []const ast.statement.FunctionParam,
+        body: []const ast.statement.Statement,
+        names: []const []const u8,
+    ) CompileError!bool {
+        if (try self.paramsMentionNames(params, names)) return true;
+        return self.scanForIdentRefs(body, names);
+    }
+
+    fn paramsMentionNames(
+        self: *Compiler,
+        params: []const ast.statement.FunctionParam,
+        names: []const []const u8,
+    ) CompileError!bool {
+        for (params) |p| switch (p) {
+            .simple => |sp| if (sp.default) |*d| {
+                if (try self.exprMentionsNamesInNestedFn(d, names)) return true;
+            },
+            .rest => {},
+        };
+        return false;
+    }
+
+    fn classBodyMentionsNames(
+        self: *Compiler,
+        superclass: ?ast.expression.Expression,
+        members: []const ast.statement.ClassMember,
+        names: []const []const u8,
+    ) CompileError!bool {
+        if (superclass) |sc| {
+            if (try self.exprMentionsNamesInNestedFn(&sc, names)) return true;
+        }
+        for (members) |m| switch (m) {
+            .method => |md| {
+                if (md.key == .computed) {
+                    if (try self.exprMentionsNamesInNestedFn(md.key.computed, names)) return true;
+                }
+                if (try self.fnBodyMentionsNames(md.params, md.body.body, names)) return true;
+            },
+            .field => |fd| {
+                if (fd.key == .computed) {
+                    if (try self.exprMentionsNamesInNestedFn(fd.key.computed, names)) return true;
+                }
+                // Field initializers run in an implicit per-instance
+                // method; treat the same as a nested function body.
+                if (fd.init) |*e| {
+                    if (try self.scanInitForIdentRefs(e, names)) return true;
+                }
+            },
+            .static_block => |sb| {
+                if (try self.scanForIdentRefs(sb.body, names)) return true;
+            },
+        };
+        return false;
+    }
+
+    /// Once we're inside a nested function-like scope, any matching
+    /// identifier reference (anywhere — including further-nested
+    /// scopes, since `let X` shadowing inside the inner body still
+    /// over-approximates safely) is a capture.
+    fn scanForIdentRefs(
+        self: *Compiler,
+        body: []const ast.statement.Statement,
+        names: []const []const u8,
+    ) CompileError!bool {
+        for (body) |*st| {
+            if (try self.scanStmtForIdentRefs(st, names)) return true;
+        }
+        return false;
+    }
+
+    fn scanStmtForIdentRefs(
+        self: *Compiler,
+        stmt: *const ast.statement.Statement,
+        names: []const []const u8,
+    ) CompileError!bool {
+        switch (stmt.*) {
+            .expression => |es| return self.scanInitForIdentRefs(&es.expression, names),
+            .block => |bs| return self.scanForIdentRefs(bs.body, names),
+            .empty, .debugger_, .break_, .continue_ => return false,
+            .lexical => |ld| {
+                for (ld.declarators) |d| {
+                    if (d.init) |*e| {
+                        if (try self.scanInitForIdentRefs(e, names)) return true;
+                    }
+                }
+                return false;
+            },
+            .if_ => |ifs| {
+                if (try self.scanInitForIdentRefs(&ifs.test_, names)) return true;
+                if (try self.scanStmtForIdentRefs(ifs.consequent, names)) return true;
+                if (ifs.alternate) |alt| return self.scanStmtForIdentRefs(alt, names);
+                return false;
+            },
+            .while_ => |ws| {
+                if (try self.scanInitForIdentRefs(&ws.test_, names)) return true;
+                return self.scanStmtForIdentRefs(ws.body, names);
+            },
+            .do_while => |dw| {
+                if (try self.scanStmtForIdentRefs(dw.body, names)) return true;
+                return self.scanInitForIdentRefs(&dw.test_, names);
+            },
+            .return_ => |rs| {
+                if (rs.argument) |*e| return self.scanInitForIdentRefs(e, names);
+                return false;
+            },
+            .throw_ => |ts| return self.scanInitForIdentRefs(&ts.argument, names),
+            .for_ => |fs| {
+                if (fs.init) |head| switch (head) {
+                    .lexical => |ld| {
+                        for (ld.declarators) |d| {
+                            if (d.init) |*e| {
+                                if (try self.scanInitForIdentRefs(e, names)) return true;
+                            }
+                        }
+                    },
+                    .expression => |e| {
+                        if (try self.scanInitForIdentRefs(&e, names)) return true;
+                    },
+                };
+                if (fs.test_) |*t| {
+                    if (try self.scanInitForIdentRefs(t, names)) return true;
+                }
+                if (fs.update) |*u| {
+                    if (try self.scanInitForIdentRefs(u, names)) return true;
+                }
+                return self.scanStmtForIdentRefs(fs.body, names);
+            },
+            .for_in_of => |fio| {
+                if (fio.left == .expression) {
+                    if (try self.scanInitForIdentRefs(&fio.left.expression, names)) return true;
+                } else {
+                    for (fio.left.lexical.declarators) |d| {
+                        if (d.init) |*e| {
+                            if (try self.scanInitForIdentRefs(e, names)) return true;
+                        }
+                    }
+                }
+                if (try self.scanInitForIdentRefs(&fio.right, names)) return true;
+                return self.scanStmtForIdentRefs(fio.body, names);
+            },
+            .try_ => |ts| {
+                if (try self.scanForIdentRefs(ts.block.body, names)) return true;
+                if (ts.handler) |h| {
+                    if (try self.scanForIdentRefs(h.body.body, names)) return true;
+                }
+                if (ts.finalizer) |f| {
+                    if (try self.scanForIdentRefs(f.body, names)) return true;
+                }
+                return false;
+            },
+            .switch_ => |sw| {
+                if (try self.scanInitForIdentRefs(&sw.discriminant, names)) return true;
+                for (sw.cases) |c| {
+                    if (c.test_) |*t| {
+                        if (try self.scanInitForIdentRefs(t, names)) return true;
+                    }
+                    if (try self.scanForIdentRefs(c.body, names)) return true;
+                }
+                return false;
+            },
+            .labeled => |ls| return self.scanStmtForIdentRefs(ls.body, names),
+            .function_decl => |fd| {
+                // Already inside a nested function — params + body of
+                // a still-deeper function. Continue scanning.
+                if (try self.paramsForScan(fd.params, names)) return true;
+                return self.scanForIdentRefs(fd.body.body, names);
+            },
+            .class_decl => |cd| {
+                if (cd.superclass) |*sc| {
+                    if (try self.scanInitForIdentRefs(sc, names)) return true;
+                }
+                for (cd.body) |m| switch (m) {
+                    .method => |md| {
+                        if (md.key == .computed) {
+                            if (try self.scanInitForIdentRefs(md.key.computed, names)) return true;
+                        }
+                        if (try self.paramsForScan(md.params, names)) return true;
+                        if (try self.scanForIdentRefs(md.body.body, names)) return true;
+                    },
+                    .field => |fd| {
+                        if (fd.key == .computed) {
+                            if (try self.scanInitForIdentRefs(fd.key.computed, names)) return true;
+                        }
+                        if (fd.init) |*e| {
+                            if (try self.scanInitForIdentRefs(e, names)) return true;
+                        }
+                    },
+                    .static_block => |sb| {
+                        if (try self.scanForIdentRefs(sb.body, names)) return true;
+                    },
+                };
+                return false;
+            },
+            .import_decl, .export_decl => return false,
+        }
+    }
+
+    fn paramsForScan(
+        self: *Compiler,
+        params: []const ast.statement.FunctionParam,
+        names: []const []const u8,
+    ) CompileError!bool {
+        for (params) |p| switch (p) {
+            .simple => |sp| if (sp.default) |*d| {
+                if (try self.scanInitForIdentRefs(d, names)) return true;
+            },
+            .rest => {},
+        };
+        return false;
+    }
+
+    fn scanInitForIdentRefs(
+        self: *Compiler,
+        e: *const ast.expression.Expression,
+        names: []const []const u8,
+    ) CompileError!bool {
+        switch (e.*) {
+            .identifier_reference => |ir| {
+                const lex = self.source[ir.span.start..ir.span.end];
+                // Cheap pre-check: if the lexeme contains a `\` then
+                // it may be Unicode-escaped — fall back to the
+                // canonicalised name compare.
+                if (std.mem.indexOfScalar(u8, lex, '\\') == null) {
+                    for (names) |n| {
+                        if (std.mem.eql(u8, lex, n)) return true;
+                    }
+                    return false;
+                }
+                const decoded = self.bindingName(ir.span) catch return false;
+                for (names) |n| {
+                    if (std.mem.eql(u8, decoded, n)) return true;
+                }
+                return false;
+            },
+            .null_literal,
+            .boolean_literal,
+            .numeric_literal,
+            .bigint_literal,
+            .string_literal,
+            .regex_literal,
+            .this_expr,
+            .super_,
+            .import_meta,
+            .new_target,
+            .private_identifier,
+            => return false,
+            .template_literal => |tl| {
+                for (tl.expressions) |*sub| {
+                    if (try self.scanInitForIdentRefs(sub, names)) return true;
+                }
+                return false;
+            },
+            .parenthesized => |p| return self.scanInitForIdentRefs(p.expression, names),
+            .unary => |u| return self.scanInitForIdentRefs(u.operand, names),
+            .binary => |b| {
+                if (try self.scanInitForIdentRefs(b.lhs, names)) return true;
+                return self.scanInitForIdentRefs(b.rhs, names);
+            },
+            .logical => |l| {
+                if (try self.scanInitForIdentRefs(l.lhs, names)) return true;
+                return self.scanInitForIdentRefs(l.rhs, names);
+            },
+            .conditional => |c| {
+                if (try self.scanInitForIdentRefs(c.test_, names)) return true;
+                if (try self.scanInitForIdentRefs(c.consequent, names)) return true;
+                return self.scanInitForIdentRefs(c.alternate, names);
+            },
+            .assignment => |a| {
+                if (try self.scanInitForIdentRefs(a.target, names)) return true;
+                return self.scanInitForIdentRefs(a.value, names);
+            },
+            .sequence => |sq| {
+                for (sq.expressions) |*sub| {
+                    if (try self.scanInitForIdentRefs(sub, names)) return true;
+                }
+                return false;
+            },
+            .member => |m| {
+                if (try self.scanInitForIdentRefs(m.object, names)) return true;
+                if (m.property == .computed) {
+                    return self.scanInitForIdentRefs(m.property.computed, names);
+                }
+                return false;
+            },
+            .call => |c| {
+                if (try self.scanInitForIdentRefs(c.callee, names)) return true;
+                for (c.arguments) |*arg| {
+                    if (try self.scanInitForIdentRefs(arg, names)) return true;
+                }
+                return false;
+            },
+            .new_expr => |n| {
+                if (try self.scanInitForIdentRefs(n.callee, names)) return true;
+                for (n.arguments) |*arg| {
+                    if (try self.scanInitForIdentRefs(arg, names)) return true;
+                }
+                return false;
+            },
+            .chain => |ch| return self.scanInitForIdentRefs(ch.expression, names),
+            .tagged_template => |tt| {
+                if (try self.scanInitForIdentRefs(tt.tag, names)) return true;
+                return self.scanInitForIdentRefs(tt.quasi, names);
+            },
+            .spread => |sp| return self.scanInitForIdentRefs(sp.argument, names),
+            .update => |up| return self.scanInitForIdentRefs(up.operand, names),
+            .function_expr => |fe| {
+                if (try self.paramsForScan(fe.params, names)) return true;
+                return self.scanForIdentRefs(fe.body.body, names);
+            },
+            .arrow_function => |af| switch (af.body) {
+                .block => |bs| {
+                    if (try self.paramsForScan(af.params, names)) return true;
+                    return self.scanForIdentRefs(bs.body, names);
+                },
+                .expression => |sub| {
+                    if (try self.paramsForScan(af.params, names)) return true;
+                    return self.scanInitForIdentRefs(sub, names);
+                },
+            },
+            .array_literal => |al| {
+                for (al.elements) |maybe| {
+                    if (maybe) |sub| {
+                        if (try self.scanInitForIdentRefs(&sub, names)) return true;
+                    }
+                }
+                return false;
+            },
+            .object_literal => |ol| {
+                for (ol.properties) |om| switch (om) {
+                    .property => |p| {
+                        if (p.key == .computed) {
+                            if (try self.scanInitForIdentRefs(p.key.computed, names)) return true;
+                        }
+                        if (try self.scanInitForIdentRefs(&p.value, names)) return true;
+                    },
+                    .spread => |sp| if (try self.scanInitForIdentRefs(sp.argument, names)) return true,
+                    .method => |m| {
+                        if (m.key == .computed) {
+                            if (try self.scanInitForIdentRefs(m.key.computed, names)) return true;
+                        }
+                        if (try self.paramsForScan(m.params, names)) return true;
+                        if (try self.scanForIdentRefs(m.body.body, names)) return true;
+                    },
+                };
+                return false;
+            },
+            .class_expr => |ce| {
+                if (ce.superclass) |sc| {
+                    if (try self.scanInitForIdentRefs(sc, names)) return true;
+                }
+                for (ce.body) |m| switch (m) {
+                    .method => |md| {
+                        if (md.key == .computed) {
+                            if (try self.scanInitForIdentRefs(md.key.computed, names)) return true;
+                        }
+                        if (try self.paramsForScan(md.params, names)) return true;
+                        if (try self.scanForIdentRefs(md.body.body, names)) return true;
+                    },
+                    .field => |fd| {
+                        if (fd.key == .computed) {
+                            if (try self.scanInitForIdentRefs(fd.key.computed, names)) return true;
+                        }
+                        if (fd.init) |*ie| {
+                            if (try self.scanInitForIdentRefs(ie, names)) return true;
+                        }
+                    },
+                    .static_block => |sb| {
+                        if (try self.scanForIdentRefs(sb.body, names)) return true;
+                    },
+                };
+                return false;
+            },
+            .yield => |y| {
+                if (y.argument) |arg| return self.scanInitForIdentRefs(arg, names);
+                return false;
+            },
+            .await_ => |aw| return self.scanInitForIdentRefs(aw.argument, names),
+            .import_call => |ic| return self.scanInitForIdentRefs(ic.source, names),
+        }
+    }
+
     fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
         // §14.7.4 ForStatement (C-style — for-in / for-of compile
         // separately). For `let`/`const` head bindings,
@@ -8980,6 +9635,19 @@ pub const Compiler = struct {
         // (the overwhelming majority) and multi-binding heads
         // (`for (let i = 0, j = 10; …)`); `var` heads stay on the
         // legacy single-slot path.
+        //
+        // §14.7.4.4 optimisation — when no nested function in the
+        // loop body / update / test captures any head binding, the
+        // per-iter env is not spec-observable. V8 / JSC / SpiderMonkey
+        // all elide it and run the loop in a single lexical scope;
+        // we do the same via `forLoopBindingsAreCaptured`. The
+        // regex property-escapes helper
+        // `for (let codePoint = start; codePoint <= end; codePoint++)
+        //   { codePoints[length++] = codePoint; }`
+        // is the canonical case — without this optimisation those
+        // fixtures (538 of them in `built-ins/RegExp/property-escapes`)
+        // blow past the harness step budget once a fresh env is
+        // allocated + populated + popped on every iteration.
         const labels = try self.drainPendingLabels();
 
         // Detect the `let`/`const`-binding case. Multi-binding is
@@ -9000,7 +9668,6 @@ pub const Compiler = struct {
                     }
                 }
                 if (all_ident and ld.declarators.len > 0) {
-                    per_iter_env = true;
                     const k: BindingKind = if (ld.kind == .let_) .let_ else .const_;
                     for (ld.declarators) |d| {
                         const name = try self.bindingName(d.name.identifier.span);
@@ -9009,6 +9676,49 @@ pub const Compiler = struct {
                             .span = d.span,
                             .kind = k,
                         });
+                    }
+                    // Only emit the per-iter env when a nested
+                    // function in the body / test / update actually
+                    // captures one of the bindings. Without a
+                    // capture, the per-iter env is unobservable and
+                    // can be elided (treat as a single block scope).
+                    var names_buf: std.ArrayListUnmanaged([]const u8) = .empty;
+                    defer names_buf.deinit(self.allocator);
+                    for (per_iter_bindings.items) |b| {
+                        try names_buf.append(self.allocator, b.name);
+                    }
+                    var captured = false;
+                    // §13.3.2 — a closure created *inside* a head
+                    // initializer (e.g. `let i = 0, f = function(){
+                    // return i; }`) captures the init env and is
+                    // spec-observable across iterations. Walk every
+                    // declarator's init expression.
+                    for (ld.declarators) |di| {
+                        if (di.init) |*ie| {
+                            if (try self.exprMentionsNamesInNestedFn(ie, names_buf.items)) {
+                                captured = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!captured) {
+                        if (try self.forLoopBindingsAreCaptured(s.body, names_buf.items)) {
+                            captured = true;
+                        } else if (s.test_) |*t| {
+                            if (try self.exprMentionsNamesInNestedFn(t, names_buf.items)) captured = true;
+                        }
+                    }
+                    if (!captured) {
+                        if (s.update) |*u| {
+                            if (try self.exprMentionsNamesInNestedFn(u, names_buf.items)) captured = true;
+                        }
+                    }
+                    per_iter_env = captured;
+                    if (!captured) {
+                        // Drop the bindings so the non-per-iter
+                        // fallthrough below uses the legacy
+                        // single-scope path.
+                        per_iter_bindings.clearRetainingCapacity();
                     }
                 }
             },
