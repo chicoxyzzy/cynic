@@ -983,6 +983,20 @@ pub const JSObject = struct {
                 return self.hasOwnIndexedSlot(idx);
             }
         }
+        // §10.4.5.2 Integer-Indexed Exotic [[HasProperty]] — when
+        // the key is a CanonicalNumericIndexString, an own-property
+        // check on a TypedArray resolves through IsValidIntegerIndex
+        // against the live buffer witness. A fixed-length view over
+        // a resizable buffer that's been shrunk past its window
+        // reports `hasOwn(i) === false` (and `i in ta === false`)
+        // for every numeric index — the §10.4.5.2 lookup explicitly
+        // does NOT walk the prototype chain on the numeric form.
+        if (self.typed_view) |tv| {
+            const ta_mod = @import("builtins/typed_array.zig");
+            if (ta_mod.canonicalNumericIndex(key)) |num| {
+                return ta_mod.isValidIntegerIndexPub(tv, num);
+            }
+        }
         return false;
     }
 

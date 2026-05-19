@@ -198,7 +198,21 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethodOnProto(realm, ta_proto, "reduceRight", typedArrayReduceRight, 1);
         try installNativeMethodOnProto(realm, ta_proto, "reverse", typedArrayReverse, 0);
         try installNativeMethodOnProto(realm, ta_proto, "some", typedArraySome, 1);
-        try installNativeMethodOnProto(realm, ta_proto, "toString", typedArrayToString, 0);
+        // §23.2.3.32 — `%TypedArray%.prototype.toString` is the
+        // same built-in function object as `Array.prototype.toString`
+        // (§23.1.3.32). Pull the already-installed Array method
+        // and alias it here so `TypedArray.prototype.toString ===
+        // Array.prototype.toString` holds; allocating a separate
+        // native would break that identity test.
+        {
+            const arr_proto = realm.intrinsics.array_prototype orelse unreachable;
+            const arr_to_string = arr_proto.get("toString");
+            try ta_proto.setWithFlags(realm.allocator, "toString", arr_to_string, .{
+                .writable = true,
+                .enumerable = false,
+                .configurable = true,
+            });
+        }
         try installNativeMethodOnProto(realm, ta_proto, "toLocaleString", typedArrayToLocaleString, 0);
         try installNativeMethodOnProto(realm, ta_proto, "filter", typedArrayFilter, 1);
         try installNativeMethodOnProto(realm, ta_proto, "map", typedArrayMap, 1);
@@ -211,7 +225,19 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethodOnProto(realm, ta_proto, "entries", arrayLikeEntriesMethod, 0);
         try installNativeMethodOnProto(realm, ta_proto, "keys", arrayLikeKeysMethod, 0);
         try installNativeMethodOnProto(realm, ta_proto, "values", arrayLikeValuesMethod, 0);
-        try installNativeMethodOnProto(realm, ta_proto, "@@iterator", arrayLikeValuesMethod, 0);
+        // §23.2.3.36 — `%TypedArray%.prototype[@@iterator]` is the
+        // same built-in function object as `%TypedArray%.prototype.values`
+        // (NOT a fresh native). Pull the function object back out
+        // and reinstall it under the symbol slot so the identity
+        // check `proto[Symbol.iterator] === proto.values` holds.
+        {
+            const values_fn = ta_proto.get("values");
+            try ta_proto.setWithFlags(realm.allocator, "@@iterator", values_fn, .{
+                .writable = true,
+                .enumerable = false,
+                .configurable = true,
+            });
+        }
 
         // §23.2.3 sort + ES2023 immutable variants.
         try installNativeMethodOnProto(realm, ta_proto, "sort", typedArraySort, 1);
@@ -1978,14 +2004,19 @@ fn taCallbackPreamble(realm: *Realm, this_value: Value, args: []const Value) Nat
 }
 
 fn typedArrayAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    // §23.2.3.1 %TypedArray%.prototype.at(index).
+    // §23.2.3.2 %TypedArray%.prototype.at(index).
     const tv = try taValidatedView(realm, this_value, "at");
+    // §23.2.3.2 step 3 — `len` is captured BEFORE the
+    // ToIntegerOrInfinity coercion on `index` (which may
+    // user-resize the backing buffer). The bounds check at
+    // step 6 (`k < 0 or k ≥ len`) uses this snapshot; the
+    // post-coercion live length is only re-witnessed inside
+    // IntegerIndexedElementGet (`taSafeRead`).
+    const len: i64 = @intCast(taCurrentLength(tv));
     const idx_arg = argOr(args, 0, Value.fromInt32(0));
-    // §23.2.3.1 step 4 — ToIntegerOrInfinity(index).
-    // We must run the coercion (fires user `valueOf`) BEFORE
-    // looking at the typed array length, and use the coerced
-    // integer (not the raw arg) for the negative-from-end /
-    // range test.
+    // §23.2.3.2 step 4 — ToIntegerOrInfinity(index) is allowed
+    // to fire user `valueOf` and detach / resize the buffer.
+    // The pre-captured `len` keeps `k` aligned to the spec.
     const idx_num = try intrinsics.toNumber(realm, idx_arg);
     const idx_n: f64 = if (idx_num.isInt32())
         @floatFromInt(idx_num.asInt32())
@@ -1993,7 +2024,6 @@ fn typedArrayAt(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         idx_num.asDouble()
     else
         0;
-    const len: i64 = @intCast(taCurrentLength(tv));
     // §7.1.5 ToIntegerOrInfinity — NaN→0; trunc otherwise.
     const trunc_n = if (std.math.isNan(idx_n)) 0.0 else @trunc(idx_n);
     const max_i: f64 = @floatFromInt(std.math.maxInt(i64));
@@ -2016,30 +2046,36 @@ fn typedArrayCopyWithin(realm: *Realm, this_value: Value, args: []const Value) N
     const target = try taResolveIndex(realm, argOr(args, 0, Value.fromInt32(0)), len, 0);
     const start = try taResolveIndex(realm, argOr(args, 1, Value.fromInt32(0)), len, 0);
     const end = try taResolveIndex(realm, argOr(args, 2, Value.undefined_), len, len);
-    // §23.2.3.6 step 9 — re-validate after coercions. A user
+    // §23.2.3.6 step 9 — `count` is min(end-start, len-target)
+    // using the PRE-coercion `len` snapshot from step 2. The
+    // ES2024 spec doesn't re-witness the witness here.
+    const count = @min(end - start, len - target);
+    if (count <= 0) return this_value;
+    // §23.2.3.6 step 10 — re-validate after coercions. A user
     // valueOf may have detached `O.[[ViewedArrayBuffer]]`; the
-    // spec calls IsDetachedBuffer here (effectively the same
-    // ValidateTypedArray check) and only proceeds with the
-    // memmove when the buffer is still live.
+    // spec re-witnesses with MakeTypedArrayWithBufferWitnessRecord
+    // here and only proceeds with the memmove when the buffer is
+    // still live. The post-coercion live length is then used as
+    // `bufferByteLimit` to clamp the memmove byte range — never
+    // to grow the `count` derived from the pre-coercion len.
     const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray.prototype.copyWithin: buffer detached during coercion");
     if (taIsOutOfBounds(tv)) {
         return throwTypeError(realm, "TypedArray.prototype.copyWithin: TypedArray went out-of-bounds during coercion");
     }
-    // §23.2.3.6 step 10 — recompute len against the post-coercion
-    // buffer (a RAB shrink reduces the count; a grow leaves the
-    // original count intact since we capture it pre-coercion).
     const live_len: i64 = @intCast(taCurrentLength(tv));
-    const eff_target = @min(target, live_len);
-    const eff_start = @min(start, live_len);
-    const eff_end = @min(end, live_len);
-    const count = @min(eff_end - eff_start, live_len - eff_target);
-    if (count <= 0) return this_value;
     const elem_size = tv.kind.elementSize();
-    const byte_count: usize = @as(usize, @intCast(count)) * elem_size;
-    const src_off = tv.byte_offset + @as(usize, @intCast(eff_start)) * elem_size;
-    const dst_off = tv.byte_offset + @as(usize, @intCast(eff_target)) * elem_size;
+    const byte_limit = tv.byte_offset + @as(usize, @intCast(live_len)) * elem_size;
+    const src_off = tv.byte_offset + @as(usize, @intCast(start)) * elem_size;
+    const dst_off = tv.byte_offset + @as(usize, @intCast(target)) * elem_size;
+    // §23.2.3.6 step 10.j-k — clamp the byte count if either
+    // endpoint would exceed `bufferByteLimit` post-resize.
+    var byte_count: usize = @as(usize, @intCast(count)) * elem_size;
+    if (src_off >= byte_limit or dst_off >= byte_limit) return this_value;
+    if (src_off + byte_count > byte_limit) byte_count = byte_limit - src_off;
+    if (dst_off + byte_count > byte_limit) byte_count = byte_limit - dst_off;
+    if (byte_count == 0) return this_value;
     if (src_off + byte_count > buf.len or dst_off + byte_count > buf.len) {
-        return this_value; // clamped to whatever's available
+        return this_value; // belt-and-suspenders against witness drift
     }
     // §23.2.3.6 copyWithin uses memmove-style overlap-safe copy.
     // Zig's `@memcpy` panics on aliased ranges, so dispatch into
@@ -2293,11 +2329,6 @@ fn typedArrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeE
     return Value.fromString(result);
 }
 
-fn typedArrayToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    return typedArrayJoin(realm, this_value, &.{});
-}
-
 /// §23.2.3.32 %TypedArray%.prototype.toLocaleString — same shape
 /// as Array.prototype.toLocaleString (§23.1.3.32) but reads the
 /// length / index slots from the typed view directly. For each
@@ -2307,16 +2338,37 @@ fn typedArrayToString(realm: *Realm, this_value: Value, args: []const Value) Nat
 fn typedArrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const tv = try taValidatedView(realm, this_value, "toLocaleString");
-    const buf = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached");
     const elem_size = tv.kind.elementSize();
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
     const interpreter = @import("../interpreter.zig");
+    // §23.2.3.34 step 4 — `len` is captured BEFORE the iteration
+    // starts. The loop visits each of the original `len` slots;
+    // a user `Number.prototype.toLocaleString` that shrinks the
+    // backing buffer mid-iteration moves the remaining indices
+    // out of bounds, but the iteration count itself doesn't
+    // change. §10.4.5.16 IntegerIndexedElementGet on an OOB slot
+    // returns `undefined`; per §23.2.3.34 step 7.b the
+    // corresponding element rendered into the join is the empty
+    // string.
     const tls_len = taCurrentLength(tv);
     var i: usize = 0;
     while (i < tls_len) : (i += 1) {
         if (i > 0) out.appendSlice(realm.allocator, ",") catch return error.OutOfMemory;
-        const v = readTypedElement(realm, buf, tv.kind, tv.byte_offset + i * elem_size);
+        // Re-witness the buffer each iteration — a previous
+        // toLocaleString call may have detached / resized it.
+        const live_buf = tv.viewed.array_buffer;
+        const live_len_iter = taCurrentLength(tv);
+        const v: Value = blk: {
+            if (i >= live_len_iter) break :blk Value.undefined_;
+            const lb = live_buf orelse break :blk Value.undefined_;
+            const off = tv.byte_offset + i * elem_size;
+            if (off + elem_size > lb.len) break :blk Value.undefined_;
+            break :blk readTypedElement(realm, lb, tv.kind, off);
+        };
+        // §23.2.3.34 step 7.b — `undefined` / `null` elements
+        // contribute the empty string to the join.
+        if (v.isUndefined() or v.isNull()) continue;
         // §23.2.3.34 step 7 — `Invoke(elt, "toLocaleString")`
         // observes the user-installed
         // `Number.prototype.toLocaleString` (or BigInt's). Box the
@@ -2650,16 +2702,15 @@ fn taSpeciesCreateSubarray(
         return inst;
     }
     const species_fn = heap_mod.valueAsFunction(species_v) orelse return throwTypeError(realm, "TypedArray @@species is not a constructor");
-    // §23.2.5.1.4 NewTypedArrayFromArrayBuffer step 11 — even
-    // the user-overridden species ctor receives a detached
-    // buffer and will throw inside its TA constructor. Throw
-    // earlier so we don't re-enter for nothing; this also
-    // sidesteps engines that short-circuit the construct
-    // when buffer is null. (The construct path below would
-    // throw anyway via the inner ArrayBuffer-detached check
-    // inside `typedArrayConstructorBuilder`, but failing fast
-    // matches V8 / JSC.)
-    if (buffer.array_buffer == null) return throwTypeError(realm, "TypedArray: ArrayBuffer is detached");
+    // §23.2.4.3 TypedArraySpeciesCreate(exemplar, args) is just
+    // `TypedArrayCreate(constructor, args)` — the spec hands the
+    // arguments to the species constructor and validates the
+    // *returned* TA, NOT the input buffer. A custom @@species
+    // that ignores `buffer` and returns an unrelated TA (e.g.
+    // `new TA(0)`) is well-formed even when the source buffer
+    // has been detached mid-coercion. Don't pre-emptively throw
+    // here; the spec-mandated checks happen on the returned TA
+    // below.
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
     // §23.2.3.31 steps 15-16 — argument list shape depends on
@@ -2720,41 +2771,39 @@ fn typedArrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 
 fn typedArrayFilter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctx = try taCallbackPreamble(realm, this_value, args);
-    // Two-pass: first decide which elements are kept (record into
-    // a temp byte array), then allocate the result with the exact
-    // size and copy. Avoids two reallocations for the common case
-    // where most pass.
-    var kept: std.ArrayListUnmanaged(usize) = .empty;
+    // §23.2.3.10 — `filter` reads each element through
+    // IntegerIndexedElementGet (NOT a memcpy of the original
+    // bytes), invokes the callback with the read value, and
+    // keeps the *value that was read* (not the live byte slot).
+    // A callback that resizes the backing buffer therefore
+    // changes what subsequent reads return, but earlier values
+    // are pinned. For float views a resized-OOB slot read
+    // returns `undefined`, which → `NaN` when stored back into
+    // a float typed slot via SetTypedArrayElement (§7.1.3 / §7.1.4
+    // ToNumber dispatches `undefined → NaN`).
+    var kept: std.ArrayListUnmanaged(Value) = .empty;
     defer kept.deinit(realm.allocator);
     var i: usize = 0;
     while (i < ctx.len) : (i += 1) {
         const v = taSafeRead(realm, ctx.tv, @intCast(i));
         const r = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
-        if (toBoolean(r)) kept.append(realm.allocator, i) catch return error.OutOfMemory;
+        if (toBoolean(r)) kept.append(realm.allocator, v) catch return error.OutOfMemory;
     }
     // §23.2.3.10 step 12 — TypedArraySpeciesCreate(O, « kept.length »).
     const out = try taSpeciesCreate(realm, ctx.self_obj, ctx.tv.kind, kept.items.len);
-    const out_buf = out.typed_view.?.viewed.array_buffer.?;
-    const elem_size = ctx.tv.kind.elementSize();
-    // Length-tracking destinations whose backing buffer has been
-    // resized below kept.len*elem_size after taSpeciesCreate
-    // returned (e.g. species ctor handed us a TA over a shrunk
-    // resizable buffer) — clamp so the memcpy stays in-bounds.
-    // Per §23.2.4.1 the species result is also required to have
-    // length ≥ count, but the check is `[[ArrayLength]]`, not
-    // `byteLength`, and a length-tracking view of a resized-down
-    // buffer reports the construction-time length while exposing
-    // a smaller backing slice.
-    const src_buf_opt = ctx.tv.viewed.array_buffer;
+    const out_tv = out.typed_view.?;
+    const out_buf = out_tv.viewed.array_buffer.?;
+    const out_elem_size = out_tv.kind.elementSize();
+    // §23.2.3.10 step 14 — store each retained value via
+    // SetTypedArrayElement, which dispatches ToNumber / ToBigInt
+    // through writeTypedElementForView. A species result whose
+    // own buffer is shorter than `kept.len * elemSize` (e.g.
+    // length-tracking over a shrunk buffer) clamps the write.
     const dst_cap = out_buf.len;
-    for (kept.items, 0..) |src_i, dst_i| {
-        const src_off = ctx.tv.byte_offset + src_i * elem_size;
-        const dst_off = dst_i * elem_size;
-        if (dst_off + elem_size > dst_cap) break;
-        if (src_buf_opt) |src_buf| {
-            if (src_off + elem_size > src_buf.len) break;
-            @memcpy(out_buf[dst_off .. dst_off + elem_size], src_buf[src_off .. src_off + elem_size]);
-        }
+    for (kept.items, 0..) |val, dst_i| {
+        const dst_off = dst_i * out_elem_size;
+        if (dst_off + out_elem_size > dst_cap) break;
+        writeTypedElementForView(out_buf, out_tv, dst_off, val);
     }
     return heap_mod.taggedObject(out);
 }
@@ -3689,7 +3738,11 @@ pub fn typedArrayDefineOwnProperty(
         const buf = live_tv.viewed.array_buffer orelse return .applied;
         const elem_size = live_tv.kind.elementSize();
         const idx: usize = @intFromFloat(num);
-        writeTypedElement(buf, live_tv.kind, live_tv.byte_offset + idx * elem_size, coerced);
+        // §7.1.11 ToUint8Clamp vs §7.1.6 ToUint8 — Uint8ClampedArray
+        // shares `kind = .uint8` with Uint8Array; the name-aware
+        // dispatcher routes the clamped path so a defineProperty
+        // value of e.g. 32768 lands as 255, not 0.
+        writeTypedElementForView(buf, live_tv, live_tv.byte_offset + idx * elem_size, coerced);
     }
     return .applied;
 }

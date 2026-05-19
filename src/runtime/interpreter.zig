@@ -1346,6 +1346,21 @@ fn genReturn(realm: *Realm, this_value: Value, args: []const Value) @import("fun
     const obj = heap_mod.valueAsPlainObject(this_value).?;
     const gen = obj.generator_ref.?;
     const arg: Value = if (args.len > 0) args[0] else Value.undefined_;
+    // §27.5.1.3 step 1 → §27.5.1.2 GeneratorValidate step 5 — a
+    // re-entrant `iter.return(...)` from inside the generator
+    // body itself observes state == .executing and must throw
+    // TypeError. The body's own unwind will mark the generator
+    // completed when the propagated TypeError reaches the body
+    // tail (§27.5.3.10 step 4.d), so no state edit is needed
+    // here.
+    if (gen.state == .executing) {
+        const ex = makeTypeError(realm, "Generator is already running") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
     // §27.5.1.3 step 3 — if the generator is suspended, drive a
     // return-completion through any pending `try { … } finally`
     // blocks. `initial` / `completed` skip the body re-entry:
@@ -3408,9 +3423,19 @@ pub fn resumeGenerator(
                 }
                 return .{ .thrown = ex };
             },
-            .value => {
+            .value => |v| {
+                // §14.15.3 step 4 — the finally block executed
+                // its own abrupt `return X` (or `break` with a
+                // labelled value reaching the function tail). The
+                // finally's completion replaces the outer return-
+                // completion outright — surface its value, NOT the
+                // saved `return_val`. Empty / naturally-completing
+                // finally blocks come back through the `.thrown`
+                // arm above (the synth-rethrow round-trip) where
+                // `valuesIdentical(ex, return_val)` restores the
+                // saved value.
                 gen.state = .completed;
-                return .{ .value = return_val };
+                return .{ .value = v };
             },
             .yielded => |v| {
                 // §14.15.3 step 4 — the finally body itself
