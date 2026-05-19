@@ -73,6 +73,25 @@ pub fn statementReferencesArguments(source: []const u8, s: *const ast.statement.
             if (statementReferencesArguments(source, s2.body)) break :blk true;
             break :blk false;
         },
+        // §14.7.5 ForInOfStatement. `for (x in arguments)` /
+        // `for (x of arguments)` must mark `arguments` as
+        // referenced; without this, the prologue skips the
+        // `lda_arguments` install and the for-in/of head reads
+        // `arguments` as an outer-scope ReferenceError.
+        .for_in_of => |s2| blk: {
+            switch (s2.left) {
+                .expression => |*e| if (expressionReferencesArguments(source, e)) break :blk true,
+                .lexical => |ld| for (ld.declarators) |d| {
+                    if (d.init) |*e| if (expressionReferencesArguments(source, e)) break :blk true;
+                },
+            }
+            if (expressionReferencesArguments(source, &s2.right)) break :blk true;
+            if (statementReferencesArguments(source, s2.body)) break :blk true;
+            break :blk false;
+        },
+        // LabeledStatement just wraps another statement — recurse
+        // so `arguments` inside the labeled body is still seen.
+        .labeled => |s2| statementReferencesArguments(source, s2.body),
         .return_ => |s2| if (s2.argument) |*e| expressionReferencesArguments(source, e) else false,
         .throw_ => |s2| expressionReferencesArguments(source, &s2.argument),
         .try_ => |s2| blk: {
