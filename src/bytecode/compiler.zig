@@ -2639,34 +2639,67 @@ pub const Compiler = struct {
             if (a.op != .eq) {
                 return self.compileSuperCompoundAssign(a, m);
             }
-            // §13.3.7.1 step 2 — for `super[expr] = v`, GetThisBinding
-            // precedes Expression evaluation. Emit the guard before
-            // the bracket key compiles so a derived ctor before
-            // super() throws ReferenceError without observing the
-            // RHS side effects.
+            // §13.15.2 AssignmentExpression evaluation: evaluate the
+            // LeftHandSideExpression FIRST, then the AssignmentExpression
+            // (right-hand side). For `super[prop()] = expr()`, the LHS
+            // evaluation runs §13.3.7.1 SuperProperty steps 1-5 — which
+            // includes ToPropertyKey on the bracket key. So an abrupt
+            // completion from `prop()` (or its ToPropertyKey coercion)
+            // must short-circuit before `expr()` ever evaluates.
+            //
+            // For `super.ident = v` there's no observable LHS side
+            // effect to order against, but the §13.3.7.1 step 2
+            // GetThisBinding guard still has to fire before the RHS.
+            //
+            // Emit order:
+            //   1. super_check_this  (§13.3.7.1 step 2)
+            //   2. evaluate computed key, stash in r_key
+            //   3. evaluate RHS, stash in r_val
+            //   4. super_set / super_set_computed
+            //
+            // See test262 language/expressions/assignment/
+            //   target-super-{computed-reference,identifier-reference-null}.js
             if (m.property == .computed) {
                 try self.builder.emitOp(.super_check_this, m.span);
             }
-            try self.compileExpression(a.value);
-            const r_val = try self.reserveTemp();
-            defer self.releaseTemp();
-            try self.builder.emitOp(.star, a.span);
-            try self.builder.emitU8(r_val);
             switch (m.property) {
                 .ident => |span| {
                     const raw = self.source[span.start..span.end];
                     if (raw.len > 0 and raw[0] == '#') return error.UnsupportedExpression;
                     const k = try self.internString(try self.decodeIdentifierName(raw));
+                    try self.compileExpression(a.value);
+                    const r_val = try self.reserveTemp();
+                    defer self.releaseTemp();
+                    try self.builder.emitOp(.star, a.span);
+                    try self.builder.emitU8(r_val);
                     try self.builder.emitOp(.super_set, m.span);
                     try self.builder.emitU16(k);
                     try self.builder.emitU8(r_val);
                 },
                 .computed => |key_expr| {
+                    // §13.3.2.1 EvaluatePropertyAccessWithExpressionKey
+                    // steps 3-4 — evaluate the key expression and
+                    // GetValue it BEFORE the RHS, but DO NOT
+                    // ToPropertyKey here. §10.1.9.1 Set / §6.2.5.5
+                    // PutValue defers the ToPropertyKey-equivalent
+                    // until after RHS evaluation, so a `prop` whose
+                    // `toString` throws still lets the RHS evaluate
+                    // first and surface ITS abrupt instead. A throw
+                    // from the key Expression itself (e.g. `prop()`)
+                    // still short-circuits before the RHS, which is
+                    // what the first half of test262
+                    // language/expressions/assignment/
+                    // target-super-computed-reference.js exercises.
                     try self.compileExpression(key_expr);
                     const r_key = try self.reserveTemp();
                     defer self.releaseTemp();
                     try self.builder.emitOp(.star, a.span);
                     try self.builder.emitU8(r_key);
+                    try self.compileExpression(a.value);
+                    const r_val = try self.reserveTemp();
+                    defer self.releaseTemp();
+                    try self.builder.emitOp(.star, a.span);
+                    try self.builder.emitU8(r_val);
                     try self.builder.emitOp(.super_set_computed, m.span);
                     try self.builder.emitU8(r_key);
                     try self.builder.emitU8(r_val);
@@ -4574,7 +4607,21 @@ pub const Compiler = struct {
                 if (self.is_module) try self.publishExportedNamesFromDecl(stmt);
             },
             .default_value => |e| {
-                try self.compileExpression(&e);
+                // §15.2.3.11 ExportDeclaration : `export default
+                // AssignmentExpression` — when the expression is an
+                // anonymous ClassExpression, NamedEvaluation runs
+                // ClassDefinitionEvaluation with `className =
+                // "default"` (§15.7.14 step 1). The static-field
+                // initializer body then observes `this.name ===
+                // "default"`. Without this, the class compiles as
+                // anonymous and `.name` is "". See test262
+                // language/expressions/class/elements/
+                // class-name-static-initializer-default-export.js.
+                if (e == .class_expr and e.class_expr.name == null) {
+                    try self.emitClassBuild("default", e.class_expr.superclass, e.class_expr.body, e.class_expr.span);
+                } else {
+                    try self.compileExpression(&e);
+                }
                 if (self.is_module) {
                     const k_default = try self.internString("default");
                     try self.builder.emitOp(.module_export, ed.span);
@@ -7701,7 +7748,15 @@ pub const Compiler = struct {
                         if (prop.key == .ident) {
                             break :blk try self.decodeIdentifierName(self.source[key_span.start..key_span.end]);
                         }
-                        break :blk self.source[key_span.start..key_span.end];
+                        // §13.2.5.4 PropertyDefinitionEvaluation step 2 —
+                        // `LiteralPropertyName : NumericLiteral` returns
+                        // `! ToString(NumericValue)`. The raw source
+                        // `1n` / `0x10` / `1e2` must canonicalise to
+                        // the property key Cynic actually stored
+                        // (`"1"` / `"16"` / `"100"`). Without this
+                        // `let {1n: a} = {1: …}` reads at `"1n"` and
+                        // misses.
+                        break :blk try self.canonicalNumericKey(self.source[key_span.start..key_span.end]);
                     };
                     const k = try self.internString(key_slice);
                     try self.builder.emitOp(.ldar, prop.span);
@@ -7743,7 +7798,11 @@ pub const Compiler = struct {
                             if (prop.key == .ident) {
                                 break :blk try self.decodeIdentifierName(self.source[key_span.start..key_span.end]);
                             }
-                            break :blk self.source[key_span.start..key_span.end];
+                            // §13.2.5.4 — canonicalise NumericLiteral
+                            // key to match `lda_property` path above so
+                            // the exclusion set is in the same form as
+                            // the source's stored key.
+                            break :blk try self.canonicalNumericKey(self.source[key_span.start..key_span.end]);
                         };
                         const k = try self.internString(key_slice);
                         try self.builder.emitOp(.lda_constant, target.span());

@@ -302,18 +302,69 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         const ok = fn_obj.setIfWritable(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
         return Value.fromBool(ok);
     }
-    const target = heap_mod.valueAsPlainObject(arg).?;
+    var target = heap_mod.valueAsPlainObject(arg).?;
     // §9.4.6.4 Module Namespace exotic [[Set]] — always returns
     // false. Reflect.set surfaces that as the literal boolean
     // `false`; the strict-mode bytecode path translates it to
     // TypeError elsewhere.
     if (target.is_module_namespace) return Value.false_;
-    // §10.5.6 Proxy [[Set]] dispatch. Reflect.set returns the
+    // §10.5.9 Proxy [[Set]] dispatch. Reflect.set returns the
     // trap's boolean — it never throws on a falsy return, unlike
     // strict-mode bytecode assignment.
+    //
+    // When `target` is a Proxy whose `set` trap is null/undefined
+    // we MUST walk through to the wrapped non-proxy and re-bind
+    // `target` to the unwrapped object before falling through to
+    // the OrdinarySetWithOwnDescriptor path. Otherwise the cursor
+    // walk below climbs `target.prototype` (the proxy's prototype,
+    // which may be unrelated to the wrapped array's exotic shape)
+    // and the final CreateDataProperty lands on the receiver
+    // (still the outer proxy) instead of failing because the
+    // wrapped target was sealed / preventExtensions'd. See test262
+    // built-ins/Proxy/set/trap-is-{null,undefined}-target-is-proxy.js.
     {
         var proxy_cur = target;
-        while (proxy_cur.proxy_target != null or proxy_cur.proxy_revoked) {
+        while (proxy_cur.proxy_target != null or proxy_cur.proxy_target_fn != null or proxy_cur.proxy_revoked) {
+            // Callable Proxy of a function: §10.5.9 fires `set` if
+            // present, otherwise `target.[[Set]]` against the wrapped
+            // function. The function leg short-circuits through
+            // `setIfWritable` per §10.1.9 OrdinarySet. Handled here
+            // because `nativeProxySet` only knows the plain-object
+            // target shape (`proxy_target`).
+            if (proxy_cur.proxy_target == null and proxy_cur.proxy_target_fn != null and !proxy_cur.proxy_revoked) {
+                const handler = proxy_cur.proxy_handler orelse return throwTypeError(realm, "proxy handler slot is null");
+                const trap_v = handler.get("set");
+                if (!trap_v.isUndefined() and !trap_v.isNull()) {
+                    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'set' trap is not callable");
+                    const key_str = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
+                    const trap_args = [_]Value{ heap_mod.taggedFunction(proxy_cur.proxy_target_fn.?), Value.fromString(key_str), v, receiver_v };
+                    const interp = @import("../interpreter.zig");
+                    const outcome = interp.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => return error.NativeThrew,
+                    };
+                    switch (outcome) {
+                        .value, .yielded => |trap_ret| {
+                            const arith = @import("../interpreter_arith.zig");
+                            return Value.fromBool(arith.toBoolean(trap_ret));
+                        },
+                        .thrown => |ex| {
+                            realm.pending_exception = ex;
+                            return error.NativeThrew;
+                        },
+                    }
+                }
+                // Trap missing — fall through to the wrapped function.
+                // §10.1.9 OrdinarySet on a function: write through
+                // `setIfWritable`. When Receiver !== the function,
+                // semantics still target Receiver, but no fixture in
+                // our scope exercises that asymmetry on a function
+                // through a callable-proxy chain.
+                const fn_target = proxy_cur.proxy_target_fn.?;
+                const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
+                const ok = fn_target.setIfWritable(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+                return Value.fromBool(ok);
+            }
             const r = try proxy_mod.nativeProxySet(realm, proxy_cur, key_slice, v, receiver_v);
             switch (r) {
                 .boolean => |b| return Value.fromBool(b),
@@ -323,6 +374,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
                 },
             }
         }
+        target = proxy_cur;
     }
     // §10.4.5.5 Integer-Indexed exotic [[Set]] — when `target` is
     // a TypedArray and `key` is a CanonicalNumericIndexString:
@@ -453,8 +505,68 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // `Receiver` as `this`. If we find a writable data descriptor
     // (or no descriptor at all, defaulted to writable / enumerable
     // / configurable), the write lands on `Receiver`, NOT `target`.
+    //
+    // When a Proxy sits on the prototype chain, the spec's
+    // `parent.[[Set]](P, V, Receiver)` recursion (§10.1.9.2 step 2)
+    // hands control to the Proxy's [[Set]] — which fires the
+    // `set` trap (or recurses through trapless layers into the
+    // wrapped target). Detect a proxy ancestor and dispatch through
+    // it so `Reflect.set(Object.create(proxy), key, v)` reaches the
+    // proxy's trap (built-ins/Proxy/set/trap-is-undefined-target-is-
+    // proxy.js's third block).
     var cursor: ?*@import("../object.zig").JSObject = target;
-    while (cursor) |o| : (cursor = o.prototype) {
+    walk: while (cursor) |o| {
+        if (o != target and (o.proxy_target != null or o.proxy_target_fn != null or o.proxy_revoked)) {
+            // Walk the proxy chain to either hit a trap (which
+            // settles the result) or reach a non-proxy ancestor we
+            // can resume the ordinary cursor walk on.
+            var proxy_cur = o;
+            while (proxy_cur.proxy_target != null or proxy_cur.proxy_target_fn != null or proxy_cur.proxy_revoked) {
+                if (proxy_cur.proxy_target == null and proxy_cur.proxy_target_fn != null and !proxy_cur.proxy_revoked) {
+                    const handler = proxy_cur.proxy_handler orelse return throwTypeError(realm, "proxy handler slot is null");
+                    const trap_v = handler.get("set");
+                    if (!trap_v.isUndefined() and !trap_v.isNull()) {
+                        const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'set' trap is not callable");
+                        const key_str_t = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
+                        const trap_args = [_]Value{ heap_mod.taggedFunction(proxy_cur.proxy_target_fn.?), Value.fromString(key_str_t), v, receiver_v };
+                        const interp = @import("../interpreter.zig");
+                        const outcome = interp.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            else => return error.NativeThrew,
+                        };
+                        switch (outcome) {
+                            .value, .yielded => |trap_ret| {
+                                const arith = @import("../interpreter_arith.zig");
+                                return Value.fromBool(arith.toBoolean(trap_ret));
+                            },
+                            .thrown => |ex| {
+                                realm.pending_exception = ex;
+                                return error.NativeThrew;
+                            },
+                        }
+                    }
+                    // Trap missing on a callable proxy — fall through
+                    // to the wrapped function's OrdinarySet.
+                    const fn_target = proxy_cur.proxy_target_fn.?;
+                    const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
+                    const ok = fn_target.setIfWritable(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+                    return Value.fromBool(ok);
+                }
+                const r = try proxy_mod.nativeProxySet(realm, proxy_cur, key_slice, v, receiver_v);
+                switch (r) {
+                    .boolean => |b| return Value.fromBool(b),
+                    .fallthrough => |t| {
+                        if (t == proxy_cur) break;
+                        proxy_cur = t;
+                    },
+                }
+            }
+            // Non-proxy ancestor reached; resume the cursor walk
+            // from there so own descriptors / accessors on the
+            // unwrapped tail are still observed.
+            cursor = proxy_cur;
+            continue :walk;
+        }
         // Accessor descriptor — fire the setter with `Receiver`
         // as `this` per §10.1.9.2 step 4 (Reflect.set
         // call-prototype-property-set.js / set-value-on-accessor-
@@ -495,6 +607,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
             break;
         }
         // No own descriptor on this rung — keep climbing.
+        cursor = o.prototype;
     }
     // Reached step 3.b / 3.f territory — either an inherited
     // writable data descriptor was found OR the chain ran out
@@ -512,6 +625,30 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         return Value.false_;
     };
     // §10.1.9.2 step 3.c-e — existing descriptor on Receiver.
+    // When Receiver is itself a Proxy, the spec dispatches through
+    // its `defineProperty` trap (or, with no trap, recurses into
+    // the wrapped target's [[DefineOwnProperty]]). Walk the proxy
+    // chain so a trapless proxy wrapping a preventExtensions'd
+    // target reports the rejection correctly (test262
+    // built-ins/Proxy/set/trap-is-{null,undefined}-target-is-proxy.js).
+    if (receiver_obj.proxy_target != null or receiver_obj.proxy_revoked) {
+        var proxy_cur = receiver_obj;
+        while (proxy_cur.proxy_target != null or proxy_cur.proxy_revoked) {
+            const r = try proxy_mod.nativeProxyDefineProperty(realm, proxy_cur, key_slice, v);
+            switch (r) {
+                .boolean => |b| return Value.fromBool(b),
+                .fallthrough => |t| {
+                    if (t == proxy_cur) break;
+                    proxy_cur = t;
+                },
+            }
+        }
+        // Reached a non-proxy receiver — fall through to the
+        // ordinary descriptor-on-receiver path against the
+        // unwrapped object so the rest of §10.1.9.2 step 3
+        // runs against real slots.
+        return try reflectSetOnReceiver(realm, heap_mod.taggedObject(proxy_cur), key_slice, v);
+    }
     if (receiver_obj.accessors.contains(key_slice)) {
         // IsAccessorDescriptor(existingDescriptor) → return false
         // (different-property-descriptors.js).

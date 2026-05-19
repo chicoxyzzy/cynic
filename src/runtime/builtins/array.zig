@@ -300,7 +300,19 @@ fn arrayConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const reuse_this: bool = blk: {
         const obj = heap_mod.valueAsPlainObject(this_value) orelse break :blk false;
         if (obj.is_array_exotic) break :blk true;
-        if (obj.prototype != null and obj.prototype == realm.intrinsics.array_prototype) break :blk true;
+        // §22.1.1.1 Array(...) construct path — `this_value` is the
+        // fresh OrdinaryCreateFromConstructor instance whose
+        // [[Prototype]] is `NewTarget.prototype`. For a subclass
+        // `class MyArray extends Array {}` (or proxy newTarget that
+        // resolves to one), that chain reaches %Array.prototype%
+        // but isn't equal to it. Walk the chain so a freshly-built
+        // subclass instance still gets `is_array_exotic` punched in
+        // and the args populated in-place, instead of allocating a
+        // discarded fresh Array with the wrong prototype.
+        var cur = obj.prototype;
+        while (cur) |p| : (cur = p.prototype) {
+            if (p == realm.intrinsics.array_prototype) break :blk true;
+        }
         break :blk false;
     };
     const out = if (reuse_this)

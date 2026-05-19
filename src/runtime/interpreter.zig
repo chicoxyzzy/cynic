@@ -3737,6 +3737,29 @@ pub fn constructValue(
     // than `undefined`. The native / generator / async paths don't
     // observe NewTarget through a frame slot, so route them
     // through plain callJSFunction unchanged.
+    //
+    // For a bound target (chunk == null) we MUST route through
+    // `callJSFunctionAsSuper`, not plain `callJSFunction`. The
+    // latter unwraps the bound chain with `for_construct=false`,
+    // which overrides `this_value` with the bound `[[BoundThis]]`
+    // — but §10.4.1.2 [[Construct]] step 4 keeps the freshly
+    // allocated `this` (per `OrdinaryCreateFromConstructor`),
+    // ignoring `[[BoundThis]]` entirely. Without this branch,
+    // `Reflect.construct(Foo.bind(null, 1), [2], SubFoo)` (and
+    // its proxy-wrapped equivalents like
+    // `built-ins/Proxy/construct/trap-is-undefined-target-is-proxy.js`)
+    // sees `this = null` inside Foo's body and a subsequent
+    // `this.sum = …` throws "Cannot set properties of non-object".
+    if (target.bound_target != null) {
+        const outcome = try callJSFunctionAsSuper(allocator, realm, target, this_arg, args, new_target);
+        switch (outcome) {
+            .value, .yielded => |v| {
+                if (heap_mod.valueAsPlainObject(v) != null or heap_mod.valueAsFunction(v) != null) return .{ .value = v };
+                return .{ .value = this_arg };
+            },
+            .thrown => |ex| return .{ .thrown = ex },
+        }
+    }
     if (target.native_callback != null or target.is_generator or target.is_async or target.chunk == null) {
         const outcome = try callJSFunction(allocator, realm, target, this_arg, args);
         switch (outcome) {
@@ -5796,9 +5819,32 @@ fn runFrames(
                             if (!src_obj.flagsFor(k).enumerable) continue;
                         }
                         // §7.3.27 step 4.c.iii — Get(from, nextKey).
-                        // A throw here propagates as an abrupt
-                        // completion through the destructuring.
-                        const v = intrinsics_mod.getPropertyChain(realm, src_obj, k) catch |err| switch (err) {
+                        // Route the Proxy source through the
+                        // [[Get]] trap so the `get` handler fires
+                        // for every enumerable key; the plain-object
+                        // path stays on `getPropertyChain` for
+                        // accessor support. A throw propagates as an
+                        // abrupt completion through the destructuring.
+                        const v: Value = if (is_src_proxy) blk_v: {
+                            const proxy_mod = @import("builtins/proxy.zig");
+                            const outcome = proxy_mod.nativeProxyGet(realm, src_obj, k, heap_mod.taggedObject(src_obj)) catch |err| switch (err) {
+                                error.OutOfMemory => return error.OutOfMemory,
+                                else => {
+                                    const ex = consumePendingException(realm) orelse try makeTypeError(realm, "rest property read failed");
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    break;
+                                },
+                            };
+                            break :blk_v switch (outcome) {
+                                .value => |val| val,
+                                .fallthrough => |t| t.get(k),
+                            };
+                        } else intrinsics_mod.getPropertyChain(realm, src_obj, k) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             else => {
                                 const ex = consumePendingException(realm) orelse try makeTypeError(realm, "rest property read failed");
@@ -6440,6 +6486,31 @@ fn runFrames(
                                     continue;
                                 }
                             }
+                        }
+                        // §6.2.5.5 PutValue with a Super Reference —
+                        // `Let baseObj be ? ToObject(V.[[Base]])`.
+                        // GetSuperBase for a static method returns
+                        // `HomeObject.[[GetPrototypeOf]]()` = the
+                        // constructor's [[Prototype]]. When that's
+                        // null (e.g. after `Object.setPrototypeOf(C,
+                        // null)`), ToObject(null) throws TypeError —
+                        // and the spec runs this AFTER the RHS has
+                        // been evaluated, so any side effect there
+                        // (count += 1) is already observable. Match
+                        // that ordering: we land here post-RHS, so
+                        // throwing here preserves the spec sequence.
+                        // See test262
+                        // language/expressions/assignment/
+                        // target-super-identifier-reference-null.js.
+                        if (hf.static_parent == null and hf.proto == null) {
+                            const ex = try makeTypeError(realm, "Cannot set properties of null (super)");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue;
                         }
                         // Fall back to writing on `this` (the
                         // current constructor, since this is static).
@@ -8341,7 +8412,24 @@ fn runFrames(
                 // The flag is checked post-call below; here we just
                 // remember the pre-call state so the BindThisValue
                 // gate can fire correctly.
-                const second_super_call = f.is_derived_ctor and f.super_called;
+                //
+                // For `super(...)` invoked from an arrow body, the
+                // current frame is the arrow's — `is_derived_ctor`
+                // is false and `super_called` is the arrow's own
+                // local zero. The lexically-enclosing derived ctor
+                // shares its `super_called_cell` with us, so read
+                // that cell as the authoritative "has super already
+                // been called" signal. Otherwise the second
+                // `() => super()` invocation wouldn't trip the
+                // BindThisValue ReferenceError and the field
+                // initializers would re-run (test262
+                // language/expressions/class/elements/
+                // fields-run-once-on-double-super.js).
+                const enclosing_super_called: bool = blk: {
+                    if (f.super_called_cell) |cell| break :blk cell.*;
+                    break :blk f.super_called;
+                };
+                const second_super_call = enclosing_super_called;
                 // §13.3.7.2 GetSuperConstructor — the *active*
                 // function's [[Prototype]], not its home-object's
                 // prototype's `constructor` slot. `Object.setPrototypeOf(C,
@@ -9029,9 +9117,13 @@ fn runFrames(
                         const desc_obj = heap_mod.valueAsPlainObject(desc_v) orelse continue;
                         if (!intrinsics_mod.toBoolean(desc_obj.get("enumerable"))) continue;
                         // §7.3.27 step 4.c.iii — `Get(from, key)`.
-                        // Fires the Proxy `get` trap and any accessor
-                        // on the chain.
-                        const v = intrinsics_mod.getPropertyChain(realm, src_obj, key) catch |err| switch (err) {
+                        // Route through `nativeProxyGet` so the
+                        // Proxy `get` trap fires with the proxy as
+                        // receiver. `getPropertyChain` walks the
+                        // ordinary property bag + prototype chain
+                        // and would silently miss the trap.
+                        const proxy_mod = @import("builtins/proxy.zig");
+                        const outcome = proxy_mod.nativeProxyGet(realm, src_obj, key, src_v) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             else => {
                                 const ex = consumePendingException(realm) orelse try makeTypeError(realm, "object spread get failed");
@@ -9044,7 +9136,10 @@ fn runFrames(
                                 break;
                             },
                         };
-                        prop_value = v;
+                        switch (outcome) {
+                            .value => |v| prop_value = v,
+                            .fallthrough => |t| prop_value = t.get(key),
+                        }
                     } else {
                         if (!src_obj.flagsFor(key).enumerable) continue;
                         if (lookupAccessor(src_obj, key)) |acc_pair| {
@@ -10683,8 +10778,68 @@ fn strictSetPropertyAnchored(
         // dispatching down the chain (§10.5.6 step 7.a recurses
         // into target.[[Set]]).
         var obj = obj_in;
-        const receiver_is_proxy = obj_in.proxy_target != null or obj_in.proxy_revoked;
-        while (obj.proxy_target != null or obj.proxy_revoked) {
+        const receiver_is_proxy = obj_in.proxy_target != null or obj_in.proxy_target_fn != null or obj_in.proxy_revoked;
+        while (obj.proxy_target != null or obj.proxy_target_fn != null or obj.proxy_revoked) {
+            // §10.5.9 [[Set]] on a callable Proxy whose `[[ProxyTarget]]`
+            // is a function (`proxy_target_fn`). The trap, if present,
+            // fires with the function as the spec-target arg; absent,
+            // the spec says `Return ? target.[[Set]](P, V, Receiver)`,
+            // which for a function is OrdinarySet — write through
+            // `setIfWritable` and translate a false return to a
+            // strict-mode TypeError. Without this branch the bytecode
+            // loop exits the moment it reaches a callable proxy and
+            // the post-loop default-receiver path silently creates the
+            // property on the outer proxy. See test262
+            // built-ins/Proxy/set/trap-is-undefined-target-is-proxy.js.
+            if (obj.proxy_target == null and obj.proxy_target_fn != null and !obj.proxy_revoked) {
+                const handler = obj.proxy_handler orelse {
+                    const ex = try makeTypeError(realm, "proxy handler slot is null");
+                    f.ip = ip;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                    return .handled;
+                };
+                const trap_v = handler.get("set");
+                if (!trap_v.isUndefined() and !trap_v.isNull()) {
+                    const trap_fn = heap_mod.valueAsFunction(trap_v) orelse {
+                        const ex = try makeTypeError(realm, "Proxy 'set' trap is not callable");
+                        f.ip = ip;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                        return .handled;
+                    };
+                    const key_str_t = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                    const trap_args = [_]Value{ heap_mod.taggedFunction(obj.proxy_target_fn.?), Value.fromString(key_str_t), value, recv };
+                    const trap_outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args);
+                    switch (trap_outcome) {
+                        .value, .yielded => |trap_ret| {
+                            if (!arith.toBoolean(trap_ret)) {
+                                const ex = try makeTypeError(realm, "'set' on proxy returned falsy");
+                                f.ip = ip;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                                return .handled;
+                            }
+                            return .ok;
+                        },
+                        .thrown => |ex| {
+                            f.ip = ip;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                            return .handled;
+                        },
+                    }
+                }
+                // Trap missing — §10.5.9 step 7.a: `Return ?
+                // target.[[Set]](P, V, Receiver)`. The target is the
+                // function; OrdinarySet writes through `setIfWritable`.
+                const fn_target = obj.proxy_target_fn.?;
+                const owned_k_fn = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                const ok = fn_target.setIfWritable(allocator, owned_k_fn.bytes, value) catch return error.OutOfMemory;
+                if (!ok) {
+                    const ex = try makeTypeError(realm, "Cannot assign to read-only property");
+                    f.ip = ip;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                    return .handled;
+                }
+                return .ok;
+            }
             const r = try proxySetTrap(allocator, realm, frames, f, ip, obj, key, value, recv);
             switch (r) {
                 .value => return .ok,
