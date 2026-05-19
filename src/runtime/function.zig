@@ -513,6 +513,18 @@ pub const JSFunction = struct {
             // ([[ConstructorKind]] = "derived"): `{w:false, e:false, c:false}`.
             // `is_class_constructor` is set both for `class …` literals and
             // by `installConstructor` for the built-ins.
+            //
+            // Non-constructor built-ins (`Math.abs`, `Array.prototype.map`,
+            // arrow / concise-method functions, etc.) carry no `prototype`
+            // slot at all (§10.2.4 only installs one for functions with
+            // a `[[Construct]]`). The §10.2.4 synthesized descriptor only
+            // applies to constructors that own the synthesized slot. If
+            // the user later writes `Math.abs.prototype = 42`, the new
+            // property is an ORDINARY own data property — fall through
+            // to the all-true default.
+            if (self.prototype == null) {
+                return PropertyFlags.default;
+            }
             return if (self.is_class_constructor)
                 .{ .writable = false, .enumerable = false, .configurable = false }
             else
@@ -598,13 +610,29 @@ test "JSFunction: flagsForOwn synthesizes prototype defaults" {
     var chunk = try b.finish();
     defer chunk.deinit(testing.allocator);
 
-    // Ordinary function: §10.2.4 — `prototype` is { w:true, e:false, c:false }.
+    // Ordinary function with a synthesized `prototype` slot:
+    // §10.2.4 — `prototype` is { w:true, e:false, c:false }.
+    // Use a zeroed JSObject as the slot tag — `flagsForOwn` only
+    // null-checks the slot pointer, never dereferences it.
+    var dummy_proto: JSObject = .{};
     const f = try JSFunction.init(testing.allocator, &chunk, 0, null, false, null);
     defer f.deinit(testing.allocator);
+    f.prototype = &dummy_proto;
     const proto_flags = f.flagsForOwn("prototype");
     try testing.expectEqual(true, proto_flags.writable);
     try testing.expectEqual(false, proto_flags.enumerable);
     try testing.expectEqual(false, proto_flags.configurable);
+
+    // No `prototype` slot at all (`Math.abs` shape — built-in
+    // without [[Construct]]). The §10.2.4 synthesized descriptor
+    // doesn't apply; a user write would create an ordinary
+    // own property, so the defaults are all-true.
+    const no_proto = try JSFunction.init(testing.allocator, &chunk, 0, null, false, null);
+    defer no_proto.deinit(testing.allocator);
+    const no_proto_flags = no_proto.flagsForOwn("prototype");
+    try testing.expectEqual(true, no_proto_flags.writable);
+    try testing.expectEqual(true, no_proto_flags.enumerable);
+    try testing.expectEqual(true, no_proto_flags.configurable);
 
     // Other keys default to all-true.
     const other = f.flagsForOwn("foo");
@@ -616,6 +644,7 @@ test "JSFunction: flagsForOwn synthesizes prototype defaults" {
     const cls = try JSFunction.init(testing.allocator, &chunk, 0, null, false, null);
     defer cls.deinit(testing.allocator);
     cls.is_class_constructor = true;
+    cls.prototype = &dummy_proto;
     const cls_proto_flags = cls.flagsForOwn("prototype");
     try testing.expectEqual(false, cls_proto_flags.writable);
     try testing.expectEqual(false, cls_proto_flags.enumerable);
