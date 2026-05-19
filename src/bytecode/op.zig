@@ -479,6 +479,19 @@ pub const Op = enum(u8) {
     /// reaction. TypeError on missing loader / failed load
     /// becomes a rejected Promise; the call itself never throws.
     dynamic_import,
+    /// `[op]` — §16.2.1.7 ImportMeta runtime semantics. Lazy-
+    /// initialise `realm.current_module.import_meta` (an
+    /// ordinary object with `[[Prototype]] = %Object.prototype%`)
+    /// on first read, then return the cached object in `acc`.
+    /// Every subsequent evaluation in the same module returns
+    /// the same object (test262
+    /// `language/expressions/import.meta/same-object-returned.js`,
+    /// `distinct-for-each-module.js`). The parser guarantees this
+    /// opcode is only emitted inside a Module goal, so
+    /// `realm.current_module` is always set when it runs;
+    /// defensive check throws a SyntaxError-class TypeError if
+    /// it isn't (should be unreachable in practice).
+    import_meta,
     /// `[op] [k:u16]` — publish acc as an export named `k` on
     /// the executing module's namespace
     /// (`realm.current_module.exports`). No-op outside module
@@ -814,6 +827,7 @@ pub const Op = enum(u8) {
             .super_get_computed,
             .super_check_this,
             .dynamic_import,
+            .import_meta,
             .module_link_complete,
             .module_reexport_star,
             => 0,
@@ -989,6 +1003,7 @@ pub const Op = enum(u8) {
             .pop_env => "PopEnv",
             .module_load => "ModuleLoad",
             .dynamic_import => "DynamicImport",
+            .import_meta => "ImportMeta",
             .module_export => "ModuleExport",
             .module_link_complete => "ModuleLinkComplete",
             .module_reexport_star => "ModuleReexportStar",

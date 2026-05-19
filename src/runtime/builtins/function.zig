@@ -120,7 +120,16 @@ pub fn installPrototypeMethods(realm: *Realm) !void {
 /// source compilation — aligns with SES / Hardened JavaScript.
 fn functionConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     if (args.len > 0) {
-        return throwTypeError(realm, "Function constructor with source string is not supported (Cynic ships no eval / runtime code construction)");
+        // §20.2.1.1.1 CreateDynamicFunction parses the source
+        // string and surfaces every early-error class — most
+        // notably §16.2.1.7 ImportMeta (`import.meta` outside a
+        // Module goal). Cynic permanently does not ship runtime
+        // source compilation (AGENTS.md), so we throw at the
+        // entry — but as a SyntaxError, matching the spec's
+        // observable completion when CreateDynamicFunction fails
+        // its parse step (test262
+        // `language/expressions/import.meta/syntax/goal-*-params-or-body.js`).
+        return @import("../intrinsics.zig").throwSyntaxError(realm, "Function constructor from source string is not supported (Cynic ships no eval / runtime code construction)");
     }
     // Allocate an empty anonymous function. The native body
     // returns undefined regardless of arguments — matches the
@@ -579,10 +588,17 @@ fn installVariantCtor(realm: *Realm, name: []const u8) !*JSObject {
 fn variantCtorThrows(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     _ = args;
-    // Calling `GeneratorFunction("…")` etc. would compile a
-    // string source. For now throw so tests that
-    // intentionally trigger the error see a TypeError.
-    return throwTypeError(realm, "Function constructor from string not supported");
+    // Calling `GeneratorFunction("…")` / `AsyncFunction("…")` /
+    // `AsyncGeneratorFunction("…")` would invoke
+    // CreateDynamicFunction (§20.2.1.1.1) to parse the source,
+    // which surfaces every early-error class as a SyntaxError —
+    // including §16.2.1.7 ImportMeta outside a Module goal
+    // (test262
+    // `language/expressions/import.meta/syntax/goal-{generator,async-function,async-generator}-params-or-body.js`).
+    // Cynic permanently bans runtime source compilation
+    // (AGENTS.md); throwing SyntaxError here matches the
+    // spec-observable completion of the failed parse step.
+    return @import("../intrinsics.zig").throwSyntaxError(realm, "Function constructor from source string is not supported (Cynic ships no eval / runtime code construction)");
 }
 
 // ── Function.prototype.toString ─────────────────────────────────────────────

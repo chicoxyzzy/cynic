@@ -956,7 +956,9 @@ pub const Realm = struct {
         // exception for `.errored` modules so re-imports
         // re-throw the same identity. `evaluation_promise`
         // pins the async-module result Promise that the body's
-        // suspended frame settles when it returns.
+        // suspended frame settles when it returns. `import_meta`
+        // pins the §16.2.1.7 [[ImportMeta]] object so
+        // user-installed properties survive across GC cycles.
         if (self.current_module) |m| self.heap.markValue(heap_mod.taggedObject(m.exports));
         var mit = self.modules.iterator();
         while (mit.next()) |e| {
@@ -964,6 +966,7 @@ pub const Realm = struct {
             self.heap.markValue(heap_mod.taggedObject(m.exports));
             self.heap.markValue(m.error_value);
             self.heap.markValue(m.evaluation_promise);
+            if (m.import_meta) |im| self.heap.markValue(heap_mod.taggedObject(im));
         }
 
         // Chunk constants — pinned at chunk-finalize time

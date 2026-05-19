@@ -620,13 +620,17 @@ pub const Compiler = struct {
         }
     }
 
-    /// `import.meta` — return the meta object for the current
-    /// module. later: real-module-graph metadata. Today it's a
-    /// fresh empty object on each access (sufficient for the
-    /// common `import.meta.url` / `import.meta.resolve` shape
-    /// tests).
+    /// `import.meta` — §16.2.1.7 ImportMeta. Emit the
+    /// `import_meta` opcode; the interpreter lazy-initialises
+    /// the module's [[ImportMeta]] slot to an ordinary object
+    /// (proto: `%Object.prototype%`) on first read and returns
+    /// the same cached object on every subsequent read in the
+    /// same module (test262
+    /// `language/expressions/import.meta/same-object-returned.js`,
+    /// `distinct-for-each-module.js`,
+    /// `import-meta-is-an-ordinary-object.js`).
     fn compileImportMeta(self: *Compiler, span: Span) CompileError!void {
-        try self.builder.emitOp(.make_object, span);
+        try self.builder.emitOp(.import_meta, span);
     }
 
     /// `import(specifier)` — §13.3.10 dynamic import.

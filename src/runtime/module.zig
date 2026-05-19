@@ -105,6 +105,19 @@ pub const ModuleRecord = struct {
     /// import to a contiguous block before the body proper, so a
     /// single drain at the end of that block matches spec ordering.
     pending_async_deps: std.ArrayListUnmanaged(*ModuleRecord) = .empty,
+    /// §16.2.1.7 ImportMeta runtime semantics — the module's
+    /// [[ImportMeta]] slot. `null` until first `import.meta`
+    /// evaluation in the module body; from then on cached so
+    /// every subsequent evaluation in the same module returns
+    /// the same ordinary object (test262
+    /// `language/expressions/import.meta/same-object-returned.js`,
+    /// `distinct-for-each-module.js`). Lazily-initialised in
+    /// `interpreter.import_meta`. The object's [[Prototype]] is
+    /// `%Object.prototype%` (the spec leaves the prototype
+    /// implementation-defined via HostFinalizeImportMeta; every
+    /// shipping engine returns an ordinary object — matches
+    /// V8 / JSC / SpiderMonkey).
+    import_meta: ?*JSObject = null,
     /// Mark-sweep bit, written by `Heap.markValue`.
     marked: bool = false,
 

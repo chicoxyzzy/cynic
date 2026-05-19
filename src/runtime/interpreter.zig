@@ -154,6 +154,18 @@ pub const CallFrame = struct {
     /// uncaught throws in `Promise.reject(...)` so the caller
     /// observes a Promise — the spec's §27.7 AsyncFunctionStart.
     wrap_return_in_promise: bool = false,
+    /// §10.4.1 GetActiveScriptOrModule — the ModuleRecord this
+    /// frame belongs to, copied from the callee
+    /// `JSFunction.owning_module` at frame entry. Read by the
+    /// `import_meta` opcode so a function exported from module
+    /// A and invoked from module B's body still resolves
+    /// `import.meta` to A's module record (test262
+    /// `language/expressions/import.meta/distinct-for-each-module.js`).
+    /// `null` for script-goal frames and engine-synthesised
+    /// frames whose body never references `import.meta`; the
+    /// `import_meta` op falls back to `realm.current_module`
+    /// when this is unset (matches the legacy module-body case).
+    owning_module: ?*@import("module.zig").ModuleRecord = null,
 };
 
 pub const RunError = error{
@@ -3853,6 +3865,7 @@ pub fn callJSFunction(
         .super_called_cell = callee.super_called_cell,
         .argc = @intCast(@min(args.len, std.math.maxInt(u8))),
         .wrap_return_in_promise = false,
+        .owning_module = callee.owning_module,
     });
 
     return runFrames(allocator, realm, &frames);
@@ -3925,6 +3938,7 @@ pub fn callJSFunctionAsSuper(
         .home_function = callee.home_function,
         .argc = @intCast(@min(args.len, std.math.maxInt(u8))),
         .wrap_return_in_promise = false,
+        .owning_module = callee.owning_module,
     });
 
     return runFrames(allocator, realm, &frames);
@@ -4588,6 +4602,14 @@ fn runFrames(
                     tmpl.is_arrow,
                     captured_env,
                 ) catch return error.OutOfMemory;
+                // §10.4.1 GetActiveScriptOrModule — record the
+                // module the function is defined in so a later
+                // `import.meta` access (or any future
+                // ScriptOrModule-dependent op) reads the
+                // function's own module, not its caller's. The
+                // call-site dispatch saves and restores
+                // `realm.current_module` accordingly.
+                fn_obj.owning_module = realm.current_module;
                 if (op_tag == .make_named_function_expr) {
                     captured_env.?.slots[0] = heap_mod.taggedFunction(fn_obj);
                 }
@@ -4936,6 +4958,7 @@ fn runFrames(
                     .super_called_cell = callee_fn.super_called_cell,
                     .argc = argc,
                     .wrap_return_in_promise = false,
+                    .owning_module = callee_fn.owning_module,
                 }) catch {
                     allocator.free(callee_regs);
                     return error.OutOfMemory;
@@ -5144,6 +5167,7 @@ fn runFrames(
                     .super_called_cell = callee_fn.super_called_cell,
                     .argc = argc,
                     .wrap_return_in_promise = false,
+                    .owning_module = callee_fn.owning_module,
                 }) catch {
                     allocator.free(callee_regs);
                     return error.OutOfMemory;
@@ -5393,6 +5417,7 @@ fn runFrames(
                     .new_target = heap_mod.taggedFunction(callee_fn),
                     .home_object = callee_fn.home_object,
                     .home_function = callee_fn.home_function,
+                    .owning_module = callee_fn.owning_module,
                     .argc = argc,
                 }) catch {
                     allocator.free(callee_regs);
@@ -5429,6 +5454,51 @@ fn runFrames(
 
             .lda_new_target => {
                 acc = f.new_target;
+            },
+
+            .import_meta => {
+                // §16.2.1.7 ImportMeta runtime semantics.
+                //   1. Let module be GetActiveScriptOrModule().[[Module]].
+                //   2. Let importMeta be module.[[ImportMeta]].
+                //   3. If importMeta is undefined:
+                //      a. Set importMeta to OrdinaryObjectCreate(%Object.prototype%).
+                //      b-e. Host hook stubbed.
+                //      f. Set module.[[ImportMeta]] to importMeta.
+                //      g. Return importMeta.
+                //   4. Else return importMeta.
+                //
+                // The active "script or module" is the one this
+                // frame's function was defined in (captured at
+                // `make_function` time, propagated through frame
+                // entry as `f.owning_module`). A function exported
+                // from module A and called from module B must
+                // still see A's import.meta — so we consult
+                // `f.owning_module` first and only fall through
+                // to `realm.current_module` for module-body
+                // top-level frames (where owning_module is null
+                // because the body itself isn't a JSFunction).
+                const mr_opt = f.owning_module orelse realm.current_module;
+                if (mr_opt) |mr| {
+                    if (mr.import_meta) |im| {
+                        acc = heap_mod.taggedObject(im);
+                    } else {
+                        const im = realm.heap.allocateObject() catch return error.OutOfMemory;
+                        im.prototype = realm.intrinsics.object_prototype;
+                        mr.import_meta = im;
+                        acc = heap_mod.taggedObject(im);
+                    }
+                } else {
+                    // Parser gates `import.meta` to a Module goal,
+                    // so this branch is unreachable in practice;
+                    // throw a defensive SyntaxError if a future code
+                    // path (host-script eval, etc.) ever reaches it.
+                    const ex = @import("builtins/error.zig").newSyntaxError(realm, "import.meta is only valid inside a Module") catch return error.OutOfMemory;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue;
+                }
             },
 
             .instanceof_ => {

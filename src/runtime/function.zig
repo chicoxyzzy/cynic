@@ -112,6 +112,19 @@ pub const JSFunction = struct {
     /// environment (the interpreter passes the script's env on
     /// the very first call).
     captured_env: ?*Environment = null,
+    /// §10.4.1 GetActiveScriptOrModule — the ModuleRecord this
+    /// function was defined inside, captured at `make_function`
+    /// time. Set to `realm.current_module` whenever the function
+    /// is created during a module body's evaluation; `null` for
+    /// functions defined in script-goal code or in native
+    /// installer paths. Used by the `import_meta` opcode (and
+    /// any future host-script-or-module dispatch) so that a
+    /// function exported from module A and called from module B
+    /// still reads A's `import.meta` (test262
+    /// `language/expressions/import.meta/distinct-for-each-module.js`).
+    /// The interpreter saves the caller's `current_module`
+    /// before invoking a function and restores it on return.
+    owning_module: ?*@import("module.zig").ModuleRecord = null,
     /// Lexical `this` capture for arrow functions (§15.3). Set
     /// at MakeFunction time to the creator frame's `this_value`,
     /// then plumbed through as the arrow's `this` at call time.

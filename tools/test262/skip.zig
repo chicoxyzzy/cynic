@@ -121,6 +121,24 @@ pub const skip_ses_substrings = [_][]const u8{
     // §15.3.2 Function constructor). Other 15.3.5.4 fixtures
     // (non-`gs.js`) stay attempted.
     "built-ins/Function/15.3.5.4_2-",
+    // `built-ins/Function/prototype/{apply,call}/S15.3.4.[34]_A8_T[45].js`
+    // — Sputnik fixtures that build a callable via
+    // `Function("src").apply` (or `…call`) and then verify
+    // `new FACTORY()` throws a TypeError because apply / call
+    // aren't constructors. They were lucky-passing before
+    // §16.2.1.7 ImportMeta alignment (when Cynic threw
+    // TypeError eagerly from the `Function(string)` constructor
+    // — and the `instanceof TypeError` assertion happened to
+    // hold even though execution never reached the
+    // `.apply`-isn't-constructable check). Switching the
+    // constructor's error class to SyntaxError (spec-faithful
+    // for a failed CreateDynamicFunction parse) flips the
+    // assertion. Same permanent SES carve-out as the rest of
+    // the `Function(string)` family.
+    "built-ins/Function/prototype/apply/S15.3.4.3_A8_T4",
+    "built-ins/Function/prototype/apply/S15.3.4.3_A8_T5",
+    "built-ins/Function/prototype/call/S15.3.4.4_A7_T4",
+    "built-ins/Function/prototype/call/S15.3.4.4_A7_T5",
 
     // §27.3.2 GeneratorFunction(string) / §27.4.2 AsyncGenerator
     // Function(string) / §27.7.2 AsyncFunction(string) — same
