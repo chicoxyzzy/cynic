@@ -1774,21 +1774,17 @@ pub fn stringifyArg(realm: *Realm, v: Value) NativeError!*JSString {
             defer realm.allocator.free(buf);
             return realm.heap.allocateString(buf) catch return error.OutOfMemory;
         }
-        if (heap_mod.valueAsFunction(v)) |fn_obj| {
-            // §20.2.3.5 — match Function.prototype.toString. Real
-            // source for user functions, native-function format
-            // (with name when present) otherwise.
-            if (fn_obj.source) |src| {
-                return realm.heap.allocateString(src) catch return error.OutOfMemory;
-            }
-            const display_name: []const u8 = if (fn_obj.name) |n| n else "";
-            const formatted = if (display_name.len == 0)
-                std.fmt.allocPrint(realm.allocator, "function () {{ [native code] }}", .{}) catch return error.OutOfMemory
-            else
-                std.fmt.allocPrint(realm.allocator, "function {s}() {{ [native code] }}", .{display_name}) catch return error.OutOfMemory;
-            defer realm.allocator.free(formatted);
-            return realm.heap.allocateString(formatted) catch return error.OutOfMemory;
-        }
+        // §7.1.17 ToString step 5 — `Let primValue be ?
+        // ToPrimitive(argument, string)`. Run this BEFORE any
+        // function-specific short-circuit, so a user-installed
+        // `valueOf` / `toString` on the function object (or a
+        // monkey-patched `Function.prototype.toString`) fires
+        // per spec. The Function.prototype.toString fallback
+        // formatting lives in `builtins/function.zig` and is
+        // reached via the normal ToPrimitive → toString lookup
+        // path. Test262 S15.5.2.1_A1_T8 / _T11 cover the case
+        // where the function's `valueOf` / `toString` override
+        // is observable through `new String(fn)`.
         const prim = try toPrimitive(realm, v, .string);
         // Don't recurse into another `isObject()` case — at this
         // point `prim` must be a primitive (toPrimitive throws

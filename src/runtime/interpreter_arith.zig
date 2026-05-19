@@ -40,6 +40,50 @@ pub fn toBoolean(v: Value) bool {
     return v.toBooleanPrimitive();
 }
 
+/// §12.5 WhiteSpace + §12.7 LineTerminator — the StrWhiteSpace
+/// codepoint set §7.1.4.1.1 StringToNumber trims from both ends
+/// before parsing. Mirrors the table in `builtins/number.zig`;
+/// kept inline here so `toNumber` doesn't have to reach into the
+/// builtins layer.
+fn isStrWhiteSpace(cp: u21) bool {
+    return switch (cp) {
+        // §12.5 ASCII WhiteSpace + §12.7 LineTerminator.
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20 => true,
+        // §12.5 — NBSP and ZWNBSP (BOM).
+        0x00A0, 0xFEFF => true,
+        // §12.5 — Unicode Space_Separator (Zs) enumerated; Cynic
+        // tracks the Unicode 15 set without pulling the full UCD.
+        0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x202F, 0x205F, 0x3000 => true,
+        // §12.7 — LineTerminator LS / PS.
+        0x2028, 0x2029 => true,
+        else => false,
+    };
+}
+
+fn skipStrWhiteSpaceFwd(bytes: []const u8) usize {
+    var view = std.unicode.Utf8View.initUnchecked(bytes).iterator();
+    while (true) {
+        const before = view.i;
+        const cp = view.nextCodepoint() orelse return bytes.len;
+        if (!isStrWhiteSpace(cp)) return before;
+    }
+}
+
+fn skipStrWhiteSpaceRev(bytes: []const u8) usize {
+    // Walk backwards through valid UTF-8 sequences. A continuation
+    // byte starts with `10xxxxxx`; back up over those to find the
+    // start of the last code point.
+    var end = bytes.len;
+    while (end > 0) {
+        var start = end - 1;
+        while (start > 0 and (bytes[start] & 0xC0) == 0x80) start -= 1;
+        const cp = std.unicode.utf8Decode(bytes[start..end]) catch return end;
+        if (!isStrWhiteSpace(cp)) return end;
+        end = start;
+    }
+    return 0;
+}
+
 /// §7.1.4 ToNumber. Object-typed coercion (which can call user
 /// code via ToPrimitive) lands with later; until then objects fall
 /// back to NaN unless they're a primitive wrapper (§7.1.1
@@ -55,11 +99,15 @@ pub fn toNumber(v: Value) f64 {
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
         // §7.1.4.1.1 StringToNumber. Empty / whitespace-only strings
-        // are 0; otherwise std.fmt.parseFloat. The full spec rules
-        // (sign-prefix tolerance, hex `0x`, infinity literal) get
-        // filled in with the `Number.parseFloat` work later.
-        const trimmed = std.mem.trim(u8, s.bytes, " \t\r\n");
-        if (trimmed.len == 0) return 0.0;
+        // are 0; otherwise std.fmt.parseFloat. Trim StrWhiteSpace +
+        // StrLineTerminator from both ends per §12.5 / §12.7 — the
+        // full Unicode set, not just ASCII tab/space/CR/LF (the
+        // Sputnik S9.3.1_A3 fixtures pass NBSP, the Zs block, and
+        // LS/PS as whitespace).
+        const start_idx = skipStrWhiteSpaceFwd(s.bytes);
+        const end_idx = skipStrWhiteSpaceRev(s.bytes);
+        if (start_idx >= end_idx) return 0.0;
+        const trimmed = s.bytes[start_idx..end_idx];
         // §7.1.4.1.1 StringToNumber — the StrUnsignedDecimalLiteral
         // grammar accepts only the case-sensitive `Infinity`. Zig's
         // `parseFloat` accepts `INFINITY`/`inf` etc.; pre-check the
