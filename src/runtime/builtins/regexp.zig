@@ -216,7 +216,7 @@ fn regexpProtoMatch(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
     // step 5 — `If flags does not contain "g", return ?
     // RegExpExec(rx, S)`.
-    const is_global = std.mem.indexOfScalar(u8, flags_s.bytes, 'g') != null;
+    const is_global = std.mem.indexOfScalar(u8, flags_s.flatBytes(), 'g') != null;
     if (!is_global) return try regExpExecGeneric(realm, rx, s);
 
     // step 6.a — `If flags contains "u" or "v", let fullUnicode
@@ -224,8 +224,8 @@ fn regexpProtoMatch(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // `unicode` *property* is no longer consulted — only the
     // `flags` string. The `get-global-err` fixture explicitly
     // asserts `unicode` is not read.
-    const full_unicode = std.mem.indexOfScalar(u8, flags_s.bytes, 'u') != null or
-        std.mem.indexOfScalar(u8, flags_s.bytes, 'v') != null;
+    const full_unicode = std.mem.indexOfScalar(u8, flags_s.flatBytes(), 'u') != null or
+        std.mem.indexOfScalar(u8, flags_s.flatBytes(), 'v') != null;
 
     // step 6.b — `Perform ? Set(rx, "lastIndex", +0𝔽, true)`. A
     // non-writable `lastIndex` raises TypeError per `g-init-
@@ -266,9 +266,9 @@ fn regexpProtoMatch(realm: *Realm, this_value: Value, args: []const Value) Nativ
         // CreateDataPropertyOrThrow(A, ToString(n), matchStr)`.
         const name_slice = std.fmt.bufPrint(&ibuf, "{d}", .{n}) catch unreachable;
         const key = realm.heap.allocateString(name_slice) catch return error.OutOfMemory;
-        out.set(realm.allocator, key.bytes, Value.fromString(match_str)) catch return error.OutOfMemory;
+        out.set(realm.allocator, key.flatBytes(), Value.fromString(match_str)) catch return error.OutOfMemory;
         // step 6.e.iii.3 — `If matchStr is the empty String`:
-        if (match_str.bytes.len == 0) {
+        if (match_str.flatBytes().len == 0) {
             // step 6.e.iii.3.a — `Let thisIndex be ?
             // ToLength(? Get(rx, "lastIndex"))`. Throwing
             // valueOf surfaces here (g-match-empty-coerce-
@@ -277,7 +277,7 @@ fn regexpProtoMatch(realm: *Realm, this_value: Value, args: []const Value) Nativ
             const this_index = try intrinsics.toLengthValue(realm, li_v);
             // step 6.e.iii.3.b — `Let nextIndex be
             // AdvanceStringIndex(S, thisIndex, fullUnicode)`.
-            const next_index = advanceStringIndex(s.bytes, this_index, full_unicode);
+            const next_index = advanceStringIndex(s.flatBytes(), this_index, full_unicode);
             // step 6.e.iii.3.c — `Perform
             // ? Set(rx, "lastIndex", nextIndex, true)`. A non-
             // writable `lastIndex` here surfaces TypeError
@@ -336,7 +336,7 @@ fn regexpProtoReplace(realm: *Realm, this_value: Value, args: []const Value) Nat
     // step 4 — `Let lengthS be the number of code unit elements
     // in S`.
     const utf16 = @import("../utf16.zig");
-    const length_s_usize = utf16.lengthInCodeUnits(s.bytes);
+    const length_s_usize = utf16.lengthInCodeUnits(s.flatBytes());
     const length_s: i64 = @intCast(length_s_usize);
 
     // step 5 — `Let functionalReplace be IsCallable(replaceValue)`.
@@ -354,11 +354,11 @@ fn regexpProtoReplace(realm: *Realm, this_value: Value, args: []const Value) Nat
 
     // step 8 — `If flags contains "g", let global be true; else
     // false`.
-    const is_global = std.mem.indexOfScalar(u8, flags_s.bytes, 'g') != null;
+    const is_global = std.mem.indexOfScalar(u8, flags_s.flatBytes(), 'g') != null;
     // step 9.a — `If flags contains "u" or "v", let fullUnicode be
     // true`.
-    const full_unicode = std.mem.indexOfScalar(u8, flags_s.bytes, 'u') != null or
-        std.mem.indexOfScalar(u8, flags_s.bytes, 'v') != null;
+    const full_unicode = std.mem.indexOfScalar(u8, flags_s.flatBytes(), 'u') != null or
+        std.mem.indexOfScalar(u8, flags_s.flatBytes(), 'v') != null;
 
     // step 9.b — `If global is true, perform ? Set(rx,
     // "lastIndex", +0𝔽, true)`. Honors writable.
@@ -383,7 +383,7 @@ fn regexpProtoReplace(realm: *Realm, this_value: Value, args: []const Value) Nat
         // "0"))`. Then if matchStr is "", advance lastIndex.
         const zero_v = try intrinsics.getPropertyChain(realm, result_obj, "0");
         const match_str = try intrinsics.stringifyArg(realm, zero_v);
-        if (match_str.bytes.len == 0) {
+        if (match_str.flatBytes().len == 0) {
             // §22.2.5.11 step 12.c.iii.2.a — `thisIndex = ?
             // ToLength(? Get(rx, "lastIndex"))`. §7.1.20 ToLength
             // clamps to `min(len, 2^53 - 1)`; `toLengthValue` only
@@ -400,7 +400,7 @@ fn regexpProtoReplace(realm: *Realm, this_value: Value, args: []const Value) Nat
             // `advanceStringIndex` which handles fullUnicode.
             const ni_v: Value = blk: {
                 if (this_index <= @as(i64, std.math.maxInt(i32)) - 1) {
-                    const ni = advanceStringIndex(s.bytes, this_index, full_unicode);
+                    const ni = advanceStringIndex(s.flatBytes(), this_index, full_unicode);
                     if (ni <= @as(i64, std.math.maxInt(i32)))
                         break :blk Value.fromInt32(@intCast(ni))
                     else
@@ -436,7 +436,7 @@ fn regexpProtoReplace(realm: *Realm, this_value: Value, args: []const Value) Nat
 
         // step 15.d — `Let matchLength be the number of code unit
         // elements in matched`.
-        const match_length: i64 = @intCast(utf16.lengthInCodeUnits(matched.bytes));
+        const match_length: i64 = @intCast(utf16.lengthInCodeUnits(matched.flatBytes()));
 
         // step 15.e — `Let position be ? ToIntegerOrInfinity(?
         // Get(result, "index"))`. ToIntegerOrInfinity on a non-
@@ -526,7 +526,7 @@ fn regexpProtoReplace(realm: *Realm, this_value: Value, args: []const Value) Nat
             // captures, namedCaptures, replaceValue)`.
             replacement_owned = try getSubstitution(
                 realm,
-                repl_template.?.bytes,
+                repl_template.?.flatBytes(),
                 matched,
                 s,
                 position,
@@ -538,9 +538,9 @@ fn regexpProtoReplace(realm: *Realm, this_value: Value, args: []const Value) Nat
         // step 15.m — `If position ≥ nextSourcePosition`:
         if (position >= next_src_unit) {
             // Append S[nextSourcePosition..position] + replacement.
-            const tail_slice = utf16.sliceCodeUnits(s.bytes, @intCast(next_src_unit), @intCast(position));
+            const tail_slice = utf16.sliceCodeUnits(s.flatBytes(), @intCast(next_src_unit), @intCast(position));
             try appendUtf16SliceBytes(realm, &out, tail_slice);
-            out.appendSlice(realm.allocator, replacement_owned.?.bytes) catch return error.OutOfMemory;
+            out.appendSlice(realm.allocator, replacement_owned.?.flatBytes()) catch return error.OutOfMemory;
             next_src_unit = position + match_length;
         }
     }
@@ -548,7 +548,7 @@ fn regexpProtoReplace(realm: *Realm, this_value: Value, args: []const Value) Nat
     // step 16-17 — `If nextSourcePosition < lengthS`, append the
     // tail substring.
     if (next_src_unit < length_s) {
-        const tail_slice = utf16.sliceCodeUnits(s.bytes, @intCast(next_src_unit), length_s_usize);
+        const tail_slice = utf16.sliceCodeUnits(s.flatBytes(), @intCast(next_src_unit), length_s_usize);
         try appendUtf16SliceBytes(realm, &out, tail_slice);
     }
     const out_str = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
@@ -614,9 +614,9 @@ fn getSubstitution(
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
 
-    const match_length: i64 = @intCast(utf16.lengthInCodeUnits(matched.bytes));
+    const match_length: i64 = @intCast(utf16.lengthInCodeUnits(matched.flatBytes()));
     const tail_pos: i64 = position + match_length;
-    const source_unit_len: i64 = @intCast(utf16.lengthInCodeUnits(source.bytes));
+    const source_unit_len: i64 = @intCast(utf16.lengthInCodeUnits(source.flatBytes()));
 
     var i: usize = 0;
     while (i < template.len) {
@@ -633,13 +633,13 @@ fn getSubstitution(
                 i += 2;
             },
             '&' => {
-                out.appendSlice(realm.allocator, matched.bytes) catch return error.OutOfMemory;
+                out.appendSlice(realm.allocator, matched.flatBytes()) catch return error.OutOfMemory;
                 i += 2;
             },
             '`' => {
                 // §22.1.3.19.1 Table 64 — `$\`` is the substring
                 // of S from 0 to position (in code units).
-                const sl = utf16.sliceCodeUnits(source.bytes, 0, @intCast(position));
+                const sl = utf16.sliceCodeUnits(source.flatBytes(), 0, @intCast(position));
                 try appendUtf16SliceBytes(realm, &out, sl);
                 i += 2;
             },
@@ -647,7 +647,7 @@ fn getSubstitution(
                 // `$'` — substring from (position + matchLength)
                 // to end. Clamp the start to lengthS.
                 const start_u: i64 = if (tail_pos > source_unit_len) source_unit_len else tail_pos;
-                const sl = utf16.sliceCodeUnits(source.bytes, @intCast(start_u), @intCast(source_unit_len));
+                const sl = utf16.sliceCodeUnits(source.flatBytes(), @intCast(start_u), @intCast(source_unit_len));
                 try appendUtf16SliceBytes(realm, &out, sl);
                 i += 2;
             },
@@ -667,7 +667,7 @@ fn getSubstitution(
                     const cap = captures[index - 1];
                     if (cap.isString()) {
                         const cs: *JSString = @ptrCast(@alignCast(cap.asString()));
-                        out.appendSlice(realm.allocator, cs.bytes) catch return error.OutOfMemory;
+                        out.appendSlice(realm.allocator, cs.flatBytes()) catch return error.OutOfMemory;
                     }
                     // `undefined` capture → empty (no append).
                     i += 1 + digit_count;
@@ -710,7 +710,7 @@ fn getSubstitution(
                 const cap_v = try intrinsics.getPropertyChain(realm, named_obj, name);
                 if (!cap_v.isUndefined()) {
                     const cs = try intrinsics.stringifyArg(realm, cap_v);
-                    out.appendSlice(realm.allocator, cs.bytes) catch return error.OutOfMemory;
+                    out.appendSlice(realm.allocator, cs.flatBytes()) catch return error.OutOfMemory;
                 }
                 i = j + 1;
             },
@@ -830,16 +830,16 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
     // step 7 — `If flags contains "u" or flags contains "v", let
     // unicodeMatching be true; else false`.
-    const unicode_matching = std.mem.indexOfScalar(u8, flags_s.bytes, 'u') != null or
-        std.mem.indexOfScalar(u8, flags_s.bytes, 'v') != null;
+    const unicode_matching = std.mem.indexOfScalar(u8, flags_s.flatBytes(), 'u') != null or
+        std.mem.indexOfScalar(u8, flags_s.flatBytes(), 'v') != null;
 
     // steps 8-9 — `If flags contains "y", let newFlags be flags;
     // else newFlags be the string-concatenation of flags and "y"`.
-    const has_y = std.mem.indexOfScalar(u8, flags_s.bytes, 'y') != null;
+    const has_y = std.mem.indexOfScalar(u8, flags_s.flatBytes(), 'y') != null;
     const new_flags_js: *JSString = if (has_y) flags_s else nf: {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         defer buf.deinit(realm.allocator);
-        buf.appendSlice(realm.allocator, flags_s.bytes) catch return error.OutOfMemory;
+        buf.appendSlice(realm.allocator, flags_s.flatBytes()) catch return error.OutOfMemory;
         buf.append(realm.allocator, 'y') catch return error.OutOfMemory;
         break :nf realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
     };
@@ -894,7 +894,7 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // UTF-16 code units. Cynic stores WTF-8; `utf16.lengthInCodeUnits`
     // converts.
     const utf16 = @import("../utf16.zig");
-    const size_usize = utf16.lengthInCodeUnits(s.bytes);
+    const size_usize = utf16.lengthInCodeUnits(s.flatBytes());
     const size: i64 = @intCast(size_usize);
 
     // step 16 — `If size = 0, then
@@ -928,7 +928,7 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
         if (z.isNull()) {
             // step 19.d — `If z is null, set q to
             // AdvanceStringIndex(S, q, unicodeMatching)`.
-            q = advanceStringIndex(s.bytes, q, unicode_matching);
+            q = advanceStringIndex(s.flatBytes(), q, unicode_matching);
             continue;
         }
         const z_obj = heap_mod.valueAsPlainObject(z) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.split]: RegExpExec returned non-Object");
@@ -940,19 +940,19 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
         // step 19.e.iii — `If e = p, set q to
         // AdvanceStringIndex(S, q, unicodeMatching)`.
         if (e == p) {
-            q = advanceStringIndex(s.bytes, q, unicode_matching);
+            q = advanceStringIndex(s.flatBytes(), q, unicode_matching);
             continue;
         }
         // step 19.e.iv — `Else,
         //   1. Let T be the substring of S from p to q.`.
         // Substring is in code-unit space. Convert UTF-16 indices
         // to byte offsets through the WTF-8 buffer.
-        const t_slice = utf16.sliceCodeUnits(s.bytes, @intCast(p), @intCast(q));
+        const t_slice = utf16.sliceCodeUnits(s.flatBytes(), @intCast(p), @intCast(q));
         const t_str = try jsStringFromUtf16Slice(realm, t_slice);
         //   2. Perform ! CreateDataPropertyOrThrow(A, ToString(lengthA), T).
         var name_slice = std.fmt.bufPrint(&ibuf, "{d}", .{length_a}) catch unreachable;
         const t_key = realm.heap.allocateString(name_slice) catch return error.OutOfMemory;
-        out.set(realm.allocator, t_key.bytes, Value.fromString(t_str)) catch return error.OutOfMemory;
+        out.set(realm.allocator, t_key.flatBytes(), Value.fromString(t_str)) catch return error.OutOfMemory;
         //   3. Set lengthA to lengthA + 1.
         length_a += 1;
         //   4. If lengthA = lim, return A.
@@ -979,7 +979,7 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
             //         ToString(lengthA), nextCapture).
             name_slice = std.fmt.bufPrint(&ibuf, "{d}", .{length_a}) catch unreachable;
             const cap_idx_key = realm.heap.allocateString(name_slice) catch return error.OutOfMemory;
-            out.set(realm.allocator, cap_idx_key.bytes, next_capture) catch return error.OutOfMemory;
+            out.set(realm.allocator, cap_idx_key.flatBytes(), next_capture) catch return error.OutOfMemory;
             length_a += 1;
             //  9.e — If lengthA = lim, return A.
             if (@as(u32, @intCast(length_a)) == lim) {
@@ -992,13 +992,13 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
     }
 
     // step 20 — `Let T be the substring of S from p to size`.
-    const tail_slice = utf16.sliceCodeUnits(s.bytes, @intCast(p), size_usize);
+    const tail_slice = utf16.sliceCodeUnits(s.flatBytes(), @intCast(p), size_usize);
     const tail_str = try jsStringFromUtf16Slice(realm, tail_slice);
     // step 21 — `Perform ! CreateDataPropertyOrThrow(A,
     // ToString(lengthA), T)`.
     const tail_key_slice = std.fmt.bufPrint(&ibuf, "{d}", .{length_a}) catch unreachable;
     const tail_key = realm.heap.allocateString(tail_key_slice) catch return error.OutOfMemory;
-    out.set(realm.allocator, tail_key.bytes, Value.fromString(tail_str)) catch return error.OutOfMemory;
+    out.set(realm.allocator, tail_key.flatBytes(), Value.fromString(tail_str)) catch return error.OutOfMemory;
     length_a += 1;
     intrinsics.setLength(realm, out, length_a) catch return error.OutOfMemory;
     // step 22 — `Return A`.
@@ -1280,9 +1280,9 @@ fn regexpProtoMatchAll(realm: *Realm, this_value: Value, args: []const Value) Na
     // fullUnicode be true; else false`. Per `species-regexp-get-
     // global-throws.js`, `global` is NOT re-read from `matcher`
     // — both flags come from the cloned `flags` string.
-    const is_global = std.mem.indexOfScalar(u8, flags_s.bytes, 'g') != null;
-    const full_unicode = std.mem.indexOfScalar(u8, flags_s.bytes, 'u') != null or
-        std.mem.indexOfScalar(u8, flags_s.bytes, 'v') != null;
+    const is_global = std.mem.indexOfScalar(u8, flags_s.flatBytes(), 'g') != null;
+    const full_unicode = std.mem.indexOfScalar(u8, flags_s.flatBytes(), 'u') != null or
+        std.mem.indexOfScalar(u8, flags_s.flatBytes(), 'v') != null;
 
     // step 11 — `Return CreateRegExpStringIterator(matcher, S,
     // global, fullUnicode)`. Allocate an iterator object chained to
@@ -1391,7 +1391,7 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     // RegExp(undefined, "ii")` (dup), `new RegExp("a|b", "z")`,
     // `new RegExp(/1?1/mig, {})` (flags = "[object Object]") all
     // must throw.
-    _ = try parseFlagsStrict(realm, flag_s.bytes);
+    _ = try parseFlagsStrict(realm, flag_s.flatBytes());
     // §22.2.4 `[[OriginalSource]]` / `[[OriginalFlags]]` — typed
     // JSObject slots, not properties. Surfaced to JS only through
     // the accessors on `RegExp.prototype`.
@@ -1494,7 +1494,7 @@ fn parseFlags(s: []const u8) c_int {
 fn ensureBytecode(realm: *Realm, regex_obj: *JSObject) NativeError!?[]u8 {
     if (regex_obj.regex_bytecode) |bc| return bc;
     const src_s = regex_obj.regexp_source orelse return null;
-    const flag_str: []const u8 = if (regex_obj.regexp_flags) |f| f.bytes else "";
+    const flag_str: []const u8 = if (regex_obj.regexp_flags) |f| f.flatBytes() else "";
     const re_flags = parseFlags(flag_str);
 
     var err_buf: [128]u8 = undefined;
@@ -1511,8 +1511,8 @@ fn ensureBytecode(realm: *Realm, regex_obj: *JSObject) NativeError!?[]u8 {
     // to keep libregexp happy. Under `/u`/`/v` the buffer is
     // passed through unchanged; libregexp consumes it as UTF-8.
     const fullUnicode = (re_flags & LRE_FLAG_UNICODE) != 0 or (re_flags & LRE_FLAG_UNICODE_SETS) != 0;
-    const src_bytes = if (fullUnicode) src_s.bytes else try utf8ToCesu8(realm.allocator, src_s.bytes);
-    defer if (!fullUnicode and src_bytes.ptr != src_s.bytes.ptr) realm.allocator.free(src_bytes);
+    const src_bytes = if (fullUnicode) src_s.flatBytes() else try utf8ToCesu8(realm.allocator, src_s.flatBytes());
+    defer if (!fullUnicode and src_bytes.ptr != src_s.flatBytes().ptr) realm.allocator.free(src_bytes);
     // libregexp's parser checks `*buf_ptr != '\0'` after the
     // outer disjunction to detect trailing junk, so the input
     // must be NUL-terminated. Copy into a heap buffer + null.
@@ -1682,7 +1682,7 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const input_s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
     const bc = (try ensureBytecode(realm, regex_obj)) orelse return Value.null_;
 
-    var input = buildInputBuf(realm.allocator, input_s.bytes) catch return error.OutOfMemory;
+    var input = buildInputBuf(realm.allocator, input_s.flatBytes()) catch return error.OutOfMemory;
     defer input.deinit();
 
     const re_flags = c.lre_get_flags(bc.ptr);
@@ -1760,7 +1760,7 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
-    const whole_str = try allocMatchString(realm, input_s.bytes, whole_start, whole_end);
+    const whole_str = try allocMatchString(realm, input_s.flatBytes(), whole_start, whole_end);
     out.set(realm.allocator, "0", Value.fromString(whole_str)) catch return error.OutOfMemory;
 
     var g: usize = 1;
@@ -1771,12 +1771,12 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
         const start_ptr = captures[2 * g];
         const end_ptr = captures[2 * g + 1];
         if (start_ptr == null or end_ptr == null) {
-            out.set(realm.allocator, owned_idx.bytes, Value.undefined_) catch return error.OutOfMemory;
+            out.set(realm.allocator, owned_idx.flatBytes(), Value.undefined_) catch return error.OutOfMemory;
         } else {
             const u_start = (@intFromPtr(start_ptr.?) - cbuf_addr) / 2;
             const u_end = (@intFromPtr(end_ptr.?) - cbuf_addr) / 2;
-            const cap_str = try allocMatchString(realm, input_s.bytes, u_start, u_end);
-            out.set(realm.allocator, owned_idx.bytes, Value.fromString(cap_str)) catch return error.OutOfMemory;
+            const cap_str = try allocMatchString(realm, input_s.flatBytes(), u_start, u_end);
+            out.set(realm.allocator, owned_idx.flatBytes(), Value.fromString(cap_str)) catch return error.OutOfMemory;
         }
     }
     out.set(realm.allocator, "length", Value.fromInt32(@intCast(cap_count))) catch return error.OutOfMemory;
@@ -1986,7 +1986,7 @@ fn buildGroupsObject(
         const cap_v: Value = if (start_ptr == null or end_ptr == null) Value.undefined_ else blk: {
             const u_start = (@intFromPtr(start_ptr.?) - cbuf_addr) / 2;
             const u_end = (@intFromPtr(end_ptr.?) - cbuf_addr) / 2;
-            const cap_str = try allocMatchString(realm, input_s.bytes, u_start, u_end);
+            const cap_str = try allocMatchString(realm, input_s.flatBytes(), u_start, u_end);
             break :blk Value.fromString(cap_str);
         };
         // CreateDataProperty (own, writable / enumerable /
@@ -2015,7 +2015,7 @@ fn buildGroupsObject(
 fn regexpBuiltinExecMatchOnly(realm: *Realm, regex_obj: *JSObject, input_s: *JSString) NativeError!bool {
     const bc = (try ensureBytecode(realm, regex_obj)) orelse return false;
 
-    var input = buildInputBuf(realm.allocator, input_s.bytes) catch return error.OutOfMemory;
+    var input = buildInputBuf(realm.allocator, input_s.flatBytes()) catch return error.OutOfMemory;
     defer input.deinit();
 
     const re_flags = c.lre_get_flags(bc.ptr);
@@ -2144,12 +2144,12 @@ fn regexpToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
     out.append(realm.allocator, '/') catch return error.OutOfMemory;
     if (src_v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(src_v.asString()));
-        out.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
+        out.appendSlice(realm.allocator, s.flatBytes()) catch return error.OutOfMemory;
     }
     out.append(realm.allocator, '/') catch return error.OutOfMemory;
     if (flags_v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(flags_v.asString()));
-        out.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
+        out.appendSlice(realm.allocator, s.flatBytes()) catch return error.OutOfMemory;
     }
     const r = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
     return Value.fromString(r);
@@ -2181,14 +2181,14 @@ fn isRegExpPrototypeReceiver(realm: *Realm, this_value: Value) bool {
 fn regexpInternalSource(this_value: Value) ?[]const u8 {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
     const s = obj.regexp_source orelse return null;
-    return s.bytes;
+    return s.flatBytes();
 }
 
 /// Read `[[OriginalFlags]]`. Same shape as `regexpInternalSource`.
 fn regexpInternalFlagsStr(this_value: Value) ?[]const u8 {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
     const f = obj.regexp_flags orelse return null;
-    return f.bytes;
+    return f.flatBytes();
 }
 
 fn regexpInternalFlagHas(this_value: Value, ch: u8) ?bool {
@@ -2333,8 +2333,8 @@ fn regexpEscape(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // is one supplementary code point.
     var i: usize = 0;
     var first = true;
-    while (i < s.bytes.len) {
-        const lead = s.bytes[i];
+    while (i < s.flatBytes().len) {
+        const lead = s.flatBytes()[i];
         const seq_len = std.unicode.utf8ByteSequenceLength(lead) catch {
             // Malformed lead byte — treat it as a Latin-1 code point.
             try encodeForRegExpEscape(realm, &out, lead);
@@ -2342,18 +2342,18 @@ fn regexpEscape(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             i += 1;
             continue;
         };
-        if (i + seq_len > s.bytes.len) break;
+        if (i + seq_len > s.flatBytes().len) break;
         const cp: u21 = switch (seq_len) {
             1 => lead,
             2 => (@as(u21, lead & 0x1F) << 6) |
-                @as(u21, s.bytes[i + 1] & 0x3F),
+                @as(u21, s.flatBytes()[i + 1] & 0x3F),
             3 => (@as(u21, lead & 0x0F) << 12) |
-                (@as(u21, s.bytes[i + 1] & 0x3F) << 6) |
-                @as(u21, s.bytes[i + 2] & 0x3F),
+                (@as(u21, s.flatBytes()[i + 1] & 0x3F) << 6) |
+                @as(u21, s.flatBytes()[i + 2] & 0x3F),
             else => (@as(u21, lead & 0x07) << 18) |
-                (@as(u21, s.bytes[i + 1] & 0x3F) << 12) |
-                (@as(u21, s.bytes[i + 2] & 0x3F) << 6) |
-                @as(u21, s.bytes[i + 3] & 0x3F),
+                (@as(u21, s.flatBytes()[i + 1] & 0x3F) << 12) |
+                (@as(u21, s.flatBytes()[i + 2] & 0x3F) << 6) |
+                @as(u21, s.flatBytes()[i + 3] & 0x3F),
         };
         i += seq_len;
         // §22.2.7.1 step 4.a — when the leading code point is an

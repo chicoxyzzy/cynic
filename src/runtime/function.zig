@@ -458,7 +458,7 @@ pub const JSFunction = struct {
         if (std.mem.eql(u8, key, "name")) {
             if (v.isString()) {
                 const s: *@import("string.zig").JSString = @ptrCast(@alignCast(v.asString()));
-                self.name = s.bytes;
+                self.name = s.flatBytes();
                 self.name_string = s;
             } else {
                 self.name = null;
@@ -486,7 +486,7 @@ pub const JSFunction = struct {
         if (std.mem.eql(u8, key, "name")) {
             if (v.isString()) {
                 const s: *@import("string.zig").JSString = @ptrCast(@alignCast(v.asString()));
-                self.name = s.bytes;
+                self.name = s.flatBytes();
                 self.name_string = s;
             } else {
                 self.name = null;

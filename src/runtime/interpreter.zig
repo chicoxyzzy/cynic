@@ -1733,7 +1733,7 @@ pub fn openForInIterator(
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
             const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
             const key_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
-            arr.set(realm.allocator, idx_owned.bytes, Value.fromString(key_owned)) catch return error.OutOfMemory;
+            arr.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(key_owned)) catch return error.OutOfMemory;
             len += 1;
         }
         // §14.7.5.6 EnumerateObjectProperties step 5 — climb the
@@ -1760,7 +1760,7 @@ pub fn openForInIterator(
                 const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
                 const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
                 const k_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                arr.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
+                arr.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(k_owned)) catch return error.OutOfMemory;
                 len += 1;
             }
             // §14.7.5.6 also surfaces accessor properties; mark them
@@ -1778,7 +1778,7 @@ pub fn openForInIterator(
                 const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
                 const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
                 const k_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                arr.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
+                arr.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(k_owned)) catch return error.OutOfMemory;
                 len += 1;
             }
             current_proto = cur.prototype;
@@ -1827,7 +1827,7 @@ pub fn openForInIterator(
                             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
                             const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
                             const k_owned = realm.heap.allocateString(k) catch return error.OutOfMemory;
-                            arr.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
+                            arr.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(k_owned)) catch return error.OutOfMemory;
                             len += 1;
                         }
                     }
@@ -1869,7 +1869,7 @@ pub fn openForInIterator(
                         var ibuf: [16]u8 = undefined;
                         const ks = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch continue;
                         const key_owned_str = realm.heap.allocateString(ks) catch return error.OutOfMemory;
-                        int_keys.append(realm.allocator, .{ .idx = idx, .key = key_owned_str.bytes }) catch return error.OutOfMemory;
+                        int_keys.append(realm.allocator, .{ .idx = idx, .key = key_owned_str.flatBytes() }) catch return error.OutOfMemory;
                     }
                 } else {
                     var ei: u32 = 0;
@@ -1878,7 +1878,7 @@ pub fn openForInIterator(
                         var ibuf: [16]u8 = undefined;
                         const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ei}) catch continue;
                         const key_owned_str = realm.heap.allocateString(ks) catch return error.OutOfMemory;
-                        int_keys.append(realm.allocator, .{ .idx = ei, .key = key_owned_str.bytes }) catch return error.OutOfMemory;
+                        int_keys.append(realm.allocator, .{ .idx = ei, .key = key_owned_str.flatBytes() }) catch return error.OutOfMemory;
                     }
                 }
             }
@@ -1906,7 +1906,7 @@ pub fn openForInIterator(
                     var ibuf: [16]u8 = undefined;
                     const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ti}) catch continue;
                     const key_owned_str = realm.heap.allocateString(ks) catch return error.OutOfMemory;
-                    int_keys.append(realm.allocator, .{ .idx = ti, .key = key_owned_str.bytes }) catch return error.OutOfMemory;
+                    int_keys.append(realm.allocator, .{ .idx = ti, .key = key_owned_str.flatBytes() }) catch return error.OutOfMemory;
                 }
             }
 
@@ -1995,7 +1995,7 @@ pub fn openForInIterator(
                 const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
                 const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
                 const key_owned = realm.heap.allocateString(e.key) catch return error.OutOfMemory;
-                arr.set(realm.allocator, idx_owned.bytes, Value.fromString(key_owned)) catch return error.OutOfMemory;
+                arr.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(key_owned)) catch return error.OutOfMemory;
                 len += 1;
             }
             for (str_keys.items) |key| {
@@ -2005,7 +2005,7 @@ pub fn openForInIterator(
                 const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
                 const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
                 const key_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                arr.set(realm.allocator, idx_owned.bytes, Value.fromString(key_owned)) catch return error.OutOfMemory;
+                arr.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(key_owned)) catch return error.OutOfMemory;
                 len += 1;
             }
             // §14.7.5.6 — own-but-non-enumerable names shadow
@@ -2062,13 +2062,13 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
     if (target.isString()) {
         const s: *@import("string.zig").JSString = @ptrCast(@alignCast(target.asString()));
         const start: usize = idx;
-        if (start >= s.bytes.len) {
+        if (start >= s.flatBytes().len) {
             result.set(realm.allocator, "value", Value.undefined_) catch return error.OutOfMemory;
             result.set(realm.allocator, "done", Value.true_) catch return error.OutOfMemory;
             state.done = true;
             return heap_mod.taggedObject(result);
         }
-        const b0 = s.bytes[start];
+        const b0 = s.flatBytes()[start];
         // Decode the leading-byte width — UTF-8 (and WTF-8) sequence
         // lengths are 1/2/3/4 by the high bits of b0. We accept
         // anything well-formed AND lone-surrogate 3-byte sequences
@@ -2084,8 +2084,8 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
         } else if (b0 & 0xF8 == 0xF0) {
             width = 4;
         }
-        if (start + width > s.bytes.len) width = 1;
-        const sub = realm.heap.allocateString(s.bytes[start .. start + width]) catch return error.OutOfMemory;
+        if (start + width > s.flatBytes().len) width = 1;
+        const sub = realm.heap.allocateString(s.flatBytes()[start .. start + width]) catch return error.OutOfMemory;
         result.set(realm.allocator, "value", Value.fromString(sub)) catch return error.OutOfMemory;
         result.set(realm.allocator, "done", Value.false_) catch return error.OutOfMemory;
         state.idx = idx + @as(u32, @intCast(width));
@@ -2132,7 +2132,7 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
                     // user code can't safely delete-during-for-in on
                     // a proxy anyway (the trap controls visibility).
                     const is_proxy = src.proxy_target != null or src.proxy_target_fn != null or src.proxy_revoked;
-                    if (!is_proxy and !src.hasProperty(key_str.bytes)) {
+                    if (!is_proxy and !src.hasProperty(key_str.flatBytes())) {
                         cursor += 1;
                         continue;
                     }
@@ -2147,11 +2147,11 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
                     // /15.2.3.6-4-595.js — for-in over a function
                     // surfacing a user-installed enumerable inherited
                     // `prop`).
-                    var fn_has = src_fn.properties.contains(key_str.bytes) or src_fn.accessors.contains(key_str.bytes);
+                    var fn_has = src_fn.properties.contains(key_str.flatBytes()) or src_fn.accessors.contains(key_str.flatBytes());
                     if (!fn_has) {
                         var ancestor: ?*JSObject = src_fn.proto;
                         while (ancestor) |a| {
-                            if (a.properties.contains(key_str.bytes) or a.accessors.contains(key_str.bytes)) {
+                            if (a.properties.contains(key_str.flatBytes()) or a.accessors.contains(key_str.flatBytes())) {
                                 fn_has = true;
                                 break;
                             }
@@ -3583,7 +3583,7 @@ pub fn callValue(
                     var ibuf: [24]u8 = undefined;
                     const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
                     const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-                    arr.set(allocator, owned.bytes, args[i]) catch return error.OutOfMemory;
+                    arr.set(allocator, owned.flatBytes(), args[i]) catch return error.OutOfMemory;
                 }
                 arr.set(allocator, "length", Value.fromInt32(@intCast(args.len))) catch return error.OutOfMemory;
                 const trap_args = [_]Value{ target_v, this_value, heap_mod.taggedObject(arr) };
@@ -3796,7 +3796,7 @@ pub fn constructValue(
                     var ibuf: [24]u8 = undefined;
                     const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
                     const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-                    arr.set(allocator, owned.bytes, args[i]) catch return error.OutOfMemory;
+                    arr.set(allocator, owned.flatBytes(), args[i]) catch return error.OutOfMemory;
                 }
                 arr.set(allocator, "length", Value.fromInt32(@intCast(args.len))) catch return error.OutOfMemory;
                 const trap_args = [_]Value{ target_v, heap_mod.taggedObject(arr), new_target };
@@ -5979,7 +5979,7 @@ fn runFrames(
                             // source's stored key form.
                             if (k_v.isString()) {
                                 const ks: *JSString = @ptrCast(@alignCast(k_v.asString()));
-                                excluded.append(allocator, ks.bytes) catch return error.OutOfMemory;
+                                excluded.append(allocator, ks.flatBytes()) catch return error.OutOfMemory;
                             } else if (heap_mod.valueAsSymbol(k_v)) |sym| {
                                 // Symbols exclude by their `prop_key`.
                                 excluded.append(allocator, sym.prop_key) catch return error.OutOfMemory;
@@ -6144,7 +6144,7 @@ fn runFrames(
                     var obuf: [24]u8 = undefined;
                     const out_islice = std.fmt.bufPrint(&obuf, "{d}", .{out_idx}) catch unreachable;
                     const owned = realm.heap.allocateString(out_islice) catch return error.OutOfMemory;
-                    out_obj.set(allocator, owned.bytes, elem) catch return error.OutOfMemory;
+                    out_obj.set(allocator, owned.flatBytes(), elem) catch return error.OutOfMemory;
                 }
                 out_obj.set(allocator, "length", Value.fromInt32(@intCast(out_idx))) catch return error.OutOfMemory;
                 acc = heap_mod.taggedObject(out_obj);
@@ -6485,7 +6485,7 @@ fn runFrames(
                             // §10.1.8.1 OrdinaryGet — accessor descriptor
                             // wins; getter fires with `this` =
                             // f.this_value (the current class).
-                            if (parent_fn.accessors.get(key_s.bytes)) |acc_pair| {
+                            if (parent_fn.accessors.get(key_s.flatBytes())) |acc_pair| {
                                 if (acc_pair.getter) |getter| {
                                     const outcome = try callJSFunction(allocator, realm, getter, f.this_value, &.{});
                                     switch (outcome) {
@@ -6504,7 +6504,7 @@ fn runFrames(
                                     acc = Value.undefined_;
                                 }
                             } else {
-                                acc = parent_fn.get(key_s.bytes);
+                                acc = parent_fn.get(key_s.flatBytes());
                             }
                         } else {
                             acc = Value.undefined_;
@@ -6542,7 +6542,7 @@ fn runFrames(
                 // `this` bound to the caller's `this_value` (§9.1.6
                 // step 5: Receiver = the active method's `this`,
                 // not the parent prototype).
-                if (lookupAccessor(parent_proto, key_s.bytes)) |acc_pair| {
+                if (lookupAccessor(parent_proto, key_s.flatBytes())) |acc_pair| {
                     if (acc_pair.getter) |getter| {
                         const outcome = try callJSFunction(allocator, realm, getter, f.this_value, &.{});
                         switch (outcome) {
@@ -6562,7 +6562,7 @@ fn runFrames(
                     }
                     continue;
                 }
-                acc = parent_proto.get(key_s.bytes);
+                acc = parent_proto.get(key_s.flatBytes());
             },
 
             .super_get_computed => {
@@ -6713,7 +6713,7 @@ fn runFrames(
                 if (f.home_object == null) {
                     if (f.home_function) |hf| {
                         if (hf.static_parent) |parent_fn| {
-                            if (parent_fn.accessors.get(key_s.bytes)) |acc_pair| {
+                            if (parent_fn.accessors.get(key_s.flatBytes())) |acc_pair| {
                                 if (acc_pair.setter) |setter| {
                                     const args_one = [_]Value{value};
                                     const outcome = try callJSFunction(allocator, realm, setter, f.this_value, &args_one);
@@ -6762,9 +6762,9 @@ fn runFrames(
                         // Fall back to writing on `this` (the
                         // current constructor, since this is static).
                         if (heap_mod.valueAsFunction(f.this_value)) |this_fn| {
-                            this_fn.set(allocator, key_s.bytes, value) catch return error.OutOfMemory;
+                            this_fn.set(allocator, key_s.flatBytes(), value) catch return error.OutOfMemory;
                         } else if (heap_mod.valueAsPlainObject(f.this_value)) |this_obj| {
-                            this_obj.set(allocator, key_s.bytes, value) catch return error.OutOfMemory;
+                            this_obj.set(allocator, key_s.flatBytes(), value) catch return error.OutOfMemory;
                         }
                         acc = value;
                         continue;
@@ -6797,7 +6797,7 @@ fn runFrames(
                 var did_setter = false;
                 {
                     const p = parent_proto;
-                    if (lookupAccessor(p, key_s.bytes)) |acc_pair| {
+                    if (lookupAccessor(p, key_s.flatBytes())) |acc_pair| {
                         if (acc_pair.setter) |setter| {
                             const args_one = [_]Value{value};
                             const outcome = try callJSFunction(allocator, realm, setter, f.this_value, &args_one);
@@ -6828,8 +6828,8 @@ fn runFrames(
                     // namespace [[Set]] reject (TypeError) only
                     // fires once that descriptor read succeeds.
                     if (heap_mod.valueAsPlainObject(f.this_value)) |this_obj| {
-                        if (this_obj.is_module_namespace and !std.mem.startsWith(u8, key_s.bytes, "@@") and !std.mem.startsWith(u8, key_s.bytes, "<sym:") and this_obj.hasOwn(key_s.bytes)) {
-                            _ = module_mod.namespaceGetThrowingOnHole(realm, this_obj, key_s.bytes) catch |err| switch (err) {
+                        if (this_obj.is_module_namespace and !std.mem.startsWith(u8, key_s.flatBytes(), "@@") and !std.mem.startsWith(u8, key_s.flatBytes(), "<sym:") and this_obj.hasOwn(key_s.flatBytes())) {
+                            _ = module_mod.namespaceGetThrowingOnHole(realm, this_obj, key_s.flatBytes()) catch |err| switch (err) {
                                 error.OutOfMemory => return error.OutOfMemory,
                                 error.NativeThrew => {
                                     const ex = realm.pending_exception orelse Value.undefined_;
@@ -6852,7 +6852,7 @@ fn runFrames(
                         // own data slot is non-writable — the spec
                         // says throw TypeError. Surface that here
                         // before the silent-write fallback.
-                        if (!this_obj.hasOwn(key_s.bytes)) {
+                        if (!this_obj.hasOwn(key_s.flatBytes())) {
                             if (!this_obj.extensible) {
                                 const ex = try makeTypeError(realm, "Cannot add property, object is not extensible");
                                 f.ip = ip;
@@ -6864,7 +6864,7 @@ fn runFrames(
                                 continue;
                             }
                         } else {
-                            const ok = this_obj.setIfWritable(allocator, key_s.bytes, value) catch return error.OutOfMemory;
+                            const ok = this_obj.setIfWritable(allocator, key_s.flatBytes(), value) catch return error.OutOfMemory;
                             if (!ok) {
                                 const ex = try makeTypeError(realm, "Cannot assign to read-only property via super");
                                 f.ip = ip;
@@ -6882,14 +6882,14 @@ fn runFrames(
                         // write per §10.1.9.2 — the receiver is
                         // the current `this`, not the parent
                         // prototype. (No own slot + extensible.)
-                        this_obj.set(allocator, key_s.bytes, value) catch return error.OutOfMemory;
+                        this_obj.set(allocator, key_s.flatBytes(), value) catch return error.OutOfMemory;
                     } else if (heap_mod.valueAsFunction(f.this_value)) |this_fn| {
                         // Receiver is a class function (static
                         // super.X = v lands here). No extensibility
                         // flag on JSFunction yet — leave the silent
                         // write path. TODO(cynic): wire JSFunction
                         // extensibility for Object.freeze parity.
-                        this_fn.set(allocator, key_s.bytes, value) catch return error.OutOfMemory;
+                        this_fn.set(allocator, key_s.flatBytes(), value) catch return error.OutOfMemory;
                     }
                 }
                 acc = value;
@@ -7265,7 +7265,7 @@ fn runFrames(
                 // lives on the method's home_object / home_function
                 // — both set by `class.zig` at ClassTail evaluation.
                 var brand_buf: [128]u8 = undefined;
-                const lookup_key = translatePrivateKey(&brand_buf, key_s.bytes, framePrivateBrand(f, acc, key_s.bytes));
+                const lookup_key = translatePrivateKey(&brand_buf, key_s.flatBytes(), framePrivateBrand(f, acc, key_s.flatBytes()));
                 // §15.7 — `class C { static #x = …; static M() { return C.#x; } }`
                 // routes the read through the constructor's
                 // private slots when the receiver is the class
@@ -7400,7 +7400,7 @@ fn runFrames(
                 // receiver also belongs to a sibling class with a
                 // colliding identifier.
                 var brand_buf: [128]u8 = undefined;
-                const lookup_key = translatePrivateKey(&brand_buf, key_s.bytes, framePrivateBrand(f, acc, key_s.bytes));
+                const lookup_key = translatePrivateKey(&brand_buf, key_s.flatBytes(), framePrivateBrand(f, acc, key_s.flatBytes()));
                 // Static private members live on the class
                 // function itself (`#x` declared `static`); instance
                 // private members live on the receiver object.
@@ -7888,7 +7888,7 @@ fn runFrames(
                 const spec_v = local_chunk.constants[k];
                 if (!spec_v.isString()) return error.InvalidOpcode;
                 const spec_s: *JSString = @ptrCast(@alignCast(spec_v.asString()));
-                const outcome = loadModule(allocator, realm, spec_s.bytes, local_chunk.base_url) catch |err| switch (err) {
+                const outcome = loadModule(allocator, realm, spec_s.flatBytes(), local_chunk.base_url) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.InvalidOpcode,
                 };
@@ -7939,7 +7939,7 @@ fn runFrames(
                     },
                 };
                 if (di_spec_string) |spec_string| {
-                    const outcome = loadModule(allocator, realm, spec_string.bytes, local_chunk.base_url) catch |err| switch (err) {
+                    const outcome = loadModule(allocator, realm, spec_string.flatBytes(), local_chunk.base_url) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => return error.InvalidOpcode,
                     };
@@ -8003,7 +8003,7 @@ fn runFrames(
                 // land here with an empty-named JSFunction. Named
                 // forms already have a non-empty own `name`, so the
                 // own-property check leaves them alone.
-                if (std.mem.eql(u8, name_s.bytes, "default")) {
+                if (std.mem.eql(u8, name_s.flatBytes(), "default")) {
                     if (heap_mod.valueAsFunction(acc)) |fn_obj| {
                         // §16.2.3.7 step 3 — `If hasNameProperty is
                         // false, perform SetFunctionName(value,
@@ -8023,18 +8023,18 @@ fn runFrames(
                         const looks_anonymous = blk: {
                             if (!cur.isString()) break :blk false;
                             const cs: *JSString = @ptrCast(@alignCast(cur.asString()));
-                            break :blk cs.bytes.len == 0;
+                            break :blk cs.flatBytes().len == 0;
                         };
                         if (looks_anonymous) {
                             const owned = realm.heap.allocateString("default") catch return error.OutOfMemory;
                             fn_obj.set(realm.allocator, "name", Value.fromString(owned)) catch return error.OutOfMemory;
                             fn_obj.name_string = owned;
-                            fn_obj.name = owned.bytes;
+                            fn_obj.name = owned.flatBytes();
                         }
                     }
                 }
                 if (realm.current_module) |mr| {
-                    mr.exports.set(realm.allocator, name_s.bytes, acc) catch return error.OutOfMemory;
+                    mr.exports.set(realm.allocator, name_s.flatBytes(), acc) catch return error.OutOfMemory;
                 }
                 // No-op outside module context (e.g. running
                 // module-shaped code as a script for tests).
@@ -8070,9 +8070,9 @@ fn runFrames(
                         // value alongside the redirect (the
                         // redirect-first lookup path skips the
                         // local map when a redirect is present).
-                        mr.exports.namespace_redirects.put(realm.allocator, exp_s.bytes, .{
+                        mr.exports.namespace_redirects.put(realm.allocator, exp_s.flatBytes(), .{
                             .target_ns = src_obj,
-                            .target_key = local_s.bytes,
+                            .target_key = local_s.flatBytes(),
                             // §15.2.1.16 IndirectExportEntries — flag
                             // so post-body validation in
                             // `validateIndirectExports` walks this
@@ -8086,7 +8086,7 @@ fn runFrames(
                         // still resolves through the redirect
                         // walk without an empty data slot getting
                         // in the way.
-                        _ = mr.exports.properties.swapRemove(exp_s.bytes);
+                        _ = mr.exports.properties.swapRemove(exp_s.flatBytes());
                     }
                 }
             },
@@ -8223,7 +8223,7 @@ fn runFrames(
                     var ibuf: [16]u8 = undefined;
                     const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
                     const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-                    obj.set(allocator, owned.bytes, registers[i]) catch return error.OutOfMemory;
+                    obj.set(allocator, owned.flatBytes(), registers[i]) catch return error.OutOfMemory;
                 }
                 // §10.4.4.6 step 8 — `length` is `{ writable: true,
                 // enumerable: false, configurable: true }`. Default
@@ -8286,7 +8286,7 @@ fn runFrames(
                         var ibuf: [16]u8 = undefined;
                         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
                         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-                        obj.set(allocator, owned.bytes, registers[i]) catch return error.OutOfMemory;
+                        obj.set(allocator, owned.flatBytes(), registers[i]) catch return error.OutOfMemory;
                         len += 1;
                     }
                 }
@@ -8305,7 +8305,7 @@ fn runFrames(
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
                 const obj = heap_mod.valueAsPlainObject(registers[r_obj]) orelse return error.InvalidOpcode;
                 const fn_obj = heap_mod.valueAsFunction(acc) orelse return error.InvalidOpcode;
-                const entry = obj.accessors.getOrPut(allocator, key_s.bytes) catch return error.OutOfMemory;
+                const entry = obj.accessors.getOrPut(allocator, key_s.flatBytes()) catch return error.OutOfMemory;
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 if (is_setter) {
                     entry.value_ptr.*.setter = fn_obj;
@@ -8314,7 +8314,7 @@ fn runFrames(
                 }
                 // §10.1.11 OrdinaryOwnPropertyKeys — accessor counts as
                 // an own key for enumeration order.
-                obj.recordKey(allocator, key_s.bytes) catch return error.OutOfMemory;
+                obj.recordKey(allocator, key_s.flatBytes()) catch return error.OutOfMemory;
             },
 
             .def_computed_accessor => {
@@ -8340,14 +8340,14 @@ fn runFrames(
                 const obj = heap_mod.valueAsPlainObject(registers[r_obj]) orelse return error.InvalidOpcode;
                 const fn_obj = heap_mod.valueAsFunction(acc) orelse return error.InvalidOpcode;
                 const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
-                const entry = obj.accessors.getOrPut(allocator, owned.bytes) catch return error.OutOfMemory;
+                const entry = obj.accessors.getOrPut(allocator, owned.flatBytes()) catch return error.OutOfMemory;
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 if (is_setter) {
                     entry.value_ptr.*.setter = fn_obj;
                 } else {
                     entry.value_ptr.*.getter = fn_obj;
                 }
-                obj.recordKey(allocator, owned.bytes) catch return error.OutOfMemory;
+                obj.recordKey(allocator, owned.flatBytes()) catch return error.OutOfMemory;
             },
 
             .set_home => {
@@ -8423,7 +8423,7 @@ fn runFrames(
                     // and we always emit those with the empty
                     // template — so only the "no prefix" path
                     // honours an existing non-empty name.
-                    if (cs.bytes.len != 0 and prefix_kind == 0) continue;
+                    if (cs.flatBytes().len != 0 and prefix_kind == 0) continue;
                 }
                 const prefix: []const u8 = switch (prefix_kind) {
                     1 => "get ",
@@ -8472,7 +8472,7 @@ fn runFrames(
                 // §15.7.14 step 11 — pass the receiver (in r_obj),
                 // NOT `acc` (which holds the value being stored).
                 // The brand walk needs the target object's chain.
-                const lookup_key = translatePrivateKey(&brand_buf, key_s.bytes, framePrivateBrand(f, registers[r_obj], key_s.bytes));
+                const lookup_key = translatePrivateKey(&brand_buf, key_s.flatBytes(), framePrivateBrand(f, registers[r_obj], key_s.flatBytes()));
                 // §15.7 static private — receiver is the class
                 // constructor function. Mirror the JSObject path
                 // (accessor wins, then data, then brand-check
@@ -8837,9 +8837,9 @@ fn runFrames(
                 // that order; `throw_if_hole` (emitted by the
                 // compiler when the binding is `let`/`const`/
                 // `class`) catches the TDZ case.
-                if (realm.globals.get(key_s.bytes)) |v| {
+                if (realm.globals.get(key_s.flatBytes())) |v| {
                     acc = v;
-                } else switch (try lookupGlobalAccessor(allocator, realm, key_s.bytes)) {
+                } else switch (try lookupGlobalAccessor(allocator, realm, key_s.flatBytes())) {
                     .value => |v| acc = v,
                     .thrown => |ex| {
                         f.ip = ip;
@@ -8851,7 +8851,7 @@ fn runFrames(
                         continue;
                     },
                     .none => {
-                        const ex = try makeReferenceError(realm, key_s.bytes);
+                        const ex = try makeReferenceError(realm, key_s.flatBytes());
                         f.ip = ip;
                         f.accumulator = acc;
                         committed = true;
@@ -8878,9 +8878,9 @@ fn runFrames(
                 const key_v = local_chunk.constants[k];
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-                if (realm.globals.get(key_s.bytes)) |v| {
+                if (realm.globals.get(key_s.flatBytes())) |v| {
                     acc = v;
-                } else switch (try lookupGlobalAccessor(allocator, realm, key_s.bytes)) {
+                } else switch (try lookupGlobalAccessor(allocator, realm, key_s.flatBytes())) {
                     .value => |v| acc = v,
                     .thrown => |ex| {
                         f.ip = ip;
@@ -8908,7 +8908,7 @@ fn runFrames(
                 const key_v = local_chunk.constants[k];
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-                try realm.globals.putDecl(realm.allocator, key_s.bytes, acc);
+                try realm.globals.putDecl(realm.allocator, key_s.flatBytes(), acc);
             },
             .sta_global_fn_decl => {
                 // §9.1.1.4.19 CreateGlobalFunctionBinding —
@@ -8921,7 +8921,7 @@ fn runFrames(
                 const key_v = local_chunk.constants[k];
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-                try realm.globals.installScriptFunctionBinding(realm.allocator, key_s.bytes, acc);
+                try realm.globals.installScriptFunctionBinding(realm.allocator, key_s.flatBytes(), acc);
             },
             .sta_global => {
                 const k = readU16(code, ip);
@@ -8938,8 +8938,8 @@ fn runFrames(
                 // key is present. Anything missing here is a bare
                 // `x = 1` for some `x` that was never declared
                 // anywhere — strict mode forbids the implicit global.
-                if (!realm.globals.contains(key_s.bytes)) {
-                    const ex = try makeReferenceError(realm, key_s.bytes);
+                if (!realm.globals.contains(key_s.flatBytes())) {
+                    const ex = try makeReferenceError(realm, key_s.flatBytes());
                     f.ip = ip;
                     f.accumulator = acc;
                     committed = true;
@@ -8960,8 +8960,8 @@ fn runFrames(
                 // PutValue (§6.2.5.5) and must surface the §13.3.1
                 // TDZ ReferenceError when the slot still holds the
                 // Hole sentinel.
-                if (realm.globals.hasLexicalDeclaration(key_s.bytes)) {
-                    const cur = realm.globals.getDecl(key_s.bytes) orelse Value.hole_;
+                if (realm.globals.hasLexicalDeclaration(key_s.flatBytes())) {
+                    const cur = realm.globals.getDecl(key_s.flatBytes()) orelse Value.hole_;
                     if (cur.isHole()) {
                         const ex = try makeReferenceError(realm, "Cannot access binding before initialisation");
                         f.ip = ip;
@@ -8972,7 +8972,7 @@ fn runFrames(
                         }
                         continue;
                     }
-                    if (realm.globals.isLexConst(key_s.bytes)) {
+                    if (realm.globals.isLexConst(key_s.flatBytes())) {
                         const ex = try makeTypeError(realm, "Assignment to constant variable");
                         f.ip = ip;
                         f.accumulator = acc;
@@ -8982,7 +8982,7 @@ fn runFrames(
                         }
                         continue;
                     }
-                    try realm.globals.putDecl(realm.allocator, key_s.bytes, acc);
+                    try realm.globals.putDecl(realm.allocator, key_s.flatBytes(), acc);
                 } else {
                     // §10.1.9.1 OrdinarySet step 3 — a write to a
                     // non-writable own data property of the global
@@ -8992,7 +8992,7 @@ fn runFrames(
                     // (`undefined = 1`, `NaN = 1`, `Infinity = 1`)
                     // and any host-installed read-only data slot.
                     if (realm.globals.target) |gt| {
-                        if (gt.property_flags.get(key_s.bytes)) |flags| {
+                        if (gt.property_flags.get(key_s.flatBytes())) |flags| {
                             if (!flags.writable) {
                                 const ex = try makeTypeError(realm, "Cannot assign to read-only property on globalThis");
                                 f.ip = ip;
@@ -9005,7 +9005,7 @@ fn runFrames(
                             }
                         }
                     }
-                    try realm.globals.put(realm.allocator, key_s.bytes, acc);
+                    try realm.globals.put(realm.allocator, key_s.flatBytes(), acc);
                 }
             },
             .capture_unresolved_global => {
@@ -9027,7 +9027,7 @@ fn runFrames(
                 const key_v = local_chunk.constants[k];
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-                registers[r] = if (realm.globals.contains(key_s.bytes))
+                registers[r] = if (realm.globals.contains(key_s.flatBytes()))
                     Value.fromBool(false)
                 else
                     Value.fromBool(true);
@@ -9055,7 +9055,7 @@ fn runFrames(
                 const flag = registers[r];
                 const was_unresolved = flag.isBool() and flag.asBool();
                 if (was_unresolved) {
-                    const ex = try makeReferenceError(realm, key_s.bytes);
+                    const ex = try makeReferenceError(realm, key_s.flatBytes());
                     f.ip = ip;
                     f.accumulator = acc;
                     committed = true;
@@ -9070,14 +9070,14 @@ fn runFrames(
                 // both records); a name that was lex-declared
                 // after the capture but before the store still
                 // routes correctly to the declarative record here.
-                if (realm.globals.hasLexicalDeclaration(key_s.bytes)) {
+                if (realm.globals.hasLexicalDeclaration(key_s.flatBytes())) {
                     // §13.3.1 — `sta_global_strict` is reached only
                     // from assignment-expression code paths (never
                     // a declarator init), so a Hole-valued slot
                     // here is a §13.3.1 TDZ ReferenceError, not a
                     // first-init. Mirrors the matching check in
                     // `sta_global` above.
-                    const cur = realm.globals.getDecl(key_s.bytes) orelse Value.hole_;
+                    const cur = realm.globals.getDecl(key_s.flatBytes()) orelse Value.hole_;
                     if (cur.isHole()) {
                         const ex = try makeReferenceError(realm, "Cannot access binding before initialisation");
                         f.ip = ip;
@@ -9088,7 +9088,7 @@ fn runFrames(
                         }
                         continue;
                     }
-                    if (realm.globals.isLexConst(key_s.bytes)) {
+                    if (realm.globals.isLexConst(key_s.flatBytes())) {
                         const ex = try makeTypeError(realm, "Assignment to constant variable");
                         f.ip = ip;
                         f.accumulator = acc;
@@ -9098,7 +9098,7 @@ fn runFrames(
                         }
                         continue;
                     }
-                    try realm.globals.putDecl(realm.allocator, key_s.bytes, acc);
+                    try realm.globals.putDecl(realm.allocator, key_s.flatBytes(), acc);
                 } else {
                     // §10.1.9.1 OrdinarySet step 3 — same writable
                     // gate as `sta_global`. `sta_global_strict` is
@@ -9107,7 +9107,7 @@ fn runFrames(
                     // data property of the global object refuses
                     // the write with TypeError.
                     if (realm.globals.target) |gt| {
-                        if (gt.property_flags.get(key_s.bytes)) |flags| {
+                        if (gt.property_flags.get(key_s.flatBytes())) |flags| {
                             if (!flags.writable) {
                                 const ex = try makeTypeError(realm, "Cannot assign to read-only property on globalThis");
                                 f.ip = ip;
@@ -9120,7 +9120,7 @@ fn runFrames(
                             }
                         }
                     }
-                    try realm.globals.put(realm.allocator, key_s.bytes, acc);
+                    try realm.globals.put(realm.allocator, key_s.flatBytes(), acc);
                 }
             },
 
@@ -9279,7 +9279,7 @@ fn runFrames(
                         var db: [24]u8 = undefined;
                         const ds = std.fmt.bufPrint(&db, "{d}", .{target_len}) catch unreachable;
                         const owned = realm.heap.allocateString(ds) catch return error.OutOfMemory;
-                        target.set(allocator, owned.bytes, elem) catch return error.OutOfMemory;
+                        target.set(allocator, owned.flatBytes(), elem) catch return error.OutOfMemory;
                     }
                     target_len += 1;
                 }
@@ -9460,7 +9460,7 @@ fn runFrames(
                     // on the target.
                     var obj = obj_in;
                     if (obj.proxy_target != null or obj.proxy_revoked) {
-                        const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key_s.bytes, acc);
+                        const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key_s.flatBytes(), acc);
                         switch (r) {
                             .value => |v| {
                                 acc = v;
@@ -9486,8 +9486,8 @@ fn runFrames(
                     // ordinary path. Accessors don't exist on a
                     // module namespace, so the lookupAccessor walk
                     // below is skipped for the namespace case.
-                    if (obj.is_module_namespace and !std.mem.startsWith(u8, key_s.bytes, "@@") and !std.mem.startsWith(u8, key_s.bytes, "<sym:")) {
-                        const v_ns = module_mod.namespaceGetThrowingOnHole(realm, obj, key_s.bytes) catch |err| switch (err) {
+                    if (obj.is_module_namespace and !std.mem.startsWith(u8, key_s.flatBytes(), "@@") and !std.mem.startsWith(u8, key_s.flatBytes(), "<sym:")) {
+                        const v_ns = module_mod.namespaceGetThrowingOnHole(realm, obj, key_s.flatBytes()) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             error.NativeThrew => {
                                 const ex = realm.pending_exception orelse Value.undefined_;
@@ -9510,7 +9510,7 @@ fn runFrames(
                         // 4.b passes Receiver unchanged). Without this
                         // an inherited proxy accessor / trap silently
                         // bypasses.
-                        switch (try getThroughChain(allocator, realm, frames, f, ip, obj, key_s.bytes, acc)) {
+                        switch (try getThroughChain(allocator, realm, frames, f, ip, obj, key_s.flatBytes(), acc)) {
                             .value => |v| acc = v,
                             .handled => {
                                 committed = true;
@@ -9518,7 +9518,7 @@ fn runFrames(
                             },
                             .uncaught => |ex| return .{ .thrown = ex },
                         }
-                    } else if (lookupAccessor(obj, key_s.bytes)) |acc_pair| {
+                    } else if (lookupAccessor(obj, key_s.flatBytes())) |acc_pair| {
                         // §10.1.8 — accessor descriptor wins over
                         // data property. Walk the prototype chain
                         // looking for an accessor first.
@@ -9541,7 +9541,7 @@ fn runFrames(
                             acc = Value.undefined_;
                         }
                     } else {
-                        acc = obj.get(key_s.bytes);
+                        acc = obj.get(key_s.flatBytes());
                     }
                 } else if (heap_mod.valueAsFunction(acc)) |fn_obj| {
                     // §10.1.8.1 OrdinaryGet step 4 — accessor
@@ -9551,7 +9551,7 @@ fn runFrames(
                     // `caller` / `arguments` accessors installed on
                     // %Function.prototype% (§10.2.4) fire when user
                     // code reads `fn.caller` / `fn.arguments`.
-                    if (lookupFunctionAccessor(fn_obj, key_s.bytes)) |acc_pair| {
+                    if (lookupFunctionAccessor(fn_obj, key_s.flatBytes())) |acc_pair| {
                         if (acc_pair.getter) |getter| {
                             const recv = acc;
                             const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
@@ -9571,7 +9571,7 @@ fn runFrames(
                             acc = Value.undefined_;
                         }
                     } else {
-                        acc = fn_obj.get(key_s.bytes);
+                        acc = fn_obj.get(key_s.flatBytes());
                     }
                 } else if (acc.isString()) {
                     // §6.1.4.4 — string primitives expose.length,
@@ -9579,11 +9579,11 @@ fn runFrames(
                     // `String.prototype` methods (`.charAt` etc.)
                     // looked up through the realm's intrinsic.
                     const recv: *JSString = @ptrCast(@alignCast(acc.asString()));
-                    if (std.mem.eql(u8, key_s.bytes, "length")) {
+                    if (std.mem.eql(u8, key_s.flatBytes(), "length")) {
                         // §22.1.5.1 — String.prototype.length is the
                         // count of UTF-16 code units in the String
                         // value (§6.1.4), not the WTF-8 byte length.
-                        acc = Value.fromInt32(@intCast(utf16.lengthInCodeUnits(recv.bytes)));
+                        acc = Value.fromInt32(@intCast(utf16.lengthInCodeUnits(recv.flatBytes())));
                     } else if (realm.intrinsics.string_prototype) |sp| {
                         // §10.1.8.1 OrdinaryGet — walk the prototype
                         // chain looking for an accessor first; an
@@ -9592,7 +9592,7 @@ fn runFrames(
                         // primitive receivers forward the primitive
                         // as `this` to the getter (§10.2.1.2
                         // OrdinaryCallBindThis — no boxing).
-                        if (lookupAccessor(sp, key_s.bytes)) |acc_pair| {
+                        if (lookupAccessor(sp, key_s.flatBytes())) |acc_pair| {
                             if (acc_pair.getter) |getter| {
                                 const recv_v = acc;
                                 const outcome = try callJSFunction(allocator, realm, getter, recv_v, &.{});
@@ -9612,7 +9612,7 @@ fn runFrames(
                                 acc = Value.undefined_;
                             }
                         } else {
-                            acc = sp.get(key_s.bytes);
+                            acc = sp.get(key_s.flatBytes());
                         }
                     } else acc = Value.undefined_;
                 } else if (acc.isInt32() or acc.isDouble()) {
@@ -9626,7 +9626,7 @@ fn runFrames(
                     // `this = <number primitive>` in strict mode.
                     if (heap_mod.valueAsFunction(realm.globals.get("Number") orelse Value.undefined_)) |num_ctor| {
                         if (num_ctor.prototype) |np| {
-                            if (lookupAccessor(np, key_s.bytes)) |acc_pair| {
+                            if (lookupAccessor(np, key_s.flatBytes())) |acc_pair| {
                                 if (acc_pair.getter) |getter| {
                                     const recv_v = acc;
                                     const outcome = try callJSFunction(allocator, realm, getter, recv_v, &.{});
@@ -9646,7 +9646,7 @@ fn runFrames(
                                     acc = Value.undefined_;
                                 }
                             } else {
-                                acc = np.get(key_s.bytes);
+                                acc = np.get(key_s.flatBytes());
                             }
                         } else acc = Value.undefined_;
                     } else acc = Value.undefined_;
@@ -9655,7 +9655,7 @@ fn runFrames(
                     // chain walk as the Number arm above.
                     if (heap_mod.valueAsFunction(realm.globals.get("Boolean") orelse Value.undefined_)) |bool_ctor| {
                         if (bool_ctor.prototype) |bp| {
-                            if (lookupAccessor(bp, key_s.bytes)) |acc_pair| {
+                            if (lookupAccessor(bp, key_s.flatBytes())) |acc_pair| {
                                 if (acc_pair.getter) |getter| {
                                     const recv_v = acc;
                                     const outcome = try callJSFunction(allocator, realm, getter, recv_v, &.{});
@@ -9675,7 +9675,7 @@ fn runFrames(
                                     acc = Value.undefined_;
                                 }
                             } else {
-                                acc = bp.get(key_s.bytes);
+                                acc = bp.get(key_s.flatBytes());
                             }
                         } else acc = Value.undefined_;
                     } else acc = Value.undefined_;
@@ -9684,7 +9684,7 @@ fn runFrames(
                     // chain walk as the Number arm above.
                     if (heap_mod.valueAsFunction(realm.globals.get("BigInt") orelse Value.undefined_)) |bi_ctor| {
                         if (bi_ctor.prototype) |bp| {
-                            if (lookupAccessor(bp, key_s.bytes)) |acc_pair| {
+                            if (lookupAccessor(bp, key_s.flatBytes())) |acc_pair| {
                                 if (acc_pair.getter) |getter| {
                                     const recv_v = acc;
                                     const outcome = try callJSFunction(allocator, realm, getter, recv_v, &.{});
@@ -9704,7 +9704,7 @@ fn runFrames(
                                     acc = Value.undefined_;
                                 }
                             } else {
-                                acc = bp.get(key_s.bytes);
+                                acc = bp.get(key_s.flatBytes());
                             }
                         } else acc = Value.undefined_;
                     } else acc = Value.undefined_;
@@ -9717,7 +9717,7 @@ fn runFrames(
                         if (sym_ctor.prototype) |sp| {
                             // Accessor descriptors (e.g. `description`)
                             // win over property-bag entries.
-                            if (lookupAccessor(sp, key_s.bytes)) |acc_pair| {
+                            if (lookupAccessor(sp, key_s.flatBytes())) |acc_pair| {
                                 if (acc_pair.getter) |getter| {
                                     const recv = acc;
                                     const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
@@ -9737,7 +9737,7 @@ fn runFrames(
                                     acc = Value.undefined_;
                                 }
                             } else {
-                                acc = sp.get(key_s.bytes);
+                                acc = sp.get(key_s.flatBytes());
                             }
                         } else acc = Value.undefined_;
                     } else acc = Value.undefined_;
@@ -9762,7 +9762,7 @@ fn runFrames(
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
                 const recv = registers[r_obj];
                 {
-                    const set_outcome = try strictSetProperty(allocator, realm, frames, f, ip, recv, key_s.bytes, acc);
+                    const set_outcome = try strictSetProperty(allocator, realm, frames, f, ip, recv, key_s.flatBytes(), acc);
                     switch (set_outcome) {
                         .ok => {},
                         .handled => {
@@ -9791,21 +9791,21 @@ fn runFrames(
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
                 const recv = registers[r_obj];
                 const obj = heap_mod.valueAsPlainObject(recv) orelse return error.InvalidOpcode;
-                const had_own = obj.hasOwn(key_s.bytes);
+                const had_own = obj.hasOwn(key_s.flatBytes());
                 if (!had_own and !obj.extensible) {
                     const ex = try makeTypeError(realm, "Cannot define property on non-extensible object");
                     return .{ .thrown = ex };
                 }
                 if (had_own) {
-                    const cur = obj.flagsFor(key_s.bytes);
+                    const cur = obj.flagsFor(key_s.flatBytes());
                     if (!cur.configurable) {
                         const ex = try makeTypeError(realm, "Cannot redefine non-configurable property");
                         return .{ .thrown = ex };
                     }
-                    _ = obj.properties.swapRemove(key_s.bytes);
-                    _ = obj.property_flags.swapRemove(key_s.bytes);
+                    _ = obj.properties.swapRemove(key_s.flatBytes());
+                    _ = obj.property_flags.swapRemove(key_s.flatBytes());
                 }
-                obj.setWithFlags(allocator, key_s.bytes, acc, object_mod.PropertyFlags.default) catch return error.OutOfMemory;
+                obj.setWithFlags(allocator, key_s.flatBytes(), acc, object_mod.PropertyFlags.default) catch return error.OutOfMemory;
             },
             .lda_computed => {
                 const r_obj = code[ip];
@@ -9978,14 +9978,14 @@ fn runFrames(
                     // inherited String.prototype methods.
                     const s: *JSString = @ptrCast(@alignCast(recv.asString()));
                     if (std.mem.eql(u8, key_slice, "length")) {
-                        acc = Value.fromInt32(@intCast(utf16.lengthInCodeUnits(s.bytes)));
+                        acc = Value.fromInt32(@intCast(utf16.lengthInCodeUnits(s.flatBytes())));
                     } else if (std.fmt.parseInt(usize, key_slice, 10)) |idx| {
                         // §22.1.4.4 [[GetOwnProperty]] — the indexed
                         // own property is the one-element String
                         // value containing the code unit at index
                         // `idx`. Walk the code-unit view and emit
                         // the WTF-8 encoding of that single unit.
-                        if (utf16.codeUnitAt(s.bytes, idx)) |cu| {
+                        if (utf16.codeUnitAt(s.flatBytes(), idx)) |cu| {
                             var buf: std.ArrayListUnmanaged(u8) = .empty;
                             defer buf.deinit(allocator);
                             utf16.appendCodeUnitAsWtf8(allocator, &buf, cu) catch return error.OutOfMemory;
@@ -10164,7 +10164,7 @@ fn runFrames(
                 // map only stores the slice).
                 const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
                 {
-                    const set_outcome = try strictSetPropertyAnchored(allocator, realm, frames, f, ip, recv, owned.bytes, owned, acc);
+                    const set_outcome = try strictSetPropertyAnchored(allocator, realm, frames, f, ip, recv, owned.flatBytes(), owned, acc);
                     switch (set_outcome) {
                         .ok => {},
                         .handled => {
@@ -10196,7 +10196,7 @@ fn runFrames(
                     const tmp = computedKeyToString(key_v, &key_buf);
                     break :blk realm.heap.allocateString(tmp) catch return error.OutOfMemory;
                 };
-                const key_slice = key_js.bytes;
+                const key_slice = key_js.flatBytes();
                 const had_own = obj.hasOwn(key_slice);
                 if (!had_own and !obj.extensible) {
                     const ex = try makeTypeError(realm, "Cannot define property on non-extensible object");
@@ -10226,7 +10226,7 @@ fn runFrames(
                 // §10.5.10 Proxy [[Delete]] dispatch.
                 if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
                     if (obj_in.proxy_target != null or obj_in.proxy_revoked) {
-                        const r = try proxyDeleteTrap(allocator, realm, frames, f, ip, obj_in, key_s.bytes);
+                        const r = try proxyDeleteTrap(allocator, realm, frames, f, ip, obj_in, key_s.flatBytes());
                         switch (r) {
                             .value => |v| {
                                 // §13.5.1.2 step 6 — strict-mode
@@ -10247,7 +10247,7 @@ fn runFrames(
                                 continue;
                             },
                             .fallthrough => |t| {
-                                const outcome = deleteOwnProperty(realm, heap_mod.taggedObject(t), key_s.bytes);
+                                const outcome = deleteOwnProperty(realm, heap_mod.taggedObject(t), key_s.flatBytes());
                                 switch (outcome) {
                                     .ok => |b| acc = Value.fromBool(b),
                                     .throw_typeerror => |msg| {
@@ -10271,7 +10271,7 @@ fn runFrames(
                         }
                     }
                 }
-                const outcome = deleteOwnProperty(realm, recv, key_s.bytes);
+                const outcome = deleteOwnProperty(realm, recv, key_s.flatBytes());
                 switch (outcome) {
                     .ok => |b| acc = Value.fromBool(b),
                     .throw_typeerror => |msg| {
@@ -10829,7 +10829,7 @@ pub fn formatDoubleSafe(scratch: *[64]u8, d: f64) []const u8 {
 
 /// §7.1.19 ToPropertyKey-ish coercion for computed key access.
 /// Returns a slice that borrows from `scratch` for primitives and
-/// from the original `JSString.bytes` for string keys. Caller
+/// from the original `JSString.flatBytes()` for string keys. Caller
 /// must not retain the slice past the next allocation that could
 /// invalidate the JSString contents — at sta_computed sites we
 /// re-allocate before storing.
@@ -10868,7 +10868,7 @@ pub fn isCanonicalNumericIndexString(s: []const u8) bool {
 fn computedKeyToString(v: Value, scratch: *[64]u8) []const u8 {
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
-        return s.bytes;
+        return s.flatBytes();
     }
     if (v.isInt32()) {
         return std.fmt.bufPrint(scratch, "{d}", .{v.asInt32()}) catch unreachable;
@@ -11154,7 +11154,7 @@ fn strictSetPropertyAnchored(
                 // function; OrdinarySet writes through `setIfWritable`.
                 const fn_target = obj.proxy_target_fn.?;
                 const owned_k_fn = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                const ok = fn_target.setIfWritable(allocator, owned_k_fn.bytes, value) catch return error.OutOfMemory;
+                const ok = fn_target.setIfWritable(allocator, owned_k_fn.flatBytes(), value) catch return error.OutOfMemory;
                 if (!ok) {
                     const ex = try makeTypeError(realm, "Cannot assign to read-only property");
                     f.ip = ip;
@@ -12492,7 +12492,7 @@ pub fn arrayLengthCoerce(v: Value) ?u32 {
     if (v.isBool()) return if (v.asBool()) 1 else 0;
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
-        const n = std.fmt.parseFloat(f64, s.bytes) catch return null;
+        const n = std.fmt.parseFloat(f64, s.flatBytes()) catch return null;
         if (std.math.isNan(n) or std.math.isInf(n) or n < 0 or @trunc(n) != n) return null;
         if (n > @as(f64, @floatFromInt(std.math.maxInt(u32)))) return null;
         return @intFromFloat(n);

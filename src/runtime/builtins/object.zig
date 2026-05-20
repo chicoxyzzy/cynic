@@ -220,7 +220,7 @@ pub fn ownPropertyKeysOrdered(
                 var ibuf: [16]u8 = undefined;
                 const ks = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch continue;
                 const owned = realm.heap.allocateString(ks) catch return error.OutOfMemory;
-                integer_keys.append(realm.allocator, .{ .idx = idx, .key = owned.bytes }) catch return error.OutOfMemory;
+                integer_keys.append(realm.allocator, .{ .idx = idx, .key = owned.flatBytes() }) catch return error.OutOfMemory;
             }
         } else {
             var ei: u32 = 0;
@@ -229,7 +229,7 @@ pub fn ownPropertyKeysOrdered(
                 var ibuf: [16]u8 = undefined;
                 const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ei}) catch continue;
                 const owned = realm.heap.allocateString(ks) catch return error.OutOfMemory;
-                integer_keys.append(realm.allocator, .{ .idx = ei, .key = owned.bytes }) catch return error.OutOfMemory;
+                integer_keys.append(realm.allocator, .{ .idx = ei, .key = owned.flatBytes() }) catch return error.OutOfMemory;
             }
         }
     }
@@ -257,7 +257,7 @@ pub fn ownPropertyKeysOrdered(
             var ibuf: [16]u8 = undefined;
             const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ti}) catch continue;
             const owned = realm.heap.allocateString(ks) catch return error.OutOfMemory;
-            integer_keys.append(realm.allocator, .{ .idx = ti, .key = owned.bytes }) catch return error.OutOfMemory;
+            integer_keys.append(realm.allocator, .{ .idx = ti, .key = owned.flatBytes() }) catch return error.OutOfMemory;
         }
     }
     // §10.1.11 OrdinaryOwnPropertyKeys — the spec walks String
@@ -571,7 +571,7 @@ pub fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []
         // entry that isn't a String or Symbol. Numbers / booleans /
         // null / undefined → TypeError.
         const key_str = if (k_v.isString())
-            (@as(*JSString, @ptrCast(@alignCast(k_v.asString())))).bytes
+            (@as(*JSString, @ptrCast(@alignCast(k_v.asString())))).flatBytes()
         else if (heap_mod.valueAsSymbol(k_v)) |sym|
             // Cynic flattens symbol property keys into the
             // sym.prop_key string (`@@<wellknown>` / `<sym:N>`).
@@ -672,7 +672,7 @@ fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError
             var ibuf: [16]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
             const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-            result.set(realm.allocator, idx_owned.bytes, Value.fromString(key_owned)) catch return error.OutOfMemory;
+            result.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(key_owned)) catch return error.OutOfMemory;
             idx += 1;
         }
         result.set(realm.allocator, "length", Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
@@ -727,7 +727,7 @@ fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError
         var ibuf: [16]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        result.set(realm.allocator, owned.bytes, Value.fromString(key_str)) catch return error.OutOfMemory;
+        result.set(realm.allocator, owned.flatBytes(), Value.fromString(key_str)) catch return error.OutOfMemory;
         idx += 1;
     }
     result.set(realm.allocator, "length", Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
@@ -852,7 +852,7 @@ fn functionEnumerableOwnValues(
         const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         switch (kind) {
             .value => {
-                result.set(realm.allocator, idx_owned.bytes, value) catch return error.OutOfMemory;
+                result.set(realm.allocator, idx_owned.flatBytes(), value) catch return error.OutOfMemory;
             },
             .entry => {
                 const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
@@ -862,7 +862,7 @@ fn functionEnumerableOwnValues(
                 pair.set(realm.allocator, "0", Value.fromString(key_owned)) catch return error.OutOfMemory;
                 pair.set(realm.allocator, "1", value) catch return error.OutOfMemory;
                 pair.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
-                result.set(realm.allocator, idx_owned.bytes, heap_mod.taggedObject(pair)) catch return error.OutOfMemory;
+                result.set(realm.allocator, idx_owned.flatBytes(), heap_mod.taggedObject(pair)) catch return error.OutOfMemory;
             },
         }
         idx += 1;
@@ -897,7 +897,7 @@ fn objectValues(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         var ibuf: [16]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        result.set(realm.allocator, owned.bytes, p.value) catch return error.OutOfMemory;
+        result.set(realm.allocator, owned.flatBytes(), p.value) catch return error.OutOfMemory;
         idx += 1;
     }
     result.set(realm.allocator, "length", Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
@@ -936,7 +936,7 @@ fn objectEntries(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         var ibuf: [16]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        result.set(realm.allocator, owned.bytes, heap_mod.taggedObject(pair)) catch return error.OutOfMemory;
+        result.set(realm.allocator, owned.flatBytes(), heap_mod.taggedObject(pair)) catch return error.OutOfMemory;
         idx += 1;
     }
     result.set(realm.allocator, "length", Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
@@ -1067,7 +1067,7 @@ fn objectHasOwn(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         const s: *@import("../string.zig").JSString = @ptrCast(@alignCast(o.asString()));
         if (std.mem.eql(u8, key, "length")) return Value.true_;
         const i = std.fmt.parseInt(usize, key, 10) catch return Value.false_;
-        return Value.fromBool(i < s.bytes.len);
+        return Value.fromBool(i < s.flatBytes().len);
     }
     return Value.false_;
 }
@@ -1077,7 +1077,7 @@ fn objectHasOwn(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 fn descriptorKey(realm: *Realm, v: Value) NativeError![]const u8 {
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
-        return s.bytes;
+        return s.flatBytes();
     }
     // Symbols use their stable `prop_key` slug (`@@iterator` for
     // well-known, `<sym:N>` for user-allocated). The interpreter's
@@ -1097,10 +1097,10 @@ fn descriptorKey(realm: *Realm, v: Value) NativeError![]const u8 {
         const prim = try intrinsics.toPrimitive(realm, v, .string);
         if (heap_mod.valueAsSymbol(prim)) |sym| return sym.prop_key;
         const s = try stringifyArg(realm, prim);
-        return s.bytes;
+        return s.flatBytes();
     }
     const s = try stringifyArg(realm, v);
-    return s.bytes;
+    return s.flatBytes();
 }
 
 /// §6.2.5.5 ToPropertyDescriptor result. Each `has_*` flag
@@ -2174,7 +2174,7 @@ fn objectGetOwnPropertyDescriptors(realm: *Realm, this_value: Value, args: []con
         const inner_args = [_]Value{ heap_mod.taggedObject(obj), key_arg };
         const desc = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &inner_args);
         if (desc.isUndefined()) continue;
-        out.set(realm.allocator, k_str.bytes, desc) catch return error.OutOfMemory;
+        out.set(realm.allocator, k_str.flatBytes(), desc) catch return error.OutOfMemory;
     }
     return heap_mod.taggedObject(out);
 }
@@ -2238,7 +2238,7 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
             const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
             const k_owned = realm.heap.allocateString(e.key) catch return error.OutOfMemory;
-            out.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
+            out.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(k_owned)) catch return error.OutOfMemory;
             len += 1;
         }
 
@@ -2252,14 +2252,14 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
             const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
             const k_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
-            out.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
+            out.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(k_owned)) catch return error.OutOfMemory;
             len += 1;
             if (!emitted_prototype and has_dedicated_prototype and std.mem.eql(u8, key, "name")) {
                 var ibuf2: [16]u8 = undefined;
                 const islice2 = std.fmt.bufPrint(&ibuf2, "{d}", .{len}) catch unreachable;
                 const idx2 = realm.heap.allocateString(islice2) catch return error.OutOfMemory;
                 const k2 = realm.heap.allocateString("prototype") catch return error.OutOfMemory;
-                out.set(realm.allocator, idx2.bytes, Value.fromString(k2)) catch return error.OutOfMemory;
+                out.set(realm.allocator, idx2.flatBytes(), Value.fromString(k2)) catch return error.OutOfMemory;
                 len += 1;
                 emitted_prototype = true;
             }
@@ -2271,7 +2271,7 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
             const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
             const k_owned = realm.heap.allocateString("prototype") catch return error.OutOfMemory;
-            out.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
+            out.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(k_owned)) catch return error.OutOfMemory;
             len += 1;
         }
         out.set(realm.allocator, "length", Value.fromInt32(len)) catch return error.OutOfMemory;
@@ -2299,7 +2299,7 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
         const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         const k_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
-        out.set(realm.allocator, idx_owned.bytes, Value.fromString(k_owned)) catch return error.OutOfMemory;
+        out.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(k_owned)) catch return error.OutOfMemory;
         len += 1;
     }
     out.set(realm.allocator, "length", Value.fromInt32(len)) catch return error.OutOfMemory;
@@ -2348,7 +2348,7 @@ fn objectGetOwnPropertySymbols(realm: *Realm, this_value: Value, args: []const V
             var ibuf: [16]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{flen}) catch unreachable;
             const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-            out.set(realm.allocator, idx_owned.bytes, heap_mod.taggedSymbol(sym)) catch return error.OutOfMemory;
+            out.set(realm.allocator, idx_owned.flatBytes(), heap_mod.taggedSymbol(sym)) catch return error.OutOfMemory;
             flen += 1;
         }
         out.set(realm.allocator, "length", Value.fromInt32(flen)) catch return error.OutOfMemory;
@@ -2383,7 +2383,7 @@ fn objectGetOwnPropertySymbols(realm: *Realm, this_value: Value, args: []const V
         var ibuf: [16]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
         const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        out.set(realm.allocator, idx_owned.bytes, heap_mod.taggedSymbol(sym)) catch return error.OutOfMemory;
+        out.set(realm.allocator, idx_owned.flatBytes(), heap_mod.taggedSymbol(sym)) catch return error.OutOfMemory;
         len += 1;
     }
     out.set(realm.allocator, "length", Value.fromInt32(len)) catch return error.OutOfMemory;
@@ -2442,7 +2442,7 @@ fn assignSetOrThrow(
 ) NativeError!void {
     const interpreter = @import("../interpreter.zig");
     const allocator = realm.allocator;
-    const key = key_string.bytes;
+    const key = key_string.flatBytes();
     // §10.1.9.2 — accessor descriptor on the receiver or its
     // proto chain wins. A getter-only accessor (no `set`) is a
     // TypeError under strict-mode Set.
@@ -2820,7 +2820,7 @@ fn lowerArrayIndexedFlags(realm: *Realm, obj: *JSObject, sealed_only: bool) Nati
         // pull from either the packed elements or a previously-
         // bag-promoted slot.
         const v = obj.getIndexed(idx);
-        obj.setWithFlags(realm.allocator, ks_owned.bytes, v, flags) catch return error.OutOfMemory;
+        obj.setWithFlags(realm.allocator, ks_owned.flatBytes(), v, flags) catch return error.OutOfMemory;
     }
 }
 
@@ -3246,7 +3246,7 @@ fn invokeFromEntriesReturn(realm: *Realm, iter_obj: *JSObject, iter_v: Value) vo
 /// §7.1.19 ToPropertyKey for `Object.fromEntries` — preserves
 /// Symbol keys (Cynic flattens to `<sym:N>` / `@@<name>`) and
 /// ToString-coerces the rest. Returns a slice valid for the
-/// realm's lifetime (heap-allocated JSString.bytes).
+/// realm's lifetime (heap-allocated JSString.flatBytes()).
 fn propertyKeyForFromEntries(realm: *Realm, k: Value) NativeError![]const u8 {
     // Symbol primitive — Cynic stores as a `*JSSymbol` whose
     // `prop_key` is the `<sym:N>` / `@@<descr>` slot key.
@@ -3255,10 +3255,10 @@ fn propertyKeyForFromEntries(realm: *Realm, k: Value) NativeError![]const u8 {
     }
     if (k.isString()) {
         const s: *JSString = @ptrCast(@alignCast(k.asString()));
-        return s.bytes;
+        return s.flatBytes();
     }
     const s = try stringifyArg(realm, k);
-    return s.bytes;
+    return s.flatBytes();
 }
 
 /// §10.5.2 Proxy [[SetPrototypeOf]] (V) — shared helper used by
@@ -3466,10 +3466,10 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
             },
         };
         const key_str = if (key_v.isString())
-            (@as(*JSString, @ptrCast(@alignCast(key_v.asString())))).bytes
+            (@as(*JSString, @ptrCast(@alignCast(key_v.asString())))).flatBytes()
         else blk: {
             const s = try stringifyArg(realm, key_v);
-            break :blk s.bytes;
+            break :blk s.flatBytes();
         };
         // Look up or create the bucket array.
         var bucket: *JSObject = undefined;
@@ -3490,7 +3490,7 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         // bytes must outlive this stack frame — intern via the
         // heap.
         const idx_owned = realm.heap.allocateString(idx_slice) catch return error.OutOfMemory;
-        bucket.set(realm.allocator, idx_owned.bytes, item) catch return error.OutOfMemory;
+        bucket.set(realm.allocator, idx_owned.flatBytes(), item) catch return error.OutOfMemory;
         bucket.set(realm.allocator, "length", Value.fromInt32(len_i + 1)) catch return error.OutOfMemory;
     }
     return heap_mod.taggedObject(out);
@@ -3540,7 +3540,7 @@ fn objectHasOwnProperty(realm: *Realm, this_value: Value, args: []const Value) N
         // Numeric indices that fall within the string look like own.
         if (std.mem.eql(u8, key, "length")) return Value.true_;
         const i = std.fmt.parseInt(usize, key, 10) catch return Value.false_;
-        return Value.fromBool(i < s.bytes.len);
+        return Value.fromBool(i < s.flatBytes().len);
     }
     return Value.false_;
 }
@@ -3738,7 +3738,7 @@ pub fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value
     if (tag_v) |v| {
         if (v.isString()) {
             const ts: *JSString = @ptrCast(@alignCast(v.asString()));
-            tag_slice = ts.bytes;
+            tag_slice = ts.flatBytes();
         }
     }
 

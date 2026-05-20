@@ -104,10 +104,11 @@ pub fn toNumber(v: Value) f64 {
         // full Unicode set, not just ASCII tab/space/CR/LF (the
         // Sputnik S9.3.1_A3 fixtures pass NBSP, the Zs block, and
         // LS/PS as whitespace).
-        const start_idx = skipStrWhiteSpaceFwd(s.bytes);
-        const end_idx = skipStrWhiteSpaceRev(s.bytes);
+        const s_bytes = s.flatBytes();
+        const start_idx = skipStrWhiteSpaceFwd(s_bytes);
+        const end_idx = skipStrWhiteSpaceRev(s_bytes);
         if (start_idx >= end_idx) return 0.0;
-        const trimmed = s.bytes[start_idx..end_idx];
+        const trimmed = s_bytes[start_idx..end_idx];
         // §7.1.4.1.1 StringToNumber — the StrUnsignedDecimalLiteral
         // grammar accepts only the case-sensitive `Infinity`. Zig's
         // `parseFloat` accepts `INFINITY`/`inf` etc.; pre-check the
@@ -662,7 +663,16 @@ pub fn addValues(realm: *Realm, lhs: Value, rhs: Value) RunError!?Value {
         // already copies the whole growing accumulator once (flat
         // immutable strings — ropes are future work, see
         // docs/ROADMAP.md), the intermediate buffer made it twice.
-        const s = realm.heap.allocateStringConcat2(lhs_str.bytes, rhs_str.bytes) catch return error.OutOfMemory;
+        const s = realm.heap.allocateStringConcat2(lhs_str.bytes, rhs_str.bytes) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // §6.1.4 — the concatenation would exceed the maximum
+            // string length (`u32` byte cap). V8 / JSC throw a
+            // RangeError ("Invalid string length") here.
+            error.StringTooLong => {
+                realm.pending_exception = try makeRangeError(realm, "Invalid string length");
+                return null;
+            },
+        };
         return Value.fromString(s);
     }
     return Value.fromDouble(toNumber(l) + toNumber(r));
@@ -677,7 +687,7 @@ pub const StringSlice = struct { bytes: []const u8, allocated: bool };
 pub fn valueToOwnedString(realm: *Realm, v: Value, scratch: *[64]u8) RunError!StringSlice {
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
-        return .{ .bytes = s.bytes, .allocated = false };
+        return .{ .bytes = s.flatBytes(), .allocated = false };
     }
     if (v.isInt32()) {
         const written = std.fmt.bufPrint(scratch, "{d}", .{v.asInt32()}) catch unreachable;
@@ -780,7 +790,7 @@ pub fn looseEq(a: Value, b: Value) bool {
     if (heap_mod.valueAsBigInt(a)) |abi| {
         if (b.isString()) {
             const s: *JSString = @ptrCast(@alignCast(b.asString()));
-            return stringEqualsBigInt(s.bytes, abi.value);
+            return stringEqualsBigInt(s.flatBytes(), abi.value);
         }
         if (b.isInt32()) return abi.value == @as(i128, b.asInt32());
         if (b.isDouble()) return bigintEqualsDouble(abi.value, b.asDouble());
@@ -789,7 +799,7 @@ pub fn looseEq(a: Value, b: Value) bool {
     if (heap_mod.valueAsBigInt(b)) |bbi| {
         if (a.isString()) {
             const s: *JSString = @ptrCast(@alignCast(a.asString()));
-            return stringEqualsBigInt(s.bytes, bbi.value);
+            return stringEqualsBigInt(s.flatBytes(), bbi.value);
         }
         if (a.isInt32()) return bbi.value == @as(i128, a.asInt32());
         if (a.isDouble()) return bigintEqualsDouble(bbi.value, a.asDouble());
@@ -863,7 +873,7 @@ pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
         // string; on failure the result is undefined → false.
         if (rhs.isString()) {
             const s: *JSString = @ptrCast(@alignCast(rhs.asString()));
-            const parsed = tryStringToBigInt(s.bytes) orelse return Value.false_;
+            const parsed = tryStringToBigInt(s.flatBytes()) orelse return Value.false_;
             return Value.fromBool(applyRelOp(op, a.value, parsed));
         }
         // BigInt vs Number — compare numerically with the BigInt
@@ -877,7 +887,7 @@ pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
     if (heap_mod.valueAsBigInt(rhs)) |b| {
         if (lhs.isString()) {
             const s: *JSString = @ptrCast(@alignCast(lhs.asString()));
-            const parsed = tryStringToBigInt(s.bytes) orelse return Value.false_;
+            const parsed = tryStringToBigInt(s.flatBytes()) orelse return Value.false_;
             return Value.fromBool(applyRelOp(op, parsed, b.value));
         }
         const bf: f64 = @floatFromInt(b.value);
@@ -890,7 +900,7 @@ pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
         // compare by UTF-16 code-unit value, not WTF-8 byte order.
         const ls: *JSString = @ptrCast(@alignCast(lhs.asString()));
         const rs: *JSString = @ptrCast(@alignCast(rhs.asString()));
-        const cmp = utf16.compareCodeUnits(ls.bytes, rs.bytes);
+        const cmp = utf16.compareCodeUnits(ls.flatBytes(), rs.flatBytes());
         const result = switch (op) {
             .lt => cmp == .lt,
             .gt => cmp == .gt,

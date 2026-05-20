@@ -639,8 +639,8 @@ fn parseIntNative(realm: *Realm, this_value: Value, args: []const Value) NativeE
         }
     }
     // §19.2.5 step 2 — strip leading StrWhiteSpace (Unicode-aware).
-    const start = skipStrWhiteSpace(s.bytes);
-    const trimmed = s.bytes[start..];
+    const start = skipStrWhiteSpace(s.flatBytes());
+    const trimmed = s.flatBytes()[start..];
     if (trimmed.len == 0) return Value.fromDouble(std.math.nan(f64));
     var slice = trimmed;
     var negative = false;
@@ -777,8 +777,8 @@ fn parseFloatNative(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // §19.2.4 — ToString first.
     const s = try stringifyArg(realm, v);
     // §19.2.4 step 2 — strip leading StrWhiteSpace (Unicode-aware).
-    const start = skipStrWhiteSpace(s.bytes);
-    const trimmed = s.bytes[start..];
+    const start = skipStrWhiteSpace(s.flatBytes());
+    const trimmed = s.flatBytes()[start..];
     if (trimmed.len == 0) return Value.fromDouble(std.math.nan(f64));
     var slice = trimmed;
     var negative = false;

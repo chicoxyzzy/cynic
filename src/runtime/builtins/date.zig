@@ -152,8 +152,8 @@ fn dateToPrimitive(realm: *Realm, this_value: Value, args: []const Value) Native
     const try_first_string: bool = blk: {
         if (hint_v.isString()) {
             const s: *JSString = @ptrCast(@alignCast(hint_v.asString()));
-            if (std.mem.eql(u8, s.bytes, "string") or std.mem.eql(u8, s.bytes, "default")) break :blk true;
-            if (std.mem.eql(u8, s.bytes, "number")) break :blk false;
+            if (std.mem.eql(u8, s.flatBytes(), "string") or std.mem.eql(u8, s.flatBytes(), "default")) break :blk true;
+            if (std.mem.eql(u8, s.flatBytes(), "number")) break :blk false;
         }
         return throwTypeError(realm, "Date.prototype[Symbol.toPrimitive]: invalid hint");
     };
@@ -435,7 +435,7 @@ fn dateConstructor(realm: *Realm, this_value: Value, args: []const Value) Native
         const prim = try intrinsics.toPrimitive(realm, arg, .default);
         if (prim.isString()) {
             const s_obj: *JSString = @ptrCast(@alignCast(prim.asString()));
-            ms = parseIsoDate(s_obj.bytes);
+            ms = parseIsoDate(s_obj.flatBytes());
         } else {
             const nv = try intrinsics.toNumber(realm, prim);
             ms = if (nv.isInt32()) @floatFromInt(nv.asInt32()) else nv.asDouble();
@@ -509,7 +509,7 @@ fn dateParse(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     _ = this_value;
     if (args.len == 0) return Value.fromDouble(std.math.nan(f64));
     const s_value = try intrinsics.stringifyArg(realm, args[0]);
-    const s = s_value.bytes;
+    const s = s_value.flatBytes();
     // §21.4.1.18 simplified ISO format. Real engines also accept
     // RFC 2822-style ("Mon, 01 Jan 2024 00:00:00 GMT"), but the
     // ISO branch covers nearly every test262 fixture and most

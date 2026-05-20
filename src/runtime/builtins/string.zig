@@ -183,11 +183,11 @@ fn regexpStringIterNext(realm: *Realm, this_value: Value, args: []const Value) N
     if (heap_mod.valueAsPlainObject(exec_result)) |match_arr| {
         const whole_v = try intrinsics.getPropertyChain(realm, match_arr, "0");
         const whole_str = try intrinsics.stringifyArg(realm, whole_v);
-        if (whole_str.bytes.len == 0) {
+        if (whole_str.flatBytes().len == 0) {
             const li_v = try intrinsics.getPropertyChain(realm, re_obj, "lastIndex");
             const li_i64 = try intrinsics.toLengthValue(realm, li_v);
             const li_unit: usize = if (li_i64 > 0) @intCast(li_i64) else 0;
-            const next_unit = if (full_unicode) advanceStringIndexUnicode(input.bytes, li_unit) else li_unit + 1;
+            const next_unit = if (full_unicode) advanceStringIndexUnicode(input.flatBytes(), li_unit) else li_unit + 1;
             re_obj.set(realm.allocator, "lastIndex", Value.fromInt32(@intCast(next_unit))) catch return error.OutOfMemory;
         }
     }
@@ -347,12 +347,12 @@ fn stringRaw(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         const key = std.fmt.bufPrint(&ibuf, "{d}", .{next_index}) catch unreachable;
         const seg_v = try intrinsics.getPropertyChain(realm, raw_obj, key);
         const seg_str = try stringifyArg(realm, seg_v);
-        out.appendSlice(realm.allocator, seg_str.bytes) catch return error.OutOfMemory;
+        out.appendSlice(realm.allocator, seg_str.flatBytes()) catch return error.OutOfMemory;
         if (next_index + 1 == lit_segs) break;
         if (next_index < num_subs) {
             const sub_v = args[1 + @as(usize, @intCast(next_index))];
             const sub_str = try stringifyArg(realm, sub_v);
-            out.appendSlice(realm.allocator, sub_str.bytes) catch return error.OutOfMemory;
+            out.appendSlice(realm.allocator, sub_str.flatBytes()) catch return error.OutOfMemory;
         }
     }
 
@@ -415,7 +415,7 @@ fn stringMatchAllDispatched(realm: *Realm, this_value: Value, args: []const Valu
             if (flags_v.isUndefined() or flags_v.isNull())
                 return throwTypeError(realm, "String.prototype.matchAll: regex has no flags");
             const flags_s = try intrinsics.stringifyArg(realm, flags_v);
-            if (std.mem.indexOfScalar(u8, flags_s.bytes, 'g') == null)
+            if (std.mem.indexOfScalar(u8, flags_s.flatBytes(), 'g') == null)
                 return throwTypeError(realm, "String.prototype.matchAll requires a global regex");
         }
         // step 3.c-d — GetMethod(regexpOrPattern, @@matchAll); if
@@ -487,7 +487,7 @@ pub fn stringMatch(realm: *Realm, this_value: Value, args: []const Value) Native
     // so `obj.get` returns undefined unless we walk accessors.
     // §22.1.3.10 step 4 forwards `regexp.flags` via Get + ToString.
     const flags_v = try intrinsics.getPropertyChain(realm, re_obj, "flags");
-    const flags_str: []const u8 = if (flags_v.isString()) (@as(*JSString, @ptrCast(@alignCast(flags_v.asString())))).bytes else "";
+    const flags_str: []const u8 = if (flags_v.isString()) (@as(*JSString, @ptrCast(@alignCast(flags_v.asString())))).flatBytes() else "";
     const is_global = std.mem.indexOfScalar(u8, flags_str, 'g') != null;
     const exec_fn_v = try intrinsics.getPropertyChain(realm, re_obj, "exec");
     const exec_fn = heap_mod.valueAsFunction(exec_fn_v) orelse return Value.null_;
@@ -534,7 +534,7 @@ pub fn stringMatch(realm: *Realm, this_value: Value, args: []const Value) Native
         const whole = match_arr.get("0");
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        result.set(realm.allocator, owned.bytes, whole) catch return error.OutOfMemory;
+        result.set(realm.allocator, owned.flatBytes(), whole) catch return error.OutOfMemory;
         idx += 1;
         // If the regex didn't advance lastIndex, bump it manually
         // to avoid an infinite loop on zero-width matches.
@@ -746,7 +746,7 @@ fn stringCharAt(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         const empty = realm.heap.allocateString("") catch return error.OutOfMemory;
         return Value.fromString(empty);
     }
-    const cu = utf16.codeUnitAt(s.bytes, @intCast(idx)) orelse {
+    const cu = utf16.codeUnitAt(s.flatBytes(), @intCast(idx)) orelse {
         const empty = realm.heap.allocateString("") catch return error.OutOfMemory;
         return Value.fromString(empty);
     };
@@ -771,7 +771,7 @@ fn stringCharCodeAt(realm: *Realm, this_value: Value, args: []const Value) Nativ
         break :blk @intFromFloat(@trunc(d));
     };
     if (idx < 0) return Value.fromDouble(std.math.nan(f64));
-    const cu = utf16.codeUnitAt(s.bytes, @intCast(idx)) orelse return Value.fromDouble(std.math.nan(f64));
+    const cu = utf16.codeUnitAt(s.flatBytes(), @intCast(idx)) orelse return Value.fromDouble(std.math.nan(f64));
     return Value.fromInt32(@intCast(cu));
 }
 
@@ -786,18 +786,18 @@ fn stringIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const pos_v = argOr(args, 1, Value.undefined_);
     // Receiver length in code units, used for clamping `position`
     // (§22.1.3.8 step 5 — Min(Max(intPosition, 0), len)).
-    const cu_len = utf16.lengthInCodeUnits(s.bytes);
+    const cu_len = utf16.lengthInCodeUnits(s.flatBytes());
     var start_cu: usize = 0;
     if (!pos_v.isUndefined()) {
         const n = try intrinsics.toNumber(realm, pos_v);
         start_cu = clampPos(intrinsics.toInt(n), cu_len);
     }
-    if (needle.bytes.len == 0) return Value.fromInt32(@intCast(start_cu));
-    const start_byte = utf16.byteIndexForCodeUnit(s.bytes, start_cu) orelse s.bytes.len;
-    if (start_byte >= s.bytes.len) return Value.fromInt32(-1);
-    if (std.mem.indexOf(u8, s.bytes[start_byte..], needle.bytes)) |off| {
+    if (needle.flatBytes().len == 0) return Value.fromInt32(@intCast(start_cu));
+    const start_byte = utf16.byteIndexForCodeUnit(s.flatBytes(), start_cu) orelse s.flatBytes().len;
+    if (start_byte >= s.flatBytes().len) return Value.fromInt32(-1);
+    if (std.mem.indexOf(u8, s.flatBytes()[start_byte..], needle.flatBytes())) |off| {
         const abs_byte = off + start_byte;
-        return Value.fromInt32(@intCast(utf16.codeUnitIndexForByte(s.bytes, abs_byte)));
+        return Value.fromInt32(@intCast(utf16.codeUnitIndexForByte(s.flatBytes(), abs_byte)));
     }
     return Value.fromInt32(-1);
 }
@@ -898,17 +898,17 @@ fn stringIncludes(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const s = try coerceThisToJSString(realm, this_value);
     const needle = try coerceSearchString(realm, argOr(args, 0, Value.undefined_), "includes");
     const pos_v = argOr(args, 1, Value.undefined_);
-    const cu_len = utf16.lengthInCodeUnits(s.bytes);
+    const cu_len = utf16.lengthInCodeUnits(s.flatBytes());
     var start_cu: usize = 0;
     if (!pos_v.isUndefined()) {
         const n = try intrinsics.toNumber(realm, pos_v);
         start_cu = clampPos(intrinsics.toInt(n), cu_len);
     }
     if (start_cu >= cu_len) {
-        return Value.fromBool(needle.bytes.len == 0);
+        return Value.fromBool(needle.flatBytes().len == 0);
     }
-    const start_byte = utf16.byteIndexForCodeUnit(s.bytes, start_cu) orelse s.bytes.len;
-    return Value.fromBool(std.mem.indexOf(u8, s.bytes[start_byte..], needle.bytes) != null);
+    const start_byte = utf16.byteIndexForCodeUnit(s.flatBytes(), start_cu) orelse s.flatBytes().len;
+    return Value.fromBool(std.mem.indexOf(u8, s.flatBytes()[start_byte..], needle.flatBytes()) != null);
 }
 
 /// §22.1.3.21 String.prototype.startsWith(searchString, position).
@@ -921,15 +921,15 @@ fn stringStartsWith(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const s = try coerceThisToJSString(realm, this_value);
     const needle = try coerceSearchString(realm, argOr(args, 0, Value.undefined_), "startsWith");
     const pos_v = argOr(args, 1, Value.undefined_);
-    const cu_len = utf16.lengthInCodeUnits(s.bytes);
+    const cu_len = utf16.lengthInCodeUnits(s.flatBytes());
     var start_cu: usize = 0;
     if (!pos_v.isUndefined()) {
         const n = try intrinsics.toNumber(realm, pos_v);
         start_cu = clampPos(intrinsics.toInt(n), cu_len);
     }
-    const start_byte = utf16.byteIndexForCodeUnit(s.bytes, start_cu) orelse s.bytes.len;
-    if (start_byte + needle.bytes.len > s.bytes.len) return Value.false_;
-    return Value.fromBool(std.mem.startsWith(u8, s.bytes[start_byte..], needle.bytes));
+    const start_byte = utf16.byteIndexForCodeUnit(s.flatBytes(), start_cu) orelse s.flatBytes().len;
+    if (start_byte + needle.flatBytes().len > s.flatBytes().len) return Value.false_;
+    return Value.fromBool(std.mem.startsWith(u8, s.flatBytes()[start_byte..], needle.flatBytes()));
 }
 
 /// §22.1.3.6 String.prototype.endsWith(searchString, endPosition).
@@ -942,16 +942,16 @@ fn stringEndsWith(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const s = try coerceThisToJSString(realm, this_value);
     const needle = try coerceSearchString(realm, argOr(args, 0, Value.undefined_), "endsWith");
     const end_pos_v = argOr(args, 1, Value.undefined_);
-    const cu_len = utf16.lengthInCodeUnits(s.bytes);
+    const cu_len = utf16.lengthInCodeUnits(s.flatBytes());
     var end_cu: usize = cu_len;
     if (!end_pos_v.isUndefined()) {
         const n = try intrinsics.toNumber(realm, end_pos_v);
         end_cu = clampPos(intrinsics.toInt(n), cu_len);
     }
-    const end_byte = utf16.byteIndexForCodeUnit(s.bytes, end_cu) orelse s.bytes.len;
-    if (needle.bytes.len > end_byte) return Value.false_;
-    const start = end_byte - needle.bytes.len;
-    return Value.fromBool(std.mem.eql(u8, s.bytes[start..end_byte], needle.bytes));
+    const end_byte = utf16.byteIndexForCodeUnit(s.flatBytes(), end_cu) orelse s.flatBytes().len;
+    if (needle.flatBytes().len > end_byte) return Value.false_;
+    const start = end_byte - needle.flatBytes().len;
+    return Value.fromBool(std.mem.eql(u8, s.flatBytes()[start..end_byte], needle.flatBytes()));
 }
 
 /// Allocate a JSString from a `utf16.Slice` — the byte slice
@@ -980,7 +980,7 @@ fn jsStringFromUtf16Slice(realm: *Realm, sl: utf16.Slice) NativeError!*JSString 
 /// code-unit range `[start, end)` (clamped to `[0, len]`).
 fn stringSlice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
-    const len: i64 = @intCast(utf16.lengthInCodeUnits(s.bytes));
+    const len: i64 = @intCast(utf16.lengthInCodeUnits(s.flatBytes()));
     const start_num = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
     var start: i64 = intrinsics.toInt(start_num);
     var end: i64 = len;
@@ -994,7 +994,7 @@ fn stringSlice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     start = @min(start, len);
     end = @min(end, len);
     if (end < start) end = start;
-    const sl = utf16.sliceCodeUnits(s.bytes, @intCast(start), @intCast(end));
+    const sl = utf16.sliceCodeUnits(s.flatBytes(), @intCast(start), @intCast(end));
     const out = try jsStringFromUtf16Slice(realm, sl);
     return Value.fromString(out);
 }
@@ -1005,7 +1005,7 @@ fn stringSlice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
 /// order. Indexed in UTF-16 code units.
 fn stringSubstring(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
-    const len: i64 = @intCast(utf16.lengthInCodeUnits(s.bytes));
+    const len: i64 = @intCast(utf16.lengthInCodeUnits(s.flatBytes()));
     const start_num = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
     var start: i64 = intrinsics.toInt(start_num);
     var end: i64 = len;
@@ -1022,7 +1022,7 @@ fn stringSubstring(realm: *Realm, this_value: Value, args: []const Value) Native
         start = end;
         end = t;
     }
-    const sl = utf16.sliceCodeUnits(s.bytes, @intCast(start), @intCast(end));
+    const sl = utf16.sliceCodeUnits(s.flatBytes(), @intCast(start), @intCast(end));
     const out = try jsStringFromUtf16Slice(realm, sl);
     return Value.fromString(out);
 }
@@ -1049,7 +1049,7 @@ fn stringToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
 fn stringToUpperCase(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const s = try coerceThisToJSString(realm, this_value);
-    return caseConvertString(realm, s.bytes, 0);
+    return caseConvertString(realm, s.flatBytes(), 0);
 }
 
 /// §22.1.3.26 String.prototype.toLowerCase. Uses libunicode's
@@ -1063,7 +1063,7 @@ fn stringToUpperCase(realm: *Realm, this_value: Value, args: []const Value) Nati
 fn stringToLowerCase(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const s = try coerceThisToJSString(realm, this_value);
-    return caseConvertString(realm, s.bytes, 1);
+    return caseConvertString(realm, s.flatBytes(), 1);
 }
 
 /// Shared body for §22.1.3.{26, 27, 28, 29}. `conv_type` is the
@@ -1226,9 +1226,9 @@ fn endAfterTrailingWhitespace(bytes: []const u8) usize {
 fn stringTrim(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const s = try coerceThisToJSString(realm, this_value);
-    const start = skipLeadingWhitespace(s.bytes);
-    const end = endAfterTrailingWhitespace(s.bytes);
-    const trimmed = if (start >= end) s.bytes[0..0] else s.bytes[start..end];
+    const start = skipLeadingWhitespace(s.flatBytes());
+    const end = endAfterTrailingWhitespace(s.flatBytes());
+    const trimmed = if (start >= end) s.flatBytes()[0..0] else s.flatBytes()[start..end];
     const out = realm.heap.allocateString(trimmed) catch return error.OutOfMemory;
     return Value.fromString(out);
 }
@@ -1237,10 +1237,10 @@ fn stringConcat(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const s = try coerceThisToJSString(realm, this_value);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
-    buf.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
+    buf.appendSlice(realm.allocator, s.flatBytes()) catch return error.OutOfMemory;
     for (args) |a| {
         const part = try stringifyArg(realm, a);
-        buf.appendSlice(realm.allocator, part.bytes) catch return error.OutOfMemory;
+        buf.appendSlice(realm.allocator, part.flatBytes()) catch return error.OutOfMemory;
     }
     const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
     return Value.fromString(out);
@@ -1276,14 +1276,14 @@ fn stringRepeat(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         return Value.fromString(empty);
     }
     // Cap to avoid OOM on giant repeat counts.
-    const total: usize = @intCast(@as(i64, @intCast(s.bytes.len)) * n);
+    const total: usize = @intCast(@as(i64, @intCast(s.flatBytes().len)) * n);
     if (total > 1024 * 1024) return error.NativeThrew;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
     buf.ensureTotalCapacity(realm.allocator, total) catch return error.OutOfMemory;
     var k: i64 = 0;
     while (k < n) : (k += 1) {
-        buf.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
+        buf.appendSlice(realm.allocator, s.flatBytes()) catch return error.OutOfMemory;
     }
     const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
     return Value.fromString(out);
@@ -1368,8 +1368,8 @@ pub fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) Native
     // step 8 — `If separator is undefined, return [str]`.
     if (sep_v.isUndefined()) {
         const owned = realm.heap.allocateString("0") catch return error.OutOfMemory;
-        const cs = realm.heap.allocateString(s.bytes) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, Value.fromString(cs)) catch return error.OutOfMemory;
+        const cs = realm.heap.allocateString(s.flatBytes()) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.flatBytes(), Value.fromString(cs)) catch return error.OutOfMemory;
         setLength(realm, out, 1) catch return error.OutOfMemory;
         return heap_mod.taggedObject(out);
     }
@@ -1377,15 +1377,15 @@ pub fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) Native
     const sep: *JSString = @ptrCast(@alignCast(sep_str_v.asString()));
 
     // Empty separator — split into chars. Honour `limit`.
-    if (sep.bytes.len == 0) {
+    if (sep.flatBytes().len == 0) {
         var idx: usize = 0;
-        for (s.bytes) |c| {
+        for (s.flatBytes()) |c| {
             if (idx >= @as(usize, @intCast(limit))) break;
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
             const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
             const cs = realm.heap.allocateString(&[_]u8{c}) catch return error.OutOfMemory;
-            out.set(realm.allocator, owned.bytes, Value.fromString(cs)) catch return error.OutOfMemory;
+            out.set(realm.allocator, owned.flatBytes(), Value.fromString(cs)) catch return error.OutOfMemory;
             idx += 1;
         }
         setLength(realm, out, @intCast(idx)) catch return error.OutOfMemory;
@@ -1396,25 +1396,25 @@ pub fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) Native
     // pieces — the spec caps the result, not the work.
     var i: usize = 0;
     var idx: usize = 0;
-    while (i <= s.bytes.len) {
+    while (i <= s.flatBytes().len) {
         if (idx >= @as(usize, @intCast(limit))) break;
-        const remaining = s.bytes[i..];
-        if (std.mem.indexOf(u8, remaining, sep.bytes)) |pos| {
+        const remaining = s.flatBytes()[i..];
+        if (std.mem.indexOf(u8, remaining, sep.flatBytes())) |pos| {
             const part = remaining[0..pos];
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
             const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
             const cs = realm.heap.allocateString(part) catch return error.OutOfMemory;
-            out.set(realm.allocator, owned.bytes, Value.fromString(cs)) catch return error.OutOfMemory;
+            out.set(realm.allocator, owned.flatBytes(), Value.fromString(cs)) catch return error.OutOfMemory;
             idx += 1;
-            i += pos + sep.bytes.len;
+            i += pos + sep.flatBytes().len;
         } else {
             // Last piece.
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
             const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
             const cs = realm.heap.allocateString(remaining) catch return error.OutOfMemory;
-            out.set(realm.allocator, owned.bytes, Value.fromString(cs)) catch return error.OutOfMemory;
+            out.set(realm.allocator, owned.flatBytes(), Value.fromString(cs)) catch return error.OutOfMemory;
             idx += 1;
             break;
         }
@@ -1450,9 +1450,9 @@ fn stringPad(realm: *Realm, this_value: Value, args: []const Value, start: bool)
     };
     // Receiver code-unit length; pad only when the target exceeds
     // it (StringPad step 1).
-    const s_cu_len = utf16.lengthInCodeUnits(s.bytes);
+    const s_cu_len = utf16.lengthInCodeUnits(s.flatBytes());
     if (target_len <= @as(i64, @intCast(s_cu_len))) {
-        const out = realm.heap.allocateString(s.bytes) catch return error.OutOfMemory;
+        const out = realm.heap.allocateString(s.flatBytes()) catch return error.OutOfMemory;
         return Value.fromString(out);
     }
     // StringPad step 3 — fillString defaults to a single space.
@@ -1462,12 +1462,12 @@ fn stringPad(realm: *Realm, this_value: Value, args: []const Value, start: bool)
         try stringifyArg(realm, Value.fromString(realm.heap.allocateString(" ") catch return error.OutOfMemory))
     else
         try stringifyArg(realm, fill_v);
-    if (fill_str.bytes.len == 0) {
+    if (fill_str.flatBytes().len == 0) {
         // StringPad step 4 — empty fillString is a no-op.
-        const out = realm.heap.allocateString(s.bytes) catch return error.OutOfMemory;
+        const out = realm.heap.allocateString(s.flatBytes()) catch return error.OutOfMemory;
         return Value.fromString(out);
     }
-    const fill_cu_len = utf16.lengthInCodeUnits(fill_str.bytes);
+    const fill_cu_len = utf16.lengthInCodeUnits(fill_str.flatBytes());
     const target_cu: usize = @intCast(target_len);
     if (target_cu > 1024 * 1024) return error.NativeThrew; // sanity cap
     const pad_cu = target_cu - s_cu_len;
@@ -1478,7 +1478,7 @@ fn stringPad(realm: *Realm, this_value: Value, args: []const Value, start: bool)
     defer pad_buf.deinit(realm.allocator);
     var produced_cu: usize = 0;
     while (produced_cu + fill_cu_len <= pad_cu) {
-        pad_buf.appendSlice(realm.allocator, fill_str.bytes) catch return error.OutOfMemory;
+        pad_buf.appendSlice(realm.allocator, fill_str.flatBytes()) catch return error.OutOfMemory;
         produced_cu += fill_cu_len;
     }
     if (produced_cu < pad_cu) {
@@ -1486,7 +1486,7 @@ fn stringPad(realm: *Realm, this_value: Value, args: []const Value, start: bool)
         // code units. Slice in code-unit space so a fill string
         // ending mid-surrogate-pair is split correctly.
         const remaining_cu = pad_cu - produced_cu;
-        const tail = utf16.sliceCodeUnits(fill_str.bytes, 0, remaining_cu);
+        const tail = utf16.sliceCodeUnits(fill_str.flatBytes(), 0, remaining_cu);
         if (tail.head_surrogate != 0)
             utf16.appendCodeUnitAsWtf8(realm.allocator, &pad_buf, tail.head_surrogate) catch return error.OutOfMemory;
         pad_buf.appendSlice(realm.allocator, tail.bytes) catch return error.OutOfMemory;
@@ -1498,9 +1498,9 @@ fn stringPad(realm: *Realm, this_value: Value, args: []const Value, start: bool)
     defer out_buf.deinit(realm.allocator);
     if (start) {
         out_buf.appendSlice(realm.allocator, pad_buf.items) catch return error.OutOfMemory;
-        out_buf.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
+        out_buf.appendSlice(realm.allocator, s.flatBytes()) catch return error.OutOfMemory;
     } else {
-        out_buf.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
+        out_buf.appendSlice(realm.allocator, s.flatBytes()) catch return error.OutOfMemory;
         out_buf.appendSlice(realm.allocator, pad_buf.items) catch return error.OutOfMemory;
     }
     const out = realm.heap.allocateString(out_buf.items) catch return error.OutOfMemory;
@@ -1515,10 +1515,10 @@ fn stringAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
     const s = try coerceThisToJSString(realm, this_value);
     const idx_num = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
     var idx: i64 = intrinsics.toInt(idx_num);
-    const cu_len: i64 = @intCast(utf16.lengthInCodeUnits(s.bytes));
+    const cu_len: i64 = @intCast(utf16.lengthInCodeUnits(s.flatBytes()));
     if (idx < 0) idx += cu_len;
     if (idx < 0 or idx >= cu_len) return Value.undefined_;
-    const cu = utf16.codeUnitAt(s.bytes, @intCast(idx)) orelse return Value.undefined_;
+    const cu = utf16.codeUnitAt(s.flatBytes(), @intCast(idx)) orelse return Value.undefined_;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
     utf16.appendCodeUnitAsWtf8(realm.allocator, &buf, cu) catch return error.OutOfMemory;
@@ -1540,7 +1540,7 @@ fn stringLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nati
     // ToIntegerOrInfinity, then clamped to [0, len]. Indexing is
     // in UTF-16 code units.
     const pos_v = argOr(args, 1, Value.undefined_);
-    const cu_len = utf16.lengthInCodeUnits(s.bytes);
+    const cu_len = utf16.lengthInCodeUnits(s.flatBytes());
     var search_end_cu: usize = cu_len;
     if (!pos_v.isUndefined()) {
         const n = try intrinsics.toNumber(realm, pos_v);
@@ -1550,17 +1550,17 @@ fn stringLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nati
             search_end_cu = clampPos(pos_i, cu_len);
         }
     }
-    if (needle.bytes.len == 0) return Value.fromInt32(@intCast(search_end_cu));
-    if (needle.bytes.len > s.bytes.len) return Value.fromInt32(-1);
+    if (needle.flatBytes().len == 0) return Value.fromInt32(@intCast(search_end_cu));
+    if (needle.flatBytes().len > s.flatBytes().len) return Value.fromInt32(-1);
     // Convert the code-unit upper bound to a byte upper bound,
-    // padded by needle.bytes.len so a match starting at
-    // `search_end_cu` (whose byte offset + needle.bytes.len would
+    // padded by needle.flatBytes().len so a match starting at
+    // `search_end_cu` (whose byte offset + needle.flatBytes().len would
     // overshoot) is still considered. Then walk the byte-level
     // lastIndexOf result back to a code-unit index.
-    const search_end_byte = utf16.byteIndexForCodeUnit(s.bytes, search_end_cu) orelse s.bytes.len;
-    const upper = @min(search_end_byte + needle.bytes.len, s.bytes.len);
-    if (std.mem.lastIndexOf(u8, s.bytes[0..upper], needle.bytes)) |pos| {
-        const cu_idx = utf16.codeUnitIndexForByte(s.bytes, pos);
+    const search_end_byte = utf16.byteIndexForCodeUnit(s.flatBytes(), search_end_cu) orelse s.flatBytes().len;
+    const upper = @min(search_end_byte + needle.flatBytes().len, s.flatBytes().len);
+    if (std.mem.lastIndexOf(u8, s.flatBytes()[0..upper], needle.flatBytes())) |pos| {
+        const cu_idx = utf16.codeUnitIndexForByte(s.flatBytes(), pos);
         // The found byte offset must correspond to a code-unit
         // index ≤ search_end_cu — clamp defensively.
         if (cu_idx <= search_end_cu) return Value.fromInt32(@intCast(cu_idx));
@@ -1591,12 +1591,12 @@ fn regexSplit(
     // advances by one code unit, ignoring fullUnicode — the
     // byte-level cursor walking we already do handles the
     // surrogate-pair codepoints uniformly.
-    const has_y = std.mem.indexOfScalar(u8, flags_str.bytes, 'y') != null;
+    const has_y = std.mem.indexOfScalar(u8, flags_str.flatBytes(), 'y') != null;
     // Step 8-9 — build newFlags. Append "y" only when missing.
     var new_flags_buf: [16]u8 = undefined;
-    const new_flags: []const u8 = if (has_y) flags_str.bytes else blk: {
-        const len = flags_str.bytes.len;
-        @memcpy(new_flags_buf[0..len], flags_str.bytes);
+    const new_flags: []const u8 = if (has_y) flags_str.flatBytes() else blk: {
+        const len = flags_str.flatBytes().len;
+        @memcpy(new_flags_buf[0..len], flags_str.flatBytes());
         new_flags_buf[len] = 'y';
         break :blk new_flags_buf[0 .. len + 1];
     };
@@ -1611,13 +1611,13 @@ fn regexSplit(
     // null, return `[str]`; else `[]`.
     var idx: i32 = 0;
     var ibuf: [24]u8 = undefined;
-    if (s.bytes.len == 0) {
+    if (s.flatBytes().len == 0) {
         splitter.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
         const er = try regexExecCall(realm, splitter, s);
         if (er.isNull()) {
             const owned = realm.heap.allocateString("0") catch return error.OutOfMemory;
             const empty_s = realm.heap.allocateString("") catch return error.OutOfMemory;
-            out.set(realm.allocator, owned.bytes, Value.fromString(empty_s)) catch return error.OutOfMemory;
+            out.set(realm.allocator, owned.flatBytes(), Value.fromString(empty_s)) catch return error.OutOfMemory;
             setLength(realm, out, 1) catch return error.OutOfMemory;
         } else {
             setLength(realm, out, 0) catch return error.OutOfMemory;
@@ -1633,12 +1633,12 @@ fn regexSplit(
     var search_index: usize = 0;
     const max_iter: usize = 1 << 20;
     var step: usize = 0;
-    while (step < max_iter and search_index < s.bytes.len) : (step += 1) {
+    while (step < max_iter and search_index < s.flatBytes().len) : (step += 1) {
         splitter.set(realm.allocator, "lastIndex", Value.fromInt32(@intCast(search_index))) catch return error.OutOfMemory;
         const er = try regexExecCall(realm, splitter, s);
         if (er.isNull()) {
             // Step 20.c — no match at search_index → advance.
-            search_index = advanceUnitOnString(s.bytes, search_index);
+            search_index = advanceUnitOnString(s.flatBytes(), search_index);
             continue;
         }
         const match_arr = heap_mod.valueAsPlainObject(er) orelse return throwTypeError(realm, "split: exec did not return Object/null");
@@ -1646,20 +1646,20 @@ fn regexSplit(
         // clamped to size.
         const li_v = try intrinsics.getPropertyChain(realm, splitter, "lastIndex");
         const li_raw: i64 = if (li_v.isInt32()) @max(0, @as(i64, li_v.asInt32())) else try intrinsics.toLengthValue(realm, li_v);
-        const match_end: usize = @min(@as(usize, @intCast(li_raw)), s.bytes.len);
+        const match_end: usize = @min(@as(usize, @intCast(li_raw)), s.flatBytes().len);
         if (match_end == last_match_end) {
             // Step 20.d.iii — zero-width or already-emitted boundary
             // → advance the search position only.
-            search_index = advanceUnitOnString(s.bytes, search_index);
+            search_index = advanceUnitOnString(s.flatBytes(), search_index);
             continue;
         }
         // Step 20.d.iv — emit the substring from lastMatchEnd to
         // searchIndex.
-        const part = s.bytes[last_match_end..search_index];
+        const part = s.flatBytes()[last_match_end..search_index];
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         const part_str = realm.heap.allocateString(part) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, Value.fromString(part_str)) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.flatBytes(), Value.fromString(part_str)) catch return error.OutOfMemory;
         idx += 1;
         if (idx >= limit) {
             setLength(realm, out, @intCast(idx)) catch return error.OutOfMemory;
@@ -1675,7 +1675,7 @@ fn regexSplit(
             const cap_v = match_arr.get(ci_islice);
             const out_islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
             const out_owned = realm.heap.allocateString(out_islice) catch return error.OutOfMemory;
-            out.set(realm.allocator, out_owned.bytes, cap_v) catch return error.OutOfMemory;
+            out.set(realm.allocator, out_owned.flatBytes(), cap_v) catch return error.OutOfMemory;
             idx += 1;
             if (idx >= limit) {
                 setLength(realm, out, @intCast(idx)) catch return error.OutOfMemory;
@@ -1686,11 +1686,11 @@ fn regexSplit(
     }
     // §22.2.6.14 step 21 — emit the trailing substring.
     if (idx < limit) {
-        const part = s.bytes[last_match_end..];
+        const part = s.flatBytes()[last_match_end..];
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         const part_str = realm.heap.allocateString(part) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, Value.fromString(part_str)) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.flatBytes(), Value.fromString(part_str)) catch return error.OutOfMemory;
         idx += 1;
     }
     setLength(realm, out, @intCast(idx)) catch return error.OutOfMemory;
@@ -1734,7 +1734,7 @@ fn flagsHas(realm: *Realm, regex_obj: *JSObject, flag: u8) bool {
     const flags_v = intrinsics.getPropertyChain(realm, regex_obj, "flags") catch return false;
     if (!flags_v.isString()) return false;
     const f: *JSString = @ptrCast(@alignCast(flags_v.asString()));
-    return std.mem.indexOfScalar(u8, f.bytes, flag) != null;
+    return std.mem.indexOfScalar(u8, f.flatBytes(), flag) != null;
 }
 
 /// §22.2.6.{11,12,13,…} — the @@replace / @@split / @@match
@@ -1787,15 +1787,15 @@ pub fn stringReplace(realm: *Realm, this_value: Value, args: []const Value) Nati
     const repl_s: ?*JSString = if (functional) null else try intrinsics.stringifyArg(realm, repl_v);
     // step 8-10 — first-match position lookup; on miss return the
     // unchanged source.
-    const pos = std.mem.indexOf(u8, s.bytes, pat.bytes) orelse {
-        const out = realm.heap.allocateString(s.bytes) catch return error.OutOfMemory;
+    const pos = std.mem.indexOf(u8, s.flatBytes(), pat.flatBytes()) orelse {
+        const out = realm.heap.allocateString(s.flatBytes()) catch return error.OutOfMemory;
         return Value.fromString(out);
     };
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
-    buf.appendSlice(realm.allocator, s.bytes[0..pos]) catch return error.OutOfMemory;
+    buf.appendSlice(realm.allocator, s.flatBytes()[0..pos]) catch return error.OutOfMemory;
     try appendStringPatternReplacement(realm, &buf, s, pat, pos, repl_v, functional, repl_s);
-    buf.appendSlice(realm.allocator, s.bytes[pos + pat.bytes.len ..]) catch return error.OutOfMemory;
+    buf.appendSlice(realm.allocator, s.flatBytes()[pos + pat.flatBytes().len ..]) catch return error.OutOfMemory;
     const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
     return Value.fromString(out);
 }
@@ -1819,7 +1819,7 @@ pub fn regexReplace(
     // `Get(rx, "global")` directly diverges from ES2024 §22.2.6.11.
     const flags_v = try intrinsics.getPropertyChain(realm, regex_obj, "flags");
     const flags_s = try intrinsics.stringifyArg(realm, flags_v);
-    const is_global = std.mem.indexOfScalar(u8, flags_s.bytes, 'g') != null;
+    const is_global = std.mem.indexOfScalar(u8, flags_s.flatBytes(), 'g') != null;
     // §22.2.6.11 step 7.a — `If functionalReplace is false,
     // Let replaceValue be ? ToString(replaceValue)`. Run the
     // coercion synchronously before any regex matching so a
@@ -1842,7 +1842,7 @@ pub fn regexReplace(
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
     // Two parallel cursors into the source: `byte_pos` walks the
-    // UTF-8 bytes (for slicing into `s.bytes`); `unit_pos` walks
+    // UTF-8 bytes (for slicing into `s.flatBytes()`); `unit_pos` walks
     // UTF-16 code units (matching the index space that `exec`'s
     // `index` and `lastIndex` properties live in). They're updated
     // in lock-step.
@@ -1873,18 +1873,18 @@ pub fn regexReplace(
         // output. Matches are monotonic so this is amortised O(n)
         // across the whole loop.
         const append_start = byte_pos;
-        while (unit_pos < m_idx_unit and byte_pos < s.bytes.len) {
-            const seq_len = utf8SeqLen(s.bytes[byte_pos]);
-            if (byte_pos + seq_len > s.bytes.len) break;
+        while (unit_pos < m_idx_unit and byte_pos < s.flatBytes().len) {
+            const seq_len = utf8SeqLen(s.flatBytes()[byte_pos]);
+            if (byte_pos + seq_len > s.flatBytes().len) break;
             byte_pos += seq_len;
             unit_pos += if (seq_len == 4) 2 else 1;
         }
         const m_byte = byte_pos;
-        if (m_byte > append_start) buf.appendSlice(realm.allocator, s.bytes[append_start..m_byte]) catch return error.OutOfMemory;
+        if (m_byte > append_start) buf.appendSlice(realm.allocator, s.flatBytes()[append_start..m_byte]) catch return error.OutOfMemory;
         try appendRegexReplacement(realm, &buf, s, match_arr, whole, m_byte, m_idx_unit, repl_v);
-        byte_pos = m_byte + whole.bytes.len;
-        unit_pos = m_idx_unit + utf8UnitCount(whole.bytes);
-        if (whole.bytes.len == 0) {
+        byte_pos = m_byte + whole.flatBytes().len;
+        unit_pos = m_idx_unit + utf8UnitCount(whole.flatBytes());
+        if (whole.flatBytes().len == 0) {
             // §22.2.6.11 step 8.j — `AdvanceStringIndex` after a
             // zero-width match, otherwise the next `exec` would
             // re-match the same position. Advancing by a full
@@ -1894,9 +1894,9 @@ pub fn regexReplace(
             // strings whose codepoints survive the surrogate-pair
             // round-trip. Update the regex's `lastIndex` *and* our
             // local cursors.
-            if (byte_pos < s.bytes.len) {
-                const seq_len = utf8SeqLen(s.bytes[byte_pos]);
-                if (byte_pos + seq_len <= s.bytes.len) {
+            if (byte_pos < s.flatBytes().len) {
+                const seq_len = utf8SeqLen(s.flatBytes()[byte_pos]);
+                if (byte_pos + seq_len <= s.flatBytes().len) {
                     byte_pos += seq_len;
                     unit_pos += if (seq_len == 4) 2 else 1;
                 }
@@ -1937,7 +1937,7 @@ pub fn regexReplace(
         }
         if (!all) break;
     }
-    if (byte_pos < s.bytes.len) buf.appendSlice(realm.allocator, s.bytes[byte_pos..]) catch return error.OutOfMemory;
+    if (byte_pos < s.flatBytes().len) buf.appendSlice(realm.allocator, s.flatBytes()[byte_pos..]) catch return error.OutOfMemory;
     const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
     return Value.fromString(out);
 }
@@ -1974,7 +1974,7 @@ fn utf8UnitCount(s: []const u8) usize {
 /// a freshly-`dupe`d slice that callers forgot to free; writing into the
 /// caller's buffer removes that bookkeeping (and the leak).
 ///
-/// `byte_pos` is the match's byte offset into `source.bytes` (used for
+/// `byte_pos` is the match's byte offset into `source.flatBytes()` (used for
 /// `$\`` / `$'` byte slicing); `unit_pos` is the same position in
 /// UTF-16 code units (the offset passed to a callable replacer, per
 /// spec). They coincide for ASCII inputs and diverge across
@@ -2021,11 +2021,11 @@ fn appendRegexReplacement(
             .thrown => return error.NativeThrew,
         };
         const ret_s = try intrinsics.stringifyArg(realm, ret);
-        out.appendSlice(realm.allocator, ret_s.bytes) catch return error.OutOfMemory;
+        out.appendSlice(realm.allocator, ret_s.flatBytes()) catch return error.OutOfMemory;
         return;
     }
     const repl_s = try intrinsics.stringifyArg(realm, repl_v);
-    try expandSubstitutionInto(realm, out, repl_s.bytes, source, match_arr, whole, byte_pos);
+    try expandSubstitutionInto(realm, out, repl_s.flatBytes(), source, match_arr, whole, byte_pos);
 }
 
 /// §22.1.3.19.1 GetSubstitution ( matched, str, position, captures,
@@ -2065,17 +2065,17 @@ fn expandSubstitutionInto(
                 i += 2;
             },
             '&' => {
-                out.appendSlice(realm.allocator, whole.bytes) catch return error.OutOfMemory;
+                out.appendSlice(realm.allocator, whole.flatBytes()) catch return error.OutOfMemory;
                 i += 2;
             },
             '`' => {
-                out.appendSlice(realm.allocator, source.bytes[0..pos]) catch return error.OutOfMemory;
+                out.appendSlice(realm.allocator, source.flatBytes()[0..pos]) catch return error.OutOfMemory;
                 i += 2;
             },
             '\'' => {
-                const tail_start = pos + whole.bytes.len;
-                if (tail_start < source.bytes.len)
-                    out.appendSlice(realm.allocator, source.bytes[tail_start..]) catch return error.OutOfMemory;
+                const tail_start = pos + whole.flatBytes().len;
+                if (tail_start < source.flatBytes().len)
+                    out.appendSlice(realm.allocator, source.flatBytes()[tail_start..]) catch return error.OutOfMemory;
                 i += 2;
             },
             '0'...'9' => {
@@ -2101,10 +2101,10 @@ fn expandSubstitutionInto(
                     // empty; string capture expands verbatim.
                     if (cap_v.isString()) {
                         const cs: *JSString = @ptrCast(@alignCast(cap_v.asString()));
-                        out.appendSlice(realm.allocator, cs.bytes) catch return error.OutOfMemory;
+                        out.appendSlice(realm.allocator, cs.flatBytes()) catch return error.OutOfMemory;
                     } else if (!cap_v.isUndefined()) {
                         const cs = try intrinsics.stringifyArg(realm, cap_v);
-                        out.appendSlice(realm.allocator, cs.bytes) catch return error.OutOfMemory;
+                        out.appendSlice(realm.allocator, cs.flatBytes()) catch return error.OutOfMemory;
                     }
                     i += 1 + digit_count;
                 } else {
@@ -2139,10 +2139,10 @@ fn expandSubstitutionInto(
                 const cap_v = groups_obj.get(name);
                 if (cap_v.isString()) {
                     const cs: *JSString = @ptrCast(@alignCast(cap_v.asString()));
-                    out.appendSlice(realm.allocator, cs.bytes) catch return error.OutOfMemory;
+                    out.appendSlice(realm.allocator, cs.flatBytes()) catch return error.OutOfMemory;
                 } else if (!cap_v.isUndefined()) {
                     const cs = try intrinsics.stringifyArg(realm, cap_v);
-                    out.appendSlice(realm.allocator, cs.bytes) catch return error.OutOfMemory;
+                    out.appendSlice(realm.allocator, cs.flatBytes()) catch return error.OutOfMemory;
                 }
                 i = j + 1;
             },
@@ -2177,7 +2177,7 @@ fn stringReplaceAllDispatched(realm: *Realm, this_value: Value, args: []const Va
             if (flags_v.isUndefined() or flags_v.isNull())
                 return throwTypeError(realm, "String.prototype.replaceAll: regex has no flags");
             const flags_s = try intrinsics.stringifyArg(realm, flags_v);
-            if (std.mem.indexOfScalar(u8, flags_s.bytes, 'g') == null)
+            if (std.mem.indexOfScalar(u8, flags_s.flatBytes(), 'g') == null)
                 return throwTypeError(realm, "String.prototype.replaceAll requires a global regex");
         }
         // step 3.c-d — GetMethod + dispatch. The receiver passed to
@@ -2215,15 +2215,15 @@ fn stringReplaceAllCore(realm: *Realm, this_value: Value, pat_v: Value, repl_v_i
         try intrinsics.stringifyArg(realm, repl_v_in);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
-    if (pat.bytes.len == 0) {
+    if (pat.flatBytes().len == 0) {
         // step 9 — advanceBy = max(1, searchLength). Empty pattern
         // → interleave the replacement between every code unit.
         // §22.1.3.20.1 GetSubstitution with empty captures: any
         // `$N` in the template stays literal (no captures).
         var cursor: usize = 0;
-        while (cursor <= s.bytes.len) : (cursor += 1) {
+        while (cursor <= s.flatBytes().len) : (cursor += 1) {
             try appendStringPatternReplacement(realm, &buf, s, pat, cursor, repl_v_in, functional, repl_s);
-            if (cursor < s.bytes.len) buf.append(realm.allocator, s.bytes[cursor]) catch return error.OutOfMemory;
+            if (cursor < s.flatBytes().len) buf.append(realm.allocator, s.flatBytes()[cursor]) catch return error.OutOfMemory;
         }
         const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
         return Value.fromString(out);
@@ -2234,12 +2234,12 @@ fn stringReplaceAllCore(realm: *Realm, this_value: Value, pat_v: Value, repl_v_i
     // identities for callable-replacer args are computed in
     // `appendStringPatternReplacement`.
     var cursor: usize = 0;
-    while (cursor <= s.bytes.len) {
-        const remaining = s.bytes[cursor..];
-        if (std.mem.indexOf(u8, remaining, pat.bytes)) |pos| {
+    while (cursor <= s.flatBytes().len) {
+        const remaining = s.flatBytes()[cursor..];
+        if (std.mem.indexOf(u8, remaining, pat.flatBytes())) |pos| {
             buf.appendSlice(realm.allocator, remaining[0..pos]) catch return error.OutOfMemory;
             try appendStringPatternReplacement(realm, &buf, s, pat, cursor + pos, repl_v_in, functional, repl_s);
-            cursor += pos + pat.bytes.len;
+            cursor += pos + pat.flatBytes().len;
         } else {
             buf.appendSlice(realm.allocator, remaining) catch return error.OutOfMemory;
             break;
@@ -2270,8 +2270,8 @@ fn appendStringPatternReplacement(
         // §22.1.3.20 step 17.b — Call(replaceValue, undefined,
         // « searchString, 𝔽(matchPosition), string »). The
         // position is a code-unit index, not a byte offset; compute
-        // it from byte_pos via the UTF-16 view of `source.bytes`.
-        const unit_pos = utf16.codeUnitIndexForByte(source.bytes, byte_pos);
+        // it from byte_pos via the UTF-16 view of `source.flatBytes()`.
+        const unit_pos = utf16.codeUnitIndexForByte(source.flatBytes(), byte_pos);
         const fn_obj = heap_mod.valueAsFunction(repl_v).?;
         const args = [_]Value{
             Value.fromString(matched),
@@ -2290,11 +2290,11 @@ fn appendStringPatternReplacement(
             },
         };
         const ret_s = try intrinsics.stringifyArg(realm, ret);
-        out.appendSlice(realm.allocator, ret_s.bytes) catch return error.OutOfMemory;
+        out.appendSlice(realm.allocator, ret_s.flatBytes()) catch return error.OutOfMemory;
         return;
     }
     const tpl = repl_template orelse return;
-    try expandSubstitutionEmptyCaptures(realm, out, tpl.bytes, source, matched, byte_pos);
+    try expandSubstitutionEmptyCaptures(realm, out, tpl.flatBytes(), source, matched, byte_pos);
 }
 
 /// §22.1.3.19.1 GetSubstitution with `captures` = empty list and
@@ -2327,17 +2327,17 @@ fn expandSubstitutionEmptyCaptures(
                 i += 2;
             },
             '&' => {
-                out.appendSlice(realm.allocator, matched.bytes) catch return error.OutOfMemory;
+                out.appendSlice(realm.allocator, matched.flatBytes()) catch return error.OutOfMemory;
                 i += 2;
             },
             '`' => {
-                out.appendSlice(realm.allocator, source.bytes[0..byte_pos]) catch return error.OutOfMemory;
+                out.appendSlice(realm.allocator, source.flatBytes()[0..byte_pos]) catch return error.OutOfMemory;
                 i += 2;
             },
             '\'' => {
-                const tail_start = byte_pos + matched.bytes.len;
-                if (tail_start < source.bytes.len)
-                    out.appendSlice(realm.allocator, source.bytes[tail_start..]) catch return error.OutOfMemory;
+                const tail_start = byte_pos + matched.flatBytes().len;
+                if (tail_start < source.flatBytes().len)
+                    out.appendSlice(realm.allocator, source.flatBytes()[tail_start..]) catch return error.OutOfMemory;
                 i += 2;
             },
             else => {
@@ -2358,15 +2358,15 @@ fn expandSubstitutionEmptyCaptures(
 fn stringTrimStart(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const s = try coerceThisToJSString(realm, this_value);
-    const start = skipLeadingWhitespace(s.bytes);
-    const out = realm.heap.allocateString(s.bytes[start..]) catch return error.OutOfMemory;
+    const start = skipLeadingWhitespace(s.flatBytes());
+    const out = realm.heap.allocateString(s.flatBytes()[start..]) catch return error.OutOfMemory;
     return Value.fromString(out);
 }
 fn stringTrimEnd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const s = try coerceThisToJSString(realm, this_value);
-    const end = endAfterTrailingWhitespace(s.bytes);
-    const out = realm.heap.allocateString(s.bytes[0..end]) catch return error.OutOfMemory;
+    const end = endAfterTrailingWhitespace(s.flatBytes());
+    const out = realm.heap.allocateString(s.flatBytes()[0..end]) catch return error.OutOfMemory;
     return Value.fromString(out);
 }
 
@@ -2442,7 +2442,7 @@ fn stringNormalize(realm: *Realm, this_value: Value, args: []const Value) Native
     if (!form_v.isUndefined()) {
         // §22.1.3.16 step 5 — Let f be ? ToString(form).
         const form_s = try intrinsics.stringifyArg(realm, form_v);
-        const f = form_s.bytes;
+        const f = form_s.flatBytes();
         if (std.mem.eql(u8, f, "NFC")) {
             form_kind = lib_unicode.UNICODE_NFC;
         } else if (std.mem.eql(u8, f, "NFD")) {
@@ -2457,7 +2457,7 @@ fn stringNormalize(realm: *Realm, this_value: Value, args: []const Value) Native
         }
     }
 
-    const normalized = normalizeWtf8(realm.allocator, s.bytes, form_kind) catch return error.OutOfMemory;
+    const normalized = normalizeWtf8(realm.allocator, s.flatBytes(), form_kind) catch return error.OutOfMemory;
     defer normalized.deinit();
 
     // Re-encode the normalized code-point list as WTF-8.
@@ -2511,17 +2511,17 @@ fn stringCodePointAt(realm: *Realm, this_value: Value, args: []const Value) Nati
     // unit means "return the trail-surrogate code unit value".
     var byte_pos: usize = 0;
     var unit_pos: usize = 0;
-    while (byte_pos < s.bytes.len) {
-        const seq_len = utf8SeqLen(s.bytes[byte_pos]);
-        if (byte_pos + seq_len > s.bytes.len) return Value.undefined_;
+    while (byte_pos < s.flatBytes().len) {
+        const seq_len = utf8SeqLen(s.flatBytes()[byte_pos]);
+        if (byte_pos + seq_len > s.flatBytes().len) return Value.undefined_;
         if (seq_len == 4) {
             // Astral codepoint occupies 2 UTF-16 units.
             if (unit_pos == target_unit) {
-                const cp = std.unicode.utf8Decode(s.bytes[byte_pos .. byte_pos + 4]) catch return Value.undefined_;
+                const cp = std.unicode.utf8Decode(s.flatBytes()[byte_pos .. byte_pos + 4]) catch return Value.undefined_;
                 return Value.fromInt32(@intCast(cp));
             }
             if (unit_pos + 1 == target_unit) {
-                const cp = std.unicode.utf8Decode(s.bytes[byte_pos .. byte_pos + 4]) catch return Value.undefined_;
+                const cp = std.unicode.utf8Decode(s.flatBytes()[byte_pos .. byte_pos + 4]) catch return Value.undefined_;
                 // §11.1.4 UTF16EncodeCodePoint — trail surrogate of the pair.
                 const adjusted: u32 = @as(u32, @intCast(cp)) - 0x10000;
                 const trail: u16 = @intCast(0xDC00 + (adjusted & 0x3FF));
@@ -2534,7 +2534,7 @@ fn stringCodePointAt(realm: *Realm, this_value: Value, args: []const Value) Nati
                 // §10.1.1 — for 1/2/3-byte WTF-8 the codepoint *is*
                 // a single UTF-16 code unit (BMP scalar or lone
                 // surrogate D800-DFFF). Decode it as a u16 value.
-                const cu = wtf8DecodeBmp(s.bytes[byte_pos .. byte_pos + seq_len]) orelse return Value.undefined_;
+                const cu = wtf8DecodeBmp(s.flatBytes()[byte_pos .. byte_pos + seq_len]) orelse return Value.undefined_;
                 return Value.fromInt32(@intCast(cu));
             }
             byte_pos += seq_len;
@@ -2578,20 +2578,20 @@ fn stringIsWellFormed(realm: *Realm, this_value: Value, args: []const Value) Nat
     _ = args;
     const s = try coerceThisToJSString(realm, this_value);
     var i: usize = 0;
-    while (i < s.bytes.len) {
-        const b = s.bytes[i];
+    while (i < s.flatBytes().len) {
+        const b = s.flatBytes()[i];
         const seq_len = utf8SeqLen(b);
-        if (i + seq_len > s.bytes.len) return Value.fromBool(false);
-        if (isLoneHighSurrogateAt(s.bytes, i)) {
+        if (i + seq_len > s.flatBytes().len) return Value.fromBool(false);
+        if (isLoneHighSurrogateAt(s.flatBytes(), i)) {
             // Followed by a lone low surrogate? Treat as a paired
             // surrogate-pair (formed at boundary by `+`-concat).
-            if (i + 6 <= s.bytes.len and isLoneLowSurrogateAt(s.bytes, i + 3)) {
+            if (i + 6 <= s.flatBytes().len and isLoneLowSurrogateAt(s.flatBytes(), i + 3)) {
                 i += 6;
                 continue;
             }
             return Value.fromBool(false);
         }
-        if (isLoneLowSurrogateAt(s.bytes, i)) return Value.fromBool(false);
+        if (isLoneLowSurrogateAt(s.flatBytes(), i)) return Value.fromBool(false);
         i += seq_len;
     }
     return Value.fromBool(true);
@@ -2629,14 +2629,14 @@ fn stringToWellFormed(realm: *Realm, this_value: Value, args: []const Value) Nat
     var needs_rewrite = false;
     {
         var i: usize = 0;
-        while (i < s.bytes.len) {
-            const b = s.bytes[i];
+        while (i < s.flatBytes().len) {
+            const b = s.flatBytes()[i];
             const seq_len = utf8SeqLen(b);
-            if (i + seq_len > s.bytes.len) {
+            if (i + seq_len > s.flatBytes().len) {
                 needs_rewrite = true;
                 break;
             }
-            if (seq_len == 3 and b == 0xED and (s.bytes[i + 1] & 0xE0) == 0xA0) {
+            if (seq_len == 3 and b == 0xED and (s.flatBytes()[i + 1] & 0xE0) == 0xA0) {
                 needs_rewrite = true;
                 break;
             }
@@ -2650,22 +2650,22 @@ fn stringToWellFormed(realm: *Realm, this_value: Value, args: []const Value) Nat
     // U+FFFD is `0xEF 0xBF 0xBD` in UTF-8.
     const replacement = [_]u8{ 0xEF, 0xBF, 0xBD };
     var i: usize = 0;
-    while (i < s.bytes.len) {
-        const b = s.bytes[i];
+    while (i < s.flatBytes().len) {
+        const b = s.flatBytes()[i];
         const seq_len = utf8SeqLen(b);
-        if (i + seq_len > s.bytes.len) {
+        if (i + seq_len > s.flatBytes().len) {
             buf.appendSlice(realm.allocator, &replacement) catch return error.OutOfMemory;
             i += 1;
             continue;
         }
-        if (isLoneHighSurrogateAt(s.bytes, i)) {
-            if (i + 6 <= s.bytes.len and isLoneLowSurrogateAt(s.bytes, i + 3)) {
+        if (isLoneHighSurrogateAt(s.flatBytes(), i)) {
+            if (i + 6 <= s.flatBytes().len and isLoneLowSurrogateAt(s.flatBytes(), i + 3)) {
                 // §22.1.3.30 step 6.c — paired surrogate, emit as-is.
                 // Folding into a UTF-8 4-byte sequence would break
                 // String-value equality against the WTF-8 source
                 // (see returns-well-formed-string.js, which asserts
                 // `('a'+lead+trail+'d').toWellFormed() === 'a'+lead+trail+'d'`).
-                buf.appendSlice(realm.allocator, s.bytes[i .. i + 6]) catch return error.OutOfMemory;
+                buf.appendSlice(realm.allocator, s.flatBytes()[i .. i + 6]) catch return error.OutOfMemory;
                 i += 6;
                 continue;
             }
@@ -2673,12 +2673,12 @@ fn stringToWellFormed(realm: *Realm, this_value: Value, args: []const Value) Nat
             i += 3;
             continue;
         }
-        if (isLoneLowSurrogateAt(s.bytes, i)) {
+        if (isLoneLowSurrogateAt(s.flatBytes(), i)) {
             buf.appendSlice(realm.allocator, &replacement) catch return error.OutOfMemory;
             i += 3;
             continue;
         }
-        buf.appendSlice(realm.allocator, s.bytes[i .. i + seq_len]) catch return error.OutOfMemory;
+        buf.appendSlice(realm.allocator, s.flatBytes()[i .. i + seq_len]) catch return error.OutOfMemory;
         i += seq_len;
     }
     const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
@@ -2701,11 +2701,11 @@ fn stringLocaleCompare(realm: *Realm, this_value: Value, args: []const Value) Na
 
     // Fast path — byte-identical strings are trivially equal and
     // skip the normalization round-trip entirely.
-    if (std.mem.eql(u8, s.bytes, other_s.bytes)) return Value.fromInt32(0);
+    if (std.mem.eql(u8, s.flatBytes(), other_s.flatBytes())) return Value.fromInt32(0);
 
-    const lhs = normalizeWtf8(realm.allocator, s.bytes, lib_unicode.UNICODE_NFD) catch return error.OutOfMemory;
+    const lhs = normalizeWtf8(realm.allocator, s.flatBytes(), lib_unicode.UNICODE_NFD) catch return error.OutOfMemory;
     defer lhs.deinit();
-    const rhs = normalizeWtf8(realm.allocator, other_s.bytes, lib_unicode.UNICODE_NFD) catch return error.OutOfMemory;
+    const rhs = normalizeWtf8(realm.allocator, other_s.flatBytes(), lib_unicode.UNICODE_NFD) catch return error.OutOfMemory;
     defer rhs.deinit();
 
     const cmp = std.mem.order(u32, lhs.slice(), rhs.slice());

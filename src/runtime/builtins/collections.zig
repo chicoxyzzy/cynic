@@ -525,7 +525,7 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) StepOutcome {
         }
     } else if (target.isString()) {
         const s: *@import("../string.zig").JSString = @ptrCast(@alignCast(target.asString()));
-        length = @intCast(@min(s.bytes.len, std.math.maxInt(i32)));
+        length = @intCast(@min(s.flatBytes().len, std.math.maxInt(i32)));
         // §22.1.5.2.1 StringIterator.next — advance by encoded
         // codepoint length, not by byte. Cynic stores strings as
         // WTF-8; a leading byte of \`0xxxxxxx\` is 1 byte,
@@ -543,20 +543,20 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) StepOutcome {
         // form; detect the adjacency here so the iterator yields
         // the surrogate pair as a single step.
         const start: usize = @intCast(idx);
-        if (start < s.bytes.len) {
-            const lead = s.bytes[start];
+        if (start < s.flatBytes().len) {
+            const lead = s.flatBytes()[start];
             var cp_len: usize = if (lead & 0x80 == 0) 1 else if (lead & 0xE0 == 0xC0) 2 else if (lead & 0xF0 == 0xE0) 3 else if (lead & 0xF8 == 0xF0) 4 else 1;
-            if (cp_len == 3 and start + 6 <= s.bytes.len) {
+            if (cp_len == 3 and start + 6 <= s.flatBytes().len) {
                 // High-surrogate WTF-8: 0xED 0xA0..0xAF 0x80..0xBF
                 // encodes U+D800..U+DBFF.
-                if (lead == 0xED and s.bytes[start + 1] >= 0xA0 and s.bytes[start + 1] <= 0xAF and
-                    s.bytes[start + 3] == 0xED and s.bytes[start + 4] >= 0xB0 and s.bytes[start + 4] <= 0xBF)
+                if (lead == 0xED and s.flatBytes()[start + 1] >= 0xA0 and s.flatBytes()[start + 1] <= 0xAF and
+                    s.flatBytes()[start + 3] == 0xED and s.flatBytes()[start + 4] >= 0xB0 and s.flatBytes()[start + 4] <= 0xBF)
                 {
                     cp_len = 6;
                 }
             }
-            const end = @min(start + cp_len, s.bytes.len);
-            const sub = realm.heap.allocateString(s.bytes[start..end]) catch return .done;
+            const end = @min(start + cp_len, s.flatBytes().len);
+            const sub = realm.heap.allocateString(s.flatBytes()[start..end]) catch return .done;
             elem = Value.fromString(sub);
             // Bump state.idx by codepoint length now; the
             // tail of arrayLikeIterStep would otherwise bump by 1
@@ -713,14 +713,14 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
             var idx_buf: [16]u8 = undefined;
             const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{len_i}) catch return error.OutOfMemory;
             const idx_owned = realm.heap.allocateString(idx_slice) catch return error.OutOfMemory;
-            bucket_obj.set(realm.allocator, idx_owned.bytes, item) catch return error.OutOfMemory;
+            bucket_obj.set(realm.allocator, idx_owned.flatBytes(), item) catch return error.OutOfMemory;
             bucket_obj.set(realm.allocator, "length", Value.fromInt32(len_i + 1)) catch return error.OutOfMemory;
         } else {
             const bucket = realm.heap.allocateObject() catch return error.OutOfMemory;
             bucket.prototype = realm.intrinsics.array_prototype;
             bucket.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
             const idx_owned = realm.heap.allocateString("0") catch return error.OutOfMemory;
-            bucket.set(realm.allocator, idx_owned.bytes, item) catch return error.OutOfMemory;
+            bucket.set(realm.allocator, idx_owned.flatBytes(), item) catch return error.OutOfMemory;
             bucket.set(realm.allocator, "length", Value.fromInt32(1)) catch return error.OutOfMemory;
             data.entries.append(realm.allocator, .{ .key = key_v, .value = heap_mod.taggedObject(bucket) }) catch return error.OutOfMemory;
         }

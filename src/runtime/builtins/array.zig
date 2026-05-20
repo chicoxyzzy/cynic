@@ -350,7 +350,7 @@ fn arrayConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, args[i]) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.flatBytes(), args[i]) catch return error.OutOfMemory;
     }
     out.set(realm.allocator, "length", Value.fromInt32(@intCast(args.len))) catch return error.OutOfMemory;
     return heap_mod.taggedObject(out);
@@ -386,7 +386,7 @@ fn arrayPush(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         // Anchor the key — `setOrThrow` may land it in the
         // property bag if the receiver isn't an Array exotic.
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        try setOrThrow(realm, obj, owned.bytes, v);
+        try setOrThrow(realm, obj, owned.flatBytes(), v);
         len += 1;
     }
     try setLengthOrThrow(realm, obj, len);
@@ -830,7 +830,7 @@ fn arrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         // ToString (an inherited `Symbol.toPrimitive` / `toString`
         // setter on the receiver participates and can throw).
         const s = try stringifyArg(realm, sep_v);
-        break :blk s.bytes;
+        break :blk s.flatBytes();
     };
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
@@ -842,7 +842,7 @@ fn arrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         const v = try getPropertyChain(realm, obj, islice);
         if (v.isUndefined() or v.isNull()) continue; // §23.1.3.18 — undefined / null become empty
         const s = try stringifyArg(realm, v);
-        buf.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
+        buf.appendSlice(realm.allocator, s.flatBytes()) catch return error.OutOfMemory;
     }
     const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
     return Value.fromString(out);
@@ -899,7 +899,7 @@ fn arrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) Na
             }
         }
         const s = try stringifyArg(realm, str_v);
-        buf.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
+        buf.appendSlice(realm.allocator, s.flatBytes()) catch return error.OutOfMemory;
     }
     const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
     return Value.fromString(out);
@@ -960,7 +960,7 @@ fn arraySlice(realm: *Realm, this_value: Value, args: []const Value) NativeError
         const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{write_idx}) catch unreachable;
         const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
         // §23.1.3.28 step 11.c.ii — CreateDataPropertyOrThrow, not Set.
-        try createDataPropertyOrThrowGeneric(realm, out, owned.bytes, v);
+        try createDataPropertyOrThrowGeneric(realm, out, owned.flatBytes(), v);
         write_idx += 1;
     }
     // §23.1.3.28 step 12 — ? Set(A, "length", n, true).
@@ -1043,7 +1043,7 @@ fn concatWriteOne(realm: *Realm, out: *JSObject, v: Value, write_idx: *i64) Nati
     // CreateDataProperty, which redefines the slot back to the
     // default `{w:T,e:T,c:T}` and rejects non-configurable own
     // slots / non-extensible receivers.
-    try createDataPropertyOrThrowGeneric(realm, out, owned.bytes, v);
+    try createDataPropertyOrThrowGeneric(realm, out, owned.flatBytes(), v);
     write_idx.* += 1;
 }
 
@@ -1225,7 +1225,7 @@ fn arrayOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
         const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         // §23.1.2.3 step 4.c — CreateDataPropertyOrThrow.
-        try createDataPropertyOrThrowGeneric(realm, out, idx_owned.bytes, v);
+        try createDataPropertyOrThrowGeneric(realm, out, idx_owned.flatBytes(), v);
     }
     // §23.1.2.3 step 5 — Set(A, "length", 𝔽(len), true). Goes
     // through the user-installed setter on subclass receivers.
@@ -1280,8 +1280,8 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     if (items.isString()) {
         const s: *JSString = @ptrCast(@alignCast(items.asString()));
         var i: usize = 0;
-        while (i < s.bytes.len) : (i += 1) {
-            const ch = realm.heap.allocateString(s.bytes[i .. i + 1]) catch return error.OutOfMemory;
+        while (i < s.flatBytes().len) : (i += 1) {
+            const ch = realm.heap.allocateString(s.flatBytes()[i .. i + 1]) catch return error.OutOfMemory;
             const elem: Value = blk: {
                 if (mapfn) |mf| {
                     const cb_args = [_]Value{ Value.fromString(ch), numberFromI64(@intCast(i)) };
@@ -1299,9 +1299,9 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
             const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-            out.set(realm.allocator, idx_owned.bytes, elem) catch return error.OutOfMemory;
+            out.set(realm.allocator, idx_owned.flatBytes(), elem) catch return error.OutOfMemory;
         }
-        setLength(realm, out, @intCast(s.bytes.len)) catch return error.OutOfMemory;
+        setLength(realm, out, @intCast(s.flatBytes().len)) catch return error.OutOfMemory;
         return heap_mod.taggedObject(out);
     }
 
@@ -1419,7 +1419,7 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
             // §23.1.2.1 step 5.g.viii — `CreateDataPropertyOrThrow(A,
             // Pk, mappedValue)`. Failure → IteratorClose(iterator)
             // then propagate (iter-set-elem-prop-err).
-            createDataPropertyOrThrowGeneric(realm, out, idx_owned.bytes, elem) catch |err| switch (err) {
+            createDataPropertyOrThrowGeneric(realm, out, idx_owned.flatBytes(), elem) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => {
                     closeIterOnAbrupt(realm, iter_obj, iter);
@@ -1482,7 +1482,7 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         // a configurable-but-non-writable own slot back to the
         // {w,e,c}-true default (source-object-length-set-elem-
         // prop-non-writable).
-        try createDataPropertyOrThrowGeneric(realm, out, idx_owned.bytes, elem);
+        try createDataPropertyOrThrowGeneric(realm, out, idx_owned.flatBytes(), elem);
     }
     // §23.1.2.1 step 7.f — `Set(A, "length", 𝔽(len), true)`. Spec-
     // faithful Set so a prototype-chain `length` setter fires.
@@ -1571,7 +1571,7 @@ fn arrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         // §23.1.3.7 step 11.b — Set(O, Pk, value, true). Honor
         // accessor setters / writable / extensible.
-        try setOrThrow(realm, obj, owned.bytes, value);
+        try setOrThrow(realm, obj, owned.flatBytes(), value);
     }
     return heap_mod.taggedObject(obj);
 }
@@ -2063,7 +2063,7 @@ fn flattenInto(realm: *Realm, source: *JSObject, source_len: i64, depth: i64, ta
             var wbuf: [24]u8 = undefined;
             const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{write_idx.*}) catch unreachable;
             const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-            try createDataPropertyOrThrowGeneric(realm, target, owned.bytes, elem);
+            try createDataPropertyOrThrowGeneric(realm, target, owned.flatBytes(), elem);
             write_idx.* += 1;
         }
     }
@@ -2133,14 +2133,14 @@ fn arrayFlatMap(realm: *Realm, this_value: Value, args: []const Value) NativeErr
                 // [[Set]]. Non-extensible target throws; non-
                 // configurable own slot throws; non-writable own
                 // slot is configurable-redefined.
-                try createDataPropertyOrThrowGeneric(realm, out, owned.bytes, v);
+                try createDataPropertyOrThrowGeneric(realm, out, owned.flatBytes(), v);
                 write_idx += 1;
             }
         } else {
             var wbuf: [24]u8 = undefined;
             const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{write_idx}) catch unreachable;
             const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-            try createDataPropertyOrThrowGeneric(realm, out, owned.bytes, mapped);
+            try createDataPropertyOrThrowGeneric(realm, out, owned.flatBytes(), mapped);
             write_idx += 1;
         }
     }
@@ -2254,7 +2254,7 @@ fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
         var wbuf: [24]u8 = undefined;
         const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{i}) catch unreachable;
         const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-        try createDataPropertyOrThrowGeneric(realm, removed, owned.bytes, v);
+        try createDataPropertyOrThrowGeneric(realm, removed, owned.flatBytes(), v);
     }
     try setLengthOrThrow(realm, removed, delete_count);
 
@@ -2275,7 +2275,7 @@ fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
             if (obj.hasProperty(sslice)) {
                 const v = try getPropertyChain(realm, obj, sslice);
                 const owned = realm.heap.allocateString(dslice) catch return error.OutOfMemory;
-                try setOrThrow(realm, obj, owned.bytes, v);
+                try setOrThrow(realm, obj, owned.flatBytes(), v);
             } else {
                 try deletePropertyOrThrow(realm, obj, dslice);
             }
@@ -2304,7 +2304,7 @@ fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
             if (obj.hasProperty(sslice)) {
                 const v = try getPropertyChain(realm, obj, sslice);
                 const owned = realm.heap.allocateString(dslice) catch return error.OutOfMemory;
-                try setOrThrow(realm, obj, owned.bytes, v);
+                try setOrThrow(realm, obj, owned.flatBytes(), v);
             } else {
                 try deletePropertyOrThrow(realm, obj, dslice);
             }
@@ -2317,7 +2317,7 @@ fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
         var b: [24]u8 = undefined;
         const slc = std.fmt.bufPrint(&b, "{d}", .{start + ins}) catch unreachable;
         const owned = realm.heap.allocateString(slc) catch return error.OutOfMemory;
-        try setOrThrow(realm, obj, owned.bytes, args[2 + @as(usize, @intCast(ins))]);
+        try setOrThrow(realm, obj, owned.flatBytes(), args[2 + @as(usize, @intCast(ins))]);
     }
 
     // §23.1.3.29 step 19 — ? Set(O, "length", len - dc + ic, true).
@@ -2453,7 +2453,7 @@ fn copyWithinStep(realm: *Realm, obj: *JSObject, src: i64, dst: i64) NativeError
         // §23.1.3.4 step 15.b.iv — Set(O, toKey, fromVal, true).
         // Honor setter / writable / extensible.
         const owned = realm.heap.allocateString(dslice) catch return error.OutOfMemory;
-        try setOrThrow(realm, obj, owned.bytes, v);
+        try setOrThrow(realm, obj, owned.flatBytes(), v);
     } else {
         try deletePropertyOrThrow(realm, obj, dslice);
     }
@@ -2536,7 +2536,7 @@ fn arraySort(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         // property bag if no accessor / array-exotic path absorbs
         // the write.
         const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-        try setOrThrow(realm, obj, owned.bytes, items.items[w]);
+        try setOrThrow(realm, obj, owned.flatBytes(), items.items[w]);
     }
     // §23.1.3.30 step 8 — DeletePropertyOrThrow up to the *original*
     // len. A setter that shrunk the array doesn't shorten the
@@ -2618,7 +2618,7 @@ fn sortCompare(realm: *Realm, x: Value, y: Value, cmp_fn: ?*JSFunction) NativeEr
     // `toString` / `valueOf` per the spec hint chain).
     const xs = try intrinsics.stringifyArg(realm, x);
     const ys = try intrinsics.stringifyArg(realm, y);
-    return switch (std.mem.order(u8, xs.bytes, ys.bytes)) {
+    return switch (std.mem.order(u8, xs.flatBytes(), ys.flatBytes())) {
         .lt => -1,
         .eq => 0,
         .gt => 1,
@@ -2677,14 +2677,14 @@ fn arrayToSorted(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         var wbuf: [24]u8 = undefined;
         const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{w}) catch unreachable;
         const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, items.items[w]) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.flatBytes(), items.items[w]) catch return error.OutOfMemory;
     }
     var u: i64 = 0;
     while (u < undef_count) : (u += 1) {
         var wbuf: [24]u8 = undefined;
         const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{@as(i64, @intCast(items.items.len)) + u}) catch unreachable;
         const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, Value.undefined_) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.flatBytes(), Value.undefined_) catch return error.OutOfMemory;
     }
     setLength(realm, out, len) catch return error.OutOfMemory;
     return heap_mod.taggedObject(out);
@@ -2707,7 +2707,7 @@ fn arrayToReversed(realm: *Realm, this_value: Value, args: []const Value) Native
         const wslice = std.fmt.bufPrint(&wb, "{d}", .{i}) catch unreachable;
         const v = try getPropertyChain(realm, obj, rslice);
         const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
     }
     setLength(realm, out, len) catch return error.OutOfMemory;
     return heap_mod.taggedObject(out);
@@ -2771,7 +2771,7 @@ fn arrayToSpliced(realm: *Realm, this_value: Value, args: []const Value) NativeE
         const rslice = std.fmt.bufPrint(&rb, "{d}", .{i}) catch unreachable;
         const owned = realm.heap.allocateString(rslice) catch return error.OutOfMemory;
         const v = try getPropertyChain(realm, obj, rslice);
-        out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
     }
     // [start..start+insert_count) — items.
     var k: i64 = 0;
@@ -2779,7 +2779,7 @@ fn arrayToSpliced(realm: *Realm, this_value: Value, args: []const Value) NativeE
         var wb: [24]u8 = undefined;
         const wslice = std.fmt.bufPrint(&wb, "{d}", .{start + k}) catch unreachable;
         const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, args[2 + @as(usize, @intCast(k))]) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.flatBytes(), args[2 + @as(usize, @intCast(k))]) catch return error.OutOfMemory;
     }
     // [start+insert_count..new_len) — tail of receiver after the gap.
     var r: i64 = start + delete_count;
@@ -2794,7 +2794,7 @@ fn arrayToSpliced(realm: *Realm, this_value: Value, args: []const Value) NativeE
         const wslice = std.fmt.bufPrint(&wb, "{d}", .{w}) catch unreachable;
         const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
         const v = try getPropertyChain(realm, obj, rslice);
-        out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
     }
     setLength(realm, out, new_len) catch return error.OutOfMemory;
     return heap_mod.taggedObject(out);
@@ -2833,7 +2833,7 @@ fn arrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         const rslice = std.fmt.bufPrint(&rb, "{d}", .{i}) catch unreachable;
         const v = if (i == idx) value else try getPropertyChain(realm, obj, rslice);
         const owned = realm.heap.allocateString(rslice) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
     }
     setLength(realm, out, len) catch return error.OutOfMemory;
     return heap_mod.taggedObject(out);
@@ -2842,7 +2842,7 @@ fn arrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 fn computedKeyForSort(v: Value, scratch: *[64]u8) []const u8 {
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
-        return s.bytes;
+        return s.flatBytes();
     }
     if (v.isInt32()) {
         return std.fmt.bufPrint(scratch, "{d}", .{v.asInt32()}) catch unreachable;
@@ -2914,14 +2914,14 @@ fn arrayReverse(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         const owned_i = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         const owned_j = realm.heap.allocateString(jslice) catch return error.OutOfMemory;
         if (lower_exists and upper_exists) {
-            try setOrThrow(realm, obj, owned_i.bytes, upper_v);
-            try setOrThrow(realm, obj, owned_j.bytes, lower_v);
+            try setOrThrow(realm, obj, owned_i.flatBytes(), upper_v);
+            try setOrThrow(realm, obj, owned_j.flatBytes(), lower_v);
         } else if (upper_exists) {
-            try setOrThrow(realm, obj, owned_i.bytes, upper_v);
-            try deletePropertyOrThrow(realm, obj, owned_j.bytes);
+            try setOrThrow(realm, obj, owned_i.flatBytes(), upper_v);
+            try deletePropertyOrThrow(realm, obj, owned_j.flatBytes());
         } else if (lower_exists) {
-            try deletePropertyOrThrow(realm, obj, owned_i.bytes);
-            try setOrThrow(realm, obj, owned_j.bytes, lower_v);
+            try deletePropertyOrThrow(realm, obj, owned_i.flatBytes());
+            try setOrThrow(realm, obj, owned_j.flatBytes(), lower_v);
         }
     }
     // §23.1.3.26 step 6 — Return O (the ToObject wrapper, not the
@@ -2960,7 +2960,7 @@ fn arrayShift(realm: *Realm, this_value: Value, args: []const Value) NativeError
         if (obj.hasProperty(fslice)) {
             const v = try getPropertyChain(realm, obj, fslice);
             const owned = realm.heap.allocateString(tslice) catch return error.OutOfMemory;
-            try setOrThrow(realm, obj, owned.bytes, v);
+            try setOrThrow(realm, obj, owned.flatBytes(), v);
         } else {
             try deletePropertyOrThrow(realm, obj, tslice);
         }
@@ -3005,7 +3005,7 @@ fn arrayUnshift(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             if (obj.hasProperty(fslice)) {
                 const v = try getPropertyChain(realm, obj, fslice);
                 const owned = realm.heap.allocateString(tslice) catch return error.OutOfMemory;
-                try setOrThrow(realm, obj, owned.bytes, v);
+                try setOrThrow(realm, obj, owned.flatBytes(), v);
             } else {
                 try deletePropertyOrThrow(realm, obj, tslice);
             }
@@ -3015,7 +3015,7 @@ fn arrayUnshift(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             var b: [24]u8 = undefined;
             const slc = std.fmt.bufPrint(&b, "{d}", .{idx}) catch unreachable;
             const owned = realm.heap.allocateString(slc) catch return error.OutOfMemory;
-            try setOrThrow(realm, obj, owned.bytes, a);
+            try setOrThrow(realm, obj, owned.flatBytes(), a);
         }
     }
     const new_len = len + argc;
@@ -3119,7 +3119,7 @@ fn arrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
         const v = try invokeCallback(realm, callback, this_arg, elem, i, obj);
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         // §23.1.3.19 step 6.c.iii — CreateDataPropertyOrThrow.
-        try createDataPropertyOrThrowGeneric(realm, out, owned.bytes, v);
+        try createDataPropertyOrThrowGeneric(realm, out, owned.flatBytes(), v);
     }
     try setLengthOrThrow(realm, out, len);
     return out_v;
@@ -3149,7 +3149,7 @@ fn arrayFilter(realm: *Realm, this_value: Value, args: []const Value) NativeErro
             const wslice = std.fmt.bufPrint(&wbuf, "{d}", .{write_idx}) catch unreachable;
             const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
             // §23.1.3.8 step 6.c.iii.2 — CreateDataPropertyOrThrow.
-            try createDataPropertyOrThrowGeneric(realm, out, owned.bytes, elem);
+            try createDataPropertyOrThrowGeneric(realm, out, owned.flatBytes(), elem);
             write_idx += 1;
         }
     }
@@ -3293,7 +3293,7 @@ fn arrayReduce(realm: *Realm, this_value: Value, args: []const Value) NativeErro
 pub fn toBoolean(v: Value) bool {
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
-        return s.bytes.len > 0;
+        return s.flatBytes().len > 0;
     }
     if (v.isInt32()) return v.asInt32() != 0;
     if (v.isDouble()) {
@@ -3812,7 +3812,7 @@ fn appendAndStepIter(realm: *Realm, state: *JSObject, value: Value) NativeError!
     // §23.1.2.1.1 step 3.j.ii.8 — `CreateDataPropertyOrThrow(A, Pk,
     // mappedValue)`. Abrupt completion routes through
     // `closeIterAndReject` (step 9 — `AsyncIteratorClose`).
-    createDataPropertyOrThrow(realm, out, owned.bytes, value) catch {
+    createDataPropertyOrThrow(realm, out, owned.flatBytes(), value) catch {
         return closeIterAndReject(realm, state);
     };
     state.set(realm.allocator, k_fa_index, Value.fromInt32(k + 1)) catch return error.OutOfMemory;
@@ -3921,7 +3921,7 @@ fn appendAndStepArrayLike(realm: *Realm, state: *JSObject, value: Value) NativeE
     // §23.1.2.1.1 step 3.l.iii — `CreateDataPropertyOrThrow(A, Pk,
     // mappedValue)`. There's no iterator to close on the array-like
     // path; an abrupt completion just rejects the outer promise.
-    createDataPropertyOrThrow(realm, out, owned.bytes, value) catch {
+    createDataPropertyOrThrow(realm, out, owned.flatBytes(), value) catch {
         return rejectFromState(realm, state);
     };
     state.set(realm.allocator, k_fa_index, Value.fromInt32(k + 1)) catch return error.OutOfMemory;

@@ -117,7 +117,7 @@ fn printValueStream(io: std.Io, out: std.Io.File, v: Value) !void {
         try out.writeStreamingAll(io, "undefined");
     } else if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
-        try out.writeStreamingAll(io, s.bytes);
+        try out.writeStreamingAll(io, s.flatBytes());
     } else if (v.isObject()) {
         try out.writeStreamingAll(io, "[object]");
     }

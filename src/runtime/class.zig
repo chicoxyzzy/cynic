@@ -817,7 +817,7 @@ fn maybePrefixAccessor(
     @memcpy(buf[prefix.len..], base);
     const owned = realm.heap.allocateString(buf) catch return base;
     anchor.key_anchors.append(realm.allocator, owned) catch {};
-    return owned.bytes;
+    return owned.flatBytes();
 }
 
 const ResolvedKey = struct {
@@ -881,7 +881,7 @@ fn resolveComputedKey(
                 const owned = realm.heap.allocateString(buf) catch break :blk "";
                 realm.allocator.free(buf);
                 anchor.key_anchors.append(realm.allocator, owned) catch {};
-                break :blk owned.bytes;
+                break :blk owned.flatBytes();
             }
             break :blk "";
         };
@@ -897,5 +897,5 @@ fn resolveComputedKey(
     // a later GC cycle sweeps the JSString and the property
     // bag's borrowed `[]const u8` key slice dangles.
     anchor.key_anchors.append(realm.allocator, s) catch return .{ .name = fallback, .display_name = fallback };
-    return .{ .name = s.bytes, .display_name = s.bytes };
+    return .{ .name = s.flatBytes(), .display_name = s.flatBytes() };
 }

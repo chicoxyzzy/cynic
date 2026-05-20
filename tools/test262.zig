@@ -183,7 +183,7 @@ fn test262EvalScript(
         return throwTest262TypeError(realm, "$262.evalScript: source must be a string");
     }
     const s: *cynic.runtime.JSString = @ptrCast(@alignCast(args[0].asString()));
-    const result = cynic.runtime.evaluateScript(realm.allocator, realm, s.bytes) catch |err| switch (err) {
+    const result = cynic.runtime.evaluateScript(realm.allocator, realm, s.flatBytes()) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // Parse / compile errors surface to user code as a thrown
         // SyntaxError. The exact message text isn't observable in
@@ -307,7 +307,7 @@ fn test262ChildEvalScript(
         return throwTest262TypeError(realm, "$262.evalScript: source must be a string");
     }
     const s: *cynic.runtime.JSString = @ptrCast(@alignCast(args[0].asString()));
-    const result = cynic.runtime.evaluateScript(child.allocator, child, s.bytes) catch |err| switch (err) {
+    const result = cynic.runtime.evaluateScript(child.allocator, child, s.flatBytes()) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return throwTest262SyntaxError(realm, "$262.evalScript: parse or compile error"),
     };
@@ -2006,14 +2006,14 @@ fn classifyAndRun(
             if (o.properties.get("message")) |m| {
                 if (m.isString()) {
                     const s: *cynic.runtime.JSString = @ptrCast(@alignCast(m.asString()));
-                    std.debug.print("\nFAIL {s}: {s}\n", .{ rel, s.bytes });
+                    std.debug.print("\nFAIL {s}: {s}\n", .{ rel, s.flatBytes() });
                 }
             } else {
                 std.debug.print("\nFAIL {s}: object (no message)\n", .{rel});
             }
         } else if (ex.isString()) {
             const s: *cynic.runtime.JSString = @ptrCast(@alignCast(ex.asString()));
-            std.debug.print("\nFAIL {s}: str: {s}\n", .{ rel, s.bytes });
+            std.debug.print("\nFAIL {s}: str: {s}\n", .{ rel, s.flatBytes() });
         } else {
             std.debug.print("\nFAIL {s}: non-object\n", .{rel});
         }

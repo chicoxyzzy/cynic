@@ -750,13 +750,13 @@ pub const JSObject = struct {
         // `elements`. The JSString anchor is unnecessary because
         // the value isn't keyed by the string at all.
         if (self.is_array_exotic) {
-            if (canonicalIntegerIndex(key_str.bytes)) |idx| {
+            if (canonicalIntegerIndex(key_str.flatBytes())) |idx| {
                 return self.setIndexed(allocator, idx, v);
             }
         }
-        try self.properties.put(allocator, key_str.bytes, v);
+        try self.properties.put(allocator, key_str.flatBytes(), v);
         try self.key_anchors.append(allocator, key_str);
-        try self.recordKey(allocator, key_str.bytes);
+        try self.recordKey(allocator, key_str.flatBytes());
     }
 
     /// Read the (possibly defaulted) descriptor flags for

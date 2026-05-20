@@ -1220,7 +1220,7 @@ fn iteratorToArray(realm: *Realm, this_value: Value, args: []const Value) Native
         const value = try iterGet(realm, r, "value");
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, value) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.flatBytes(), value) catch return error.OutOfMemory;
         idx += 1;
     }
     out.set(realm.allocator, "length", Value.fromInt32(idx)) catch return error.OutOfMemory;
@@ -1580,9 +1580,9 @@ fn iteratorConcat(realm: *Realm, this_value: Value, args: []const Value) NativeE
     var sbuf: [40]u8 = undefined;
     for (args, 0..) |item, i| {
         const owned = realm.heap.allocateString(slotName(&sbuf, "__cynic_iter_input_", i)) catch return error.OutOfMemory;
-        wrap.set(realm.allocator, owned.bytes, item) catch return error.OutOfMemory;
+        wrap.set(realm.allocator, owned.flatBytes(), item) catch return error.OutOfMemory;
         const m_owned = realm.heap.allocateString(slotName(&sbuf, "__cynic_iter_method_", i)) catch return error.OutOfMemory;
-        wrap.set(realm.allocator, m_owned.bytes, heap_mod.taggedFunction(captured_methods.items[i])) catch return error.OutOfMemory;
+        wrap.set(realm.allocator, m_owned.flatBytes(), heap_mod.taggedFunction(captured_methods.items[i])) catch return error.OutOfMemory;
     }
 
     const next_fn = realm.heap.allocateFunctionNative(concatNext, 0, "next") catch return error.OutOfMemory;
@@ -1707,9 +1707,9 @@ fn readZipMode(realm: *Realm, options_v: Value) NativeError!ZipMode {
     if (mode_v.isUndefined()) return .shortest;
     if (!mode_v.isString()) return throwTypeError(realm, "Iterator.zip 'mode' must be a string");
     const s: *JSString = @ptrCast(@alignCast(mode_v.asString()));
-    if (std.mem.eql(u8, s.bytes, "shortest")) return .shortest;
-    if (std.mem.eql(u8, s.bytes, "longest")) return .longest;
-    if (std.mem.eql(u8, s.bytes, "strict")) return .strict;
+    if (std.mem.eql(u8, s.flatBytes(), "shortest")) return .shortest;
+    if (std.mem.eql(u8, s.flatBytes(), "longest")) return .longest;
+    if (std.mem.eql(u8, s.flatBytes(), "strict")) return .strict;
     return throwTypeError(realm, "Iterator.zip 'mode' must be 'shortest', 'longest', or 'strict'");
 }
 
@@ -1874,15 +1874,15 @@ fn buildZipWrapper(
     var sbuf: [40]u8 = undefined;
     for (iters, 0..) |slot, i| {
         const owned = realm.heap.allocateString(slotName(&sbuf, "__cynic_iter_zip_", i)) catch return error.OutOfMemory;
-        wrap.set(realm.allocator, owned.bytes, slot.iter) catch return error.OutOfMemory;
+        wrap.set(realm.allocator, owned.flatBytes(), slot.iter) catch return error.OutOfMemory;
         // §7.4.2 GetIteratorDirect — snapshot of iter.next, stashed
         // per-input so step time doesn't re-trigger a `get next`
         // accessor (the `iterator-zip-iteration.js` log expects
         // exactly one `get name.next` per input, at construction).
         const owned_n = realm.heap.allocateString(slotName(&sbuf, "__cynic_iter_zipnext_", i)) catch return error.OutOfMemory;
-        wrap.set(realm.allocator, owned_n.bytes, slot.next) catch return error.OutOfMemory;
+        wrap.set(realm.allocator, owned_n.flatBytes(), slot.next) catch return error.OutOfMemory;
         const owned_a = realm.heap.allocateString(slotName(&sbuf, "__cynic_iter_active_", i)) catch return error.OutOfMemory;
-        wrap.set(realm.allocator, owned_a.bytes, Value.fromBool(true)) catch return error.OutOfMemory;
+        wrap.set(realm.allocator, owned_a.flatBytes(), Value.fromBool(true)) catch return error.OutOfMemory;
     }
 
     if (keys) |ks| {
@@ -1892,7 +1892,7 @@ fn buildZipWrapper(
             // Store the (heap-owned) key string as a Value so the
             // GC keeps it alive.
             const k_value = Value.fromString(k_owned);
-            wrap.set(realm.allocator, slot_owned.bytes, k_value) catch return error.OutOfMemory;
+            wrap.set(realm.allocator, slot_owned.flatBytes(), k_value) catch return error.OutOfMemory;
         }
     }
 
@@ -1951,16 +1951,16 @@ fn buildZipWrapper(
                 };
                 if (intrinsics.toBoolean(done_v)) {
                     still_active = false;
-                    wrap.set(realm.allocator, slot_owned.bytes, Value.undefined_) catch return error.OutOfMemory;
+                    wrap.set(realm.allocator, slot_owned.flatBytes(), Value.undefined_) catch return error.OutOfMemory;
                     continue;
                 }
                 const value = iterGet(realm, r, "value") catch |err| {
                     closeAllSwallowSlots(realm, iters, 0);
                     return err;
                 };
-                wrap.set(realm.allocator, slot_owned.bytes, value) catch return error.OutOfMemory;
+                wrap.set(realm.allocator, slot_owned.flatBytes(), value) catch return error.OutOfMemory;
             } else {
-                wrap.set(realm.allocator, slot_owned.bytes, Value.undefined_) catch return error.OutOfMemory;
+                wrap.set(realm.allocator, slot_owned.flatBytes(), Value.undefined_) catch return error.OutOfMemory;
             }
         }
         // If we read every slot but the iterator wasn't exhausted,
@@ -2263,13 +2263,13 @@ fn storeZipResult(
         const k_v = wrap.get(k_slot);
         if (k_v.isString()) {
             const s: *JSString = @ptrCast(@alignCast(k_v.asString()));
-            result_obj.set(realm.allocator, s.bytes, value) catch return error.OutOfMemory;
+            result_obj.set(realm.allocator, s.flatBytes(), value) catch return error.OutOfMemory;
         }
     } else {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        result_obj.set(realm.allocator, owned.bytes, value) catch return error.OutOfMemory;
+        result_obj.set(realm.allocator, owned.flatBytes(), value) catch return error.OutOfMemory;
     }
 }
 

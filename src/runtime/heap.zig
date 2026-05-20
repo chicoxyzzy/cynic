@@ -516,7 +516,8 @@ pub const Heap = struct {
         const name_str = try self.allocateString(display_name);
         if (display_name.len > 0) {
             f.name_string = name_str;
-            f.name = name_str.bytes;
+            // Freshly heap-allocated flat string — known-flat.
+            f.name = name_str.flatBytes();
         }
         try f.properties.put(self.allocator, "name", Value.fromString(name_str));
         try f.property_flags.put(self.allocator, "name", flags);
@@ -536,13 +537,37 @@ pub const Heap = struct {
     }
 
     /// Allocate a string that is `a ++ b`, owned by the heap.
-    pub fn concatStrings(self: *Heap, a: *const JSString, b: *const JSString) !*JSString {
-        try self.charge(a.bytes.len + b.bytes.len + @sizeOf(JSString));
+    /// Stage 1 (ConsString): produces a flat result — `JSString.
+    /// concat` flattens both operands and allocates the joined
+    /// buffer in one shot. No rope is built.
+    pub fn concatStrings(self: *Heap, a: *JSString, b: *JSString) !*JSString {
+        try self.charge(a.byte_len + b.byte_len + @sizeOf(JSString));
         const s = try JSString.concat(self.allocator, self.bytes_allocator, a, b);
         errdefer s.deinit(self.allocator, self.bytes_allocator);
         try self.strings.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
+    }
+
+    /// Allocate a `ConsString` (lazy rope) node for `a ++ b`.
+    ///
+    /// **Stage 1 of the ConsString effort: this MUST NOT build a
+    /// rope.** It eager-flattens — identical observable result to
+    /// `concatStrings` — so the rope representation exists in the
+    /// type without changing any behaviour. Later stages will
+    /// return an actual `.cons` node here when the operands are
+    /// large enough and the WTF-8 seam is clean.
+    ///
+    /// §6.1.4 dirty-seam rule (for the next stage): if the left
+    /// operand ends in a lone high surrogate and the right starts
+    /// with a lone low surrogate (`utf16.wtf8ConcatSeamPairs`),
+    /// the pair must collapse to one 4-byte form — a cons node
+    /// cannot represent that, so such a concat must eager-flatten
+    /// (via `JSString.concat`, which routes through `concatBytes`'
+    /// seam merge) instead of building a `.cons`.
+    pub fn allocateConsString(self: *Heap, a: *JSString, b: *JSString) !*JSString {
+        // Stage 1: always eager-flatten. Identical to concatStrings.
+        return self.concatStrings(a, b);
     }
 
     /// Allocate a heap-owned string that is the concatenation of two
@@ -560,6 +585,29 @@ pub const Heap = struct {
         return s;
     }
 
+    /// Mark a `JSString` and, when it is a cons (rope) node, its
+    /// `left` / `right` children. Idempotent — the `!marked` guard
+    /// stops the recursion at an already-visited node. Strings form
+    /// a DAG with no cycles (a cons child is allocated strictly
+    /// before its parent), so the guard is enough; no cycle break
+    /// is needed.
+    ///
+    /// Stage 1 of the ConsString effort builds no cons node, so the
+    /// recursive arm here is exercised only by the hand-built-cons
+    /// unit test below. It is in place so a later stage that does
+    /// create ropes has a correct mark walk from day one.
+    pub fn markString(self: *Heap, s: *JSString) void {
+        if (s.marked) return;
+        s.marked = true;
+        switch (s.payload) {
+            .flat => {},
+            .cons => |c| {
+                self.markString(c.left);
+                self.markString(c.right);
+            },
+        }
+    }
+
     /// Mark a single value if it carries a heap pointer. Idempotent.
     /// handles `String` and `Object` (where Object is
     /// currently always a `JSFunction`). later generalises Object
@@ -567,7 +615,7 @@ pub const Heap = struct {
     pub fn markValue(self: *Heap, v: Value) void {
         if (v.isString()) {
             const s: *JSString = @ptrCast(@alignCast(v.asString()));
-            s.marked = true;
+            self.markString(s);
         } else if (valueAsSymbol(v)) |sym| {
             sym.marked = true;
         } else if (valueAsBigInt(v)) |bi| {
@@ -1090,7 +1138,7 @@ test "Heap: collect keeps an object reachable through roots" {
 
     heap.collect(&.{v});
     try testing.expectEqual(@as(usize, 1), heap.strings.items.len);
-    try testing.expectEqualStrings("kept", s.bytes);
+    try testing.expectEqualStrings("kept", s.flatBytes());
 }
 
 test "Heap: collect resets mark bit between cycles" {
@@ -1162,12 +1210,52 @@ test "Heap: concatStrings tracks the result" {
     const b = try heap.allocateString("bar");
     const ab = try heap.concatStrings(a, b);
 
-    try testing.expectEqualStrings("foobar", ab.bytes);
+    try testing.expectEqualStrings("foobar", ab.flatBytes());
     try testing.expectEqual(@as(usize, 3), heap.strings.items.len);
 
     // With only `ab` rooted, `a` and `b` are freed.
     heap.collect(&.{Value.fromString(ab)});
     try testing.expectEqual(@as(usize, 1), heap.strings.items.len);
+}
+
+test "Heap: markString recurses through a hand-built cons node" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // Two flat children, plus a cons parent. Stage 1 production
+    // code never builds a cons — this exercises the mark recursion.
+    const left = try heap.allocateString("Hello, ");
+    const right = try heap.allocateString("world!");
+    const cons = try heap.allocator.create(JSString);
+    cons.* = .{
+        .length_cu = left.length_cu + right.length_cu,
+        .byte_len = left.byte_len + right.byte_len,
+        .depth = 1,
+        .payload = .{ .cons = .{ .left = left, .right = right } },
+    };
+    try heap.strings.append(heap.allocator, cons);
+
+    // Root only the cons node. Marking it must mark both children
+    // so the sweep keeps all three alive.
+    heap.collect(&.{Value.fromString(cons)});
+    try testing.expectEqual(@as(usize, 3), heap.strings.items.len);
+
+    // Drop the root; everything is collected.
+    heap.collect(&.{});
+    try testing.expectEqual(@as(usize, 0), heap.strings.items.len);
+}
+
+test "Heap: allocateConsString eager-flattens in Stage 1 (no rope)" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const a = try heap.allocateString("ab");
+    const b = try heap.allocateString("cd");
+    const ab = try heap.allocateConsString(a, b);
+
+    // Stage 1 invariant: the result is a flat node, not a cons.
+    try testing.expect(ab.isFlat());
+    try testing.expectEqualStrings("abcd", ab.flatBytes());
 }
 
 test "tagging: real JSObject from heap is recognised as plain object" {

@@ -165,7 +165,7 @@ fn installWellKnownSymbol(
     prop_key: []const u8,
 ) !void {
     const desc = try realm.heap.allocateString(description);
-    const sym = try realm.heap.allocateWellKnownSymbol(desc.bytes, prop_key);
+    const sym = try realm.heap.allocateWellKnownSymbol(desc.flatBytes(), prop_key);
     // §20.4.2 — well-known symbols on the Symbol constructor are
     // frozen data properties: `{ w:false, e:false, c:false }`.
     try ctor.setWithFlags(realm.allocator, name, heap_mod.taggedSymbol(sym), .{
@@ -187,7 +187,7 @@ fn symbolConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     var desc: ?[]const u8 = null;
     if (args.len > 0 and !args[0].isUndefined()) {
         const desc_str = try stringifyArg(realm, args[0]);
-        desc = desc_str.bytes;
+        desc = desc_str.flatBytes();
     }
     const sym = realm.heap.allocateSymbol(desc) catch return error.OutOfMemory;
     return heap_mod.taggedSymbol(sym);
@@ -201,12 +201,12 @@ fn symbolFor(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         try stringifyArg(realm, args[0])
     else
         realm.heap.allocateString("undefined") catch return error.OutOfMemory;
-    if (realm.heap.symbol_registry.get(key_str.bytes)) |existing| {
+    if (realm.heap.symbol_registry.get(key_str.flatBytes())) |existing| {
         return heap_mod.taggedSymbol(existing);
     }
-    const sym = realm.heap.allocateSymbol(key_str.bytes) catch return error.OutOfMemory;
+    const sym = realm.heap.allocateSymbol(key_str.flatBytes()) catch return error.OutOfMemory;
     sym.is_registered = true;
-    realm.heap.symbol_registry.put(realm.allocator, key_str.bytes, sym) catch return error.OutOfMemory;
+    realm.heap.symbol_registry.put(realm.allocator, key_str.flatBytes(), sym) catch return error.OutOfMemory;
     return heap_mod.taggedSymbol(sym);
 }
 fn symbolKeyFor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

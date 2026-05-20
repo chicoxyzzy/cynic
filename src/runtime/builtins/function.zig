@@ -445,7 +445,7 @@ fn functionBind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     };
     if (target_name_v.isString()) {
         const ts: *JSString = @ptrCast(@alignCast(target_name_v.asString()));
-        name_buf.appendSlice(realm.allocator, ts.bytes) catch return error.OutOfMemory;
+        name_buf.appendSlice(realm.allocator, ts.flatBytes()) catch return error.OutOfMemory;
     }
 
     // The bound function carries no chunk; call sites detect

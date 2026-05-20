@@ -1522,7 +1522,7 @@ fn setIndexedOnArray(realm: *Realm, arr: *JSObject, idx: u32, v: Value) NativeEr
     var ibuf: [24]u8 = undefined;
     const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
     const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-    arr.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+    arr.set(realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
 }
 
 fn toBoolFlag(v: Value) bool {
@@ -1711,7 +1711,7 @@ fn allSettledProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, idx:
     var ibuf: [24]u8 = undefined;
     const islice = std.fmt.bufPrint(&ibuf, "{d}", .{ctx.count}) catch unreachable;
     const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-    ctx.out.set(realm.allocator, owned.bytes, heap_mod.taggedObject(entry)) catch return error.OutOfMemory;
+    ctx.out.set(realm.allocator, owned.flatBytes(), heap_mod.taggedObject(entry)) catch return error.OutOfMemory;
     ctx.count += 1;
     return .continue_;
 }

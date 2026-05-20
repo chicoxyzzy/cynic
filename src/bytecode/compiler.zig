@@ -1920,7 +1920,7 @@ pub const Compiler = struct {
             var ibuf: [16]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
             const idx_owned = self.realm.heap.allocateString(islice) catch return error.OutOfMemory;
-            raw_arr.setWithFlags(self.allocator, idx_owned.bytes, Value.fromString(owned), indexed_frozen) catch return error.OutOfMemory;
+            raw_arr.setWithFlags(self.allocator, idx_owned.flatBytes(), Value.fromString(owned), indexed_frozen) catch return error.OutOfMemory;
         }
         raw_arr.setWithFlags(self.allocator, "length", Value.fromInt32(@intCast(lit.quasis.len)), meta_frozen) catch return error.OutOfMemory;
         raw_arr.extensible = false;
@@ -1939,7 +1939,7 @@ pub const Compiler = struct {
             var ibuf: [16]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
             const idx_owned = self.realm.heap.allocateString(islice) catch return error.OutOfMemory;
-            strs_arr.setWithFlags(self.allocator, idx_owned.bytes, Value.fromString(owned), indexed_frozen) catch return error.OutOfMemory;
+            strs_arr.setWithFlags(self.allocator, idx_owned.flatBytes(), Value.fromString(owned), indexed_frozen) catch return error.OutOfMemory;
         }
         strs_arr.setWithFlags(self.allocator, "length", Value.fromInt32(@intCast(lit.quasis.len)), meta_frozen) catch return error.OutOfMemory;
         strs_arr.setWithFlags(self.allocator, "raw", heap_mod.taggedObject(raw_arr), meta_frozen) catch return error.OutOfMemory;

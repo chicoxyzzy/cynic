@@ -820,8 +820,8 @@ pub fn toObjectThis(realm: *Realm, this_value: Value) NativeError!*JSObject {
         };
         // §22.1.4.4 [[GetOwnProperty]] — `length` and the indexed
         // own properties report UTF-16 code-unit positions, not
-        // WTF-8 byte offsets. Walk the code-unit view of `s.bytes`.
-        const cu_len = utf16_mod.lengthInCodeUnits(s.bytes);
+        // WTF-8 byte offsets. Walk the code-unit view of `s.flatBytes()`.
+        const cu_len = utf16_mod.lengthInCodeUnits(s.flatBytes());
         w.setWithFlags(realm.allocator, "length", Value.fromInt32(@intCast(cu_len)), ro_flags) catch return error.OutOfMemory;
         var idx: usize = 0;
         while (idx < cu_len) : (idx += 1) {
@@ -831,13 +831,13 @@ pub fn toObjectThis(realm: *Realm, this_value: Value) NativeError!*JSObject {
             // single-unit WTF-8 string for the wrapper slot. This
             // splits a supplementary code point into two distinct
             // entries (lead at i, trail at i+1).
-            const cu = utf16_mod.codeUnitAt(s.bytes, idx) orelse 0xFFFD;
+            const cu = utf16_mod.codeUnitAt(s.flatBytes(), idx) orelse 0xFFFD;
             var cu_buf: std.ArrayListUnmanaged(u8) = .empty;
             defer cu_buf.deinit(realm.allocator);
             utf16_mod.appendCodeUnitAsWtf8(realm.allocator, &cu_buf, cu) catch return error.OutOfMemory;
             const ch = realm.heap.allocateString(cu_buf.items) catch return error.OutOfMemory;
             const own_key = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-            w.setWithFlags(realm.allocator, own_key.bytes, Value.fromString(ch), idx_flags) catch return error.OutOfMemory;
+            w.setWithFlags(realm.allocator, own_key.flatBytes(), Value.fromString(ch), idx_flags) catch return error.OutOfMemory;
         }
         return w;
     }
@@ -1043,7 +1043,7 @@ fn toLengthValuePropagating(realm: *Realm, v: Value) NativeError!i64 {
     if (v.isBool()) return if (v.asBool()) 1 else 0;
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
-        const d = std.fmt.parseFloat(f64, s.bytes) catch return 0;
+        const d = std.fmt.parseFloat(f64, s.flatBytes()) catch return 0;
         if (std.math.isNan(d) or d <= 0) return 0;
         return doubleToI64Saturating(d);
     }
@@ -1253,7 +1253,7 @@ fn stringConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
             // failed.
             // §22.1.4.4 — `length` and indexed entries are counted
             // and indexed in UTF-16 code units, not WTF-8 bytes.
-            const cu_len = utf16_mod.lengthInCodeUnits(ps.bytes);
+            const cu_len = utf16_mod.lengthInCodeUnits(ps.flatBytes());
             inst.setWithFlags(realm.allocator, "length", Value.fromInt32(@intCast(cu_len)), .{
                 .writable = false,
                 .enumerable = false,
@@ -1264,12 +1264,12 @@ fn stringConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
             while (ci < cu_len) : (ci += 1) {
                 const islice = std.fmt.bufPrint(&ibuf, "{d}", .{ci}) catch unreachable;
                 const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-                const cu = utf16_mod.codeUnitAt(ps.bytes, ci) orelse 0xFFFD;
+                const cu = utf16_mod.codeUnitAt(ps.flatBytes(), ci) orelse 0xFFFD;
                 var cu_buf: std.ArrayListUnmanaged(u8) = .empty;
                 defer cu_buf.deinit(realm.allocator);
                 utf16_mod.appendCodeUnitAsWtf8(realm.allocator, &cu_buf, cu) catch return error.OutOfMemory;
                 const ch = realm.heap.allocateString(cu_buf.items) catch return error.OutOfMemory;
-                inst.setWithFlags(realm.allocator, owned.bytes, Value.fromString(ch), .{
+                inst.setWithFlags(realm.allocator, owned.flatBytes(), Value.fromString(ch), .{
                     .writable = false,
                     .enumerable = true,
                     .configurable = false,
@@ -1355,7 +1355,7 @@ pub fn coerceToNumber(v: Value) Value {
     if (v.isUndefined()) return Value.fromDouble(std.math.nan(f64));
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
-        return stringToNumber(s.bytes);
+        return stringToNumber(s.flatBytes());
     }
     return Value.fromDouble(std.math.nan(f64));
 }
@@ -1666,7 +1666,7 @@ pub fn strictEqualsLite(a: Value, b: Value) bool {
     if (a.isString() and b.isString()) {
         const sa: *JSString = @ptrCast(@alignCast(a.asString()));
         const sb: *JSString = @ptrCast(@alignCast(b.asString()));
-        return std.mem.eql(u8, sa.bytes, sb.bytes);
+        return std.mem.eql(u8, sa.flatBytes(), sb.flatBytes());
     }
     // §6.1.6.2.13 BigInt::equal — compare mathematical values.
     // Two distinct JSBigInt allocations with the same value pass

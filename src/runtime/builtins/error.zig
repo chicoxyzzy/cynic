@@ -259,7 +259,7 @@ fn aggregateErrorMaterialiseErrors(realm: *Realm, errors_v: Value) NativeError!V
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{k}) catch unreachable;
             const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-            out.set(realm.allocator, idx_owned.bytes, elem) catch return error.OutOfMemory;
+            out.set(realm.allocator, idx_owned.flatBytes(), elem) catch return error.OutOfMemory;
             k += 1;
         }
         @import("array.zig").setLength(realm, out, k) catch return error.OutOfMemory;
@@ -274,7 +274,7 @@ fn aggregateErrorMaterialiseErrors(realm: *Realm, errors_v: Value) NativeError!V
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
         const elem = try intrinsics.getPropertyChain(realm, src, islice);
         const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        out.set(realm.allocator, idx_owned.bytes, elem) catch return error.OutOfMemory;
+        out.set(realm.allocator, idx_owned.flatBytes(), elem) catch return error.OutOfMemory;
     }
     @import("array.zig").setLength(realm, out, len) catch return error.OutOfMemory;
     return heap_mod.taggedObject(out);
@@ -403,10 +403,10 @@ fn errorPrototypeToString(realm: *Realm, this_value: Value, args: []const Value)
         break :blk try stringifyArg(realm, msg_v);
     };
 
-    if (name_str.bytes.len == 0) return Value.fromString(msg_str);
-    if (msg_str.bytes.len == 0) return Value.fromString(name_str);
+    if (name_str.byte_len == 0) return Value.fromString(msg_str);
+    if (msg_str.byte_len == 0) return Value.fromString(name_str);
 
-    const joined = std.fmt.allocPrint(realm.allocator, "{s}: {s}", .{ name_str.bytes, msg_str.bytes }) catch return error.OutOfMemory;
+    const joined = std.fmt.allocPrint(realm.allocator, "{s}: {s}", .{ name_str.flatBytes(), msg_str.flatBytes() }) catch return error.OutOfMemory;
     defer realm.allocator.free(joined);
     const out = realm.heap.allocateString(joined) catch return error.OutOfMemory;
     return Value.fromString(out);

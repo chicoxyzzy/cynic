@@ -259,20 +259,20 @@ fn makeURIError(realm: *Realm, msg: []const u8) !Value {
 fn globalEncodeURI(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
-    return encodeURIImpl(realm, s.bytes, true);
+    return encodeURIImpl(realm, s.flatBytes(), true);
 }
 fn globalEncodeURIComponent(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
-    return encodeURIImpl(realm, s.bytes, false);
+    return encodeURIImpl(realm, s.flatBytes(), false);
 }
 fn globalDecodeURI(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
-    return decodeURIImpl(realm, s.bytes, true);
+    return decodeURIImpl(realm, s.flatBytes(), true);
 }
 fn globalDecodeURIComponent(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
-    return decodeURIImpl(realm, s.bytes, false);
+    return decodeURIImpl(realm, s.flatBytes(), false);
 }

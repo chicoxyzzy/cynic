@@ -84,7 +84,7 @@ fn expectScriptStringWithBuiltins(source: []const u8, expected: []const u8) !voi
     };
     try testing.expect(v.isString());
     const s: *JSString = @ptrCast(@alignCast(v.asString()));
-    try testing.expectEqualStrings(expected, s.bytes);
+    try testing.expectEqualStrings(expected, s.flatBytes());
 }
 
 /// Test helper: run a script, returning the final accumulator
@@ -111,7 +111,7 @@ fn expectScriptString(source: []const u8, expected: []const u8) !void {
     const v = try evaluateScriptValue(&realm, source);
     try testing.expect(v.isString());
     const s: *JSString = @ptrCast(@alignCast(v.asString()));
-    try testing.expectEqualStrings(expected, s.bytes);
+    try testing.expectEqualStrings(expected, s.flatBytes());
 }
 
 fn expectScriptThrows(source: []const u8) !void {
@@ -159,7 +159,7 @@ fn expectString(source: []const u8, expected: []const u8) !void {
     const v = try evaluate(&realm, source);
     try testing.expect(v.isString());
     const s: *JSString = @ptrCast(@alignCast(v.asString()));
-    try testing.expectEqualStrings(expected, s.bytes);
+    try testing.expectEqualStrings(expected, s.flatBytes());
 }
 
 test "interpreter: 1 + 2 = 3 (int32 fast path)" {
@@ -2948,7 +2948,7 @@ fn expectScriptStringUnderGcPressure(source: []const u8, expected: []const u8) !
     };
     try testing.expect(v.isString());
     const s: *JSString = @ptrCast(@alignCast(v.asString()));
-    try testing.expectEqualStrings(expected, s.bytes);
+    try testing.expectEqualStrings(expected, s.flatBytes());
 }
 
 test "GC: generator wrapper iteration survives gc_threshold=1" {

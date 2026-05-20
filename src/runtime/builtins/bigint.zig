@@ -117,7 +117,7 @@ pub fn toBigIntValue(realm: *Realm, v_in: Value) !Value {
         // StrUnsignedDecimalLiteral with DecimalDigits (so no
         // `Infinity` / `.` / exponent). Failure is a SyntaxError,
         // *not* TypeError per §7.1.13 step 3.b.
-        return stringToBigInt(realm, s.bytes);
+        return stringToBigInt(realm, s.flatBytes());
     }
     return throwTypeError(realm, "Cannot convert value to BigInt");
 }

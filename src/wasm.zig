@@ -359,7 +359,7 @@ fn appendValueText(buf: *std.ArrayListUnmanaged(u8), v: Value) !void {
         try buf.appendSlice(gpa, "undefined");
     } else if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
-        try buf.appendSlice(gpa, s.bytes);
+        try buf.appendSlice(gpa, s.flatBytes());
     } else if (cynic.runtime.heap.valueAsBigInt(v)) |bi| {
         try buf.appendSlice(gpa, try std.fmt.bufPrint(&scratch, "{d}n", .{bi.value}));
     } else if (cynic.runtime.heap.isFunction(v)) {
@@ -401,14 +401,14 @@ fn lookupString(obj: *cynic.runtime.JSObject, key: []const u8) ?[]const u8 {
     if (obj.properties.get(key)) |p| {
         if (p.isString()) {
             const s: *JSString = @ptrCast(@alignCast(p.asString()));
-            return s.bytes;
+            return s.flatBytes();
         }
     }
     if (obj.prototype) |proto| {
         if (proto.properties.get(key)) |p| {
             if (p.isString()) {
                 const s: *JSString = @ptrCast(@alignCast(p.asString()));
-                return s.bytes;
+                return s.flatBytes();
             }
         }
     }

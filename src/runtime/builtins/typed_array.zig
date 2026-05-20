@@ -2426,7 +2426,7 @@ fn typedArrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const sep_v = argOr(args, 0, Value.undefined_);
     const sep_s: []const u8 = if (sep_v.isUndefined()) "," else blk: {
         const s = try stringifyArg(realm, sep_v);
-        break :blk s.bytes;
+        break :blk s.flatBytes();
     };
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
@@ -2438,7 +2438,7 @@ fn typedArrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeE
         // let next be the empty String`. Skip stringification.
         if (v.isUndefined() or v.isNull()) continue;
         const s = try stringifyArg(realm, v);
-        out.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
+        out.appendSlice(realm.allocator, s.flatBytes()) catch return error.OutOfMemory;
     }
     const result = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
     return Value.fromString(result);
@@ -2510,7 +2510,7 @@ fn typedArrayToLocaleString(realm: *Realm, this_value: Value, args: []const Valu
             str_v = v;
         }
         const s = try stringifyArg(realm, str_v);
-        out.appendSlice(realm.allocator, s.bytes) catch return error.OutOfMemory;
+        out.appendSlice(realm.allocator, s.flatBytes()) catch return error.OutOfMemory;
     }
     const result = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
     return Value.fromString(result);
@@ -3052,7 +3052,7 @@ fn dvToBigInt64(realm: *Realm, v: Value) NativeError!i64 {
     if (prim.isBool()) return if (prim.asBool()) 1 else 0;
     if (prim.isString()) {
         const s: *JSString = @ptrCast(@alignCast(prim.asString()));
-        const trimmed = std.mem.trim(u8, s.bytes, " \t\n\r");
+        const trimmed = std.mem.trim(u8, s.flatBytes(), " \t\n\r");
         if (trimmed.len == 0) return 0;
         var negate = false;
         var rest = trimmed;

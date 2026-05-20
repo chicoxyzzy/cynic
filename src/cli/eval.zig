@@ -103,7 +103,7 @@ fn printValue(allocator: std.mem.Allocator, io: std.Io, v: Value) !void {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
         // Unquoted at the top level — same convention V8's `d8` and
         // SpiderMonkey's `js` use when printing a final expression.
-        try std.Io.File.stdout().writeStreamingAll(io, s.bytes);
+        try std.Io.File.stdout().writeStreamingAll(io, s.flatBytes());
         try std.Io.File.stdout().writeStreamingAll(io, "\n");
     } else if (v.isObject()) {
         try std.Io.File.stdout().writeStreamingAll(io, "[object]\n");

@@ -356,7 +356,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         // for function targets isn't surfaced by any failing
         // fixture in our scope today.
         const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
-        const ok = fn_obj.setIfWritable(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+        const ok = fn_obj.setIfWritable(realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
         return Value.fromBool(ok);
     }
     var target = heap_mod.valueAsPlainObject(arg).?;
@@ -419,7 +419,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
                 // through a callable-proxy chain.
                 const fn_target = proxy_cur.proxy_target_fn.?;
                 const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
-                const ok = fn_target.setIfWritable(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+                const ok = fn_target.setIfWritable(realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
                 return Value.fromBool(ok);
             }
             const r = try proxy_mod.nativeProxySet(realm, proxy_cur, key_slice, v, receiver_v);
@@ -606,7 +606,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
                     // to the wrapped function's OrdinarySet.
                     const fn_target = proxy_cur.proxy_target_fn.?;
                     const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
-                    const ok = fn_target.setIfWritable(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+                    const ok = fn_target.setIfWritable(realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
                     return Value.fromBool(ok);
                 }
                 const r = try proxy_mod.nativeProxySet(realm, proxy_cur, key_slice, v, receiver_v);
@@ -676,7 +676,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         // Functions are objects too; allow that path.
         if (heap_mod.valueAsFunction(receiver_v)) |fn_recv| {
             const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
-            const ok = fn_recv.setIfWritable(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+            const ok = fn_recv.setIfWritable(realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
             return Value.fromBool(ok);
         }
         return Value.false_;
@@ -735,7 +735,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // default `{writable, enumerable, configurable}: true` flags.
     if (!receiver_obj.extensible) return Value.false_;
     const owned_k = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
-    receiver_obj.set(realm.allocator, owned_k.bytes, v) catch return error.OutOfMemory;
+    receiver_obj.set(realm.allocator, owned_k.flatBytes(), v) catch return error.OutOfMemory;
     return Value.true_;
 }
 
@@ -751,7 +751,7 @@ fn reflectSetOnReceiver(realm: *Realm, receiver_v: Value, key_slice: []const u8,
     const receiver_obj = heap_mod.valueAsPlainObject(receiver_v) orelse {
         if (heap_mod.valueAsFunction(receiver_v)) |fn_recv| {
             const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
-            const ok = fn_recv.setIfWritable(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+            const ok = fn_recv.setIfWritable(realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
             return Value.fromBool(ok);
         }
         return Value.false_;
@@ -803,7 +803,7 @@ fn reflectSetOnReceiver(realm: *Realm, receiver_v: Value, key_slice: []const u8,
     }
     if (!receiver_obj.extensible) return Value.false_;
     const owned_k = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
-    receiver_obj.set(realm.allocator, owned_k.bytes, v) catch return error.OutOfMemory;
+    receiver_obj.set(realm.allocator, owned_k.flatBytes(), v) catch return error.OutOfMemory;
     return Value.true_;
 }
 
@@ -815,17 +815,17 @@ fn reflectSetOnReceiver(realm: *Realm, receiver_v: Value, key_slice: []const u8,
 fn toPropertyKeySpec(realm: *Realm, v: Value) NativeError![]const u8 {
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
-        return s.bytes;
+        return s.flatBytes();
     }
     if (heap_mod.valueAsSymbol(v)) |sym| return sym.prop_key;
     if (heap_mod.valueAsPlainObject(v) != null or heap_mod.valueAsFunction(v) != null) {
         const prim = try intrinsics.toPrimitive(realm, v, .string);
         if (heap_mod.valueAsSymbol(prim)) |sym| return sym.prop_key;
         const s = try intrinsics.stringifyArg(realm, prim);
-        return s.bytes;
+        return s.flatBytes();
     }
     const s = try intrinsics.stringifyArg(realm, v);
-    return s.bytes;
+    return s.flatBytes();
 }
 
 fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -908,7 +908,7 @@ fn reflectOwnKeys(realm: *Realm, this_value: Value, args: []const Value) NativeE
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
             const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-            out.set(realm.allocator, owned.bytes, Value.fromString(key_str)) catch return error.OutOfMemory;
+            out.set(realm.allocator, owned.flatBytes(), Value.fromString(key_str)) catch return error.OutOfMemory;
         }
         out.set(realm.allocator, "length", Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
         return heap_mod.taggedObject(out);
@@ -945,7 +945,7 @@ fn reflectOwnKeys(realm: *Realm, this_value: Value, args: []const Value) NativeE
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        out.set(realm.allocator, owned.bytes, v) catch return error.OutOfMemory;
+        out.set(realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
         idx += 1;
     }
     out.set(realm.allocator, "length", Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
@@ -1258,7 +1258,7 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
 fn computedKeyForReflect(v: Value, scratch: *[64]u8) []const u8 {
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
-        return s.bytes;
+        return s.flatBytes();
     }
     // §7.1.19 ToPropertyKey — Symbol primitives become their
     // canonical property-key string. Cynic flattens well-known

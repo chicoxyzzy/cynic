@@ -1067,7 +1067,7 @@ fn appendValueText(realm: *Realm, v: Value) !void {
         try realm.output.appendSlice(realm.allocator, "undefined");
     } else if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
-        try realm.output.appendSlice(realm.allocator, s.bytes);
+        try realm.output.appendSlice(realm.allocator, s.flatBytes());
     } else if (heap_mod.valueAsBigInt(v)) |bi| {
         const m = try std.fmt.bufPrint(&buf, "{d}", .{bi.value});
         try realm.output.appendSlice(realm.allocator, m);
@@ -1092,7 +1092,7 @@ test "Realm: init / deinit round-trip" {
 
     // Heap is reachable through the realm and usable for allocation.
     const s = try realm.heap.allocateString("hello");
-    try testing.expectEqualStrings("hello", s.bytes);
+    try testing.expectEqualStrings("hello", s.flatBytes());
 }
 
 test "Realm: deinit frees heap-allocated strings" {

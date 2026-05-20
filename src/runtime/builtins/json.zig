@@ -257,13 +257,13 @@ fn resolvePropertyList(state: *StringifyState, replacer_v: Value) NativeError!vo
         var item_bytes: ?[]const u8 = null;
         if (v.isString()) {
             const s: *JSString = @ptrCast(@alignCast(v.asString()));
-            item_bytes = s.bytes;
+            item_bytes = s.flatBytes();
         } else if (v.isInt32() or v.isDouble()) {
             const owned = stringifyArg(realm, v) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => continue,
             };
-            item_bytes = owned.bytes;
+            item_bytes = owned.flatBytes();
         } else if (heap_mod.valueAsPlainObject(v)) |o| {
             // §25.5.2 step 4.b.iv.4.e — accept Number / String
             // wrapper objects; coerce via ToString. Order
@@ -271,11 +271,11 @@ fn resolvePropertyList(state: *StringifyState, replacer_v: Value) NativeError!vo
             // so look for the string slot first.
             if (o.boxed_string != null) {
                 const s = try stringifyArg(realm, v);
-                item_bytes = s.bytes;
+                item_bytes = s.flatBytes();
             } else if (o.boxed_primitive) |bp| {
                 if (bp.isInt32() or bp.isDouble()) {
                     const s = try stringifyArg(realm, v);
-                    item_bytes = s.bytes;
+                    item_bytes = s.flatBytes();
                 }
             }
         }
@@ -352,15 +352,15 @@ fn resolveSpace(state: *StringifyState, space_v: Value) NativeError!void {
     // §25.5.2 step 7 — String → first 10 code units.
     if (space_resolved.isString()) {
         const s: *JSString = @ptrCast(@alignCast(space_resolved.asString()));
-        if (s.bytes.len == 0) return;
+        if (s.flatBytes().len == 0) return;
         // Cynic stores strings as UTF-8 byte buffers. The spec
         // counts UTF-16 code units; for the common ASCII /
         // BMP-non-supplementary inputs the truncation aligns
         // exactly. For the rest, first-10-bytes is a tolerable
         // approximation — the test262 fixtures use ASCII.
-        const len = if (s.bytes.len > 10) 10 else s.bytes.len;
+        const len = if (s.flatBytes().len > 10) 10 else s.flatBytes().len;
         const buf = realm.allocator.alloc(u8, len) catch return error.OutOfMemory;
-        @memcpy(buf, s.bytes[0..len]);
+        @memcpy(buf, s.flatBytes()[0..len]);
         state.owned_buffers.append(realm.allocator, buf) catch {
             realm.allocator.free(buf);
             return error.OutOfMemory;
@@ -477,7 +477,7 @@ fn serializeJSONProperty(
             const raw_v = obj_raw.get("rawJSON");
             if (raw_v.isString()) {
                 const s: *JSString = @ptrCast(@alignCast(raw_v.asString()));
-                try buf.appendSlice(realm.allocator, s.bytes);
+                try buf.appendSlice(realm.allocator, s.flatBytes());
                 return true;
             }
         }
@@ -519,7 +519,7 @@ fn serializeJSONProperty(
     }
     if (value.isString()) {
         const s: *JSString = @ptrCast(@alignCast(value.asString()));
-        try jsonAppendString(realm, buf, s.bytes);
+        try jsonAppendString(realm, buf, s.flatBytes());
         return true;
     }
     if (value.isInt32()) {
@@ -831,7 +831,7 @@ fn jsonParse(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     else
         try stringifyArg(realm, v);
 
-    var parser = JsonParser{ .input = src.bytes, .pos = 0, .realm = realm };
+    var parser = JsonParser{ .input = src.flatBytes(), .pos = 0, .realm = realm };
     parser.skipWs();
     const result = parser.parseValue() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -846,7 +846,7 @@ fn jsonParse(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         },
     };
     parser.skipWs();
-    if (parser.pos != src.bytes.len) {
+    if (parser.pos != src.flatBytes().len) {
         const ex = intrinsics.newSyntaxError(realm, "JSON.parse: unexpected trailing characters") catch return error.OutOfMemory;
         realm.pending_exception = ex;
         return error.NativeThrew;
@@ -1221,7 +1221,7 @@ const JsonParser = struct {
             if (self.peek() != @as(u8, ':')) return error.Malformed;
             self.advance();
             const val = try self.parseValue();
-            obj.set(self.realm.allocator, key_s.bytes, val) catch return error.OutOfMemory;
+            obj.set(self.realm.allocator, key_s.flatBytes(), val) catch return error.OutOfMemory;
             self.skipWs();
             switch (self.peek() orelse return error.Malformed) {
                 ',' => self.advance(),
@@ -1250,7 +1250,7 @@ const JsonParser = struct {
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
             const owned = self.realm.heap.allocateString(islice) catch return error.OutOfMemory;
-            arr.set(self.realm.allocator, owned.bytes, val) catch return error.OutOfMemory;
+            arr.set(self.realm.allocator, owned.flatBytes(), val) catch return error.OutOfMemory;
             idx += 1;
             self.skipWs();
             switch (self.peek() orelse return error.Malformed) {
@@ -1366,7 +1366,7 @@ fn jsonRawJSON(realm: *Realm, this_value: Value, args: []const Value) NativeErro
         @ptrCast(@alignCast(v.asString()))
     else
         try stringifyArg(realm, v);
-    const bytes = src.bytes;
+    const bytes = src.flatBytes();
 
     // Step 2 — empty / whitespace-bracketed strings reject. The
     // §25.5.4 step 2 list is exactly TAB (0x09), LF (0x0A), CR
