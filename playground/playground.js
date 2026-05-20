@@ -94,17 +94,7 @@ async function loadWasm() {
   // is all `instantiateStreaming` needs.
   const importObject = {};
   try {
-    let result;
-    if (WebAssembly.instantiateStreaming) {
-      result = await WebAssembly.instantiateStreaming(
-        fetch('cynic.wasm'),
-        importObject,
-      );
-    } else {
-      // Older browsers: fall back to fetch + arrayBuffer.
-      const bytes = await (await fetch('cynic.wasm')).arrayBuffer();
-      result = await WebAssembly.instantiate(bytes, importObject);
-    }
+    const result = await instantiateWasm(importObject);
     wasm = {
       instance: result.instance,
       exports: result.instance.exports,
@@ -118,6 +108,32 @@ async function loadWasm() {
     renderError('Could not load cynic.wasm: ' + err);
     console.error(err);
   }
+}
+
+// Instantiate `cynic.wasm`. Prefer streaming compile, but fall
+// back to a buffered fetch on ANY streaming failure — not just a
+// missing `instantiateStreaming`. `instantiateStreaming` rejects
+// when the server sends the wrong `Content-Type` (anything other
+// than `application/wasm`), which happens on local static servers
+// that don't know the `.wasm` MIME type. GitHub Pages serves it
+// correctly, so the fallback is purely local-dev insurance.
+async function instantiateWasm(importObject) {
+  if (WebAssembly.instantiateStreaming) {
+    try {
+      return await WebAssembly.instantiateStreaming(
+        fetch('cynic.wasm'),
+        importObject,
+      );
+    } catch (err) {
+      console.warn(
+        'instantiateStreaming failed (likely a Content-Type other ' +
+          'than application/wasm); retrying with a buffered fetch.',
+        err,
+      );
+    }
+  }
+  const bytes = await (await fetch('cynic.wasm')).arrayBuffer();
+  return WebAssembly.instantiate(bytes, importObject);
 }
 
 function readVersion() {
