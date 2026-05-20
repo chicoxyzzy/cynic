@@ -5,6 +5,12 @@
 // the module via `cynic_alloc`, runs it through `cynic_eval`, and
 // renders the framed result.
 //
+// The editor is CodeMirror 6, vendored offline as a single
+// committed bundle (`codemirror.bundle.js`) — Cynic is SES-aligned,
+// so the playground pulls no third-party code at load time. See
+// codemirror.bundle.README.md for the pinned versions + regenerate
+// command.
+//
 // The WASM result frame layout (see src/wasm.zig):
 //   [u8  status]      0 ok | 1 uncaught throw | 2 parse/compile error
 //   [u32 stdout_len]  big-endian   followed by stdout_len bytes
@@ -14,7 +20,29 @@
 // `cynic_parse` reuses the frame: `value` carries a bytecode
 // disassembly, `stdout` is empty.
 
-'use strict';
+import {
+  EditorState,
+  EditorView,
+  StateField,
+  StateEffect,
+  Decoration,
+  keymap,
+  lineNumbers,
+  highlightActiveLine,
+  highlightActiveLineGutter,
+  history,
+  defaultKeymap,
+  historyKeymap,
+  indentWithTab,
+  syntaxHighlighting,
+  HighlightStyle,
+  indentUnit,
+  javascript,
+  tags as t,
+} from './codemirror.bundle.js';
+
+// ES modules are strict by definition — no `'use strict'` directive
+// needed (and it would be invalid after the import statements).
 
 const SAMPLES = {
   'Hello, strict world': `// Cynic is strict-only — every script runs in strict mode.
@@ -70,7 +98,7 @@ frozen.locked;`,
 const DEFAULT_SNIPPET = SAMPLES['Hello, strict world'];
 
 const els = {
-  editor: document.getElementById('editor'),
+  editorHost: document.getElementById('editor-host'),
   run: document.getElementById('run'),
   share: document.getElementById('share'),
   inspector: document.getElementById('inspector'),
@@ -82,6 +110,142 @@ const els = {
 };
 
 let wasm = null; // { instance, exports, memory }
+let view = null; // the CodeMirror EditorView
+
+// --------------------------------------------------------------------------
+// CodeMirror editor
+// --------------------------------------------------------------------------
+
+// A StateEffect carries a `{from, to}` source range (or null to
+// clear). The StateField below folds it into a DecorationSet so the
+// bytecode-inspector hover-link can highlight source independently
+// of the user's real selection — no .focus() needed.
+const setHotRange = StateEffect.define();
+
+// A single yellow mark over the hovered instruction's source span.
+const hotMark = Decoration.mark({ class: 'cm-hot' });
+
+const hotRangeField = StateField.define({
+  create() {
+    return Decoration.none;
+  },
+  update(deco, tr) {
+    // Map existing decorations through any document change first.
+    deco = deco.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(setHotRange)) {
+        deco =
+          e.value === null
+            ? Decoration.none
+            : Decoration.set([hotMark.range(e.value.from, e.value.to)]);
+      }
+    }
+    return deco;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+
+// Editor theme — paints the playground palette onto CodeMirror.
+// CSS custom properties resolve against :root, so the Simpsons
+// palette in playground.html drives these too.
+const cynicTheme = EditorView.theme({
+  '&': {
+    color: 'var(--ink)',
+    backgroundColor: 'var(--paper)',
+    height: '100%',
+    fontSize: '14px',
+  },
+  '.cm-content': {
+    fontFamily: 'var(--mono)',
+    caretColor: 'var(--ink)',
+    padding: '12px 0',
+  },
+  '.cm-scroller': { fontFamily: 'var(--mono)', lineHeight: '1.5' },
+  '&.cm-focused': { outline: '2px solid var(--marge)', outlineOffset: '-2px' },
+  '.cm-gutters': {
+    backgroundColor: 'var(--paper)',
+    color: 'var(--ink-soft)',
+    border: 'none',
+    borderRight: '2px dashed rgba(0, 0, 0, 0.18)',
+  },
+  '.cm-activeLine': { backgroundColor: 'rgba(255, 213, 33, 0.22)' },
+  '.cm-activeLineGutter': { backgroundColor: 'rgba(255, 213, 33, 0.30)' },
+  '.cm-cursor': { borderLeftColor: 'var(--ink)' },
+  '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
+    backgroundColor: 'rgba(17, 166, 214, 0.30)',
+  },
+  // The bytecode-inspector hover-link decoration.
+  '.cm-hot': {
+    backgroundColor: 'var(--skin)',
+    borderRadius: '2px',
+  },
+});
+
+// Syntax highlighting tuned to the playground palette.
+const cynicHighlight = HighlightStyle.define([
+  { tag: t.keyword, color: '#9b1d8f', fontWeight: '700' },
+  { tag: [t.controlKeyword, t.moduleKeyword], color: '#9b1d8f', fontWeight: '700' },
+  { tag: [t.name, t.deleted, t.character, t.macroName], color: 'var(--ink)' },
+  { tag: [t.propertyName], color: '#0d7a8a' },
+  { tag: [t.function(t.variableName), t.labelName], color: '#1a64b8' },
+  { tag: [t.string, t.special(t.string)], color: '#1f7a2e' },
+  { tag: [t.number, t.bool, t.null], color: '#b5500f' },
+  { tag: [t.comment, t.lineComment, t.blockComment], color: 'var(--ink-soft)', fontStyle: 'italic' },
+  { tag: [t.operator, t.operatorKeyword], color: '#6a3d00' },
+  { tag: [t.punctuation, t.separator, t.bracket], color: 'var(--ink-soft)' },
+  { tag: [t.typeName, t.className], color: '#1a64b8' },
+  { tag: t.regexp, color: '#b5500f' },
+  { tag: t.invalid, color: 'var(--bart)' },
+]);
+
+function createEditor(initialDoc) {
+  const runShortcut = {
+    // Ctrl/Cmd+Enter runs — matches the old textarea binding.
+    key: 'Mod-Enter',
+    run: () => {
+      run();
+      return true;
+    },
+  };
+
+  view = new EditorView({
+    parent: els.editorHost,
+    state: EditorState.create({
+      doc: initialDoc,
+      extensions: [
+        lineNumbers(),
+        highlightActiveLine(),
+        highlightActiveLineGutter(),
+        history(),
+        javascript(),
+        syntaxHighlighting(cynicHighlight),
+        indentUnit.of('  '),
+        hotRangeField,
+        keymap.of([runShortcut, indentWithTab, ...defaultKeymap, ...historyKeymap]),
+        cynicTheme,
+        EditorState.tabSize.of(2),
+      ],
+    }),
+  });
+}
+
+// The editor's text is the document string.
+function getSource() {
+  return view.state.doc.toString();
+}
+
+// Replace the whole document via a transaction.
+function setSource(text) {
+  view.dispatch({
+    changes: { from: 0, to: view.state.doc.length, insert: text },
+  });
+}
+
+// Highlight a source range in the editor (or clear it with null).
+function setEditorHotRange(range) {
+  if (!view) return;
+  view.dispatch({ effects: setHotRange.of(range) });
+}
 
 // --------------------------------------------------------------------------
 // WASM loading
@@ -257,14 +421,96 @@ function renderEvalResult(frame) {
   }
 }
 
+// --------------------------------------------------------------------------
+// Bytecode inspector — disassembly with a CodeMirror hover-link
+// --------------------------------------------------------------------------
+
+// The engine's `[start..end]` spans are UTF-8 byte offsets; the
+// CodeMirror document is indexed in UTF-16 code units. Build a
+// byte-offset -> code-unit-index map for `source` once per
+// disassembly. `map[b]` is the code-unit index of the character
+// that starts at byte `b`; bytes inside a multi-byte sequence are
+// left pointing at the start of that character. `map` has
+// `byteLength + 1` entries so an end-offset at EOF maps cleanly.
+function buildByteToCodeUnitMap(source) {
+  const bytes = encoder.encode(source);
+  const map = new Uint32Array(bytes.length + 1);
+  let codeUnit = 0;
+  let b = 0;
+  for (const ch of source) {
+    // `ch` is one Unicode code point; its UTF-16 length is 1 or 2.
+    const utf16Len = ch.length;
+    const utf8Len = encoder.encode(ch).length;
+    for (let k = 0; k < utf8Len; k++) map[b + k] = codeUnit;
+    b += utf8Len;
+    codeUnit += utf16Len;
+  }
+  map[bytes.length] = codeUnit;
+  return map;
+}
+
+// Match a trailing ` [start..end]` source span on a disasm line.
+const SPAN_RE = /\[(\d+)\.\.(\d+)\]\s*$/;
+
 function renderInspectorResult(frame) {
   clearOutput();
   els.outputLabel.textContent = 'bytecode disassembly';
-  if (frame.status === 0 && frame.value.length > 0) {
-    appendLine(frame.value, 'out-stdout');
-  } else {
+  setEditorHotRange(null);
+
+  if (frame.status !== 0 || frame.value.length === 0) {
     appendLine(frame.error || 'could not disassemble', 'out-error');
+    return;
   }
+
+  // The hover-link maps byte offsets in the *source the engine
+  // disassembled* — that's the current editor document.
+  const byteToCodeUnit = buildByteToCodeUnitMap(getSource());
+  const docLength = view.state.doc.length;
+
+  const lines = frame.value.split('\n');
+  for (const line of lines) {
+    const el = document.createElement('span');
+    el.className = 'bc-line out-stdout';
+    el.textContent = line + '\n';
+
+    const m = line.match(SPAN_RE);
+    if (m) {
+      // The `(chunk …` header and the closing `)` carry no span —
+      // only real instruction lines reach here.
+      const startByte = Number(m[1]);
+      const endByte = Number(m[2]);
+      let from = byteToCodeUnit[Math.min(startByte, byteToCodeUnit.length - 1)];
+      let to = byteToCodeUnit[Math.min(endByte, byteToCodeUnit.length - 1)];
+      // Clamp into the live document, just in case.
+      from = Math.max(0, Math.min(from, docLength));
+      to = Math.max(from, Math.min(to, docLength));
+
+      el.classList.add('bc-hot');
+      el.dataset.from = String(from);
+      el.dataset.to = String(to);
+    }
+
+    els.output.appendChild(el);
+  }
+}
+
+// Hovering a `.bc-hot` instruction line marks the matching source
+// range in CodeMirror. The mark is a StateField decoration — it
+// does not touch the user's real selection and needs no .focus().
+function wireInspectorHover() {
+  els.output.addEventListener('mouseover', (e) => {
+    const hot = e.target.closest('.bc-hot');
+    if (!hot || !els.output.contains(hot)) return;
+    const from = Number(hot.dataset.from);
+    const to = Number(hot.dataset.to);
+    if (Number.isFinite(from) && Number.isFinite(to) && to > from) {
+      setEditorHotRange({ from, to });
+    }
+  });
+  // Pointer leaving the output panel entirely clears the link.
+  els.output.addEventListener('mouseleave', () => {
+    setEditorHotRange(null);
+  });
 }
 
 // --------------------------------------------------------------------------
@@ -273,12 +519,13 @@ function renderInspectorResult(frame) {
 
 function run() {
   if (!wasm) return;
-  const source = els.editor.value;
+  const source = getSource();
   setStatus('running…');
   try {
     if (els.inspector.checked) {
       renderInspectorResult(callEngine('cynic_parse', source));
     } else {
+      setEditorHotRange(null);
       renderEvalResult(callEngine('cynic_eval', source));
     }
     setStatus('ready');
@@ -309,7 +556,7 @@ function decodeSource(b64) {
 }
 
 function shareLink() {
-  const hash = '#code=' + encodeURIComponent(encodeSource(els.editor.value));
+  const hash = '#code=' + encodeURIComponent(encodeSource(getSource()));
   const url = location.origin + location.pathname + hash;
   history.replaceState(null, '', hash);
   navigator.clipboard?.writeText(url).then(
@@ -331,27 +578,8 @@ function seedFromHash() {
 }
 
 // --------------------------------------------------------------------------
-// Editor wiring
+// Sample snippets
 // --------------------------------------------------------------------------
-
-function wireEditor() {
-  // Tab inserts two spaces rather than moving focus.
-  els.editor.addEventListener('keydown', (e) => {
-    if (e.key === 'Tab') {
-      e.preventDefault();
-      const start = els.editor.selectionStart;
-      const end = els.editor.selectionEnd;
-      const v = els.editor.value;
-      els.editor.value = v.slice(0, start) + '  ' + v.slice(end);
-      els.editor.selectionStart = els.editor.selectionEnd = start + 2;
-    }
-    // Ctrl/Cmd+Enter runs.
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      run();
-    }
-  });
-}
 
 function wireSnippets() {
   for (const name of Object.keys(SAMPLES)) {
@@ -363,9 +591,9 @@ function wireSnippets() {
   els.snippets.addEventListener('change', () => {
     const name = els.snippets.value;
     if (name && SAMPLES[name]) {
-      els.editor.value = SAMPLES[name];
+      setSource(SAMPLES[name]);
       els.snippets.value = '';
-      els.editor.focus();
+      view.focus();
     }
   });
 }
@@ -376,9 +604,9 @@ function wireSnippets() {
 
 function init() {
   els.run.disabled = true;
-  els.editor.value = seedFromHash() || DEFAULT_SNIPPET;
-  wireEditor();
+  createEditor(seedFromHash() || DEFAULT_SNIPPET);
   wireSnippets();
+  wireInspectorHover();
   els.run.addEventListener('click', run);
   els.share.addEventListener('click', shareLink);
   els.inspector.addEventListener('change', () => {

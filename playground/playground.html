@@ -43,7 +43,7 @@
     padding: 28px 20px 60px;
   }
 
-  .wrap { max-width: 980px; margin: 0 auto; }
+  .wrap { max-width: 1160px; margin: 0 auto; }
 
   header {
     display: flex;
@@ -51,7 +51,7 @@
     justify-content: space-between;
     flex-wrap: wrap;
     gap: 12px;
-    margin-bottom: 24px;
+    margin-bottom: 22px;
   }
 
   .brand {
@@ -68,42 +68,7 @@
     font-size: 13px;
   }
 
-  .panel {
-    background: var(--paper);
-    border: var(--bd);
-    box-shadow: var(--shadow-sm);
-    margin-bottom: 22px;
-  }
-
-  .panel-head {
-    font-family: var(--display);
-    font-size: 14px;
-    letter-spacing: 0.04em;
-    background: var(--skin);
-    border-bottom: var(--bd);
-    padding: 8px 12px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-  }
-
-  textarea#editor {
-    display: block;
-    width: 100%;
-    min-height: 280px;
-    resize: vertical;
-    border: 0;
-    padding: 14px;
-    font-family: var(--mono);
-    font-size: 14px;
-    line-height: 1.5;
-    color: var(--ink);
-    background: var(--paper);
-    tab-size: 2;
-  }
-  textarea#editor:focus { outline: 2px solid var(--marge); outline-offset: -2px; }
-
+  /* Toolbar spans the full width above the two-column row. */
   .toolbar {
     display: flex;
     align-items: center;
@@ -149,10 +114,56 @@
     margin-left: auto;
   }
 
+  /* The two-column working area: editor left, output right. */
+  .columns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 22px;
+    align-items: stretch;
+  }
+
+  .panel {
+    background: var(--paper);
+    border: var(--bd);
+    box-shadow: var(--shadow-sm);
+    display: flex;
+    flex-direction: column;
+    min-height: 460px;
+  }
+
+  .panel-head {
+    font-family: var(--display);
+    font-size: 14px;
+    letter-spacing: 0.04em;
+    background: var(--skin);
+    border-bottom: var(--bd);
+    padding: 8px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex: 0 0 auto;
+  }
+
+  /* The CodeMirror editor host fills the left panel body. */
+  #editor-host {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+  }
+
+  /* CodeMirror theming — see playground.js for the EditorView theme
+     that paints the --paper background, --ink text and --marge focus
+     accent. The host just needs to let the view stretch. */
+  #editor-host .cm-editor { height: 100%; }
+  #editor-host .cm-scroller { font-family: var(--mono); }
+
   pre.output {
     margin: 0;
     padding: 14px;
-    min-height: 80px;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
     font-family: var(--mono);
     font-size: 13px;
     line-height: 1.5;
@@ -177,8 +188,16 @@
   }
   .out-empty { color: var(--ink-soft); font-style: italic; }
 
+  /* Bytecode-inspector disassembly: one element per line. A line
+     carrying a [start..end] source span gets `.bc-hot` and lights
+     up on hover, paired with a CodeMirror range decoration over
+     the matching source. */
+  .bc-line { display: block; }
+  .bc-hot { cursor: pointer; border-radius: 2px; }
+  .bc-hot:hover { background: var(--skin); }
+
   footer {
-    margin-top: 30px;
+    margin-top: 26px;
     font-size: 12px;
     color: var(--ink-soft);
     background: rgba(255, 255, 255, 0.55);
@@ -186,6 +205,12 @@
     display: inline-block;
   }
   footer a { color: var(--ink); }
+
+  /* Narrow viewports: collapse to a single stacked column. */
+  @media (max-width: 760px) {
+    .columns { grid-template-columns: 1fr; }
+    .panel { min-height: 320px; }
+  }
 </style>
 </head>
 <body>
@@ -196,26 +221,26 @@
     <div class="tag">strict-only ECMAScript, compiled to WebAssembly. No eval. That's the point.</div>
   </header>
 
-  <div class="panel">
-    <div class="panel-head">
-      <span>source</span>
-      <select id="snippets" title="Load a sample">
-        <option value="">— sample snippets —</option>
-      </select>
-    </div>
-    <textarea id="editor" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
-  </div>
-
   <div class="toolbar">
     <button id="run" type="button">Run</button>
     <button id="share" type="button">Copy link</button>
     <label class="toggle"><input type="checkbox" id="inspector" /> bytecode inspector</label>
+    <select id="snippets" title="Load a sample">
+      <option value="">— sample snippets —</option>
+    </select>
     <span class="status" id="status">loading engine…</span>
   </div>
 
-  <div class="panel">
-    <div class="panel-head"><span id="output-label">output</span></div>
-    <pre class="output" id="output"><span class="out-empty">Run something. Cynic will judge it.</span></pre>
+  <div class="columns">
+    <div class="panel">
+      <div class="panel-head"><span>source</span></div>
+      <div id="editor-host"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><span id="output-label">output</span></div>
+      <pre class="output" id="output"><span class="out-empty">Run something. Cynic will judge it.</span></pre>
+    </div>
   </div>
 
   <footer>
@@ -225,6 +250,6 @@
   </footer>
 
 </div>
-<script src="playground.js"></script>
+<script type="module" src="playground.js"></script>
 </body>
 </html>

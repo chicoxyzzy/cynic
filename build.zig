@@ -354,7 +354,10 @@ pub fn build(b: *std.Build) void {
     });
 
     // Assemble a directly-servable playground directory:
-    // zig-out/playground/{playground.html,playground.js,cynic.wasm}.
+    // zig-out/playground/{playground.html,playground.js,
+    //                     codemirror.bundle.js,cynic.wasm}.
+    // `codemirror.bundle.js` is the committed, offline-vendored
+    // CodeMirror 6 editor bundle — see playground/codemirror.bundle.README.md.
     const wasm_into_playground = b.addInstallFileWithDir(
         wasm_exe.getEmittedBin(),
         .{ .custom = "playground" },
@@ -370,12 +373,18 @@ pub fn build(b: *std.Build) void {
         .{ .custom = "playground" },
         "playground.js",
     );
+    const cm_into_playground = b.addInstallFileWithDir(
+        b.path("playground/codemirror.bundle.js"),
+        .{ .custom = "playground" },
+        "codemirror.bundle.js",
+    );
 
     const wasm_step = b.step("wasm", "Build the playground WASM module + assemble zig-out/playground/");
     wasm_step.dependOn(&install_wasm.step);
     wasm_step.dependOn(&wasm_into_playground.step);
     wasm_step.dependOn(&html_into_playground.step);
     wasm_step.dependOn(&js_into_playground.step);
+    wasm_step.dependOn(&cm_into_playground.step);
 }
 
 /// `git rev-parse --short HEAD` at configure time. Returns

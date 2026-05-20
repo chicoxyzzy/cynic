@@ -14,12 +14,15 @@ point of the demo.
 ## Layout
 
 ```
-src/wasm.zig                  WASM entry module — C-ABI exports
-src/wasm_shim.c               freestanding libc shim (mem*/str*/malloc)
-vendor/quickjs/wasm-libc/     stub <stdlib.h> / <string.h> / … headers
-playground/playground.html    single-page front-end
-playground/playground.js      WASM loader + marshalling
-playground/build.sh           convenience wrapper over `zig build wasm`
+src/wasm.zig                       WASM entry module — C-ABI exports
+src/wasm_shim.c                    freestanding libc shim (mem*/str*/malloc)
+vendor/quickjs/wasm-libc/          stub <stdlib.h> / <string.h> / … headers
+playground/playground.html         two-column front-end
+playground/playground.js           WASM loader + marshalling + CM6 editor
+playground/codemirror.bundle.js    vendored CodeMirror 6 (committed artifact)
+playground/codemirror-entry.mjs    bundle source — re-exports the CM6 surface
+playground/codemirror.bundle.README.md  pinned versions + regenerate steps
+playground/build.sh                convenience wrapper over `zig build wasm`
 ```
 
 ## Building
@@ -37,7 +40,7 @@ This:
 3. links them into `zig-out/bin/cynic.wasm`;
 4. assembles a directly-servable directory at
    `zig-out/playground/` containing `playground.html`,
-   `playground.js`, and `cynic.wasm`.
+   `playground.js`, `codemirror.bundle.js`, and `cynic.wasm`.
 
 Serve `zig-out/playground/` over HTTP (a `file://` origin will not
 satisfy `WebAssembly.instantiateStreaming` / `fetch`):
@@ -161,11 +164,40 @@ bytecode-inspector toggle is on), and decodes the result frame.
 The import object is empty — the freestanding module imports
 nothing.
 
+The page is a full-width toolbar over a two-column grid (editor
+left, output right; it collapses to a single stacked column under
+~760 px).
+
 The editor source is encoded into `location.hash` (`#code=` +
 URI-encoded base64) for shareable links; on load, a present hash
 seeds the editor. A few sample snippets ship in the editor
 showing strict-mode behaviour (TDZ ReferenceError, a Proxy trap,
 a generator, a frozen-object TypeError).
+
+### CodeMirror 6 editor
+
+The editor is [CodeMirror 6](https://codemirror.net/), vendored
+**offline** as a single committed bundle,
+`playground/codemirror.bundle.js`. Cynic is SES-aligned ("no eval,
+that's the point") — a runtime CDN import would be supply-chain
+bait, and the playground must work fully offline. The bundle is
+treated like a pinned `vendor/` blob: regenerate it, never
+hand-edit it. `playground/codemirror-entry.mjs` is the bundle
+source — it imports the CM6 packages and re-exports exactly the
+surface the front-end uses; `codemirror.bundle.README.md` carries
+the pinned package versions and the `esbuild` regenerate command.
+
+The bytecode inspector wires a **hover-link** between the two
+columns: every disassembly instruction line carrying a trailing
+`[start..end]` source span is rendered with a `.bc-hot` class and
+`data-from` / `data-to` attributes. The engine's spans are UTF-8
+byte offsets; the CodeMirror document is indexed in UTF-16 code
+units, so the front-end builds a byte-offset → code-unit map from
+the current source once per disassembly and converts. Hovering a
+`.bc-hot` line dispatches a CodeMirror `StateEffect` that marks
+the matching source range via a `StateField`-backed
+`Decoration.mark` — a focus-independent highlight that never
+touches the user's real selection.
 
 ## Rebuilding and deploying to the project site
 
@@ -174,10 +206,10 @@ branch — a clean, reviewable location. The public site lives on
 the `gh-pages` branch. To publish:
 
 1. `zig build wasm` — produces `zig-out/playground/` with all
-   three files.
-2. Copy `playground.html`, `playground.js`, and `cynic.wasm`
-   onto the `gh-pages` branch (e.g. into a `playground/`
-   subdirectory there).
+   four files.
+2. Copy `playground.html`, `playground.js`,
+   `codemirror.bundle.js`, and `cynic.wasm` onto the `gh-pages`
+   branch (e.g. into a `playground/` subdirectory there).
 3. Ensure the host serves `.wasm` with
    `Content-Type: application/wasm` so
    `instantiateStreaming` works — GitHub Pages already does.
