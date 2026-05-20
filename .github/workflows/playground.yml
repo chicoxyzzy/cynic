@@ -1,0 +1,73 @@
+name: Deploy playground
+
+# Rebuilds the WebAssembly playground and republishes it to
+# `gh-pages:/playground/` whenever the engine, the front-end, the
+# vendored regex C, or the build graph changes on `main`. Keeps the
+# 1.6 MB `cynic.wasm` out of tracked branch history — it is
+# regenerated from source on every deploy instead of hand-committed.
+#
+# The main-site nav link (`index.html` → `playground/`) is a
+# one-time edit on the `gh-pages` branch; this workflow never
+# touches anything outside `/playground/`.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'playground/**'
+      - 'vendor/quickjs/**'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - '.github/workflows/playground.yml'
+  workflow_dispatch:
+
+# The publish step pushes a commit to the `gh-pages` branch.
+permissions:
+  contents: write
+
+# A newer deploy supersedes an in-flight one — no point publishing
+# a stale bundle.
+concurrency:
+  group: deploy-playground
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    name: Build WASM + publish to gh-pages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # No submodules: the wasm build is the engine + vendored
+        # QuickJS-NG (in-tree), not test262.
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          # Keep in lockstep with `.github/workflows/ci.yml` and
+          # `build.zig.zon` (`.minimum_zig_version`) on every bump.
+          version: 0.17.0-dev.305+bdfbf432d
+
+      - name: Build the playground WASM bundle
+        # Emits zig-out/playground/{playground.html,playground.js,cynic.wasm}
+        # — the wasm version string is stamped with this commit's SHA.
+        run: zig build wasm
+
+      - name: Stage the publish directory
+        # The playground page must be `index.html` so the deployed
+        # URL is `/playground/` — what the main-site nav link points
+        # at.
+        run: mv zig-out/playground/playground.html zig-out/playground/index.html
+
+      - name: Publish to gh-pages/playground
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./zig-out/playground
+          # Scope the publish to the subdir — `index.html`, the
+          # icons, and the rest of the site at the branch root are
+          # never touched. `keep_files` is belt-and-suspenders.
+          destination_dir: playground
+          keep_files: true
+          commit_message: 'playground: redeploy WASM bundle from ${{ github.sha }}'
