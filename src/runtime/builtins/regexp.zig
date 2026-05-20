@@ -572,6 +572,26 @@ fn appendUtf16SliceBytes(
         utf16.appendCodeUnitAsWtf8(realm.allocator, out, sl.tail_surrogate) catch return error.OutOfMemory;
 }
 
+/// Allocate a JSString for the matched span `[u_start, u_end)` (in
+/// UTF-16 code units) of `bytes`. Routes through
+/// `utf16.sliceCodeUnits` so a span that begins or ends mid-pair —
+/// e.g. a non-`/u` regex matching a single code unit of a
+/// supplementary character — yields a well-formed WTF-8 lone
+/// surrogate rather than the empty slice that raw `byte_for_unit`
+/// arithmetic produces when both endpoints land on the same 4-byte
+/// sequence.
+fn allocMatchString(realm: *Realm, bytes: []const u8, u_start: usize, u_end: usize) NativeError!*JSString {
+    const utf16 = @import("../utf16.zig");
+    const sl = utf16.sliceCodeUnits(bytes, u_start, u_end);
+    if (sl.head_surrogate == 0 and sl.tail_surrogate == 0) {
+        return realm.heap.allocateString(sl.bytes) catch return error.OutOfMemory;
+    }
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(realm.allocator);
+    try appendUtf16SliceBytes(realm, &buf, sl);
+    return realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
+}
+
 /// §22.1.3.19.1 GetSubstitution — string-template path. Walks the
 /// template, expanding `$&`, `$\``, `$'`, `$N`, `$NN`, `$<name>`
 /// per Table 64. `captures` is the pre-coerced capture list (each
@@ -1577,62 +1597,73 @@ fn utf8ToCesu8(allocator: std.mem.Allocator, src: []const u8) std.mem.Allocator.
 const InputBuf = struct {
     /// UTF-16 code units (matching ECMA-262's regex index space).
     units: []u16,
-    /// `byte_for_unit[i]` = offset into the source UTF-8 string
-    /// where unit `i` starts. `byte_for_unit[len]` = total UTF-8
-    /// byte count, so a pair of unit indices slices cleanly.
-    byte_for_unit: []usize,
     allocator: std.mem.Allocator,
 
     fn deinit(self: *InputBuf) void {
         self.allocator.free(self.units);
-        self.allocator.free(self.byte_for_unit);
     }
 };
 
+/// Transcode a WTF-8 string into the `[]u16` UTF-16 buffer
+/// libregexp's `lre_exec` expects. ECMA-262's regex index space is
+/// UTF-16 code units (§22.2.7.2), so each unit must be one entry.
+///
+/// Cynic stores a lone surrogate (U+D800..DFFF — legal JS string
+/// content per §6.1.4) as a 3-byte CESU-8 escape
+/// (`0xED 0xA[0-F] 0x[8-B][0-F]`); a supplementary code point
+/// stores as the 4-byte UTF-8 form. `std.unicode.utf8Decode`
+/// rejects the CESU-8 escape (D800..DFFF aren't UTF-8 scalars), so
+/// the lone-surrogate case is decoded by hand into the single u16
+/// unit it represents. Match spans are translated back to source
+/// bytes by `allocMatchString` via `utf16.sliceCodeUnits`, so no
+/// per-unit byte-offset table is needed here.
 fn buildInputBuf(allocator: std.mem.Allocator, utf8: []const u8) !InputBuf {
     var units: std.ArrayListUnmanaged(u16) = .empty;
     errdefer units.deinit(allocator);
-    var map: std.ArrayListUnmanaged(usize) = .empty;
-    errdefer map.deinit(allocator);
 
     var i: usize = 0;
     while (i < utf8.len) {
-        const seq_len = std.unicode.utf8ByteSequenceLength(utf8[i]) catch {
+        const lead = utf8[i];
+        const seq_len = std.unicode.utf8ByteSequenceLength(lead) catch {
             // Invalid UTF-8 — treat the byte as Latin-1.
-            try units.append(allocator, utf8[i]);
-            try map.append(allocator, i);
+            try units.append(allocator, lead);
             i += 1;
             continue;
         };
         if (i + seq_len > utf8.len) break;
+
+        if (seq_len == 3 and lead == 0xED and utf8[i + 1] >= 0xA0) {
+            // CESU-8 lone-surrogate escape (3-byte
+            // `0xED 0xA[0-F] 0x[8-B][0-F]`) — decode directly into
+            // the single u16 code unit it represents.
+            const surrogate: u16 = (@as(u16, lead & 0x0F) << 12) |
+                (@as(u16, utf8[i + 1] & 0x3F) << 6) |
+                (@as(u16, utf8[i + 2] & 0x3F));
+            try units.append(allocator, surrogate);
+            i += 3;
+            continue;
+        }
+
         const cp = std.unicode.utf8Decode(utf8[i .. i + seq_len]) catch {
-            try units.append(allocator, utf8[i]);
-            try map.append(allocator, i);
+            try units.append(allocator, lead);
             i += 1;
             continue;
         };
         if (cp < 0x10000) {
             try units.append(allocator, @intCast(cp));
-            try map.append(allocator, i);
         } else {
-            // Encode as a UTF-16 surrogate pair. Both units map
-            // back to the same UTF-8 byte (the leading byte of
-            // the 4-byte sequence).
+            // Supplementary code point — emit a UTF-16 surrogate pair.
             const v = cp - 0x10000;
             const hi: u16 = @intCast(0xD800 + (v >> 10));
             const lo: u16 = @intCast(0xDC00 + (v & 0x3FF));
             try units.append(allocator, hi);
-            try map.append(allocator, i);
             try units.append(allocator, lo);
-            try map.append(allocator, i);
         }
         i += seq_len;
     }
-    try map.append(allocator, utf8.len);
 
     return .{
         .units = try units.toOwnedSlice(allocator),
-        .byte_for_unit = try map.toOwnedSlice(allocator),
         .allocator = allocator,
     };
 }
@@ -1729,9 +1760,7 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
-    const whole_byte_start = input.byte_for_unit[whole_start];
-    const whole_byte_end = input.byte_for_unit[whole_end];
-    const whole_str = realm.heap.allocateString(input_s.bytes[whole_byte_start..whole_byte_end]) catch return error.OutOfMemory;
+    const whole_str = try allocMatchString(realm, input_s.bytes, whole_start, whole_end);
     out.set(realm.allocator, "0", Value.fromString(whole_str)) catch return error.OutOfMemory;
 
     var g: usize = 1;
@@ -1746,9 +1775,7 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
         } else {
             const u_start = (@intFromPtr(start_ptr.?) - cbuf_addr) / 2;
             const u_end = (@intFromPtr(end_ptr.?) - cbuf_addr) / 2;
-            const b_start = input.byte_for_unit[u_start];
-            const b_end = input.byte_for_unit[u_end];
-            const cap_str = realm.heap.allocateString(input_s.bytes[b_start..b_end]) catch return error.OutOfMemory;
+            const cap_str = try allocMatchString(realm, input_s.bytes, u_start, u_end);
             out.set(realm.allocator, owned_idx.bytes, Value.fromString(cap_str)) catch return error.OutOfMemory;
         }
     }
@@ -1764,7 +1791,7 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // `undefined`. Per step 36 the property is always defined on
     // the result via CreateDataProperty — even the `undefined`
     // case must be an own own property.
-    const groups_v = try buildGroupsObject(realm, bc, captures, cap_count, cbuf_addr, &input, input_s);
+    const groups_v = try buildGroupsObject(realm, bc, captures, cap_count, cbuf_addr, input_s);
     out.set(realm.allocator, "groups", groups_v) catch return error.OutOfMemory;
 
     // §22.2.7.2 step 8 / step 36 — when `hasIndices` (the `d`
@@ -1777,7 +1804,7 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // and `indices.groups` mirrors the named-capture map with the
     // same `[start, end]` pairs (or `undefined`).
     if ((re_flags & LRE_FLAG_INDICES) != 0) {
-        const indices_v = try buildIndicesArray(realm, bc, captures, cap_count, cbuf_addr, &input);
+        const indices_v = try buildIndicesArray(realm, bc, captures, cap_count, cbuf_addr);
         out.set(realm.allocator, "indices", indices_v) catch return error.OutOfMemory;
     }
 
@@ -1800,7 +1827,6 @@ fn buildIndicesArray(
     captures: []const ?[*]const u8,
     cap_count: usize,
     cbuf_addr: usize,
-    input: *const InputBuf,
 ) NativeError!Value {
     // step 6 — `Let A be ! ArrayCreate(n)`. Array-exotic so
     // `Array.isArray(indices)` is true (`indices-array.js`).
@@ -1823,9 +1849,11 @@ fn buildIndicesArray(
         // step 13.a / §22.2.7.7 GetMatchIndicesArray — a fresh
         // ordinary Array of `[startIndex, endIndex]`, both
         // numbers (`indices-array-element.js`).
+        // §22.2.7.7 — the indices array holds UTF-16 code-unit
+        // positions directly, the same space `result.index` lives
+        // in; no byte-offset translation needed.
         const u_start = (@intFromPtr(start_ptr.?) - cbuf_addr) / 2;
         const u_end = (@intFromPtr(end_ptr.?) - cbuf_addr) / 2;
-        _ = input; // unit indices already in UTF-16 code-unit space
         const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
         pair.prototype = realm.intrinsics.array_prototype;
         pair.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
@@ -1915,7 +1943,6 @@ fn buildGroupsObject(
     captures: []const ?[*]const u8,
     cap_count: usize,
     cbuf_addr: usize,
-    input: *const InputBuf,
     input_s: *JSString,
 ) NativeError!Value {
     const re_flags = c.lre_get_flags(bc.ptr);
@@ -1959,9 +1986,7 @@ fn buildGroupsObject(
         const cap_v: Value = if (start_ptr == null or end_ptr == null) Value.undefined_ else blk: {
             const u_start = (@intFromPtr(start_ptr.?) - cbuf_addr) / 2;
             const u_end = (@intFromPtr(end_ptr.?) - cbuf_addr) / 2;
-            const b_start = input.byte_for_unit[u_start];
-            const b_end = input.byte_for_unit[u_end];
-            const cap_str = realm.heap.allocateString(input_s.bytes[b_start..b_end]) catch return error.OutOfMemory;
+            const cap_str = try allocMatchString(realm, input_s.bytes, u_start, u_end);
             break :blk Value.fromString(cap_str);
         };
         // CreateDataProperty (own, writable / enumerable /
@@ -2177,10 +2202,39 @@ fn regexpEscape(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
 
-    var it = std.unicode.Utf8View.initUnchecked(s.bytes).iterator();
+    // §22.2.7.1 iterates StringToCodePoints(S) — which yields an
+    // unpaired surrogate as its own code point (§11.1.4 CodePointAt
+    // on a lone surrogate). Cynic stores those as a 3-byte CESU-8
+    // escape, which `std.unicode`'s decoder rejects, so walk the
+    // WTF-8 bytes directly: every 1/2/3-byte sequence is one BMP
+    // code point (lone surrogate included), every 4-byte sequence
+    // is one supplementary code point.
+    var i: usize = 0;
     var first = true;
-    while (it.nextCodepoint()) |cp| {
-        // §22.2.7.1 step 4.a — when the leading codepoint is an
+    while (i < s.bytes.len) {
+        const lead = s.bytes[i];
+        const seq_len = std.unicode.utf8ByteSequenceLength(lead) catch {
+            // Malformed lead byte — treat it as a Latin-1 code point.
+            try encodeForRegExpEscape(realm, &out, lead);
+            first = false;
+            i += 1;
+            continue;
+        };
+        if (i + seq_len > s.bytes.len) break;
+        const cp: u21 = switch (seq_len) {
+            1 => lead,
+            2 => (@as(u21, lead & 0x1F) << 6) |
+                @as(u21, s.bytes[i + 1] & 0x3F),
+            3 => (@as(u21, lead & 0x0F) << 12) |
+                (@as(u21, s.bytes[i + 1] & 0x3F) << 6) |
+                @as(u21, s.bytes[i + 2] & 0x3F),
+            else => (@as(u21, lead & 0x07) << 18) |
+                (@as(u21, s.bytes[i + 1] & 0x3F) << 12) |
+                (@as(u21, s.bytes[i + 2] & 0x3F) << 6) |
+                @as(u21, s.bytes[i + 3] & 0x3F),
+        };
+        i += seq_len;
+        // §22.2.7.1 step 4.a — when the leading code point is an
         // ASCII letter or digit, escape it as `\xHH` so the
         // result can be safely concatenated with another regex.
         if (first and isAsciiLetterOrDigit(cp)) {
