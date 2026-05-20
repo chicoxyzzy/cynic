@@ -96,23 +96,29 @@ pub const JSString = struct {
     }
 
     /// §13.5.3 — concatenate two raw WTF-8 byte slices into a fresh
-    /// `JSString` in a *single* allocation + two memcpys. Used by
-    /// `addValues` (the `+` operator) where one or both operands
-    /// were ToString-coerced into scratch slices that aren't
+    /// `JSString` in a *single* allocation. Used by `addValues`
+    /// (the `+` operator) where one or both operands were
+    /// ToString-coerced into scratch slices that aren't
     /// `JSString`s — concatenating directly avoids materialising a
     /// throwaway intermediate buffer that `allocateString` would
     /// then copy a second time.
+    ///
+    /// §6.1.4 WTF-8 invariant: a *valid* surrogate pair is always
+    /// stored as the single 4-byte UTF-8 form, never two adjacent
+    /// 3-byte CESU-8 escapes. A plain `a ++ b` violates that when
+    /// `a` ends with a lone high surrogate and `b` starts with a
+    /// lone low surrogate — `utf16.wtf8ConcatInto` merges that seam.
     pub fn concatBytes(
         struct_allocator: std.mem.Allocator,
         bytes_allocator: std.mem.Allocator,
         a: []const u8,
         b: []const u8,
     ) !*JSString {
-        const total = a.len + b.len;
+        const utf16 = @import("utf16.zig");
+        const total = utf16.wtf8ConcatLen(a, b);
         const owned = try bytes_allocator.alloc(u8, total);
         errdefer bytes_allocator.free(owned);
-        @memcpy(owned[0..a.len], a);
-        @memcpy(owned[a.len..], b);
+        utf16.wtf8ConcatInto(owned, a, b);
         const s = try struct_allocator.create(JSString);
         s.* = .{ .bytes = owned };
         return s;
@@ -186,4 +192,24 @@ test "JSString: concat with empty operands is a no-op-ish copy" {
 
     try testing.expectEqualStrings("abc", left.bytes);
     try testing.expectEqualStrings("abc", right.bytes);
+}
+
+test "JSString: concatBytes merges a paired surrogate seam (§6.1.4)" {
+    // `a` ends with a lone high surrogate U+D800 (`ED A0 80`), `b`
+    // starts with a lone low surrogate U+DC00 (`ED B0 80`). The pair
+    // is the supplementary U+10000 — the WTF-8 invariant requires
+    // the single 4-byte form `F0 90 80 80`, not two 3-byte escapes.
+    const a = [_]u8{ 'x', 0xED, 0xA0, 0x80 };
+    const b = [_]u8{ 0xED, 0xB0, 0x80, 'y' };
+    const s = try JSString.concatBytes(testing.allocator, testing.allocator, &a, &b);
+    defer s.deinit(testing.allocator, testing.allocator);
+    try testing.expectEqualSlices(u8, &[_]u8{ 'x', 0xF0, 0x90, 0x80, 0x80, 'y' }, s.bytes);
+}
+
+test "JSString: concatBytes leaves a non-paired surrogate seam intact" {
+    // Two lone *high* surrogates do not pair — plain join, 6 bytes.
+    const hi = [_]u8{ 0xED, 0xA0, 0x80 };
+    const s = try JSString.concatBytes(testing.allocator, testing.allocator, &hi, &hi);
+    defer s.deinit(testing.allocator, testing.allocator);
+    try testing.expectEqual(@as(usize, 6), s.bytes.len);
 }

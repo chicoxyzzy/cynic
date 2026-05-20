@@ -283,6 +283,61 @@ pub fn appendCodeUnitAsWtf8(allocator: std.mem.Allocator, out: *std.ArrayListUnm
     }
 }
 
+/// True when WTF-8 slice `s` ends with a 3-byte CESU-8 escape for a
+/// lone *high* surrogate (U+D800..U+DBFF): bytes `ED A0..AF 8x`.
+fn endsWithHighSurrogate(s: []const u8) bool {
+    if (s.len < 3) return false;
+    const t = s[s.len - 3 ..];
+    return t[0] == 0xED and t[1] >= 0xA0 and t[1] <= 0xAF;
+}
+
+/// True when WTF-8 slice `s` starts with a 3-byte CESU-8 escape for
+/// a lone *low* surrogate (U+DC00..U+DFFF): bytes `ED B0..BF 8x`.
+fn startsWithLowSurrogate(s: []const u8) bool {
+    if (s.len < 3) return false;
+    return s[0] == 0xED and s[1] >= 0xB0 and s[1] <= 0xBF;
+}
+
+/// Whether concatenating WTF-8 `a ++ b` pairs a lone high surrogate
+/// at the end of `a` with a lone low surrogate at the start of `b`.
+/// Cynic's WTF-8 storage invariant (AGENTS.md §6.1.4) requires a
+/// *valid* surrogate pair to be the single 4-byte UTF-8 form, never
+/// two adjacent 3-byte CESU-8 escapes — so a plain byte-wise concat
+/// is wrong exactly in this case and the seam must be merged.
+pub fn wtf8ConcatSeamPairs(a: []const u8, b: []const u8) bool {
+    return endsWithHighSurrogate(a) and startsWithLowSurrogate(b);
+}
+
+/// Byte length of the well-formed WTF-8 concatenation `a ++ b`.
+/// Equal to `a.len + b.len`, minus 2 when the seam pairs (the two
+/// 3-byte CESU-8 escapes — 6 bytes — collapse to one 4-byte form).
+pub fn wtf8ConcatLen(a: []const u8, b: []const u8) usize {
+    return if (wtf8ConcatSeamPairs(a, b)) a.len + b.len - 2 else a.len + b.len;
+}
+
+/// Write the well-formed WTF-8 concatenation of `a` and `b` into
+/// `dst`, merging a paired surrogate seam (§6.1.4) into the 4-byte
+/// supplementary form. `dst.len` must equal `wtf8ConcatLen(a, b)`.
+pub fn wtf8ConcatInto(dst: []u8, a: []const u8, b: []const u8) void {
+    if (!wtf8ConcatSeamPairs(a, b)) {
+        @memcpy(dst[0..a.len], a);
+        @memcpy(dst[a.len..], b);
+        return;
+    }
+    // Decode the two halves out of their 3-byte CESU-8 escapes and
+    // re-encode the supplementary code point as one 4-byte sequence.
+    const hi: u21 = decodeBmpUnit(a[a.len - 3 ..]) orelse unreachable;
+    const lo: u21 = decodeBmpUnit(b[0..3]) orelse unreachable;
+    const cp: u21 = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
+    const head = a.len - 3;
+    @memcpy(dst[0..head], a[0..head]);
+    dst[head + 0] = @intCast(0xF0 | (cp >> 18));
+    dst[head + 1] = @intCast(0x80 | ((cp >> 12) & 0x3F));
+    dst[head + 2] = @intCast(0x80 | ((cp >> 6) & 0x3F));
+    dst[head + 3] = @intCast(0x80 | (cp & 0x3F));
+    @memcpy(dst[head + 4 ..], b[3..]);
+}
+
 /// §7.2.13 IsLessThan / §22.1.3.10 String.prototype.localeCompare
 /// abstract lexicographic comparison of two String values. The
 /// spec compares by UTF-16 code-unit *integer values*; WTF-8 byte
@@ -494,4 +549,52 @@ test "utf16: appendCodeUnitAsWtf8 — lone trail surrogate is 3-byte WTF-8" {
     defer buf.deinit(testing.allocator);
     try appendCodeUnitAsWtf8(testing.allocator, &buf, 0xDC00);
     try testing.expectEqualSlices(u8, &[_]u8{ 0xED, 0xB0, 0x80 }, buf.items);
+}
+
+// WTF-8 concat-seam merge (§6.1.4). U+D800 lone high = `ED A0 80`;
+// U+DC00 lone low = `ED B0 80`; the pair is the supplementary
+// U+10000, whose 4-byte UTF-8 form is `F0 90 80 80`.
+const lone_high_d800 = [_]u8{ 0xED, 0xA0, 0x80 };
+const lone_low_dc00 = [_]u8{ 0xED, 0xB0, 0x80 };
+const supp_10000 = [_]u8{ 0xF0, 0x90, 0x80, 0x80 };
+
+test "utf16: wtf8ConcatSeamPairs — high+low seam pairs" {
+    try testing.expect(wtf8ConcatSeamPairs(&lone_high_d800, &lone_low_dc00));
+}
+
+test "utf16: wtf8ConcatSeamPairs — clean seams do not pair" {
+    try testing.expect(!wtf8ConcatSeamPairs("abc", "def"));
+    // high + non-low
+    try testing.expect(!wtf8ConcatSeamPairs(&lone_high_d800, &lone_high_d800));
+    // non-high + low
+    try testing.expect(!wtf8ConcatSeamPairs(&lone_low_dc00, &lone_low_dc00));
+    // empty operands
+    try testing.expect(!wtf8ConcatSeamPairs("", &lone_low_dc00));
+    try testing.expect(!wtf8ConcatSeamPairs(&lone_high_d800, ""));
+}
+
+test "utf16: wtf8ConcatLen — paired seam collapses 6 bytes to 4" {
+    try testing.expectEqual(@as(usize, 4), wtf8ConcatLen(&lone_high_d800, &lone_low_dc00));
+    try testing.expectEqual(@as(usize, 6), wtf8ConcatLen("abc", "def"));
+}
+
+test "utf16: wtf8ConcatInto — paired seam merges to the 4-byte form" {
+    var dst: [4]u8 = undefined;
+    wtf8ConcatInto(&dst, &lone_high_d800, &lone_low_dc00);
+    try testing.expectEqualSlices(u8, &supp_10000, &dst);
+}
+
+test "utf16: wtf8ConcatInto — paired seam with surrounding text" {
+    const a = "x" ++ lone_high_d800;
+    const b = lone_low_dc00 ++ "y";
+    var dst: [@as(usize, 8)]u8 = undefined; // 1 + 4 + 1 = 6 used
+    const used = dst[0..wtf8ConcatLen(a, b)];
+    wtf8ConcatInto(used, a, b);
+    try testing.expectEqualSlices(u8, "x" ++ supp_10000 ++ "y", used);
+}
+
+test "utf16: wtf8ConcatInto — clean seam is a plain join" {
+    var dst: [6]u8 = undefined;
+    wtf8ConcatInto(&dst, "abc", "def");
+    try testing.expectEqualStrings("abcdef", &dst);
 }
