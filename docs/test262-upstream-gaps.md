@@ -111,3 +111,37 @@ the corpus under the relevant section's directory before adding.
   constructor body specifically. A
   `class-ctor-body-var-hoist.js` positive test would freeze the
   shape.
+
+### `+` concat of a lone high surrogate with a lone low surrogate stored ill-formed
+
+- **Fixed in:** `8a266ea`
+- **Spec:** §13.15.5 / §22.1.3.4 string concatenation; §6.1.4 the
+  String type as UTF-16 code units. Cynic-internal: the WTF-8
+  storage invariant (AGENTS.md) — a *valid* surrogate pair is
+  always the 4-byte UTF-8 form, never two adjacent 3-byte CESU-8
+  escapes.
+- **Reproducer:**
+  ```js
+  var combined = "\uD800" + "\uDC00";          // high + low surrogate
+  var direct = String.fromCodePoint(0x10000);  // same supplementary cp
+  combined === direct;            // expected true
+  combined.codePointAt(0) === 0x10000;         // expected true
+  combined.isWellFormed();                     // expected true
+  ```
+- **Before fix:** the `+` operator's single-allocation concat
+  path did a plain two-memcpy join, leaving the paired
+  surrogates as two 3-byte CESU-8 escapes (6 bytes) where a
+  flat-built equivalent has one 4-byte sequence (4 bytes).
+  `combined === direct` was `false` — two String values that
+  are the same per spec compared unequal because the byte-wise
+  `===` saw different lengths.
+- **After fix:** the concat merges the seam into the 4-byte
+  supplementary form; `combined === direct` is `true`.
+- **Suggested fixture shape:** positive runtime fixture under
+  `language/expressions/addition/` (or `built-ins/String/`),
+  `features: []`. Asserts a `+`-built string equals the
+  `String.fromCodePoint` / `\u{10000}` equivalent and round-
+  trips through `codePointAt` / `isWellFormed` / `[...str]`.
+  No existing fixture concatenates split surrogate halves and
+  checks the result is a well-formed pair — the corpus tests
+  lone surrogates and pairs, but not the *cross-concat* seam.
