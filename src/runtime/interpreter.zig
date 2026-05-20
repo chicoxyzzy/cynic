@@ -4200,6 +4200,94 @@ pub fn startAsyncCall(
     return .{ .value = result_promise };
 }
 
+/// Decode the opcode at `ip.*`, advancing `ip` past the opcode
+/// byte. The threaded-dispatch tail for every arm that completes
+/// without changing the active frame. `committed` is reset so the
+/// arm-local write-back flag never carries state across an opcode
+/// boundary.
+inline fn decodeNext(code: []const u8, ip: *usize, committed: *bool) RunError!Op {
+    committed.* = false;
+    if (ip.* >= code.len) return error.InvalidOpcode;
+    const b = code[ip.*];
+    ip.* += 1;
+    return std.enums.fromInt(Op, b) orelse error.InvalidOpcode;
+}
+
+/// Re-derive the loop-persistent dispatch state from the top frame,
+/// then decode the next opcode. Used after any step that swaps the
+/// active frame (call push / return pop) or repositions it (an
+/// exception unwind landing on a handler). The frame carries the
+/// authoritative `ip` / `accumulator`: a call push seeds `ip = 0`,
+/// `return` / `unwindThrow` write them onto the frame they leave us
+/// on. Resets `committed` for the next arm.
+inline fn reEnterDispatch(
+    frames: *std.ArrayListUnmanaged(CallFrame),
+    f: **CallFrame,
+    local_chunk: **const Chunk,
+    code: *[]const u8,
+    registers: *[]Value,
+    ip: *usize,
+    acc: *Value,
+    committed: *bool,
+) RunError!Op {
+    committed.* = false;
+    const fr = &frames.items[frames.items.len - 1];
+    f.* = fr;
+    local_chunk.* = fr.chunk;
+    code.* = fr.chunk.code;
+    registers.* = fr.registers;
+    ip.* = fr.ip;
+    acc.* = fr.accumulator;
+    if (ip.* >= code.*.len) return error.InvalidOpcode;
+    const b = code.*[ip.*];
+    ip.* += 1;
+    return std.enums.fromInt(Op, b) orelse error.InvalidOpcode;
+}
+
+/// Threaded-dispatch safe point. Runs the cooperative checks the
+/// old `while`-loop dispatcher performed once per opcode at the
+/// loop top — allocation-pressure GC, step budget, host interrupt.
+///
+/// A threaded interpreter has no per-opcode loop top, so these move
+/// to the points where running them is *safe*: backward branches
+/// (the only way to build an unbounded loop), call frame pushes,
+/// frame pops on return, and the first opcode of a fresh
+/// `runFrames` invocation (which is how a suspended generator
+/// resumes). GC is stop-the-world and only ever fires here —
+/// between opcodes, never mid-opcode — so a native holding a raw
+/// pointer across a sub-call never sees the heap shift under it.
+///
+/// The step budget decrements per safe-point crossing rather than
+/// per opcode. Every unbounded loop crosses a backward branch each
+/// iteration and every unbounded recursion crosses a call, so the
+/// budget still bounds any non-terminating fixture; the test262
+/// harness budget kills a `while(true){}` long before it can wedge
+/// the sweep. Returns a non-null `RunResult` when the budget is
+/// exhausted or a host interrupt fired — the caller surfaces it
+/// directly, without a handler walk, matching the pre-threaded
+/// behaviour.
+inline fn runSafePoint(realm: *Realm) RunError!?RunResult {
+    // GC safe point. Single-tier stop-the-world mark-sweep today;
+    // the main session merges the two-tier minor/major dispatch in
+    // afterward — it slots in right here.
+    if (realm.heap.allocs_since_gc >= realm.heap.gc_threshold or
+        realm.heap.bytes_since_gc >= realm.heap.gc_byte_threshold)
+    {
+        realm.collectGarbage();
+    }
+    if (realm.step_budget == 0) {
+        const ex = try makeRangeError(realm, "interpreter step budget exhausted");
+        return RunResult{ .thrown = ex };
+    }
+    if (realm.interrupt.load(.acquire)) {
+        realm.clearInterrupt();
+        const ex = try makeRangeError(realm, "execution interrupted");
+        return RunResult{ .thrown = ex };
+    }
+    realm.step_budget -|= 1;
+    return null;
+}
+
 fn runFrames(
     allocator: std.mem.Allocator,
     realm: *Realm,
@@ -4231,110 +4319,81 @@ fn runFrames(
             }
         }
     }
-    while (frames.items.len > 0) {
-        // Allocation-pressure GC — when the heap counter has
-        // climbed past its threshold, run a stop-the-world
-        // mark-sweep. Roots come from the realm (globals,
-        // intrinsics, microtask queue, modules) plus every
-        // nested `runFrames` stack registered above. Stop-the-
-        // world means we never run mid-opcode, so pointers
-        // natives hold across a sub-call stay stable; the
-        // check at dispatch top is the natural safe point.
-        if (realm.heap.allocs_since_gc >= realm.heap.gc_threshold or
-            realm.heap.bytes_since_gc >= realm.heap.gc_byte_threshold)
-        {
-            realm.collectGarbage();
-        }
-        // Cooperative step budget — saturating decrement, then
-        // unwind a synthetic `RangeError` when the budget hits
-        // zero. The default budget is huge (maxInt(u64)) so
-        // ordinary hosts never see this; the test262 harness
-        // dials it down per-test so a `while(true){}` fixture
-        // can't wedge the whole sweep. The check sits before
-        // opcode dispatch — every re-entry into `runFrames`
-        // (native call → JS callback → ...) ticks too.
-        if (realm.step_budget == 0) {
-            const ex = try makeRangeError(realm, "interpreter step budget exhausted");
-            return .{ .thrown = ex };
-        }
-        // Cooperative interrupt — host-side watchdog flips
-        // `realm.interrupt` from another thread; the dispatch
-        // loop notices on the next tick and unwinds with
-        // `RangeError("execution interrupted")`. Same shape as
-        // V8's `Isolate::TerminateExecution`, JSC's
-        // `Watchdog::fire`, and `JS_SetInterruptCallback` on
-        // SpiderMonkey / QuickJS.
-        const host_interrupted = if (realm.host_interrupt) |h| h.load(.acquire) else false;
-        if (realm.interrupt.load(.acquire) or host_interrupted) {
-            realm.clearInterrupt();
-            const ex = try makeRangeError(realm, "execution interrupted");
-            return .{ .thrown = ex };
-        }
-        realm.step_budget -|= 1;
-        var f = &frames.items[frames.items.len - 1];
-        const local_chunk = f.chunk;
-        const code = local_chunk.code;
-        if (f.ip >= code.len) return error.InvalidOpcode;
-        const op_byte = code[f.ip];
-        f.ip += 1;
-        const op: Op = std.enums.fromInt(Op, op_byte) orelse return error.InvalidOpcode;
+    // Empty frame stack — nothing to run. (The pre-threaded
+    // dispatcher expressed this as the `while` loop condition.)
+    if (frames.items.len == 0) return RunResult{ .value = Value.undefined_ };
 
-        // Bind locals so the existing opcode bodies can stay
-        // unchanged below. Any control-flow change to `ip` /
-        // `acc` / `registers` writes back to the frame at the
-        // end of each iteration via a `defer`-style update.
-        var ip: usize = f.ip;
-        var acc: Value = f.accumulator;
-        var registers: []Value = f.registers;
+    // ── Threaded dispatch ────────────────────────────────────────
+    // Loop-persistent dispatch state — declared once, mutated in
+    // place across opcodes. The pre-threaded `while + switch` form
+    // re-derived all of this every iteration and ran a `defer`
+    // write-back; that per-opcode overhead is what this rung
+    // removes. Each opcode arm ends in `continue :dispatch <next>`,
+    // emitting a separate indirect branch per opcode site (the
+    // computed-goto equivalent) so the branch predictor learns
+    // per-opcode-pair patterns instead of funnelling through one
+    // shared dispatch.
+    //
+    // Frame state (`f.ip` / `f.accumulator`) is written back only
+    // at frame-swap points (call / return) and exception unwind;
+    // `reEnterDispatch` re-loads it. `committed` is the arm-local
+    // write-back flag the few arms that route a throw out through a
+    // labeled block consult (`if (committed) continue ...`); the
+    // dispatch helpers reset it so it never leaks across an opcode.
+    var f: *CallFrame = &frames.items[frames.items.len - 1];
+    var local_chunk: *const Chunk = f.chunk;
+    var code: []const u8 = local_chunk.code;
+    var registers: []Value = f.registers;
+    var ip: usize = f.ip;
+    var acc: Value = f.accumulator;
+    var committed: bool = false;
 
-        // Helper to commit register / acc / ip changes into the
-        // current frame at the end of dispatch. We can't use a
-        // `defer` here because `Call` and `Return` swap which
-        // frame is "current" — those branches save state
-        // explicitly before mutating `frames`.
-        var committed = false;
-        defer if (!committed) {
-            // Default: just sync `ip` / `acc` back into the top
-            // frame (registers are aliased into the slice so
-            // mutations are already visible).
-            if (frames.items.len > 0) {
-                frames.items[frames.items.len - 1].ip = ip;
-                frames.items[frames.items.len - 1].accumulator = acc;
-            }
-        };
+    // First opcode of this `runFrames` invocation. A fresh entry is
+    // also how a suspended generator resumes, so cross the safe
+    // point before the first dispatch (GC / step budget / interrupt
+    // — see `runSafePoint`).
+    if (try runSafePoint(realm)) |r| return r;
+    if (ip >= code.len) return error.InvalidOpcode;
+    const first_op: Op = std.enums.fromInt(Op, code[ip]) orelse return error.InvalidOpcode;
+    ip += 1;
 
-        switch (op) {
+    dispatch: switch (first_op) {
             // ── Loads ───────────────────────────────────────────────────
-            .lda_undefined => acc = Value.undefined_,
-            .lda_null => acc = Value.null_,
-            .lda_true => acc = Value.true_,
-            .lda_false => acc = Value.false_,
+            .lda_undefined => { acc = Value.undefined_; continue :dispatch try decodeNext(code, &ip, &committed); },
+            .lda_null => { acc = Value.null_; continue :dispatch try decodeNext(code, &ip, &committed); },
+            .lda_true => { acc = Value.true_; continue :dispatch try decodeNext(code, &ip, &committed); },
+            .lda_false => { acc = Value.false_; continue :dispatch try decodeNext(code, &ip, &committed); },
             .lda_smi => {
                 acc = Value.fromInt32(readI32(code, ip));
                 ip += 4;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .lda_constant => {
                 const k = readU16(code, ip);
                 ip += 2;
                 acc = local_chunk.constants[k];
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .ldar => {
                 const r = code[ip];
                 ip += 1;
                 acc = registers[r];
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .star => {
                 const r = code[ip];
                 ip += 1;
                 registers[r] = acc;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .mov => {
                 const src = code[ip];
                 const dst = code[ip + 1];
                 ip += 2;
                 registers[dst] = registers[src];
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
-            .lda_hole => acc = Value.hole_,
+            .lda_hole => { acc = Value.hole_; continue :dispatch try decodeNext(code, &ip, &committed); },
 
             // ── Arithmetic — `acc = reg <op> acc` ───────────────────────
             // Per §13.15.4 ApplyStringOrNumericBinaryOperator the
@@ -4353,8 +4412,9 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .sub => {
                 const r = code[ip];
@@ -4366,8 +4426,9 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .mul => {
                 const r = code[ip];
@@ -4379,8 +4440,9 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .div => {
                 const r = code[ip];
@@ -4392,8 +4454,9 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .mod => {
                 const r = code[ip];
@@ -4405,8 +4468,9 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .pow => {
                 const r = code[ip];
@@ -4418,8 +4482,9 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             // ── Bitwise — both operands are ToInt32-coerced ─────────────
@@ -4433,8 +4498,9 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .bit_or => {
                 const r = code[ip];
@@ -4446,8 +4512,9 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .bit_xor => {
                 const r = code[ip];
@@ -4459,8 +4526,9 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .shl => {
                 const r = code[ip];
@@ -4472,8 +4540,9 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .shr => {
                 const r = code[ip];
@@ -4485,8 +4554,9 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .shr_u => {
                 const r = code[ip];
@@ -4498,8 +4568,9 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             // ── Unary on accumulator ────────────────────────────────────
@@ -4511,8 +4582,9 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .bit_not => {
                 if (try unaryBitNot(realm, acc)) |res| acc = res else {
@@ -4522,10 +4594,11 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
-            .logical_not => acc = Value.fromBool(!toBoolean(acc)),
+            .logical_not => { acc = Value.fromBool(!toBoolean(acc)); continue :dispatch try decodeNext(code, &ip, &committed); },
             .to_number => {
                 if (try unaryToNumber(realm, acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
@@ -4534,8 +4607,9 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .to_numeric => {
                 if (try unaryToNumeric(realm, acc)) |res| acc = res else {
@@ -4545,8 +4619,9 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .to_string => {
                 // §7.1.17 ToString — for Object input, runs §7.1.1
@@ -4565,10 +4640,11 @@ fn runFrames(
                         f.accumulator = acc;
                         committed = true;
                         if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                 };
                 acc = Value.fromString(s);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .inc => {
                 if (try arith.incOrDec(realm, acc, 1)) |res| acc = res else {
@@ -4578,8 +4654,9 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .dec => {
                 if (try arith.incOrDec(realm, acc, -1)) |res| acc = res else {
@@ -4589,10 +4666,11 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
-            .typeof_ => acc = try typeOf(realm, acc),
+            .typeof_ => { acc = try typeOf(realm, acc); continue :dispatch try decodeNext(code, &ip, &committed); },
 
             // ── Comparison ──────────────────────────────────────────────
             // §7.2.14 IsLooselyEqual / §7.2.13 IsLessThan call
@@ -4612,20 +4690,22 @@ fn runFrames(
                 if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
                 if (lhs == .handled) {
                     committed = true;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 const rhs = try coerceForCompareEq(allocator, realm, frames, f, ip, rhs_v, lhs.ok);
                 if (rhs == .uncaught) return .{ .thrown = rhs.uncaught };
                 if (rhs == .handled) {
                     committed = true;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 acc = Value.fromBool(looseEq(lhs.ok, rhs.ok));
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .strict_eq => {
                 const r = code[ip];
                 ip += 1;
                 acc = Value.fromBool(strictEq(registers[r], acc));
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .neq => {
                 const r = code[ip];
@@ -4636,20 +4716,22 @@ fn runFrames(
                 if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
                 if (lhs == .handled) {
                     committed = true;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 const rhs = try coerceForCompareEq(allocator, realm, frames, f, ip, rhs_v, lhs.ok);
                 if (rhs == .uncaught) return .{ .thrown = rhs.uncaught };
                 if (rhs == .handled) {
                     committed = true;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 acc = Value.fromBool(!looseEq(lhs.ok, rhs.ok));
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .strict_neq => {
                 const r = code[ip];
                 ip += 1;
                 acc = Value.fromBool(!strictEq(registers[r], acc));
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .lt => {
                 const r = code[ip];
@@ -4658,13 +4740,13 @@ fn runFrames(
                 if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
                 if (lhs == .handled) {
                     committed = true;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 const rhs = try coerceForCompare(allocator, realm, frames, f, ip, acc, .number);
                 if (rhs == .uncaught) return .{ .thrown = rhs.uncaught };
                 if (rhs == .handled) {
                     committed = true;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 acc = relational(.lt, realm, lhs.ok, rhs.ok) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -4675,9 +4757,10 @@ fn runFrames(
                         f.accumulator = lhs.ok;
                         if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                         committed = true;
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                 };
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .gt => {
                 const r = code[ip];
@@ -4686,13 +4769,13 @@ fn runFrames(
                 if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
                 if (lhs == .handled) {
                     committed = true;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 const rhs = try coerceForCompare(allocator, realm, frames, f, ip, acc, .number);
                 if (rhs == .uncaught) return .{ .thrown = rhs.uncaught };
                 if (rhs == .handled) {
                     committed = true;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 acc = relational(.gt, realm, lhs.ok, rhs.ok) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -4703,9 +4786,10 @@ fn runFrames(
                         f.accumulator = lhs.ok;
                         if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                         committed = true;
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                 };
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .le => {
                 const r = code[ip];
@@ -4714,13 +4798,13 @@ fn runFrames(
                 if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
                 if (lhs == .handled) {
                     committed = true;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 const rhs = try coerceForCompare(allocator, realm, frames, f, ip, acc, .number);
                 if (rhs == .uncaught) return .{ .thrown = rhs.uncaught };
                 if (rhs == .handled) {
                     committed = true;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 acc = relational(.le, realm, lhs.ok, rhs.ok) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -4731,9 +4815,10 @@ fn runFrames(
                         f.accumulator = lhs.ok;
                         if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                         committed = true;
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                 };
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .ge => {
                 const r = code[ip];
@@ -4742,13 +4827,13 @@ fn runFrames(
                 if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
                 if (lhs == .handled) {
                     committed = true;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 const rhs = try coerceForCompare(allocator, realm, frames, f, ip, acc, .number);
                 if (rhs == .uncaught) return .{ .thrown = rhs.uncaught };
                 if (rhs == .handled) {
                     committed = true;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 acc = relational(.ge, realm, lhs.ok, rhs.ok) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -4759,9 +4844,10 @@ fn runFrames(
                         f.accumulator = lhs.ok;
                         if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
                         committed = true;
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                 };
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             // ── Control flow ────────────────────────────────────────────
@@ -4769,21 +4855,25 @@ fn runFrames(
                 const off = readI16(code, ip);
                 ip += 2;
                 ip = applyOffset(ip, off);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .jmp_if_false => {
                 const off = readI16(code, ip);
                 ip += 2;
                 if (!toBoolean(acc)) ip = applyOffset(ip, off);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .jmp_if_true => {
                 const off = readI16(code, ip);
                 ip += 2;
                 if (toBoolean(acc)) ip = applyOffset(ip, off);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .jmp_if_nullish => {
                 const off = readI16(code, ip);
                 ip += 2;
                 if (acc.isNull() or acc.isUndefined()) ip = applyOffset(ip, off);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             // ── Functions / calls ───────────────────────────────────────
@@ -4934,6 +5024,7 @@ fn runFrames(
                 else
                     realm.intrinsics.function_prototype;
                 acc = heap_mod.taggedFunction(fn_obj);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .call => {
                 const r_callee = code[ip];
@@ -4952,7 +5043,7 @@ fn runFrames(
                         switch (cresult) {
                             .value, .yielded => |v| {
                                 acc = v;
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                             .thrown => |ex| {
                                 f.ip = ip;
@@ -4961,7 +5052,7 @@ fn runFrames(
                                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                                     return .{ .thrown = ex };
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                         }
                     }
@@ -4974,7 +5065,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
 
                 // §15.7.14 step 1 — class constructors are not
@@ -4987,7 +5078,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 // §28.2.2.1.1 — revocation function. Calling it
@@ -5001,7 +5092,7 @@ fn runFrames(
                     rp.proxy_revoked = true;
                     callee_fn.revocable_proxy = null;
                     acc = Value.undefined_;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 // §10.4.1 — bound functions unwrap and re-enter
@@ -5023,7 +5114,7 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                     const args_start = @as(usize, r_callee) + 1;
                     const result = try callJSFunction(allocator, realm, callee_fn, Value.undefined_, registers[args_start .. args_start + argc]);
@@ -5036,10 +5127,10 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 // §27.5 / §27.6 — calling a `function*` or
@@ -5062,10 +5153,10 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 // Native fast path — no frame, no register file,
@@ -5096,11 +5187,11 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     };
                     acc = result;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 // §27.7 — async function call. Start fresh, run the
@@ -5121,10 +5212,10 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 if (frames.items.len >= max_call_frames) {
@@ -5135,7 +5226,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
@@ -5186,6 +5277,7 @@ fn runFrames(
                     allocator.free(callee_regs);
                     return error.OutOfMemory;
                 };
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .call_method => {
@@ -5205,7 +5297,7 @@ fn runFrames(
                         switch (cresult) {
                             .value, .yielded => |v| {
                                 acc = v;
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                             .thrown => |ex| {
                                 f.ip = ip;
@@ -5214,7 +5306,7 @@ fn runFrames(
                                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                                     return .{ .thrown = ex };
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                         }
                     }
@@ -5227,7 +5319,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
 
                 const recv = registers[r_recv];
@@ -5240,7 +5332,7 @@ fn runFrames(
                     rp.proxy_revoked = true;
                     callee_fn.revocable_proxy = null;
                     acc = Value.undefined_;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 // §10.4.1 — bound functions unwrap. `this = recv`
@@ -5258,10 +5350,10 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 // §27.5 / §27.6 — calling a `function*` or
@@ -5285,10 +5377,10 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 // Native fast path — no frame, no register file.
@@ -5313,11 +5405,11 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     };
                     acc = result;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 if (callee_fn.is_async) {
@@ -5334,10 +5426,10 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 if (frames.items.len >= max_call_frames) {
@@ -5348,7 +5440,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
@@ -5395,6 +5487,7 @@ fn runFrames(
                     allocator.free(callee_regs);
                     return error.OutOfMemory;
                 };
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .new_call => {
@@ -5416,7 +5509,7 @@ fn runFrames(
                         switch (cresult) {
                             .value, .yielded => |v| {
                                 acc = v;
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                             .thrown => |ex| {
                                 f.ip = ip;
@@ -5425,7 +5518,7 @@ fn runFrames(
                                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                                     return .{ .thrown = ex };
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                         }
                     }
@@ -5442,7 +5535,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 if (callee_fn.is_arrow) {
                     const ex = try makeTypeError(realm, "arrow functions are not constructors");
@@ -5452,7 +5545,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 // §17 — built-in non-constructor methods don't
                 // implement [[Construct]]. `new Object.keys()`,
@@ -5467,7 +5560,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 // §10.4.1.2 — `new boundFn(...)` constructs the
@@ -5508,7 +5601,7 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     };
                     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
@@ -5542,10 +5635,10 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 // §25.1.4.1 / §25.3.2.1 — native ctors that
@@ -5571,7 +5664,7 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     };
                     if (heap_mod.valueAsPlainObject(result) != null or
@@ -5586,9 +5679,9 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 // §13.3.5.1.1 OrdinaryCallBindThis with NewTarget=callee.
                 // §10.1.14 GetPrototypeFromConstructor — read
@@ -5604,7 +5697,7 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                 };
                 const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
@@ -5633,7 +5726,7 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     };
                     // §13.3.5.1.1 ConstructResult: object > this.
@@ -5644,7 +5737,7 @@ fn runFrames(
                     } else {
                         acc = this_value;
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 if (frames.items.len >= max_call_frames) {
@@ -5655,7 +5748,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
@@ -5688,6 +5781,7 @@ fn runFrames(
                     allocator.free(callee_regs);
                     return error.OutOfMemory;
                 };
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .lda_this => {
@@ -5722,13 +5816,15 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 acc = f.this_value;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .lda_new_target => {
                 acc = f.new_target;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .import_meta => {
@@ -5772,8 +5868,9 @@ fn runFrames(
                     f.accumulator = acc;
                     committed = true;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .instanceof_ => {
@@ -5794,7 +5891,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 // §13.10.2 step 2 — `GetMethod(target, @@hasInstance)`.
                 // Walks the prototype chain via the accessor-aware
@@ -5815,7 +5912,7 @@ fn runFrames(
                                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                                     return .{ .thrown = ex };
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                         };
                     } else if (rhs_fn_opt) |fn_obj| {
@@ -5829,7 +5926,7 @@ fn runFrames(
                         .value, .yielded => |v| {
                             // §13.10.2 step 4.a — `ToBoolean(? Call(…))`.
                             acc = Value.fromBool(arith.toBoolean(v));
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                         .thrown => |ex| {
                             f.ip = ip;
@@ -5838,7 +5935,7 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     }
                 }
@@ -5852,7 +5949,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 // §7.3.20 OrdinaryHasInstance — unwrap bound
                 // targets (step 1) and look up `Get(C, "prototype")`
@@ -5876,7 +5973,7 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                 } else if (heap_mod.valueAsPlainObject(lhs)) |lhs_obj| {
                     var cursor: ?*JSObject = lhs_obj.prototype;
@@ -5908,6 +6005,7 @@ fn runFrames(
                     // Non-object LHS is never an instance.
                     acc = Value.fromBool(false);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .object_rest_from => {
@@ -5945,7 +6043,7 @@ fn runFrames(
                     };
                     break :blk_coerce heap_mod.taggedObject(w);
                 };
-                if (committed) continue;
+                if (committed) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 if (heap_mod.valueAsPlainObject(src_coerced)) |src_obj| {
                     // §14.3.3.4 RestBindingInitialization →
                     // §7.3.27 CopyDataProperties: build the
@@ -6028,7 +6126,7 @@ fn runFrames(
                         };
                         break :blk_pk ko;
                     };
-                    if (committed) continue;
+                    if (committed) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     const keys: []const []const u8 = if (keys_opt) |k| k else (obj_mod_inner.ownPropertyKeysOrdered(realm, src_obj) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => return error.InvalidOpcode,
@@ -6111,9 +6209,10 @@ fn runFrames(
                         };
                         realm.heap.storeProperty(out_obj, allocator, k, v) catch return error.OutOfMemory;
                     }
-                    if (committed) continue;
+                    if (committed) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 acc = heap_mod.taggedObject(out_obj);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .array_rest_from => {
@@ -6153,6 +6252,7 @@ fn runFrames(
                 }
                 realm.heap.storeProperty(out_obj, allocator, "length", Value.fromInt32(@intCast(out_idx))) catch return error.OutOfMemory;
                 acc = heap_mod.taggedObject(out_obj);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .iter_close => {
@@ -6167,7 +6267,7 @@ fn runFrames(
                     // the `__cynic_iter_done__` slot that
                     // `iter_step` maintains.
                     if (iter_obj.properties.get("__cynic_iter_done__")) |dv| {
-                        if (toBoolean(dv)) continue;
+                        if (toBoolean(dv)) continue :dispatch try decodeNext(code, &ip, &committed);
                     }
                     // §7.4.6 IteratorClose step 4 → §7.3.10 GetMethod —
                     // a present but non-callable `return` throws
@@ -6186,7 +6286,7 @@ fn runFrames(
                             const ex = consumePendingException(realm) orelse try makeTypeError(realm, "iterator 'return' read failed");
                             if (mode == 1) {
                                 // Throw completion swallows inner errors.
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             }
                             f.ip = ip;
                             f.accumulator = acc;
@@ -6194,7 +6294,7 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     };
                     const ret_fn_opt: ?*JSFunction = blk: {
@@ -6210,7 +6310,7 @@ fn runFrames(
                         }
                         break :blk null;
                     };
-                    if (committed) continue;
+                    if (committed) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     if (ret_fn_opt) |ret_fn| {
                         // §7.4.6 IteratorClose — completion-type
                         // dispatch. `mode == 1` ⇒ the surrounding
@@ -6241,7 +6341,7 @@ fn runFrames(
                                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                                         return .{ .thrown = ex };
                                     }
-                                    continue;
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                 },
                                 .value, .yielded => |v| {
                                     // §7.4.6 step 9 — non-Object
@@ -6257,7 +6357,7 @@ fn runFrames(
                                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                                             return .{ .thrown = ex };
                                         }
-                                        continue;
+                                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                     }
                                     acc = saved_acc;
                                 },
@@ -6265,6 +6365,7 @@ fn runFrames(
                         }
                     }
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .in_op => {
@@ -6283,7 +6384,7 @@ fn runFrames(
                         .ok => |v| v,
                         .handled => {
                             committed = true;
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                         .uncaught => |ex| return .{ .thrown = ex },
                     };
@@ -6303,7 +6404,7 @@ fn runFrames(
                         }
                     }
                     acc = Value.fromBool(found);
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 const obj_in = heap_mod.valueAsPlainObject(obj_v) orelse {
                     const ex = try makeTypeError(realm, "Cannot use 'in' operator to search non-object");
@@ -6313,14 +6414,14 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 // §7.1.19 ToPropertyKey on the LHS.
                 const key_v = switch (try coerceToPropertyKey(allocator, realm, frames, f, ip, registers[r])) {
                     .ok => |v| v,
                     .handled => {
                         committed = true;
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                     .uncaught => |ex| return .{ .thrown = ex },
                 };
@@ -6369,6 +6470,7 @@ fn runFrames(
                 }
                 if (handled_via_proxy) continue;
                 acc = Value.fromBool(found);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             // ── Class definition + super ───────────────────────
@@ -6452,7 +6554,8 @@ fn runFrames(
                         break :blk Value.undefined_;
                     },
                 };
-                if (committed) continue;
+                if (committed) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .super_get => {
@@ -6474,7 +6577,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 // §13.3.7 static-method form — home is the class
                 // constructor (a JSFunction); super walks
@@ -6502,7 +6605,7 @@ fn runFrames(
                                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                                 return .{ .thrown = ex };
                                             }
-                                            continue;
+                                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                         },
                                     }
                                 } else {
@@ -6514,7 +6617,7 @@ fn runFrames(
                         } else {
                             acc = Value.undefined_;
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                 }
                 const home = f.home_object orelse {
@@ -6525,7 +6628,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 // §13.3.7.3 MakeSuperPropertyReference step 5 —
                 // RequireObjectCoercible(GetSuperBase()). When the
@@ -6540,7 +6643,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 // §10.1.8 OrdinaryGet via super reference — the
                 // accessor descriptor wins, and getters fire with
@@ -6559,15 +6662,16 @@ fn runFrames(
                                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                                     return .{ .thrown = ex };
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                         }
                     } else {
                         acc = Value.undefined_;
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 acc = parent_proto.get(key_s.flatBytes());
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .super_get_computed => {
@@ -6580,7 +6684,7 @@ fn runFrames(
                             .ok => |v| v,
                             .handled => {
                                 committed = true;
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                             .uncaught => |ex| return .{ .thrown = ex },
                         };
@@ -6606,19 +6710,19 @@ fn runFrames(
                                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                                 return .{ .thrown = ex };
                                             }
-                                            continue;
+                                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                         },
                                     }
                                 } else {
                                     acc = Value.undefined_;
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             }
                             acc = parent_fn.get(key_slice_s);
                         } else {
                             acc = Value.undefined_;
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                 }
                 const home = f.home_object orelse {
@@ -6629,7 +6733,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 // §13.3.7.3 MakeSuperPropertyReference step 5 —
                 // RequireObjectCoercible on the home object's
@@ -6643,14 +6747,14 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 // §7.1.19 ToPropertyKey on the bracket key.
                 const key_v = switch (try coerceToPropertyKey(allocator, realm, frames, f, ip, acc)) {
                     .ok => |v| v,
                     .handled => {
                         committed = true;
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                     .uncaught => |ex| return .{ .thrown = ex },
                 };
@@ -6668,15 +6772,16 @@ fn runFrames(
                                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                                     return .{ .thrown = ex };
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                         }
                     } else {
                         acc = Value.undefined_;
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 acc = parent_proto.get(key_slice);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .super_set => {
@@ -6707,7 +6812,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 // §13.3.7 static-method form — `this` is the
                 // current class; super setter dispatch reads the
@@ -6731,11 +6836,11 @@ fn runFrames(
                                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                                 return .{ .thrown = ex };
                                             }
-                                            continue;
+                                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                         },
                                     }
                                     acc = value;
-                                    continue;
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                 }
                             }
                         }
@@ -6762,7 +6867,7 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         }
                         // Fall back to writing on `this` (the
                         // current constructor, since this is static).
@@ -6772,7 +6877,7 @@ fn runFrames(
                             realm.heap.storeProperty(this_obj, allocator, key_s.flatBytes(), value) catch return error.OutOfMemory;
                         }
                         acc = value;
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                 }
                 const home = f.home_object orelse {
@@ -6783,7 +6888,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 // §13.3.7.3 MakeSuperPropertyReference step 5 —
                 // RequireObjectCoercible on the home object's
@@ -6797,7 +6902,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 var did_setter = false;
                 {
@@ -6815,7 +6920,7 @@ fn runFrames(
                                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                                         return .{ .thrown = ex };
                                     }
-                                    continue;
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                 },
                             }
                             did_setter = true;
@@ -6845,7 +6950,7 @@ fn runFrames(
                                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                                         return .{ .thrown = ex };
                                     }
-                                    continue;
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                 },
                             };
                         }
@@ -6866,7 +6971,7 @@ fn runFrames(
                                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                                     return .{ .thrown = ex };
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             }
                         } else {
                             const ok = realm.heap.storePropertyIfWritable(this_obj, allocator, key_s.flatBytes(), value) catch return error.OutOfMemory;
@@ -6878,10 +6983,10 @@ fn runFrames(
                                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                                     return .{ .thrown = ex };
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             }
                             acc = value;
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         }
                         // Fall back to a plain `this[key] = value`
                         // write per §10.1.9.2 — the receiver is
@@ -6898,6 +7003,7 @@ fn runFrames(
                     }
                 }
                 acc = value;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .super_set_computed => {
@@ -6918,7 +7024,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 // §13.3.7.3 MakeSuperPropertyReference step 5 —
                 // RequireObjectCoercible on the home object's
@@ -6938,7 +7044,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 // §6.2.5.6 PutValue step 3.c.i — ToPropertyKey now
                 // (after baseValue captured above). A user
@@ -6948,7 +7054,7 @@ fn runFrames(
                     .ok => |v| v,
                     .handled => {
                         committed = true;
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                     .uncaught => |ex| return .{ .thrown = ex },
                 };
@@ -6970,7 +7076,7 @@ fn runFrames(
                                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                                         return .{ .thrown = ex };
                                     }
-                                    continue;
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                 },
                             }
                             did_setter = true;
@@ -6992,7 +7098,7 @@ fn runFrames(
                                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                                     return .{ .thrown = ex };
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             }
                         } else {
                             const ok = realm.heap.storePropertyIfWritable(this_obj, allocator, key_slice, value) catch return error.OutOfMemory;
@@ -7004,15 +7110,16 @@ fn runFrames(
                                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                                     return .{ .thrown = ex };
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             }
                             acc = value;
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         }
                         realm.heap.storeProperty(this_obj, allocator, key_slice, value) catch return error.OutOfMemory;
                     }
                 }
                 acc = value;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .super_check_this => {
@@ -7031,8 +7138,9 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .init_instance_fields => {
@@ -7132,7 +7240,7 @@ fn runFrames(
                                 }
                             }
                         }
-                        if (thrown_method) continue;
+                        if (thrown_method) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                 }
                 if (home.instance_field_inits) |inits| {
@@ -7253,8 +7361,9 @@ fn runFrames(
                             }
                         }
                     }
-                    if (committed) continue;
+                    if (committed) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .lda_private => {
@@ -7288,7 +7397,7 @@ fn runFrames(
                                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                                         return .{ .thrown = ex };
                                     }
-                                    continue;
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                 },
                             }
                         } else {
@@ -7302,11 +7411,11 @@ fn runFrames(
                                 return .{ .thrown = ex };
                             }
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                     if (fn_recv.private_properties.get(lookup_key)) |v| {
                         acc = v;
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                     const ex = try makeTypeError(realm, "Cannot read private field — brand check failed");
                     f.ip = ip;
@@ -7315,7 +7424,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 const recv = heap_mod.valueAsPlainObject(acc) orelse {
                     const ex = try makeTypeError(realm, "Cannot read private field on non-object");
@@ -7325,7 +7434,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 // §15.7 — private accessor descriptors win over
                 // data slots on read. A read of a write-only
@@ -7343,7 +7452,7 @@ fn runFrames(
                                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                                     return .{ .thrown = ex };
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                         }
                     } else {
@@ -7354,7 +7463,7 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                 } else if (recv.private_properties.get(lookup_key)) |v| {
                     acc = v;
@@ -7366,8 +7475,9 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .private_in => {
@@ -7395,7 +7505,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 // §15.7.14 step 31 — same brand resolution as
                 // `lda_private` / `sta_private`. The runtime key
@@ -7414,17 +7524,18 @@ fn runFrames(
                 if (heap_mod.valueAsFunction(acc)) |fn_recv| {
                     const present = fn_recv.private_properties.contains(lookup_key) or fn_recv.private_accessors.contains(lookup_key);
                     acc = Value.fromBool(present);
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 if (heap_mod.valueAsPlainObject(acc)) |obj| {
                     const present = obj.private_properties.contains(lookup_key) or obj.private_accessors.contains(lookup_key);
                     acc = Value.fromBool(present);
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 // Some other object kind (Symbol/BigInt wrapped
                 // primitives etc.) — they can't carry private
                 // slots, so the answer is `false`.
                 acc = Value.fromBool(false);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .gen_yield => {
@@ -7634,6 +7745,7 @@ fn runFrames(
                 // queued microtasks for symmetry and fall
                 // through.
                 drainMicrotasks(allocator, realm) catch return error.OutOfMemory;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .iter_open => {
@@ -7662,11 +7774,12 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                     error.InvalidOpcode => return error.InvalidOpcode,
                 };
                 acc = new_iter;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .async_iter_open => {
@@ -7685,11 +7798,12 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                     error.InvalidOpcode => return error.InvalidOpcode,
                 };
                 acc = new_iter;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .iter_step => {
@@ -7706,7 +7820,7 @@ fn runFrames(
                 const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse {
                     acc = Value.undefined_;
                     registers[r_done] = Value.true_;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 // Cynic-internal `__cynic_iter_done__` short-circuit:
                 // once the iter has surfaced `done: true` we stop
@@ -7717,7 +7831,7 @@ fn runFrames(
                     if (toBoolean(dv)) {
                         acc = Value.undefined_;
                         registers[r_done] = Value.true_;
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                 }
                 // §7.4.5 GetIteratorDirect — the spec captures
@@ -7744,7 +7858,7 @@ fn runFrames(
                     realm.heap.storeProperty(iter_obj, allocator, "__cynic_iter_next__", v) catch return error.OutOfMemory;
                     break :nv v;
                 };
-                if (committed) continue;
+                if (committed) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 const next_fn = heap_mod.valueAsFunction(next_v) orelse {
                     const ex = try makeTypeError(realm, "iterator.next is not callable");
                     f.ip = ip;
@@ -7753,7 +7867,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 const outcome = callJSFunction(allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -7773,7 +7887,7 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                 };
                 if (heap_mod.valueAsPlainObject(result_v)) |result_obj| {
@@ -7788,14 +7902,14 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     };
                     if (toBoolean(done_v)) {
                         iter_obj.set(allocator, "__cynic_iter_done__", Value.true_) catch return error.OutOfMemory;
                         acc = Value.undefined_;
                         registers[r_done] = Value.true_;
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                     const value_v = intrinsics_mod.getPropertyChain(realm, result_obj, "value") catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
@@ -7808,7 +7922,7 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     };
                     acc = value_v;
@@ -7825,8 +7939,9 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .for_in_open => {
@@ -7867,12 +7982,13 @@ fn runFrames(
                                 if (!try unwindThrow(allocator, realm, frames, probe_outcome)) {
                                     return .{ .thrown = probe_outcome };
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             }
                         }
                     }
                     acc = openForInIterator(allocator, realm, acc) catch return error.OutOfMemory;
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .pop_env => {
@@ -7884,6 +8000,7 @@ fn runFrames(
                 if (f.env) |cur_env| {
                     f.env = cur_env.parent;
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .module_load => {
@@ -7904,9 +8021,10 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, outcome.value)) {
                         return .{ .thrown = outcome.value };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 acc = outcome.value;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .dynamic_import => {
@@ -7987,6 +8105,7 @@ fn runFrames(
                         }
                     }
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .module_export => {
@@ -8043,6 +8162,7 @@ fn runFrames(
                 }
                 // No-op outside module context (e.g. running
                 // module-shaped code as a script for tests).
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .module_reexport_named => {
@@ -8094,6 +8214,7 @@ fn runFrames(
                         _ = mr.exports.properties.swapRemove(exp_s.flatBytes());
                     }
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .module_reexport_star => {
@@ -8130,7 +8251,7 @@ fn runFrames(
                 // No-op outside module context.
                 if (realm.current_module) |mr| {
                     const src_obj = heap_mod.valueAsPlainObject(acc) orelse {
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     };
                     // Helper closure values can't be expressed in
                     // Zig's switch arms — inline the merge for
@@ -8150,6 +8271,7 @@ fn runFrames(
                         try mergeStarKey(realm.allocator, mr.exports, key, src_obj, key);
                     }
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .module_link_complete => {
@@ -8180,7 +8302,7 @@ fn runFrames(
                 // boundary (matches §16.2.1.9
                 // AsyncModuleExecutionRejected propagating to
                 // each [[AsyncParentModule]]).
-                const mr = realm.current_module orelse continue;
+                const mr = realm.current_module orelse continue :dispatch try decodeNext(code, &ip, &committed);
                 f.ip = ip;
                 f.accumulator = acc;
                 committed = true;
@@ -8199,11 +8321,12 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 ip = f.ip;
                 acc = f.accumulator;
                 committed = false;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .lda_arguments => {
@@ -8274,6 +8397,7 @@ fn runFrames(
                     }
                 }
                 acc = heap_mod.taggedObject(obj);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .rest_args_from => {
@@ -8298,6 +8422,7 @@ fn runFrames(
                 }
                 realm.heap.storeProperty(obj, allocator, "length", Value.fromInt32(len)) catch return error.OutOfMemory;
                 acc = heap_mod.taggedObject(obj);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .def_accessor => {
@@ -8322,6 +8447,7 @@ fn runFrames(
                 // §10.1.11 OrdinaryOwnPropertyKeys — accessor counts as
                 // an own key for enumeration order.
                 obj.recordKey(allocator, key_s.flatBytes()) catch return error.OutOfMemory;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .def_computed_accessor => {
@@ -8338,7 +8464,7 @@ fn runFrames(
                     .ok => |v| v,
                     .handled => {
                         committed = true;
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                     .uncaught => |ex| return .{ .thrown = ex },
                 };
@@ -8356,6 +8482,7 @@ fn runFrames(
                     entry.value_ptr.*.getter = fn_obj;
                 }
                 obj.recordKey(allocator, owned.flatBytes()) catch return error.OutOfMemory;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .set_home => {
@@ -8394,6 +8521,7 @@ fn runFrames(
                         fn_obj.prototype = null;
                     }
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .set_proto_literal => {
@@ -8412,6 +8540,7 @@ fn runFrames(
                     obj.prototype = p;
                 }
                 // else: no-op; do not throw.
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .set_fn_name_from => {
@@ -8422,7 +8551,7 @@ fn runFrames(
                 const r_key = code[ip];
                 const prefix_kind = code[ip + 1];
                 ip += 2;
-                const fn_obj = heap_mod.valueAsFunction(acc) orelse continue;
+                const fn_obj = heap_mod.valueAsFunction(acc) orelse continue :dispatch try decodeNext(code, &ip, &committed);
                 // Already named — Annex-B-style nested fix-up
                 // doesn't override.
                 const cur_name = fn_obj.get("name");
@@ -8433,7 +8562,7 @@ fn runFrames(
                     // and we always emit those with the empty
                     // template — so only the "no prefix" path
                     // honours an existing non-empty name.
-                    if (cs.flatBytes().len != 0 and prefix_kind == 0) continue;
+                    if (cs.flatBytes().len != 0 and prefix_kind == 0) continue :dispatch try decodeNext(code, &ip, &committed);
                 }
                 const prefix: []const u8 = switch (prefix_kind) {
                     1 => "get ",
@@ -8454,7 +8583,7 @@ fn runFrames(
                     defer realm.allocator.free(final);
                     const owned = realm.heap.allocateString(final) catch return error.OutOfMemory;
                     realm.heap.storeFunctionProperty(fn_obj, realm.allocator, "name", Value.fromString(owned)) catch return error.OutOfMemory;
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 var key_buf: [64]u8 = undefined;
                 const key_slice = computedKeyToString(key_v, &key_buf);
@@ -8462,6 +8591,7 @@ fn runFrames(
                 defer realm.allocator.free(final);
                 const owned = realm.heap.allocateString(final) catch return error.OutOfMemory;
                 realm.heap.storeFunctionProperty(fn_obj, realm.allocator, "name", Value.fromString(owned)) catch return error.OutOfMemory;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .sta_private => {
@@ -8501,7 +8631,7 @@ fn runFrames(
                                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                                         return .{ .thrown = ex };
                                     }
-                                    continue;
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                 },
                             }
                         } else {
@@ -8512,7 +8642,7 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         }
                     } else if (!fn_recv.private_properties.contains(lookup_key)) {
                         const ex = try makeTypeError(realm, "Cannot write private field — brand check failed");
@@ -8522,7 +8652,7 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     } else if (fn_recv.private_methods.contains(lookup_key)) {
                         // §7.3.30 PrivateSet step 4 — methods aren't writable.
                         const ex = try makeTypeError(realm, "Cannot assign to private method");
@@ -8532,7 +8662,7 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     } else {
                         // Use the existing key slice in the map
                         // (it's the per-evaluation brand-prefixed
@@ -8545,7 +8675,7 @@ fn runFrames(
                         realm.heap.storeInternalSlot(.{ .function = fn_recv }, acc);
                         slot.* = acc;
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 const recv = heap_mod.valueAsPlainObject(registers[r_obj]) orelse {
                     const ex = try makeTypeError(realm, "Cannot write private field on non-object");
@@ -8555,7 +8685,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 // §15.7 — private accessor descriptors win over
                 // data slots on write. A write to a read-only
@@ -8574,7 +8704,7 @@ fn runFrames(
                                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                                     return .{ .thrown = ex };
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                         }
                     } else {
@@ -8585,7 +8715,7 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                 } else if (!recv.private_properties.contains(lookup_key)) {
                     const ex = try makeTypeError(realm, "Cannot write private field — brand check failed");
@@ -8595,7 +8725,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 } else if (recv.private_methods.contains(lookup_key)) {
                     // §7.3.30 PrivateSet step 4 — methods aren't writable.
                     const ex = try makeTypeError(realm, "Cannot assign to private method");
@@ -8605,7 +8735,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 } else {
                     // The slot key already exists in the map
                     // (brand-prefixed string in `class_arena`);
@@ -8615,6 +8745,7 @@ fn runFrames(
                     realm.heap.storeInternalSlot(.{ .object = recv }, acc);
                     slot.* = acc;
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .super_call, .super_call_forward, .super_call_spread => {
@@ -8710,7 +8841,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 const parent_fn = home_fn.static_parent orelse {
                     const ex = try makeTypeError(realm, "super(...) requires a constructor in the prototype chain");
@@ -8720,7 +8851,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 // §13.3.7.1 step 5 — `IsConstructor(func)` is checked
                 // *after* ArgumentListEvaluation. The args were just
@@ -8735,7 +8866,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 // §13.3.7 / §10.2.1.4 — `super(...)` invokes the
                 // parent constructor with `[[NewTarget]]` of the
@@ -8764,7 +8895,7 @@ fn runFrames(
                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                 return .{ .thrown = ex };
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         }
                         // §10.2.1.3 [[Construct]] step 10 — if the
                         // parent ctor body returned an Object, that
@@ -8793,7 +8924,7 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                 }
                 // §10.2.1.4 — `super(...)` flips `[[ThisBindingStatus]]`
@@ -8833,6 +8964,7 @@ fn runFrames(
                         }
                     }
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             // ── Globals ─────────────────────────────────────────────────
@@ -8860,7 +8992,7 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                     .none => {
                         const ex = try makeReferenceError(realm, key_s.flatBytes());
@@ -8870,9 +9002,10 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .lda_global_or_undef => {
                 // §13.5.3 step 3 — typeof of an unresolvable
@@ -8901,10 +9034,11 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                     .none => acc = Value.undefined_,
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .sta_global_init => {
                 // §9.1.1.4 InitializeBinding for a top-level
@@ -8921,6 +9055,7 @@ fn runFrames(
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
                 try realm.globals.putDecl(realm.allocator, key_s.flatBytes(), acc);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .sta_global_fn_decl => {
                 // §9.1.1.4.19 CreateGlobalFunctionBinding —
@@ -8934,6 +9069,7 @@ fn runFrames(
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
                 try realm.globals.installScriptFunctionBinding(realm.allocator, key_s.flatBytes(), acc);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .lda_global_slot => {
                 // Slot-indexed load of a top-level `let` / `const`
@@ -8955,6 +9091,7 @@ fn runFrames(
                 std.debug.assert(idx < vals.len);
                 std.debug.assert(realm.globals.decl_consts.count() == realm.globals.decl_env.count());
                 acc = vals[idx];
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .sta_global_slot_init => {
                 // §9.1.1.4 InitializeBinding — slot-indexed
@@ -8968,6 +9105,7 @@ fn runFrames(
                 std.debug.assert(idx < vals.len);
                 std.debug.assert(realm.globals.decl_consts.count() == realm.globals.decl_env.count());
                 vals[idx] = acc;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .sta_global_slot => {
                 // §9.1.1.4 SetMutableBinding — slot-indexed
@@ -8988,7 +9126,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 if (realm.globals.decl_consts.values()[idx]) {
                     const ex = try makeTypeError(realm, "Assignment to constant variable");
@@ -8998,9 +9136,10 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 vals[idx] = acc;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .sta_global => {
                 const k = readU16(code, ip);
@@ -9025,7 +9164,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 // §9.1.1.4 SetMutableBinding — declarative env-
                 // record first. `sta_global` is the non-init store:
@@ -9049,7 +9188,7 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                     if (realm.globals.isLexConst(key_s.flatBytes())) {
                         const ex = try makeTypeError(realm, "Assignment to constant variable");
@@ -9059,7 +9198,7 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                     try realm.globals.putDecl(realm.allocator, key_s.flatBytes(), acc);
                 } else {
@@ -9080,12 +9219,13 @@ fn runFrames(
                                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                                     return .{ .thrown = ex };
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             }
                         }
                     }
                     try realm.globals.put(realm.allocator, key_s.flatBytes(), acc);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .capture_unresolved_global => {
                 // §13.15.2 step 1.a — Evaluation of the LHS of
@@ -9110,6 +9250,7 @@ fn runFrames(
                     Value.fromBool(false)
                 else
                     Value.fromBool(true);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .sta_global_strict => {
                 // §13.15.2 step 1.d — PutValue on the Reference
@@ -9141,7 +9282,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 // Same declarative-vs-object env-record dispatch
                 // as `sta_global`. The unresolved-Reference check
@@ -9165,7 +9306,7 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                     if (realm.globals.isLexConst(key_s.flatBytes())) {
                         const ex = try makeTypeError(realm, "Assignment to constant variable");
@@ -9175,7 +9316,7 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                     try realm.globals.putDecl(realm.allocator, key_s.flatBytes(), acc);
                 } else {
@@ -9195,12 +9336,13 @@ fn runFrames(
                                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                                     return .{ .thrown = ex };
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             }
                         }
                     }
                     try realm.globals.put(realm.allocator, key_s.flatBytes(), acc);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             // ── Objects / properties ────────────────────────────────────
@@ -9208,6 +9350,7 @@ fn runFrames(
                 const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
                 obj.prototype = realm.intrinsics.object_prototype;
                 acc = heap_mod.taggedObject(obj);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .make_array => {
                 const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
@@ -9222,6 +9365,7 @@ fn runFrames(
                     .configurable = false,
                 }) catch return error.OutOfMemory;
                 acc = heap_mod.taggedObject(obj);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .array_spread => {
                 // `acc` holds the source; `r_arr` holds the target.
@@ -9241,7 +9385,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
 
                 const iter = openIterator(allocator, realm, acc) catch |err| switch (err) {
@@ -9259,7 +9403,7 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                 };
                 // The iterator object lives only as a Zig-stack
@@ -9281,7 +9425,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
 
                 // Walk until done. Cap iterations to guard against
@@ -9362,7 +9506,7 @@ fn runFrames(
                     }
                     target_len += 1;
                 }
-                if (committed) continue;
+                if (committed) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 if (iter_count >= max_iter) {
                     const ex = try makeRangeError(realm, "spread source too large");
                     f.ip = ip;
@@ -9371,7 +9515,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
 
                 // §10.4.2.4 — `target` is array-exotic by the
@@ -9392,6 +9536,7 @@ fn runFrames(
                         Value.fromDouble(@floatFromInt(target_len));
                     target.set(allocator, "length", len_v) catch return error.OutOfMemory;
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .object_spread => {
@@ -9405,7 +9550,7 @@ fn runFrames(
                 // target. `null` / `undefined` source is a no-op.
                 const r_obj = code[ip];
                 ip += 1;
-                if (acc.isNull() or acc.isUndefined()) continue;
+                if (acc.isNull() or acc.isUndefined()) continue :dispatch try decodeNext(code, &ip, &committed);
                 const target = heap_mod.valueAsPlainObject(registers[r_obj]) orelse return error.InvalidOpcode;
                 const src_v = acc;
                 const src_obj = heap_mod.valueAsPlainObject(src_v) orelse {
@@ -9414,7 +9559,7 @@ fn runFrames(
                     // own enumerable string keys (numeric index
                     // expansion for strings is rare in real code
                     // and trips object-rest tests; revisit later).
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 };
                 const obj_mod = @import("builtins/object.zig");
                 // §7.3.27 CopyDataProperties step 4 — fire the
@@ -9439,7 +9584,7 @@ fn runFrames(
                     };
                     break :blk_pk ko;
                 };
-                if (committed) continue;
+                if (committed) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 const keys: []const []const u8 = if (keys_opt) |k| k else (obj_mod.ownPropertyKeysOrdered(realm, src_obj) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.InvalidOpcode,
@@ -9522,7 +9667,8 @@ fn runFrames(
                     }
                     realm.heap.storeProperty(target, allocator, key, prop_value) catch return error.OutOfMemory;
                 }
-                if (committed) continue;
+                if (committed) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .lda_property => {
@@ -9543,12 +9689,12 @@ fn runFrames(
                         switch (r) {
                             .value => |v| {
                                 acc = v;
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                             .fallthrough => |t| obj = t,
                             .handled => {
                                 committed = true;
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                             .uncaught => |ex| return .{ .thrown = ex },
                         }
@@ -9577,7 +9723,7 @@ fn runFrames(
                                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                                     return .{ .thrown = ex };
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                         };
                         acc = v_ns;
@@ -9593,7 +9739,7 @@ fn runFrames(
                             .value => |v| acc = v,
                             .handled => {
                                 committed = true;
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                             .uncaught => |ex| return .{ .thrown = ex },
                         }
@@ -9613,7 +9759,7 @@ fn runFrames(
                                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                                         return .{ .thrown = ex };
                                     }
-                                    continue;
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                 },
                             }
                         } else {
@@ -9643,7 +9789,7 @@ fn runFrames(
                                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                                         return .{ .thrown = ex };
                                     }
-                                    continue;
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                 },
                             }
                         } else {
@@ -9684,7 +9830,7 @@ fn runFrames(
                                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                                             return .{ .thrown = ex };
                                         }
-                                        continue;
+                                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                     },
                                 }
                             } else {
@@ -9718,7 +9864,7 @@ fn runFrames(
                                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                                 return .{ .thrown = ex };
                                             }
-                                            continue;
+                                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                         },
                                     }
                                 } else {
@@ -9747,7 +9893,7 @@ fn runFrames(
                                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                                 return .{ .thrown = ex };
                                             }
-                                            continue;
+                                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                         },
                                     }
                                 } else {
@@ -9776,7 +9922,7 @@ fn runFrames(
                                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                                 return .{ .thrown = ex };
                                             }
-                                            continue;
+                                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                         },
                                     }
                                 } else {
@@ -9809,7 +9955,7 @@ fn runFrames(
                                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                                 return .{ .thrown = ex };
                                             }
-                                            continue;
+                                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                         },
                                     }
                                 } else {
@@ -9828,8 +9974,9 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .sta_property => {
                 const k = readU16(code, ip);
@@ -9846,11 +9993,12 @@ fn runFrames(
                         .ok => {},
                         .handled => {
                             committed = true;
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                         .uncaught => |ex| return .{ .thrown = ex },
                     }
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .def_property => {
                 // §7.3.7 CreateDataPropertyOrThrow — used by Array /
@@ -9885,6 +10033,7 @@ fn runFrames(
                     _ = obj.property_flags.swapRemove(key_s.flatBytes());
                 }
                 realm.heap.storePropertyWithFlags(obj, allocator, key_s.flatBytes(), acc, object_mod.PropertyFlags.default) catch return error.OutOfMemory;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .lda_computed => {
                 const r_obj = code[ip];
@@ -9903,7 +10052,7 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 // §7.1.19 ToPropertyKey — for object keys (e.g.
                 // `obj[arr]`), run ToPrimitive(string) so user-
@@ -9913,7 +10062,7 @@ fn runFrames(
                     .ok => |v| v,
                     .handled => {
                         committed = true;
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                     .uncaught => |ex| return .{ .thrown = ex },
                 };
@@ -9927,12 +10076,12 @@ fn runFrames(
                         switch (r) {
                             .value => |v| {
                                 acc = v;
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                             .fallthrough => |t| obj = t,
                             .handled => {
                                 committed = true;
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                             .uncaught => |ex| return .{ .thrown = ex },
                         }
@@ -9958,7 +10107,7 @@ fn runFrames(
                             } else {
                                 acc = Value.undefined_;
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         }
                     }
                     // §9.4.6.7 Module Namespace [[Get]] — mirror
@@ -9980,11 +10129,11 @@ fn runFrames(
                                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                                     return .{ .thrown = ex };
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                         };
                         acc = v_ns;
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                     // §10.1.8 [[Get]] — accessor wins over data.
                     // Mirror the `lda_property` handling so
@@ -9995,11 +10144,11 @@ fn runFrames(
                             .value => |v| acc = v,
                             .handled => {
                                 committed = true;
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                             .uncaught => |ex| return .{ .thrown = ex },
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                     if (lookupAccessor(obj, key_slice)) |acc_pair| {
                         if (acc_pair.getter) |getter| {
@@ -10013,13 +10162,13 @@ fn runFrames(
                                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                                         return .{ .thrown = ex };
                                     }
-                                    continue;
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                 },
                             }
                         } else {
                             acc = Value.undefined_;
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                     acc = obj.get(key_slice);
                 } else if (heap_mod.valueAsFunction(recv)) |fn_obj| {
@@ -10040,7 +10189,7 @@ fn runFrames(
                                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                                         return .{ .thrown = ex };
                                     }
-                                    continue;
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                 },
                             }
                         } else {
@@ -10091,7 +10240,7 @@ fn runFrames(
                                             if (!try unwindThrow(allocator, realm, frames, ex)) {
                                                 return .{ .thrown = ex };
                                             }
-                                            continue;
+                                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                         },
                                     }
                                 } else {
@@ -10126,7 +10275,7 @@ fn runFrames(
                                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                                             return .{ .thrown = ex };
                                         }
-                                        continue;
+                                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                     },
                                 }
                             } else {
@@ -10143,9 +10292,10 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .sta_computed => {
                 const r_obj = code[ip];
@@ -10158,7 +10308,7 @@ fn runFrames(
                     .ok => |v| v,
                     .handled => {
                         committed = true;
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                     .uncaught => |ex| return .{ .thrown = ex },
                 };
@@ -10214,14 +10364,14 @@ fn runFrames(
                                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                                         return .{ .thrown = ex };
                                     }
-                                    continue;
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                 },
                             };
                             // Re-fetch the live view (a user `valueOf` could
                             // have detached / shrunk the buffer between
                             // ToNumber and the write).
                             const live_tv = obj.typed_view orelse {
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             };
                             if (ta_mod.isValidIntegerIndexPub(live_tv, num)) {
                                 const buf = live_tv.viewed.array_buffer.?;
@@ -10232,7 +10382,7 @@ fn runFrames(
                                 // than modular ToUint8 (§7.1.6).
                                 intrinsics_mod.writeTypedElementForView(buf, live_tv, live_tv.byte_offset + idx * elem_size, coerced);
                             }
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         }
                     }
                 }
@@ -10248,11 +10398,12 @@ fn runFrames(
                         .ok => {},
                         .handled => {
                             committed = true;
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                         .uncaught => |ex| return .{ .thrown = ex },
                     }
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .def_computed => {
                 // §7.3.7 CreateDataPropertyOrThrow with a computed
@@ -10292,6 +10443,7 @@ fn runFrames(
                 }
                 realm.heap.storePropertyWithFlags(obj, allocator, key_slice, acc, object_mod.PropertyFlags.default) catch return error.OutOfMemory;
                 obj.key_anchors.append(allocator, key_js) catch return error.OutOfMemory;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .del_named_property => {
                 const k = readU16(code, ip);
@@ -10320,10 +10472,10 @@ fn runFrames(
                                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                                         return .{ .thrown = ex };
                                     }
-                                    continue;
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                 }
                                 acc = v;
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                             .fallthrough => |t| {
                                 const outcome = deleteOwnProperty(realm, heap_mod.taggedObject(t), key_s.flatBytes());
@@ -10337,14 +10489,14 @@ fn runFrames(
                                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                                             return .{ .thrown = ex };
                                         }
-                                        continue;
+                                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                     },
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                             .handled => {
                                 committed = true;
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                             .uncaught => |ex| return .{ .thrown = ex },
                         }
@@ -10361,9 +10513,10 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .del_computed_property => {
                 const r_obj = code[ip];
@@ -10375,7 +10528,7 @@ fn runFrames(
                     .ok => |v| v,
                     .handled => {
                         committed = true;
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                     .uncaught => |ex| return .{ .thrown = ex },
                 };
@@ -10394,10 +10547,10 @@ fn runFrames(
                                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                                         return .{ .thrown = ex };
                                     }
-                                    continue;
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                 }
                                 acc = v;
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                             .fallthrough => |t| {
                                 const outcome = deleteOwnProperty(realm, heap_mod.taggedObject(t), key_slice);
@@ -10411,14 +10564,14 @@ fn runFrames(
                                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                                             return .{ .thrown = ex };
                                         }
-                                        continue;
+                                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                     },
                                 }
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                             .handled => {
                                 committed = true;
-                                continue;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                             .uncaught => |ex| return .{ .thrown = ex },
                         }
@@ -10435,9 +10588,10 @@ fn runFrames(
                         if (!try unwindThrow(allocator, realm, frames, ex)) {
                             return .{ .thrown = ex };
                         }
-                        continue;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             // ── Environments / closures ─────────────────────────────────
@@ -10446,6 +10600,7 @@ fn runFrames(
                 ip += 1;
                 const env = realm.heap.allocateEnvironment(f.env, slot_count) catch return error.OutOfMemory;
                 f.env = env;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .lda_env => {
                 const depth = code[ip];
@@ -10458,6 +10613,7 @@ fn runFrames(
                 }
                 if (env == null or slot >= env.?.slots.len) return error.InvalidOpcode;
                 acc = env.?.slots[slot];
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .sta_env => {
                 const depth = code[ip];
@@ -10470,6 +10626,7 @@ fn runFrames(
                 }
                 if (env == null or slot >= env.?.slots.len) return error.InvalidOpcode;
                 realm.heap.storeEnvSlot(env.?, slot, acc);
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             // ── Exceptions ──────────────────────────────────────────────
@@ -10480,6 +10637,7 @@ fn runFrames(
                 if (!try unwindThrow(allocator, realm, frames, acc)) {
                     return .{ .thrown = acc };
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .throw_if_hole => {
                 if (acc.isHole()) {
@@ -10491,6 +10649,7 @@ fn runFrames(
                         return .{ .thrown = ex };
                     }
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .require_object_coercible => {
                 if (acc.isNull() or acc.isUndefined()) {
@@ -10502,6 +10661,7 @@ fn runFrames(
                         return .{ .thrown = ex };
                     }
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .throw_assign_const => {
                 // §8.1.1.1.4 SetMutableBinding step 9.b — write to
@@ -10517,6 +10677,7 @@ fn runFrames(
                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                     return .{ .thrown = ex };
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .throw_if_not_object => {
                 // §7.2.5 IsObject — pass plain objects and callable
@@ -10543,6 +10704,7 @@ fn runFrames(
                         return .{ .thrown = ex };
                     }
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .to_property_key => {
@@ -10560,11 +10722,12 @@ fn runFrames(
                         .ok => |v| acc = v,
                         .handled => {
                             committed = true;
-                            continue;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                         .uncaught => |ex| return .{ .thrown = ex },
                     }
                 }
+                continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
             .return_ => {
@@ -10666,15 +10829,15 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
-                    continue;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 if (frames.items.len == 0) {
                     return .{ .value = ret };
                 }
                 frames.items[frames.items.len - 1].accumulator = ret;
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             },
         }
-    }
     unreachable;
 }
 
