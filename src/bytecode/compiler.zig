@@ -126,6 +126,24 @@ pub const Compiler = struct {
     /// the `depth` operand of `LdaEnv` / `StaEnv` from the
     /// difference with the binding's recorded `env_depth`.
     env_depth: u8 = 0,
+    /// Base index into the realm's global declarative env-record
+    /// (`GlobalBindings.decl_env`) for this script's slot-indexed
+    /// global-lexical bindings. Snapshotted ONCE in
+    /// `compileScriptAsChunk` immediately before `hoistLetConst`
+    /// (= `realm.globals.decl_env.count()` at that moment), then
+    /// stamped into the script body chunk's `Builder` and into
+    /// every nested-function sub-`Builder` so the whole compile
+    /// tree shares one base. Runtime slot index =
+    /// `global_lexical_base + Binding.global_lex_slot`. Unused
+    /// (0) for modules. See `Chunk.global_lexical_base`.
+    global_lexical_base: u32 = 0,
+    /// Running counter for assigning `Binding.global_lex_slot` to
+    /// top-level script `let` / `const` / `class` bindings, in
+    /// hoist order. Each global-lexical binding declared via
+    /// `declareBindingFull` takes the next value; `decl_env`
+    /// entries land in the same insertion order, so slot `s`
+    /// maps to `decl_env` index `global_lexical_base + s`.
+    next_global_lex_slot: u32 = 0,
     /// Anonymous temp registers in use during expression
     /// evaluation. Independent of the env-based named bindings.
     temps_in_use: u8 = 0,
@@ -231,6 +249,20 @@ pub const Compiler = struct {
             .source = source,
             .builder = Builder.init(allocator),
         };
+    }
+
+    /// Allocate a `Builder` for a nested-function / sub-chunk,
+    /// pre-stamped with the script's `global_lexical_base`. The
+    /// base is constant for the entire compile tree of one
+    /// script (see `Compiler.global_lexical_base`); a nested
+    /// function is invoked with its own chunk, so that chunk
+    /// must carry the script's base for its slot-indexed
+    /// global-lexical opcodes to resolve. Modules leave the base
+    /// at 0 (module top-levels are never slotted).
+    fn freshSubBuilder(self: *Compiler) Builder {
+        var b = Builder.init(self.allocator);
+        b.global_lexical_base = self.global_lexical_base;
+        return b;
     }
 
     pub fn deinit(self: *Compiler) void {
@@ -370,6 +402,22 @@ pub const Compiler = struct {
         // import / export, not the global object.
         const is_global = target.kind == .script and !self.is_module;
         const slot: u8 = if (is_global) 0 else try self.newEnvSlot();
+        // Slot-indexed global-lexical access: a top-level script
+        // `let` / `const` / `class` binding gets a compile-time
+        // 0-based slot, assigned in hoist order. Top-level `var` /
+        // `function` declarations stay on the object env-record
+        // (no decl_env entry, no slot — keep the string-keyed
+        // path); module top-levels are never `is_global`. Each
+        // slotted binding takes the next counter value; the
+        // matching `installScriptLexBinding` call below appends a
+        // `decl_env` entry in the same order, so slot `s` maps to
+        // `decl_env` index `global_lexical_base + s`.
+        const has_lex_slot = is_global and kind != .var_;
+        const lex_slot: u32 = if (has_lex_slot) blk: {
+            const s = self.next_global_lex_slot;
+            self.next_global_lex_slot += 1;
+            break :blk s;
+        } else 0;
         const binding: Binding = .{
             .name = name,
             .env_slot = slot,
@@ -377,6 +425,8 @@ pub const Compiler = struct {
             .kind = kind,
             .span = span,
             .is_global = is_global,
+            .global_lex_slot = lex_slot,
+            .has_global_lex_slot = has_lex_slot,
         };
         try target.bindings.append(self.allocator, binding);
         if (is_global) {
@@ -446,9 +496,18 @@ pub const Compiler = struct {
             return;
         }
         if (binding.is_global) {
-            const k = try self.internString(binding.name);
-            try self.builder.emitOp(.lda_global, span);
-            try self.builder.emitU16(k);
+            if (binding.has_global_lex_slot) {
+                // Slot-indexed load — bounds-checked array index
+                // into the realm's declarative env-record, no name
+                // hash. The `throw_if_hole` below handles §13.3.1
+                // TDZ exactly as the `lda_global` path does.
+                try self.builder.emitOp(.lda_global_slot, span);
+                try self.builder.emitU32(binding.global_lex_slot);
+            } else {
+                const k = try self.internString(binding.name);
+                try self.builder.emitOp(.lda_global, span);
+                try self.builder.emitU16(k);
+            }
         } else {
             const depth = self.env_depth - binding.env_depth;
             try self.builder.emitOp(.lda_env, span);
@@ -519,25 +578,43 @@ pub const Compiler = struct {
             return;
         }
         if (binding.is_global) {
-            const k = try self.internString(binding.name);
-            // §9.1.1.4 InitializeBinding (`is_init = true` for
-            // let / const / class declarators + function-decl
-            // hoist) bypasses the const-immutability gate so the
-            // declaration's initial value lands cleanly. A later
-            // re-assignment of the same name routes through the
-            // ordinary `sta_global` path and re-applies the gate.
-            //
-            // §9.1.1.4.19 CreateGlobalFunctionBinding —
-            // function-decl writes overwrite both data slot AND
-            // descriptor flags via `sta_global_fn_decl`.
-            const op: Op = if (is_init and binding.is_function_decl)
-                .sta_global_fn_decl
-            else if (is_init and binding.kind != .var_)
-                .sta_global_init
-            else
-                .sta_global;
-            try self.builder.emitOp(op, span);
-            try self.builder.emitU16(k);
+            if (binding.has_global_lex_slot) {
+                // Slot-indexed store for a top-level `let` /
+                // `const` / `class`. `is_init` writes (declarator
+                // initializers, destructuring leaves threaded with
+                // is_init) bypass the const gate via
+                // `sta_global_slot_init` — §9.1.1.4
+                // InitializeBinding. A re-assignment routes through
+                // `sta_global_slot`, which re-applies the §13.3.1
+                // TDZ + §13.15.2 const checks inside the opcode.
+                // A slotted binding is always lexical and never a
+                // function declaration (those are `var`-kind, no
+                // slot), so the `sta_global_fn_decl` case can't
+                // arise here.
+                const op: Op = if (is_init) .sta_global_slot_init else .sta_global_slot;
+                try self.builder.emitOp(op, span);
+                try self.builder.emitU32(binding.global_lex_slot);
+            } else {
+                const k = try self.internString(binding.name);
+                // §9.1.1.4 InitializeBinding (`is_init = true` for
+                // let / const / class declarators + function-decl
+                // hoist) bypasses the const-immutability gate so the
+                // declaration's initial value lands cleanly. A later
+                // re-assignment of the same name routes through the
+                // ordinary `sta_global` path and re-applies the gate.
+                //
+                // §9.1.1.4.19 CreateGlobalFunctionBinding —
+                // function-decl writes overwrite both data slot AND
+                // descriptor flags via `sta_global_fn_decl`.
+                const op: Op = if (is_init and binding.is_function_decl)
+                    .sta_global_fn_decl
+                else if (is_init and binding.kind != .var_)
+                    .sta_global_init
+                else
+                    .sta_global;
+                try self.builder.emitOp(op, span);
+                try self.builder.emitU16(k);
+            }
         } else {
             const depth = self.env_depth - binding.env_depth;
             // §13.3.1 — non-init store to a `let` / `const` env
@@ -6609,7 +6686,7 @@ pub const Compiler = struct {
         const saved_env_depth = self.env_depth;
         const saved_current_loop = self.current_loop;
 
-        self.builder = @import("chunk.zig").Builder.init(self.allocator);
+        self.builder = self.freshSubBuilder();
         var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
         self.scope = &fn_scope;
         self.env_slot_count = 0;
@@ -6670,7 +6747,7 @@ pub const Compiler = struct {
         const saved_env_depth = self.env_depth;
         const saved_current_loop = self.current_loop;
 
-        self.builder = @import("chunk.zig").Builder.init(self.allocator);
+        self.builder = self.freshSubBuilder();
         var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
         self.scope = &fn_scope;
         self.env_slot_count = 0;
@@ -6738,7 +6815,7 @@ pub const Compiler = struct {
         const saved_env_depth = self.env_depth;
         const saved_current_loop = self.current_loop;
 
-        self.builder = @import("chunk.zig").Builder.init(self.allocator);
+        self.builder = self.freshSubBuilder();
         var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
         self.scope = &fn_scope;
         self.env_slot_count = 0;
@@ -6866,7 +6943,7 @@ pub const Compiler = struct {
         const saved_current_loop = self.current_loop;
         const saved_is_async = self.current_is_async;
 
-        self.builder = @import("chunk.zig").Builder.init(self.allocator);
+        self.builder = self.freshSubBuilder();
         var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
         self.scope = &fn_scope;
         self.env_slot_count = 0;
@@ -6974,7 +7051,7 @@ pub const Compiler = struct {
         const saved_env_depth = self.env_depth;
         const saved_current_loop = self.current_loop;
 
-        self.builder = @import("chunk.zig").Builder.init(self.allocator);
+        self.builder = self.freshSubBuilder();
         var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
         self.scope = &fn_scope;
         self.env_slot_count = 0;
@@ -10558,7 +10635,7 @@ fn compileFunctionTemplateExtNamed(
     self.pending_labels = .empty;
 
     // Reset to a fresh inner state.
-    self.builder = @import("chunk.zig").Builder.init(self.allocator);
+    self.builder = self.freshSubBuilder();
     // §15.6.5 — when this is a NAMED function expression, splice a
     // synthetic 1-binding scope between the outer scope and the
     // function body scope. Inner references to the function's own
@@ -10790,6 +10867,19 @@ pub fn compileScriptAsChunk(
         // omitted to keep the chunk small).
         try c.emitGlobalDeclThrow(name, start_span);
     } else {
+        // Slot-indexed global-lexical access: snapshot the realm's
+        // declarative env-record size BEFORE `hoistLetConst`
+        // installs this script's top-level `let` / `const` /
+        // `class` bindings. Each such binding takes the next
+        // 0-based slot (`next_global_lex_slot`); the runtime index
+        // is `global_lexical_base + slot`. A realm runs multiple
+        // scripts, so script 2's slot 0 is `decl_env` index N, not
+        // 0 — this snapshot is what makes the multi-script case
+        // correct. Stamp the base into the script body chunk's
+        // builder; every nested-function sub-builder copies it via
+        // `freshSubBuilder` so the whole tree shares one base.
+        c.global_lexical_base = @intCast(c.realm.globals.decl_env.count());
+        c.builder.global_lexical_base = c.global_lexical_base;
         try c.hoistLetConst(program.body);
         try c.hoistVarAndFunctions(program.body);
         try c.emitVarInits(start_span);

@@ -157,6 +157,10 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
                 const k = readU16(chunk.code, i + 1);
                 try buf.print(allocator, " k{d}", .{k});
             },
+            .lda_global_slot, .sta_global_slot, .sta_global_slot_init => {
+                const slot = readU32(chunk.code, i + 1);
+                try buf.print(allocator, " s{d}", .{slot});
+            },
             .capture_unresolved_global, .sta_global_strict => {
                 const k = readU16(chunk.code, i + 1);
                 const r = chunk.code[i + 3];
@@ -186,6 +190,13 @@ fn readU16(code: []const u8, at: usize) u16 {
 
 fn readI16(code: []const u8, at: usize) i16 {
     return @bitCast(readU16(code, at));
+}
+
+fn readU32(code: []const u8, at: usize) u32 {
+    return @as(u32, code[at]) |
+        (@as(u32, code[at + 1]) << 8) |
+        (@as(u32, code[at + 2]) << 16) |
+        (@as(u32, code[at + 3]) << 24);
 }
 
 fn readI32(code: []const u8, at: usize) i32 {
@@ -296,6 +307,32 @@ test "disasm: register operands" {
         \\  0000 Star r0 [0..5]
         \\  0002 Ldar r0 [0..5]
         \\  0004 Return [0..5]
+        \\)
+    , out);
+}
+
+test "disasm: global-lexical slot opcodes print the slot index" {
+    var b = Builder.init(testing.allocator);
+    errdefer b.deinit();
+    const span: Span = .{ .start = 0, .end = 3 };
+    try b.emitOp(.lda_global_slot, span);
+    try b.emitU32(0);
+    try b.emitOp(.sta_global_slot, span);
+    try b.emitU32(2);
+    try b.emitOp(.sta_global_slot_init, span);
+    try b.emitU32(5);
+    try b.emitOp(.return_, span);
+    var chunk = try b.finish();
+    defer chunk.deinit(testing.allocator);
+
+    const out = try dump(testing.allocator, &chunk);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings(
+        \\(chunk regs=0 consts=0
+        \\  0000 LdaGlobalSlot s0 [0..3]
+        \\  0005 StaGlobalSlot s2 [0..3]
+        \\  000a StaGlobalSlotInit s5 [0..3]
+        \\  000f Return [0..3]
         \\)
     , out);
 }

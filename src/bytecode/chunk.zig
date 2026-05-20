@@ -272,6 +272,20 @@ pub const Chunk = struct {
     /// function-body chunks (their `await` is inside an async
     /// function, which is handled separately).
     is_async_module: bool = false,
+    /// Base index into the realm's global declarative env-record
+    /// (`GlobalBindings.decl_env`) for this chunk's slot-indexed
+    /// global-lexical opcodes (`lda_global_slot` /
+    /// `sta_global_slot` / `sta_global_slot_init`). A realm runs
+    /// multiple scripts (`Realm.evaluateScript` — e.g. the
+    /// test262 harness runs `sta.js` + `assert.js` + the fixture);
+    /// each script's slot 0 is `decl_env` index `base`, snapshotted
+    /// in `compileScriptAsChunk` just before `hoistLetConst`. Every
+    /// nested-function sub-chunk of a script inherits the SAME base
+    /// (the script's whole compile tree is one base). The runtime
+    /// index for slot `s` is `global_lexical_base + s`. `0` for
+    /// modules (module top-levels are never slotted) and for any
+    /// chunk that emits no slot opcodes.
+    global_lexical_base: u32 = 0,
 
     pub fn deinit(self: *Chunk, allocator: std.mem.Allocator) void {
         allocator.free(self.code);
@@ -302,6 +316,12 @@ pub const Builder = struct {
     /// top-level emit for any `.await_` opcode (tracked via the
     /// compiler's `module_has_top_level_await` flag).
     is_async_module: bool = false,
+    /// Surfaced on the finished `Chunk` as `.global_lexical_base`.
+    /// Stamped by the compiler from its `global_lexical_base`
+    /// field (constant for a script's whole compile tree) so the
+    /// script body chunk AND every nested-function sub-chunk
+    /// carry the same base. See `Chunk.global_lexical_base`.
+    global_lexical_base: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) Builder {
         return .{ .allocator = allocator };
@@ -391,6 +411,10 @@ pub const Builder = struct {
         try self.code.appendSlice(self.allocator, &std.mem.toBytes(x));
     }
 
+    pub fn emitU32(self: *Builder, x: u32) !void {
+        try self.code.appendSlice(self.allocator, &std.mem.toBytes(x));
+    }
+
     /// Patch a previously-emitted i16 placeholder at `at` with the
     /// signed offset from the byte AFTER the operand to `target`.
     pub fn patchI16(self: *Builder, at: u32, target: u32) !void {
@@ -429,6 +453,7 @@ pub const Builder = struct {
             .class_templates = try self.class_templates.toOwnedSlice(self.allocator),
             .register_count = self.register_count,
             .is_async_module = self.is_async_module,
+            .global_lexical_base = self.global_lexical_base,
         };
     }
 };

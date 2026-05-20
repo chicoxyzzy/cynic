@@ -647,6 +647,38 @@ pub const Op = enum(u8) {
     /// matching the function-decl shape rather than the prior
     /// `defineProperty` shape.
     sta_global_fn_decl,
+    /// `[op] [slot:u32]` — slot-indexed load of a top-level
+    /// `let` / `const` / `class` binding. The runtime index is
+    /// `chunk.global_lexical_base + slot`; the value is read by
+    /// a bounds-checked array index into the declarative env-
+    /// record's `decl_env.values()` — no name hash, no map
+    /// lookup. The compiler emits this in place of `lda_global`
+    /// only when the resolved binding is provably a global
+    /// lexical with an assigned slot.
+    ///
+    /// Soundness: Cynic ships no `eval` / `Function(string)`, so
+    /// the full set of global-lexical bindings is statically
+    /// known at compile time — no runtime guard / ResolveType is
+    /// needed before the index. This is the perf dividend of the
+    /// SES no-dynamic-code stance.
+    ///
+    /// TDZ (§13.3.1): the slot holds the Hole until init; this
+    /// op loads whatever is there and the compiler emits a
+    /// following `throw_if_hole`, exactly as `lda_global` does.
+    lda_global_slot,
+    /// `[op] [slot:u32]` — slot-indexed non-init store to a
+    /// top-level `let` / `const` binding. Runtime index is
+    /// `chunk.global_lexical_base + slot`. If the slot holds the
+    /// Hole → §13.3.1 ReferenceError; else if the binding is
+    /// `const` (checked via `decl_consts.values()[idx]`) →
+    /// §13.15.2 TypeError; else write `acc` into the slot.
+    sta_global_slot,
+    /// `[op] [slot:u32]` — slot-indexed initializer store for a
+    /// top-level `let` / `const` / `class` binding. Runtime
+    /// index is `chunk.global_lexical_base + slot`. Writes `acc`
+    /// into the slot unconditionally (fills the TDZ Hole); no
+    /// const check — this IS §9.1.1.4 InitializeBinding.
+    sta_global_slot_init,
 
     // ── Objects / properties ────────────────────────────────────
     /// Allocate a fresh empty `JSObject` whose `[[Prototype]]` is
@@ -921,6 +953,10 @@ pub const Op = enum(u8) {
             .call_method => 3, // r_recv:u8 + r_callee:u8 + argc:u8
             .make_environment => 1, // slot_count:u8
             .lda_smi => 4, // i32 immediate
+            .lda_global_slot,
+            .sta_global_slot,
+            .sta_global_slot_init,
+            => 4, // slot:u32
         };
     }
 
@@ -1039,6 +1075,9 @@ pub const Op = enum(u8) {
             .sta_global => "StaGlobal",
             .sta_global_init => "StaGlobalInit",
             .sta_global_fn_decl => "StaGlobalFnDecl",
+            .lda_global_slot => "LdaGlobalSlot",
+            .sta_global_slot => "StaGlobalSlot",
+            .sta_global_slot_init => "StaGlobalSlotInit",
             .capture_unresolved_global => "CaptureUnresolvedGlobal",
             .sta_global_strict => "StaGlobalStrict",
             .throw_ => "Throw",

@@ -2541,6 +2541,69 @@ test "later: const declared in script A is reachable in script B" {
     try testing.expectEqual(@as(i32, 4), v.asInt32());
 }
 
+test "global-lexical slot: multi-script base offsets each script's slot 0" {
+    // Slot-indexed global-lexical access — each script's slot 0
+    // maps to a DISTINCT `decl_env` index because
+    // `compileScriptAsChunk` snapshots `decl_env.count()` as the
+    // chunk's `global_lexical_base` before hoisting. Three scripts
+    // declaring distinct `let`s and cross-referencing the earlier
+    // ones exercises the base arithmetic: script 2's slot 0 is
+    // index 1, script 3's slot 0 is index 2.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+
+    _ = try evaluateScript(testing.allocator, &realm, "let s1 = 10;");
+    _ = try evaluateScript(testing.allocator, &realm, "let s2 = s1 + 20;");
+    const r = try evaluateScript(testing.allocator, &realm, "let s3 = s1 + s2 + 100; s3;");
+    const v = switch (r) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UnexpectedThrow,
+    };
+    // s1=10, s2=30, s3 = 10 + 30 + 100 = 140.
+    try testing.expectEqual(@as(i32, 140), v.asInt32());
+}
+
+test "global-lexical slot: nested function reads slotted binding via inherited base" {
+    // A nested function runs with its own sub-chunk; that chunk
+    // must carry the script's `global_lexical_base` so a
+    // `lda_global_slot` inside it resolves correctly. The function
+    // is defined in script A and called in script B — the base is
+    // baked into the function's chunk at compile time.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+
+    _ = try evaluateScript(testing.allocator, &realm, "let base = 7; function getBase() { return base; }");
+    _ = try evaluateScript(testing.allocator, &realm, "let other = 3;");
+    const r = try evaluateScript(testing.allocator, &realm, "getBase() + other;");
+    const v = switch (r) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UnexpectedThrow,
+    };
+    try testing.expectEqual(@as(i32, 10), v.asInt32());
+}
+
+test "global-lexical slot: re-assignment and const guard hold across scripts" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+
+    _ = try evaluateScript(testing.allocator, &realm, "let m = 1; const c = 2;");
+    _ = try evaluateScript(testing.allocator, &realm, "m = m + 40;");
+    const r = try evaluateScript(testing.allocator, &realm, "m;");
+    const v = switch (r) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UnexpectedThrow,
+    };
+    try testing.expectEqual(@as(i32, 41), v.asInt32());
+
+    // §13.15.2 — re-assigning the `const` from a third script
+    // throws a TypeError through `sta_global_slot`'s const check.
+    const r_const = try evaluateScript(testing.allocator, &realm, "c = 9;");
+    try testing.expect(r_const == .thrown);
+}
+
 test "later: delete o.x removes own property; subsequent read is undefined" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();

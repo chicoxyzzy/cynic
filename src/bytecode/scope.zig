@@ -117,6 +117,23 @@ pub const Binding = struct {
     /// arena that produced it. Only meaningful when `is_import`
     /// is true.
     import_name: []const u8 = "",
+    /// Compile-time 0-based slot for a top-level `let` / `const`
+    /// / `class` binding, assigned in hoist order. The runtime
+    /// index into the realm's declarative env-record is
+    /// `chunk.global_lexical_base + global_lex_slot`. Only
+    /// meaningful when `has_global_lex_slot` is true (which
+    /// implies `is_global` and a lexical `kind`). Reads emit
+    /// `lda_global_slot`, writes emit `sta_global_slot` /
+    /// `sta_global_slot_init` — a bounds-checked array index
+    /// instead of a name-keyed hash lookup. See
+    /// `Chunk.global_lexical_base`.
+    global_lex_slot: u32 = 0,
+    /// True when `global_lex_slot` has been assigned — set at
+    /// declaration time for top-level script `let` / `const` /
+    /// `class` bindings. Global `var` / `function` bindings,
+    /// builtins, and module bindings leave this false and keep
+    /// the string-keyed `lda_global` / `sta_global` path.
+    has_global_lex_slot: bool = false,
 };
 
 pub const ScopeKind = enum {

@@ -8923,6 +8923,73 @@ fn runFrames(
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
                 try realm.globals.installScriptFunctionBinding(realm.allocator, key_s.flatBytes(), acc);
             },
+            .lda_global_slot => {
+                // Slot-indexed load of a top-level `let` / `const`
+                // / `class` binding. Runtime index =
+                // `chunk.global_lexical_base + slot`; the value is
+                // a bounds-checked array index into the §9.1.1.4
+                // declarative env-record (`decl_env.values()`) —
+                // no name hash. The compiler emits this only when
+                // the resolved binding is provably a global
+                // lexical; Cynic ships no `eval`, so the complete
+                // global-lexical set is known at compile time and
+                // no runtime guard is needed. §13.3.1 TDZ: a
+                // following `throw_if_hole` (emitted by the
+                // compiler) catches the uninitialised slot.
+                const slot = readU32(code, ip);
+                ip += 4;
+                const idx = local_chunk.global_lexical_base + slot;
+                const vals = realm.globals.decl_env.values();
+                std.debug.assert(idx < vals.len);
+                std.debug.assert(realm.globals.decl_consts.count() == realm.globals.decl_env.count());
+                acc = vals[idx];
+            },
+            .sta_global_slot_init => {
+                // §9.1.1.4 InitializeBinding — slot-indexed
+                // initializer store for a top-level `let` /
+                // `const` / `class`. Fills the TDZ Hole; no const
+                // check (this IS the initialization step).
+                const slot = readU32(code, ip);
+                ip += 4;
+                const idx = local_chunk.global_lexical_base + slot;
+                const vals = realm.globals.decl_env.values();
+                std.debug.assert(idx < vals.len);
+                std.debug.assert(realm.globals.decl_consts.count() == realm.globals.decl_env.count());
+                vals[idx] = acc;
+            },
+            .sta_global_slot => {
+                // §9.1.1.4 SetMutableBinding — slot-indexed
+                // non-init store to a top-level `let` / `const`.
+                // §13.3.1: Hole → ReferenceError; §13.15.2:
+                // `const` → TypeError; else write.
+                const slot = readU32(code, ip);
+                ip += 4;
+                const idx = local_chunk.global_lexical_base + slot;
+                const vals = realm.globals.decl_env.values();
+                std.debug.assert(idx < vals.len);
+                std.debug.assert(realm.globals.decl_consts.count() == realm.globals.decl_env.count());
+                if (vals[idx].isHole()) {
+                    const ex = try makeReferenceError(realm, "Cannot access binding before initialisation");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                }
+                if (realm.globals.decl_consts.values()[idx]) {
+                    const ex = try makeTypeError(realm, "Assignment to constant variable");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue;
+                }
+                vals[idx] = acc;
+            },
             .sta_global => {
                 const k = readU16(code, ip);
                 ip += 2;
@@ -12665,6 +12732,13 @@ fn readI32(code: []const u8, at: usize) i32 {
         (@as(u32, code[at + 2]) << 16) |
         (@as(u32, code[at + 3]) << 24);
     return @bitCast(u);
+}
+
+fn readU32(code: []const u8, at: usize) u32 {
+    return @as(u32, code[at]) |
+        (@as(u32, code[at + 1]) << 8) |
+        (@as(u32, code[at + 2]) << 16) |
+        (@as(u32, code[at + 3]) << 24);
 }
 
 fn applyOffset(ip: usize, off: i16) usize {
