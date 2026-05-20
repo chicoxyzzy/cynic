@@ -34,6 +34,7 @@
 //! `flatBytesIfFlat()` (fast read-only branch).
 
 const std = @import("std");
+const Heap = @import("heap.zig").Heap;
 
 /// Maximum string length in WTF-8 bytes. A concatenation whose
 /// result would exceed this overflows `byte_len` (`u32`) and is
@@ -107,15 +108,15 @@ pub const JSString = struct {
     pub const Cons = struct {
         left: *JSString,
         right: *JSString,
-        /// The byte allocator the owning heap uses for flat string
-        /// payloads. Stored on the cons node so `flatBytes()` /
-        /// `equals()` — heap-free read accessors — can materialise
-        /// the rope on demand (V8 / JSC treat ropes as fully
-        /// transparent: every byte reader flattens). It is exactly
-        /// the allocator `Heap.allocateConsString` would pass to
-        /// `flatten`, so the materialised buffer is freed correctly
-        /// by `deinit`'s `bytes_allocator` arm.
-        bytes_allocator: std.mem.Allocator,
+        /// The heap that owns this rope. Stored so `flatBytes()` /
+        /// `equals()` — heap-free read accessors — can reach
+        /// `heap.bytes_allocator` and materialise the rope on demand
+        /// (V8 / JSC treat ropes as fully transparent: every byte
+        /// reader flattens). A bare `*Heap` (8 bytes) rather than an
+        /// embedded `std.mem.Allocator` (16) — the heap is a stable
+        /// `allocator.create(Heap)` pointer, so this never dangles
+        /// and keeps the `JSString` header to 48 bytes.
+        heap: *Heap,
     };
 
     /// Allocate a new flat `JSString` whose contents are a copy of
@@ -243,7 +244,7 @@ pub const JSString = struct {
             .flat => |b| return b,
             .cons => |c| {
                 const mutable: *JSString = @constCast(self);
-                return mutable.flatten(c.bytes_allocator) catch "";
+                return mutable.flatten(c.heap.bytes_allocator) catch "";
             },
         }
     }
@@ -435,10 +436,26 @@ pub const JSString = struct {
 
 const testing = std.testing;
 
-/// Hand-build a cons node over two children. Stage 1 production
-/// code never builds a cons — this is a test-only helper so the
-/// cons arm of `flatten` / `markValue` gets exercised.
-fn makeConsForTest(left: *JSString, right: *JSString) !*JSString {
+/// A bare `Heap` for cons-node tests. A cons node's `.heap`
+/// back-pointer is read only by `flatten` (to reach
+/// `bytes_allocator`), so this heap carries no registered strings —
+/// the tests create their `JSString`s directly with
+/// `testing.allocator` and deinit them by hand.
+fn makeTestHeap() *Heap {
+    const h = testing.allocator.create(Heap) catch unreachable;
+    h.* = Heap.init(testing.allocator);
+    return h;
+}
+
+fn destroyTestHeap(h: *Heap) void {
+    h.deinit();
+    testing.allocator.destroy(h);
+}
+
+/// Hand-build a cons node over two children. Production code builds
+/// cons nodes via `Heap.allocateConsString`; this test-only helper
+/// exercises the cons arm of `flatten` / `markString` directly.
+fn makeConsForTest(heap: *Heap, left: *JSString, right: *JSString) !*JSString {
     const cons = try testing.allocator.create(JSString);
     cons.* = .{
         .length_cu = left.length_cu + right.length_cu,
@@ -447,7 +464,7 @@ fn makeConsForTest(left: *JSString, right: *JSString) !*JSString {
         .payload = .{ .cons = .{
             .left = left,
             .right = right,
-            .bytes_allocator = testing.allocator,
+            .heap = heap,
         } },
     };
     return cons;
@@ -461,6 +478,13 @@ test "JSString: init copies the source bytes (no aliasing)" {
     // Mutating the source buffer must not affect the JSString.
     src_buf[0] = 'X';
     try testing.expectEqualStrings("hello", s.flatBytesIfFlat().?);
+}
+
+test "JSString: header stays compact" {
+    // Regression guard: the `cons` arm holds a bare `*Heap`
+    // (8 bytes), not an embedded `std.mem.Allocator` (16). Keep the
+    // header from creeping back up — every live string pays it.
+    try testing.expect(@sizeOf(JSString) <= 48);
 }
 
 test "JSString: length matches input slice length" {
@@ -514,9 +538,11 @@ test "JSString: flatten on a flat node returns the slice directly" {
 }
 
 test "JSString: flatten materialises a hand-built cons node" {
+    const heap = makeTestHeap();
+    defer destroyTestHeap(heap);
     const left = try JSString.init(testing.allocator, testing.allocator, "Hello, ");
     const right = try JSString.init(testing.allocator, testing.allocator, "world!");
-    const cons = try makeConsForTest(left, right);
+    const cons = try makeConsForTest(heap, left, right);
 
     try testing.expect(!cons.isFlat());
     try testing.expect(cons.flatBytesIfFlat() == null);
@@ -546,9 +572,11 @@ test "JSString: flatten a nested cons tree (iterative work-stack)" {
     const c = try JSString.init(testing.allocator, testing.allocator, "c");
     const d = try JSString.init(testing.allocator, testing.allocator, "d");
 
-    const ab = try makeConsForTest(a, b);
-    const cd = try makeConsForTest(c, d);
-    const root = try makeConsForTest(ab, cd);
+    const heap = makeTestHeap();
+    defer destroyTestHeap(heap);
+    const ab = try makeConsForTest(heap, a, b);
+    const cd = try makeConsForTest(heap, c, d);
+    const root = try makeConsForTest(heap, ab, cd);
     try testing.expectEqual(@as(u16, 2), root.depth);
 
     const flat = try root.flatten(testing.allocator);
@@ -584,9 +612,11 @@ test "JSString: equals — fast pre-checks and byte compare" {
 }
 
 test "JSString: equalsFlatten works across a hand-built cons" {
+    const heap = makeTestHeap();
+    defer destroyTestHeap(heap);
     const lhs_l = try JSString.init(testing.allocator, testing.allocator, "ab");
     const lhs_r = try JSString.init(testing.allocator, testing.allocator, "cd");
-    const lhs = try makeConsForTest(lhs_l, lhs_r);
+    const lhs = try makeConsForTest(heap, lhs_l, lhs_r);
     const rhs = try JSString.init(testing.allocator, testing.allocator, "abcd");
 
     try testing.expect(try lhs.equalsFlatten(rhs, testing.allocator));
@@ -660,9 +690,11 @@ test "JSString: rightmostLeaf / leftmostLeaf walk a nested cons tree" {
     const b = try JSString.init(testing.allocator, testing.allocator, "b");
     const c = try JSString.init(testing.allocator, testing.allocator, "c");
     const d = try JSString.init(testing.allocator, testing.allocator, "d");
-    const ab = try makeConsForTest(a, b);
-    const cd = try makeConsForTest(c, d);
-    const root = try makeConsForTest(ab, cd);
+    const heap = makeTestHeap();
+    defer destroyTestHeap(heap);
+    const ab = try makeConsForTest(heap, a, b);
+    const cd = try makeConsForTest(heap, c, d);
+    const root = try makeConsForTest(heap, ab, cd);
 
     try testing.expectEqual(a, root.leftmostLeaf());
     try testing.expectEqual(d, root.rightmostLeaf());
@@ -680,6 +712,8 @@ test "JSString: flatten a deep left-leaning rope (no stack overflow)" {
     // Build a strictly left-leaning spine of `max_rope_depth` cons
     // levels by hand — the shape a `result += chunk` loop produces.
     // `flatten` must walk it iteratively without overflowing.
+    const heap = makeTestHeap();
+    defer destroyTestHeap(heap);
     var leaves: [max_rope_depth + 1]*JSString = undefined;
     for (&leaves) |*slot| {
         slot.* = try JSString.init(testing.allocator, testing.allocator, "x");
@@ -688,7 +722,7 @@ test "JSString: flatten a deep left-leaning rope (no stack overflow)" {
     var built: [max_rope_depth]*JSString = undefined;
     var i: usize = 0;
     while (i < max_rope_depth) : (i += 1) {
-        const node = try makeConsForTest(spine, leaves[i + 1]);
+        const node = try makeConsForTest(heap, spine, leaves[i + 1]);
         built[i] = node;
         spine = node;
     }

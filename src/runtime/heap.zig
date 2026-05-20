@@ -650,7 +650,7 @@ pub const Heap = struct {
             .payload = .{ .cons = .{
                 .left = left,
                 .right = right,
-                .bytes_allocator = self.bytes_allocator,
+                .heap = self,
             } },
         };
         try self.strings.append(self.allocator, s);
@@ -1322,7 +1322,7 @@ test "Heap: markString recurses through a hand-built cons node" {
         .payload = .{ .cons = .{
             .left = left,
             .right = right,
-            .bytes_allocator = heap.bytes_allocator,
+            .heap = &heap,
         } },
     };
     try heap.strings.append(heap.allocator, cons);
