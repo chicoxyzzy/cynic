@@ -2369,6 +2369,64 @@ fn stringTrimEnd(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     return Value.fromString(out);
 }
 
+/// Owned output of `normalizeWtf8` — a `std.c.malloc`-backed
+/// code-point buffer produced by libunicode's `unicode_normalize`.
+/// Free with `deinit`. `slice` is empty when the input was empty.
+const NormalizedCodepoints = struct {
+    ptr: ?[*]u32,
+    len: usize,
+
+    fn slice(self: NormalizedCodepoints) []const u32 {
+        if (self.ptr) |p| return p[0..self.len];
+        return &.{};
+    }
+
+    fn deinit(self: NormalizedCodepoints) void {
+        if (self.ptr) |p| std.c.free(@ptrCast(p));
+    }
+};
+
+/// §3.11 Unicode Normalization — decode `bytes` (WTF-8) into a
+/// u32 code-point buffer and hand it to libunicode's
+/// `unicode_normalize` under the given form. Returns the
+/// normalized code-point list; the caller owns it and must call
+/// `deinit`. Lone surrogates pass through as their 0xD800..0xDFFF
+/// code-point values — §3.11 normalizes on code points and treats
+/// unpaired surrogates as themselves. Shared by
+/// `String.prototype.normalize` (re-encodes to WTF-8) and
+/// `String.prototype.localeCompare` (compares NFD forms for
+/// canonical equivalence).
+fn normalizeWtf8(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    form_kind: lib_unicode.UnicodeNormalizationEnum,
+) std.mem.Allocator.Error!NormalizedCodepoints {
+    var cps: std.ArrayListUnmanaged(u32) = .empty;
+    defer cps.deinit(allocator);
+    try decodeWtf8ToCodepoints(allocator, &cps, bytes);
+
+    // `unicode_normalize` allocates `*pdst` via the supplied
+    // realloc; we hand it `std.c.malloc/free` via the same hook
+    // libregexp uses (`lre_realloc`). On a length-0 input it
+    // returns 0 and leaves `*pdst` untouched, so seed it null.
+    var dst_ptr: ?[*]u32 = null;
+    const src_len: c_int = @intCast(cps.items.len);
+    const src_ptr: ?[*]const u32 = if (cps.items.len == 0) null else cps.items.ptr;
+    const out_len = lib_unicode.unicode_normalize(
+        @ptrCast(&dst_ptr),
+        @ptrCast(src_ptr),
+        src_len,
+        form_kind,
+        null,
+        normalizeRealloc,
+    );
+    if (out_len < 0) {
+        if (dst_ptr) |p| std.c.free(@ptrCast(p));
+        return error.OutOfMemory;
+    }
+    return .{ .ptr = dst_ptr, .len = @intCast(out_len) };
+}
+
 /// §22.1.3.16 String.prototype.normalize ( [ form ] ). Performs
 /// §3.11 Unicode Normalization (NFC / NFD / NFKC / NFKD) via
 /// libunicode's `unicode_normalize` — decompose into a u32
@@ -2398,45 +2456,17 @@ fn stringNormalize(realm: *Realm, this_value: Value, args: []const Value) Native
         }
     }
 
-    // Decode the receiver into a u32 codepoint buffer (lone
-    // surrogates pass through as their 0xD800..0xDFFF code-point
-    // values — §3.11 treats them as themselves since
-    // normalization is defined on code points).
-    var cps: std.ArrayListUnmanaged(u32) = .empty;
-    defer cps.deinit(realm.allocator);
-    decodeWtf8ToCodepoints(realm.allocator, &cps, s.bytes) catch return error.OutOfMemory;
-
-    // `unicode_normalize` allocates `*pdst` via the supplied
-    // realloc; we hand it `std.c.malloc/free` via the same hook
-    // libregexp uses (`lre_realloc`). On a length-0 input it
-    // returns 0 and leaves `*pdst` untouched, so seed it null.
-    var dst_ptr: ?[*]u32 = null;
-    const src_len: c_int = @intCast(cps.items.len);
-    const src_ptr: ?[*]const u32 = if (cps.items.len == 0) null else cps.items.ptr;
-    const out_len = lib_unicode.unicode_normalize(
-        @ptrCast(&dst_ptr),
-        @ptrCast(src_ptr),
-        src_len,
-        form_kind,
-        null,
-        normalizeRealloc,
-    );
-    if (out_len < 0) return error.OutOfMemory;
-    defer if (dst_ptr) |p| std.c.free(@ptrCast(p));
+    const normalized = normalizeWtf8(realm.allocator, s.bytes, form_kind) catch return error.OutOfMemory;
+    defer normalized.deinit();
 
     // Re-encode the normalized code-point list as WTF-8.
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
-    if (dst_ptr) |p| {
-        var i: usize = 0;
-        const n: usize = @intCast(out_len);
-        while (i < n) : (i += 1) {
-            const cp: u32 = p[i];
-            // `unicode_normalize` returns code points in the
-            // valid range 0..0x10FFFF (including the surrogate
-            // values for unpaired-surrogate inputs).
-            appendWtf8(realm.allocator, &out, @intCast(cp)) catch return error.OutOfMemory;
-        }
+    for (normalized.slice()) |cp| {
+        // `unicode_normalize` returns code points in the valid
+        // range 0..0x10FFFF (including the surrogate values for
+        // unpaired-surrogate inputs).
+        appendWtf8(realm.allocator, &out, @intCast(cp)) catch return error.OutOfMemory;
     }
     const new_s = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
     return Value.fromString(new_s);
@@ -2658,12 +2688,30 @@ fn stringToWellFormed(realm: *Realm, this_value: Value, args: []const Value) Nat
     return Value.fromString(out);
 }
 
-/// §22.1.3.10 String.prototype.localeCompare — without ICU,
-/// fall back to byte-wise compare. Returns -1/0/+1 per spec.
+/// §22.1.3.10 String.prototype.localeCompare — without ICU there
+/// is no full locale-sensitive collation, but the method "must
+/// treat Strings that are canonically equivalent according to the
+/// Unicode standard as identical and must return 0 when comparing
+/// Strings that are considered canonically equivalent" (note in
+/// §22.1.3.10). Two strings are canonically equivalent iff they
+/// share the same §3.11 NFD form, so normalize both operands to
+/// NFD before the ordinal compare. The decomposed code-point
+/// sequences are compared directly; a tie under NFD means
+/// canonical equivalence and yields 0. Returns -1/0/+1 per spec.
 fn stringLocaleCompare(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const s = try coerceThisToJSString(realm, this_value);
     const other_s = try intrinsics.stringifyArg(realm, argOr(args, 0, Value.undefined_));
-    const cmp = std.mem.order(u8, s.bytes, other_s.bytes);
+
+    // Fast path — byte-identical strings are trivially equal and
+    // skip the normalization round-trip entirely.
+    if (std.mem.eql(u8, s.bytes, other_s.bytes)) return Value.fromInt32(0);
+
+    const lhs = normalizeWtf8(realm.allocator, s.bytes, lib_unicode.UNICODE_NFD) catch return error.OutOfMemory;
+    defer lhs.deinit();
+    const rhs = normalizeWtf8(realm.allocator, other_s.bytes, lib_unicode.UNICODE_NFD) catch return error.OutOfMemory;
+    defer rhs.deinit();
+
+    const cmp = std.mem.order(u32, lhs.slice(), rhs.slice());
     return Value.fromInt32(switch (cmp) {
         .lt => -1,
         .eq => 0,
