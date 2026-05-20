@@ -934,6 +934,33 @@ pub const Realm = struct {
     /// `heap.allocs_since_gc` crosses `heap.gc_threshold`. The
     /// counter resets to zero at the end of `heap.collect`.
     pub fn collectGarbage(self: *Realm) void {
+        self.markRoots();
+        // Hand off to `heap.collectFull` for the handle-scope walk
+        // and the actual sweep. The empty roots slice is fine —
+        // every root above is already marked.
+        self.heap.collectFull(&.{});
+    }
+
+    /// Run a minor (young-generation) collection. Marks exactly the
+    /// same realm roots as `collectGarbage`, then hands off to
+    /// `heap.collectYoung`, which additionally walks the remembered
+    /// set and every mature container's typed internal slots,
+    /// sweeps only the young lists, and promotes young survivors
+    /// into the mature generation by relink (non-moving).
+    pub fn collectGarbageYoung(self: *Realm) void {
+        // Debug-only barrier audit — under Debug / ReleaseSafe this
+        // asserts every routed-setter mature→young edge is in the
+        // remembered set before the minor cycle consumes it.
+        self.heap.verifyRememberedSet();
+        self.markRoots();
+        self.heap.collectYoung(&.{});
+    }
+
+    /// Mark every realm-level root reachable for a GC cycle. Shared
+    /// by the major (`collectGarbage`) and minor
+    /// (`collectGarbageYoung`) collectors — the root set is
+    /// identical; only the sweep differs.
+    fn markRoots(self: *Realm) void {
         // Globals — both the object env-record (live target /
         // fallback) and the declarative env-record. Lex bindings
         // (`let x = someObject;`) are GC roots just like var.
@@ -1011,11 +1038,6 @@ pub const Realm = struct {
                 // f.chunk's constants were pinned at finalize.
             }
         }
-
-        // Hand off to `heap.collectFull` for the handle-scope walk
-        // and the actual sweep. The empty roots slice is fine —
-        // every root above is already marked.
-        self.heap.collectFull(&.{});
     }
 
     /// Install the host's built-in bindings — `print`, `console`,

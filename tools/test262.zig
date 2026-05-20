@@ -1837,7 +1837,7 @@ fn classifyAndRun(
     // misbehaving allocating fixture can't balloon a worker's
     // RSS while still inside its step budget. `0` falls through
     // to the engine default.
-    if (gc_threshold != 0) realm.heap.gc_threshold = gc_threshold;
+    if (gc_threshold != 0) realm.heap.setGcThreshold(gc_threshold);
     realm.heap.gc_stats = gc_stats;
 
     // §INTERPRETING.md — async-flagged tests call `$DONE()` /

@@ -4275,13 +4275,25 @@ inline fn reEnterDispatch(
 /// directly, without a handler walk, matching the pre-threaded
 /// behaviour.
 inline fn runSafePoint(realm: *Realm) RunError!?RunResult {
-    // GC safe point. Single-tier stop-the-world mark-sweep today;
-    // the main session merges the two-tier minor/major dispatch in
-    // afterward — it slots in right here.
-    if (realm.heap.allocs_since_gc >= realm.heap.gc_threshold or
+    // Allocation-pressure GC — two-tier dispatch. A minor
+    // (young-only) collection fires when `allocs_since_gc` crosses
+    // the small `gc_young_threshold`; it is promoted to a major
+    // (full) collection when the byte threshold trips, when the
+    // major allocation threshold is crossed, or once every
+    // `full_every_n_minor` minor cycles so mature garbage and
+    // remembered-set residue are reclaimed periodically.
+    if (realm.heap.allocs_since_gc >= realm.heap.gc_young_threshold or
         realm.heap.bytes_since_gc >= realm.heap.gc_byte_threshold)
     {
-        realm.collectGarbage();
+        const force_full =
+            realm.heap.bytes_since_gc >= realm.heap.gc_byte_threshold or
+            realm.heap.allocs_since_gc >= realm.heap.gc_threshold or
+            realm.heap.minor_cycles_since_full + 1 >= realm.heap.full_every_n_minor;
+        if (force_full) {
+            realm.collectGarbage();
+        } else {
+            realm.collectGarbageYoung();
+        }
     }
     if (realm.step_budget == 0) {
         const ex = try makeRangeError(realm, "interpreter step budget exhausted");

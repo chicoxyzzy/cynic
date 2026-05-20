@@ -140,6 +140,19 @@ pub fn valueAsBigInt(v: Value) ?*JSBigInt {
     return @ptrFromInt(@as(usize, @intCast(p)));
 }
 
+/// Erase a heap value to an opaque pointer for diagnostic
+/// printing — used by `verifyRememberedSet` to name the
+/// young-target of an un-barriered edge. Returns `null` for a
+/// non-heap value.
+fn valueHeapPtr(v: Value) ?*const anyopaque {
+    if (v.isString()) return v.asString();
+    if (valueAsFunction(v)) |f| return f;
+    if (valueAsPlainObject(v)) |o| return o;
+    if (valueAsSymbol(v)) |s| return s;
+    if (valueAsBigInt(v)) |b| return b;
+    return null;
+}
+
 /// Used by GC marking and printing — returns whether the value
 /// is the function flavour without needing to coerce to a
 /// concrete pointer type.
@@ -266,13 +279,38 @@ pub const Heap = struct {
     /// threshold, so dead intermediates pile up between collects.
     /// Bytes-based trigger keeps GC firing on data volume too.
     bytes_since_gc: usize = 0,
-    /// Allocation count that triggers a collection. Tunable; the
-    /// default is sized so an empty allocating loop runs GC every
-    /// few hundred ms at typical `JSObject`/`Environment` sizes.
-    /// `std.math.maxInt(u32)` effectively disables the trigger
-    /// (the unit-test paths that call `collect` directly do this
-    /// when they want full control over when GC fires).
+    /// Allocation count that triggers a *major* (full) collection.
+    /// Tunable; the default is sized so an empty allocating loop
+    /// runs GC every few hundred ms at typical
+    /// `JSObject`/`Environment` sizes. `std.math.maxInt(u32)`
+    /// effectively disables the trigger (the unit-test paths that
+    /// call `collect` directly do this when they want full control
+    /// over when GC fires).
     gc_threshold: u32 = 16384,
+    /// Allocation count that triggers a *minor* (young-only)
+    /// collection. The two-tier dispatch: a minor cycle fires
+    /// when `allocs_since_gc` crosses this; a major cycle when
+    /// `minor_cycles_since_full` reaches `full_every_n_minor`
+    /// (or the byte threshold trips). Sized at a quarter of the
+    /// major threshold — most allocations die young, so the cheap
+    /// young sweep absorbs the bulk of the churn and the
+    /// expensive full trace stays rare. `setGcThreshold` keeps
+    /// this coherent with `gc_threshold`.
+    gc_young_threshold: u32 = 4096,
+    /// Number of minor cycles between forced major (full) cycles.
+    /// The dispatch fires a minor cycle on young-threshold
+    /// pressure; every `full_every_n_minor`-th minor cycle is
+    /// promoted to a major cycle so mature garbage (and any
+    /// remembered-set residue) is reclaimed periodically. Bounded
+    /// so even a `--gc-threshold=1` stress run, where every
+    /// allocation collects, still exercises `collectYoung` heavily
+    /// while running a `collectFull` often enough to keep RSS
+    /// bounded and the remembered set drained.
+    full_every_n_minor: u32 = 8,
+    /// Minor cycles run since the last major cycle. Reset to zero
+    /// by `collectFull`; bumped by `collectYoung`. Drives the
+    /// "promote to full every Nth minor" rule in the dispatch.
+    minor_cycles_since_full: u32 = 0,
     /// Byte counterpart to `gc_threshold` — collect when the
     /// charged payload since the last sweep crosses this. 16 MiB
     /// is loose enough to leave small workloads count-gated while
@@ -338,6 +376,22 @@ pub const Heap = struct {
         bytes_allocator: std.mem.Allocator,
     ) Heap {
         return .{ .allocator = allocator, .bytes_allocator = bytes_allocator };
+    }
+
+    /// Set the GC pressure threshold from a single harness knob
+    /// (`--gc-threshold=<n>`). `n` becomes the *minor* threshold —
+    /// a young collection fires every `n` allocations — and the
+    /// *major* count threshold is set to `n * full_every_n_minor`
+    /// so a full cycle still lands on the count path at the same
+    /// total allocation cadence as before the two-tier split,
+    /// while the minor-cycle counter promotes to full every
+    /// `full_every_n_minor` minor cycles regardless. The upshot:
+    /// `--gc-threshold=1` collects (minor) on every allocation and
+    /// runs a full cycle every `full_every_n_minor`-th — the exact
+    /// stress profile the generational collector needs exercised.
+    pub fn setGcThreshold(self: *Heap, n: u32) void {
+        self.gc_young_threshold = n;
+        self.gc_threshold = n *| self.full_every_n_minor;
     }
 
     /// Charge `n` bytes against the heap ceiling. Returns
@@ -1171,9 +1225,12 @@ pub const Heap = struct {
 
         // Reset the allocation pressure counters so the next
         // collect doesn't fire until fresh allocations cross
-        // a threshold again.
+        // a threshold again. A full cycle also resets the
+        // minor-cycle counter — the two-tier dispatch counts
+        // minor cycles since the last full one.
         self.allocs_since_gc = 0;
         self.bytes_since_gc = 0;
+        self.minor_cycles_since_full = 0;
 
         // Always-on cycle accounting (cheap; drives the harness
         // `--mem-summary` line).
@@ -1218,6 +1275,423 @@ pub const Heap = struct {
                     self.bigintCount(),
                 },
             );
+        }
+    }
+
+    /// Run a minor (young-generation) mark-sweep cycle. Only the
+    /// young lists are swept; the mature lists are left untouched.
+    /// `roots` plus every open handle scope plus the realm roots
+    /// (the caller marks those before calling) seed the trace.
+    ///
+    /// Three additional root sources peculiar to a minor cycle:
+    ///
+    ///  1. **The remembered set.** Every mature container the write
+    ///     barrier observed storing a young pointer is marked
+    ///     transitively — its property bag, elements, env slots and
+    ///     internal slots become roots. Without this a young object
+    ///     reachable only from old space would be swept.
+    ///  2. **Mature typed internal slots.** Roughly 240 raw
+    ///     `container.field = young` writes in `builtins/*.zig` and
+    ///     the object model bypass the Stage-0 routed setters and so
+    ///     never hit the write barrier (`prototype`, `home_object`,
+    ///     `typed_view.viewed`, accessor halves, Map/Set entries,
+    ///     bound-function state, …). Rather than barrier all 240
+    ///     fragile sites, every minor cycle scans those typed slots
+    ///     on every mature container directly — bounded by mature
+    ///     object count × a fixed field set, far cheaper than the
+    ///     mature property-bag walk a full cycle pays.
+    ///  3. Marking from the realm roots (the caller's responsibility,
+    ///     same set `collectFull` uses).
+    ///
+    /// Survivors in the young lists are **promoted** — relinked from
+    /// the young list into the mature list of their kind and their
+    /// `generation` bit flipped — and crucially the object's address
+    /// never changes (Cynic's collector is non-moving; there are no
+    /// JIT stack maps to fix up, which is the whole reason for the
+    /// JSC-Riptide promotion-by-relink model).
+    ///
+    /// Because `markValue` recurses through mature objects too, the
+    /// mark bit gets set on mature survivors as well; a minor sweep
+    /// only clears bits on the young lists it sweeps, so this routine
+    /// finishes with an explicit pass that clears the mark bit on
+    /// every mature object — otherwise the next `collectFull` would
+    /// see stale marks and leak.
+    pub fn collectYoung(self: *Heap, roots: []const Value) void {
+        const t_start = monotonicNs();
+
+        // ── Mark phase ──────────────────────────────────────────
+        for (roots) |r| self.markValue(r);
+        for (self.handle_scopes.items) |scope| {
+            for (scope.handles.items) |r| self.markValue(r);
+        }
+        {
+            var rit = self.symbol_registry.iterator();
+            while (rit.next()) |e| {
+                const sym = e.value_ptr.*;
+                if (sym.generation == .young) sym.marked = true;
+            }
+        }
+
+        // Root source 1 — remembered set. Each recorded mature
+        // container is a root edge into young: mark it (and via
+        // `markValue`'s recursion, everything it reaches).
+        for (self.remembered.items) |container| {
+            switch (container) {
+                .object => |o| self.markValue(taggedObject(o)),
+                .function => |f| self.markValue(taggedFunction(f)),
+                .environment => |e| self.markEnvironment(e),
+                .generator => |g| self.markGenerator(g),
+            }
+        }
+
+        // Root source 2 — typed internal slots on every mature
+        // container. These raw-pointer fields bypass the barrier,
+        // so they are scanned unconditionally on every minor cycle.
+        for (self.objects_mature.items) |o| self.markObjectInternalSlots(o);
+        for (self.functions_mature.items) |f| self.markFunctionInternalSlots(f);
+        for (self.environments_mature.items) |e| {
+            for (e.slots) |s| self.markValue(s);
+        }
+        for (self.generators_mature.items) |g| self.markGeneratorInternalSlots(g);
+
+        // Snapshot pre-sweep young counts for the diagnostic line.
+        const pre_objs = self.objects_young.items.len;
+        const pre_strs = self.strings_young.items.len;
+        const pre_fns = self.functions_young.items.len;
+        const pre_envs = self.environments_young.items.len;
+        const pre_gens = self.generators_young.items.len;
+        const pre_syms = self.symbols_young.items.len;
+        const pre_bigs = self.bigints_young.items.len;
+
+        // ── Sweep + promote phase ───────────────────────────────
+        // Young survivors are relinked into the mature list; young
+        // garbage is freed. Mature lists are not touched.
+        promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, self.allocator, .{ self.allocator, self.bytes_allocator });
+        promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, self.allocator, .{self.allocator});
+        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, self.allocator, .{self.allocator});
+        promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, self.allocator, .{self.allocator});
+        promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, self.allocator, .{self.allocator});
+        promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, self.allocator, .{self.allocator});
+        promoteYoungList(*JSBigInt, &self.bigints_young, &self.bigints_mature, self.allocator, .{self.allocator});
+
+        // Clear the mark bit on every mature object. A minor sweep
+        // only resets bits on the young lists it walks; the mark
+        // phase above set bits on mature objects too (the trace
+        // recurses through old space). Leaving them set would make
+        // the next `collectFull` treat them as already-visited.
+        for (self.objects_mature.items) |o| o.marked = false;
+        for (self.functions_mature.items) |f| f.marked = false;
+        for (self.environments_mature.items) |e| e.marked = false;
+        for (self.generators_mature.items) |g| g.marked = false;
+        for (self.strings_mature.items) |s| s.marked = false;
+        for (self.symbols_mature.items) |s| s.marked = false;
+        for (self.bigints_mature.items) |b| b.marked = false;
+
+        // The remembered set is consumed by this cycle. Clear it and
+        // every surviving container's `in_remembered_set` bit so the
+        // next minor cycle starts from a clean slate; a still-live
+        // old→young edge will be re-recorded by the barrier on its
+        // next store (or, for a pre-existing edge, would be missed —
+        // but the typed-slot scan covers internal slots and Stage-0
+        // routing covers property writes, so a *new* store is what
+        // re-arms it). Note: an edge created before this cycle and
+        // not re-stored is still safe because the referent was
+        // promoted to mature this cycle (it survived as a root), so
+        // it no longer lives in young space.
+        for (self.remembered.items) |container| container.setInRememberedSet(false);
+        self.remembered.clearRetainingCapacity();
+
+        // Reset allocation-pressure counters; count this minor
+        // cycle toward the next forced major.
+        self.allocs_since_gc = 0;
+        self.bytes_since_gc = 0;
+        self.minor_cycles_since_full +|= 1;
+
+        const elapsed_ns_total: i128 = monotonicNs() - t_start;
+        self.gc_cycles_total +|= 1;
+        if (elapsed_ns_total > 0) self.gc_time_ns_total +|= @intCast(elapsed_ns_total);
+
+        if (self.gc_stats and @import("builtin").os.tag != .freestanding) {
+            self.gc_stats_cycle += 1;
+            const elapsed_us: i128 = @divTrunc(elapsed_ns_total, 1000);
+            std.debug.print(
+                "[gc {d}] young {d}\u{00B5}s live={d}KB peak={d}KB alloc_total={d}KB obj={d}\u{2192}{d} str={d}\u{2192}{d} fn={d}\u{2192}{d} env={d}\u{2192}{d} gen={d}\u{2192}{d} sym={d}\u{2192}{d} big={d}\u{2192}{d}\n",
+                .{
+                    self.gc_stats_cycle,
+                    elapsed_us,
+                    self.bytes_live / 1024,
+                    self.bytes_live_peak / 1024,
+                    self.bytes_alloc_total / 1024,
+                    pre_objs, self.objects_young.items.len,
+                    pre_strs, self.strings_young.items.len,
+                    pre_fns,  self.functions_young.items.len,
+                    pre_envs, self.environments_young.items.len,
+                    pre_gens, self.generators_young.items.len,
+                    pre_syms, self.symbols_young.items.len,
+                    pre_bigs, self.bigints_young.items.len,
+                },
+            );
+        }
+    }
+
+    /// Sweep one young list, promoting marked survivors into the
+    /// matching mature list. A reverse walk keeps `swapRemove` O(1).
+    /// An unmarked entry is freed; a marked entry has its bit
+    /// cleared, its `generation` flipped to `.mature`, and is moved
+    /// to `mature_list` — the pointer never moves, only its list
+    /// membership. A pinned string (chunk constant) is promoted
+    /// without needing a mark (it is permanently live).
+    fn promoteYoungList(
+        comptime PtrT: type,
+        young_list: *std.ArrayListUnmanaged(PtrT),
+        mature_list: *std.ArrayListUnmanaged(PtrT),
+        allocator: std.mem.Allocator,
+        deinit_args: anytype,
+    ) void {
+        const EntryT = @typeInfo(PtrT).pointer.child;
+        const has_pinned = @hasField(EntryT, "pinned");
+        var i: usize = young_list.items.len;
+        while (i > 0) {
+            i -= 1;
+            const entry = young_list.items[i];
+            const live = (has_pinned and entry.pinned) or entry.marked;
+            if (live) {
+                entry.marked = false;
+                entry.generation = .mature;
+                if (@hasField(EntryT, "in_remembered_set")) {
+                    entry.in_remembered_set = false;
+                }
+                _ = young_list.swapRemove(i);
+                // Append to mature. On OOM the object would leak —
+                // but the heap allocator already failed catastrophically
+                // by this point; keep the object reachable rather than
+                // free a survivor.
+                mature_list.append(allocator, entry) catch {
+                    young_list.append(allocator, entry) catch {};
+                };
+            } else {
+                _ = young_list.swapRemove(i);
+                @call(.auto, EntryT.deinit, .{entry} ++ deinit_args);
+            }
+        }
+    }
+
+    /// Mark the typed internal-slot pointers of a `JSObject` —
+    /// everything `markValue` reaches for an object EXCEPT the
+    /// property bag / element vector (those are covered by the
+    /// Stage-0-routed write barrier + remembered set). Used by
+    /// `collectYoung` to root young objects reachable only through
+    /// a raw `mature_obj.field = young` write in a builtin.
+    fn markObjectInternalSlots(self: *Heap, o: *JSObject) void {
+        var pait = o.private_accessors.iterator();
+        while (pait.next()) |entry| {
+            if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
+            if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+        }
+        var ait = o.accessors.iterator();
+        while (ait.next()) |entry| {
+            if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
+            if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+        }
+        var nrit = o.namespace_redirects.iterator();
+        while (nrit.next()) |entry| {
+            self.markValue(taggedObject(entry.value_ptr.target_ns));
+        }
+        if (o.boxed_primitive) |bp| self.markValue(bp);
+        if (o.map_data) |md| {
+            for (md.entries.items) |entry| {
+                if (entry.deleted) continue;
+                self.markValue(entry.key);
+                self.markValue(entry.value);
+            }
+        }
+        if (o.set_data) |sd| {
+            for (sd.entries.items) |entry| {
+                if (entry.deleted) continue;
+                self.markValue(entry.value);
+            }
+        }
+        if (o.array_like_iter) |s| {
+            self.markValue(s.target);
+            self.markValue(s.for_in_source);
+        }
+        if (o.iter_helper) |s| {
+            self.markValue(s.source);
+            self.markValue(s.next_fn);
+            self.markValue(s.payload);
+            self.markValue(s.active);
+        }
+        if (o.capability_record) |c| {
+            self.markValue(c.resolve);
+            self.markValue(c.reject);
+        }
+        if (o.finally_callback) |f| self.markValue(taggedFunction(f));
+        self.markValue(o.finally_value);
+        if (o.finally_constructor) |f| self.markValue(taggedFunction(f));
+        if (o.generator_ref) |gen| self.markGenerator(gen);
+        if (o.is_weak_ref) self.markValue(o.weak_ref_target);
+        if (o.finalization_cells) |fc| {
+            self.markValue(fc.cleanup_callback);
+            for (fc.cells.items) |cell| {
+                if (cell.deleted) continue;
+                self.markValue(cell.target);
+                self.markValue(cell.held_value);
+                if (cell.has_token) self.markValue(cell.unregister_token);
+            }
+        }
+        for (o.key_anchors.items) |s| self.markString(s);
+        for (o.promise_reactions.items) |r| {
+            self.markValue(r.on_fulfilled);
+            self.markValue(r.on_rejected);
+            self.markValue(r.result_promise);
+        }
+        for (o.promise_waiters.items) |w| self.markGenerator(w);
+        if (o.promise_state != .none) self.markValue(o.promise_value);
+        if (o.regexp_source) |s| self.markString(s);
+        if (o.regexp_flags) |s| self.markString(s);
+        if (o.instance_field_inits) |inits| {
+            for (inits) |fi| {
+                if (fi.init_fn) |fnp| self.markValue(taggedFunction(fnp));
+            }
+        }
+        if (o.private_method_inits) |inits| {
+            for (inits) |fi| {
+                if (fi.init_fn) |fnp| self.markValue(taggedFunction(fnp));
+            }
+        }
+        if (o.prototype) |p| self.markValue(taggedObject(p));
+        if (o.typed_view) |tv| self.markValue(taggedObject(tv.viewed));
+        if (o.data_view) |dv| self.markValue(taggedObject(dv.viewed));
+    }
+
+    /// Mark the typed internal-slot pointers of a `JSFunction` —
+    /// the `markValue` function arm minus the property bag.
+    fn markFunctionInternalSlots(self: *Heap, f: *JSFunction) void {
+        if (f.captured_env) |env| self.markEnvironment(env);
+        var fait = f.accessors.iterator();
+        while (fait.next()) |entry| {
+            if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
+            if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+        }
+        var fpit = f.private_properties.iterator();
+        while (fpit.next()) |entry| self.markValue(entry.value_ptr.*);
+        var fpait = f.private_accessors.iterator();
+        while (fpait.next()) |entry| {
+            if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
+            if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+        }
+        if (f.prototype) |p| self.markValue(taggedObject(p));
+        self.markValue(f.captured_this);
+        self.markValue(f.captured_new_target);
+        if (f.bound_target) |bt| self.markValue(taggedFunction(bt));
+        self.markValue(f.bound_this);
+        if (f.bound_args) |ba| {
+            for (ba) |a| self.markValue(a);
+        }
+        if (f.name_string) |s| self.markString(s);
+    }
+
+    /// Mark the typed internal-slot pointers of a `JSGenerator`.
+    fn markGeneratorInternalSlots(self: *Heap, g: *JSGenerator) void {
+        for (g.registers) |s| self.markValue(s);
+        self.markValue(g.accumulator);
+        self.markValue(g.this_value);
+        if (g.env) |e| self.markEnvironment(e);
+        if (g.home_object) |ho| self.markValue(taggedObject(ho));
+        for (g.queue.items) |req| {
+            switch (req.completion) {
+                .normal => |v| self.markValue(v),
+                .return_value => |v| self.markValue(v),
+                .throw_value => |v| self.markValue(v),
+            }
+            self.markValue(taggedObject(req.capability_promise));
+        }
+    }
+
+    /// Debug-only remembered-set verifier. Before a minor cycle,
+    /// walk every mature container and assert that any
+    /// mature→young pointer edge living in a *property bag*,
+    /// *element vector*, or *environment slot* — the edge classes
+    /// the Stage-0 routed setters are responsible for barriering —
+    /// is covered by the remembered set. A missing entry names the
+    /// exact `(container, field, young-target)` triple.
+    ///
+    /// Typed internal slots (`prototype`, `viewed`, accessor
+    /// halves, …) are deliberately NOT checked: `collectYoung`
+    /// scans those directly on every mature container, so a raw
+    /// write into one never needs a remembered-set entry. This
+    /// verifier therefore only polices the routed-setter contract.
+    ///
+    /// Compiled to a no-op outside Debug / ReleaseSafe.
+    pub fn verifyRememberedSet(self: *Heap) void {
+        if (@import("builtin").mode != .Debug and
+            @import("builtin").mode != .ReleaseSafe) return;
+
+        for (self.objects_mature.items) |o| {
+            // Property bag.
+            var it = o.properties.iterator();
+            while (it.next()) |entry| {
+                if (isYoungHeapValue(entry.value_ptr.*) and !o.in_remembered_set) {
+                    std.debug.print(
+                        "verifyRememberedSet: un-barriered mature\u{2192}young edge: " ++
+                            "JSObject {*} property \"{s}\" -> young {*}\n",
+                        .{ o, entry.key_ptr.*, valueHeapPtr(entry.value_ptr.*) },
+                    );
+                    std.debug.assert(false);
+                }
+            }
+            // Element vector.
+            if (o.is_array_exotic) {
+                if (o.is_sparse) {
+                    var sit = o.sparse_elements.iterator();
+                    while (sit.next()) |entry| {
+                        if (isYoungHeapValue(entry.value_ptr.*) and !o.in_remembered_set) {
+                            std.debug.print(
+                                "verifyRememberedSet: un-barriered mature\u{2192}young edge: " ++
+                                    "JSObject {*} sparse element [{d}] -> young {*}\n",
+                                .{ o, entry.key_ptr.*, valueHeapPtr(entry.value_ptr.*) },
+                            );
+                            std.debug.assert(false);
+                        }
+                    }
+                } else {
+                    for (o.elements.items, 0..) |elem, idx| {
+                        if (isYoungHeapValue(elem) and !o.in_remembered_set) {
+                            std.debug.print(
+                                "verifyRememberedSet: un-barriered mature\u{2192}young edge: " ++
+                                    "JSObject {*} element [{d}] -> young {*}\n",
+                                .{ o, idx, valueHeapPtr(elem) },
+                            );
+                            std.debug.assert(false);
+                        }
+                    }
+                }
+            }
+        }
+        for (self.functions_mature.items) |f| {
+            var it = f.properties.iterator();
+            while (it.next()) |entry| {
+                if (isYoungHeapValue(entry.value_ptr.*) and !f.in_remembered_set) {
+                    std.debug.print(
+                        "verifyRememberedSet: un-barriered mature\u{2192}young edge: " ++
+                            "JSFunction {*} property \"{s}\" -> young {*}\n",
+                        .{ f, entry.key_ptr.*, valueHeapPtr(entry.value_ptr.*) },
+                    );
+                    std.debug.assert(false);
+                }
+            }
+        }
+        for (self.environments_mature.items) |e| {
+            for (e.slots, 0..) |slot, idx| {
+                if (isYoungHeapValue(slot) and !e.in_remembered_set) {
+                    std.debug.print(
+                        "verifyRememberedSet: un-barriered mature\u{2192}young edge: " ++
+                            "Environment {*} slot [{d}] -> young {*}\n",
+                        .{ e, idx, valueHeapPtr(slot) },
+                    );
+                    std.debug.assert(false);
+                }
+            }
         }
     }
 
@@ -1650,6 +2124,135 @@ test "Heap: collectFull clears the remembered set and the bits" {
     const young2 = try heap.allocateObject();
     heap.writeBarrier(.{ .object = container }, taggedObject(young2));
     try testing.expectEqual(@as(usize, 1), heap.remembered.items.len);
+}
+
+test "Heap: collectYoung sweeps young garbage, leaves mature untouched" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // One mature object (hand-promoted) and one young garbage.
+    const mature = try heap.allocateObject();
+    _ = heap.objects_young.pop();
+    try heap.objects_mature.append(heap.allocator, mature);
+    mature.generation = .mature;
+    _ = try heap.allocateObject(); // young garbage, unrooted
+
+    try testing.expectEqual(@as(usize, 1), heap.objects_young.items.len);
+    try testing.expectEqual(@as(usize, 1), heap.objects_mature.items.len);
+
+    heap.collectYoung(&.{});
+
+    // Young garbage freed; mature object untouched (not even
+    // visited for sweeping).
+    try testing.expectEqual(@as(usize, 0), heap.objects_young.items.len);
+    try testing.expectEqual(@as(usize, 1), heap.objects_mature.items.len);
+}
+
+test "Heap: collectYoung promotes a young survivor by relink" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const survivor = try heap.allocateObject();
+    const addr_before = @intFromPtr(survivor);
+    try testing.expectEqual(Generation.young, survivor.generation);
+    try testing.expectEqual(@as(usize, 1), heap.objects_young.items.len);
+
+    heap.collectYoung(&.{taggedObject(survivor)});
+
+    // Relinked into mature — same address (non-moving), bit flipped.
+    try testing.expectEqual(@as(usize, 0), heap.objects_young.items.len);
+    try testing.expectEqual(@as(usize, 1), heap.objects_mature.items.len);
+    try testing.expectEqual(Generation.mature, survivor.generation);
+    try testing.expectEqual(addr_before, @intFromPtr(survivor));
+    try testing.expect(!survivor.marked);
+}
+
+test "Heap: collectYoung keeps a young object reachable from the remembered set" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // A mature container holding a young value in its property bag —
+    // the canonical old→young edge the remembered set exists to
+    // bridge during a minor cycle.
+    const container = try heap.allocateObject();
+    _ = heap.objects_young.pop();
+    try heap.objects_mature.append(heap.allocator, container);
+    container.generation = .mature;
+
+    const young = try heap.allocateObject();
+    try heap.storeProperty(container, heap.allocator, "k", taggedObject(young));
+    try testing.expectEqual(@as(usize, 1), heap.remembered.items.len);
+
+    // The young object is NOT in `roots`; only the remembered-set
+    // entry keeps it alive.
+    heap.collectYoung(&.{});
+
+    // Survivor promoted; remembered set drained.
+    try testing.expectEqual(@as(usize, 0), heap.objects_young.items.len);
+    try testing.expectEqual(@as(usize, 2), heap.objects_mature.items.len);
+    try testing.expectEqual(Generation.mature, young.generation);
+    try testing.expectEqual(@as(usize, 0), heap.remembered.items.len);
+    try testing.expect(!container.in_remembered_set);
+}
+
+test "Heap: collectYoung keeps a young object reachable from a mature typed slot" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // A mature object whose `prototype` typed internal slot points
+    // at a young object via a RAW write (no barrier, no remembered-
+    // set entry). The minor cycle's mature-typed-slot scan must
+    // still find and promote it — this is the gap that sank the
+    // previous Stage-3 attempt.
+    const container = try heap.allocateObject();
+    _ = heap.objects_young.pop();
+    try heap.objects_mature.append(heap.allocator, container);
+    container.generation = .mature;
+
+    const young_proto = try heap.allocateObject();
+    container.prototype = young_proto; // raw write, no barrier
+    try testing.expectEqual(@as(usize, 0), heap.remembered.items.len);
+
+    heap.collectYoung(&.{});
+
+    // The typed-slot scan rooted it: promoted, not swept.
+    try testing.expectEqual(@as(usize, 0), heap.objects_young.items.len);
+    try testing.expectEqual(@as(usize, 2), heap.objects_mature.items.len);
+    try testing.expectEqual(Generation.mature, young_proto.generation);
+}
+
+test "Heap: collectYoung clears stale mark bits on mature objects" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // A mature object reachable from a root: the minor cycle marks
+    // it transitively but must clear its mark bit afterward, or the
+    // next collectFull would treat it as already-visited and leak.
+    const mature = try heap.allocateObject();
+    _ = heap.objects_young.pop();
+    try heap.objects_mature.append(heap.allocator, mature);
+    mature.generation = .mature;
+
+    heap.collectYoung(&.{taggedObject(mature)});
+    try testing.expect(!mature.marked);
+
+    // A subsequent collectFull with empty roots must still be able
+    // to free it — proof the mark bit was genuinely cleared.
+    heap.collectFull(&.{});
+    try testing.expectEqual(@as(usize, 0), heap.objects_mature.items.len);
+}
+
+test "Heap: setGcThreshold derives a coherent minor/major pair" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    heap.setGcThreshold(1);
+    try testing.expectEqual(@as(u32, 1), heap.gc_young_threshold);
+    try testing.expectEqual(@as(u32, 8), heap.gc_threshold);
+
+    heap.setGcThreshold(1000);
+    try testing.expectEqual(@as(u32, 1000), heap.gc_young_threshold);
+    try testing.expectEqual(@as(u32, 8000), heap.gc_threshold);
 }
 
 test "Heap: collect keeps an object reachable through roots" {
