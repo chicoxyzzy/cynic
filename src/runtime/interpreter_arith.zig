@@ -652,12 +652,17 @@ pub fn addValues(realm: *Realm, lhs: Value, rhs: Value) RunError!?Value {
         const rhs_str = try valueToOwnedString(realm, r, &rhs_buf);
         defer if (rhs_str.allocated) realm.allocator.free(rhs_str.bytes);
 
-        const total = lhs_str.bytes.len + rhs_str.bytes.len;
-        const buf = realm.allocator.alloc(u8, total) catch return error.OutOfMemory;
-        @memcpy(buf[0..lhs_str.bytes.len], lhs_str.bytes);
-        @memcpy(buf[lhs_str.bytes.len..], rhs_str.bytes);
-        defer realm.allocator.free(buf);
-        const s = realm.heap.allocateString(buf) catch return error.OutOfMemory;
+        // §13.15.4 — concatenate the two coerced byte slices into a
+        // single heap-owned `JSString` directly. The previous path
+        // allocated a throwaway intermediate buffer and then let
+        // `allocateString` copy it a *second* time into the string
+        // payload — doubling allocator traffic on every `+`. The
+        // hot loser was the `s += chunk` accumulator pattern (e.g.
+        // test262's `buildString` in `regExpUtils.js`): each `+=`
+        // already copies the whole growing accumulator once (flat
+        // immutable strings — ropes are future work, see
+        // docs/ROADMAP.md), the intermediate buffer made it twice.
+        const s = realm.heap.allocateStringConcat2(lhs_str.bytes, rhs_str.bytes) catch return error.OutOfMemory;
         return Value.fromString(s);
     }
     return Value.fromDouble(toNumber(l) + toNumber(r));

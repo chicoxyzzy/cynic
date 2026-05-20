@@ -1997,9 +1997,131 @@ fn buildGroupsObject(
     return heap_mod.taggedObject(groups);
 }
 
+/// §22.2.7.2 RegExpBuiltinExec — match-only variant. Runs the
+/// libregexp matcher and updates `lastIndex` exactly as the full
+/// `regexpExec` does, but returns just a boolean instead of
+/// materialising the match-result Array, the per-capture
+/// substrings (`allocMatchString`), the `groups` object, the
+/// `indices` array and the `index` / `input` properties. §22.2.6.15
+/// `RegExp.prototype.test` only observes match-or-no-match, so for
+/// the (overwhelmingly common) un-shadowed-`exec` receiver this
+/// avoids allocating an object graph whose every field is then
+/// discarded — the whole-match substring copy alone is O(input
+/// length). V8 / JSC take the same shortcut.
+///
+/// Returns `true`/`false` for match/no-match; the `lastIndex`
+/// writes can re-enter JS (a non-writable own slot raises
+/// TypeError), so the result is still `NativeError!bool`.
+fn regexpBuiltinExecMatchOnly(realm: *Realm, regex_obj: *JSObject, input_s: *JSString) NativeError!bool {
+    const bc = (try ensureBytecode(realm, regex_obj)) orelse return false;
+
+    var input = buildInputBuf(realm.allocator, input_s.bytes) catch return error.OutOfMemory;
+    defer input.deinit();
+
+    const re_flags = c.lre_get_flags(bc.ptr);
+    const cap_count: usize = @intCast(c.lre_get_capture_count(bc.ptr));
+    const is_global = (re_flags & LRE_FLAG_GLOBAL) != 0;
+    const is_sticky = (re_flags & LRE_FLAG_STICKY) != 0;
+
+    // §22.2.7.2 step 4 — `lastIndex = ? ToLength(? Get(R, "lastIndex"))`.
+    const last_index_v = try intrinsics.getPropertyChain(realm, regex_obj, "lastIndex");
+    const last_index_i64: i64 = try intrinsics.toLengthValue(realm, last_index_v);
+    var last_index: usize = if (last_index_i64 > 0) @intCast(last_index_i64) else 0;
+    // §22.2.7.2 step 7 — non-global, non-sticky ⇒ `lastIndex = 0`.
+    if (!is_global and !is_sticky) last_index = 0;
+    if (last_index > input.units.len) {
+        if (is_global or is_sticky) {
+            try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(0));
+        }
+        return false;
+    }
+
+    // `lre_exec` needs the capture-pointer array even though `test`
+    // discards every capture — `capture[0..1]` carry the whole-match
+    // span used to advance `lastIndex` per §22.2.7.2 step 18.
+    const captures = realm.allocator.alloc(?[*]const u8, 2 * cap_count) catch return error.OutOfMemory;
+    defer realm.allocator.free(captures);
+    @memset(captures, null);
+
+    const cbuf: [*]const u8 = @ptrCast(input.units.ptr);
+    const ret = c.lre_exec(
+        @ptrCast(captures.ptr),
+        bc.ptr,
+        cbuf,
+        @intCast(last_index),
+        @intCast(input.units.len),
+        1,
+        @ptrCast(realm),
+    );
+    if (ret <= 0) {
+        // §22.2.7.2 step 15.c.i / step 16 — sticky / global failure
+        // resets `lastIndex` to 0 honoring writability.
+        if (is_global or is_sticky) {
+            try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(0));
+        }
+        return false;
+    }
+
+    // §22.2.7.2 step 18 — on a global / sticky match, advance
+    // `lastIndex` to the end of the whole match (UTF-16 units).
+    if (is_global or is_sticky) {
+        const cbuf_addr: usize = @intFromPtr(cbuf);
+        const whole_end: usize = if (captures[1]) |p| (@intFromPtr(p) - cbuf_addr) / 2 else 0;
+        try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(@intCast(whole_end)));
+    }
+    return true;
+}
+
+/// §22.2.6.15 RegExp.prototype.test ( S ).
+///   1-2. RequireInternalSlot(R) — R must be an Object.
+///   3.   string = ? ToString(S).
+///   4.   match = ? RegExpExec(R, string).
+///   5.   Return `match` is not null.
+///
+/// §22.2.7.1 RegExpExec dispatches to a user-supplied `exec`
+/// when `Get(R, "exec")` is callable, otherwise to the built-in
+/// RegExpBuiltinExec. The fast path (`regexpBuiltinExecMatchOnly`)
+/// is taken only on the builtin branch — a user `exec` override
+/// must still observe a real call and may return any object.
 fn regexpTest(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const result = try regexpExec(realm, this_value, args);
-    return Value.fromBool(!result.isNull());
+    // §22.2.6.15 step 1-2 — RequireInternalSlot: R must be an Object.
+    const regex_obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "RegExp.prototype.test called on non-object");
+    // §22.2.6.15 step 3 — `string = ? ToString(S)`.
+    const input_s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
+
+    // §22.2.7.1 RegExpExec step 1 — `exec = ? Get(R, "exec")`. A
+    // callable override must be honored; only the un-shadowed
+    // built-in path may take the allocation-free match shortcut.
+    const exec_v = try intrinsics.getPropertyChain(realm, regex_obj, "exec");
+    if (heap_mod.valueAsFunction(exec_v)) |exec_fn| {
+        const interp = @import("../interpreter.zig");
+        const call_args = [_]Value{Value.fromString(input_s)};
+        const outcome = interp.callJSFunction(realm.allocator, realm, exec_fn, this_value, &call_args) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        const v: Value = switch (outcome) {
+            .value, .yielded => |x| x,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        };
+        // §22.2.7.1 step 5.b — the result of a user `exec` must be
+        // Object or null.
+        if (!v.isNull() and heap_mod.valueAsPlainObject(v) == null) {
+            return throwTypeError(realm, "RegExpExec: exec must return Object or null");
+        }
+        return Value.fromBool(!v.isNull());
+    }
+
+    // §22.2.7.1 step 6 — no callable `exec`: require [[RegExpMatcher]].
+    if (regex_obj.regexp_source == null) {
+        return throwTypeError(realm, "RegExp.prototype.test called on non-RegExp");
+    }
+    const matched = try regexpBuiltinExecMatchOnly(realm, regex_obj, input_s);
+    return Value.fromBool(matched);
 }
 
 fn regexpToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

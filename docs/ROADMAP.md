@@ -662,6 +662,21 @@ sampling by `/profile`.
   trigger keeps RSS bounded (~255 MB peak across 35 GC cycles)
   but the wall-time cost is real.
 
+  **Done so far — `addValues` double-copy removed.** The `+`
+  operator (`src/runtime/interpreter_arith.zig` `addValues`)
+  previously allocated a throwaway intermediate buffer, memcpy'd
+  both operands into it, then handed it to `allocateString` which
+  copied it a *second* time into the JSString payload — two
+  full-size allocations per `+`. It now concatenates the two
+  ToString-coerced slices straight into the string payload via
+  `Heap.allocateStringConcat2` / `JSString.concatBytes` (one
+  allocation, two memcpys). This halves *allocator traffic* and
+  process RSS on the `buildString +=` pattern but does **not**
+  change the *charged* cumulative (`--mem-summary`) — each `+`
+  still copies the whole growing accumulator exactly once. The
+  O(N²) is inherent to flat immutable strings; only ConsString
+  removes it.
+
   **Test262 score impact (measured):** in addition to the 12
   CharacterClassEscapes fixtures, the same `buildString +=`
   pattern in `harness/regExpUtils.js` blocks ~74 fixtures under

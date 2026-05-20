@@ -541,6 +541,22 @@ pub const Heap = struct {
         const s = try JSString.concat(self.allocator, self.bytes_allocator, a, b);
         errdefer s.deinit(self.allocator, self.bytes_allocator);
         try self.strings.append(self.allocator, s);
+        self.allocs_since_gc +|= 1;
+        return s;
+    }
+
+    /// Allocate a heap-owned string that is the concatenation of two
+    /// raw WTF-8 byte slices, in a single allocation. Dual of
+    /// `concatStrings` for callers (the `+` operator) whose operands
+    /// were ToString-coerced into scratch slices rather than
+    /// `JSString`s — saves the throwaway intermediate buffer +
+    /// second copy that `allocateString(scratch)` would incur.
+    pub fn allocateStringConcat2(self: *Heap, a: []const u8, b: []const u8) !*JSString {
+        try self.charge(a.len + b.len + @sizeOf(JSString));
+        const s = try JSString.concatBytes(self.allocator, self.bytes_allocator, a, b);
+        errdefer s.deinit(self.allocator, self.bytes_allocator);
+        try self.strings.append(self.allocator, s);
+        self.allocs_since_gc +|= 1;
         return s;
     }
 

@@ -92,11 +92,27 @@ pub const JSString = struct {
         a: *const JSString,
         b: *const JSString,
     ) !*JSString {
-        const total = a.bytes.len + b.bytes.len;
+        return concatBytes(struct_allocator, bytes_allocator, a.bytes, b.bytes);
+    }
+
+    /// §13.5.3 — concatenate two raw WTF-8 byte slices into a fresh
+    /// `JSString` in a *single* allocation + two memcpys. Used by
+    /// `addValues` (the `+` operator) where one or both operands
+    /// were ToString-coerced into scratch slices that aren't
+    /// `JSString`s — concatenating directly avoids materialising a
+    /// throwaway intermediate buffer that `allocateString` would
+    /// then copy a second time.
+    pub fn concatBytes(
+        struct_allocator: std.mem.Allocator,
+        bytes_allocator: std.mem.Allocator,
+        a: []const u8,
+        b: []const u8,
+    ) !*JSString {
+        const total = a.len + b.len;
         const owned = try bytes_allocator.alloc(u8, total);
         errdefer bytes_allocator.free(owned);
-        @memcpy(owned[0..a.bytes.len], a.bytes);
-        @memcpy(owned[a.bytes.len..], b.bytes);
+        @memcpy(owned[0..a.len], a);
+        @memcpy(owned[a.len..], b);
         const s = try struct_allocator.create(JSString);
         s.* = .{ .bytes = owned };
         return s;
