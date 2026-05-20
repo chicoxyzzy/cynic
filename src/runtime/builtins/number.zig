@@ -612,13 +612,62 @@ fn parseIntNative(realm: *Realm, this_value: Value, args: []const Value) NativeE
     }
     if (i == 0) return Value.fromDouble(std.math.nan(f64));
     const prefix = slice[0..i];
-    const value = std.fmt.parseInt(i64, prefix, radix) catch {
-        // Probably overflowed. Fall back to f64.
-        const d = std.fmt.parseFloat(f64, prefix) catch return Value.fromDouble(std.math.nan(f64));
+    if (std.fmt.parseInt(i64, prefix, radix)) |value| {
+        const signed = if (negative) -value else value;
+        return numberFromI64(signed);
+    } else |_| {}
+    // §19.2.5 — the algorithm computes the *mathematical* integer
+    // value `mathInt` exactly, then performs a single
+    // "mathematical value → Number" conversion (round-to-nearest)
+    // at the end. The i64 fast path overflowed; redo the
+    // accumulation so the final f64 rounds correctly instead of
+    // rounding at every digit. `u128` holds every prefix the spec
+    // can produce in practice (2^127 ≈ a 39-decimal-digit value);
+    // a single `@floatFromInt` then rounds once. Only an
+    // astronomically long digit run overflows u128, in which case
+    // we fall through to digit-by-digit f64 accumulation — the
+    // result is already far beyond Number.MAX_VALUE there.
+    var acc_u128: u128 = 0;
+    var u128_overflow = false;
+    for (prefix) |ch| {
+        const digit: u128 = switch (ch) {
+            '0'...'9' => @intCast(ch - '0'),
+            'a'...'z' => @intCast(ch - 'a' + 10),
+            'A'...'Z' => @intCast(ch - 'A' + 10),
+            else => unreachable, // prefix is pre-validated above
+        };
+        const mul = @mulWithOverflow(acc_u128, @as(u128, radix));
+        if (mul[1] != 0) {
+            u128_overflow = true;
+            break;
+        }
+        const add = @addWithOverflow(mul[0], digit);
+        if (add[1] != 0) {
+            u128_overflow = true;
+            break;
+        }
+        acc_u128 = add[0];
+    }
+    if (!u128_overflow) {
+        const d: f64 = @floatFromInt(acc_u128);
         return Value.fromDouble(if (negative) -d else d);
-    };
-    const signed = if (negative) -value else value;
-    return numberFromI64(signed);
+    }
+    // u128 overflowed — accumulate in f64. The value already
+    // exceeds 2^127, so rounding error at this magnitude is
+    // immaterial (the result is +Infinity or a value far past
+    // any exactly-representable integer either way).
+    var acc_f: f64 = 0;
+    const radix_f: f64 = @floatFromInt(radix);
+    for (prefix) |ch| {
+        const digit: f64 = switch (ch) {
+            '0'...'9' => @floatFromInt(ch - '0'),
+            'a'...'z' => @floatFromInt(ch - 'a' + 10),
+            'A'...'Z' => @floatFromInt(ch - 'A' + 10),
+            else => unreachable,
+        };
+        acc_f = acc_f * radix_f + digit;
+    }
+    return Value.fromDouble(if (negative) -acc_f else acc_f);
 }
 
 /// §19.2.4 step 4 — find the longest prefix of `bytes` that is a

@@ -231,15 +231,20 @@ fn advanceUnitOnString(s: []const u8, from_unit: usize) usize {
 }
 
 /// §22.1.2.1 String.fromCharCode(...codeUnits). Each argument is
-/// ToUint16-coerced and emitted as one UTF-16 code unit. Cynic
-/// stores strings as WTF-8: every code unit fits in 1-3 bytes
-/// (surrogate halves get their natural 3-byte sequence — they
-/// only combine into an astral codepoint when the caller wrote
-/// the high half right before the low half).
+/// ToUint16-coerced into one UTF-16 code unit. Cynic stores
+/// strings as WTF-8 (AGENTS.md): a lone surrogate gets its
+/// 3-byte CESU-8 escape, but a high surrogate immediately
+/// followed by a low surrogate is a *valid pair* and MUST encode
+/// as the 4-byte UTF-8 form of the supplementary code point —
+/// otherwise `===` / `codePointAt` / `decodeURI` round-tripping
+/// diverge from a string built any other way (the WTF-8
+/// invariant the position helpers rely on). So coerce every
+/// argument first (observing `valueOf` order), then run a
+/// pairing pass over the code-unit buffer.
 fn stringFromCharCode(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    defer out.deinit(realm.allocator);
+    var units: std.ArrayListUnmanaged(u16) = .empty;
+    defer units.deinit(realm.allocator);
     for (args) |a| {
         // §7.1.7 ToUint16 step 1 — `Let number be ? ToNumber(argument)`.
         // Spec ToNumber consults `Symbol.toPrimitive` / `valueOf` on
@@ -247,8 +252,30 @@ fn stringFromCharCode(realm: *Realm, this_value: Value, args: []const Value) Nat
         // the silent `coerceToNumber` short-circuit masked both.
         const nv = try intrinsics.toNumber(realm, a);
         const n: f64 = if (nv.isInt32()) @floatFromInt(nv.asInt32()) else nv.asDouble();
-        const cu: u16 = toUint16(n);
-        appendWtf8(realm.allocator, &out, cu) catch return error.OutOfMemory;
+        units.append(realm.allocator, toUint16(n)) catch return error.OutOfMemory;
+    }
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(realm.allocator);
+    var i: usize = 0;
+    while (i < units.items.len) {
+        const cu = units.items[i];
+        // High surrogate (0xD800-0xDBFF) followed by a low
+        // surrogate (0xDC00-0xDFFF) → combine into the
+        // supplementary code point and emit the 4-byte form.
+        if (cu >= 0xD800 and cu <= 0xDBFF and i + 1 < units.items.len) {
+            const lo = units.items[i + 1];
+            if (lo >= 0xDC00 and lo <= 0xDFFF) {
+                const cp: u21 = 0x10000 +
+                    (@as(u21, cu - 0xD800) << 10) +
+                    @as(u21, lo - 0xDC00);
+                appendWtf8(realm.allocator, &out, cp) catch return error.OutOfMemory;
+                i += 2;
+                continue;
+            }
+        }
+        // BMP scalar or lone surrogate — 1-3 byte (CESU-8) form.
+        appendWtf8(realm.allocator, &out, @as(u21, cu)) catch return error.OutOfMemory;
+        i += 1;
     }
     const s = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
     return Value.fromString(s);

@@ -329,6 +329,15 @@ pub fn install(realm: *Realm) !void {
         // byteOffset, length) or one of the other 3-arg forms).
         const ctor = try realm.heap.allocateFunctionNative(typedArrayConstructorBuilder(variant.kind, variant.name), 3, variant.name);
         ctor.is_class_constructor = true;
+        // §23.2.5.1 — argument processing (ToIndex on a length arg,
+        // the typed-array / buffer brand checks, the detached-buffer
+        // TypeError) all precede AllocateTypedArray, which is the
+        // step that performs OrdinaryCreateFromConstructor and so
+        // reads `Get(newTarget, "prototype")`. Defer the proto
+        // lookup so a throwing `prototype` getter on newTarget never
+        // fires before the spec-mandated validation gates. See
+        // throw-type-error-before-custom-proto-access.js.
+        ctor.defers_proto_lookup = true;
         ctor.static_parent = ta_ctor; // §23.2.6 — Int8Array.[[Prototype]] = %TypedArray%
         const proto = try realm.heap.allocateObject();
         proto.prototype = ta_proto; // §23.2.6 — concrete proto inherits from %TypedArray%.prototype.
@@ -767,10 +776,52 @@ fn arrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) Nativ
     return heap_mod.taggedObject(result_obj);
 }
 
+/// §23.2.5.1 AllocateTypedArray — resolve the instance prototype
+/// from newTarget (deferred per `defers_proto_lookup`) and
+/// allocate the fresh TypedArray object. Runs only after every
+/// argument-validation gate, so a throwing `prototype` getter on
+/// newTarget surfaces here and never before the spec-mandated
+/// brand checks / ToIndex coercions.
+fn allocateTypedArrayInstance(realm: *Realm, new_target: Value, default_proto: ?*JSObject) NativeError!*JSObject {
+    const interp = @import("../interpreter.zig");
+    const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, default_proto) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const proto: ?*JSObject = switch (proto_lookup) {
+        .proto => |p| p,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+    const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
+    inst.prototype = proto;
+    return inst;
+}
+
 fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_name: []const u8) NativeFn {
     return struct {
         fn ctor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-            const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray constructor requires 'new'");
+            _ = this_value; // §23.2.5.1 — OCFC is deferred (see
+            // install: `defers_proto_lookup`). newTarget is stashed
+            // on `realm.pending_native_new_target`; absence means we
+            // were called without `new`.
+            const new_target = realm.pending_native_new_target;
+            if (new_target.isUndefined()) {
+                return throwTypeError(realm, "TypedArray constructor requires 'new'");
+            }
+            // §23.2.5.1 — AllocateTypedArray's `defaultProto` is
+            // `%<constructorName>.prototype%`, i.e. the concrete
+            // per-kind prototype. Resolve it from the registered
+            // constructor so a newTarget without a `prototype` slot
+            // (e.g. a bound function passed to Reflect.construct)
+            // falls back to the right intrinsic.
+            const default_proto: ?*JSObject = blk: {
+                const ctor_v = realm.globals.get(ta_name) orelse break :blk realm.intrinsics.typed_array_prototype;
+                const ctor_fn = heap_mod.valueAsFunction(ctor_v) orelse break :blk realm.intrinsics.typed_array_prototype;
+                break :blk ctor_fn.prototype;
+            };
             const arg = argOr(args, 0, Value.undefined_);
             const elem_size: usize = kind.elementSize();
 
@@ -801,21 +852,30 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                 const byte_len = length * elem_size;
                 if (byte_len > std.math.maxInt(u32)) return throwRangeError(realm, "TypedArray byte length out of range");
 
+                // §23.2.5.1 — AllocateTypedArray runs OCFC (and so
+                // `Get(newTarget, "prototype")`) only after ToIndex
+                // has validated the length argument above.
+                const inst = try allocateTypedArrayInstance(realm, new_target, default_proto);
                 const buf_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-                if (heap_mod.valueAsFunction(realm.globals.get("ArrayBuffer") orelse Value.undefined_)) |ab| {
-                    buf_obj.prototype = ab.prototype;
-                }
+                buf_obj.prototype = realm.intrinsics.array_buffer_prototype;
                 const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
                 @memset(buf_bytes, 0);
                 buf_obj.array_buffer = buf_bytes;
                 buf_obj.has_array_buffer_data = true;
 
                 inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name };
-                return this_value;
+                return heap_mod.taggedObject(inst);
             }
 
-            // ArrayBuffer source.
+            // ArrayBuffer / object source.
             if (heap_mod.valueAsPlainObject(arg)) |src| {
+                // §23.2.5.1 step 6.b.i — for an Object firstArgument
+                // the spec performs `AllocateTypedArray(.., NewTarget,
+                // proto)` *before* the Initialize* sub-step, so the
+                // proto lookup precedes the buffer / array-like
+                // processing. (The non-Object length branch above
+                // defers it past ToIndex per step 6.c.)
+                const inst = try allocateTypedArrayInstance(realm, new_target, default_proto);
                 if (src.has_array_buffer_data) {
                     // §23.2.5.1 InitializeTypedArrayFromArrayBuffer
                     // step 6 — `Let offset be ? ToIndex(byteOffset)`.
@@ -865,7 +925,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                         if (length * elem_size > remaining) return throwRangeError(realm, "view exceeds buffer");
                     }
                     inst.typed_view = .{ .kind = kind, .viewed = src, .byte_offset = byte_offset, .length = length, .name = ta_name, .length_tracking = length_tracking };
-                    return this_value;
+                    return heap_mod.taggedObject(inst);
                 }
 
                 // Iterable source — §23.2.5.1.5 IterableToList path.
@@ -931,9 +991,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                     const length: usize = collected.items.len;
                     const byte_len = length * elem_size;
                     const buf_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-                    if (heap_mod.valueAsFunction(realm.globals.get("ArrayBuffer") orelse Value.undefined_)) |ab| {
-                        buf_obj.prototype = ab.prototype;
-                    }
+                    buf_obj.prototype = realm.intrinsics.array_buffer_prototype;
                     const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
                     @memset(buf_bytes, 0);
                     buf_obj.array_buffer = buf_bytes;
@@ -970,7 +1028,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                             writeTypedElement(buf_bytes, kind, idx * elem_size, coerced_item);
                         }
                     }
-                    return this_value;
+                    return heap_mod.taggedObject(inst);
                 }
 
                 // Array-like source — §23.2.5.1.6
@@ -993,9 +1051,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                 const length: usize = @intCast(length_u);
                 const byte_len = length * elem_size;
                 const buf_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-                if (heap_mod.valueAsFunction(realm.globals.get("ArrayBuffer") orelse Value.undefined_)) |ab| {
-                    buf_obj.prototype = ab.prototype;
-                }
+                buf_obj.prototype = realm.intrinsics.array_buffer_prototype;
                 const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
                 @memset(buf_bytes, 0);
                 buf_obj.array_buffer = buf_bytes;
@@ -1025,7 +1081,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                         writeTypedElement(buf_bytes, kind, i * elem_size, coerced);
                     }
                 }
-                return this_value;
+                return heap_mod.taggedObject(inst);
             }
             // §23.2.5.1 step 6.b — a callable arg is still an
             // Object; the spec routes it through IterableToList
