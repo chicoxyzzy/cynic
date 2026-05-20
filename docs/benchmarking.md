@@ -113,6 +113,85 @@ comparison):
 These come from `realm.heap` counters, exposed via the `$bench` host
 builtin installed only when `cynic` is launched via the bench harness.
 
+## Interpreter-tier cross-engine runs
+
+`zig build bench` is single-engine — it tracks Cynic against its own
+history. To put Cynic next to other engines on the same fixtures,
+`tools/bench-cross.sh` runs the `bench/micros/*.js` suite under every
+engine present and prints a comparison table.
+
+**This is an internal regression compass, not a public scoreboard.**
+The output never goes to the website or `bench-results.md`. Its only
+job is to answer "did a runtime change move Cynic relative to the
+field" for the developer running it.
+
+### Interpreter tier only — the hard rule
+
+Cynic is a pure bytecode interpreter with no JIT. Comparing it against
+a JIT-warm engine measures nothing useful: the JIT engine wins by an
+order of magnitude and the number says only "JIT beats interpreter,"
+which we already know. So **every JIT engine is run with its JIT
+disabled**, leaving interpreter-tier vs interpreter-tier:
+
+| Engine | No-JIT invocation | Notes |
+|---|---|---|
+| V8 (`d8`) | `--jitless` | disables every JIT tier |
+| SpiderMonkey (`sm`) | `--no-baseline --no-ion` | disables Baseline + Ion; older builds also take `--no-warp`, jsvu 151.x rejects it |
+| JavaScriptCore (`jsc`) | env `JSC_useJIT=0` | a flag-less env toggle |
+| QuickJS-NG (`qjs`) | none needed | non-JIT C interpreter |
+| Hermes (`hermes`) | none needed | natively interpreter-only |
+| XS (`xst`) | none needed | natively interpreter-only |
+| Cynic | none needed | pure bytecode interpreter |
+
+The headline peer is **QuickJS-NG** — a non-JIT C interpreter, the
+fairest comparison point (Cynic already vendors its libregexp).
+
+### Install the engines
+
+```sh
+npm i -g jsvu eshost-cli
+jsvu --engines=quickjs,v8,spidermonkey,hermes
+```
+
+`jsvu` drops pinned binaries into `~/.jsvu/bin/`. QuickJS-NG is the
+must-have; the others are nice-to-have. `eshost-cli` is the uniform
+shim layer — Cynic + every engine register as eshost hosts via
+`bench/eshost-hosts.json` (or `tools/bench-setup-hosts.sh`, which
+copies the entries into `~/.eshost-config.json` for plain
+`eshost --list` / `eshost <file>` use).
+
+A caveat on eshost: its bundled per-engine *agents* are version-
+coupled and drift from the jsvu binaries (the `qjs` agent injects a
+`-N` flag QuickJS-NG 0.14 rejects; the `hermes` agent passes
+`-fenable-tdz`, dropped in newer Hermes). So `tools/bench-cross.sh`
+invokes the engine binaries **directly** with the no-JIT flags above
+for reliable wall-clock timing. The eshost config still serves manual
+one-off runs and is the one committed place the canonical flag set
+lives.
+
+### Running it
+
+```sh
+tools/bench-cross.sh            # comparison table to stdout
+tools/bench-cross.sh -o x.md    # also write the table to a file
+tools/bench-cross.sh --runs 7   # override the timed-run count
+```
+
+The runner builds Cynic `ReleaseFast` itself before timing — a Debug
+`cynic` is 5-18x slower and would make the comparison meaningless
+against the optimized peer binaries.
+
+The runner follows the [measurement protocol](#measurement-protocol)
+above: 1 discarded warmup, 5 timed subprocess runs, report the
+median, flag (`*`) any fixture whose max-min spread tops 10%. It
+**degrades gracefully** — any engine whose binary is absent is
+skipped with a note rather than failing the run, so it works against
+Cynic alone if no peers are installed.
+
+The table prints to stdout (or the `-o` file). It is deliberately
+**not** appended to `bench-results.md` — that file is the
+single-engine `zig build bench` artifact and stays that way.
+
 ## Output format
 
 `bench-results.md`, dated rows mirroring `test262-results.md`:
@@ -159,8 +238,11 @@ host (separate from the GitHub-Actions runners, which vary in CPU).
 ## What's NOT in scope
 
 - DOM benchmarks (Cynic doesn't target browsers).
-- JIT-warm vs cold separation beyond "discard first run" — Cynic has
-  no JIT, comparison engines do, and that mismatch is OK to publish.
+- JIT-warm comparison. Cynic has no JIT; the cross-engine runner
+  (`tools/bench-cross.sh`) pins every JIT peer to its no-JIT flags so
+  the comparison stays interpreter-tier vs interpreter-tier. A
+  JIT-warm number against Cynic is meaningless and is never recorded
+  or published — see "Interpreter-tier cross-engine runs" above.
 - Microbenchmarking individual opcodes from outside the engine —
   see `src/bytecode/op.zig`'s in-tree perf tests instead.
 - Multi-isolate or multi-thread workloads — single-agent-per-isolate

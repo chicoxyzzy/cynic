@@ -1,0 +1,71 @@
+{
+  "_comment": [
+    "Interpreter-tier eshost-cli host registry for Cynic's cross-engine",
+    "micro-bench harness. Use with `eshost -c bench/eshost-hosts.json ...`",
+    "or copy the `hosts` block into ~/.eshost-config.json.",
+    "",
+    "This harness is an INTERNAL regression compass, not a public",
+    "scoreboard. It compares Cynic's bytecode interpreter against other",
+    "engines' INTERPRETER TIERS ONLY. Every JIT engine below is pinned",
+    "to its no-JIT flags so the comparison stays apples-to-apples:",
+    "Cynic has no JIT, so a JIT-warm peer would be a meaningless baseline.",
+    "",
+    "Engine paths assume jsvu's default layout (~/.jsvu/bin/<engine>).",
+    "Install with: npm i -g jsvu eshost-cli && jsvu --engines=quickjs,v8,spidermonkey,hermes",
+    "",
+    "No-JIT flag rationale:",
+    "  v8 (d8)        --jitless          disable all JIT tiers, interpreter-only",
+    "  spidermonkey   --no-baseline --no-ion   disable Baseline + Ion JITs",
+    "                 (older builds also accept --no-warp; jsvu 151.x rejects it)",
+    "  quickjs-ng     none               natively a non-JIT C interpreter",
+    "  hermes         none               natively interpreter-only",
+    "  cynic          none               pure bytecode interpreter, no JIT",
+    "",
+    "QuickJS-NG is the headline peer: a non-JIT C interpreter, the",
+    "fairest comparison point. Cynic already vendors its libregexp.",
+    "",
+    "Host-type notes: jsvu's QuickJS-NG 0.14.0 rejects the `-N` flag the",
+    "eshost `qjs` agent injects, so QuickJS is registered with the `ch`",
+    "host type (bare file arg, auto-detects scripts, exposes print()).",
+    "The cross-engine timing runner (tools/bench-cross.sh) invokes the",
+    "engine binaries directly with these same flags rather than through",
+    "eshost's agent layer, because the jsvu binary versions and the",
+    "bundled eshost agents drift apart (hermes -fenable-tdz, etc.).",
+    "This config still drives manual `eshost --list` / one-off eshost",
+    "runs and documents the canonical flag set in one committed place."
+  ],
+  "hosts": {
+    "cynic": {
+      "type": "ch",
+      "path": "./zig-out/bin/cynic",
+      "args": "run"
+    },
+    "qjs": {
+      "type": "ch",
+      "path": "~/.jsvu/bin/qjs"
+    },
+    "v8": {
+      "type": "d8",
+      "path": "~/.jsvu/bin/v8",
+      "args": "--jitless"
+    },
+    "sm": {
+      "type": "jsshell",
+      "path": "~/.jsvu/bin/sm",
+      "args": "--no-baseline --no-ion"
+    },
+    "jsc": {
+      "type": "jsc",
+      "path": "~/.jsvu/bin/jsc",
+      "env": { "JSC_useJIT": "0" }
+    },
+    "hermes": {
+      "type": "hermes",
+      "path": "~/.jsvu/bin/hermes"
+    },
+    "xs": {
+      "type": "xs",
+      "path": "~/.jsvu/bin/xst"
+    }
+  }
+}
