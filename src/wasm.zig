@@ -316,7 +316,11 @@ export fn cynic_parse(src: [*]const u8, len: u32) [*]u8 {
 // Version string
 // ---------------------------------------------------------------------------
 
-const version = "cynic-wasm 0.1";
+// Stamped by `build.zig` from `git rev-parse --short HEAD` at
+// configure time, so the playground footer always names the exact
+// commit the `.wasm` was built from. Falls back to "cynic-wasm
+// unknown" when git isn't available (e.g. a source tarball build).
+const version = @import("build_options").wasm_version;
 
 export fn cynic_version_ptr() [*]const u8 {
     return version.ptr;

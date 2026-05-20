@@ -323,6 +323,18 @@ pub fn build(b: *std.Build) void {
     wasm_mod.addIncludePath(b.path("vendor/quickjs"));
     wasm_mod.addImport("c", wasm_c_mod);
 
+    // Stamp the build's git short-SHA into the module so the
+    // playground footer names the exact commit. `build.zig`'s
+    // configure phase re-runs on every `zig build`, so the SHA is
+    // re-read each invocation; if it changed, the option value
+    // changes and the wasm step recompiles. (Unlike the test262
+    // score rows — see the note above — a configure-time capture
+    // is correct here: the value flows through a compile step, so
+    // a changed SHA invalidates the cache on its own.)
+    const wasm_opts = b.addOptions();
+    wasm_opts.addOption([]const u8, "wasm_version", b.fmt("cynic-wasm {s}", .{gitShortSha(b)}));
+    wasm_mod.addOptions("build_options", wasm_opts);
+
     const wasm_exe = b.addExecutable(.{
         .name = "cynic",
         .root_module = wasm_mod,
@@ -364,4 +376,22 @@ pub fn build(b: *std.Build) void {
     wasm_step.dependOn(&wasm_into_playground.step);
     wasm_step.dependOn(&html_into_playground.step);
     wasm_step.dependOn(&js_into_playground.step);
+}
+
+/// `git rev-parse --short HEAD` at configure time. Returns
+/// `"unknown"` when git is absent or the command fails (a source
+/// tarball, a detached build environment) so the build never hard-
+/// fails on a missing VCS.
+fn gitShortSha(b: *std.Build) []const u8 {
+    // `runAllowFail` only writes `out_code` on a failure term; a
+    // non-zero git exit surfaces as `error.ExitCodeFailure`, so the
+    // `catch` covers every failure path and `code` is never read.
+    var code: u8 = undefined;
+    const stdout = b.runAllowFail(
+        &.{ "git", "-C", b.build_root.path orelse ".", "rev-parse", "--short", "HEAD" },
+        &code,
+        .ignore,
+    ) catch return "unknown";
+    const trimmed = std.mem.trim(u8, stdout, " \t\r\n");
+    return if (trimmed.len == 0) "unknown" else trimmed;
 }
