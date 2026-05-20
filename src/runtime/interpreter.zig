@@ -11522,8 +11522,60 @@ fn strictSetPropertyAnchored(
         }
         return .ok;
     }
+    // §6.2.5.6 PutValue step 5 — when the Reference's base is a
+    // primitive (string / number / bigint / boolean / symbol),
+    // `HasPrimitiveBase(V)` is true: `base` is set to
+    // `ToObject(base)` and `[[Set]]` runs with `GetThisValue(V)`
+    // — the *original primitive* — as the Receiver. The transient
+    // wrapper has no own properties, so OrdinarySetWithOwnDescriptor
+    // recurses straight into `<Prototype>.[[Set]]` (§10.1.9.2 step
+    // 2). Walk that prototype chain with `setThroughChain`, keeping
+    // the primitive as `recv`: an accessor / Proxy ancestor handles
+    // the write (test262 language/types/reference/
+    // put-value-prop-base-primitive.js installs a `set`-trapping
+    // Proxy as `Number.prototype`'s prototype). A clean walk with no
+    // descriptor bottoms out at a receiver-side CreateDataProperty
+    // on the primitive, which returns false — strict assignment then
+    // throws TypeError per §6.2.5.6 step 5.c.
+    if (primitiveWrapperPrototype(realm, recv)) |proto_obj| {
+        switch (try setThroughChain(allocator, realm, frames, f, ip, proto_obj, key, value, recv)) {
+            .handled_set => |ok| {
+                if (ok) return .ok;
+                // No accessor / writable-data descriptor on the
+                // chain: the receiver-side write targets a
+                // primitive and fails. Strict mode → TypeError.
+                const ex = try makeTypeError(realm, "Cannot create property on primitive value");
+                return throwInSetter(realm, frames, f, ip, value, ex);
+            },
+            .handled_or_uncaught => |out| return out,
+        }
+    }
     const ex = try makeTypeError(realm, "Cannot set properties of non-object");
     return throwInSetter(realm, frames, f, ip, value, ex);
+}
+
+/// §7.1.18 ToObject for a primitive — returns the `[[Prototype]]`
+/// object of the transient wrapper that `ToObject` would build for
+/// `v` (i.e. `<Type>.prototype`), or `null` when `v` is not a
+/// primitive with a wrapper type (objects, functions, null,
+/// undefined). The wrapper itself carries no own properties, so
+/// callers that only need to walk the wrapper's prototype chain
+/// (e.g. §6.2.5.6 PutValue with a primitive base) can start here.
+fn primitiveWrapperPrototype(realm: *Realm, v: Value) ?*JSObject {
+    const ctor_name: []const u8 = if (v.isString())
+        "String"
+    else if (v.isInt32() or v.isDouble())
+        "Number"
+    else if (v.isBool())
+        "Boolean"
+    else if (heap_mod.isBigInt(v))
+        "BigInt"
+    else if (heap_mod.isSymbol(v))
+        "Symbol"
+    else
+        return null;
+    const ctor_fn = heap_mod.valueAsFunction(realm.globals.get(ctor_name) orelse return null) orelse return null;
+    return ctor_fn.prototype;
 }
 
 fn throwInSetter(
