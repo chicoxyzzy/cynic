@@ -20,9 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
+        # No submodules: `zig build` / `zig build test` never read
+        # the test262 corpus (the only submodule). The inline
+        # `tools/test262/*` tests are pure skip-rule / frontmatter
+        # logic. Only the `test262` job below needs the submodule.
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
@@ -41,7 +43,10 @@ jobs:
   fmt-check:
     name: zig fmt (advisory)
     runs-on: ubuntu-latest
-    needs: build-and-test
+    # No `needs:` — `zig build fmt-check` compiles nothing, it just
+    # runs the formatter. Letting it start immediately surfaces a
+    # formatting drift without waiting on a full engine build.
+    #
     # Advisory: a fail means `zig fmt` would rewrite something
     # under `src/` or `tools/`. Drift slips in from agent edits
     # and patch-by-bash workarounds; surfacing it in PR review is
@@ -61,12 +66,18 @@ jobs:
         run: zig build fmt-check
 
   test262:
-    name: test262 conformance (advisory)
+    name: test262 conformance + RSS smoke (advisory)
     runs-on: ubuntu-latest
     needs: build-and-test
-    # Advisory: a fail would mean the harness crashed (panic /
-    # SEGV / OOM / timeout), not that the score regressed. Score
-    # regressions are reviewed in PRs against test262-results.md.
+    # One job builds the ReleaseFast harness once, then runs both
+    # the full runtime sweep and the filtered RSS smoke against it —
+    # the second `zig build test262` reuses the first's `.zig-cache`,
+    # so the harness compiles a single time.
+    #
+    # Both steps are advisory (`continue-on-error`): a fail would
+    # mean the harness crashed (panic / SEGV / OOM / timeout), not
+    # that the score regressed. Score regressions are reviewed in
+    # PRs against `test262-results.md`.
     #
     # Runtime mode is the meaningful signal — parser is uniformly
     # ≥95% across areas. ReleaseFast + 4 workers (matching the
@@ -99,40 +110,23 @@ jobs:
         # on PRs against `test262-results.md`, not here.
         #
         # `--top-rss=20` surfaces the memory-heaviest fixtures
-        # after the tally; pair with the filtered RSS smoke job
-        # below to catch leaks at PR time before they reach
-        # `main`.
+        # after the tally; pair with the filtered RSS smoke step
+        # below to catch leaks at PR time before they reach `main`.
         timeout-minutes: 8
         continue-on-error: true
         run: zig build test262 -- --mode=runtime --threads=4 --top-rss=20
 
-  test262-rss-smoke:
-    name: test262 RSS smoke (advisory)
-    runs-on: ubuntu-latest
-    needs: build-and-test
-    # Advisory leak guard: a filtered runtime sweep reports the
-    # heaviest per-fixture RSS deltas via `--top-rss`. Healthy
-    # deltas on `language/expressions` are ≤ ~20 MiB; a jump
-    # almost always means a new allocation path stopped freeing.
-    # We deliberately do NOT wrap in `/usr/bin/time -v` — that
-    # reports the parent `zig build` RSS (≈1 GB during link),
-    # not the harness, and would always look "leaking."
-    #
-    # `continue-on-error` because we don't want a flaky runner
-    # to paint PRs red; this is for human review of the top-rss
-    # block in the log.
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Set up Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.17.0-dev.305+bdfbf432d
-
       - name: Filtered sweep with top-rss
+        # Advisory leak guard: a filtered runtime sweep reports the
+        # heaviest per-fixture RSS deltas via `--top-rss`. Healthy
+        # deltas on `language/expressions` are ≤ ~20 MiB; a jump
+        # almost always means a new allocation path stopped freeing.
+        # We deliberately do NOT wrap in `/usr/bin/time -v` — that
+        # reports the parent `zig build` RSS (≈1 GB during link),
+        # not the harness, and would always look "leaking."
+        #
+        # Reuses the harness binary built by the step above (same
+        # runner, same `.zig-cache`) — no second compile.
         timeout-minutes: 5
         continue-on-error: true
         run: |
