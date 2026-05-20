@@ -1234,16 +1234,33 @@ fn stringTrim(realm: *Realm, this_value: Value, args: []const Value) NativeError
 }
 
 fn stringConcat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §22.1.3.5 String.prototype.concat — fold each coerced argument
+    // onto the receiver via `allocateConsString`, building lazy rope
+    // nodes (amortised O(1) per join) instead of copying the whole
+    // accumulator into a growing buffer. `stringifyArg` can re-enter
+    // JS (ToString on an object argument), so the accumulator is
+    // pinned on a `HandleScope` to survive a mid-call GC.
     const s = try coerceThisToJSString(realm, this_value);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(realm.allocator);
-    buf.appendSlice(realm.allocator, s.flatBytes()) catch return error.OutOfMemory;
+    var acc: *JSString = s;
+    if (args.len == 0) return Value.fromString(acc);
+
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(Value.fromString(acc)) catch return error.OutOfMemory;
     for (args) |a| {
         const part = try stringifyArg(realm, a);
-        buf.appendSlice(realm.allocator, part.flatBytes()) catch return error.OutOfMemory;
+        acc = realm.heap.allocateConsString(acc, part) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // §6.1.4 — joined length past the `u32` byte cap.
+            error.StringTooLong => {
+                const ex = intrinsics.newRangeError(realm, "Invalid string length") catch return error.OutOfMemory;
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        };
+        scope.push(Value.fromString(acc)) catch return error.OutOfMemory;
     }
-    const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
-    return Value.fromString(out);
+    return Value.fromString(acc);
 }
 
 fn stringRepeat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

@@ -8,16 +8,17 @@
 //!
 //! Two payload kinds:
 //!
-//! - **`flat`** — an owned WTF-8 byte buffer. This is the only kind
-//!   ever produced today; `+` / `String.prototype.concat` allocate
-//!   a fresh flat node.
+//! - **`flat`** — an owned WTF-8 byte buffer.
 //! - **`cons`** — a lazy concatenation node `(left, right)` whose
 //!   realised bytes are `left ++ right`. This is the rope
 //!   representation (JSC `JSRopeString`, V8 `ConsString`) that lets
-//!   `a + b` be O(1). It exists in the type but **Stage 1 of the
-//!   ConsString effort never creates one** — `allocateConsString`
-//!   eager-flattens. The cons arm of `flatten` / `markValue` is
-//!   exercised only by unit tests that hand-build a cons node.
+//!   `a + b` be amortised O(1). Stage 2 of the ConsString effort
+//!   builds real cons nodes from `+` / `+=` / `String.prototype.
+//!   concat` — subject to three gates: a min-length threshold
+//!   (`min_cons_byte_len`), the WTF-8 dirty-surrogate-seam rule
+//!   (§6.1.4 — a paired seam eager-flattens so every cons tree is
+//!   trivially clean), and a depth cap (`max_rope_depth`) that
+//!   eager-flattens one operand before the tree would grow past it.
 //!
 //! `length_cu` (UTF-16 code-unit count, the JS-visible
 //! `String.prototype.length` per §22.1.5) and `byte_len` (WTF-8
@@ -40,6 +41,25 @@ const std = @import("std");
 /// a RangeError (§6.1.4 note "the maximum length … is
 /// implementation-defined"; V8 / JSC both cap and throw).
 pub const max_byte_len: usize = std.math.maxInt(u32);
+
+/// ConsString Stage 2 — minimum total WTF-8 byte length below which
+/// `Heap.allocateConsString` eager-flattens instead of building a
+/// `.cons` node. A cons header is two pointers plus the JSString
+/// header (~32 B); below this threshold the rope costs more than the
+/// byte copy it would save and only deepens the tree. V8's
+/// `ConsString::kMinLength` is 13; Cynic picks 16. Left a named
+/// const for Stage 3 tuning.
+pub const min_cons_byte_len: usize = 16;
+
+/// ConsString Stage 2 — maximum cons-tree depth. A `result += chunk`
+/// loop builds a strictly left-leaning spine of depth = iteration
+/// count; `flatten` / `markString` walk that depth. When a new cons
+/// node would exceed this cap, `Heap.allocateConsString` flattens
+/// one operand first so the resulting depth stays bounded. The
+/// `+=` loop then periodically flattens and keeps going — still
+/// amortised O(1) per `+=`, but no rope ever exceeds the cap.
+/// `markString`'s recursion is bounded by this value.
+pub const max_rope_depth: u16 = 96;
 
 /// Error set of the `concat` family. `StringTooLong` is raised when
 /// joining two valid strings would exceed `max_byte_len`; the
@@ -87,6 +107,15 @@ pub const JSString = struct {
     pub const Cons = struct {
         left: *JSString,
         right: *JSString,
+        /// The byte allocator the owning heap uses for flat string
+        /// payloads. Stored on the cons node so `flatBytes()` /
+        /// `equals()` — heap-free read accessors — can materialise
+        /// the rope on demand (V8 / JSC treat ropes as fully
+        /// transparent: every byte reader flattens). It is exactly
+        /// the allocator `Heap.allocateConsString` would pass to
+        /// `flatten`, so the materialised buffer is freed correctly
+        /// by `deinit`'s `bytes_allocator` arm.
+        bytes_allocator: std.mem.Allocator,
     };
 
     /// Allocate a new flat `JSString` whose contents are a copy of
@@ -186,22 +215,65 @@ pub const JSString = struct {
         };
     }
 
-    /// Stage-1 known-flat byte accessor — the migration target for
-    /// every former `JSString.bytes` reader that needs the WTF-8
-    /// bytes but has no heap in scope (and therefore cannot call
-    /// `flatten`).
+    /// Heap-free WTF-8 byte accessor — the workhorse every former
+    /// `JSString.bytes` reader uses.
     ///
-    /// In Stage 1 of the ConsString effort **no cons node is ever
-    /// created** — `+` / `concat` / every `Heap.allocate*` produce
-    /// flat nodes — so a `*JSString` reaching any of these call
-    /// sites is provably flat and this is a correct direct access.
-    /// A later stage that lets cons nodes escape into observable
-    /// positions must revisit each `flatBytes()` caller and either
-    /// thread a heap through to call `flatten`, or prove the node
-    /// is flat there. The `unreachable` makes that audit a hard
-    /// compile/runtime signal rather than a silent miscompare.
+    /// For a flat node this is a direct slice return, no allocation.
+    /// For a cons (rope) node it materialises the subtree on demand
+    /// — Stage 2 makes ropes fully transparent the way V8 / JSC do:
+    /// every byte reader flattens, so callers never have to thread a
+    /// heap through. The cons node carries its own `bytes_allocator`
+    /// (see `Cons`) precisely so this accessor can flatten without a
+    /// `Heap` in scope. After the first call the node is degenerated
+    /// to flat and the result cached, so repeat reads are O(1).
+    ///
+    /// On the (practically unreachable) allocation failure while
+    /// materialising a rope, this falls back to the empty slice
+    /// rather than crashing — a wrong-but-safe answer. Callers that
+    /// must distinguish OOM should use `flatten` directly.
+    ///
+    /// The signature stays `*const` even though flattening a rope
+    /// mutates `payload` (`@constCast` below): the mutation is a
+    /// benign, idempotent cache fill — the realised bytes and every
+    /// stored length are unchanged — so a `*const JSString` reader
+    /// is not lying. V8's `String::Flatten` does the same on a
+    /// nominally-const string.
     pub fn flatBytes(self: *const JSString) []const u8 {
-        return self.flatBytesIfFlat() orelse unreachable;
+        switch (self.payload) {
+            .flat => |b| return b,
+            .cons => |c| {
+                const mutable: *JSString = @constCast(self);
+                return mutable.flatten(c.bytes_allocator) catch "";
+            },
+        }
+    }
+
+    /// Walk the right spine of a (possibly cons) tree and return its
+    /// rightmost flat leaf — the node whose bytes end the realised
+    /// string. O(depth): one pointer chase per cons level. Used by
+    /// `Heap.allocateConsString` to inspect the WTF-8 seam (§6.1.4)
+    /// without materialising either operand.
+    pub fn rightmostLeaf(self: *JSString) *JSString {
+        var cursor: *JSString = self;
+        while (true) {
+            switch (cursor.payload) {
+                .flat => return cursor,
+                .cons => |c| cursor = c.right,
+            }
+        }
+    }
+
+    /// Walk the left spine of a (possibly cons) tree and return its
+    /// leftmost flat leaf — the node whose bytes begin the realised
+    /// string. Dual of `rightmostLeaf`; O(depth).
+    pub fn leftmostLeaf(self: *JSString) *JSString {
+        var cursor: *JSString = self;
+        while (true) {
+            switch (cursor.payload) {
+                .flat => return cursor,
+                .cons => |c| cursor = c.left,
+            }
+        }
     }
 
     /// Return the realised contiguous WTF-8 bytes of this string.
@@ -255,10 +327,11 @@ pub const JSString = struct {
     /// and there is no recursion.
     fn copyConsBytes(root: *JSString, dst: []u8) void {
         // The stack holds at most one right-child per level of the
-        // current descent; 128 frames is ample for any cons tree a
-        // sane balancer produces. Stage 1 builds no cons, so an
-        // overflow here would be a bug — asserted below.
-        var stack_buf: [128]*JSString = undefined;
+        // current descent. `Heap.allocateConsString` caps cons depth
+        // at `max_rope_depth`, so `max_rope_depth + 16` frames are
+        // always ample; an overflow here would be a depth-cap bug,
+        // asserted below.
+        var stack_buf: [max_rope_depth + 16]*JSString = undefined;
         var sp: usize = 0;
         var cursor: *JSString = root;
         var offset: usize = 0;
@@ -286,24 +359,15 @@ pub const JSString = struct {
     /// §7.2.13 / §7.2.10 string equality used by `===` and
     /// `Object.is`. Pointer-equal short-circuits to `true`;
     /// differing `length_cu` or `byte_len` short-circuits to
-    /// `false`. Only when both nodes are flat does it fall through
-    /// to a byte compare — a cons operand would need a heap to
-    /// flatten, so the no-heap fast path can only answer
-    /// structurally. Stage 1: every node is flat, so the
-    /// byte-compare arm always runs.
+    /// `false`. Otherwise both operands are materialised via
+    /// `flatBytes` (O(1) for a flat node, a one-time rope flatten
+    /// for a cons — see `flatBytes`) and byte-compared. Ropes are
+    /// transparent here: a cons operand flattens itself.
     pub fn equals(self: *const JSString, other: *const JSString) bool {
         if (self == other) return true;
         if (self.length_cu != other.length_cu) return false;
         if (self.byte_len != other.byte_len) return false;
-        const a = self.flatBytesIfFlat();
-        const b = other.flatBytesIfFlat();
-        if (a != null and b != null) return std.mem.eql(u8, a.?, b.?);
-        // A cons operand reached `equals` without a heap. Stage 1
-        // never builds a cons so this is unreachable in practice;
-        // a later stage routes string `===` through the heap-aware
-        // `equalsFlatten`. Conservatively report inequality rather
-        // than crash.
-        return false;
+        return std.mem.eql(u8, self.flatBytes(), other.flatBytes());
     }
 
     /// Heap-aware string equality — flattens both operands, then
@@ -380,7 +444,11 @@ fn makeConsForTest(left: *JSString, right: *JSString) !*JSString {
         .length_cu = left.length_cu + right.length_cu,
         .byte_len = left.byte_len + right.byte_len,
         .depth = 1 + @max(left.depth, right.depth),
-        .payload = .{ .cons = .{ .left = left, .right = right } },
+        .payload = .{ .cons = .{
+            .left = left,
+            .right = right,
+            .bytes_allocator = testing.allocator,
+        } },
     };
     return cons;
 }
@@ -577,4 +645,61 @@ test "JSString: concatBytes leaves a non-paired surrogate seam intact" {
     const s = try JSString.concatBytes(testing.allocator, testing.allocator, &hi, &hi);
     defer s.deinit(testing.allocator, testing.allocator);
     try testing.expectEqual(@as(usize, 6), s.byte_len);
+}
+
+test "JSString: rightmostLeaf / leftmostLeaf walk a flat node to itself" {
+    const s = try JSString.init(testing.allocator, testing.allocator, "solo");
+    defer s.deinit(testing.allocator, testing.allocator);
+    try testing.expectEqual(s, s.rightmostLeaf());
+    try testing.expectEqual(s, s.leftmostLeaf());
+}
+
+test "JSString: rightmostLeaf / leftmostLeaf walk a nested cons tree" {
+    // ((a + b) + (c + d)) — leftmost leaf is `a`, rightmost is `d`.
+    const a = try JSString.init(testing.allocator, testing.allocator, "a");
+    const b = try JSString.init(testing.allocator, testing.allocator, "b");
+    const c = try JSString.init(testing.allocator, testing.allocator, "c");
+    const d = try JSString.init(testing.allocator, testing.allocator, "d");
+    const ab = try makeConsForTest(a, b);
+    const cd = try makeConsForTest(c, d);
+    const root = try makeConsForTest(ab, cd);
+
+    try testing.expectEqual(a, root.leftmostLeaf());
+    try testing.expectEqual(d, root.rightmostLeaf());
+
+    root.deinit(testing.allocator, testing.allocator);
+    ab.deinit(testing.allocator, testing.allocator);
+    cd.deinit(testing.allocator, testing.allocator);
+    a.deinit(testing.allocator, testing.allocator);
+    b.deinit(testing.allocator, testing.allocator);
+    c.deinit(testing.allocator, testing.allocator);
+    d.deinit(testing.allocator, testing.allocator);
+}
+
+test "JSString: flatten a deep left-leaning rope (no stack overflow)" {
+    // Build a strictly left-leaning spine of `max_rope_depth` cons
+    // levels by hand — the shape a `result += chunk` loop produces.
+    // `flatten` must walk it iteratively without overflowing.
+    var leaves: [max_rope_depth + 1]*JSString = undefined;
+    for (&leaves) |*slot| {
+        slot.* = try JSString.init(testing.allocator, testing.allocator, "x");
+    }
+    var spine: *JSString = leaves[0];
+    var built: [max_rope_depth]*JSString = undefined;
+    var i: usize = 0;
+    while (i < max_rope_depth) : (i += 1) {
+        const node = try makeConsForTest(spine, leaves[i + 1]);
+        built[i] = node;
+        spine = node;
+    }
+    try testing.expectEqual(@as(u16, max_rope_depth), spine.depth);
+
+    const flat = try spine.flatten(testing.allocator);
+    try testing.expectEqual(@as(usize, max_rope_depth + 1), flat.len);
+    for (flat) |ch| try testing.expectEqual(@as(u8, 'x'), ch);
+
+    // Tear down: the spine root now owns a flat buffer; the cons
+    // nodes and leaves are still independent.
+    for (built) |node| node.deinit(testing.allocator, testing.allocator);
+    for (leaves) |leaf| leaf.deinit(testing.allocator, testing.allocator);
 }

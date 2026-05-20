@@ -24,7 +24,9 @@ const std = @import("std");
 
 const value_mod = @import("value.zig");
 const Value = value_mod.Value;
-const JSString = @import("string.zig").JSString;
+const string_mod = @import("string.zig");
+const JSString = string_mod.JSString;
+const utf16 = @import("utf16.zig");
 const JSFunction = @import("function.zig").JSFunction;
 const HeapKind = @import("function.zig").HeapKind;
 const JSObject = @import("object.zig").JSObject;
@@ -551,23 +553,109 @@ pub const Heap = struct {
 
     /// Allocate a `ConsString` (lazy rope) node for `a ++ b`.
     ///
-    /// **Stage 1 of the ConsString effort: this MUST NOT build a
-    /// rope.** It eager-flattens — identical observable result to
-    /// `concatStrings` — so the rope representation exists in the
-    /// type without changing any behaviour. Later stages will
-    /// return an actual `.cons` node here when the operands are
-    /// large enough and the WTF-8 seam is clean.
+    /// Stage 2 of the ConsString effort: this builds a real lazy
+    /// `.cons` node so `a + b` is amortised O(1) instead of an
+    /// O(n) byte copy — subject to three gates. When any gate
+    /// rejects the rope, it falls through to the eager flat
+    /// `concatStrings` path (identical observable result).
     ///
-    /// §6.1.4 dirty-seam rule (for the next stage): if the left
-    /// operand ends in a lone high surrogate and the right starts
-    /// with a lone low surrogate (`utf16.wtf8ConcatSeamPairs`),
-    /// the pair must collapse to one 4-byte form — a cons node
-    /// cannot represent that, so such a concat must eager-flatten
-    /// (via `JSString.concat`, which routes through `concatBytes`'
-    /// seam merge) instead of building a `.cons`.
+    /// - **Gate A — min length.** Below `min_cons_byte_len` total
+    ///   bytes, a cons header (two pointers + JSString header,
+    ///   ~32 B) costs more than the copy it saves and only deepens
+    ///   the tree. Eager-flatten.
+    /// - **Gate B — WTF-8 dirty surrogate seam (§6.1.4).** A
+    ///   *valid* surrogate pair must be stored as the single 4-byte
+    ///   form, never two adjacent 3-byte CESU-8 escapes. When the
+    ///   rightmost flat leaf of `a` ends with a lone high surrogate
+    ///   and the leftmost flat leaf of `b` starts with a lone low
+    ///   surrogate, a plain leaf-concat would leave that seam dirty.
+    ///   A cons node cannot represent the merge, so such a concat
+    ///   eager-flattens (`concatStrings` → `concatBytes` merges the
+    ///   seam). This keeps every cons tree trivially clean —
+    ///   `flatten` is then a pure leaf-memcpy with no seam logic and
+    ///   `byte_len = a.byte_len + b.byte_len` exactly.
+    /// - **Gate C — depth cap.** A `result += chunk` loop builds a
+    ///   left-leaning spine of depth = iteration count; unbounded
+    ///   depth means `flatten` / `markString` recurse / iterate
+    ///   without bound. When the new node would exceed
+    ///   `max_rope_depth`, the deeper operand is flattened first so
+    ///   the new node's depth resets. The loop stays amortised
+    ///   O(1) per `+=` (a flatten only every `max_rope_depth`
+    ///   steps) while no rope ever exceeds the cap.
     pub fn allocateConsString(self: *Heap, a: *JSString, b: *JSString) !*JSString {
-        // Stage 1: always eager-flatten. Identical to concatStrings.
-        return self.concatStrings(a, b);
+        var left = a;
+        var right = b;
+
+        // Gate A — min-length threshold. `byte_len` is O(1).
+        const total: usize = @as(usize, left.byte_len) + @as(usize, right.byte_len);
+        if (total < string_mod.min_cons_byte_len) {
+            return self.concatStrings(left, right);
+        }
+
+        // Gate B — WTF-8 dirty surrogate seam. Inspect the rightmost
+        // flat leaf of `left` and the leftmost flat leaf of `right`;
+        // every existing cons tree is already clean (this gate
+        // guarantees it), so the seam is decided entirely by those
+        // two leaves — an O(depth) spine walk, no materialisation.
+        const left_tail = left.rightmostLeaf().flatBytes();
+        const right_head = right.leftmostLeaf().flatBytes();
+        if (utf16.wtf8ConcatSeamPairs(left_tail, right_head)) {
+            return self.concatStrings(left, right);
+        }
+
+        // Gate C — depth cap. The new node's depth would be
+        // `1 + max(left.depth, right.depth)`. If that exceeds the
+        // cap, flatten the deeper operand first (then, in the rare
+        // both-deep case, the other) so the resulting depth stays
+        // bounded. In the dominant `result += chunk` loop only
+        // `left` is deep, so this flattens once every
+        // `max_rope_depth` iterations — still amortised O(1).
+        if (1 + @max(left.depth, right.depth) > string_mod.max_rope_depth) {
+            // `flatten` allocates a fresh `byte_len`-sized buffer; it
+            // has no `Heap` in scope, so charge the byte trigger here
+            // (the leaf buffers it concatenates were already charged
+            // at their `allocateString`, but the materialised copy is
+            // new live memory until the next sweep frees the leaves).
+            if (left.depth >= right.depth) {
+                if (!left.isFlat()) try self.charge(left.byte_len);
+                _ = try left.flatten(self.bytes_allocator);
+            } else {
+                if (!right.isFlat()) try self.charge(right.byte_len);
+                _ = try right.flatten(self.bytes_allocator);
+            }
+            if (1 + @max(left.depth, right.depth) > string_mod.max_rope_depth) {
+                // Both operands were deep — flatten the other too.
+                if (left.depth >= right.depth) {
+                    if (!left.isFlat()) try self.charge(left.byte_len);
+                    _ = try left.flatten(self.bytes_allocator);
+                } else {
+                    if (!right.isFlat()) try self.charge(right.byte_len);
+                    _ = try right.flatten(self.bytes_allocator);
+                }
+            }
+        }
+        const new_depth: usize = 1 + @max(left.depth, right.depth);
+
+        // All gates passed — build a real lazy cons node. The total
+        // byte length is exact (Gate B ruled out a seam merge) and
+        // both `length_cu` figures are O(1) stored values.
+        if (total > string_mod.max_byte_len) return error.StringTooLong;
+        try self.charge(@sizeOf(JSString));
+        const s = try self.allocator.create(JSString);
+        errdefer self.allocator.destroy(s);
+        s.* = .{
+            .length_cu = left.length_cu + right.length_cu,
+            .byte_len = @intCast(total),
+            .depth = @intCast(new_depth),
+            .payload = .{ .cons = .{
+                .left = left,
+                .right = right,
+                .bytes_allocator = self.bytes_allocator,
+            } },
+        };
+        try self.strings.append(self.allocator, s);
+        self.allocs_since_gc +|= 1;
+        return s;
     }
 
     /// Allocate a heap-owned string that is the concatenation of two
@@ -1231,7 +1319,11 @@ test "Heap: markString recurses through a hand-built cons node" {
         .length_cu = left.length_cu + right.length_cu,
         .byte_len = left.byte_len + right.byte_len,
         .depth = 1,
-        .payload = .{ .cons = .{ .left = left, .right = right } },
+        .payload = .{ .cons = .{
+            .left = left,
+            .right = right,
+            .bytes_allocator = heap.bytes_allocator,
+        } },
     };
     try heap.strings.append(heap.allocator, cons);
 
@@ -1245,17 +1337,95 @@ test "Heap: markString recurses through a hand-built cons node" {
     try testing.expectEqual(@as(usize, 0), heap.strings.items.len);
 }
 
-test "Heap: allocateConsString eager-flattens in Stage 1 (no rope)" {
+test "Heap: allocateConsString eager-flattens below the min-length gate" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
 
+    // Total 4 bytes — well below `min_cons_byte_len` (16). Gate A
+    // says eager-flatten: a cons header would cost more than the copy.
     const a = try heap.allocateString("ab");
     const b = try heap.allocateString("cd");
     const ab = try heap.allocateConsString(a, b);
 
-    // Stage 1 invariant: the result is a flat node, not a cons.
     try testing.expect(ab.isFlat());
     try testing.expectEqualStrings("abcd", ab.flatBytes());
+}
+
+test "Heap: allocateConsString builds a lazy cons above the min-length gate" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // Total 20 bytes ≥ `min_cons_byte_len` (16) — Gate A passes,
+    // seam is clean, depth 1 ≤ cap. A real cons node is built.
+    const a = try heap.allocateString("0123456789");
+    const b = try heap.allocateString("abcdefghij");
+    const ab = try heap.allocateConsString(a, b);
+
+    try testing.expect(!ab.isFlat());
+    try testing.expectEqual(@as(u16, 1), ab.depth);
+    try testing.expectEqual(@as(u32, 20), ab.byte_len);
+    try testing.expectEqual(@as(u32, 20), ab.length_cu);
+    // Flatten on demand reproduces the joined bytes.
+    try testing.expectEqualStrings("0123456789abcdefghij", try ab.flatten(heap.bytes_allocator));
+}
+
+test "Heap: allocateConsString eager-flattens a dirty WTF-8 seam" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // `a` ends with a lone high surrogate, `b` starts with a lone
+    // low surrogate — the seam pairs (§6.1.4). Gate B forbids a cons
+    // here even though both operands are long enough; the result
+    // must be a flat node with the 4-byte form at the seam.
+    const a_bytes = [_]u8{ 'p', 'a', 'd', '-', 'p', 'a', 'd', '-', 'p', 'a', 'd', '-', 'p', 'a', 'd', 0xED, 0xA0, 0x80 };
+    const b_bytes = [_]u8{ 0xED, 0xB0, 0x80, 'p', 'a', 'd', '-', 'p', 'a', 'd', '-', 'p', 'a', 'd', '-', 'p', 'a', 'd' };
+    const a = try heap.allocateString(&a_bytes);
+    const b = try heap.allocateString(&b_bytes);
+    const ab = try heap.allocateConsString(a, b);
+
+    try testing.expect(ab.isFlat());
+    // 18 + 18 bytes, minus 2 for the merged seam = 34.
+    try testing.expectEqual(@as(u32, 34), ab.byte_len);
+}
+
+test "Heap: allocateConsString caps rope depth, eager-flattening one operand" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // Build a left-leaning spine one cons at a time, mimicking a
+    // `result += chunk` loop. The depth must never exceed
+    // `max_rope_depth`: once it would, `allocateConsString` flattens
+    // the left operand first and the new node's depth resets low.
+    const chunk = "0123456789abcdef"; // 16 bytes — passes Gate A.
+    var spine = try heap.allocateString(chunk);
+    var iter: usize = 0;
+    while (iter < string_mod.max_rope_depth * 3) : (iter += 1) {
+        const next = try heap.allocateString(chunk);
+        spine = try heap.allocateConsString(spine, next);
+        try testing.expect(spine.depth <= string_mod.max_rope_depth);
+    }
+
+    // The accumulated string is still correct after the cap kicked in.
+    const flat = try spine.flatten(heap.bytes_allocator);
+    try testing.expectEqual(@as(usize, chunk.len * (string_mod.max_rope_depth * 3 + 1)), flat.len);
+}
+
+test "Heap: GC marks a real lazy cons tree built by allocateConsString" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const a = try heap.allocateString("0123456789");
+    const b = try heap.allocateString("abcdefghij");
+    const ab = try heap.allocateConsString(a, b);
+    try testing.expect(!ab.isFlat());
+
+    // Rooting only the cons keeps both children alive.
+    heap.collect(&.{Value.fromString(ab)});
+    try testing.expectEqual(@as(usize, 3), heap.strings.items.len);
+
+    // Drop the root — everything collected.
+    heap.collect(&.{});
+    try testing.expectEqual(@as(usize, 0), heap.strings.items.len);
 }
 
 test "tagging: real JSObject from heap is recognised as plain object" {

@@ -646,6 +646,34 @@ pub fn addValues(realm: *Realm, lhs: Value, rhs: Value) RunError!?Value {
         return Value.fromDouble(toNumber(l) + toNumber(r));
     }
     if (l.isString() or r.isString()) {
+        // §13.15.4 — string concatenation. When *both* operands are
+        // already `JSString`s — the dominant `result += chunk`
+        // accumulator pattern (test262's `buildString` in
+        // `regExpUtils.js`, JSON building, template assembly) — route
+        // through `allocateConsString`, which builds a lazy rope
+        // node so the `+` is amortised O(1) instead of an O(n) byte
+        // copy. The ConsString gates (min length, WTF-8 seam, depth
+        // cap) decide rope-vs-flat internally; see
+        // `Heap.allocateConsString`.
+        if (l.isString() and r.isString()) {
+            const ls: *JSString = @ptrCast(@alignCast(l.asString()));
+            const rs: *JSString = @ptrCast(@alignCast(r.asString()));
+            const s = realm.heap.allocateConsString(ls, rs) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.StringTooLong => {
+                    realm.pending_exception = try makeRangeError(realm, "Invalid string length");
+                    return null;
+                },
+            };
+            return Value.fromString(s);
+        }
+
+        // Mixed string / non-string. The non-string side coerces
+        // (ToString) into a short scratch slice; building a throwaway
+        // flat `JSString` for it just to cons would cost more than
+        // it saves. Stay on the single-allocation `allocateStringConcat2`
+        // path — it joins the two coerced byte slices directly, no
+        // intermediate buffer.
         var lhs_buf: [64]u8 = undefined;
         var rhs_buf: [64]u8 = undefined;
         const lhs_str = try valueToOwnedString(realm, l, &lhs_buf);
@@ -653,16 +681,6 @@ pub fn addValues(realm: *Realm, lhs: Value, rhs: Value) RunError!?Value {
         const rhs_str = try valueToOwnedString(realm, r, &rhs_buf);
         defer if (rhs_str.allocated) realm.allocator.free(rhs_str.bytes);
 
-        // §13.15.4 — concatenate the two coerced byte slices into a
-        // single heap-owned `JSString` directly. The previous path
-        // allocated a throwaway intermediate buffer and then let
-        // `allocateString` copy it a *second* time into the string
-        // payload — doubling allocator traffic on every `+`. The
-        // hot loser was the `s += chunk` accumulator pattern (e.g.
-        // test262's `buildString` in `regExpUtils.js`): each `+=`
-        // already copies the whole growing accumulator once (flat
-        // immutable strings — ropes are future work, see
-        // docs/ROADMAP.md), the intermediate buffer made it twice.
         const s = realm.heap.allocateStringConcat2(lhs_str.bytes, rhs_str.bytes) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             // §6.1.4 — the concatenation would exceed the maximum
@@ -687,7 +705,13 @@ pub const StringSlice = struct { bytes: []const u8, allocated: bool };
 pub fn valueToOwnedString(realm: *Realm, v: Value, scratch: *[64]u8) RunError!StringSlice {
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
-        return .{ .bytes = s.flatBytes(), .allocated = false };
+        // A `JSString` may be a lazy cons (rope) node — materialise
+        // it. `flatten` is O(1) for an already-flat node and caches
+        // the result on a cons, so the returned slice is heap-owned
+        // and outlives this call (the `allocated` flag stays false:
+        // the caller must NOT free a slice owned by the GC heap).
+        const bytes = s.flatten(realm.heap.bytes_allocator) catch return error.OutOfMemory;
+        return .{ .bytes = bytes, .allocated = false };
     }
     if (v.isInt32()) {
         const written = std.fmt.bufPrint(scratch, "{d}", .{v.asInt32()}) catch unreachable;
