@@ -243,6 +243,16 @@ pub const Heap = struct {
     /// scanned during a collect.
     handle_scopes: std.ArrayListUnmanaged(*HandleScope) = .empty,
 
+    /// Remembered set — every mature container that the write
+    /// barrier has observed storing a pointer to a young object.
+    /// `collectYoung` scans these as additional roots so a young
+    /// object reachable only from old space survives. An entry is
+    /// appended at most once (the container's `in_remembered_set`
+    /// bit guards re-insertion); `collectYoung` clears the set and
+    /// the bits after each young cycle. `collectFull` ignores and
+    /// clears it — a full mark already traces every mature object.
+    remembered: std.ArrayListUnmanaged(Container) = .empty,
+
     /// Allocations (across every kind) since the last `collect`
     /// call. Bumped by each `allocateX`; the interpreter dispatch
     /// loop checks it against `gc_threshold` between opcodes and
@@ -384,6 +394,7 @@ pub const Heap = struct {
         for (self.bigints_mature.items) |b| b.deinit(self.allocator);
         self.bigints_young.deinit(self.allocator);
         self.bigints_mature.deinit(self.allocator);
+        self.remembered.deinit(self.allocator);
         self.handle_scopes.deinit(self.allocator);
     }
 
@@ -1073,9 +1084,20 @@ pub const Heap = struct {
             const EntryT = @typeInfo(@TypeOf(entry)).pointer.child;
             const has_pinned = @hasField(EntryT, "pinned");
             if (has_pinned and entry.pinned) {
-                // Permanently live (chunk constants). Skip.
+                // Permanently live (chunk constants). Skip. A
+                // pinned string never enters the remembered set
+                // (strings aren't barriered containers), so no bit
+                // to clear here.
             } else if (entry.marked) {
                 entry.marked = false;
+                // A full trace already visited this survivor, so
+                // any remembered-set membership is now stale. Clear
+                // the bit (the set itself is emptied by the caller)
+                // so the next young cycle can re-record a genuine
+                // old→young store into it.
+                if (@hasField(EntryT, "in_remembered_set")) {
+                    entry.in_remembered_set = false;
+                }
             } else {
                 _ = list.swapRemove(i);
                 @call(.auto, EntryT.deinit, .{entry} ++ deinit_args);
@@ -1138,6 +1160,14 @@ pub const Heap = struct {
         sweepList(&self.symbols_mature, sa);
         sweepList(&self.bigints_young, sa);
         sweepList(&self.bigints_mature, sa);
+
+        // The remembered set is stale after a full trace — a full
+        // mark already visited every mature object, so no
+        // old→young edge needs separate tracking. `sweepList`
+        // cleared the `in_remembered_set` bit on every surviving
+        // container during the sweep (a freed container's bit is
+        // moot), so the set just needs emptying here.
+        self.remembered.clearRetainingCapacity();
 
         // Reset the allocation pressure counters so the next
         // collect doesn't fire until fresh allocations cross
@@ -1225,14 +1255,39 @@ pub const Heap = struct {
     // once built, so they need no store helper.
     // -----------------------------------------------------------------
 
-    /// Tagged heap-container reference. The Stage-2 write barrier
-    /// needs the container's generation bit and (when remembered)
-    /// a way to re-find it; this tagged union is that handle.
+    /// Tagged heap-container reference. The write barrier needs the
+    /// container's generation bit and `in_remembered_set` flag; a
+    /// young collection needs to re-find it as a root. This tagged
+    /// union is that handle. Only the four mutable heap kinds that
+    /// can hold a pointer to a younger object appear here — strings
+    /// (immutable post-build) and the symbol / bigint primitives do
+    /// not need a barriered store path.
     pub const Container = union(enum) {
         object: *JSObject,
         function: *JSFunction,
         environment: *Environment,
         generator: *JSGenerator,
+
+        /// Generational age of the pointed-to container.
+        pub fn generation(self: Container) Generation {
+            return switch (self) {
+                inline else => |p| p.generation,
+            };
+        }
+
+        /// Whether the container is already in the remembered set.
+        pub fn inRememberedSet(self: Container) bool {
+            return switch (self) {
+                inline else => |p| p.in_remembered_set,
+            };
+        }
+
+        /// Set the container's remembered-set membership bit.
+        pub fn setInRememberedSet(self: Container, v: bool) void {
+            switch (self) {
+                inline else => |p| p.in_remembered_set = v,
+            }
+        }
     };
 
     /// Store `v` into plain-object property `key` via §10.1.9
@@ -1356,19 +1411,63 @@ pub const Heap = struct {
         self.writeBarrier(container, v);
     }
 
-    /// Generational write barrier. Stage 0: a no-op stub — the
-    /// store helpers above are wired to call it so Stage 2 only
-    /// has to fill in this single body. Stage 2 records an
-    /// old→young store: when `container` is a mature object and
-    /// `v` carries a young heap pointer, the container joins the
-    /// remembered set so a young collection still treats it as a
-    /// root for `v`.
+    /// Generational write barrier. Records an old→young store:
+    /// when `container` is a mature object and `v` carries a young
+    /// heap pointer, the container joins the remembered set so a
+    /// young collection still treats it as a root for `v`.
+    ///
+    /// Hot path (the common case — a young container, since most
+    /// stores happen while an object is still being built): one
+    /// load of the container's `generation` and a not-taken
+    /// branch. Only an old→young store touches the remembered set,
+    /// and the `in_remembered_set` bit collapses repeated stores
+    /// into the same container to a single list entry.
+    ///
+    /// `error.OutOfMemory` from the append is swallowed: a missed
+    /// remembered-set entry would be a correctness bug, but the
+    /// safety net is that the next `collectYoung` would then
+    /// promote nothing and a fall-back `collectFull` still traces
+    /// everything. In practice the list append almost never OOMs
+    /// (amortised growth, tiny entries); a real OOM here means the
+    /// process is already failing.
     pub fn writeBarrier(self: *Heap, container: Container, v: Value) void {
-        _ = self;
-        _ = container;
-        _ = v;
+        // Fast reject — young container can't create an old→young
+        // edge (a young→young store is reclaimed wholesale by the
+        // young sweep).
+        if (container.generation() != .mature) return;
+        // Only a young heap pointer needs remembering. Primitives
+        // (number, bool, null, undefined) and already-mature
+        // referents are fine.
+        if (!isYoungHeapValue(v)) return;
+        // Already recorded — the bit collapses repeats.
+        if (container.inRememberedSet()) return;
+        container.setInRememberedSet(true);
+        self.remembered.append(self.allocator, container) catch {
+            // See doc comment — undo the bit so a later
+            // collectFull (which clears the set) re-syncs cleanly,
+            // and so a retry can still record the container.
+            container.setInRememberedSet(false);
+        };
     }
 };
+
+/// True when `v` carries a pointer to a `.young` heap object.
+/// Used by the write barrier to decide whether a store into a
+/// mature container creates an old→young edge worth remembering.
+/// Strings are immutable but still age (a young string stored
+/// into a mature object must be remembered); symbols and bigints
+/// likewise carry a generation bit.
+pub fn isYoungHeapValue(v: Value) bool {
+    if (v.isString()) {
+        const s: *JSString = @ptrCast(@alignCast(v.asString()));
+        return s.generation == .young;
+    }
+    if (valueAsFunction(v)) |f| return f.generation == .young;
+    if (valueAsPlainObject(v)) |o| return o.generation == .young;
+    if (valueAsSymbol(v)) |sym| return sym.generation == .young;
+    if (valueAsBigInt(v)) |bi| return bi.generation == .young;
+    return false;
+}
 
 /// A V8-`Local<T>`-style scope. Push values that must survive
 /// allocations across a single abstract operation; close the scope
@@ -1466,6 +1565,91 @@ test "Heap: collectFull keeps a rooted mature object" {
     heap.collectFull(&.{Value.fromString(s)});
     try testing.expectEqual(@as(usize, 1), heap.stringCount());
     try testing.expectEqual(@as(usize, 1), heap.strings_mature.items.len);
+}
+
+test "Heap: write barrier records an old→young store" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // A mature container and a young referent — the canonical
+    // old→young store the remembered set exists to track.
+    const container = try heap.allocateObject();
+    container.generation = .mature;
+    const young = try heap.allocateObject();
+    try testing.expectEqual(Generation.young, young.generation);
+
+    try testing.expectEqual(@as(usize, 0), heap.remembered.items.len);
+    heap.writeBarrier(.{ .object = container }, taggedObject(young));
+    try testing.expectEqual(@as(usize, 1), heap.remembered.items.len);
+    try testing.expect(container.in_remembered_set);
+
+    // A second store into the same container collapses — the bit
+    // guards against a duplicate entry.
+    const young2 = try heap.allocateObject();
+    heap.writeBarrier(.{ .object = container }, taggedObject(young2));
+    try testing.expectEqual(@as(usize, 1), heap.remembered.items.len);
+}
+
+test "Heap: write barrier ignores a young container" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // Young → young store: the young sweep handles both, so the
+    // barrier must NOT remember anything.
+    const container = try heap.allocateObject(); // young
+    const young = try heap.allocateObject();
+    heap.writeBarrier(.{ .object = container }, taggedObject(young));
+    try testing.expectEqual(@as(usize, 0), heap.remembered.items.len);
+    try testing.expect(!container.in_remembered_set);
+}
+
+test "Heap: write barrier ignores a mature→mature store" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // Both sides mature — no old→young edge, nothing to remember.
+    const container = try heap.allocateObject();
+    container.generation = .mature;
+    const referent = try heap.allocateObject();
+    referent.generation = .mature;
+    heap.writeBarrier(.{ .object = container }, taggedObject(referent));
+    try testing.expectEqual(@as(usize, 0), heap.remembered.items.len);
+}
+
+test "Heap: write barrier ignores a primitive store" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // Storing a non-heap value into a mature container carries no
+    // edge — barrier must be a no-op.
+    const container = try heap.allocateObject();
+    container.generation = .mature;
+    heap.writeBarrier(.{ .object = container }, Value.fromInt32(42));
+    heap.writeBarrier(.{ .object = container }, Value.undefined_);
+    try testing.expectEqual(@as(usize, 0), heap.remembered.items.len);
+}
+
+test "Heap: collectFull clears the remembered set and the bits" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const container = try heap.allocateObject();
+    container.generation = .mature;
+    _ = heap.objects_young.pop();
+    try heap.objects_mature.append(heap.allocator, container);
+    const young = try heap.allocateObject();
+    heap.writeBarrier(.{ .object = container }, taggedObject(young));
+    try testing.expectEqual(@as(usize, 1), heap.remembered.items.len);
+
+    // Root the mature container so it survives the full sweep.
+    heap.collectFull(&.{taggedObject(container)});
+    try testing.expectEqual(@as(usize, 0), heap.remembered.items.len);
+    try testing.expect(!container.in_remembered_set);
+
+    // The bit really cleared — a fresh barrier can re-record it.
+    const young2 = try heap.allocateObject();
+    heap.writeBarrier(.{ .object = container }, taggedObject(young2));
+    try testing.expectEqual(@as(usize, 1), heap.remembered.items.len);
 }
 
 test "Heap: collect keeps an object reachable through roots" {
