@@ -448,6 +448,21 @@ automatically on the next full sweep.
   for declared functions; callable Proxy returns the spec sentinel
   `function () { [native code] }`. Remaining edge: CR vs LF
   normalization (test262 `line-terminator-normalisation-CR.js`).
+- `Number.prototype.{toFixed, toExponential, toPrecision}` — the
+  digit string comes from a libc `printf`-style conversion, which
+  rounds via the shortest-round-trip path. §21.1.3.3 / §21.1.3.2 /
+  §21.1.3.5 instead specify the *exact* mathematical value of
+  `n ÷ 10^f` (ties-to-larger), so `(1000000000000000128).toFixed(0)`
+  must keep the full mantissa rather than collapse to
+  `1000000000000000100`. Closing this needs a Ryū / Grisu-style
+  exact dtoa with a controllable rounding mode — own work item,
+  3 test262 fixtures honest-fail until then.
+- `String.prototype.localeCompare` — compares by UTF-16 code unit.
+  §22.1.3.12 permits a locale-sensitive collation; without `Intl`
+  there is no canonical-equivalence folding, so `"ö"` (o +
+  combining diaeresis) and `"ö"` (precomposed ö) compare
+  unequal. Real NFC folding shares the UCD-normalization-table gap
+  with `String.prototype.normalize` above.
 
 **Deferred.** `Temporal` (ES2025) is not implemented yet —
 ~4500 test262 fixtures depend on it. It's a complete date/time

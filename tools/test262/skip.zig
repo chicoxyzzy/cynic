@@ -589,6 +589,17 @@ pub const skip_ses_exact_paths = [_][]const u8{
     "built-ins/ArrayBuffer/prototype/slice/this-is-sharedarraybuffer.js",
     "built-ins/ArrayBuffer/prototype/transfer/this-is-sharedarraybuffer.js",
     "built-ins/ArrayBuffer/prototype/transferToFixedLength/this-is-sharedarraybuffer.js",
+    // §25.2 SharedArrayBuffer again — these `TypedArrayConstructors`
+    // fixtures build their backing store via `new SharedArrayBuffer(…)`
+    // before the assertion they actually want to test (a SAB-backed
+    // TypedArray re-wrapped by a TypedArray ctor; an indexed
+    // `[[Delete]]` on a SAB-backed view). Without the constructor the
+    // setup throws before the spec step under test runs. Same
+    // permanent SES carve-out as the `ArrayBuffer` block above.
+    "built-ins/TypedArrayConstructors/ctors/buffer-arg/typedarray-backed-by-sharedarraybuffer.js",
+    "built-ins/TypedArrayConstructors/ctors-bigint/buffer-arg/typedarray-backed-by-sharedarraybuffer.js",
+    "built-ins/TypedArrayConstructors/internals/Delete/indexed-value-sab-strict.js",
+    "built-ins/TypedArrayConstructors/internals/Delete/BigInt/indexed-value-sab-strict.js",
     // §18.2.1 — global.eval is not shipped (AGENTS.md). The
     // ES5-era fixture iterates an expected-globals list that
     // includes `eval` and `Date` (duplicated), failing on a
