@@ -2037,7 +2037,7 @@ fn classifyAndRun(
     }
 
     if (test_threw) {
-        const ex = if (run_result == .thrown) run_result.value else (realm.pending_exception orelse cynic.runtime.Value.undefined_);
+        const ex = if (run_result == .thrown) run_result.thrown else (realm.pending_exception orelse cynic.runtime.Value.undefined_);
         if (cynic.runtime.heap.valueAsPlainObject(ex)) |o| {
             if (o.properties.get("message")) |m| {
                 if (m.isString()) {

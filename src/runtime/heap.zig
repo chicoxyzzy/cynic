@@ -1165,10 +1165,16 @@ pub const Heap = struct {
     /// any open `HandleScope`) is freed. After this call every
     /// surviving object's `marked` bit is back to `false`.
     ///
-    /// Behaviourally identical to the pre-generational `collect`:
-    /// it sweeps the young and mature lists of each kind, so no
-    /// object's lifetime changes — the generational split is pure
-    /// bookkeeping until `collectYoung` (Stage 3) exploits it.
+    /// A full cycle also **tenures every survivor**: young
+    /// survivors are relinked into the mature list and their
+    /// generation bit flipped. This is mandatory for a correct
+    /// generational invariant — after a full cycle there are no
+    /// young objects at all, so no mature→young edge can exist,
+    /// so the (now-cleared) remembered set is trivially complete.
+    /// Without this, a full cycle could leave a mature object
+    /// pointing at a surviving-but-still-young object while having
+    /// cleared the remembered set, and the next `collectYoung`
+    /// would free that young object out from under it.
     pub fn collectFull(self: *Heap, roots: []const Value) void {
         // Wall-clock start for the diagnostic pause-time field.
         // Production engines (V8 `--trace-gc`, JSC GC logs, SM
@@ -1197,30 +1203,34 @@ pub const Heap = struct {
         const pre_syms = self.symbolCount();
         const pre_bigs = self.bigintCount();
 
-        // Sweep phase — both generations, every kind.
+        // Sweep phase. The mature lists are swept in place; the
+        // young lists are swept-AND-promoted — every young survivor
+        // is relinked into its mature list. After this, the young
+        // lists are empty, so the generational invariant "no
+        // mature→young edge outside the remembered set" holds
+        // trivially (there are no young objects to point at).
         const ba = .{ self.allocator, self.bytes_allocator };
         const sa = .{self.allocator};
-        sweepList(&self.strings_young, ba);
         sweepList(&self.strings_mature, ba);
-        sweepList(&self.functions_young, sa);
         sweepList(&self.functions_mature, sa);
-        sweepList(&self.objects_young, sa);
         sweepList(&self.objects_mature, sa);
-        sweepList(&self.environments_young, sa);
         sweepList(&self.environments_mature, sa);
-        sweepList(&self.generators_young, sa);
         sweepList(&self.generators_mature, sa);
-        sweepList(&self.symbols_young, sa);
         sweepList(&self.symbols_mature, sa);
-        sweepList(&self.bigints_young, sa);
         sweepList(&self.bigints_mature, sa);
+        promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, self.allocator, ba);
+        promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, self.allocator, sa);
+        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, self.allocator, sa);
+        promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, self.allocator, sa);
+        promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, self.allocator, sa);
+        promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, self.allocator, sa);
+        promoteYoungList(*JSBigInt, &self.bigints_young, &self.bigints_mature, self.allocator, sa);
 
-        // The remembered set is stale after a full trace — a full
-        // mark already visited every mature object, so no
-        // old→young edge needs separate tracking. `sweepList`
-        // cleared the `in_remembered_set` bit on every surviving
-        // container during the sweep (a freed container's bit is
-        // moot), so the set just needs emptying here.
+        // The remembered set is empty after a full cycle — a full
+        // mark visited every mature object, and every survivor is
+        // now mature, so no old→young edge can exist. `sweepList` /
+        // `promoteYoungList` cleared the `in_remembered_set` bit on
+        // every survivor, so the set just needs emptying here.
         self.remembered.clearRetainingCapacity();
 
         // Reset the allocation pressure counters so the next

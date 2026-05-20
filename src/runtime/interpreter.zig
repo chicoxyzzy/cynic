@@ -4959,7 +4959,11 @@ fn runFrames(
                 // `realm.current_module` accordingly.
                 fn_obj.owning_module = realm.current_module;
                 if (op_tag == .make_named_function_expr) {
-                    captured_env.?.slots[0] = heap_mod.taggedFunction(fn_obj);
+                    // Routed through `storeEnvSlot` so the
+                    // generational write barrier sees the
+                    // self-binding store (a mature named-fn-expr
+                    // scope getting a young function pointer).
+                    realm.heap.storeEnvSlot(captured_env.?, 0, heap_mod.taggedFunction(fn_obj));
                 }
                 // §15.7.7 FunctionLength — override `f.length`
                 // from total-params (what allocateFunction
@@ -11063,7 +11067,11 @@ fn unwindThrow(
                     // depth=0 because the catch scope is in the
                     // same function as the try.
                     if (frame.env) |env| {
-                        if (slot < env.slots.len) env.slots[slot] = current_ex;
+                        // Routed through `storeEnvSlot` so the
+                        // write barrier records a mature catch
+                        // scope receiving a young exception value.
+                        if (slot < env.slots.len)
+                            realm.heap.storeEnvSlot(env, slot, current_ex);
                     }
                     frame.accumulator = Value.undefined_;
                 } else {

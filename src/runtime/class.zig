@@ -681,7 +681,10 @@ pub fn buildClass(
     if (inner_class_slot) |slot| {
         if (captured_env) |env| {
             if (slot < env.slots.len) {
-                env.slots[slot] = ctor_value;
+                // Routed through `storeEnvSlot` so the generational
+                // write barrier records a mature classScopeEnvRec
+                // receiving the (possibly young) constructor.
+                realm.heap.storeEnvSlot(env, slot, ctor_value);
             }
         }
     }
