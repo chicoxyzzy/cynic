@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 92.51 % | 99.64 % | 37093 / 40098 | 37093 / 37228 |
+| **runtime** | 92.52 % | 99.65 % | 37095 / 40094 | 37095 / 37224 |
 
 
 ## Where the runtime stands, by area
@@ -33,10 +33,9 @@ browser-era built-ins …).
 | `built-ins/Number` | 336 | 3 | 0 | 99 % | 99 % |
 | `built-ins/Set` | 380 | 1 | 1 | 99 % | 100 % |
 | `built-ins/String` | 1201 | 2 | 5 | 99 % | 100 % |
-| `built-ins/TypedArrayConstructors` | 654 | 6 | 16 | 97 % | 99 % |
+| `built-ins/TypedArrayConstructors` | 655 | 1 | 16 | 97 % | 100 % |
 | `built-ins/decodeURI` | 54 | 1 | 0 | 98 % | 98 % |
 | `built-ins/decodeURIComponent` | 55 | 1 | 0 | 98 % | 98 % |
-| `built-ins/parseInt` | 54 | 1 | 0 | 98 % | 98 % |
 | `language/module-code` | 574 | 1 | 14 | 97 % | 100 % |
 | `language/statements` | 8407 | 2 | 672 | 93 % | 100 % |
 | `language/types` | 94 | 3 | 9 | 89 % | 97 % |
@@ -87,6 +86,7 @@ browser-era built-ins …).
 | `built-ins/isFinite` | 15 | 0 | 0 | 100 % | 100 % |
 | `built-ins/isNaN` | 15 | 0 | 0 | 100 % | 100 % |
 | `built-ins/parseFloat` | 54 | 0 | 0 | 100 % | 100 % |
+| `built-ins/parseInt` | 55 | 0 | 0 | 100 % | 100 % |
 | `built-ins/undefined` | 4 | 0 | 3 | 57 % | 100 % |
 | `language/arguments-object` | 204 | 0 | 57 | 78 % | 100 % |
 | `language/asi` | 102 | 0 | 0 | 100 % | 100 % |
@@ -157,19 +157,22 @@ features ship in mainline ECMA-262.
 
 ## History
 
+### 2026-05-20 — cynic `a79d43a`, test262 `d0c1b455`
+
+|         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
+|---|---|---|---|---|---:|---:|
+| **runtime** | 92.52 % | 99.65 % | 37095 / 40094 | 37095 / 37224 | +2 | 1m 53s |
+
+Biggest movers (runtime):
+
+- `built-ins/TypedArrayConstructors` +1
+- `built-ins/parseInt` +1
+
 ### 2026-05-19 — cynic `b2efa16`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 92.51 % | 99.64 % | 37093 / 40098 | 37093 / 37228 | +117 | 2m 13s |
-
-Biggest movers (runtime):
-
-- `built-ins/Array` +6
-- `built-ins/Object` +3
-- `language/expressions` +3
-- `built-ins/Proxy` +2
-- `built-ins/AggregateError` +1
+| **runtime** | 92.51 % | 99.64 % | 37093 / 40098 | 37093 / 37227 | +117 |  |
 
 ### 2026-05-18 — cynic `debcfcf`, test262 `b1f9a0aea3`
 
