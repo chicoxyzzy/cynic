@@ -33,6 +33,13 @@ pub const Environment = struct {
     /// GC mark bit, written by `Heap.markValue` when a chain root
     /// is traced and cleared after each sweep.
     marked: bool = false,
+    /// Generational-GC age. Fresh allocations start `.young`; a
+    /// young environment surviving a `collectYoung` is promoted to
+    /// `.mature` and relinked into the mature list.
+    generation: @import("heap.zig").Generation = .young,
+    /// Set when this environment is in the heap's remembered set
+    /// as a known old→young store source.
+    in_remembered_set: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, parent: ?*Environment, slot_count: u8) !*Environment {
         const env = try allocator.create(Environment);

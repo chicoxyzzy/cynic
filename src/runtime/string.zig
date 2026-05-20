@@ -81,6 +81,17 @@ pub const JSString = struct {
     /// chunks are realm-lifetime and their constant pool can't
     /// outlive the realm.
     pinned: bool = false,
+    /// Generational-GC age. Fresh allocations start `.young`; a
+    /// young object that survives a `collectYoung` is promoted to
+    /// `.mature` and relinked into the mature list. Pinned strings
+    /// (chunk constants) allocate straight to `.mature`.
+    generation: @import("heap.zig").Generation = .young,
+    /// Set when this object is recorded in the heap's remembered
+    /// set as a known old→young store source. Guards against
+    /// double-insertion on the write-barrier hot path. Strings are
+    /// immutable post-build so this stays `false` for them today;
+    /// the field keeps every header shape uniform.
+    in_remembered_set: bool = false,
     /// UTF-16 code-unit count — the JS-visible `String.prototype.
     /// length` (§22.1.5). Computed once at construction via
     /// `utf16.lengthInCodeUnits`; O(1) for any payload kind.

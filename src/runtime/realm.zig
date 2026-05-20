@@ -1004,10 +1004,10 @@ pub const Realm = struct {
             }
         }
 
-        // Hand off to `heap.collect` for the handle-scope walk
+        // Hand off to `heap.collectFull` for the handle-scope walk
         // and the actual sweep. The empty roots slice is fine —
         // every root above is already marked.
-        self.heap.collect(&.{});
+        self.heap.collectFull(&.{});
     }
 
     /// Install the host's built-in bindings — `print`, `console`,

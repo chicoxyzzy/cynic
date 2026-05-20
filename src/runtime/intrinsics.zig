@@ -491,7 +491,10 @@ pub fn install(realm: *Realm) !void {
     // the built-ins we just installed) to %Function.prototype%
     // so inherited `.call`/`.apply`/`.bind` resolve from any fn.
     if (realm.intrinsics.function_prototype) |fn_proto| {
-        for (realm.heap.functions.items) |fn_obj| {
+        for (realm.heap.functions_young.items) |fn_obj| {
+            if (fn_obj.proto == null) fn_obj.proto = fn_proto;
+        }
+        for (realm.heap.functions_mature.items) |fn_obj| {
             if (fn_obj.proto == null) fn_obj.proto = fn_proto;
         }
     }

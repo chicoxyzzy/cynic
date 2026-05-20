@@ -29,6 +29,14 @@ pub const JSBigInt = struct {
     value: i128,
     /// Mark-sweep bit, written by `Heap.markValue`.
     marked: bool = false,
+    /// Generational-GC age. Fresh allocations start `.young`; a
+    /// young bigint surviving a `collectYoung` is promoted to
+    /// `.mature` and relinked into the mature list.
+    generation: @import("heap.zig").Generation = .young,
+    /// Set when this bigint is in the heap's remembered set as a
+    /// known old→young store source. BigInts are immutable so
+    /// this stays `false`; the field keeps headers uniform.
+    in_remembered_set: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, value: i128) !*JSBigInt {
         const b = try allocator.create(JSBigInt);

@@ -73,6 +73,15 @@ const kind_object: u64 = 0x1;
 const kind_symbol: u64 = 0x2;
 const kind_bigint: u64 = 0x3;
 
+/// Generational-GC age of a heap object. A `.young` object lives
+/// in its kind's young list and is reclaimable by a cheap
+/// `collectYoung` cycle; a `.mature` object survived at least one
+/// collection and was relinked into the kind's mature list (the
+/// object itself never moves — Cynic's collector is non-moving).
+/// Two-bit enum so it packs into the existing flag-byte padding
+/// next to each header's `marked` bit.
+pub const Generation = enum(u2) { young, mature };
+
 pub fn taggedFunction(ptr: *JSFunction) Value {
     const p: u64 = @intFromPtr(ptr);
     std.debug.assert(p & 0x7 == 0); // 8-byte aligned
@@ -172,32 +181,53 @@ pub const Heap = struct {
     /// without the split, freed string bytes stay resident inside
     /// the arena's pages and per-fixture peak RSS never shrinks.
     bytes_allocator: std.mem.Allocator,
-    /// Every live `JSString` allocated through this heap. Sweep
-    /// walks this list; allocate appends.
-    strings: std.ArrayListUnmanaged(*JSString) = .empty,
-    /// Live `JSFunction` instances.
-    functions: std.ArrayListUnmanaged(*JSFunction) = .empty,
-    /// Live plain `JSObject` instances (object literals,
+    // Per-kind live-object lists. Each kind is split into a
+    // `young` list (fresh allocations — reclaimable by the cheap
+    // `collectYoung` cycle) and a `mature` list (objects that
+    // survived at least one collection). `collectFull` sweeps
+    // both; `collectYoung` sweeps only the young lists, relinking
+    // survivors into the mature list (a pointer move — the object
+    // never relocates, the collector is non-moving). Stage 1
+    // wires the split but `collectFull` keeps the old behaviour.
+
+    /// Young `JSString` instances. Allocate appends here.
+    strings_young: std.ArrayListUnmanaged(*JSString) = .empty,
+    /// Mature `JSString` instances — survived a young collection,
+    /// or allocated straight here when pinned (chunk constants).
+    strings_mature: std.ArrayListUnmanaged(*JSString) = .empty,
+    /// Young `JSFunction` instances.
+    functions_young: std.ArrayListUnmanaged(*JSFunction) = .empty,
+    /// Mature `JSFunction` instances.
+    functions_mature: std.ArrayListUnmanaged(*JSFunction) = .empty,
+    /// Young plain `JSObject` instances (object literals,
     /// prototypes, built-in constructors' return values).
-    objects: std.ArrayListUnmanaged(*JSObject) = .empty,
-    /// Live `Environment` records — one per active scope that
-    /// holds named bindings. The chain through `parent`
-    /// pointers keeps captured environments alive as long as
-    /// any function still references them.
-    environments: std.ArrayListUnmanaged(*Environment) = .empty,
-    /// Live `JSGenerator` instances. Each carries an owned
+    objects_young: std.ArrayListUnmanaged(*JSObject) = .empty,
+    /// Mature plain `JSObject` instances.
+    objects_mature: std.ArrayListUnmanaged(*JSObject) = .empty,
+    /// Young `Environment` records — one per active scope that
+    /// holds named bindings.
+    environments_young: std.ArrayListUnmanaged(*Environment) = .empty,
+    /// Mature `Environment` records.
+    environments_mature: std.ArrayListUnmanaged(*Environment) = .empty,
+    /// Young `JSGenerator` instances. Each carries an owned
     /// register file plus borrowed pointers into env / chunk;
     /// `deinit` frees the register buffer.
-    generators: std.ArrayListUnmanaged(*JSGenerator) = .empty,
-    /// Live `JSSymbol` instances. Identity is by pointer; two
+    generators_young: std.ArrayListUnmanaged(*JSGenerator) = .empty,
+    /// Mature `JSGenerator` instances.
+    generators_mature: std.ArrayListUnmanaged(*JSGenerator) = .empty,
+    /// Young `JSSymbol` instances. Identity is by pointer; two
     /// `Symbol("x")` calls produce distinct entries here.
     /// `Symbol.for("k")` interns into `symbol_registry`.
-    symbols: std.ArrayListUnmanaged(*JSSymbol) = .empty,
-    /// Live `JSBigInt` instances. Allocated by every
+    symbols_young: std.ArrayListUnmanaged(*JSSymbol) = .empty,
+    /// Mature `JSSymbol` instances.
+    symbols_mature: std.ArrayListUnmanaged(*JSSymbol) = .empty,
+    /// Young `JSBigInt` instances. Allocated by every
     /// `0n`-literal and arithmetic result; identity is
     /// by-value at the language level (the heap may dedupe
     /// later as an optimization).
-    bigints: std.ArrayListUnmanaged(*JSBigInt) = .empty,
+    bigints_young: std.ArrayListUnmanaged(*JSBigInt) = .empty,
+    /// Mature `JSBigInt` instances.
+    bigints_mature: std.ArrayListUnmanaged(*JSBigInt) = .empty,
     /// `Symbol.for` registry (§20.4.2.2 GlobalSymbolRegistry).
     /// Maps the registry key (always a string) → JSSymbol pointer
     /// so successive `Symbol.for(k)` calls return the same symbol.
@@ -325,28 +355,42 @@ pub const Heap = struct {
     /// Free every tracked object and the bookkeeping arrays.
     /// Idempotent — safe to call on a partially-initialized heap.
     pub fn deinit(self: *Heap) void {
-        for (self.strings.items) |s| s.deinit(self.allocator, self.bytes_allocator);
-        self.strings.deinit(self.allocator);
-        for (self.functions.items) |f| f.deinit(self.allocator);
-        self.functions.deinit(self.allocator);
-        for (self.objects.items) |o| o.deinit(self.allocator);
-        self.objects.deinit(self.allocator);
-        for (self.environments.items) |e| e.deinit(self.allocator);
-        self.environments.deinit(self.allocator);
-        for (self.generators.items) |g| g.deinit(self.allocator);
-        self.generators.deinit(self.allocator);
-        for (self.symbols.items) |s| s.deinit(self.allocator);
-        self.symbols.deinit(self.allocator);
+        for (self.strings_young.items) |s| s.deinit(self.allocator, self.bytes_allocator);
+        for (self.strings_mature.items) |s| s.deinit(self.allocator, self.bytes_allocator);
+        self.strings_young.deinit(self.allocator);
+        self.strings_mature.deinit(self.allocator);
+        for (self.functions_young.items) |f| f.deinit(self.allocator);
+        for (self.functions_mature.items) |f| f.deinit(self.allocator);
+        self.functions_young.deinit(self.allocator);
+        self.functions_mature.deinit(self.allocator);
+        for (self.objects_young.items) |o| o.deinit(self.allocator);
+        for (self.objects_mature.items) |o| o.deinit(self.allocator);
+        self.objects_young.deinit(self.allocator);
+        self.objects_mature.deinit(self.allocator);
+        for (self.environments_young.items) |e| e.deinit(self.allocator);
+        for (self.environments_mature.items) |e| e.deinit(self.allocator);
+        self.environments_young.deinit(self.allocator);
+        self.environments_mature.deinit(self.allocator);
+        for (self.generators_young.items) |g| g.deinit(self.allocator);
+        for (self.generators_mature.items) |g| g.deinit(self.allocator);
+        self.generators_young.deinit(self.allocator);
+        self.generators_mature.deinit(self.allocator);
+        for (self.symbols_young.items) |s| s.deinit(self.allocator);
+        for (self.symbols_mature.items) |s| s.deinit(self.allocator);
+        self.symbols_young.deinit(self.allocator);
+        self.symbols_mature.deinit(self.allocator);
         self.symbol_registry.deinit(self.allocator);
-        for (self.bigints.items) |b| b.deinit(self.allocator);
-        self.bigints.deinit(self.allocator);
+        for (self.bigints_young.items) |b| b.deinit(self.allocator);
+        for (self.bigints_mature.items) |b| b.deinit(self.allocator);
+        self.bigints_young.deinit(self.allocator);
+        self.bigints_mature.deinit(self.allocator);
         self.handle_scopes.deinit(self.allocator);
     }
 
     pub fn allocateBigInt(self: *Heap, value: i128) !*JSBigInt {
         const b = try JSBigInt.init(self.allocator, value);
         errdefer b.deinit(self.allocator);
-        try self.bigints.append(self.allocator, b);
+        try self.bigints_young.append(self.allocator, b);
         self.allocs_since_gc +|= 1;
         return b;
     }
@@ -364,7 +408,7 @@ pub const Heap = struct {
         const owned = try self.allocator.dupe(u8, slice);
         const s = try JSSymbol.init(self.allocator, description, owned);
         errdefer s.deinit(self.allocator);
-        try self.symbols.append(self.allocator, s);
+        try self.symbols_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
     }
@@ -377,7 +421,10 @@ pub const Heap = struct {
     /// small (well-known + a handful of user-allocated). Returns
     /// `null` for keys with no registered Symbol.
     pub fn symbolForKey(self: *Heap, prop_key: []const u8) ?*JSSymbol {
-        for (self.symbols.items) |s| {
+        for (self.symbols_young.items) |s| {
+            if (std.mem.eql(u8, s.prop_key, prop_key)) return s;
+        }
+        for (self.symbols_mature.items) |s| {
             if (std.mem.eql(u8, s.prop_key, prop_key)) return s;
         }
         return null;
@@ -392,7 +439,7 @@ pub const Heap = struct {
         const owned = try self.allocator.dupe(u8, prop_key);
         const s = try JSSymbol.init(self.allocator, description, owned);
         errdefer s.deinit(self.allocator);
-        try self.symbols.append(self.allocator, s);
+        try self.symbols_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
     }
@@ -406,7 +453,7 @@ pub const Heap = struct {
     ) !*JSGenerator {
         const g = try JSGenerator.init(self.allocator, chunk, register_count, captured_env, this_value);
         errdefer g.deinit(self.allocator);
-        try self.generators.append(self.allocator, g);
+        try self.generators_young.append(self.allocator, g);
         self.allocs_since_gc +|= 1;
         return g;
     }
@@ -414,7 +461,7 @@ pub const Heap = struct {
     pub fn allocateObject(self: *Heap) !*JSObject {
         const o = try JSObject.init(self.allocator);
         errdefer o.deinit(self.allocator);
-        try self.objects.append(self.allocator, o);
+        try self.objects_young.append(self.allocator, o);
         self.allocs_since_gc +|= 1;
         return o;
     }
@@ -424,7 +471,7 @@ pub const Heap = struct {
     pub fn allocateEnvironment(self: *Heap, parent: ?*Environment, slot_count: u8) !*Environment {
         const env = try Environment.init(self.allocator, parent, slot_count);
         errdefer env.deinit(self.allocator);
-        try self.environments.append(self.allocator, env);
+        try self.environments_young.append(self.allocator, env);
         self.allocs_since_gc +|= 1;
         return env;
     }
@@ -456,7 +503,7 @@ pub const Heap = struct {
         // ordinary path and `Object.getOwnPropertyDescriptor`
         // sees the right flags.
         try self.installFunctionLengthAndName(f, param_count, name);
-        try self.functions.append(self.allocator, f);
+        try self.functions_young.append(self.allocator, f);
         self.allocs_since_gc +|= 1;
         if (!is_arrow) {
             const proto = try self.allocateObject();
@@ -486,7 +533,7 @@ pub const Heap = struct {
         const f = try JSFunction.initNative(self.allocator, callback, param_count, name);
         errdefer f.deinit(self.allocator);
         try self.installFunctionLengthAndName(f, param_count, name);
-        try self.functions.append(self.allocator, f);
+        try self.functions_young.append(self.allocator, f);
         self.allocs_since_gc +|= 1;
         return f;
     }
@@ -533,7 +580,7 @@ pub const Heap = struct {
         try self.charge(src.len + @sizeOf(JSString));
         const s = try JSString.init(self.allocator, self.bytes_allocator, src);
         errdefer s.deinit(self.allocator, self.bytes_allocator);
-        try self.strings.append(self.allocator, s);
+        try self.strings_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
     }
@@ -546,7 +593,7 @@ pub const Heap = struct {
         try self.charge(a.byte_len + b.byte_len + @sizeOf(JSString));
         const s = try JSString.concat(self.allocator, self.bytes_allocator, a, b);
         errdefer s.deinit(self.allocator, self.bytes_allocator);
-        try self.strings.append(self.allocator, s);
+        try self.strings_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
     }
@@ -653,7 +700,7 @@ pub const Heap = struct {
                 .heap = self,
             } },
         };
-        try self.strings.append(self.allocator, s);
+        try self.strings_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
     }
@@ -668,7 +715,7 @@ pub const Heap = struct {
         try self.charge(a.len + b.len + @sizeOf(JSString));
         const s = try JSString.concatBytes(self.allocator, self.bytes_allocator, a, b);
         errdefer s.deinit(self.allocator, self.bytes_allocator);
-        try self.strings.append(self.allocator, s);
+        try self.strings_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
     }
@@ -934,6 +981,14 @@ pub const Heap = struct {
         if (v.isString()) {
             const s: *JSString = @ptrCast(@alignCast(v.asString()));
             s.pinned = true;
+            // A pinned chunk-constant string is permanently live;
+            // mark it `.mature` so a young collection treats it as
+            // an old object. The string may still physically sit in
+            // `strings_young` (it was allocated there during
+            // compile, before `pinChunk` ran) — `collectYoung`
+            // relinks any such pinned straggler into
+            // `strings_mature` when it sweeps.
+            s.generation = .mature;
         }
     }
 
@@ -974,12 +1029,71 @@ pub const Heap = struct {
         }
     }
 
-    /// Run a full mark-sweep cycle. `roots` is every live value the
-    /// caller wants to keep. Anything reachable only through values
-    /// outside `roots` (and outside any open `HandleScope`) is
-    /// freed. After this call every surviving object's `marked` bit
-    /// is back to `false`, ready for the next cycle.
-    pub fn collect(self: *Heap, roots: []const Value) void {
+    // ── Live-count accessors ────────────────────────────────────
+    // The per-kind lists are split young / mature; these report
+    // the combined live count so diagnostics and callers don't
+    // care about the split.
+
+    pub fn stringCount(self: *const Heap) usize {
+        return self.strings_young.items.len + self.strings_mature.items.len;
+    }
+    pub fn functionCount(self: *const Heap) usize {
+        return self.functions_young.items.len + self.functions_mature.items.len;
+    }
+    pub fn objectCount(self: *const Heap) usize {
+        return self.objects_young.items.len + self.objects_mature.items.len;
+    }
+    pub fn environmentCount(self: *const Heap) usize {
+        return self.environments_young.items.len + self.environments_mature.items.len;
+    }
+    pub fn generatorCount(self: *const Heap) usize {
+        return self.generators_young.items.len + self.generators_mature.items.len;
+    }
+    pub fn symbolCount(self: *const Heap) usize {
+        return self.symbols_young.items.len + self.symbols_mature.items.len;
+    }
+    pub fn bigintCount(self: *const Heap) usize {
+        return self.bigints_young.items.len + self.bigints_mature.items.len;
+    }
+
+    /// Sweep one per-kind list (reverse walk so `swapRemove` stays
+    /// O(1)). An unmarked entry is `deinit`'d and removed; a marked
+    /// entry has its bit cleared and stays. `JSString` carries a
+    /// `pinned` flag (chunk constants) — pinned entries are skipped
+    /// untouched. `deinit_args` is forwarded to each freed entry's
+    /// `deinit` (strings need the bytes allocator; everyone else
+    /// just the struct allocator). `list` is `*ArrayListUnmanaged(*T)`;
+    /// passed as `anytype` because Zig has no way to spell a list
+    /// generic over the element type at a non-generic call site.
+    fn sweepList(list: anytype, deinit_args: anytype) void {
+        var i: usize = list.items.len;
+        while (i > 0) {
+            i -= 1;
+            const entry = list.items[i];
+            const EntryT = @typeInfo(@TypeOf(entry)).pointer.child;
+            const has_pinned = @hasField(EntryT, "pinned");
+            if (has_pinned and entry.pinned) {
+                // Permanently live (chunk constants). Skip.
+            } else if (entry.marked) {
+                entry.marked = false;
+            } else {
+                _ = list.swapRemove(i);
+                @call(.auto, EntryT.deinit, .{entry} ++ deinit_args);
+            }
+        }
+    }
+
+    /// Run a full mark-sweep cycle across BOTH generations. `roots`
+    /// is every live value the caller wants to keep. Anything
+    /// reachable only through values outside `roots` (and outside
+    /// any open `HandleScope`) is freed. After this call every
+    /// surviving object's `marked` bit is back to `false`.
+    ///
+    /// Behaviourally identical to the pre-generational `collect`:
+    /// it sweeps the young and mature lists of each kind, so no
+    /// object's lifetime changes — the generational split is pure
+    /// bookkeeping until `collectYoung` (Stage 3) exploits it.
+    pub fn collectFull(self: *Heap, roots: []const Value) void {
         // Wall-clock start for the diagnostic pause-time field.
         // Production engines (V8 `--trace-gc`, JSC GC logs, SM
         // `MOZ_GCTIMER`) all surface per-cycle pause distribution
@@ -991,116 +1105,40 @@ pub const Heap = struct {
         for (self.handle_scopes.items) |scope| {
             for (scope.handles.items) |r| self.markValue(r);
         }
-
-        // Snapshot pre-sweep counts for the diagnostic report.
-        const pre_objs = self.objects.items.len;
-        const pre_strs = self.strings.items.len;
-        const pre_fns = self.functions.items.len;
-        const pre_envs = self.environments.items.len;
-        const pre_gens = self.generators.items.len;
-        const pre_syms = self.symbols.items.len;
-        const pre_bigs = self.bigints.items.len;
-
-        // Sweep phase. Walk in reverse so swap-removal stays cheap.
+        // Registered symbols stay alive forever (GlobalSymbolRegistry
+        // is a strong reference). Mark them before the sweep.
         {
-            var i: usize = self.strings.items.len;
-            while (i > 0) {
-                i -= 1;
-                const s = self.strings.items[i];
-                if (s.pinned) {
-                    // Permanently live (chunk constants). Skip;
-                    // never gets marked or cleared either way.
-                } else if (s.marked) {
-                    s.marked = false;
-                } else {
-                    _ = self.strings.swapRemove(i);
-                    s.deinit(self.allocator, self.bytes_allocator);
-                }
-            }
-        }
-        {
-            var i: usize = self.functions.items.len;
-            while (i > 0) {
-                i -= 1;
-                const f = self.functions.items[i];
-                if (f.marked) {
-                    f.marked = false;
-                } else {
-                    _ = self.functions.swapRemove(i);
-                    f.deinit(self.allocator);
-                }
-            }
-        }
-        {
-            var i: usize = self.objects.items.len;
-            while (i > 0) {
-                i -= 1;
-                const obj = self.objects.items[i];
-                if (obj.marked) {
-                    obj.marked = false;
-                } else {
-                    _ = self.objects.swapRemove(i);
-                    obj.deinit(self.allocator);
-                }
-            }
-        }
-        {
-            var i: usize = self.environments.items.len;
-            while (i > 0) {
-                i -= 1;
-                const env = self.environments.items[i];
-                if (env.marked) {
-                    env.marked = false;
-                } else {
-                    _ = self.environments.swapRemove(i);
-                    env.deinit(self.allocator);
-                }
-            }
-        }
-        {
-            var i: usize = self.generators.items.len;
-            while (i > 0) {
-                i -= 1;
-                const gen = self.generators.items[i];
-                if (gen.marked) {
-                    gen.marked = false;
-                } else {
-                    _ = self.generators.swapRemove(i);
-                    gen.deinit(self.allocator);
-                }
-            }
-        }
-        {
-            // Registered symbols stay alive forever (GlobalSymbolRegistry
-            // is a strong reference). Mark them before the sweep.
             var rit = self.symbol_registry.iterator();
             while (rit.next()) |e| e.value_ptr.*.marked = true;
+        }
 
-            var i: usize = self.symbols.items.len;
-            while (i > 0) {
-                i -= 1;
-                const sym = self.symbols.items[i];
-                if (sym.marked) {
-                    sym.marked = false;
-                } else {
-                    _ = self.symbols.swapRemove(i);
-                    sym.deinit(self.allocator);
-                }
-            }
-        }
-        {
-            var i: usize = self.bigints.items.len;
-            while (i > 0) {
-                i -= 1;
-                const bi = self.bigints.items[i];
-                if (bi.marked) {
-                    bi.marked = false;
-                } else {
-                    _ = self.bigints.swapRemove(i);
-                    bi.deinit(self.allocator);
-                }
-            }
-        }
+        // Snapshot pre-sweep counts for the diagnostic report.
+        const pre_objs = self.objectCount();
+        const pre_strs = self.stringCount();
+        const pre_fns = self.functionCount();
+        const pre_envs = self.environmentCount();
+        const pre_gens = self.generatorCount();
+        const pre_syms = self.symbolCount();
+        const pre_bigs = self.bigintCount();
+
+        // Sweep phase — both generations, every kind.
+        const ba = .{ self.allocator, self.bytes_allocator };
+        const sa = .{self.allocator};
+        sweepList(&self.strings_young, ba);
+        sweepList(&self.strings_mature, ba);
+        sweepList(&self.functions_young, sa);
+        sweepList(&self.functions_mature, sa);
+        sweepList(&self.objects_young, sa);
+        sweepList(&self.objects_mature, sa);
+        sweepList(&self.environments_young, sa);
+        sweepList(&self.environments_mature, sa);
+        sweepList(&self.generators_young, sa);
+        sweepList(&self.generators_mature, sa);
+        sweepList(&self.symbols_young, sa);
+        sweepList(&self.symbols_mature, sa);
+        sweepList(&self.bigints_young, sa);
+        sweepList(&self.bigints_mature, sa);
+
         // Reset the allocation pressure counters so the next
         // collect doesn't fire until fresh allocations cross
         // a threshold again.
@@ -1127,7 +1165,7 @@ pub const Heap = struct {
             self.gc_stats_cycle += 1;
             const elapsed_us: i128 = @divTrunc(elapsed_ns_total, 1000);
             std.debug.print(
-                "[gc {d}] {d}\u{00B5}s live={d}KB peak={d}KB alloc_total={d}KB obj={d}\u{2192}{d} str={d}\u{2192}{d} fn={d}\u{2192}{d} env={d}\u{2192}{d} gen={d}\u{2192}{d} sym={d}\u{2192}{d} big={d}\u{2192}{d}\n",
+                "[gc {d}] full {d}\u{00B5}s live={d}KB peak={d}KB alloc_total={d}KB obj={d}\u{2192}{d} str={d}\u{2192}{d} fn={d}\u{2192}{d} env={d}\u{2192}{d} gen={d}\u{2192}{d} sym={d}\u{2192}{d} big={d}\u{2192}{d}\n",
                 .{
                     self.gc_stats_cycle,
                     elapsed_us,
@@ -1135,22 +1173,29 @@ pub const Heap = struct {
                     self.bytes_live_peak / 1024,
                     self.bytes_alloc_total / 1024,
                     pre_objs,
-                    self.objects.items.len,
+                    self.objectCount(),
                     pre_strs,
-                    self.strings.items.len,
+                    self.stringCount(),
                     pre_fns,
-                    self.functions.items.len,
+                    self.functionCount(),
                     pre_envs,
-                    self.environments.items.len,
+                    self.environmentCount(),
                     pre_gens,
-                    self.generators.items.len,
+                    self.generatorCount(),
                     pre_syms,
-                    self.symbols.items.len,
+                    self.symbolCount(),
                     pre_bigs,
-                    self.bigints.items.len,
+                    self.bigintCount(),
                 },
             );
         }
+    }
+
+    /// Deprecated spelling — `collect` is `collectFull`. Kept so
+    /// the unit-test suite and any external caller compile while
+    /// the rename propagates.
+    pub fn collect(self: *Heap, roots: []const Value) void {
+        self.collectFull(roots);
     }
 
     /// Open a new handle scope. The returned scope is owned by the
@@ -1372,10 +1417,55 @@ test "Heap: allocate then collect with empty roots frees the string" {
     defer heap.deinit();
 
     _ = try heap.allocateString("transient");
-    try testing.expectEqual(@as(usize, 1), heap.strings.items.len);
+    try testing.expectEqual(@as(usize, 1), heap.stringCount());
 
     heap.collect(&.{});
-    try testing.expectEqual(@as(usize, 0), heap.strings.items.len);
+    try testing.expectEqual(@as(usize, 0), heap.stringCount());
+}
+
+test "Heap: fresh allocations land in the young generation" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const s = try heap.allocateString("y");
+    const o = try heap.allocateObject();
+    try testing.expectEqual(Generation.young, s.generation);
+    try testing.expectEqual(Generation.young, o.generation);
+    try testing.expectEqual(@as(usize, 1), heap.strings_young.items.len);
+    try testing.expectEqual(@as(usize, 0), heap.strings_mature.items.len);
+    try testing.expectEqual(@as(usize, 1), heap.objects_young.items.len);
+    try testing.expectEqual(@as(usize, 0), heap.objects_mature.items.len);
+}
+
+test "Heap: collectFull sweeps both generations" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // A young string (garbage) plus a mature one (hand-promoted)
+    // — collectFull with empty roots must free BOTH.
+    _ = try heap.allocateString("young-garbage");
+    const mature = try heap.allocateString("mature-garbage");
+    _ = heap.strings_young.pop();
+    try heap.strings_mature.append(heap.allocator, mature);
+    mature.generation = .mature;
+
+    try testing.expectEqual(@as(usize, 2), heap.stringCount());
+    heap.collectFull(&.{});
+    try testing.expectEqual(@as(usize, 0), heap.stringCount());
+}
+
+test "Heap: collectFull keeps a rooted mature object" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const s = try heap.allocateString("kept");
+    _ = heap.strings_young.pop();
+    try heap.strings_mature.append(heap.allocator, s);
+    s.generation = .mature;
+
+    heap.collectFull(&.{Value.fromString(s)});
+    try testing.expectEqual(@as(usize, 1), heap.stringCount());
+    try testing.expectEqual(@as(usize, 1), heap.strings_mature.items.len);
 }
 
 test "Heap: collect keeps an object reachable through roots" {
@@ -1386,7 +1476,7 @@ test "Heap: collect keeps an object reachable through roots" {
     const v = Value.fromString(s);
 
     heap.collect(&.{v});
-    try testing.expectEqual(@as(usize, 1), heap.strings.items.len);
+    try testing.expectEqual(@as(usize, 1), heap.stringCount());
     try testing.expectEqualStrings("kept", s.flatBytes());
 }
 
@@ -1403,7 +1493,7 @@ test "Heap: collect resets mark bit between cycles" {
     // A second cycle with no roots must free it (mark bit must
     // really be cleared, not stuck on).
     heap.collect(&.{});
-    try testing.expectEqual(@as(usize, 0), heap.strings.items.len);
+    try testing.expectEqual(@as(usize, 0), heap.stringCount());
 }
 
 test "Heap: handle scope keeps an object alive without explicit roots" {
@@ -1418,13 +1508,13 @@ test "Heap: handle scope keeps an object alive without explicit roots" {
 
     // Collection with NO explicit roots — the scope must save it.
     heap.collect(&.{});
-    try testing.expectEqual(@as(usize, 1), heap.strings.items.len);
+    try testing.expectEqual(@as(usize, 1), heap.stringCount());
 
     scope.close();
 
     // Now the scope is gone — collect frees the string.
     heap.collect(&.{});
-    try testing.expectEqual(@as(usize, 0), heap.strings.items.len);
+    try testing.expectEqual(@as(usize, 0), heap.stringCount());
 }
 
 test "Heap: nested handle scopes both contribute roots" {
@@ -1440,15 +1530,15 @@ test "Heap: nested handle scopes both contribute roots" {
     try inner.push(Value.fromString(b));
 
     heap.collect(&.{});
-    try testing.expectEqual(@as(usize, 2), heap.strings.items.len);
+    try testing.expectEqual(@as(usize, 2), heap.stringCount());
 
     inner.close();
     heap.collect(&.{});
-    try testing.expectEqual(@as(usize, 1), heap.strings.items.len);
+    try testing.expectEqual(@as(usize, 1), heap.stringCount());
 
     outer.close();
     heap.collect(&.{});
-    try testing.expectEqual(@as(usize, 0), heap.strings.items.len);
+    try testing.expectEqual(@as(usize, 0), heap.stringCount());
 }
 
 test "Heap: concatStrings tracks the result" {
@@ -1460,11 +1550,11 @@ test "Heap: concatStrings tracks the result" {
     const ab = try heap.concatStrings(a, b);
 
     try testing.expectEqualStrings("foobar", ab.flatBytes());
-    try testing.expectEqual(@as(usize, 3), heap.strings.items.len);
+    try testing.expectEqual(@as(usize, 3), heap.stringCount());
 
     // With only `ab` rooted, `a` and `b` are freed.
     heap.collect(&.{Value.fromString(ab)});
-    try testing.expectEqual(@as(usize, 1), heap.strings.items.len);
+    try testing.expectEqual(@as(usize, 1), heap.stringCount());
 }
 
 test "Heap: markString recurses through a hand-built cons node" {
@@ -1486,16 +1576,16 @@ test "Heap: markString recurses through a hand-built cons node" {
             .heap = &heap,
         } },
     };
-    try heap.strings.append(heap.allocator, cons);
+    try heap.strings_young.append(heap.allocator, cons);
 
     // Root only the cons node. Marking it must mark both children
     // so the sweep keeps all three alive.
     heap.collect(&.{Value.fromString(cons)});
-    try testing.expectEqual(@as(usize, 3), heap.strings.items.len);
+    try testing.expectEqual(@as(usize, 3), heap.stringCount());
 
     // Drop the root; everything is collected.
     heap.collect(&.{});
-    try testing.expectEqual(@as(usize, 0), heap.strings.items.len);
+    try testing.expectEqual(@as(usize, 0), heap.stringCount());
 }
 
 test "Heap: allocateConsString eager-flattens below the min-length gate" {
@@ -1582,11 +1672,11 @@ test "Heap: GC marks a real lazy cons tree built by allocateConsString" {
 
     // Rooting only the cons keeps both children alive.
     heap.collect(&.{Value.fromString(ab)});
-    try testing.expectEqual(@as(usize, 3), heap.strings.items.len);
+    try testing.expectEqual(@as(usize, 3), heap.stringCount());
 
     // Drop the root — everything collected.
     heap.collect(&.{});
-    try testing.expectEqual(@as(usize, 0), heap.strings.items.len);
+    try testing.expectEqual(@as(usize, 0), heap.stringCount());
 }
 
 test "tagging: real JSObject from heap is recognised as plain object" {

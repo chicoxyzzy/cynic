@@ -2337,14 +2337,7 @@ fn objectGetOwnPropertySymbols(realm: *Realm, this_value: Value, args: []const V
         while (fit.next()) |entry| {
             const key = entry.key_ptr.*;
             if (!isSymbolKey(key)) continue;
-            var match: ?*@import("../symbol.zig").JSSymbol = null;
-            for (realm.heap.symbols.items) |sym| {
-                if (std.mem.eql(u8, sym.prop_key, key)) {
-                    match = sym;
-                    break;
-                }
-            }
-            const sym = match orelse continue;
+            const sym = realm.heap.symbolForKey(key) orelse continue;
             var ibuf: [16]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{flen}) catch unreachable;
             const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
@@ -2369,17 +2362,9 @@ fn objectGetOwnPropertySymbols(realm: *Realm, this_value: Value, args: []const V
     for (keys) |key| {
         if (!isSymbolKey(key)) continue;
         // Recover the JSSymbol pointer from the heap's symbol
-        // list by exact prop_key match. Linear scan; the lists
-        // tend to be small (handful of well-knowns + however
-        // many `Symbol()` the program allocated).
-        var match: ?*@import("../symbol.zig").JSSymbol = null;
-        for (realm.heap.symbols.items) |sym| {
-            if (std.mem.eql(u8, sym.prop_key, key)) {
-                match = sym;
-                break;
-            }
-        }
-        const sym = match orelse continue;
+        // lists by exact prop_key match (linear scan over young +
+        // mature; the lists tend to be small).
+        const sym = realm.heap.symbolForKey(key) orelse continue;
         var ibuf: [16]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
         const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;

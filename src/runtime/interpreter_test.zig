@@ -3184,16 +3184,16 @@ fn expectHeapBoundedAfterClassLoop(source: []const u8, slack: usize) !void {
     defer realm.deinit();
     try installBuiltinsAllFeatures(&realm);
     realm.collectGarbage();
-    const baseline_objects = realm.heap.objects.items.len;
-    const baseline_functions = realm.heap.functions.items.len;
+    const baseline_objects = realm.heap.objectCount();
+    const baseline_functions = realm.heap.functionCount();
     const r = try evaluateScriptResult(&realm, source);
     switch (r) {
         .thrown => return error.UncaughtException,
         else => {},
     }
     realm.collectGarbage();
-    try testing.expect(realm.heap.objects.items.len <= baseline_objects + slack);
-    try testing.expect(realm.heap.functions.items.len <= baseline_functions + slack);
+    try testing.expect(realm.heap.objectCount() <= baseline_objects + slack);
+    try testing.expect(realm.heap.functionCount() <= baseline_functions + slack);
 }
 
 test "leak-bound: computed instance-method keys stay bounded under loop" {

@@ -45,6 +45,14 @@ pub const JSSymbol = struct {
     /// Mark-sweep bit, written by `Heap.markValue` and cleared
     /// after each sweep.
     marked: bool = false,
+    /// Generational-GC age. Fresh allocations start `.young`; a
+    /// young symbol surviving a `collectYoung` is promoted to
+    /// `.mature` and relinked into the mature list.
+    generation: @import("heap.zig").Generation = .young,
+    /// Set when this symbol is in the heap's remembered set as a
+    /// known old→young store source. Symbols are immutable so
+    /// this stays `false`; the field keeps headers uniform.
+    in_remembered_set: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, description: ?[]const u8, prop_key: []const u8) !*JSSymbol {
         const s = try allocator.create(JSSymbol);

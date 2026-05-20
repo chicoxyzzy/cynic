@@ -124,6 +124,13 @@ pub const JSGenerator = struct {
     argc: u8 = 0,
     state: GeneratorState = .initial,
     marked: bool = false,
+    /// Generational-GC age. Fresh allocations start `.young`; a
+    /// young generator surviving a `collectYoung` is promoted to
+    /// `.mature` and relinked into the mature list.
+    generation: @import("heap.zig").Generation = .young,
+    /// Set when this generator is in the heap's remembered set as
+    /// a known old→young store source.
+    in_remembered_set: bool = false,
     /// True when this generator backs an `async function`'s
     /// frame rather than a `function*`. Drives the await /
     /// return / throw paths to settle `result_promise` instead

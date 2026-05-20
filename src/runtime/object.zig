@@ -346,6 +346,15 @@ pub const JSObject = struct {
     /// Mark-sweep bit, written by `Heap.markValue` and cleared
     /// after each sweep.
     marked: bool = false,
+    /// Generational-GC age. Fresh allocations start `.young`; a
+    /// young object surviving a `collectYoung` is promoted to
+    /// `.mature` and relinked into the mature list (the object
+    /// itself never moves — the collector is non-moving).
+    generation: @import("heap.zig").Generation = .young,
+    /// Set when this object is in the heap's remembered set as a
+    /// known old→young store source. Guards the write-barrier hot
+    /// path against double-insertion.
+    in_remembered_set: bool = false,
     /// `[[Extensible]]` (§10.1.2). `false` after
     /// `Object.preventExtensions` / `seal` / `freeze`. New
     /// property writes silently fail when `false`.

@@ -306,6 +306,13 @@ pub const JSFunction = struct {
     /// Mark-sweep bit, written by the heap during a collection
     /// cycle and reset to `false` after the sweep.
     marked: bool = false,
+    /// Generational-GC age. Fresh allocations start `.young`; a
+    /// young function surviving a `collectYoung` is promoted to
+    /// `.mature` and relinked into the mature list.
+    generation: @import("heap.zig").Generation = .young,
+    /// Set when this function is in the heap's remembered set as a
+    /// known old→young store source.
+    in_remembered_set: bool = false,
 
     /// §10.1.11 OrdinaryOwnPropertyKeys — unified insertion-order
     /// list spanning `properties` and `accessors`, mirroring
