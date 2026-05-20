@@ -19,6 +19,7 @@ const JSFunction = @import("../function.zig").JSFunction;
 const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
+const c_alloc = @import("../c_alloc.zig");
 
 const installConstructor = intrinsics.installConstructor;
 const installNativeMethod = intrinsics.installNativeMethod;
@@ -49,18 +50,13 @@ const LRE_FLAG_UNICODE_SETS: c_int = 1 << 8;
 
 /// libregexp uses this for memory allocation. The `opaque`
 /// pointer passed through `lre_compile` / `lre_exec` is our
-/// `*Realm`. Cynic's allocator is realm-scoped; we reach it
-/// via the opaque pointer.
+/// `*Realm`, but libregexp's allocations are not realm-scoped, so
+/// the hook dispatches straight to the C allocator. On a hosted
+/// target that is libc; on `wasm32-freestanding` (the playground
+/// build) it is the `wasm_shim.c` allocator — see `runtime/c_alloc`.
 export fn lre_realloc(opaque_ptr: ?*anyopaque, ptr: ?*anyopaque, size: usize) ?*anyopaque {
     _ = opaque_ptr;
-    if (size == 0) {
-        if (ptr) |p| std.c.free(p);
-        return null;
-    }
-    if (ptr) |p| {
-        return std.c.realloc(p, size);
-    }
-    return std.c.malloc(size);
+    return c_alloc.reallocHook(ptr, size);
 }
 
 /// libregexp calls this from `lre_exec` — we can refuse a deep

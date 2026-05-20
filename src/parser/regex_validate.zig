@@ -167,8 +167,29 @@ fn validatePattern(allocator: std.mem.Allocator, pattern: []const u8, re_flags: 
     // libregexp allocates the bytecode via the host `lre_realloc`
     // hook (which calls `malloc` / `free`). Free it here — the
     // parser has no interest in the bytecode.
-    std.c.free(bc_ptr);
+    //
+    // `std.c` has no `free` on a `wasm32-freestanding` target (no
+    // libc). The C `free` is then supplied by `src/wasm_shim.c`;
+    // bind it via `extern` so this resolves on both targets. The
+    // parser sits below the runtime layer, so it cannot reuse
+    // `runtime/c_alloc.zig` — a one-line `extern` is the minimal
+    // dependency-free fix.
+    cFree(bc_ptr);
     return true;
+}
+
+const freestanding_target = @import("builtin").os.tag == .freestanding;
+extern fn free(?*anyopaque) void;
+
+/// Free a libregexp-allocated buffer. On a hosted target this is
+/// libc `free` via `std.c`; on `wasm32-freestanding` it is the
+/// `free` symbol from `src/wasm_shim.c`.
+fn cFree(ptr: ?*anyopaque) void {
+    if (freestanding_target) {
+        free(ptr);
+    } else {
+        std.c.free(ptr);
+    }
 }
 
 /// Re-encode UTF-8 as CESU-8 — supplementary (4-byte) sequences are

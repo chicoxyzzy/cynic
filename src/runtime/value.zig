@@ -190,12 +190,16 @@ pub const Value = extern struct {
 
     pub fn asObject(self: Value) *anyopaque {
         std.debug.assert(self.isObject());
-        return @ptrFromInt(self.bits & pointer_mask);
+        // `@intCast` to `usize` keeps this portable to 32-bit
+        // targets (wasm32): the masked field is ≤ 48 bits in the
+        // encoding but real pointers fit `usize` on every target
+        // Cynic builds for. On 64-bit it is a no-op.
+        return @ptrFromInt(@as(usize, @intCast(self.bits & pointer_mask)));
     }
 
     pub fn asString(self: Value) *anyopaque {
         std.debug.assert(self.isString());
-        return @ptrFromInt(self.bits & pointer_mask);
+        return @ptrFromInt(@as(usize, @intCast(self.bits & pointer_mask)));
     }
 
     /// Number coercion: returns the value as `f64`. Int32 values

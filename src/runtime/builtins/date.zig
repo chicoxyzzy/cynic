@@ -805,6 +805,15 @@ fn currentTimeMs() f64 {
     // §21.4.1.6 — wall-clock milliseconds since the Unix epoch.
     // Zig 0.16's `std.Io.Clock` requires an `io` handle that
     // natives don't carry; drop down to the libc shim.
+    //
+    // On a freestanding target with no libc (the
+    // `wasm32-freestanding` playground build) there is no
+    // `clock_gettime` — `std.c.timespec` is `void`. The playground
+    // sandbox deliberately has no ambient wall clock anyway, so
+    // `Date.now()` and `new Date()` resolve to the epoch (0). A
+    // host that wants a real clock there would import a `now` hook;
+    // the playground does not need one.
+    if (@import("builtin").os.tag == .freestanding) return 0;
     var ts: std.c.timespec = undefined;
     if (std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts) != 0) return 0;
     const sec_f: f64 = @floatFromInt(ts.sec);

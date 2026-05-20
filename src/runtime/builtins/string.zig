@@ -16,6 +16,7 @@ const JSFunction = @import("../function.zig").JSFunction;
 const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
+const c_alloc = @import("../c_alloc.zig");
 const interpreter = @import("../interpreter.zig");
 const interpreter_arith = @import("../interpreter_arith.zig");
 const utf16 = @import("../utf16.zig");
@@ -2369,7 +2370,7 @@ fn stringTrimEnd(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     return Value.fromString(out);
 }
 
-/// Owned output of `normalizeWtf8` — a `std.c.malloc`-backed
+/// Owned output of `normalizeWtf8` — a C-allocator-backed
 /// code-point buffer produced by libunicode's `unicode_normalize`.
 /// Free with `deinit`. `slice` is empty when the input was empty.
 const NormalizedCodepoints = struct {
@@ -2382,7 +2383,7 @@ const NormalizedCodepoints = struct {
     }
 
     fn deinit(self: NormalizedCodepoints) void {
-        if (self.ptr) |p| std.c.free(@ptrCast(p));
+        if (self.ptr) |p| c_alloc.free(@ptrCast(p));
     }
 };
 
@@ -2421,7 +2422,7 @@ fn normalizeWtf8(
         normalizeRealloc,
     );
     if (out_len < 0) {
-        if (dst_ptr) |p| std.c.free(@ptrCast(p));
+        if (dst_ptr) |p| c_alloc.free(@ptrCast(p));
         return error.OutOfMemory;
     }
     return .{ .ptr = dst_ptr, .len = @intCast(out_len) };
@@ -2474,17 +2475,13 @@ fn stringNormalize(realm: *Realm, this_value: Value, args: []const Value) Native
 
 /// Realloc shim for `unicode_normalize`. The opaque is unused
 /// (libunicode's only state lives in the output buffer it
-/// reallocs), so we drop it and dispatch through libc — same
-/// pattern as `lre_realloc` in `builtins/regexp.zig`. `size == 0`
-/// means free.
+/// reallocs), so we drop it and dispatch through the C allocator —
+/// same pattern as `lre_realloc` in `builtins/regexp.zig`.
+/// `runtime/c_alloc` routes to libc on a hosted target and to the
+/// `wasm_shim.c` allocator on `wasm32-freestanding`.
 fn normalizeRealloc(opaque_ptr: ?*anyopaque, ptr: ?*anyopaque, size: usize) callconv(.c) ?*anyopaque {
     _ = opaque_ptr;
-    if (size == 0) {
-        if (ptr) |p| std.c.free(p);
-        return null;
-    }
-    if (ptr) |p| return std.c.realloc(p, size);
-    return std.c.malloc(size);
+    return c_alloc.reallocHook(ptr, size);
 }
 
 /// §22.1.3.4 String.prototype.codePointAt — UTF-16-code-unit-

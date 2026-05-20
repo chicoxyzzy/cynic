@@ -55,6 +55,7 @@ test {
     _ = @import("runtime/environment.zig");
     _ = @import("runtime/object.zig");
     _ = @import("runtime/heap.zig");
+    _ = @import("runtime/c_alloc.zig");
     _ = @import("runtime/realm.zig");
     _ = @import("runtime/interpreter.zig");
     _ = @import("runtime/interpreter_arith.zig");

@@ -227,4 +227,141 @@ pub fn build(b: *std.Build) void {
     run_bench.step.dependOn(&install_cynic_fast.step);
     const bench_step = b.step("bench", "Run the micro-bench suite (medians of 5)");
     bench_step.dependOn(&run_bench.step);
+
+    // -----------------------------------------------------------------
+    // `zig build wasm` — the browser-playground WebAssembly module.
+    //
+    // Builds `src/wasm.zig` + the vendored QuickJS C into a single
+    // `wasm32-freestanding` `ReleaseSmall` module (download size
+    // matters for a playground). Freestanding WASM has no libc, so
+    // the C is paired with `src/wasm_shim.c`, a hand-written shim
+    // routing `malloc` / `free` / `realloc` back into the Zig
+    // `WasmAllocator` and providing the `mem*` / `str*` family.
+    //
+    // The artifact is installed to `zig-out/bin/cynic.wasm`. The
+    // step then copies it next to the front-end into
+    // `zig-out/playground/` so the directory is directly servable.
+    // -----------------------------------------------------------------
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+
+    // QuickJS C for WASM — compiled with NDEBUG (drop `assert`) and
+    // pointed at the freestanding shim's headers via the source
+    // tree's own `vendor/quickjs` include path. No `-D_GNU_SOURCE`:
+    // there is no glibc to feature-gate.
+    const wasm_qjs_mod = b.createModule(.{
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+        // freestanding: no libc — the shim below supplies the C
+        // runtime symbols the QuickJS sources reference.
+    });
+    wasm_qjs_mod.addCSourceFiles(.{
+        .files = &.{
+            "vendor/quickjs/libregexp.c",
+            "vendor/quickjs/libunicode.c",
+            "src/wasm_shim.c",
+        },
+        .flags = &.{
+            "-std=c11",
+            "-DNDEBUG",
+            "-Wno-unused-parameter",
+            "-Wno-implicit-fallthrough",
+            "-Wno-sign-compare",
+            "-Wno-format-truncation",
+            "-fno-sanitize=undefined",
+        },
+    });
+    // The libc stub headers must come BEFORE vendor/quickjs so a
+    // freestanding `#include <stdlib.h>` resolves to the stub, not
+    // a (missing) system header. See vendor/quickjs/wasm-libc/.
+    wasm_qjs_mod.addIncludePath(b.path("vendor/quickjs/wasm-libc"));
+    wasm_qjs_mod.addIncludePath(b.path("vendor/quickjs"));
+    const wasm_qjs = b.addLibrary(.{
+        .linkage = .static,
+        .name = "qjs_regex_wasm",
+        .root_module = wasm_qjs_mod,
+    });
+
+    // translate-c for the WASM target — same header, freestanding
+    // ABI. Kept separate from the native `c_mod` because the
+    // generated bindings are target-specific.
+    const wasm_translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("vendor/quickjs/libregexp.h"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+        // freestanding has no libc — `addTranslateC` defaults this
+        // to true and would otherwise propagate `-lc` to the final
+        // link, which has no libc to provide.
+        .link_libc = false,
+    });
+    // libregexp.h pulls in libunicode.h → <inttypes.h>; point
+    // translate-c at the freestanding stub headers, stubs first.
+    wasm_translate_c.addIncludePath(b.path("vendor/quickjs/wasm-libc"));
+    wasm_translate_c.addIncludePath(b.path("vendor/quickjs"));
+    const wasm_c_mod = wasm_translate_c.createModule();
+
+    // Cynic library, built for WASM.
+    const wasm_lib_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    wasm_lib_mod.linkLibrary(wasm_qjs);
+    wasm_lib_mod.addIncludePath(b.path("vendor/quickjs"));
+    wasm_lib_mod.addImport("c", wasm_c_mod);
+
+    // The WASM entry module — C-ABI exports for the JS front-end.
+    const wasm_mod = b.createModule(.{
+        .root_source_file = b.path("src/wasm.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    wasm_mod.addImport("cynic", wasm_lib_mod);
+    wasm_mod.linkLibrary(wasm_qjs);
+    wasm_mod.addIncludePath(b.path("vendor/quickjs"));
+    wasm_mod.addImport("c", wasm_c_mod);
+
+    const wasm_exe = b.addExecutable(.{
+        .name = "cynic",
+        .root_module = wasm_mod,
+    });
+    // A reactor-style module: no `main`, just exports the JS side
+    // imports. `rdynamic` keeps every `export fn` in the symbol
+    // table; `entry = .disabled` because there is no process start.
+    wasm_exe.entry = .disabled;
+    wasm_exe.rdynamic = true;
+    // Grow linear memory on demand — the engine allocates per eval.
+    wasm_exe.import_memory = false;
+    wasm_exe.max_memory = 256 * 1024 * 1024;
+
+    const install_wasm = b.addInstallArtifact(wasm_exe, .{
+        .dest_dir = .{ .override = .{ .custom = "bin" } },
+        .dest_sub_path = "cynic.wasm",
+    });
+
+    // Assemble a directly-servable playground directory:
+    // zig-out/playground/{playground.html,playground.js,cynic.wasm}.
+    const wasm_into_playground = b.addInstallFileWithDir(
+        wasm_exe.getEmittedBin(),
+        .{ .custom = "playground" },
+        "cynic.wasm",
+    );
+    const html_into_playground = b.addInstallFileWithDir(
+        b.path("playground/playground.html"),
+        .{ .custom = "playground" },
+        "playground.html",
+    );
+    const js_into_playground = b.addInstallFileWithDir(
+        b.path("playground/playground.js"),
+        .{ .custom = "playground" },
+        "playground.js",
+    );
+
+    const wasm_step = b.step("wasm", "Build the playground WASM module + assemble zig-out/playground/");
+    wasm_step.dependOn(&install_wasm.step);
+    wasm_step.dependOn(&wasm_into_playground.step);
+    wasm_step.dependOn(&html_into_playground.step);
+    wasm_step.dependOn(&js_into_playground.step);
 }

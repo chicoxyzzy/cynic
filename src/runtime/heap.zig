@@ -38,7 +38,15 @@ const JSBigInt = @import("bigint.zig").JSBigInt;
 /// Used by `Heap.collect`'s diagnostic pause-time field; the
 /// std `std.Io` clock would require threading the io handle
 /// down here, which costs more than this small libc detour.
+///
+/// On a freestanding target with no libc (the `wasm32-freestanding`
+/// playground build) `std.c.timespec` is `void` — there is no
+/// monotonic clock to read, so the GC pause-time diagnostic
+/// degrades to a constant 0. Correctness of collection itself is
+/// unaffected; only the `--gc-stats` timing field goes dark, and
+/// that flag is harness-only.
 fn monotonicNs() i128 {
+    if (@import("builtin").os.tag == .freestanding) return 0;
     var ts: std.c.timespec = .{ .sec = 0, .nsec = 0 };
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(i128, @intCast(ts.sec)) * std.time.ns_per_s + @as(i128, @intCast(ts.nsec));
@@ -92,28 +100,33 @@ fn valueKind(v: Value) ?u64 {
     return v.bits & kind_mask;
 }
 
+// The NaN-boxed pointer field is masked out as a `u64`; on a
+// 32-bit target (wasm32) `@ptrFromInt` wants a `usize`, so each
+// site `@intCast`s down. Real pointers fit `usize` on every
+// target Cynic builds for; on 64-bit the cast is a no-op.
+
 pub fn valueAsFunction(v: Value) ?*JSFunction {
     if (valueKind(v) != kind_function) return null;
     const p = v.bits & Value.pointer_mask;
-    return @ptrFromInt(p);
+    return @ptrFromInt(@as(usize, @intCast(p)));
 }
 
 pub fn valueAsPlainObject(v: Value) ?*JSObject {
     if (valueKind(v) != kind_object) return null;
     const p = (v.bits & Value.pointer_mask) & ~kind_mask;
-    return @ptrFromInt(p);
+    return @ptrFromInt(@as(usize, @intCast(p)));
 }
 
 pub fn valueAsSymbol(v: Value) ?*JSSymbol {
     if (valueKind(v) != kind_symbol) return null;
     const p = (v.bits & Value.pointer_mask) & ~kind_mask;
-    return @ptrFromInt(p);
+    return @ptrFromInt(@as(usize, @intCast(p)));
 }
 
 pub fn valueAsBigInt(v: Value) ?*JSBigInt {
     if (valueKind(v) != kind_bigint) return null;
     const p = (v.bits & Value.pointer_mask) & ~kind_mask;
-    return @ptrFromInt(p);
+    return @ptrFromInt(@as(usize, @intCast(p)));
 }
 
 /// Used by GC marking and printing — returns whether the value
@@ -953,7 +966,12 @@ pub const Heap = struct {
         // ad-hoc debugging). Format: `[gc N] kind=pre→post ...`.
         // A kind whose `post` keeps climbing across cycles is
         // being kept alive by something that should let go.
-        if (self.gc_stats) {
+        // `std.debug.print` reaches for the std threaded-IO stderr
+        // path, which a `wasm32-freestanding` target cannot provide
+        // (no `getrandom`, no libc). `gc_stats` is a harness-only
+        // diagnostic — never set in the WASM playground build — so
+        // compile the report out entirely on freestanding.
+        if (self.gc_stats and @import("builtin").os.tag != .freestanding) {
             self.gc_stats_cycle += 1;
             const elapsed_us: i128 = @divTrunc(elapsed_ns_total, 1000);
             std.debug.print(

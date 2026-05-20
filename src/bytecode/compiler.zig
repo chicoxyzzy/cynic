@@ -7651,7 +7651,6 @@ pub const Compiler = struct {
                                         .is_global = true,
                                     };
                                 }
-                                std.debug.print("DEBUG: UnresolvedReference for var '{s}'\n", .{name});
                                 return error.UnresolvedReference;
                             };
                             try self.emitStoreBinding(binding, d.span);
