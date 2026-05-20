@@ -1162,6 +1162,167 @@ pub const Heap = struct {
         try self.handle_scopes.append(self.allocator, scope);
         return scope;
     }
+
+    // -----------------------------------------------------------------
+    // Generational-GC store routing — the "merge firewall".
+    //
+    // Every interpreter store arm that assigns a value into a
+    // heap-object field funnels through one of these four helpers.
+    // Stage 0 (this commit) makes them pure pass-throughs over the
+    // existing setters — zero behaviour change. Stage 2 prepends
+    // the generational write barrier inside these same four bodies,
+    // so the barrier lands in one place per store category rather
+    // than in ~20 scattered opcode arms.
+    //
+    // The container types accepted are the four mutable heap kinds
+    // that can hold a pointer to a younger object: `JSObject`,
+    // `JSFunction`, `Environment`. Strings (`JSString`) are immutable
+    // once built, so they need no store helper.
+    // -----------------------------------------------------------------
+
+    /// Tagged heap-container reference. The Stage-2 write barrier
+    /// needs the container's generation bit and (when remembered)
+    /// a way to re-find it; this tagged union is that handle.
+    pub const Container = union(enum) {
+        object: *JSObject,
+        function: *JSFunction,
+        environment: *Environment,
+        generator: *JSGenerator,
+    };
+
+    /// Store `v` into plain-object property `key` via §10.1.9
+    /// `[[Set]]` bypass (`JSObject.set`). Stage 0: pass-through.
+    pub fn storeProperty(
+        self: *Heap,
+        obj: *JSObject,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        v: Value,
+    ) !void {
+        self.writeBarrier(.{ .object = obj }, v);
+        try obj.set(allocator, key, v);
+    }
+
+    /// Store `v` into plain-object property `key`, honouring
+    /// §10.1.9 writability (`JSObject.setIfWritable`). Stage 0:
+    /// pass-through; returns the setter's writable verdict.
+    pub fn storePropertyIfWritable(
+        self: *Heap,
+        obj: *JSObject,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        v: Value,
+    ) !bool {
+        self.writeBarrier(.{ .object = obj }, v);
+        return obj.setIfWritable(allocator, key, v);
+    }
+
+    /// Store `v` into plain-object property `key` with explicit
+    /// descriptor flags (`JSObject.setWithFlags`). Stage 0:
+    /// pass-through.
+    pub fn storePropertyWithFlags(
+        self: *Heap,
+        obj: *JSObject,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        v: Value,
+        flags: @import("object.zig").PropertyFlags,
+    ) !void {
+        self.writeBarrier(.{ .object = obj }, v);
+        try obj.setWithFlags(allocator, key, v, flags);
+    }
+
+    /// Store `v` into a function-object property `key` via the
+    /// §10.2 ordinary `[[Set]]` bypass (`JSFunction.set`).
+    /// Stage 0: pass-through.
+    pub fn storeFunctionProperty(
+        self: *Heap,
+        fn_obj: *JSFunction,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        v: Value,
+    ) !void {
+        self.writeBarrier(.{ .function = fn_obj }, v);
+        try fn_obj.set(allocator, key, v);
+    }
+
+    /// Store `v` into plain-object property keyed by `key_str`,
+    /// anchoring the heap-allocated key JSString on the receiver
+    /// (`JSObject.setComputedOwned`). Stage 0: pass-through.
+    pub fn storePropertyComputedOwned(
+        self: *Heap,
+        obj: *JSObject,
+        allocator: std.mem.Allocator,
+        key_str: *JSString,
+        v: Value,
+    ) !void {
+        self.writeBarrier(.{ .object = obj }, v);
+        try obj.setComputedOwned(allocator, key_str, v);
+    }
+
+    /// Store `v` into a function-object property `key`, honouring
+    /// §10.2 writability (`JSFunction.setIfWritable`). Stage 0:
+    /// pass-through.
+    pub fn storeFunctionPropertyIfWritable(
+        self: *Heap,
+        fn_obj: *JSFunction,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        v: Value,
+    ) !bool {
+        self.writeBarrier(.{ .function = fn_obj }, v);
+        return fn_obj.setIfWritable(allocator, key, v);
+    }
+
+    /// Store `v` into an Array-exotic element slot `idx`
+    /// (`JSObject.setIndexed`). Stage 0: pass-through.
+    pub fn storeElement(
+        self: *Heap,
+        obj: *JSObject,
+        allocator: std.mem.Allocator,
+        idx: u32,
+        v: Value,
+    ) !void {
+        self.writeBarrier(.{ .object = obj }, v);
+        try obj.setIndexed(allocator, idx, v);
+    }
+
+    /// Store `v` into declarative-environment slot `slot`.
+    /// Stage 0: pass-through (the raw slot write the interpreter
+    /// `sta_env` arm used to do inline).
+    pub fn storeEnvSlot(
+        self: *Heap,
+        env: *Environment,
+        slot: usize,
+        v: Value,
+    ) void {
+        self.writeBarrier(.{ .environment = env }, v);
+        env.slots[slot] = v;
+    }
+
+    /// Record an old→young store into a *typed internal slot* of
+    /// a heap container — `prototype`, `home_object`, accessor
+    /// halves, Map/Set entry values, promise reaction fields, and
+    /// the other fields the interpreter writes directly rather
+    /// than through a property-bag setter. The caller performs the
+    /// actual field assignment; this helper only runs the barrier.
+    /// Stage 0: no-op (`writeBarrier` is a stub).
+    pub fn storeInternalSlot(self: *Heap, container: Container, v: Value) void {
+        self.writeBarrier(container, v);
+    }
+
+    /// Generational write barrier. Stage 0: a no-op stub — the
+    /// store helpers above are wired to call it so Stage 2 only
+    /// has to fill in this single body. Stage 2 records an
+    /// old→young store: when `container` is a mature object and
+    /// `v` carries a young heap pointer, the container joins the
+    /// remembered set so a young collection still treats it as a
+    /// root for `v`.
+    pub fn writeBarrier(self: *Heap, container: Container, v: Value) void {
+        _ = self;
+        _ = container;
+        _ = v;
+    }
 };
 
 /// A V8-`Local<T>`-style scope. Push values that must survive
