@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#70c0e8" />
+<title>Cynic — Playground</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Bowlby+One&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
+<style>
+  /* Palette lifted from the Cynic site (gh-pages/index.html) so the
+     playground reads as part of the same project. */
+  :root {
+    --sky: #70c0e8;
+    --skin: #ffd521;
+    --skin-shade: #e8b800;
+    --ink: #0c0c0c;
+    --ink-soft: #2a2a2a;
+    --bart: #dc4a38;
+    --marge: #11a6d6;
+    --grass: #6cbf3a;
+    --paper: #fff8e6;
+    --display: 'Bowlby One', sans-serif;
+    --mono: 'JetBrains Mono', monospace;
+    --bd: 3px solid var(--ink);
+    --bd-thick: 4px solid var(--ink);
+    --shadow-sm: 4px 4px 0 var(--ink);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    min-height: 100%;
+  }
+
+  body {
+    font-family: var(--mono);
+    color: var(--ink);
+    background: var(--sky);
+    background-attachment: fixed;
+    padding: 28px 20px 60px;
+  }
+
+  .wrap { max-width: 980px; margin: 0 auto; }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+
+  .brand {
+    font-family: var(--display);
+    font-size: 30px;
+    letter-spacing: 0.02em;
+  }
+  .brand a { color: var(--ink); text-decoration: none; }
+
+  .tag {
+    color: var(--ink-soft);
+    background: rgba(255, 255, 255, 0.55);
+    padding: 2px 6px;
+    font-size: 13px;
+  }
+
+  .panel {
+    background: var(--paper);
+    border: var(--bd);
+    box-shadow: var(--shadow-sm);
+    margin-bottom: 22px;
+  }
+
+  .panel-head {
+    font-family: var(--display);
+    font-size: 14px;
+    letter-spacing: 0.04em;
+    background: var(--skin);
+    border-bottom: var(--bd);
+    padding: 8px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  textarea#editor {
+    display: block;
+    width: 100%;
+    min-height: 280px;
+    resize: vertical;
+    border: 0;
+    padding: 14px;
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--ink);
+    background: var(--paper);
+    tab-size: 2;
+  }
+  textarea#editor:focus { outline: 2px solid var(--marge); outline-offset: -2px; }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 22px;
+  }
+
+  button, select {
+    font-family: var(--display);
+    font-size: 14px;
+    color: var(--ink);
+    background: #fff;
+    border: var(--bd);
+    box-shadow: var(--shadow-sm);
+    padding: 8px 14px;
+    cursor: pointer;
+  }
+  button:active { transform: translate(2px, 2px); box-shadow: 2px 2px 0 var(--ink); }
+  button:disabled { opacity: 0.5; cursor: progress; }
+
+  button#run { background: var(--grass); }
+  button#share { background: var(--marge); color: #fff; }
+
+  select { font-family: var(--mono); font-size: 13px; box-shadow: none; padding: 7px 10px; }
+
+  label.toggle {
+    font-family: var(--mono);
+    font-size: 13px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(255, 255, 255, 0.6);
+    padding: 6px 8px;
+    border: 2px solid var(--ink);
+    cursor: pointer;
+  }
+
+  .status {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ink-soft);
+    margin-left: auto;
+  }
+
+  pre.output {
+    margin: 0;
+    padding: 14px;
+    min-height: 80px;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .out-stdout { color: var(--ink); }
+  .out-value {
+    color: var(--ink-soft);
+    border-top: 2px dashed rgba(0, 0, 0, 0.25);
+    padding-top: 10px;
+    margin-top: 10px;
+  }
+  .out-value::before { content: "⇒ "; color: var(--grass); font-weight: 700; }
+  .out-error {
+    color: var(--bart);
+    font-weight: 700;
+    border-top: 2px dashed rgba(220, 74, 56, 0.4);
+    padding-top: 10px;
+    margin-top: 10px;
+  }
+  .out-empty { color: var(--ink-soft); font-style: italic; }
+
+  footer {
+    margin-top: 30px;
+    font-size: 12px;
+    color: var(--ink-soft);
+    background: rgba(255, 255, 255, 0.55);
+    padding: 8px 10px;
+    display: inline-block;
+  }
+  footer a { color: var(--ink); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand"><a href="../">Cynic</a> · Playground</div>
+    <div class="tag">strict-only ECMAScript, compiled to WebAssembly. No eval. That's the point.</div>
+  </header>
+
+  <div class="panel">
+    <div class="panel-head">
+      <span>source</span>
+      <select id="snippets" title="Load a sample">
+        <option value="">— sample snippets —</option>
+      </select>
+    </div>
+    <textarea id="editor" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+  </div>
+
+  <div class="toolbar">
+    <button id="run" type="button">Run</button>
+    <button id="share" type="button">Copy link</button>
+    <label class="toggle"><input type="checkbox" id="inspector" /> bytecode inspector</label>
+    <span class="status" id="status">loading engine…</span>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><span id="output-label">output</span></div>
+    <pre class="output" id="output"><span class="out-empty">Run something. Cynic will judge it.</span></pre>
+  </div>
+
+  <footer>
+    Engine: <span id="version">cynic-wasm</span> ·
+    <a href="../">project site</a> ·
+    <a href="https://github.com/chicoxyzzy/cynic">source</a>
+  </footer>
+
+</div>
+<script src="playground.js"></script>
+</body>
+</html>
