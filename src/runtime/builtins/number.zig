@@ -16,6 +16,7 @@ const JSFunction = @import("../function.zig").JSFunction;
 const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
+const dtoa = @import("../dtoa.zig");
 
 const installNativeMethod = intrinsics.installNativeMethod;
 const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
@@ -129,9 +130,54 @@ fn numberToFixed(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         const s = try intrinsics.stringifyArg(realm, Value.fromDouble(x));
         return Value.fromString(s);
     }
-    var buf: [128]u8 = undefined;
-    const slice = std.fmt.bufPrint(&buf, "{d:.[1]}", .{ x, @as(usize, @intCast(digits)) }) catch return error.OutOfMemory;
-    const s = realm.heap.allocateString(slice) catch return error.OutOfMemory;
+    // §21.1.3.3 step 8 — `n` is the integer for which the EXACT
+    // mathematical value of `n ÷ 10^f − x` is closest to zero
+    // (ties → larger n). A libc `printf`-style conversion rounds
+    // shortest-round-trip instead, so `(1e21-adjacent).toFixed(0)`
+    // came out short of the exact value. `dtoa.fixedDigits` does
+    // the exact big-integer rounding the spec mandates.
+    const f: u32 = @intCast(digits);
+    var dec = dtoa.Decimal{};
+    dtoa.fixedDigits(@abs(x), f, &dec);
+    const m = dec.digits(); // decimal digits of n, no leading zero
+
+    var buf: [160]u8 = undefined;
+    var n: usize = 0;
+    // §21.1.3.3 step 3 — `x < 0` controls the sign; -0 renders
+    // unsigned. `@abs` already dropped the sign; re-add it here.
+    if (x < 0 and !(m.len == 1 and m[0] == '0')) {
+        buf[n] = '-';
+        n += 1;
+    }
+    if (f == 0) {
+        // §21.1.3.3 step 10 — no fractional part: the string is m.
+        @memcpy(buf[n .. n + m.len], m);
+        n += m.len;
+    } else if (m.len > f) {
+        // Integer part is `m[0 .. len-f]`, fraction is the rest.
+        const int_len = m.len - f;
+        @memcpy(buf[n .. n + int_len], m[0..int_len]);
+        n += int_len;
+        buf[n] = '.';
+        n += 1;
+        @memcpy(buf[n .. n + f], m[int_len..]);
+        n += f;
+    } else {
+        // §21.1.3.3 step 11 — |n| < 10^f: a "0." prefix and
+        // `f - len(m)` leading fractional zeros.
+        buf[n] = '0';
+        n += 1;
+        buf[n] = '.';
+        n += 1;
+        var pad: usize = f - m.len;
+        while (pad > 0) : (pad -= 1) {
+            buf[n] = '0';
+            n += 1;
+        }
+        @memcpy(buf[n .. n + m.len], m);
+        n += m.len;
+    }
+    const s = realm.heap.allocateString(buf[0..n]) catch return error.OutOfMemory;
     return Value.fromString(s);
 }
 
@@ -167,23 +213,70 @@ fn numberToExponential(realm: *Realm, this_value: Value, args: []const Value) Na
     if (!digits_finite_in_range) {
         return throwRangeError(realm, "toExponential digits out of range [0, 100]");
     }
-    // §21.1.3.2 step 3 — `x < 0` controls the sign character; -0
-    // is NOT < 0 and renders as `"0e+0"`, not `"-0e+0"`. Zig's
-    // `{e}` formatter prints `-0e0` for IEEE -0, which would
-    // otherwise leak through the normaliser. Special-case before
-    // bufPrint so step 9 (`If x = 0`) routes through the
-    // unsigned-zero formatter.
-    var buf: [128]u8 = undefined;
-    const x_for_print: f64 = if (x == 0) 0 else x;
-    const raw = if (digits < 0)
-        std.fmt.bufPrint(&buf, "{e}", .{x_for_print}) catch return error.OutOfMemory
-    else
-        std.fmt.bufPrint(&buf, "{e:.[1]}", .{ x_for_print, @as(usize, @intCast(digits)) }) catch return error.OutOfMemory;
-    // §6.1.6.1.13 Number::toString — JS demands `1e+22` for
-    // positive exponents; Zig's `{e}` emits a bare `1e22`. Patch
-    // through the shared normaliser.
-    const slice = intrinsics.normalizeExponentPub(&buf, raw);
-    const s = realm.heap.allocateString(slice) catch return error.OutOfMemory;
+    // §21.1.3.2 step 9 — `If x = 0`: the digit is "0", the exponent
+    // 0, and the sign is dropped (-0 renders `"0e+0"`, never
+    // `"-0e+0"`). `dtoa.precisionDigits` asserts a non-zero input,
+    // so special-case zero here.
+    if (x == 0) {
+        var zbuf: [128]u8 = undefined;
+        var zn: usize = 0;
+        zbuf[zn] = '0';
+        zn += 1;
+        if (digits > 0) {
+            zbuf[zn] = '.';
+            zn += 1;
+            var k: i32 = 0;
+            while (k < digits) : (k += 1) {
+                zbuf[zn] = '0';
+                zn += 1;
+            }
+        }
+        @memcpy(zbuf[zn .. zn + 4], "e+0");
+        const s0 = realm.heap.allocateString(zbuf[0 .. zn + 3]) catch return error.OutOfMemory;
+        return Value.fromString(s0);
+    }
+    // §21.1.3.2 — when `fractionDigits` is undefined the spec wants
+    // the fewest digits that round-trip (ToString-style shortest);
+    // when it's given, the mantissa carries the EXACT digits of x
+    // rounded to `f + 1` significant places. `dtoa.precisionDigits`
+    // does the exact big-integer rounding the spec mandates.
+    var buf: [256]u8 = undefined;
+    if (digits < 0) {
+        // Undefined fractionDigits — defer to the shortest-form
+        // `{e}` formatter; that path already round-trips.
+        const raw = std.fmt.bufPrint(&buf, "{e}", .{x}) catch return error.OutOfMemory;
+        const slice = intrinsics.normalizeExponentPub(&buf, raw);
+        const s = realm.heap.allocateString(slice) catch return error.OutOfMemory;
+        return Value.fromString(s);
+    }
+    const count: u32 = @as(u32, @intCast(digits)) + 1;
+    var dec = dtoa.Decimal{};
+    dtoa.precisionDigits(@abs(x), count, &dec);
+    const m = dec.digits(); // exactly `count` digits
+    const e: i32 = dec.point_exp - 1; // base-10 exponent of m[0]
+
+    var n: usize = 0;
+    if (x < 0) {
+        buf[n] = '-';
+        n += 1;
+    }
+    buf[n] = m[0];
+    n += 1;
+    if (m.len > 1) {
+        buf[n] = '.';
+        n += 1;
+        @memcpy(buf[n .. n + m.len - 1], m[1..]);
+        n += m.len - 1;
+    }
+    buf[n] = 'e';
+    n += 1;
+    buf[n] = if (e >= 0) '+' else '-';
+    n += 1;
+    var ebuf: [16]u8 = undefined;
+    const es = std.fmt.bufPrint(&ebuf, "{d}", .{@abs(e)}) catch unreachable;
+    @memcpy(buf[n .. n + es.len], es);
+    n += es.len;
+    const s = realm.heap.allocateString(buf[0..n]) catch return error.OutOfMemory;
     return Value.fromString(s);
 }
 
@@ -238,50 +331,19 @@ fn numberToPrecision(realm: *Realm, this_value: Value, args: []const Value) Nati
         const s = realm.heap.allocateString(buf[0..n]) catch return error.OutOfMemory;
         return Value.fromString(s);
     }
-    // Non-zero, finite x. Round to p significant digits via
-    // Zig's `{e:.[1]}` (which gives `<d>.<d…>e<sign><exp>`), then
-    // unpack to (sign, mantissa-digits, exponent).
-    var ebuf: [256]u8 = undefined;
-    const exp_str = std.fmt.bufPrint(&ebuf, "{e:.[1]}", .{ x, p - 1 }) catch return error.OutOfMemory;
-    // Parse: optional leading '-', then digits, optionally '.digits',
-    // then 'e' sign, then digits.
-    var i: usize = 0;
-    var sign: []const u8 = "";
-    if (exp_str[i] == '-') {
-        sign = "-";
-        i += 1;
-    }
-    // Mantissa digits — collect them with the dot skipped.
+    // §21.1.3.5 step 10 — non-zero, finite x. `e` and the digit
+    // string `m` (exactly `p` significant digits) come from the
+    // EXACT big-integer rounding in `dtoa.precisionDigits`, not a
+    // libc `printf`-style shortest-round-trip conversion: the spec
+    // rounds the exact mathematical value of x to `p` places, ties
+    // toward the larger value.
+    var dec = dtoa.Decimal{};
+    dtoa.precisionDigits(@abs(x), @intCast(p), &dec);
+    const sign: []const u8 = if (x < 0) "-" else "";
     var m_buf: [128]u8 = undefined;
-    var m_len: usize = 0;
-    while (i < exp_str.len and exp_str[i] != 'e' and exp_str[i] != 'E') : (i += 1) {
-        const c = exp_str[i];
-        if (c == '.') continue;
-        if (c < '0' or c > '9') break;
-        m_buf[m_len] = c;
-        m_len += 1;
-    }
-    // Skip 'e'.
-    if (i >= exp_str.len) {
-        // No exponent — Zig should always emit one with `{e}`,
-        // but guard for safety.
-        const fallback = realm.heap.allocateString(exp_str) catch return error.OutOfMemory;
-        return Value.fromString(fallback);
-    }
-    i += 1; // past 'e'
-    var exp_sign: i32 = 1;
-    if (i < exp_str.len and exp_str[i] == '-') {
-        exp_sign = -1;
-        i += 1;
-    } else if (i < exp_str.len and exp_str[i] == '+') {
-        i += 1;
-    }
-    var exp_v: i32 = 0;
-    while (i < exp_str.len) : (i += 1) {
-        if (exp_str[i] < '0' or exp_str[i] > '9') break;
-        exp_v = exp_v * 10 + @as(i32, exp_str[i] - '0');
-    }
-    const e: i32 = exp_sign * exp_v;
+    @memcpy(m_buf[0..dec.len], dec.digits());
+    const m_len: usize = dec.len;
+    const e: i32 = dec.point_exp - 1;
 
     // §21.1.3.5 step 8 — if e < -6 or e ≥ p, use scientific.
     var out: [256]u8 = undefined;
