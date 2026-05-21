@@ -1446,18 +1446,21 @@ pub const Compiler = struct {
         // §12.7 — resolve against the StringValue (decoded escapes).
         const name = try self.bindingName(span);
         const scope = self.scope orelse return error.UnresolvedReference;
-        const binding: Binding = scope.resolve(name) orelse blk: {
-            if (self.realm.globals.contains(name)) {
-                break :blk Binding{
-                    .name = name,
-                    .env_slot = 0,
-                    .env_depth = 0,
-                    .kind = .var_,
-                    .span = span,
-                    .is_global = true,
-                };
-            }
-            return error.UnresolvedReference;
+        const binding: Binding = scope.resolve(name) orelse Binding{
+            // §13.4 — an unresolved name is a *global* reference,
+            // never an early error. `x++` / `++x` on an undeclared
+            // `x` must compile and throw ReferenceError at runtime:
+            // the `lda_global` read below performs GetValue, which
+            // §6.2.5.5 makes throw on an unresolvable Reference.
+            // Mirrors `compileIdentRef` / `compileAssignment`, which
+            // already resolve an unknown name this way — only this
+            // update path used to hard-fail at compile time.
+            .name = name,
+            .env_slot = 0,
+            .env_depth = 0,
+            .kind = .var_,
+            .span = span,
+            .is_global = true,
         };
         // §13.4.4 PostfixExpression / §13.4.5 UnaryExpression UPDATE
         // — no early error for `x++` / `++x` on a const binding. The
