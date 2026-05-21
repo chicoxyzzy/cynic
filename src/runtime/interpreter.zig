@@ -369,7 +369,7 @@ pub fn run(allocator: std.mem.Allocator, realm: *Realm, chunk: *const Chunk) Run
     // and non-async modules keep the synchronous top-level
     // frame.
     if (chunk.is_async_module) {
-        return startAsyncCall(allocator, realm, chunk, null, Value.undefined_, &.{}, null, null);
+        return startAsyncCall(allocator, realm, chunk, null, Value.undefined_, &.{}, null, null, realm.current_module);
     }
 
     var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
@@ -4010,7 +4010,7 @@ pub fn callJSFunction(
     // the call's return value.
     if (callee.is_async) {
         const callee_this: Value = if (callee.is_arrow) callee.captured_this else this_value;
-        return startAsyncCall(allocator, realm, callee_chunk, callee.captured_env, callee_this, args, callee.home_object, callee.home_function);
+        return startAsyncCall(allocator, realm, callee_chunk, callee.captured_env, callee_this, args, callee.home_object, callee.home_function, callee.owning_module);
     }
 
     var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
@@ -4151,6 +4151,7 @@ pub fn startAsyncCall(
     args: []const Value,
     home_object: ?*JSObject,
     home_function: ?*JSFunction,
+    owning_module: ?*@import("module.zig").ModuleRecord,
 ) RunError!RunResult {
     // Pre-allocate the Promise so the gen can settle it.
     const promise_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
@@ -4175,17 +4176,20 @@ pub fn startAsyncCall(
     // generators.
     gen.home_object = home_object;
     gen.home_function = home_function;
-    // §16.2.1.5.1 [[IsAsync]] module entry — capture the
-    // current module record so deferred resumes can re-thread
-    // `realm.current_module` for `module_export`. Plain
-    // `async function` calls happen with `current_module` null
-    // anyway (and stay null on resume), so this is a no-op for
-    // them. For an async module body, `chunk.is_async_module`
-    // is true; the realm's current_module is the module whose
-    // namespace exports should land on.
-    if (chunk.is_async_module) {
-        gen.owning_module = realm.current_module;
-    }
+    // §16.2.1.5.1 [[IsAsync]] — capture the module this async
+    // body belongs to so deferred resumes can re-thread
+    // `realm.current_module` for `module_export`. Two cases feed
+    // `owning_module`: an async *module body* passes the module
+    // it evaluates as; a plain `async function` passes the
+    // callee's `JSFunction.owning_module` (the module it was
+    // *defined* in). The latter matters when an async function
+    // declared in a module writes one of that module's exported
+    // live bindings — the write runs on a microtask resume long
+    // after the module body returned and unwound
+    // `realm.current_module` back to null, so without this the
+    // `module_export` op silently no-ops and the namespace keeps
+    // the stale declaration-time value.
+    gen.owning_module = owning_module;
     var i: usize = 0;
     while (i < args.len and i < gen.registers.len) : (i += 1) {
         gen.registers[i] = args[i];
@@ -5107,7 +5111,7 @@ fn runFrames(
                     const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
                     const args_start = @as(usize, r_callee) + 1;
                     const callee_this: Value = if (callee_fn.is_arrow) callee_fn.captured_this else Value.undefined_;
-                    const outcome = try startAsyncCall(allocator, realm, callee_chunk, callee_fn.captured_env, callee_this, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function);
+                    const outcome = try startAsyncCall(allocator, realm, callee_chunk, callee_fn.captured_env, callee_this, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function, callee_fn.owning_module);
                     switch (outcome) {
                         .value, .yielded => |v| acc = v,
                         .thrown => |ex| {
@@ -5320,7 +5324,7 @@ fn runFrames(
                     const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
                     const args_start = @as(usize, r_callee) + 1;
                     const callee_this: Value = if (callee_fn.is_arrow) callee_fn.captured_this else recv;
-                    const outcome = try startAsyncCall(allocator, realm, callee_chunk, callee_fn.captured_env, callee_this, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function);
+                    const outcome = try startAsyncCall(allocator, realm, callee_chunk, callee_fn.captured_env, callee_this, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function, callee_fn.owning_module);
                     switch (outcome) {
                         .value, .yielded => |v| acc = v,
                         .thrown => |ex| {

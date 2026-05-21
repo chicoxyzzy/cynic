@@ -442,6 +442,22 @@ pub const skip_ses_substrings = [_][]const u8{
     // matches these two test fixtures (FIXTURE files aren't loaded
     // as test entries by the harness). 2 fixtures.
     "language/module-code/eval-rqstd-",
+
+    // `language/expressions/dynamic-import/{eval-rqstd-once,
+    // update-to-dynamic-import}.js` — same shape as the
+    // `module-code/eval-rqstd-` pair above: each test `import()`s a
+    // sibling `*_FIXTURE.js` module whose body retrieves the global
+    // via `Function('return this;')()`. The FIXTURE is an import,
+    // not an `includes:`, so the harness `fnGlobalObject.js` stub
+    // never intercepts it — the source-string Function call runs
+    // verbatim and false-rejects on Cynic's permanent SES carve-out
+    // (§15.3.2 Function constructor; AGENTS.md "eval and runtime
+    // code construction"). The `.js` suffix in each substring keeps
+    // the match off the `*_FIXTURE.js` / `-other_FIXTURE.js`
+    // companions (which aren't loaded as test entries anyway).
+    // 2 fixtures.
+    "dynamic-import/eval-rqstd-once.js",
+    "dynamic-import/update-to-dynamic-import.js",
 };
 
 /// Sputnik-era and cross-realm fixtures that exercise

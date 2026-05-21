@@ -161,12 +161,16 @@ pub const JSGenerator = struct {
     /// completed before returning) or via a microtask drain
     /// (body suspended on a pending await).
     result_promise: ?Value = null,
-    /// §16.2.1.5.1 [[IsAsync]] modules — the ModuleRecord this
-    /// generator backs when it's the body of a top-level-await
-    /// module. Set by `startAsyncCall` from `realm.current_module`
-    /// at suspension time, restored by the drain so
-    /// `module_export` finds the right namespace on resume.
-    /// Plain `async function` calls leave this null.
+    /// §16.2.1.5.1 [[IsAsync]] — the ModuleRecord whose namespace
+    /// this generator's `module_export` ops publish to. For a
+    /// top-level-await module body it's the module being
+    /// evaluated; for a plain `async function` it's the callee's
+    /// `JSFunction.owning_module` (the module the function was
+    /// *defined* in). Set by `startAsyncCall`, restored by the
+    /// drain so `module_export` finds the right namespace on a
+    /// resume that happens after the module body has returned and
+    /// unwound `realm.current_module`. Null for async functions
+    /// defined outside any module (plain scripts).
     owning_module: ?*@import("module.zig").ModuleRecord = null,
     /// §27.5.1.3 GeneratorPrototype.return — when set, the next
     /// `resumeGenerator` injects a return-completion at the
