@@ -14,6 +14,34 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-05-21 — cynic `fda6ce0`, host `Darwin 25.5.0 arm64`
+
+Regression check after GC Stages 0–2 (generational scaffolding —
+store-site routing, generation header bits, write barrier +
+remembered set) and the test262 watchdog (a per-opcode
+`host_interrupt` check) landed on `main` — none of which was
+perf-measured when it merged.
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 3024.10 | 2973.74 | 3058.68 | 3328 |
+| prop_access | 532.36 | 530.39 | 542.76 | 3376 |
+| array_iter | 753.19 | 743.07 | 763.55 | 15856 |
+| string_concat | 6.61 | 6.53 | 6.72 | 4528 |
+| promise_chain | 5.04 | 4.90 | 5.47 | 7776 |
+| object_alloc | 92.21 | 91.57 | 94.80 | 24864 |
+
+Δ vs the `2f3b373` rung-1 row: every fixture within ±3 %. The
+stable benches — `arith_loop` −2.7 %, `prop_access` +1.2 %,
+`array_iter` −1.2 %, `object_alloc` +1.0 % — sit inside run-to-run
+noise; `string_concat` / `promise_chain` are single-digit-ms and
+noise-dominated. RSS flat across the board. **No measurable cost
+from the write barrier or the per-opcode interrupt check** — the
+barrier only does work on a mature→young store (rare in steady
+state) and the interrupt check is a cheap, near-always-false null
+test. GC Stages 0–2 landed perf-neutral, as the rung-1 plan
+assumed.
+
 ### 2026-05-20 — cynic `2f3b373`, host `Darwin 25.5.0 arm64`
 
 Interpreter perf rung 1 — slot-indexed global lexical bindings. A
