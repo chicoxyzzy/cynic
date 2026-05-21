@@ -5156,7 +5156,10 @@ fn runFrames(
                             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     }
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    // Generator object built inline — no dispatch frame
+                    // pushed (the body runs later via resumeGenerator).
+                    // Frame unchanged → decodeNext.
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
 
                 // Native fast path — no frame, no register file,
@@ -5219,7 +5222,9 @@ fn runFrames(
                             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     }
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    // Async body ran in its own runFrames re-entry — the
+                    // dispatch frame is unchanged → decodeNext.
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
 
                 if (frames.items.len >= max_call_frames) {
@@ -5281,7 +5286,11 @@ fn runFrames(
                     allocator.free(callee_regs);
                     return error.OutOfMemory;
                 };
-                continue :dispatch try decodeNext(code, &ip, &committed);
+                // JS callee — a new frame was pushed; the active
+                // frame changed. reEnterDispatch loads the callee's
+                // chunk / registers / ip=0. decodeNext would keep
+                // running the caller against a reallocated stack.
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             },
 
             .call_method => {
@@ -5384,7 +5393,10 @@ fn runFrames(
                             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     }
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    // Generator object built inline — no dispatch frame
+                    // pushed (the body runs later via resumeGenerator).
+                    // Frame unchanged → decodeNext.
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
 
                 // Native fast path — no frame, no register file.
@@ -5435,7 +5447,9 @@ fn runFrames(
                             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     }
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    // Async body ran in its own runFrames re-entry — the
+                    // dispatch frame is unchanged → decodeNext.
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
 
                 if (frames.items.len >= max_call_frames) {
@@ -5493,7 +5507,11 @@ fn runFrames(
                     allocator.free(callee_regs);
                     return error.OutOfMemory;
                 };
-                continue :dispatch try decodeNext(code, &ip, &committed);
+                // JS callee — a new frame was pushed; the active
+                // frame changed. reEnterDispatch loads the callee's
+                // chunk / registers / ip=0. decodeNext would keep
+                // running the caller against a reallocated stack.
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             },
 
             .new_call => {
@@ -5791,7 +5809,11 @@ fn runFrames(
                     allocator.free(callee_regs);
                     return error.OutOfMemory;
                 };
-                continue :dispatch try decodeNext(code, &ip, &committed);
+                // JS callee — a new frame was pushed; the active
+                // frame changed. reEnterDispatch loads the callee's
+                // chunk / registers / ip=0. decodeNext would keep
+                // running the caller against a reallocated stack.
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             },
 
             .lda_this => {
@@ -10655,7 +10677,10 @@ fn runFrames(
                 if (!try unwindThrow(allocator, realm, frames, acc)) {
                     return .{ .thrown = acc };
                 }
-                continue :dispatch try decodeNext(code, &ip, &committed);
+                // unwindThrow popped to (and repositioned) the handler
+                // frame — the active frame changed. reEnterDispatch
+                // reloads it; decodeNext would keep the dead frame.
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             },
             .throw_if_hole => {
                 if (acc.isHole()) {
