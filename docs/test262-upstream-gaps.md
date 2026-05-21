@@ -38,6 +38,34 @@ the corpus under the relevant section's directory before adding.
 
 ## Entries
 
+### C-style `for` shared a body-block lexical when a closure captured it
+
+- **Fixed in:** `1b5687c`
+- **Spec:** §14.7.4.4 CreatePerIterationEnvironment — each iteration
+  of a `let` / `const` `for` runs in a fresh environment; a closure
+  capturing any binding in it observes iteration-specific values.
+- **Reproducer:**
+  ```js
+  const fns = [];
+  for (let i = 0; i < 3; i++) { let w = i * 10; fns.push(() => w); }
+  fns.map(f => f()).join(","); // must be "0,10,20"
+  ```
+- **Before fix:** Returned `"20,20,20"`. Cynic's per-iteration-env
+  elision optimisation checked only whether a body closure captured a
+  loop-*head* binding (`i`). A closure capturing a body-block lexical
+  (`w`) — which Cynic flattens into the same per-iteration env — was
+  missed, the env was elided, and `w` was shared across iterations.
+  Capturing the loop variable itself (`() => i`) worked.
+- **After fix:** Returns `"0,10,20"`; the per-iteration env is kept
+  whenever the loop body contains any closure.
+- **Suggested fixture shape:** positive runtime fixture under
+  `language/statements/for/`. The existing `scope-body-lex-*`
+  fixtures assert per-iteration freshness of the loop *variable*;
+  none assert it for a `let` declared inside the body block. A
+  closure-array assertion like the reproducer would catch it — and
+  the same gap applies to the `for-of` / `for-in` forms, which share
+  the optimisation.
+
 ### Lazily-installed native methods had `null` as `[[Prototype]]`
 
 - **Fixed in:** `eff8381`
