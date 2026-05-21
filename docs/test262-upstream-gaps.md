@@ -38,6 +38,40 @@ the corpus under the relevant section's directory before adding.
 
 ## Entries
 
+### Lazily-installed native methods had `null` as `[[Prototype]]`
+
+- **Fixed in:** `eff8381`
+- **Spec:** §10.3 Built-in Function Objects — every built-in
+  function object has `%Function.prototype%` as the initial value
+  of its `[[Prototype]]` internal slot (unless otherwise specified).
+- **Reproducer:**
+  ```js
+  const it = [1, 2, 3][Symbol.iterator]();
+  const next = Object.getPrototypeOf(it).next; // %ArrayIteratorPrototype%.next
+  typeof next;                                  // "function"
+  typeof next.call;                             // must be "function"
+  Object.getPrototypeOf(next) === Function.prototype; // must be true
+  next.call(it).value;                          // must be 1
+  ```
+- **Before fix:** `%ArrayIteratorPrototype%.next` — and every other
+  native installed lazily after realm init (`%StringIteratorPrototype%.next`,
+  `@@iterator` self-returns, …) — had a `null` `[[Prototype]]`.
+  `next.call` / `.apply` / `.bind` were `undefined`; `next.call(it)`
+  threw `TypeError`. Natives installed *during* init (e.g.
+  `Array.prototype.slice`) were fine — a one-time wiring pass at the
+  end of `intrinsics.install` reached only those.
+- **After fix:** `[[Prototype]]` is `%Function.prototype%` for every
+  native regardless of install time; the inherited `.call` /
+  `.apply` / `.bind` resolve.
+- **Suggested fixture shape:** positive runtime fixture under
+  `built-ins/ArrayIteratorPrototype/next/`. The fixtures there cover
+  `name`, `length`, `property-descriptor`, `non-own-slots`, and
+  iteration behaviour — none assert the method's own `[[Prototype]]`.
+  `Object.getPrototypeOf(nextMethod) === Function.prototype` plus a
+  `nextMethod.call(iter)` round-trip would catch it; the same gap
+  applies to `%StringIteratorPrototype%.next` and the other
+  lazily-built iterator prototypes.
+
 ### `Iterator.zip` with a primitive String in the inner-iter sequence
 
 - **Fixed in:** `b896b71`
