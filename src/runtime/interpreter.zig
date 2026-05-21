@@ -5074,7 +5074,12 @@ fn runFrames(
                         switch (cresult) {
                             .value, .yielded => |v| {
                                 acc = v;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                // `callValue` ran the callee in its own
+                                // runFrames re-entry — no frame pushed onto
+                                // this stack, the active frame is unchanged
+                                // → decodeNext. reEnterDispatch would reload
+                                // a stale `f.ip` and re-run this call.
+                                continue :dispatch try decodeNext(code, &ip, &committed);
                             },
                             .thrown => |ex| {
                                 f.ip = ip;
@@ -5123,7 +5128,9 @@ fn runFrames(
                     rp.proxy_revoked = true;
                     callee_fn.revocable_proxy = null;
                     acc = Value.undefined_;
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    // No frame pushed, no inline call — the active frame
+                    // is unchanged → decodeNext.
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
 
                 // §10.4.1 — bound functions unwrap and re-enter
@@ -5161,7 +5168,10 @@ fn runFrames(
                             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     }
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    // `callJSFunction` ran the bound target in its own
+                    // runFrames re-entry — no frame pushed onto this
+                    // stack, the active frame is unchanged → decodeNext.
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
 
                 // §27.5 / §27.6 — calling a `function*` or
@@ -5341,7 +5351,10 @@ fn runFrames(
                         switch (cresult) {
                             .value, .yielded => |v| {
                                 acc = v;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                // `callValue` ran the callee inline (its
+                                // own runFrames re-entry) — active frame
+                                // unchanged → decodeNext.
+                                continue :dispatch try decodeNext(code, &ip, &committed);
                             },
                             .thrown => |ex| {
                                 f.ip = ip;
@@ -5376,7 +5389,8 @@ fn runFrames(
                     rp.proxy_revoked = true;
                     callee_fn.revocable_proxy = null;
                     acc = Value.undefined_;
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    // No frame pushed, no inline call → decodeNext.
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
 
                 // §10.4.1 — bound functions unwrap. `this = recv`
@@ -5397,7 +5411,9 @@ fn runFrames(
                             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     }
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    // Bound target ran inline via `callJSFunction` —
+                    // active frame unchanged → decodeNext.
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
 
                 // §27.5 / §27.6 — calling a `function*` or
@@ -5564,7 +5580,10 @@ fn runFrames(
                         switch (cresult) {
                             .value, .yielded => |v| {
                                 acc = v;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                // `constructValue` ran the callee inline
+                                // (its own runFrames re-entry) — active
+                                // frame unchanged → decodeNext.
+                                continue :dispatch try decodeNext(code, &ip, &committed);
                             },
                             .thrown => |ex| {
                                 f.ip = ip;
@@ -5693,7 +5712,10 @@ fn runFrames(
                             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     }
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    // Bound target constructed inline via
+                    // `callJSFunctionAsSuper` — active frame unchanged
+                    // → decodeNext.
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
 
                 // §25.1.4.1 / §25.3.2.1 — native ctors that
@@ -5989,7 +6011,9 @@ fn runFrames(
                         .value, .yielded => |v| {
                             // §13.10.2 step 4.a — `ToBoolean(? Call(…))`.
                             acc = Value.fromBool(arith.toBoolean(v));
-                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            // `@@hasInstance` ran inline via callJSFunction
+                            // — active frame unchanged → decodeNext.
+                            continue :dispatch try decodeNext(code, &ip, &committed);
                         },
                         .thrown => |ex| {
                             f.ip = ip;
@@ -6349,7 +6373,7 @@ fn runFrames(
                             const ex = consumePendingException(realm) orelse try makeTypeError(realm, "iterator 'return' read failed");
                             if (mode == 1) {
                                 // Throw completion swallows inner errors.
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                continue :dispatch try decodeNext(code, &ip, &committed);
                             }
                             f.ip = ip;
                             f.accumulator = acc;
@@ -6467,7 +6491,7 @@ fn runFrames(
                         }
                     }
                     acc = Value.fromBool(found);
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
                 const obj_in = heap_mod.valueAsPlainObject(obj_v) orelse {
                     const ex = try makeTypeError(realm, "Cannot use 'in' operator to search non-object");
@@ -6688,7 +6712,9 @@ fn runFrames(
                         } else {
                             acc = Value.undefined_;
                         }
-                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        // Any getter ran inline (callJSFunction) — active
+                        // frame unchanged → decodeNext.
+                        continue :dispatch try decodeNext(code, &ip, &committed);
                     }
                 }
                 const home = f.home_object orelse {
@@ -6739,7 +6765,9 @@ fn runFrames(
                     } else {
                         acc = Value.undefined_;
                     }
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    // Getter ran inline (callJSFunction) — active frame
+                    // unchanged → decodeNext.
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
                 acc = parent_proto.get(key_s.flatBytes());
                 continue :dispatch try decodeNext(code, &ip, &committed);
@@ -6787,13 +6815,13 @@ fn runFrames(
                                 } else {
                                     acc = Value.undefined_;
                                 }
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                continue :dispatch try decodeNext(code, &ip, &committed);
                             }
                             acc = parent_fn.get(key_slice_s);
                         } else {
                             acc = Value.undefined_;
                         }
-                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        continue :dispatch try decodeNext(code, &ip, &committed);
                     }
                 }
                 const home = f.home_object orelse {
@@ -6849,7 +6877,7 @@ fn runFrames(
                     } else {
                         acc = Value.undefined_;
                     }
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
                 acc = parent_proto.get(key_slice);
                 continue :dispatch try decodeNext(code, &ip, &committed);
@@ -6911,7 +6939,7 @@ fn runFrames(
                                         },
                                     }
                                     acc = value;
-                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                    continue :dispatch try decodeNext(code, &ip, &committed);
                                 }
                             }
                         }
@@ -6948,7 +6976,7 @@ fn runFrames(
                             realm.heap.storeProperty(this_obj, allocator, key_s.flatBytes(), value) catch return error.OutOfMemory;
                         }
                         acc = value;
-                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        continue :dispatch try decodeNext(code, &ip, &committed);
                     }
                 }
                 const home = f.home_object orelse {
@@ -7471,22 +7499,24 @@ fn runFrames(
                                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                 },
                             }
-                        } else {
-                            // §10.1.8.1 PrivateFieldGet step 6.b —
-                            // accessor without [[Get]] throws TypeError.
-                            const ex = try makeTypeError(realm, "Cannot read from private accessor with no getter");
-                            f.ip = ip;
-                            f.accumulator = acc;
-                            committed = true;
-                            if (!try unwindThrow(allocator, realm, frames, ex)) {
-                                return .{ .thrown = ex };
-                            }
+                            // Getter ran inline via callJSFunction —
+                            // active frame unchanged → decodeNext.
+                            continue :dispatch try decodeNext(code, &ip, &committed);
+                        }
+                        // §10.1.8.1 PrivateFieldGet step 6.b —
+                        // accessor without [[Get]] throws TypeError.
+                        const ex = try makeTypeError(realm, "Cannot read from private accessor with no getter");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
                         }
                         continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                     if (fn_recv.private_properties.get(lookup_key)) |v| {
                         acc = v;
-                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        continue :dispatch try decodeNext(code, &ip, &committed);
                     }
                     const ex = try makeTypeError(realm, "Cannot read private field — brand check failed");
                     f.ip = ip;
@@ -7595,12 +7625,12 @@ fn runFrames(
                 if (heap_mod.valueAsFunction(acc)) |fn_recv| {
                     const present = fn_recv.private_properties.contains(lookup_key) or fn_recv.private_accessors.contains(lookup_key);
                     acc = Value.fromBool(present);
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
                 if (heap_mod.valueAsPlainObject(acc)) |obj| {
                     const present = obj.private_properties.contains(lookup_key) or obj.private_accessors.contains(lookup_key);
                     acc = Value.fromBool(present);
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
                 // Some other object kind (Symbol/BigInt wrapped
                 // primitives etc.) — they can't carry private
@@ -7891,7 +7921,7 @@ fn runFrames(
                 const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse {
                     acc = Value.undefined_;
                     registers[r_done] = Value.true_;
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 };
                 // Cynic-internal `__cynic_iter_done__` short-circuit:
                 // once the iter has surfaced `done: true` we stop
@@ -7902,7 +7932,7 @@ fn runFrames(
                     if (toBoolean(dv)) {
                         acc = Value.undefined_;
                         registers[r_done] = Value.true_;
-                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        continue :dispatch try decodeNext(code, &ip, &committed);
                     }
                 }
                 // §7.4.5 GetIteratorDirect — the spec captures
@@ -7980,7 +8010,7 @@ fn runFrames(
                         iter_obj.set(allocator, "__cynic_iter_done__", Value.true_) catch return error.OutOfMemory;
                         acc = Value.undefined_;
                         registers[r_done] = Value.true_;
-                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        continue :dispatch try decodeNext(code, &ip, &committed);
                     }
                     const value_v = intrinsics_mod.getPropertyChain(realm, result_obj, "value") catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
@@ -8322,7 +8352,7 @@ fn runFrames(
                 // No-op outside module context.
                 if (realm.current_module) |mr| {
                     const src_obj = heap_mod.valueAsPlainObject(acc) orelse {
-                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        continue :dispatch try decodeNext(code, &ip, &committed);
                     };
                     // Helper closure values can't be expressed in
                     // Zig's switch arms — inline the merge for
@@ -8654,7 +8684,7 @@ fn runFrames(
                     defer realm.allocator.free(final);
                     const owned = realm.heap.allocateString(final) catch return error.OutOfMemory;
                     realm.heap.storeFunctionProperty(fn_obj, realm.allocator, "name", Value.fromString(owned)) catch return error.OutOfMemory;
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
                 var key_buf: [64]u8 = undefined;
                 const key_slice = computedKeyToString(key_v, &key_buf);
@@ -8746,7 +8776,7 @@ fn runFrames(
                         realm.heap.storeInternalSlot(.{ .function = fn_recv }, acc);
                         slot.* = acc;
                     }
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
                 const recv = heap_mod.valueAsPlainObject(registers[r_obj]) orelse {
                     const ex = try makeTypeError(realm, "Cannot write private field on non-object");
@@ -9630,7 +9660,7 @@ fn runFrames(
                     // own enumerable string keys (numeric index
                     // expansion for strings is rare in real code
                     // and trips object-rest tests; revisit later).
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 };
                 const obj_mod = @import("builtins/object.zig");
                 // §7.3.27 CopyDataProperties step 4 — fire the
@@ -9760,7 +9790,7 @@ fn runFrames(
                         switch (r) {
                             .value => |v| {
                                 acc = v;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                continue :dispatch try decodeNext(code, &ip, &committed);
                             },
                             .fallthrough => |t| obj = t,
                             .handled => {
@@ -10147,7 +10177,7 @@ fn runFrames(
                         switch (r) {
                             .value => |v| {
                                 acc = v;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                continue :dispatch try decodeNext(code, &ip, &committed);
                             },
                             .fallthrough => |t| obj = t,
                             .handled => {
@@ -10178,7 +10208,7 @@ fn runFrames(
                             } else {
                                 acc = Value.undefined_;
                             }
-                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            continue :dispatch try decodeNext(code, &ip, &committed);
                         }
                     }
                     // §9.4.6.7 Module Namespace [[Get]] — mirror
@@ -10204,7 +10234,7 @@ fn runFrames(
                             },
                         };
                         acc = v_ns;
-                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        continue :dispatch try decodeNext(code, &ip, &committed);
                     }
                     // §10.1.8 [[Get]] — accessor wins over data.
                     // Mirror the `lda_property` handling so
@@ -10219,7 +10249,7 @@ fn runFrames(
                             },
                             .uncaught => |ex| return .{ .thrown = ex },
                         }
-                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        continue :dispatch try decodeNext(code, &ip, &committed);
                     }
                     if (lookupAccessor(obj, key_slice)) |acc_pair| {
                         if (acc_pair.getter) |getter| {
@@ -10239,7 +10269,7 @@ fn runFrames(
                         } else {
                             acc = Value.undefined_;
                         }
-                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        continue :dispatch try decodeNext(code, &ip, &committed);
                     }
                     acc = obj.get(key_slice);
                 } else if (heap_mod.valueAsFunction(recv)) |fn_obj| {
@@ -10442,7 +10472,7 @@ fn runFrames(
                             // have detached / shrunk the buffer between
                             // ToNumber and the write).
                             const live_tv = obj.typed_view orelse {
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                continue :dispatch try decodeNext(code, &ip, &committed);
                             };
                             if (ta_mod.isValidIntegerIndexPub(live_tv, num)) {
                                 const buf = live_tv.viewed.array_buffer.?;
@@ -10453,7 +10483,7 @@ fn runFrames(
                                 // than modular ToUint8 (§7.1.6).
                                 intrinsics_mod.writeTypedElementForView(buf, live_tv, live_tv.byte_offset + idx * elem_size, coerced);
                             }
-                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            continue :dispatch try decodeNext(code, &ip, &committed);
                         }
                     }
                 }
@@ -10546,7 +10576,7 @@ fn runFrames(
                                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                 }
                                 acc = v;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                continue :dispatch try decodeNext(code, &ip, &committed);
                             },
                             .fallthrough => |t| {
                                 const outcome = deleteOwnProperty(realm, heap_mod.taggedObject(t), key_s.flatBytes());
@@ -10563,7 +10593,7 @@ fn runFrames(
                                         continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                     },
                                 }
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                continue :dispatch try decodeNext(code, &ip, &committed);
                             },
                             .handled => {
                                 committed = true;
@@ -10621,7 +10651,9 @@ fn runFrames(
                                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                 }
                                 acc = v;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                // proxy `deleteProperty` trap ran inline —
+                                // active frame unchanged → decodeNext.
+                                continue :dispatch try decodeNext(code, &ip, &committed);
                             },
                             .fallthrough => |t| {
                                 const outcome = deleteOwnProperty(realm, heap_mod.taggedObject(t), key_slice);
@@ -10638,7 +10670,8 @@ fn runFrames(
                                         continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                                     },
                                 }
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                // Active frame unchanged → decodeNext.
+                                continue :dispatch try decodeNext(code, &ip, &committed);
                             },
                             .handled => {
                                 committed = true;
@@ -10722,6 +10755,8 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
+                    // unwindThrow repositioned the active frame → reEnterDispatch.
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
@@ -10734,6 +10769,10 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
+                    // unwindThrow repositioned to a handler frame —
+                    // reEnterDispatch reloads it; decodeNext would keep
+                    // the dead frame.
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
@@ -10751,7 +10790,8 @@ fn runFrames(
                 if (!try unwindThrow(allocator, realm, frames, ex)) {
                     return .{ .thrown = ex };
                 }
-                continue :dispatch try decodeNext(code, &ip, &committed);
+                // unwindThrow repositioned the active frame → reEnterDispatch.
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             },
             .throw_if_not_object => {
                 // §7.2.5 IsObject — pass plain objects and callable
@@ -10777,6 +10817,8 @@ fn runFrames(
                     if (!try unwindThrow(allocator, realm, frames, ex)) {
                         return .{ .thrown = ex };
                     }
+                    // unwindThrow repositioned the active frame → reEnterDispatch.
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
