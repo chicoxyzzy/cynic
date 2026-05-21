@@ -445,6 +445,12 @@ const Options = struct {
     /// threads>1 because workers would otherwise interleave \r
     /// updates.
     threads: u32 = 0,
+    /// Per-fixture wall-clock watchdog deadline, in seconds. The
+    /// progress monitor names any worker stuck on one fixture
+    /// longer than this — so a wedged sweep identifies its fixture
+    /// instead of leaving you to bisect. `0` disables. Default 60:
+    /// long enough that only a genuine hang trips it.
+    timeout_s: u32 = 60,
     /// Per-test allocation-pressure GC threshold. Forwarded to
     /// each fresh realm's `heap.gc_threshold` before the body
     /// runs. Default 32,768 — sweet spot between memory bound
@@ -1199,25 +1205,25 @@ fn runSweep(
             spawned += 1;
         }
 
+        // The monitor always runs — even under --quiet / --verbose —
+        // so the per-fixture watchdog can name a wedged fixture. Only
+        // the live progress line is gated on those modes.
         var monitor_done: std.atomic.Value(bool) = .init(false);
-        var monitor_thread: ?std.Thread = null;
-        if (!opts.quiet and !opts.verbose) {
-            monitor_thread = try std.Thread.spawn(.{}, monitorLoop, .{
-                io,
-                &index,
-                &monitor_done,
-                @as(usize, paths.items.len),
-                paths.items,
-                current_paths,
-            });
-        }
+        const monitor_thread: std.Thread = try std.Thread.spawn(.{}, monitorLoop, .{
+            io,
+            &index,
+            &monitor_done,
+            @as(usize, paths.items.len),
+            paths.items,
+            current_paths,
+            opts.timeout_s,
+            !opts.quiet and !opts.verbose,
+        });
 
         for (threads) |t| t.join();
 
-        if (monitor_thread) |m| {
-            monitor_done.store(true, .release);
-            m.join();
-        }
+        monitor_done.store(true, .release);
+        monitor_thread.join();
     }
 
     const elapsed = start_ts.untilNow(io, .awake).toMilliseconds();
@@ -2140,16 +2146,61 @@ fn monitorLoop(
     total: usize,
     paths: []const []const u8,
     current_paths: []std.atomic.Value(usize),
+    timeout_s: u32,
+    draw_progress: bool,
 ) void {
+    const tick_s: u32 = 5;
     var elapsed_s: u32 = 0;
     var prev_dispatched: usize = 0;
     var stuck_ticks: u32 = 0;
+    // Per-worker watchdog state: consecutive ticks each worker has
+    // sat on the same fixture, and whether it's been named already.
+    // Capped at 64 workers — no bench box has more.
+    const wd_cap = @min(current_paths.len, 64);
+    var wd_last: [64]usize = @splat(idle_slot);
+    var wd_ticks: [64]u32 = @splat(0);
+    var wd_warned: [64]bool = @splat(false);
     while (!done.load(.acquire)) {
-        std.Io.sleep(io, .fromSeconds(5), .awake) catch break;
-        elapsed_s += 5;
+        std.Io.sleep(io, .fromSeconds(tick_s), .awake) catch break;
+        elapsed_s += tick_s;
         if (done.load(.acquire)) break;
         const dispatched = index.load(.acquire);
         const display = if (dispatched > total) total else dispatched;
+
+        // ── Per-fixture watchdog ─────────────────────────────────
+        // A single wedged worker doesn't stall the dispatched
+        // counter — the others keep pulling work — so the
+        // quiescence check below misses it. Track each worker's
+        // fixture across ticks; once one has held the same fixture
+        // past `timeout_s`, name it on stderr. Runs even under
+        // --quiet / --verbose, so a wedge is never silent.
+        if (timeout_s != 0) {
+            var wid: usize = 0;
+            while (wid < wd_cap) : (wid += 1) {
+                const cur = current_paths[wid].load(.acquire);
+                if (cur != idle_slot and cur == wd_last[wid]) {
+                    wd_ticks[wid] += 1;
+                } else {
+                    wd_last[wid] = cur;
+                    wd_ticks[wid] = 0;
+                    wd_warned[wid] = false;
+                }
+                if (!wd_warned[wid] and cur < paths.len and
+                    wd_ticks[wid] * tick_s >= timeout_s)
+                {
+                    wd_warned[wid] = true;
+                    var wb: [1024]u8 = undefined;
+                    const wm = std.fmt.bufPrint(
+                        &wb,
+                        "test262 watchdog: worker {d} stuck >{d}s on {s}\n",
+                        .{ wid, wd_ticks[wid] * tick_s, paths[cur] },
+                    ) catch continue;
+                    std.Io.File.stderr().writeStreamingAll(io, wm) catch {};
+                }
+            }
+        }
+
+        if (!draw_progress) continue;
 
         // Quiescence detection: if the dispatched counter hasn't
         // advanced between ticks, every worker is busy on a single
@@ -3301,6 +3352,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.list_failures = std.fmt.parseInt(u32, arg["--list-failures=".len..], 10) catch 0;
         } else if (std.mem.startsWith(u8, arg, "--threads=")) {
             opts.threads = std.fmt.parseInt(u32, arg["--threads=".len..], 10) catch 0;
+        } else if (std.mem.startsWith(u8, arg, "--timeout=")) {
+            opts.timeout_s = std.fmt.parseInt(u32, arg["--timeout=".len..], 10) catch 60;
         } else if (std.mem.startsWith(u8, arg, "--gc-threshold=")) {
             opts.gc_threshold = std.fmt.parseInt(u32, arg["--gc-threshold=".len..], 10) catch 32768;
         } else if (std.mem.eql(u8, arg, "--gc-stats")) {
