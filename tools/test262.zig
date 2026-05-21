@@ -1173,6 +1173,12 @@ fn runSweep(
         defer gpa.free(current_paths);
         for (current_paths) |*slot| slot.* = .init(idle_slot);
 
+        // Per-worker host-interrupt flags — the watchdog flips one to
+        // abort a wedged fixture (see `monitorLoop`).
+        const abort_flags = try gpa.alloc(std.atomic.Value(bool), thread_count);
+        defer gpa.free(abort_flags);
+        for (abort_flags) |*slot| slot.* = .init(false);
+
         const threads = try gpa.alloc(std.Thread, thread_count);
         defer gpa.free(threads);
         var spawned: usize = 0;
@@ -1200,6 +1206,7 @@ fn runSweep(
                 .phase = phase,
                 .worker_id = wid,
                 .current_paths = current_paths,
+                .abort_flags = abort_flags,
             };
             t.* = try std.Thread.spawn(.{}, worker, .{ctx});
             spawned += 1;
@@ -1216,6 +1223,7 @@ fn runSweep(
             @as(usize, paths.items.len),
             paths.items,
             current_paths,
+            abort_flags,
             opts.timeout_s,
             !opts.quiet and !opts.verbose,
         });
@@ -1505,9 +1513,20 @@ const WorkerCtx = struct {
     /// Lets a wedged sweep tell you exactly which fixture
     /// stalled instead of leaving you to bisect by filter.
     current_paths: []std.atomic.Value(usize),
+    /// Per-worker host-interrupt flags. The watchdog in `monitorLoop`
+    /// flips `abort_flags[worker_id]` to abort a wedged fixture; the
+    /// worker clears its own slot before each fixture.
+    abort_flags: []std.atomic.Value(bool),
 };
 
 const idle_slot: usize = std.math.maxInt(usize);
+
+/// Per-worker host-interrupt flag pointer, set once at `workerLoop`
+/// entry. `classifyAndRun` (running on the worker thread) wires each
+/// fresh realm's `host_interrupt` to it, so the watchdog in
+/// `monitorLoop` can abort a wedged fixture from another thread.
+/// Null on the sequential path (which has no monitor).
+threadlocal var worker_abort_flag: ?*std.atomic.Value(bool) = null;
 
 /// Worker entry point. Pulls paths off the shared atomic index
 /// until drained, classifies + runs each test in its own arena,
@@ -1559,6 +1578,9 @@ fn workerLoop(
     heavy: *std.ArrayListUnmanaged(HeavyEntry),
 ) !void {
     defer ctx.current_paths[ctx.worker_id].store(idle_slot, .release);
+    // Publish this worker's host-interrupt flag so `classifyAndRun`
+    // (same thread) wires it into every realm it creates.
+    worker_abort_flag = &ctx.abort_flags[ctx.worker_id];
     while (true) {
         const i = ctx.index.fetchAdd(1, .monotonic);
         if (i >= ctx.paths.len) return;
@@ -1566,6 +1588,10 @@ fn workerLoop(
         // dispatch can hang. The progress monitor reads this on
         // its next tick — when a worker wedges, the next dump
         // names the exact fixture.
+        // Clear any stale abort request from a prior fixture before
+        // claiming this one — the watchdog must only ever abort the
+        // fixture it actually flagged.
+        ctx.abort_flags[ctx.worker_id].store(false, .release);
         ctx.current_paths[ctx.worker_id].store(i, .release);
         const rel = ctx.paths[i];
 
@@ -1771,6 +1797,10 @@ fn classifyAndRun(
 
     var realm = cynic.runtime.Realm.initWithBytesAllocator(arena, bytes_allocator);
     defer realm.deinit();
+    // Wire the watchdog: on a worker thread, a wedged fixture can be
+    // aborted from `monitorLoop` via this worker's host-interrupt
+    // flag. Null on the sequential path — harmless.
+    realm.host_interrupt = worker_abort_flag;
     // LIFO `defer`: runs BEFORE `realm.deinit()` above, so the heap
     // counters are still readable. One spot covers all 20+ returns
     // inside this block.
@@ -2146,6 +2176,7 @@ fn monitorLoop(
     total: usize,
     paths: []const []const u8,
     current_paths: []std.atomic.Value(usize),
+    abort_flags: []std.atomic.Value(bool),
     timeout_s: u32,
     draw_progress: bool,
 ) void {
@@ -2189,10 +2220,15 @@ fn monitorLoop(
                     wd_ticks[wid] * tick_s >= timeout_s)
                 {
                     wd_warned[wid] = true;
+                    // Abort the wedged fixture: the worker's engine
+                    // polls this flag and unwinds with a RangeError,
+                    // so the sweep continues instead of hanging.
+                    if (wid < abort_flags.len)
+                        abort_flags[wid].store(true, .release);
                     var wb: [1024]u8 = undefined;
                     const wm = std.fmt.bufPrint(
                         &wb,
-                        "test262 watchdog: worker {d} stuck >{d}s on {s}\n",
+                        "test262 watchdog: worker {d} stuck >{d}s on {s} - aborting\n",
                         .{ wid, wd_ticks[wid] * tick_s, paths[cur] },
                     ) catch continue;
                     std.Io.File.stderr().writeStreamingAll(io, wm) catch {};

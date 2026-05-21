@@ -619,6 +619,13 @@ pub const Realm = struct {
     /// V8's `Isolate::TerminateExecution` and JSC's
     /// `Watchdog::fire`.
     interrupt: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Optional host-supplied interrupt flag, polled alongside
+    /// `interrupt`. Unlike `interrupt` (a per-realm field), this
+    /// points at storage the host keeps alive longer than the realm
+    /// — so a watchdog thread can flip it without racing the realm's
+    /// teardown. The test262 harness aims it at a stable per-worker
+    /// flag; null for ordinary embeddings.
+    host_interrupt: ?*std.atomic.Value(bool) = null,
     /// Stack of every live `runFrames` call's frame list. Each
     /// entry is the `*ArrayListUnmanaged(CallFrame)` that a
     /// `runFrames` invocation is currently dispatching against;
@@ -691,6 +698,7 @@ pub const Realm = struct {
             .allocator = parent.allocator,
             .heap = parent.heap,
             .owns_heap = false,
+            .host_interrupt = parent.host_interrupt,
         };
     }
 

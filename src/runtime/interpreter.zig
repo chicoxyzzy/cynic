@@ -4260,7 +4260,8 @@ fn runFrames(
         // V8's `Isolate::TerminateExecution`, JSC's
         // `Watchdog::fire`, and `JS_SetInterruptCallback` on
         // SpiderMonkey / QuickJS.
-        if (realm.interrupt.load(.acquire)) {
+        const host_interrupted = if (realm.host_interrupt) |h| h.load(.acquire) else false;
+        if (realm.interrupt.load(.acquire) or host_interrupted) {
             realm.clearInterrupt();
             const ex = try makeRangeError(realm, "execution interrupted");
             return .{ .thrown = ex };
