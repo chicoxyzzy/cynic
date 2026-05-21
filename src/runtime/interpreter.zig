@@ -5191,7 +5191,11 @@ fn runFrames(
                         },
                     };
                     acc = result;
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    // Native ran inline — no frame pushed, the active
+                    // frame is unchanged. `decodeNext` keeps the loop-
+                    // local ip/acc; `reEnterDispatch` would reload a
+                    // stale `f.ip` and re-run this call forever.
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
 
                 // §27.7 — async function call. Start fresh, run the
@@ -5409,7 +5413,9 @@ fn runFrames(
                         },
                     };
                     acc = result;
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    // Native ran inline — frame unchanged; decodeNext,
+                    // not reEnterDispatch (which would reload a stale ip).
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
 
                 if (callee_fn.is_async) {
@@ -5681,7 +5687,9 @@ fn runFrames(
                         }
                         continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    // Native ctor ran inline — frame unchanged; decodeNext,
+                    // not reEnterDispatch (which would reload a stale ip).
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
                 // §13.3.5.1.1 OrdinaryCallBindThis with NewTarget=callee.
                 // §10.1.14 GetPrototypeFromConstructor — read
@@ -5737,7 +5745,9 @@ fn runFrames(
                     } else {
                         acc = this_value;
                     }
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    // Native ctor ran inline — frame unchanged; decodeNext,
+                    // not reEnterDispatch (which would reload a stale ip).
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
 
                 if (frames.items.len >= max_call_frames) {
@@ -6441,6 +6451,13 @@ fn runFrames(
                         const r2 = try proxyHasTrap(allocator, realm, frames, f, ip, c, key_slice);
                         switch (r2) {
                             .value => |v| {
+                                // Trap ran via `callJSFunction` (its
+                                // own frame stack) — our frame is
+                                // intact. Record ip + result so the
+                                // shared `reEnterDispatch` tail below
+                                // reloads them.
+                                f.ip = ip;
+                                f.accumulator = v;
                                 acc = v;
                                 handled_via_proxy = true;
                                 break :walk;
@@ -6468,7 +6485,8 @@ fn runFrames(
                     }
                     cursor = c.prototype;
                 }
-                if (handled_via_proxy) continue;
+                if (handled_via_proxy)
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 acc = Value.fromBool(found);
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
@@ -8748,16 +8766,16 @@ fn runFrames(
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
-            .super_call, .super_call_forward, .super_call_spread => {
+            .super_call, .super_call_forward, .super_call_spread => |which| {
                 var args: []const Value = &.{};
                 var spread_args: std.ArrayListUnmanaged(Value) = .empty;
                 defer spread_args.deinit(allocator);
-                if (op == .super_call) {
+                if (which == .super_call) {
                     const r_args = code[ip];
                     const argc = code[ip + 1];
                     ip += 2;
                     args = registers[r_args .. @as(usize, r_args) + argc];
-                } else if (op == .super_call_spread) {
+                } else if (which == .super_call_spread) {
                     // §13.3.7 — `super(...spread)`. The runtime-
                     // built args array is in r_args_array; walk
                     // its packed elements into a fresh stack-side
