@@ -925,7 +925,9 @@ fn reflectOwnKeys(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // packed-array element and reordered objects with a mix of
     // integer-like and string keys.
     const obj_mod = @import("object.zig");
-    const keys = if (try obj_mod.proxyOwnKeysOrNull(realm, target)) |k| k else try obj_mod.ownPropertyKeysOrdered(realm, target);
+    const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer key_scope.close();
+    const keys = if (try obj_mod.proxyOwnKeysOrNull(realm, target, key_scope)) |k| k else try obj_mod.ownPropertyKeysOrdered(realm, target, key_scope);
     defer realm.allocator.free(keys);
     for (keys) |k| {
         // Symbol keys stored as `@@<name>` or `<sym:N>` need to surface

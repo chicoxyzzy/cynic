@@ -323,6 +323,14 @@ pub const JSFunction = struct {
     /// `Object.getOwnPropertyNames(fn)`, not `["y", "x"]`.
     own_key_order: std.ArrayListUnmanaged([]const u8) = .empty,
 
+    /// Heap-allocated JSStrings backing computed property keys in
+    /// `properties` — the function-object analogue of
+    /// `JSObject.key_anchors`. A `fn[expr] = v` write allocates a
+    /// fresh JSString for the key; the property map stores only its
+    /// `bytes` slice, so without this anchor the string is swept on
+    /// the next collection and the key slice dangles.
+    key_anchors: std.ArrayListUnmanaged(*@import("string.zig").JSString) = .empty,
+
     pub fn init(
         allocator: std.mem.Allocator,
         chunk: *const Chunk,
@@ -376,6 +384,7 @@ pub const JSFunction = struct {
         self.private_accessors.deinit(allocator);
         self.private_methods.deinit(allocator);
         self.own_key_order.deinit(allocator);
+        self.key_anchors.deinit(allocator);
         if (self.bound_args) |a| allocator.free(a);
         allocator.destroy(self);
     }

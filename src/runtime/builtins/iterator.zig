@@ -2332,7 +2332,9 @@ fn iteratorZipKeyed(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // order), filter to enumerable own data/accessor descriptors,
     // skip undefined values, and open each via
     // GetIteratorFlattenable.
-    const all_keys = try @import("object.zig").ownPropertyKeysOrdered(realm, iterables_obj);
+    const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer key_scope.close();
+    const all_keys = try @import("object.zig").ownPropertyKeysOrdered(realm, iterables_obj, key_scope);
     defer realm.allocator.free(all_keys);
 
     var iters: std.ArrayListUnmanaged(ZipIterSlot) = .empty;

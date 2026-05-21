@@ -1795,7 +1795,9 @@ pub fn openForInIterator(
             // builtins/object.zig.
             if (cur.proxy_target != null or cur.proxy_target_fn != null or cur.proxy_revoked) {
                 const obj_mod = @import("builtins/object.zig");
-                if (obj_mod.proxyOwnKeysOrNull(realm, cur)) |maybe_keys| {
+                const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
+                defer key_scope.close();
+                if (obj_mod.proxyOwnKeysOrNull(realm, cur, key_scope)) |maybe_keys| {
                     if (maybe_keys) |keys| {
                         defer realm.allocator.free(keys);
                         for (keys) |k| {
@@ -6221,8 +6223,10 @@ fn runFrames(
                     // ignored.
                     const obj_mod_inner = @import("builtins/object.zig");
                     const is_src_proxy = src_obj.proxy_target != null or src_obj.proxy_revoked;
+                    const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
+                    defer key_scope.close();
                     const keys_opt: ?[]const []const u8 = blk_pk: {
-                        const ko = obj_mod_inner.proxyOwnKeysOrNull(realm, src_obj) catch |err| switch (err) {
+                        const ko = obj_mod_inner.proxyOwnKeysOrNull(realm, src_obj, key_scope) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             else => {
                                 const ex = consumePendingException(realm) orelse try makeTypeError(realm, "object rest ownKeys trap threw");
@@ -6238,7 +6242,7 @@ fn runFrames(
                         break :blk_pk ko;
                     };
                     if (committed) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                    const keys: []const []const u8 = if (keys_opt) |k| k else (obj_mod_inner.ownPropertyKeysOrdered(realm, src_obj) catch |err| switch (err) {
+                    const keys: []const []const u8 = if (keys_opt) |k| k else (obj_mod_inner.ownPropertyKeysOrdered(realm, src_obj, key_scope) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => return error.InvalidOpcode,
                     });
@@ -8476,7 +8480,10 @@ fn runFrames(
                     var ibuf: [16]u8 = undefined;
                     const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
                     const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-                    realm.heap.storeProperty(obj, allocator, owned.flatBytes(), registers[i]) catch return error.OutOfMemory;
+                    // The index key is a freshly heap-allocated JSString;
+                    // anchor it on the object so a GC sweep can't free the
+                    // key slice out from under `arguments[i]` lookups.
+                    realm.heap.storePropertyComputedOwned(obj, allocator, owned, registers[i]) catch return error.OutOfMemory;
                 }
                 // §10.4.4.6 step 8 — `length` is `{ writable: true,
                 // enumerable: false, configurable: true }`. Default
@@ -8599,7 +8606,13 @@ fn runFrames(
                 const fn_obj = heap_mod.valueAsFunction(acc) orelse return error.InvalidOpcode;
                 const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
                 const entry = obj.accessors.getOrPut(allocator, owned.flatBytes()) catch return error.OutOfMemory;
-                if (!entry.found_existing) entry.value_ptr.* = .{};
+                if (!entry.found_existing) {
+                    entry.value_ptr.* = .{};
+                    // The accessors map borrows the `owned` slice as
+                    // its key; anchor the heap JSString so a GC sweep
+                    // can't dangle a computed accessor key.
+                    obj.key_anchors.append(allocator, owned) catch return error.OutOfMemory;
+                }
                 realm.heap.storeInternalSlot(.{ .object = obj }, acc);
                 if (is_setter) {
                     entry.value_ptr.*.setter = fn_obj;
@@ -9693,8 +9706,10 @@ fn runFrames(
                 // `src` isn't a proxy this is just the ordinary
                 // own-key walk.
                 const is_src_proxy = src_obj.proxy_target != null or src_obj.proxy_revoked;
+                const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
+                defer key_scope.close();
                 const keys_opt: ?[]const []const u8 = blk_pk: {
-                    const ko = obj_mod.proxyOwnKeysOrNull(realm, src_obj) catch |err| switch (err) {
+                    const ko = obj_mod.proxyOwnKeysOrNull(realm, src_obj, key_scope) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => {
                             const ex = consumePendingException(realm) orelse try makeTypeError(realm, "object spread ownKeys trap threw");
@@ -9710,7 +9725,7 @@ fn runFrames(
                     break :blk_pk ko;
                 };
                 if (committed) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                const keys: []const []const u8 = if (keys_opt) |k| k else (obj_mod.ownPropertyKeysOrdered(realm, src_obj) catch |err| switch (err) {
+                const keys: []const []const u8 = if (keys_opt) |k| k else (obj_mod.ownPropertyKeysOrdered(realm, src_obj, key_scope) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.InvalidOpcode,
                 });
@@ -11906,6 +11921,15 @@ fn strictSetPropertyAnchored(
         if (!ok) {
             const ex = try makeTypeError(realm, "Cannot assign to read-only property");
             return throwInSetter(realm, frames, f, ip, value, ex);
+        }
+        // A `fn[expr] = v` write stores the key as a borrowed
+        // `bytes` slice; anchor the heap-allocated key JSString on
+        // the function so GC keeps the slice alive. Only on first
+        // insertion — re-writes to an existing key reuse the anchor.
+        if (!had_fn_entry) {
+            if (key_string) |ks| {
+                fn_obj.key_anchors.append(allocator, ks) catch return error.OutOfMemory;
+            }
         }
         return .ok;
     }

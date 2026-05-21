@@ -197,9 +197,18 @@ fn orderListContains(obj: *const JSObject, key: []const u8) bool {
 /// (data + accessor merged), then (eventually) symbol keys.
 /// Skips internal `__cynic_*` slots. Caller owns the returned
 /// slice (allocated via `realm.allocator`).
+/// Walk `obj`'s own keys in §10.1.11 spec order. The returned
+/// slice is `realm.allocator`-owned (free it); the *string-key*
+/// entries borrow bytes from `obj`'s own property maps (stable
+/// while `obj` is reachable). Integer-index keys are synthesised
+/// fresh — the JSStrings backing them are pushed onto `key_scope`
+/// so they survive the caller's (possibly re-entrant) use of the
+/// list. `key_scope` must stay open for as long as the caller
+/// reads the returned slice.
 pub fn ownPropertyKeysOrdered(
     realm: *Realm,
     obj: *JSObject,
+    key_scope: *@import("../heap.zig").HandleScope,
 ) NativeError![]const []const u8 {
     const KeyEntry = struct { idx: u32, key: []const u8 };
     var integer_keys: std.ArrayListUnmanaged(KeyEntry) = .empty;
@@ -220,6 +229,10 @@ pub fn ownPropertyKeysOrdered(
                 var ibuf: [16]u8 = undefined;
                 const ks = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch continue;
                 const owned = realm.heap.allocateString(ks) catch return error.OutOfMemory;
+                // Root the synthesised index key on the caller's
+                // scope so it survives a GC sweep while the caller
+                // iterates the returned key list (which re-enters JS).
+                key_scope.push(Value.fromString(owned)) catch return error.OutOfMemory;
                 integer_keys.append(realm.allocator, .{ .idx = idx, .key = owned.flatBytes() }) catch return error.OutOfMemory;
             }
         } else {
@@ -229,6 +242,7 @@ pub fn ownPropertyKeysOrdered(
                 var ibuf: [16]u8 = undefined;
                 const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ei}) catch continue;
                 const owned = realm.heap.allocateString(ks) catch return error.OutOfMemory;
+                key_scope.push(Value.fromString(owned)) catch return error.OutOfMemory;
                 integer_keys.append(realm.allocator, .{ .idx = ei, .key = owned.flatBytes() }) catch return error.OutOfMemory;
             }
         }
@@ -257,6 +271,7 @@ pub fn ownPropertyKeysOrdered(
             var ibuf: [16]u8 = undefined;
             const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ti}) catch continue;
             const owned = realm.heap.allocateString(ks) catch return error.OutOfMemory;
+            key_scope.push(Value.fromString(owned)) catch return error.OutOfMemory;
             integer_keys.append(realm.allocator, .{ .idx = ti, .key = owned.flatBytes() }) catch return error.OutOfMemory;
         }
     }
@@ -500,7 +515,11 @@ pub fn getPropertyValue(realm: *Realm, obj: *JSObject, key: []const u8, receiver
 /// owns the slice and frees it via `realm.allocator`. Returns
 /// `null` when no trap fires; the caller falls back to walking
 /// the target's own keys directly.
-pub fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []const u8 {
+pub fn proxyOwnKeysOrNull(
+    realm: *Realm,
+    obj: *JSObject,
+    key_scope: *@import("../heap.zig").HandleScope,
+) NativeError!?[]const []const u8 {
     if (obj.proxy_target == null and !obj.proxy_revoked) return null;
     // §10.5.11 step 2 — revoked proxy throws TypeError.
     if (obj.proxy_revoked) return throwTypeError(realm, "Cannot perform 'ownKeys' on a revoked proxy");
@@ -525,9 +544,9 @@ pub fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []
     // non-callable is a TypeError per IsCallable.
     if (trap_v.isUndefined() or trap_v.isNull()) {
         if (proxy_target.proxy_target != null or proxy_target.proxy_revoked) {
-            return try proxyOwnKeysOrNull(realm, proxy_target);
+            return try proxyOwnKeysOrNull(realm, proxy_target, key_scope);
         }
-        return try ownPropertyKeysOrdered(realm, proxy_target);
+        return try ownPropertyKeysOrdered(realm, proxy_target, key_scope);
     }
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'ownKeys' trap is not callable");
     const interpreter = @import("../interpreter.zig");
@@ -570,9 +589,15 @@ pub fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []
         // §10.5.11 step 8 — CreateListFromArrayLike rejects any
         // entry that isn't a String or Symbol. Numbers / booleans /
         // null / undefined → TypeError.
-        const key_str = if (k_v.isString())
-            (@as(*JSString, @ptrCast(@alignCast(k_v.asString())))).flatBytes()
-        else if (heap_mod.valueAsSymbol(k_v)) |sym|
+        const key_str = if (k_v.isString()) blk: {
+            // The key string lives in the trap-result array, which
+            // is unrooted once this function returns. Root it on the
+            // caller's scope so the returned slice survives the
+            // caller's (re-entrant) iteration.
+            const ks: *JSString = @ptrCast(@alignCast(k_v.asString()));
+            key_scope.push(Value.fromString(ks)) catch return error.OutOfMemory;
+            break :blk ks.flatBytes();
+        } else if (heap_mod.valueAsSymbol(k_v)) |sym|
             // Cynic flattens symbol property keys into the
             // sym.prop_key string (`@@<wellknown>` / `<sym:N>`).
             // The caller (Reflect.ownKeys / getOwnPropertySymbols)
@@ -597,7 +622,7 @@ pub fn proxyOwnKeysOrNull(realm: *Realm, obj: *JSObject) NativeError!?[]const []
     // must list every target own key AND nothing else. A
     // non-extensible target's key set is frozen, so the proxy
     // can't add or remove from it.
-    const target_keys = try ownPropertyKeysOrdered(realm, proxy_target);
+    const target_keys = try ownPropertyKeysOrdered(realm, proxy_target, key_scope);
     defer realm.allocator.free(target_keys);
     for (target_keys) |tk| {
         if (!proxy_target.flagsFor(tk).configurable) {
@@ -661,6 +686,11 @@ fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError
         const result = realm.heap.allocateObject() catch return error.OutOfMemory;
         result.prototype = realm.intrinsics.array_prototype;
         result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+        // Root the result array — it is built across a loop whose
+        // `allocateString` calls can trigger a GC sweep.
+        const fscope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer fscope.close();
+        fscope.push(heap_mod.taggedObject(result)) catch return error.OutOfMemory;
         var idx: usize = 0;
         var fit = fn_obj.properties.iterator();
         while (fit.next()) |entry| {
@@ -668,10 +698,12 @@ fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError
             if (std.mem.startsWith(u8, key, "__cynic_")) continue;
             if (isSymbolKey(key)) continue;
             if (!fn_obj.flagsForOwn(key).enumerable) continue;
-            const key_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
             var ibuf: [16]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
             const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+            // Allocate the value string last so no GC-triggering
+            // allocation runs between it and the store.
+            const key_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
             result.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(key_owned)) catch return error.OutOfMemory;
             idx += 1;
         }
@@ -679,11 +711,20 @@ fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError
         return heap_mod.taggedObject(result);
     }
     const obj = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Object.keys called on non-object");
-    const keys = if (try proxyOwnKeysOrNull(realm, obj)) |k| k else try ownPropertyKeysOrdered(realm, obj);
+    const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer key_scope.close();
+    const keys = if (try proxyOwnKeysOrNull(realm, obj, key_scope)) |k| k else try ownPropertyKeysOrdered(realm, obj, key_scope);
     defer realm.allocator.free(keys);
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
     result.prototype = realm.intrinsics.array_prototype;
     result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    // Root the source and the result array — the loop below re-enters
+    // JS through the proxy `getOwnPropertyDescriptor` trap, and each
+    // `allocateString` is a GC safepoint.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(arg) catch return error.OutOfMemory;
+    scope.push(heap_mod.taggedObject(result)) catch return error.OutOfMemory;
     var idx: usize = 0;
     const is_proxy = obj.proxy_target != null or obj.proxy_revoked;
     for (keys) |key| {
@@ -723,10 +764,12 @@ fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError
             break :blk enum_v.isBool() and enum_v.asBool();
         } else obj.flagsFor(key).enumerable;
         if (!enumerable) continue;
-        const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
         var ibuf: [16]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+        // Allocate the value string last so no GC-triggering
+        // allocation runs between it and the store into `result`.
+        const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
         result.set(realm.allocator, owned.flatBytes(), Value.fromString(key_str)) catch return error.OutOfMemory;
         idx += 1;
     }
@@ -769,11 +812,14 @@ const KeyValuePair = struct {
 fn enumerableOwnPropertyKeyValues(
     realm: *Realm,
     obj: *JSObject,
+    scope: *@import("../heap.zig").HandleScope,
 ) NativeError![]KeyValuePair {
     // §7.3.21 step 2 — `Let ownKeys be ? O.[[OwnPropertyKeys]]()`.
     // Route through `proxyOwnKeysOrNull` so a Proxy's `ownKeys`
     // trap fires when present.
-    const keys = if (try proxyOwnKeysOrNull(realm, obj)) |k| k else try ownPropertyKeysOrdered(realm, obj);
+    const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer key_scope.close();
+    const keys = if (try proxyOwnKeysOrNull(realm, obj, key_scope)) |k| k else try ownPropertyKeysOrdered(realm, obj, key_scope);
     defer realm.allocator.free(keys);
 
     var out: std.ArrayListUnmanaged(KeyValuePair) = .empty;
@@ -797,6 +843,9 @@ fn enumerableOwnPropertyKeyValues(
             const s = realm.heap.allocateString(key) catch return error.OutOfMemory;
             break :blk Value.fromString(s);
         };
+        // Root the key string before `objectGetOwnPropertyDescriptor`
+        // re-enters JS — a GC there would otherwise free it.
+        scope.push(key_v) catch return error.OutOfMemory;
         const desc_args = [_]Value{ heap_mod.taggedObject(obj), key_v };
         const desc_v = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &desc_args);
         // step 3.a.iii — desc undefined → skip (key disappeared
@@ -818,6 +867,12 @@ fn enumerableOwnPropertyKeyValues(
         // /entries/observable-operations.js).
         const value = try getPropertyValue(realm, obj, key, heap_mod.taggedObject(obj));
         const key_str = @as(*JSString, @ptrCast(@alignCast(key_v.asString())));
+        // The pairs accumulate in a non-GC list across a loop that
+        // re-enters JS (the GOPD trap, `getPropertyValue`); root each
+        // key string and value on the caller-supplied scope so a mid-
+        // loop sweep can't collect already-gathered entries.
+        scope.push(Value.fromString(key_str)) catch return error.OutOfMemory;
+        scope.push(value) catch return error.OutOfMemory;
         out.append(realm.allocator, .{ .key_str = key_str, .value = value }) catch return error.OutOfMemory;
     }
 
@@ -839,6 +894,11 @@ fn functionEnumerableOwnValues(
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
     result.prototype = realm.intrinsics.array_prototype;
     result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    // Root the result array — it is built across `allocateString`
+    // GC safepoints.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(result)) catch return error.OutOfMemory;
     var idx: usize = 0;
     var fit = fn_obj.properties.iterator();
     while (fit.next()) |entry| {
@@ -858,6 +918,7 @@ fn functionEnumerableOwnValues(
                 const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
                 pair.prototype = realm.intrinsics.array_prototype;
                 pair.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+                scope.push(heap_mod.taggedObject(pair)) catch return error.OutOfMemory;
                 const key_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
                 pair.set(realm.allocator, "0", Value.fromString(key_owned)) catch return error.OutOfMemory;
                 pair.set(realm.allocator, "1", value) catch return error.OutOfMemory;
@@ -884,14 +945,20 @@ fn objectValues(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         return functionEnumerableOwnValues(realm, fn_obj, .value);
     }
     const obj = heap_mod.valueAsPlainObject(coerced) orelse return throwTypeError(realm, "Object.values called on non-object");
+    // Root the source, the gathered pairs and the result array
+    // across the re-entrant enumeration (GOPD traps / getters).
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(coerced) catch return error.OutOfMemory;
     // §20.1.2.21 step 2 — `Let nameList be ?
     // EnumerableOwnPropertyNames(obj, value)`.
-    const pairs = try enumerableOwnPropertyKeyValues(realm, obj);
+    const pairs = try enumerableOwnPropertyKeyValues(realm, obj, scope);
     defer realm.allocator.free(pairs);
     // step 3 — `Return CreateArrayFromList(nameList)`.
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
     result.prototype = realm.intrinsics.array_prototype;
     result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    scope.push(heap_mod.taggedObject(result)) catch return error.OutOfMemory;
     var idx: usize = 0;
     for (pairs) |p| {
         var ibuf: [16]u8 = undefined;
@@ -917,19 +984,26 @@ fn objectEntries(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         return functionEnumerableOwnValues(realm, fn_obj, .entry);
     }
     const obj = heap_mod.valueAsPlainObject(coerced) orelse return throwTypeError(realm, "Object.entries called on non-object");
+    // Root the source, gathered pairs and the result array across
+    // the re-entrant enumeration (GOPD traps / getters).
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(coerced) catch return error.OutOfMemory;
     // step 2 — `Let nameList be ?
     // EnumerableOwnPropertyNames(obj, key+value)`.
-    const pairs = try enumerableOwnPropertyKeyValues(realm, obj);
+    const pairs = try enumerableOwnPropertyKeyValues(realm, obj, scope);
     defer realm.allocator.free(pairs);
     // step 3 — `Return CreateArrayFromList(nameList)`.
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
     result.prototype = realm.intrinsics.array_prototype;
     result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    scope.push(heap_mod.taggedObject(result)) catch return error.OutOfMemory;
     var idx: usize = 0;
     for (pairs) |p| {
         const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
         pair.prototype = realm.intrinsics.array_prototype;
         pair.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+        scope.push(heap_mod.taggedObject(pair)) catch return error.OutOfMemory;
         pair.set(realm.allocator, "0", Value.fromString(p.key_str)) catch return error.OutOfMemory;
         pair.set(realm.allocator, "1", p.value) catch return error.OutOfMemory;
         pair.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
@@ -1041,7 +1115,7 @@ fn objectHasOwn(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         return throwTypeError(realm, "Object.hasOwn called on null or undefined");
     }
     // §7.1.19 ToPropertyKey — surfaces user-side ToPrimitive throws.
-    const key = try descriptorKey(realm, argOr(args, 1, Value.undefined_));
+    const key = (try descriptorKey(realm, argOr(args, 1, Value.undefined_))).key;
     if (heap_mod.valueAsPlainObject(o)) |obj| {
         // §9.4.6 module namespace [[GetOwnProperty]] materialises a
         // binding via [[Get]]; a TDZ-Hole export rethrows ReferenceError.
@@ -1074,17 +1148,26 @@ fn objectHasOwn(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 
 // ── Property descriptors (§20.1.2) ──────────────────────────────────────────
 
-fn descriptorKey(realm: *Realm, v: Value) NativeError![]const u8 {
+/// §7.1.19 ToPropertyKey result, paired with a GC anchor. `key`
+/// is the slice to use against the property maps; `anchor`, when
+/// non-null, is the heap-allocated JSString backing that slice —
+/// callers that *store* the key (defineProperty) must append it
+/// to the receiver's `key_anchors` so a GC sweep can't free the
+/// slice. A null `anchor` means the slice is stable on its own
+/// (a Symbol's `prop_key` slug).
+const DescKey = struct { key: []const u8, anchor: ?*JSString };
+
+fn descriptorKey(realm: *Realm, v: Value) NativeError!DescKey {
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
-        return s.flatBytes();
+        return .{ .key = s.flatBytes(), .anchor = s };
     }
     // Symbols use their stable `prop_key` slug (`@@iterator` for
     // well-known, `<sym:N>` for user-allocated). The interpreter's
     // computed-key path stringifies via the same slug, so
     // `Object.defineProperty(o, sym, ...)` and `o[sym]` resolve
     // to the same slot.
-    if (heap_mod.valueAsSymbol(v)) |sym| return sym.prop_key;
+    if (heap_mod.valueAsSymbol(v)) |sym| return .{ .key = sym.prop_key, .anchor = null };
     // §7.1.19 ToPropertyKey:
     //   1. key = ToPrimitive(arg, hint "string")
     //   2. If key is Symbol, return key
@@ -1095,12 +1178,12 @@ fn descriptorKey(realm: *Realm, v: Value) NativeError![]const u8 {
     // the key. Run ToPrimitive first, then dispatch.
     if (heap_mod.valueAsPlainObject(v) != null) {
         const prim = try intrinsics.toPrimitive(realm, v, .string);
-        if (heap_mod.valueAsSymbol(prim)) |sym| return sym.prop_key;
+        if (heap_mod.valueAsSymbol(prim)) |sym| return .{ .key = sym.prop_key, .anchor = null };
         const s = try stringifyArg(realm, prim);
-        return s.flatBytes();
+        return .{ .key = s.flatBytes(), .anchor = s };
     }
     const s = try stringifyArg(realm, v);
-    return s.flatBytes();
+    return .{ .key = s.flatBytes(), .anchor = s };
 }
 
 /// §6.2.5.5 ToPropertyDescriptor result. Each `has_*` flag
@@ -1292,8 +1375,21 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
     // throw if a user-side `toString` / `valueOf` returns a non-
     // primitive (the §7.1.1.1 OrdinaryToPrimitive throw). Don't
     // swallow that as OOM; surface the TypeError back to JS.
-    const key = try descriptorKey(realm, argOr(args, 1, Value.undefined_));
+    const dk = try descriptorKey(realm, argOr(args, 1, Value.undefined_));
+    const key = dk.key;
     const desc_v = argOr(args, 2, Value.undefined_);
+    // Pin the target, the descriptor object, and the heap-allocated
+    // key string across the descriptor parse and any proxy trap —
+    // all re-enter JS and can trigger a GC sweep. When this native
+    // is invoked from another native (`Object.defineProperties`,
+    // `defineFromFunctionProps`) the argument slice is a bare Zig
+    // stack array, not a rooted interpreter frame, so without this
+    // the key / target could be collected mid-call.
+    const dp_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer dp_scope.close();
+    dp_scope.push(target_v) catch return error.OutOfMemory;
+    dp_scope.push(desc_v) catch return error.OutOfMemory;
+    if (dk.anchor) |ks| dp_scope.push(Value.fromString(ks)) catch return error.OutOfMemory;
     // §10.5.6 Proxy [[DefineOwnProperty]] — dispatch through the
     // handler's `defineProperty` trap before falling back.
     if (heap_mod.valueAsPlainObject(target_v)) |obj_in| {
@@ -1656,6 +1752,12 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             // does NOT call `forgetKey` because data→accessor
             // conversion preserves the original insertion slot.
             target.recordKey(realm.allocator, key) catch return error.OutOfMemory;
+            // The accessors map borrows the `key` slice; anchor the
+            // heap-allocated key JSString so a GC sweep can't free
+            // it. Symbol keys (null anchor) are stable on their own.
+            // Anchored even on a redefine: a data→accessor conversion
+            // stores a freshly stringified key slice.
+            if (dk.anchor) |ks| target.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
             return target_v;
         }
 
@@ -1666,6 +1768,12 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             _ = target.accessors.swapRemove(key);
             const value: Value = if (parsed.has_value) parsed.value else cur_value;
             target.setWithFlags(realm.allocator, key, value, flags) catch return error.OutOfMemory;
+            // Anchor the heap key string when it landed in the
+            // named-property bag (an array-exotic integer index goes
+            // to `elements` and needs no anchor).
+            if (target.properties.contains(key)) {
+                if (dk.anchor) |ks| target.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
+            }
             // §10.4.2.4 ArraySetLength step 16-17 — when the
             // receiver is an Array and the key is "length", a
             // shrink truncates indexed slots ≥ newLen. Walks
@@ -1753,6 +1861,8 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             }
             // §10.1.11 — track function objects' own keys too.
             target_fn.recordKey(realm.allocator, key) catch return error.OutOfMemory;
+            // Anchor the borrowed heap key string on the function.
+            if (dk.anchor) |ks| target_fn.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
             return target_v;
         }
 
@@ -1761,6 +1871,9 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             _ = target_fn.accessors.swapRemove(key);
             const value: Value = if (parsed.has_value) parsed.value else cur_value;
             target_fn.setWithFlags(realm.allocator, key, value, flags) catch return error.OutOfMemory;
+            if (target_fn.properties.contains(key)) {
+                if (dk.anchor) |ks| target_fn.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
+            }
             return target_v;
         }
 
@@ -1806,6 +1919,13 @@ fn objectDefineProperties(realm: *Realm, this_value: Value, args: []const Value)
         // §7.1.18 ToObject for non-null/non-undefined primitives.
         break :blk_props try intrinsics.toObjectThis(realm, props_v);
     };
+    // Root the target and the props object across the key loop —
+    // each `objectDefineProperty` call re-enters JS (descriptor
+    // getters / proxy traps) and allocates.
+    const dps_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer dps_scope.close();
+    dps_scope.push(heap_mod.taggedObject(target)) catch return error.OutOfMemory;
+    dps_scope.push(heap_mod.taggedObject(props)) catch return error.OutOfMemory;
 
     // §20.1.2.3.1 step 3 — `Let keys be ? props.[[OwnPropertyKeys]]()`.
     // For a Proxy `props` this fires the `ownKeys` trap (test262
@@ -1814,7 +1934,7 @@ fn objectDefineProperties(realm: *Realm, this_value: Value, args: []const Value)
     // ascending, then string-keyed in insertion order); accessor-
     // backed keys are included so their getters fire per step 5.b.ii.
     const props_is_proxy = props.proxy_target != null or props.proxy_revoked;
-    const keys = if (try proxyOwnKeysOrNull(realm, props)) |k| k else try ownPropertyKeysOrdered(realm, props);
+    const keys = if (try proxyOwnKeysOrNull(realm, props, dps_scope)) |k| k else try ownPropertyKeysOrdered(realm, props, dps_scope);
     defer realm.allocator.free(keys);
     for (keys) |key| {
         // §20.1.2.3.1 step 5.a — `Let propDesc be ? props.[[GetOwnProperty]](nextKey)`,
@@ -1921,7 +2041,7 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
     // §20.1.2.7 step 2 — `Let key be ? ToPropertyKey(P)`. Runs
     // after ToObject so a poisoned ToPropertyKey side-effect
     // can't fire when the target would already have thrown.
-    const key = try descriptorKey(realm, argOr(args, 1, Value.undefined_));
+    const key = (try descriptorKey(realm, argOr(args, 1, Value.undefined_))).key;
 
     // §10.5.5 Proxy [[GetOwnProperty]] — when target is a proxy,
     // dispatch through `handler.getOwnPropertyDescriptor`. Walks
@@ -2144,13 +2264,21 @@ fn objectGetOwnPropertyDescriptors(realm: *Realm, this_value: Value, args: []con
     const obj = heap_mod.valueAsPlainObject(target) orelse return throwTypeError(realm, "Object.getOwnPropertyDescriptors target is not an object");
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.object_prototype;
+    // Root the source and the result across the re-entrant loop
+    // (proxy GOPD traps, plus `allocateString` GC safepoints).
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(target) catch return error.OutOfMemory;
+    scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     // §20.1.2.10 step 2 — `Let ownKeys be ? O.[[OwnPropertyKeys]]()`.
     // For a Proxy this fires the `ownKeys` trap (test262
     // built-ins/Object/getOwnPropertyDescriptors/observable-operations.js
     // and /proxy-no-ownkeys-returned-keys-order.js). On an Array
     // exotic ownPropertyKeysOrdered surfaces the packed-element
     // indices.
-    const keys = if (try proxyOwnKeysOrNull(realm, obj)) |k| k else try ownPropertyKeysOrdered(realm, obj);
+    const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer key_scope.close();
+    const keys = if (try proxyOwnKeysOrNull(realm, obj, key_scope)) |k| k else try ownPropertyKeysOrdered(realm, obj, key_scope);
     defer realm.allocator.free(keys);
     for (keys) |key| {
         // §20.1.2.10 step 4 — `Let desc be ? obj.[[GetOwnProperty]](key)`,
@@ -2175,6 +2303,11 @@ fn objectGetOwnPropertyDescriptors(realm: *Realm, this_value: Value, args: []con
         const desc = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &inner_args);
         if (desc.isUndefined()) continue;
         out.set(realm.allocator, k_str.flatBytes(), desc) catch return error.OutOfMemory;
+        // `out` borrows the `k_str` slice as the property key; anchor
+        // the heap string so a later sweep can't free it.
+        if (out.properties.contains(k_str.flatBytes())) {
+            out.key_anchors.append(realm.allocator, k_str) catch return error.OutOfMemory;
+        }
     }
     return heap_mod.taggedObject(out);
 }
@@ -2200,6 +2333,11 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
         const out = realm.heap.allocateObject() catch return error.OutOfMemory;
         out.prototype = realm.intrinsics.array_prototype;
         out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+        // Root the result array — built across `allocateString` GC
+        // safepoints.
+        const fscope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer fscope.close();
+        fscope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
         var len: i32 = 0;
         // §10.2.4 — built-in constructors expose `prototype` as
         // an own property; the slot is dedicated (`fn_obj.prototype`)
@@ -2283,11 +2421,17 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
     // the §10.5.11 invariants (target keys + reported keys must
     // agree on configurable + non-extensible) fire before we
     // filter to strings. Mirrors `objectGetOwnPropertySymbols`.
-    const keys = if (try proxyOwnKeysOrNull(realm, obj)) |k| k else try ownPropertyKeysOrdered(realm, obj);
+    const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer key_scope.close();
+    const keys = if (try proxyOwnKeysOrNull(realm, obj, key_scope)) |k| k else try ownPropertyKeysOrdered(realm, obj, key_scope);
     defer realm.allocator.free(keys);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(target) catch return error.OutOfMemory;
+    scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     var len: i32 = 0;
     for (keys) |key| {
         // §20.1.2.10 — string keys only. Symbol-property keys
@@ -2332,6 +2476,9 @@ fn objectGetOwnPropertySymbols(realm: *Realm, this_value: Value, args: []const V
         const out = realm.heap.allocateObject() catch return error.OutOfMemory;
         out.prototype = realm.intrinsics.array_prototype;
         out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+        const fscope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer fscope.close();
+        fscope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
         var flen: i32 = 0;
         var fit = fn_obj.properties.iterator();
         while (fit.next()) |entry| {
@@ -2353,11 +2500,17 @@ fn objectGetOwnPropertySymbols(realm: *Realm, this_value: Value, args: []const V
     // the invariants (target keys + reported keys must agree on
     // configurable+non-extensible) fire before we filter to
     // symbols. Mirrors `objectGetOwnPropertyNames` line 381.
-    const keys = if (try proxyOwnKeysOrNull(realm, obj)) |k| k else try ownPropertyKeysOrdered(realm, obj);
+    const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer key_scope.close();
+    const keys = if (try proxyOwnKeysOrNull(realm, obj, key_scope)) |k| k else try ownPropertyKeysOrdered(realm, obj, key_scope);
     defer realm.allocator.free(keys);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(target) catch return error.OutOfMemory;
+    scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     var len: i32 = 0;
     for (keys) |key| {
         if (!isSymbolKey(key)) continue;
@@ -2400,6 +2553,13 @@ fn objectCreate(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // on the first non-object descObj — `Object.create({}, 'h')`
     // sees descObj === 'h' for the first index).
     if (args.len > 1 and !args[1].isUndefined()) {
+        // Root the freshly allocated object across
+        // `objectDefineProperties`, which re-enters JS (descriptor
+        // getters) and allocates — a GC there would otherwise sweep
+        // `obj`, held only on the Zig stack.
+        const scope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer scope.close();
+        scope.push(heap_mod.taggedObject(obj)) catch return error.OutOfMemory;
         const dp_args = [_]Value{ heap_mod.taggedObject(obj), args[1] };
         _ = try objectDefineProperties(realm, Value.undefined_, &dp_args);
     }
@@ -2521,7 +2681,9 @@ fn objectAssign(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         // Route through `proxyOwnKeysOrNull` so a Proxy's `ownKeys`
         // trap fires with the §10.5.11 invariants enforced. Falls
         // back to the ordinary keys when `src` isn't a proxy.
-        const keys = if (try proxyOwnKeysOrNull(realm, src)) |k| k else try ownPropertyKeysOrdered(realm, src);
+        const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer key_scope.close();
+        const keys = if (try proxyOwnKeysOrNull(realm, src, key_scope)) |k| k else try ownPropertyKeysOrdered(realm, src, key_scope);
         defer realm.allocator.free(keys);
         const src_value: Value = heap_mod.taggedObject(src);
         for (keys) |key| {
@@ -2586,7 +2748,9 @@ fn setIntegrityLevelViaProxy(realm: *Realm, target_v: Value, target: *JSObject, 
         return throwTypeError(realm, if (frozen) "Object.freeze: Proxy preventExtensions returned false" else "Object.seal: Proxy preventExtensions returned false");
     }
     // §7.3.20 step 4 — `keys = ? O.[[OwnPropertyKeys]]()`.
-    const keys = (try proxyOwnKeysOrNull(realm, target)) orelse try ownPropertyKeysOrdered(realm, target);
+    const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer key_scope.close();
+    const keys = (try proxyOwnKeysOrNull(realm, target, key_scope)) orelse try ownPropertyKeysOrdered(realm, target, key_scope);
     defer realm.allocator.free(keys);
 
     for (keys) |key| {
@@ -2636,7 +2800,9 @@ fn testIntegrityLevelViaProxy(realm: *Realm, target_v: Value, target: *JSObject,
     // §7.3.21 step 4 — `keys = ? O.[[OwnPropertyKeys]]()`. Read
     // through the trap so the invariants fire.
     const target_obj = heap_mod.valueAsPlainObject(target_v) orelse return Value.true_;
-    const keys = (try proxyOwnKeysOrNull(realm, target_obj)) orelse try ownPropertyKeysOrdered(realm, target_obj);
+    const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer key_scope.close();
+    const keys = (try proxyOwnKeysOrNull(realm, target_obj, key_scope)) orelse try ownPropertyKeysOrdered(realm, target_obj, key_scope);
     defer realm.allocator.free(keys);
     for (keys) |key| {
         const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
@@ -2806,6 +2972,12 @@ fn lowerArrayIndexedFlags(realm: *Realm, obj: *JSObject, sealed_only: bool) Nati
         // bag-promoted slot.
         const v = obj.getIndexed(idx);
         obj.setWithFlags(realm.allocator, ks_owned.flatBytes(), v, flags) catch return error.OutOfMemory;
+        // The non-default descriptor demotes the slot into the
+        // named-property bag, which borrows the `ks_owned` slice;
+        // anchor the heap key string so a GC sweep can't dangle it.
+        if (obj.properties.contains(ks_owned.flatBytes())) {
+            obj.key_anchors.append(realm.allocator, ks_owned) catch return error.OutOfMemory;
+        }
     }
 }
 
@@ -3129,6 +3301,12 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
 
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.object_prototype;
+    // Root the result and the iterator across the iteration loop —
+    // every `next()` / accessor read re-enters JS and allocates.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+    scope.push(iter) catch return error.OutOfMemory;
 
     const max_iter: i64 = 1 << 24;
     var i: i64 = 0;
@@ -3204,7 +3382,13 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
         };
         // §20.1.2.6 — CreateDataPropertyOrThrow installs as
         // `{w:true, e:true, c:true}` (the bag default).
-        out.set(realm.allocator, key_slot, v) catch return error.OutOfMemory;
+        out.set(realm.allocator, key_slot.key, v) catch return error.OutOfMemory;
+        // Anchor the heap key string so the borrowed slice survives.
+        if (key_slot.anchor) |ks| {
+            if (out.properties.contains(key_slot.key)) {
+                out.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
+            }
+        }
     }
     return heap_mod.taggedObject(out);
 }
@@ -3232,18 +3416,18 @@ fn invokeFromEntriesReturn(realm: *Realm, iter_obj: *JSObject, iter_v: Value) vo
 /// Symbol keys (Cynic flattens to `<sym:N>` / `@@<name>`) and
 /// ToString-coerces the rest. Returns a slice valid for the
 /// realm's lifetime (heap-allocated JSString.flatBytes()).
-fn propertyKeyForFromEntries(realm: *Realm, k: Value) NativeError![]const u8 {
+fn propertyKeyForFromEntries(realm: *Realm, k: Value) NativeError!DescKey {
     // Symbol primitive — Cynic stores as a `*JSSymbol` whose
     // `prop_key` is the `<sym:N>` / `@@<descr>` slot key.
     if (heap_mod.valueAsSymbol(k)) |sym| {
-        return sym.prop_key;
+        return .{ .key = sym.prop_key, .anchor = null };
     }
     if (k.isString()) {
         const s: *JSString = @ptrCast(@alignCast(k.asString()));
-        return s.flatBytes();
+        return .{ .key = s.flatBytes(), .anchor = s };
     }
     const s = try stringifyArg(realm, k);
-    return s.flatBytes();
+    return .{ .key = s.flatBytes(), .anchor = s };
 }
 
 /// §10.5.2 Proxy [[SetPrototypeOf]] (V) — shared helper used by
@@ -3407,6 +3591,12 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         error.OutOfMemory => return error.OutOfMemory,
         else => return throwTypeError(realm, "Object.groupBy items is not iterable"),
     };
+    // Root the result and the iterator across the iteration loop —
+    // `next()` and the grouping callback re-enter JS and allocate.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+    scope.push(iter) catch return error.OutOfMemory;
     const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return throwTypeError(realm, "Object.groupBy items is not iterable");
     const next_v = iter_obj.get("next");
     const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "iterator.next is not callable");
@@ -3450,12 +3640,11 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
                 return error.NativeThrew;
             },
         };
-        const key_str = if (key_v.isString())
-            (@as(*JSString, @ptrCast(@alignCast(key_v.asString())))).flatBytes()
-        else blk: {
-            const s = try stringifyArg(realm, key_v);
-            break :blk s.flatBytes();
-        };
+        const key_js: *JSString = if (key_v.isString())
+            @ptrCast(@alignCast(key_v.asString()))
+        else
+            try stringifyArg(realm, key_v);
+        const key_str = key_js.flatBytes();
         // Look up or create the bucket array.
         var bucket: *JSObject = undefined;
         if (out.properties.get(key_str)) |existing| {
@@ -3466,6 +3655,8 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
             bucket.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
             bucket.set(realm.allocator, "length", Value.fromInt32(0)) catch return error.OutOfMemory;
             out.set(realm.allocator, key_str, heap_mod.taggedObject(bucket)) catch return error.OutOfMemory;
+            // `out` borrows the key slice; anchor the heap string.
+            out.key_anchors.append(realm.allocator, key_js) catch return error.OutOfMemory;
         }
         const cur_len = bucket.get("length");
         const len_i: i32 = if (cur_len.isInt32()) cur_len.asInt32() else 0;
@@ -3488,7 +3679,7 @@ fn objectHasOwnProperty(realm: *Realm, this_value: Value, args: []const Value) N
     // so a coercion throw from the argument propagates even when the
     // receiver is null/undefined. Use `try` instead of swallowing as
     // OutOfMemory.
-    const key = try descriptorKey(realm, argOr(args, 0, Value.undefined_));
+    const key = (try descriptorKey(realm, argOr(args, 0, Value.undefined_))).key;
     // §20.1.3.2 step 2 — `ToObject(this)` throws on null / undefined.
     if (this_value.isNull() or this_value.isUndefined()) {
         return throwTypeError(realm, "Object.prototype.hasOwnProperty called on null or undefined");
@@ -3541,7 +3732,7 @@ fn objectProtoPropertyIsEnumerable(realm: *Realm, this_value: Value, args: []con
     if (this_value.isNull() or this_value.isUndefined()) {
         return throwTypeError(realm, "Object.prototype.propertyIsEnumerable called on null or undefined");
     }
-    const key = try descriptorKey(realm, argOr(args, 0, Value.undefined_));
+    const key = (try descriptorKey(realm, argOr(args, 0, Value.undefined_))).key;
     if (heap_mod.valueAsPlainObject(this_value)) |obj| {
         // §20.1.3.4 step 3 composes `O.[[GetOwnProperty]](P)`. For a
         // Proxy that dispatches the `getOwnPropertyDescriptor` trap

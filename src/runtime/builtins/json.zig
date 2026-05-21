@@ -590,9 +590,11 @@ fn serializeJSONObject(
     // trap throw must propagate, so a revoked proxy throws here.
     var owned_keys: ?[]const []const u8 = null;
     defer if (owned_keys) |k| realm.allocator.free(k);
+    const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer key_scope.close();
     const keys: []const []const u8 = if (state.property_list) |pl| pl else blk: {
-        const proxy_keys = try object_builtins.proxyOwnKeysOrNull(realm, obj);
-        const all = if (proxy_keys) |k| k else try ownPropertyKeysOrdered(realm, obj);
+        const proxy_keys = try object_builtins.proxyOwnKeysOrNull(realm, obj, key_scope);
+        const all = if (proxy_keys) |k| k else try ownPropertyKeysOrdered(realm, obj, key_scope);
         owned_keys = all;
         break :blk all;
     };
@@ -939,8 +941,10 @@ fn internalizeJsonProperty(
             // order (integer keys first, then string keys in
             // insertion order, then symbols — we drop symbols and
             // non-enumerable below).
-            const proxy_keys = try object_builtins.proxyOwnKeysOrNull(realm, obj);
-            const keys: []const []const u8 = if (proxy_keys) |k| k else try ownPropertyKeysOrdered(realm, obj);
+            const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
+            defer key_scope.close();
+            const proxy_keys = try object_builtins.proxyOwnKeysOrNull(realm, obj, key_scope);
+            const keys: []const []const u8 = if (proxy_keys) |k| k else try ownPropertyKeysOrdered(realm, obj, key_scope);
             defer realm.allocator.free(keys);
             for (keys) |key| {
                 // §7.3.23 step 4.a.i — skip non-string keys

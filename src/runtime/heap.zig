@@ -847,6 +847,10 @@ pub const Heap = struct {
                     if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
                     if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
                 }
+                // Heap-allocated JSStrings backing computed property
+                // keys (`fn[expr] = v`). The property map holds only
+                // the `bytes` slice — without this the key dangles.
+                for (f.key_anchors.items) |s| s.marked = true;
                 if (f.prototype) |p| self.markValue(taggedObject(p));
                 // §15.3 ArrowFunction lexical captures — `this` and
                 // `new.target` are stamped at MakeFunction time and
@@ -1599,6 +1603,7 @@ pub const Heap = struct {
     /// the `markValue` function arm minus the property bag.
     fn markFunctionInternalSlots(self: *Heap, f: *JSFunction) void {
         if (f.captured_env) |env| self.markEnvironment(env);
+        for (f.key_anchors.items) |s| self.markString(s);
         var fait = f.accessors.iterator();
         while (fait.next()) |entry| {
             if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
