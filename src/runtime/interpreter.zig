@@ -4288,6 +4288,19 @@ inline fn runSafePoint(realm: *Realm) RunError!?RunResult {
     return null;
 }
 
+/// Loop back-edge safe point. A *taken* jump with a negative offset
+/// is a loop's back-edge — the one bytecode every loop iteration is
+/// guaranteed to cross, and so the place the threaded dispatcher runs
+/// `runSafePoint` (allocation-pressure GC, step budget, host
+/// interrupt). `f.ip` / `f.accumulator` are synced first so a GC
+/// fired here sees the live accumulator as a root. Returns non-null
+/// when the budget is spent / an interrupt fired.
+inline fn loopSafePoint(realm: *Realm, f: *CallFrame, ip: usize, acc: Value) RunError!?RunResult {
+    f.ip = ip;
+    f.accumulator = acc;
+    return runSafePoint(realm);
+}
+
 fn runFrames(
     allocator: std.mem.Allocator,
     realm: *Realm,
@@ -4855,24 +4868,42 @@ fn runFrames(
                 const off = readI16(code, ip);
                 ip += 2;
                 ip = applyOffset(ip, off);
+                if (off < 0) {
+                    if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
+                }
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .jmp_if_false => {
                 const off = readI16(code, ip);
                 ip += 2;
-                if (!toBoolean(acc)) ip = applyOffset(ip, off);
+                if (!toBoolean(acc)) {
+                    ip = applyOffset(ip, off);
+                    if (off < 0) {
+                        if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
+                    }
+                }
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .jmp_if_true => {
                 const off = readI16(code, ip);
                 ip += 2;
-                if (toBoolean(acc)) ip = applyOffset(ip, off);
+                if (toBoolean(acc)) {
+                    ip = applyOffset(ip, off);
+                    if (off < 0) {
+                        if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
+                    }
+                }
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .jmp_if_nullish => {
                 const off = readI16(code, ip);
                 ip += 2;
-                if (acc.isNull() or acc.isUndefined()) ip = applyOffset(ip, off);
+                if (acc.isNull() or acc.isUndefined()) {
+                    ip = applyOffset(ip, off);
+                    if (off < 0) {
+                        if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
+                    }
+                }
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
