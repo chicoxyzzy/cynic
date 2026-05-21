@@ -818,8 +818,17 @@
 
         <div class="compare-row">
           <div>
-            <div class="feature-name">JIT tiers · generational GC · inline caches</div>
-            <div class="compare-note">bytecode interp + stop-the-world mark-sweep today; <code>/perf</code> &amp; <code>/profile</code> harness scaffolded</div>
+            <div class="feature-name">Garbage collector</div>
+            <div class="compare-note">non-moving, stop-the-world mark-sweep; the generational machinery — write barrier, remembered set, young/mature split — has landed, minor collection is next</div>
+          </div>
+          <div class="check">Works.</div>
+          <div>The write barrier works. It's just waiting for a nursery to protect.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">JIT tiers · inline caches</div>
+            <div class="compare-note">bytecode interpreter today; <code>/perf</code> &amp; <code>/profile</code> harness scaffolded</div>
           </div>
           <div class="cross">Future Cynic's problem.</div>
           <div>The plan is real. The plan is also not the code.</div>
