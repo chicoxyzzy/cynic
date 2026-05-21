@@ -14,6 +14,36 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-05-21 — cynic `a36af42`, host `Darwin 25.5.0 arm64`
+
+rung-5 (int32 fast paths for arithmetic / comparison / bitwise
+opcodes) + the for-of dense-Array iteration path (skips the
+per-step iterator result object). Also landed since the row
+below — the BigInt arbitrary-precision rewrite, a GC
+root-completeness fix, the native-function `[[Prototype]]` fix —
+all conformance / correctness work, perf-neutral on this suite.
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 82.07 | 80.36 | 82.32 | 3312 |
+| prop_access | 47.40 | 45.91 | 49.13 | 3376 |
+| array_iter | 71.76 | 68.76 | 76.23 | 4384 |
+| string_concat | 3.07 | 2.85 | 3.11 | 4224 |
+| promise_chain | 3.27 | 3.23 | 3.32 | 7936 |
+| object_alloc | 18.03 | 17.68 | 18.50 | 8944 |
+
+Δ vs the `3cb87f9` row below: `array_iter` −71.4 % (251.12 →
+71.76) is the big mover — the for-of dense-Array path drops the
+per-iteration iterator-result-object allocation (RSS also falls,
+6912 → 4384 KB). `arith_loop` −44.1 % (146.93 → 82.07) — rung-5's
+int32 fast paths skip the boxed-Number path for the loop's add /
+compare. The rest are broad single-pass gains as rung-5 thins
+the per-opcode work in the surrounding loop scaffolding:
+`promise_chain` −29.5 % (4.64 → 3.27), `string_concat` −24.9 %
+(4.09 → 3.07), `object_alloc` −19.0 % (22.25 → 18.03),
+`prop_access` −16.0 % (56.43 → 47.40). All spreads are tight
+(≤ ±5 %); machine load avg ~3 at measurement.
+
 ### 2026-05-21 — cynic `3cb87f9`, host `Darwin 25.5.0 arm64`
 
 Threaded dispatch (rung-3) + unchecked opcode decode (rung-4).
