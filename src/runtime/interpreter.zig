@@ -4205,12 +4205,19 @@ pub fn startAsyncCall(
 /// without changing the active frame. `committed` is reset so the
 /// arm-local write-back flag never carries state across an opcode
 /// boundary.
+///
+/// The byte → `Op` conversion is an unchecked `@enumFromInt`: the
+/// bytecode is compiler-generated and never sourced from outside the
+/// engine, so every byte is a valid `Op`. A validity check here is
+/// ~a third of a tight dispatch loop's time; `@enumFromInt` is a
+/// free bitcast in release and still safety-checked in Debug, which
+/// catches any compiler bug that emits a stray byte.
 inline fn decodeNext(code: []const u8, ip: *usize, committed: *bool) RunError!Op {
     committed.* = false;
     if (ip.* >= code.len) return error.InvalidOpcode;
     const b = code[ip.*];
     ip.* += 1;
-    return std.enums.fromInt(Op, b) orelse error.InvalidOpcode;
+    return @enumFromInt(b);
 }
 
 /// Re-derive the loop-persistent dispatch state from the top frame,
@@ -4241,7 +4248,8 @@ inline fn reEnterDispatch(
     if (ip.* >= code.*.len) return error.InvalidOpcode;
     const b = code.*[ip.*];
     ip.* += 1;
-    return std.enums.fromInt(Op, b) orelse error.InvalidOpcode;
+    // Unchecked decode — see `decodeNext`.
+    return @enumFromInt(b);
 }
 
 /// Threaded-dispatch safe point. Runs the cooperative checks the
@@ -4367,7 +4375,7 @@ fn runFrames(
     // — see `runSafePoint`).
     if (try runSafePoint(realm)) |r| return r;
     if (ip >= code.len) return error.InvalidOpcode;
-    const first_op: Op = std.enums.fromInt(Op, code[ip]) orelse return error.InvalidOpcode;
+    const first_op: Op = @enumFromInt(code[ip]);
     ip += 1;
 
     dispatch: switch (first_op) {
