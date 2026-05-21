@@ -897,6 +897,9 @@ pub const Heap = struct {
                     self.markValue(taggedObject(entry.value_ptr.target_ns));
                 }
                 if (o.boxed_primitive) |bp| self.markValue(bp);
+                // §22.1.3 `[[StringData]]` — the JSString a `String`
+                // wrapper boxes; a typed slot, not a property.
+                if (o.boxed_string) |bs| self.markString(bs);
                 if (o.map_data) |md| {
                     for (md.entries.items) |entry| {
                         if (entry.deleted) continue;
@@ -1000,6 +1003,12 @@ pub const Heap = struct {
                     }
                 }
                 if (o.prototype) |p| self.markValue(taggedObject(p));
+                // §10.5 Proxy exotic — `[[ProxyTarget]]` /
+                // `[[ProxyHandler]]` are typed slots, not properties;
+                // a reachable Proxy must keep both alive.
+                if (o.proxy_target) |pt| self.markValue(taggedObject(pt));
+                if (o.proxy_handler) |ph| self.markValue(taggedObject(ph));
+                if (o.proxy_target_fn) |ptf| self.markValue(taggedFunction(ptf));
                 // §23.2 / §25.3 — TypedArray and DataView views
                 // borrow bytes from a sibling ArrayBuffer object via
                 // `viewed`. The ArrayBuffer is held only through this
@@ -1493,6 +1502,14 @@ pub const Heap = struct {
     /// `collectYoung` to root young objects reachable only through
     /// a raw `mature_obj.field = young` write in a builtin.
     fn markObjectInternalSlots(self: *Heap, o: *JSObject) void {
+        // §15.7 private instance fields — a typed internal map, not
+        // the property bag, so the remembered set never covers it and
+        // it must be scanned unconditionally here. The full `markValue`
+        // object arm walks it; this abbreviated copy had dropped it,
+        // so a mature instance's young `#field` value was swept out
+        // from under it.
+        var ppit = o.private_properties.iterator();
+        while (ppit.next()) |entry| self.markValue(entry.value_ptr.*);
         var pait = o.private_accessors.iterator();
         while (pait.next()) |entry| {
             if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
@@ -1508,6 +1525,7 @@ pub const Heap = struct {
             self.markValue(taggedObject(entry.value_ptr.target_ns));
         }
         if (o.boxed_primitive) |bp| self.markValue(bp);
+        if (o.boxed_string) |bs| self.markString(bs);
         if (o.map_data) |md| {
             for (md.entries.items) |entry| {
                 if (entry.deleted) continue;
@@ -1570,6 +1588,9 @@ pub const Heap = struct {
             }
         }
         if (o.prototype) |p| self.markValue(taggedObject(p));
+        if (o.proxy_target) |pt| self.markValue(taggedObject(pt));
+        if (o.proxy_handler) |ph| self.markValue(taggedObject(ph));
+        if (o.proxy_target_fn) |ptf| self.markValue(taggedFunction(ptf));
         if (o.typed_view) |tv| self.markValue(taggedObject(tv.viewed));
         if (o.data_view) |dv| self.markValue(taggedObject(dv.viewed));
     }
