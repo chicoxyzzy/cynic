@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 92.74 % | 99.89 % | 37182 / 40092 | 37182 / 37222 |
+| **runtime** | 92.75 % | 99.90 % | 37184 / 40092 | 37184 / 37222 |
 
 
 ## Where the runtime stands, by area
@@ -32,8 +32,6 @@ browser-era built-ins …).
 | `built-ins/RegExp` | 1593 | 9 | 161 | 90 % | 99 % |
 | `built-ins/Set` | 380 | 1 | 1 | 99 % | 100 % |
 | `built-ins/TypedArrayConstructors` | 655 | 1 | 16 | 97 % | 100 % |
-| `built-ins/decodeURI` | 54 | 1 | 0 | 98 % | 98 % |
-| `built-ins/decodeURIComponent` | 55 | 1 | 0 | 98 % | 98 % |
 | `language/module-code` | 574 | 1 | 14 | 97 % | 100 % |
 | `language/statements` | 8407 | 2 | 672 | 93 % | 100 % |
 | **_0 fails (passing or wholly OOS)_** | | | | | |
@@ -79,6 +77,8 @@ browser-era built-ins …).
 | `built-ins/WeakMap` | 101 | 0 | 0 | 100 % | 100 % |
 | `built-ins/WeakRef` | 28 | 0 | 0 | 100 % | 100 % |
 | `built-ins/WeakSet` | 84 | 0 | 0 | 100 % | 100 % |
+| `built-ins/decodeURI` | 55 | 0 | 0 | 100 % | 100 % |
+| `built-ins/decodeURIComponent` | 56 | 0 | 0 | 100 % | 100 % |
 | `built-ins/encodeURI` | 31 | 0 | 0 | 100 % | 100 % |
 | `built-ins/encodeURIComponent` | 31 | 0 | 0 | 100 % | 100 % |
 | `built-ins/global` | 9 | 0 | 0 | 100 % | 100 % |
@@ -157,16 +157,16 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-21 — cynic `2d19a68`, test262 `d0c1b455`
+### 2026-05-21 — cynic `b53f2bf`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 92.74 % | 99.89 % | 37182 / 40092 | 37182 / 37222 | +7 | 3m 05s |
+| **runtime** | 92.75 % | 99.90 % | 37184 / 40092 | 37184 / 37222 | +9 | 7m 06s |
 
 Biggest movers (runtime):
 
-- `language/expressions` +5
-- `language/types` +2
+- `built-ins/decodeURI` +1
+- `built-ins/decodeURIComponent` +1
 
 ### 2026-05-20 — cynic `1708084`, test262 `d0c1b455`
 
