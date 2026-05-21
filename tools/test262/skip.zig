@@ -458,6 +458,18 @@ pub const skip_ses_substrings = [_][]const u8{
     // 2 fixtures.
     "dynamic-import/eval-rqstd-once.js",
     "dynamic-import/update-to-dynamic-import.js",
+
+    // `language/expressions/async-arrow-function/prototype.js` — the
+    // test itself is fine (the `[[Prototype]]` of an async arrow IS
+    // `%AsyncFunction.prototype%`, verified independently), but it
+    // resolves `%AsyncFunction%` through the harness include
+    // `wellKnownIntrinsicObjects.js`, which obtains *every* intrinsic
+    // via `new Function("return " + source)()`. Cynic ships no
+    // runtime code construction (§15.3.2; AGENTS.md), so that helper
+    // silently yields `undefined` and `getWellKnownIntrinsicObject`
+    // throws. A permanent SES carve-out in a harness dependency, same
+    // shape as the `Function('return this;')()` cases above.
+    "async-arrow-function/prototype.js",
 };
 
 /// Sputnik-era and cross-realm fixtures that exercise

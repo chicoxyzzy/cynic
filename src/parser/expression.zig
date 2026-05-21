@@ -1345,7 +1345,10 @@ fn parseTemplateLiteral(p: *Parser, for_tag: bool) ParseError!Expression {
         if (saw_invalid_escape and !for_tag) {
             try p.report(.invalid_escape_sequence, head.span);
         }
-        try quasis.append(p.arena, .{ .span = innerQuasiSpan(head) });
+        try quasis.append(p.arena, .{
+            .span = innerQuasiSpan(head),
+            .had_invalid_escape = head.had_invalid_template_escape,
+        });
         return .{ .template_literal = .{
             .span = head.span,
             .quasis = try quasis.toOwnedSlice(p.arena),
@@ -1354,7 +1357,10 @@ fn parseTemplateLiteral(p: *Parser, for_tag: bool) ParseError!Expression {
     }
 
     std.debug.assert(head.kind == .template_head);
-    try quasis.append(p.arena, .{ .span = innerQuasiSpan(head) });
+    try quasis.append(p.arena, .{
+        .span = innerQuasiSpan(head),
+        .had_invalid_escape = head.had_invalid_template_escape,
+    });
 
     while (true) {
         const expr = try parseExpression(p);
@@ -1378,7 +1384,10 @@ fn parseTemplateLiteral(p: *Parser, for_tag: bool) ParseError!Expression {
         // past it; the next call to `bump()` will fetch a fresh token from
         // the lexer.
         p.current = part;
-        try quasis.append(p.arena, .{ .span = innerQuasiSpan(part) });
+        try quasis.append(p.arena, .{
+            .span = innerQuasiSpan(part),
+            .had_invalid_escape = part.had_invalid_template_escape,
+        });
         if (part.had_invalid_template_escape) saw_invalid_escape = true;
 
         if (part.kind == .template_tail) {

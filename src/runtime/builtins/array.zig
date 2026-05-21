@@ -3917,28 +3917,51 @@ fn createDataPropertyOrThrow(
 ) NativeError!void {
     const ObjMod = @import("../object.zig");
     const key = key_str.flatBytes();
-    const had_own = obj.hasOwn(key);
+    // §7.3.7 CreateDataPropertyOrThrow → §10.5.6 — when the
+    // receiver is a Proxy (the result of `Array.fromAsync.call(C,
+    // …)` where `C` constructs one), OrdinaryDefineOwnProperty
+    // becomes the proxy `defineProperty` trap. Each indexed
+    // element must fire it (test262 Array/fromAsync
+    // this-constructor-operations); a direct `setWithFlags` would
+    // write through to the target and skip the trap. Mirrors
+    // `createDataPropertyOrThrowGeneric`.
+    const proxy_mod = @import("proxy.zig");
+    var cur = obj;
+    while (cur.proxy_target != null or cur.proxy_revoked) {
+        const r = try proxy_mod.nativeProxyDefineProperty(realm, cur, key, value);
+        switch (r) {
+            .boolean => |b| {
+                if (!b) return throwTypeError(realm, "Array.fromAsync: 'defineProperty' trap returned false");
+                return;
+            },
+            .fallthrough => |t| {
+                if (t == cur) break;
+                cur = t;
+            },
+        }
+    }
+    const had_own = cur.hasOwn(key);
     if (!had_own) {
-        if (!obj.extensible) {
+        if (!cur.extensible) {
             return throwTypeError(realm, "Array.fromAsync: cannot define property on non-extensible object");
         }
     } else {
-        const cur = obj.flagsFor(key);
+        const cur_flags = cur.flagsFor(key);
         // §10.1.6.3 step 4 — redefining with `{w:T,e:T,c:T}` over
         // a non-configurable own property fails whenever any of
         // the current flags differs (configurable:false alone is
         // sufficient; configurable:true with writable:false /
         // enumerable:false is still allowed because the redefine
         // can flip them back on).
-        if (!cur.configurable) {
+        if (!cur_flags.configurable) {
             return throwTypeError(realm, "Array.fromAsync: cannot redefine non-configurable property");
         }
     }
-    obj.setWithFlags(realm.allocator, key, value, ObjMod.PropertyFlags.default) catch return error.OutOfMemory;
+    cur.setWithFlags(realm.allocator, key, value, ObjMod.PropertyFlags.default) catch return error.OutOfMemory;
     // Anchor the heap key string when the slice landed in the
     // named-property bag — see `createDataPropertyOrThrowGeneric`.
-    if (obj.properties.contains(key)) {
-        obj.key_anchors.append(realm.allocator, key_str) catch return error.OutOfMemory;
+    if (cur.properties.contains(key)) {
+        cur.key_anchors.append(realm.allocator, key_str) catch return error.OutOfMemory;
     }
 }
 

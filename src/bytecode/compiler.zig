@@ -2010,16 +2010,25 @@ pub const Compiler = struct {
         strs_arr.prototype = self.realm.intrinsics.array_prototype;
         strs_arr.is_array_exotic = true;
         for (lit.quasis, 0..) |q, i| {
-            const cooked = self.decodeQuasi(q.span) catch return error.OutOfMemory;
-            const owned = self.realm.heap.allocateString(cooked) catch return error.OutOfMemory;
-            // Free the temp decoded buffer if it was newly
-            // allocated (decodeQuasi may return either the raw
-            // span as-is or an owned heap slice).
-            self.allocator.free(cooked);
+            // §12.8.6 / §13.2.8.4 GetTemplateObject — a quasi whose
+            // body holds an escape that is invalid under the strict TV
+            // grammar has cooked value `undefined` (the `raw`
+            // companion above still carries the source text). The
+            // parser flags this per-quasi from the lexer; without the
+            // flag we'd hand `decodeQuasi` an invalid escape it can't
+            // decode and fail the whole compile.
+            const cooked_v: Value = if (q.had_invalid_escape)
+                Value.undefined_
+            else blk: {
+                const cooked = self.decodeQuasi(q.span) catch return error.OutOfMemory;
+                defer self.allocator.free(cooked);
+                const owned = self.realm.heap.allocateString(cooked) catch return error.OutOfMemory;
+                break :blk Value.fromString(owned);
+            };
             var ibuf: [16]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
             const idx_owned = self.realm.heap.allocateString(islice) catch return error.OutOfMemory;
-            strs_arr.setWithFlags(self.allocator, idx_owned.flatBytes(), Value.fromString(owned), indexed_frozen) catch return error.OutOfMemory;
+            strs_arr.setWithFlags(self.allocator, idx_owned.flatBytes(), cooked_v, indexed_frozen) catch return error.OutOfMemory;
         }
         strs_arr.setWithFlags(self.allocator, "length", Value.fromInt32(@intCast(lit.quasis.len)), meta_frozen) catch return error.OutOfMemory;
         strs_arr.setWithFlags(self.allocator, "raw", heap_mod.taggedObject(raw_arr), meta_frozen) catch return error.OutOfMemory;
@@ -7935,22 +7944,67 @@ pub const Compiler = struct {
                 try self.builder.emitOp(.ldar, target.span());
                 try self.builder.emitU8(r_src);
                 try self.builder.emitOp(.require_object_coercible, target.span());
+
+                // §14.3.3.4 RestBindingInitialization — when the
+                // pattern ends in `...rest`, allocate the excluded-key
+                // array up front and fill one entry per BindingProperty
+                // *as it is processed*. Building it inline (rather than
+                // re-walking the AST in a second pass) is what lets a
+                // computed key contribute its runtime post-ToPropertyKey
+                // value — a second pass can only see source text, which
+                // is why `{[expr]: x, ...rest}` used to fail to compile.
+                // Mirrors the destructuring-assignment path.
+                const r_excl_opt: ?u8 = if (obj_pat.rest != null) try self.reserveTemp() else null;
+                defer if (r_excl_opt != null) self.releaseTemp();
+                if (r_excl_opt) |r_excl| {
+                    try self.builder.emitOp(.make_array, target.span());
+                    try self.builder.emitOp(.star, target.span());
+                    try self.builder.emitU8(r_excl);
+                    const k_length = try self.internString("length");
+                    try self.builder.emitOp(.lda_smi, target.span());
+                    try self.builder.emitI32(@intCast(obj_pat.properties.len));
+                    try self.builder.emitOp(.sta_property, target.span());
+                    try self.builder.emitU16(k_length);
+                    try self.builder.emitU8(r_excl);
+                }
+
+                var excl_idx: u32 = 0;
                 for (obj_pat.properties) |prop| {
                     if (prop.key == .computed) {
                         // §14.3.3 BindingProperty : ComputedPropertyName
                         // BindingElement. Step 1: evaluate the key,
                         // ToPropertyKey-coerce. Step 2: GetV on
-                        // `r_src` via `lda_computed [r_obj]` (key in
-                        // acc, receiver in `r_obj`). The key
-                        // expression is evaluated BEFORE the value
-                        // is read, so a throwing `thrower()` key
-                        // propagates without ever touching the
-                        // value side (test262
+                        // `r_src`. The key expression is evaluated
+                        // BEFORE the value is read, so a throwing
+                        // `thrower()` key propagates without ever
+                        // touching the value side (test262
                         // `obj-ptrn-prop-eval-err.case`).
                         try self.compileExpression(prop.key.computed);
                         try self.builder.emitOp(.to_property_key, prop.span);
+                        const kr = try self.reserveTemp();
+                        try self.builder.emitOp(.star, prop.span);
+                        try self.builder.emitU8(kr);
+                        // Pin the post-ToPropertyKey value into the rest
+                        // exclusion list. `object_rest_from` honours
+                        // string entries; a symbol key is harmless (a
+                        // symbol-keyed property is excluded by it and
+                        // matches by the symbol's `prop_key`).
+                        if (r_excl_opt) |r_excl| {
+                            try self.builder.emitOp(.ldar, prop.span);
+                            try self.builder.emitU8(kr);
+                            var ibuf: [16]u8 = undefined;
+                            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{excl_idx}) catch unreachable;
+                            const ik = try self.internString(islice);
+                            try self.builder.emitOp(.sta_property, prop.span);
+                            try self.builder.emitU16(ik);
+                            try self.builder.emitU8(r_excl);
+                            excl_idx += 1;
+                        }
+                        try self.builder.emitOp(.ldar, prop.span);
+                        try self.builder.emitU8(kr);
                         try self.builder.emitOp(.lda_computed, prop.span);
                         try self.builder.emitU8(r_src);
+                        self.releaseTemp(); // kr
                         try self.applyDefaultIfNeeded(prop.value);
                         try self.assignPatternLeaf(prop.value.target, is_init);
                         continue;
@@ -7981,6 +8035,21 @@ pub const Compiler = struct {
                         break :blk try self.canonicalNumericKey(self.source[key_span.start..key_span.end]);
                     };
                     const k = try self.internString(key_slice);
+                    // Record the static key in the exclusion list at
+                    // first-pass time so the rest sees the same
+                    // exclusions regardless of any user-getter side
+                    // effects fired by the matching `lda_property`.
+                    if (r_excl_opt) |r_excl| {
+                        try self.builder.emitOp(.lda_constant, prop.span);
+                        try self.builder.emitU16(k);
+                        var ibuf: [16]u8 = undefined;
+                        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{excl_idx}) catch unreachable;
+                        const ik = try self.internString(islice);
+                        try self.builder.emitOp(.sta_property, prop.span);
+                        try self.builder.emitU16(ik);
+                        try self.builder.emitU8(r_excl);
+                        excl_idx += 1;
+                    }
                     try self.builder.emitOp(.ldar, prop.span);
                     try self.builder.emitU8(r_src);
                     try self.builder.emitOp(.lda_property, prop.span);
@@ -7989,56 +8058,12 @@ pub const Compiler = struct {
                     try self.assignPatternLeaf(prop.value.target, is_init);
                 }
                 if (obj_pat.rest) |rest_id| {
-                    // §14.3.3.4 RestElement on ObjectPattern — collect
-                    // every own enumerable property of `r_src` not in
-                    // the excluded list (the previously-bound keys)
-                    // into a fresh object.
-                    const r_excl = try self.reserveTemp();
-                    defer self.releaseTemp();
-                    try self.builder.emitOp(.make_array, target.span());
-                    try self.builder.emitOp(.star, target.span());
-                    try self.builder.emitU8(r_excl);
-                    const k_length = try self.internString("length");
-                    try self.builder.emitOp(.lda_smi, target.span());
-                    try self.builder.emitI32(@intCast(obj_pat.properties.len));
-                    try self.builder.emitOp(.sta_property, target.span());
-                    try self.builder.emitU16(k_length);
-                    try self.builder.emitU8(r_excl);
-                    for (obj_pat.properties, 0..) |prop, idx| {
-                        const key_span: Span = switch (prop.key) {
-                            .ident => |s| s,
-                            .string => |s| s,
-                            .numeric => |s| s,
-                            else => return error.UnsupportedStatement,
-                        };
-                        const key_slice: []const u8 = blk: {
-                            if (prop.key == .string) {
-                                const raw = self.source[key_span.start..key_span.end];
-                                if (raw.len < 2) break :blk raw;
-                                break :blk raw[1 .. raw.len - 1];
-                            }
-                            if (prop.key == .ident) {
-                                break :blk try self.decodeIdentifierName(self.source[key_span.start..key_span.end]);
-                            }
-                            // §13.2.5.4 — canonicalise NumericLiteral
-                            // key to match `lda_property` path above so
-                            // the exclusion set is in the same form as
-                            // the source's stored key.
-                            break :blk try self.canonicalNumericKey(self.source[key_span.start..key_span.end]);
-                        };
-                        const k = try self.internString(key_slice);
-                        try self.builder.emitOp(.lda_constant, target.span());
-                        try self.builder.emitU16(k);
-                        var idx_buf: [16]u8 = undefined;
-                        const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch unreachable;
-                        const idx_k = try self.internString(idx_slice);
-                        try self.builder.emitOp(.sta_property, target.span());
-                        try self.builder.emitU16(idx_k);
-                        try self.builder.emitU8(r_excl);
-                    }
+                    // §14.3.3.4 RestElement — collect every own
+                    // enumerable property of `r_src` not in the
+                    // excluded list into a fresh object.
                     try self.builder.emitOp(.object_rest_from, target.span());
                     try self.builder.emitU8(r_src);
-                    try self.builder.emitU8(r_excl);
+                    try self.builder.emitU8(r_excl_opt.?);
                     const rest_name = self.source[rest_id.span.start..rest_id.span.end];
                     try self.assignToBinding(rest_name, rest_id.span, is_init);
                 }

@@ -118,6 +118,15 @@ pub const TemplateQuasi = struct {
     /// Span over the *contents* of the quasi, excluding the surrounding
     /// `` ` ``, `${`, or `}`. Empty quasi has start == end.
     span: Span,
+    /// §12.8.6 — the quasi contains an escape sequence that is invalid
+    /// under the strict TV grammar (`\xg`, `\u0g`, `\9`, `\01`,
+    /// `\u{10FFFFF}`, …). For a tagged template this is legal: the
+    /// cooked value at this position is `undefined` while `raw` keeps
+    /// the source text. For a standalone template the parser has
+    /// already reported a SyntaxError. Sourced from the lexer's
+    /// `Token.had_invalid_template_escape` — the lexer is the single
+    /// authority on escape shape.
+    had_invalid_escape: bool = false,
 };
 
 pub const IdentRef = struct { span: Span };
