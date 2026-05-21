@@ -2000,6 +2000,12 @@ pub const Compiler = struct {
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
             const idx_owned = self.realm.heap.allocateString(islice) catch return error.OutOfMemory;
             raw_arr.setWithFlags(self.allocator, idx_owned.flatBytes(), Value.fromString(owned), indexed_frozen) catch return error.OutOfMemory;
+            // The frozen descriptor flags force `setWithFlags` to
+            // bag-promote the indexed slot into `properties`, keyed
+            // by `idx_owned`'s borrowed byte slice. Anchor the
+            // JSString or a GC frees it and the key dangles —
+            // `String.raw` then reads the segment back as `undefined`.
+            raw_arr.key_anchors.append(self.allocator, idx_owned) catch return error.OutOfMemory;
         }
         raw_arr.setWithFlags(self.allocator, "length", Value.fromInt32(@intCast(lit.quasis.len)), meta_frozen) catch return error.OutOfMemory;
         raw_arr.extensible = false;
@@ -2028,6 +2034,9 @@ pub const Compiler = struct {
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
             const idx_owned = self.realm.heap.allocateString(islice) catch return error.OutOfMemory;
             strs_arr.setWithFlags(self.allocator, idx_owned.flatBytes(), cooked_v, indexed_frozen) catch return error.OutOfMemory;
+            // See the `raw_arr` companion above — the bag-promoted
+            // frozen index key needs its JSString anchored.
+            strs_arr.key_anchors.append(self.allocator, idx_owned) catch return error.OutOfMemory;
         }
         strs_arr.setWithFlags(self.allocator, "length", Value.fromInt32(@intCast(lit.quasis.len)), meta_frozen) catch return error.OutOfMemory;
         strs_arr.setWithFlags(self.allocator, "raw", heap_mod.taggedObject(raw_arr), meta_frozen) catch return error.OutOfMemory;
@@ -5307,10 +5316,25 @@ pub const Compiler = struct {
         // assignment fall through to the function env (the spec
         // gives them the legacy single-binding behaviour). Pattern
         // targets get the same treatment as identifier targets.
-        const per_iter_env = (bind_target_kind == .binding or bind_target_kind == .pattern) and
+        const binding_env_needed = (bind_target_kind == .binding or bind_target_kind == .pattern) and
             (bind_kind == .let_ or bind_kind == .const_);
+        // §14.7.5.6 optimisation — the per-iteration environment is
+        // only spec-observable when a nested closure in the body
+        // captures the loop variable. With no such capture, V8 / JSC
+        // / SpiderMonkey all elide it; Cynic hoists one env out of
+        // the loop and reuses it, dropping a make/declare/pop on
+        // every iteration. Single-identifier `let` / `const` only —
+        // pattern targets keep the spec-faithful per-iteration env.
+        var per_iter_env = binding_env_needed;
+        var hoist_binding_env = false;
+        if (binding_env_needed and bind_target_kind == .binding and
+            !self.bodyHasClosure(s.body))
+        {
+            per_iter_env = false;
+            hoist_binding_env = true;
+        }
 
-        var loop_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = per_iter_env };
+        var loop_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = per_iter_env or hoist_binding_env };
         defer loop_scope.deinit(self.allocator);
         const saved_scope = self.scope;
         self.scope = &loop_scope;
@@ -5337,7 +5361,10 @@ pub const Compiler = struct {
         // invoked later — `scope-head-lex-{open,close}.js` and
         // `head-{let,const}-bound-names-fordecl-tdz.js` assert this.
         var head_tdz_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = true };
-        const head_tdz_env = per_iter_env;
+        // §13.7.5.6 step 2 — the head TDZ env is required for every
+        // `let` / `const` head regardless of whether the body's
+        // per-iteration env is hoisted away.
+        const head_tdz_env = binding_env_needed;
         var saved_head_slot_count: u8 = 0;
         if (head_tdz_env) {
             saved_head_slot_count = self.env_slot_count;
@@ -5417,6 +5444,22 @@ pub const Compiler = struct {
         const fast_for_of = s.kind != .in_ and !s.is_await;
         const r_done = try self.reserveTemp();
         defer self.releaseTemp();
+
+        // §14.7.5.6 optimisation — hoisted binding env. When the body
+        // captures nothing, the loop variable's environment is built
+        // once here, before the loop, and reused across iterations
+        // instead of a make / declare / pop on every step.
+        var hoist_size_patch: usize = 0;
+        var saved_hoist_slot_count: u8 = 0;
+        if (hoist_binding_env) {
+            saved_hoist_slot_count = self.env_slot_count;
+            self.env_slot_count = 0;
+            try self.builder.emitOp(.make_environment, s.span);
+            hoist_size_patch = self.builder.code.items.len;
+            try self.builder.emitU8(0); // placeholder; patched below
+            self.env_depth = saved_env_depth + 1;
+            _ = try self.declareBinding(bind_name, bind_kind, bind_span);
+        }
 
         const loop_start = self.builder.here();
 
@@ -5503,6 +5546,10 @@ pub const Compiler = struct {
                 // inner lexicals know where to land.
                 _ = try self.declareBinding(bind_name, bind_kind, bind_span);
             }
+        } else if (hoist_binding_env) {
+            // The loop variable was already declared in the hoisted
+            // env above the loop; `assignToBinding` below writes it
+            // each iteration. Nothing to declare here.
         } else if (bind_target_kind == .binding) {
             // var / non-let binding lives in the function env.
             _ = try self.declareBinding(bind_name, bind_kind, bind_span);
@@ -5561,7 +5608,10 @@ pub const Compiler = struct {
 
         var ctx: LoopContext = .{
             .continue_target = 0,
-            .needs_env_pop = per_iter_env,
+            // Both the per-iteration env and the hoisted env are live
+            // inside the body, so a `break` (or an outer loop's
+            // break / continue skipping through) must pop one.
+            .needs_env_pop = per_iter_env or hoist_binding_env,
             // §7.4.6 IteratorClose — `for-of` only. `for-in` walks
             // own keys directly and has no `.return()` contract.
             .iter_register = if (s.kind == .in_) null else r_iter,
@@ -5630,9 +5680,17 @@ pub const Compiler = struct {
         try self.builder.emitI16(0);
         try self.builder.patchI16(back_patch, loop_start);
 
+        // The `for_of_next`-done path falls through to here with the
+        // hoisted env still live, so pop it. `break` already popped
+        // its env via `needs_env_pop`, so it targets `real_exit`,
+        // past this pop. With no hoisted env the two labels coincide.
         const exit_target = self.builder.here();
+        if (hoist_binding_env) {
+            try self.builder.emitOp(.pop_env, s.span);
+        }
+        const real_exit = self.builder.here();
         try self.builder.patchI16(exit_patch, exit_target);
-        for (ctx.break_patches.items) |p| try self.builder.patchI16(p, exit_target);
+        for (ctx.break_patches.items) |p| try self.builder.patchI16(p, real_exit);
 
         // Patch the per-iter `make_environment` size to whatever
         // env_slot_count grew to (iteration var + body lexicals),
@@ -5640,6 +5698,10 @@ pub const Compiler = struct {
         if (per_iter_env) {
             self.builder.code.items[per_iter_size_patch] = self.env_slot_count;
             self.env_slot_count = saved_per_iter_slot_count;
+        }
+        if (hoist_binding_env) {
+            self.builder.code.items[hoist_size_patch] = self.env_slot_count;
+            self.env_slot_count = saved_hoist_slot_count;
         }
     }
 
@@ -9167,139 +9229,151 @@ pub const Compiler = struct {
         for (ctx.continue_patches.items) |p| try self.builder.patchI16(p, test_pc);
     }
 
-    /// §14.7.4.4 CreatePerIterationEnvironment optimisation —
-    /// scan `body` for any *nested* function/arrow/method/class that
-    /// references one of `names`. The per-iteration environment is
-    /// only spec-observable when such a closure exists (it's what
-    /// distinguishes "each iteration's `i` is freshly allocated"
-    /// from "loop variable is mutated in-place"); when no closure
-    /// captures the binding, V8 / JSC / SpiderMonkey all elide the
-    /// per-iter env and run the loop body in the loop's single
-    /// outer scope. That's a >10× speedup on tight numeric loops
-    /// like the regex property-escapes helper
-    /// `for (let codePoint = start; codePoint <= end; codePoint++)
-    ///   { codePoints[length++] = codePoint; }`
-    /// which otherwise blow past the harness step budget once the
-    /// inner allocation runs every iteration.
+    /// True when `stmt`'s AST subtree contains any function, arrow,
+    /// or class — anything that closes over the enclosing scope.
     ///
-    /// Conservative — match by spelling. Shadowing inside a nested
-    /// function (parameter or local `let X`) is treated as "captured"
-    /// even though it doesn't actually reach the loop binding;
-    /// over-approximation just keeps the spec-faithful slow path.
-    fn forLoopBindingsAreCaptured(
-        self: *Compiler,
-        body: *ast.statement.Statement,
-        names: []const []const u8,
-    ) CompileError!bool {
-        return self.stmtMentionsNamesInNestedFn(body, names);
-    }
-
-    fn stmtMentionsNamesInNestedFn(
-        self: *Compiler,
-        stmt: *const ast.statement.Statement,
-        names: []const []const u8,
-    ) CompileError!bool {
-        switch (stmt.*) {
-            .expression => |es| return self.exprMentionsNamesInNestedFn(&es.expression, names),
-            .block => |bs| return self.stmtsMentionsNamesInNestedFn(bs.body, names),
-            .empty, .debugger_, .break_, .continue_ => return false,
+    /// Gates the for-of per-iteration-env hoist. Cynic flattens a
+    /// loop body's block-scoped lexicals into the loop's own
+    /// environment (blocks have no runtime env of their own — see
+    /// `compileBlock`), so a hoisted single env would wrongly share
+    /// not just the loop variable but every body lexical across
+    /// iterations. A closure is the only thing that can observe
+    /// that sharing; with none in the body, hoisting is sound. The
+    /// exhaustive switches make a newly-added AST node a compile
+    /// error here rather than a silent miss.
+    fn bodyHasClosure(self: *Compiler, stmt: *const ast.statement.Statement) bool {
+        return switch (stmt.*) {
+            .function_decl, .class_decl => true,
+            .empty, .debugger_, .break_, .continue_, .import_decl, .export_decl => false,
+            .expression => |es| self.exprHasClosure(&es.expression),
+            .block => |bs| self.stmtsHaveClosure(bs.body),
             .lexical => |ld| {
                 for (ld.declarators) |d| {
-                    if (d.init) |*e| {
-                        if (try self.exprMentionsNamesInNestedFn(e, names)) return true;
-                    }
+                    if (d.init) |*e| if (self.exprHasClosure(e)) return true;
                 }
                 return false;
             },
-            .if_ => |ifs| {
-                if (try self.exprMentionsNamesInNestedFn(&ifs.test_, names)) return true;
-                if (try self.stmtMentionsNamesInNestedFn(ifs.consequent, names)) return true;
-                if (ifs.alternate) |alt| return self.stmtMentionsNamesInNestedFn(alt, names);
-                return false;
-            },
-            .while_ => |ws| {
-                if (try self.exprMentionsNamesInNestedFn(&ws.test_, names)) return true;
-                return self.stmtMentionsNamesInNestedFn(ws.body, names);
-            },
-            .do_while => |dw| {
-                if (try self.stmtMentionsNamesInNestedFn(dw.body, names)) return true;
-                return self.exprMentionsNamesInNestedFn(&dw.test_, names);
-            },
-            .return_ => |rs| {
-                if (rs.argument) |*e| return self.exprMentionsNamesInNestedFn(e, names);
-                return false;
-            },
-            .throw_ => |ts| return self.exprMentionsNamesInNestedFn(&ts.argument, names),
-            .for_ => |fs| {
+            .if_ => |ifs| self.exprHasClosure(&ifs.test_) or
+                self.bodyHasClosure(ifs.consequent) or
+                (if (ifs.alternate) |alt| self.bodyHasClosure(alt) else false),
+            .while_ => |ws| self.exprHasClosure(&ws.test_) or self.bodyHasClosure(ws.body),
+            .do_while => |dw| self.bodyHasClosure(dw.body) or self.exprHasClosure(&dw.test_),
+            .return_ => |rs| if (rs.argument) |*e| self.exprHasClosure(e) else false,
+            .throw_ => |ts| self.exprHasClosure(&ts.argument),
+            .for_ => |fs| blk: {
                 if (fs.init) |head| switch (head) {
-                    .lexical => |ld| {
-                        for (ld.declarators) |d| {
-                            if (d.init) |*e| {
-                                if (try self.exprMentionsNamesInNestedFn(e, names)) return true;
-                            }
-                        }
+                    .lexical => |ld| for (ld.declarators) |d| {
+                        if (d.init) |*e| if (self.exprHasClosure(e)) break :blk true;
                     },
-                    .expression => |e| {
-                        if (try self.exprMentionsNamesInNestedFn(&e, names)) return true;
-                    },
+                    .expression => |e| if (self.exprHasClosure(&e)) break :blk true,
                 };
-                if (fs.test_) |*t| {
-                    if (try self.exprMentionsNamesInNestedFn(t, names)) return true;
-                }
-                if (fs.update) |*u| {
-                    if (try self.exprMentionsNamesInNestedFn(u, names)) return true;
-                }
-                return self.stmtMentionsNamesInNestedFn(fs.body, names);
+                if (fs.test_) |*t| if (self.exprHasClosure(t)) break :blk true;
+                if (fs.update) |*u| if (self.exprHasClosure(u)) break :blk true;
+                break :blk self.bodyHasClosure(fs.body);
             },
-            .for_in_of => |fio| {
+            .for_in_of => |fio| blk: {
                 if (fio.left == .expression) {
-                    if (try self.exprMentionsNamesInNestedFn(&fio.left.expression, names)) return true;
-                } else {
-                    for (fio.left.lexical.declarators) |d| {
-                        if (d.init) |*e| {
-                            if (try self.exprMentionsNamesInNestedFn(e, names)) return true;
-                        }
-                    }
+                    if (self.exprHasClosure(&fio.left.expression)) break :blk true;
+                } else for (fio.left.lexical.declarators) |d| {
+                    if (d.init) |*e| if (self.exprHasClosure(e)) break :blk true;
                 }
-                if (try self.exprMentionsNamesInNestedFn(&fio.right, names)) return true;
-                return self.stmtMentionsNamesInNestedFn(fio.body, names);
+                if (self.exprHasClosure(&fio.right)) break :blk true;
+                break :blk self.bodyHasClosure(fio.body);
             },
-            .try_ => |ts| {
-                if (try self.stmtsMentionsNamesInNestedFn(ts.block.body, names)) return true;
-                if (ts.handler) |h| {
-                    if (try self.stmtsMentionsNamesInNestedFn(h.body.body, names)) return true;
-                }
-                if (ts.finalizer) |f| {
-                    if (try self.stmtsMentionsNamesInNestedFn(f.body, names)) return true;
-                }
-                return false;
+            .try_ => |ts| blk: {
+                if (self.stmtsHaveClosure(ts.block.body)) break :blk true;
+                if (ts.handler) |h| if (self.stmtsHaveClosure(h.body.body)) break :blk true;
+                if (ts.finalizer) |f| if (self.stmtsHaveClosure(f.body)) break :blk true;
+                break :blk false;
             },
-            .switch_ => |sw| {
-                if (try self.exprMentionsNamesInNestedFn(&sw.discriminant, names)) return true;
+            .switch_ => |sw| blk: {
+                if (self.exprHasClosure(&sw.discriminant)) break :blk true;
                 for (sw.cases) |c| {
-                    if (c.test_) |*t| {
-                        if (try self.exprMentionsNamesInNestedFn(t, names)) return true;
-                    }
-                    if (try self.stmtsMentionsNamesInNestedFn(c.body, names)) return true;
+                    if (c.test_) |*t| if (self.exprHasClosure(t)) break :blk true;
+                    if (self.stmtsHaveClosure(c.body)) break :blk true;
                 }
-                return false;
+                break :blk false;
             },
-            .labeled => |ls| return self.stmtMentionsNamesInNestedFn(ls.body, names),
-            .function_decl => |fd| return self.fnBodyMentionsNames(fd.params, fd.body.body, names),
-            .class_decl => |cd| return self.classBodyMentionsNames(cd.superclass, cd.body, names),
-            .import_decl, .export_decl => return false,
-        }
+            .labeled => |ls| self.bodyHasClosure(ls.body),
+        };
     }
 
-    fn stmtsMentionsNamesInNestedFn(
-        self: *Compiler,
-        stmts: []const ast.statement.Statement,
-        names: []const []const u8,
-    ) CompileError!bool {
+    fn stmtsHaveClosure(self: *Compiler, stmts: []const ast.statement.Statement) bool {
         for (stmts) |*st| {
-            if (try self.stmtMentionsNamesInNestedFn(st, names)) return true;
+            if (self.bodyHasClosure(st)) return true;
         }
         return false;
+    }
+
+    fn exprHasClosure(self: *Compiler, e: *const ast.expression.Expression) bool {
+        return switch (e.*) {
+            .function_expr, .arrow_function, .class_expr => true,
+            .null_literal,
+            .boolean_literal,
+            .numeric_literal,
+            .bigint_literal,
+            .string_literal,
+            .regex_literal,
+            .this_expr,
+            .super_,
+            .import_meta,
+            .new_target,
+            .private_identifier,
+            .identifier_reference,
+            => false,
+            .template_literal => |tl| {
+                for (tl.expressions) |*sub| if (self.exprHasClosure(sub)) return true;
+                return false;
+            },
+            .parenthesized => |p| self.exprHasClosure(p.expression),
+            .unary => |u| self.exprHasClosure(u.operand),
+            .binary => |b| self.exprHasClosure(b.lhs) or self.exprHasClosure(b.rhs),
+            .logical => |l| self.exprHasClosure(l.lhs) or self.exprHasClosure(l.rhs),
+            .conditional => |c| self.exprHasClosure(c.test_) or
+                self.exprHasClosure(c.consequent) or self.exprHasClosure(c.alternate),
+            .assignment => |a| self.exprHasClosure(a.target) or self.exprHasClosure(a.value),
+            .sequence => |sq| {
+                for (sq.expressions) |*sub| if (self.exprHasClosure(sub)) return true;
+                return false;
+            },
+            .member => |m| self.exprHasClosure(m.object) or
+                (m.property == .computed and self.exprHasClosure(m.property.computed)),
+            .call => |c| blk: {
+                if (self.exprHasClosure(c.callee)) break :blk true;
+                for (c.arguments) |*arg| if (self.exprHasClosure(arg)) break :blk true;
+                break :blk false;
+            },
+            .new_expr => |n| blk: {
+                if (self.exprHasClosure(n.callee)) break :blk true;
+                for (n.arguments) |*arg| if (self.exprHasClosure(arg)) break :blk true;
+                break :blk false;
+            },
+            .chain => |ch| self.exprHasClosure(ch.expression),
+            .tagged_template => |tt| self.exprHasClosure(tt.tag) or self.exprHasClosure(tt.quasi),
+            .spread => |sp| self.exprHasClosure(sp.argument),
+            .update => |up| self.exprHasClosure(up.operand),
+            .array_literal => |al| {
+                for (al.elements) |maybe| {
+                    if (maybe) |sub| if (self.exprHasClosure(&sub)) return true;
+                }
+                return false;
+            },
+            .object_literal => |ol| blk: {
+                for (ol.properties) |m| switch (m) {
+                    .property => |p| {
+                        if (p.key == .computed and self.exprHasClosure(p.key.computed)) break :blk true;
+                        if (self.exprHasClosure(&p.value)) break :blk true;
+                    },
+                    .spread => |sp| if (self.exprHasClosure(sp.argument)) break :blk true,
+                    // An object method is itself a closure.
+                    .method => break :blk true,
+                };
+                break :blk false;
+            },
+            .yield => |y| if (y.argument) |arg| self.exprHasClosure(arg) else false,
+            .await_ => |aw| self.exprHasClosure(aw.argument),
+            .import_call => |ic| self.exprHasClosure(ic.source),
+        };
     }
 
     fn exprMentionsNamesInNestedFn(
@@ -9833,11 +9907,11 @@ pub const Compiler = struct {
         // (`for (let i = 0, j = 10; …)`); `var` heads stay on the
         // legacy single-slot path.
         //
-        // §14.7.4.4 optimisation — when no nested function in the
-        // loop body / update / test captures any head binding, the
-        // per-iter env is not spec-observable. V8 / JSC / SpiderMonkey
-        // all elide it and run the loop in a single lexical scope;
-        // we do the same via `forLoopBindingsAreCaptured`. The
+        // §14.7.4.4 optimisation — when no closure in the loop body,
+        // and no nested function in the update / test, captures a
+        // head binding, the per-iter env is not spec-observable.
+        // V8 / JSC / SpiderMonkey all elide it and run the loop in a
+        // single lexical scope; Cynic does the same. The
         // regex property-escapes helper
         // `for (let codePoint = start; codePoint <= end; codePoint++)
         //   { codePoints[length++] = codePoint; }`
@@ -9899,7 +9973,14 @@ pub const Compiler = struct {
                         }
                     }
                     if (!captured) {
-                        if (try self.forLoopBindingsAreCaptured(s.body, names_buf.items)) {
+                        // Cynic flattens a loop body's block lexicals
+                        // into the loop env (blocks have no runtime
+                        // env of their own), so a closure capturing a
+                        // body lexical — not just a loop-head binding
+                        // — also observes per-iteration freshness.
+                        // Any closure in the body therefore keeps the
+                        // per-iteration env.
+                        if (self.bodyHasClosure(s.body)) {
                             captured = true;
                         } else if (s.test_) |*t| {
                             if (try self.exprMentionsNamesInNestedFn(t, names_buf.items)) captured = true;

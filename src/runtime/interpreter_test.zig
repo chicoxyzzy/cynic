@@ -1588,6 +1588,53 @@ test "later: for-of with break stops early" {
     , 3);
 }
 
+test "for-of: hoisted-env loop with break / continue" {
+    // §14.7.5.6 — body captures nothing, so the per-iteration env
+    // is hoisted to a single env. break / continue must still
+    // unwind it correctly.
+    try expectScriptIntWithBuiltins(
+        \\let s = 0;
+        \\for (const v of [1, 2, 3, 4, 5]) { if (v % 2 === 0) continue; s += v; }
+        \\let t = 0;
+        \\for (const v of [1, 2, 3, 4, 5]) { if (v === 4) break; t += v; }
+        \\s * 100 + t;
+    , 906);
+}
+
+test "for-of: closure over loop var keeps per-iteration values" {
+    // A closure captures the loop variable — the per-iteration env
+    // must NOT be hoisted; each closure sees its own iteration.
+    try expectScriptStringWithBuiltins(
+        \\const fns = [];
+        \\for (const v of [10, 20, 30]) fns.push(() => v);
+        \\fns.map(f => f()).join(",");
+    , "10,20,30");
+}
+
+test "for-of: closure over a body lexical keeps per-iteration values" {
+    // Cynic flattens body-block lexicals into the loop env, so a
+    // closure capturing a body `const` (not the loop variable)
+    // must also keep the per-iteration env.
+    try expectScriptStringWithBuiltins(
+        \\const fns = [];
+        \\for (const v of [1, 2, 3]) { const w = v * 100; fns.push(() => w); }
+        \\fns.map(f => f()).join(",");
+    , "100,200,300");
+}
+
+test "for: closure over a body lexical keeps per-iteration values" {
+    // §14.7.4.4 — the C-style for loop flattens body-block lexicals
+    // into its per-iteration env, so a closure capturing a body
+    // `let` (not the loop counter `i`) must also keep that env
+    // per-iteration. Regression for the per-iter-env elision gate
+    // missing body-lexical captures.
+    try expectScriptStringWithBuiltins(
+        \\const fns = [];
+        \\for (let i = 0; i < 3; i++) { let w = i * 10; fns.push(() => w); }
+        \\fns.map(f => f()).join(",");
+    , "0,10,20");
+}
+
 test "later: new Number(5) wraps a primitive that ToNumber unwraps" {
     try expectScriptIntWithBuiltins(
         \\const n = new Number(5);
