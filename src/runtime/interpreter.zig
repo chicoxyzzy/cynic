@@ -8210,6 +8210,137 @@ fn runFrames(
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
+            .for_of_next => {
+                // §7.4.2 IteratorNext + §7.4.8 IteratorStepValue,
+                // folded for plain sync `for-of`. `r_next` holds
+                // the iterator's `[[NextMethod]]` captured at loop
+                // entry. Produces the stepped value in `acc` and
+                // the boolean `done` in `r_done`.
+                const r_iter = code[ip];
+                const r_next = code[ip + 1];
+                const r_done = code[ip + 2];
+                ip += 3;
+                const iter_v = registers[r_iter];
+                const next_v = registers[r_next];
+
+                // Fast path — the unmodified built-in Array
+                // iterator: carries `array_like_iter` state, chains
+                // to `%ArrayIteratorPrototype%`, and `r_next` is
+                // still the original `next` native. Step the
+                // backing storage directly; no `.next()` call, no
+                // CreateIterResultObject allocation.
+                fast: {
+                    const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse break :fast;
+                    const st = iter_obj.array_like_iter orelse break :fast;
+                    // `entries` builds a [k,v] pair object — leave
+                    // it to the spec slow path below.
+                    if (st.kind == .entries) break :fast;
+                    if (iter_obj.prototype != realm.intrinsics.array_iterator_prototype) break :fast;
+                    if (next_v.bits != realm.intrinsics.array_iterator_next.bits) break :fast;
+                    const collections_mod = @import("builtins/collections.zig");
+                    const stepped = collections_mod.arrayIterStepFast(realm, iter_v) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => {
+                            const ex = consumePendingException(realm) orelse try makeTypeError(realm, "iterator step failed");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                    };
+                    if (stepped) |v| {
+                        acc = v;
+                        registers[r_done] = Value.false_;
+                    } else {
+                        acc = Value.undefined_;
+                        registers[r_done] = Value.true_;
+                    }
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+
+                // Slow path — §7.4.2 IteratorNext protocol. Any
+                // sync iterator: generators, Map / Set / String
+                // iterators, user iterables, or a monkeypatched
+                // Array iterator.
+                const next_fn = heap_mod.valueAsFunction(next_v) orelse {
+                    const ex = try makeTypeError(realm, "iterator.next is not a function");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                };
+                const outcome = callJSFunction(allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.InvalidOpcode,
+                };
+                const result_v = switch (outcome) {
+                    .value, .yielded => |v| v,
+                    .thrown => |ex| {
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                };
+                // §7.4.2 step 4 — `next()` result must be an object.
+                const result_obj = heap_mod.valueAsPlainObject(result_v) orelse {
+                    const ex = try makeTypeError(realm, "iterator result is not an object");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                };
+                // §7.4.3 IteratorComplete — read `.done`.
+                const done_v = intrinsics_mod.getPropertyChain(realm, result_obj, "done") catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => {
+                        const ex = consumePendingException(realm) orelse try makeTypeError(realm, "iterator result .done read failed");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                };
+                if (toBoolean(done_v)) {
+                    // §7.4.8 step 3 — on `done`, `.value` is NOT read.
+                    acc = Value.undefined_;
+                    registers[r_done] = Value.true_;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+                // §7.4.7 IteratorValue — read `.value`.
+                const value_v = intrinsics_mod.getPropertyChain(realm, result_obj, "value") catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => {
+                        const ex = consumePendingException(realm) orelse try makeTypeError(realm, "iterator result .value read failed");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                };
+                acc = value_v;
+                registers[r_done] = Value.false_;
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            },
+
             .for_in_open => {
                 // §14.7.5.6 — snapshot the object's own + inherited
                 // string keys into a fresh array iterator. `null` /

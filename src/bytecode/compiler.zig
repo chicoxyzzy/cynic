@@ -5410,38 +5410,66 @@ pub const Compiler = struct {
         try self.builder.emitOp(.star, s.span);
         try self.builder.emitU8(r_next_fn);
 
+        // Plain sync `for-of` folds the step into `for_of_next`,
+        // which writes the boolean `done` into its own register.
+        // `for-await-of` and `for-in` keep the open-coded
+        // `call_method` + `lda_property` sequence.
+        const fast_for_of = s.kind != .in_ and !s.is_await;
+        const r_done = try self.reserveTemp();
+        defer self.releaseTemp();
+
         const loop_start = self.builder.here();
 
-        // r_result = r_iter.next() — uses the cached `next` from
-        // r_next_fn (read once above) instead of re-loading every
-        // iteration.
-        // call_method r_recv=r_iter, r_callee=r_next_fn, argc=0
-        try self.builder.emitOp(.call_method, s.span);
-        try self.builder.emitU8(r_iter);
-        try self.builder.emitU8(r_next_fn);
-        try self.builder.emitU8(0);
-        // §14.7.5 / §27.1.4.4 — for-await-of awaits each next()
-        // result. Sync iters return `{done, value}` directly;
-        // `await` on a non-Promise resolves to the value as-is, so
-        // the sync fallback in `async_iter_open` composes.
-        if (s.is_await) try self.builder.emitOp(.await_, s.span);
-        try self.builder.emitOp(.star, s.span);
-        try self.builder.emitU8(r_result);
+        if (fast_for_of) {
+            // §7.4.2 IteratorNext + §7.4.8 IteratorStepValue —
+            // `for_of_next` folds the `.next()` call, the
+            // result-not-object check, and the `.done` / `.value`
+            // reads into one op (fast path for the built-in Array
+            // iterator). The stepped value lands in `acc`, the
+            // boolean `done` in `r_done`.
+            try self.builder.emitOp(.for_of_next, s.span);
+            try self.builder.emitU8(r_iter);
+            try self.builder.emitU8(r_next_fn);
+            try self.builder.emitU8(r_done);
+            // r_result holds the stepped value across the body.
+            try self.builder.emitOp(.star, s.span);
+            try self.builder.emitU8(r_result);
+            // acc = done, for the loop-exit test below.
+            try self.builder.emitOp(.ldar, s.span);
+            try self.builder.emitU8(r_done);
+        } else {
+            // r_result = r_iter.next() — uses the cached `next`
+            // from r_next_fn (read once above).
+            // call_method r_recv=r_iter, r_callee=r_next_fn, argc=0
+            try self.builder.emitOp(.call_method, s.span);
+            try self.builder.emitU8(r_iter);
+            try self.builder.emitU8(r_next_fn);
+            try self.builder.emitU8(0);
+            // §14.7.5 / §27.1.4.4 — for-await-of awaits each
+            // next() result. Sync iters return `{done, value}`
+            // directly; `await` on a non-Promise resolves to the
+            // value as-is, so the sync fallback in
+            // `async_iter_open` composes.
+            if (s.is_await) try self.builder.emitOp(.await_, s.span);
+            try self.builder.emitOp(.star, s.span);
+            try self.builder.emitU8(r_result);
 
-        // §7.4.2 IteratorNext step 4 — `If Type(result) is not Object, throw a TypeError`.
-        // Plain `for-of`: validate r_result; `for-in` is driven by
-        // the harness iterator (always Object), so skip the check.
-        if (s.kind != .in_) {
+            // §7.4.2 IteratorNext step 4 — `If Type(result) is
+            // not Object, throw a TypeError`. `for-in` is driven
+            // by the harness iterator (always Object); skip it.
+            if (s.kind != .in_) {
+                try self.builder.emitOp(.ldar, s.span);
+                try self.builder.emitU8(r_result);
+                try self.builder.emitOp(.throw_if_not_object, s.span);
+            }
+
+            // acc = r_result.done, for the loop-exit test below.
             try self.builder.emitOp(.ldar, s.span);
             try self.builder.emitU8(r_result);
-            try self.builder.emitOp(.throw_if_not_object, s.span);
+            try self.builder.emitOp(.lda_property, s.span);
+            try self.builder.emitU16(k_done);
         }
-
-        // if (r_result.done) jmp exit
-        try self.builder.emitOp(.ldar, s.span);
-        try self.builder.emitU8(r_result);
-        try self.builder.emitOp(.lda_property, s.span);
-        try self.builder.emitU16(k_done);
+        // if (done) jmp exit
         try self.builder.emitOp(.jmp_if_true, s.span);
         const exit_patch = self.builder.here();
         try self.builder.emitI16(0);
@@ -5490,11 +5518,15 @@ pub const Compiler = struct {
         // §14.7.5.7 step 4 covers `lhsRef is abrupt` explicitly.
         // `for-in` is excluded (no IteratorClose contract).
 
-        // value = r_result.value → bind
+        // value → bind. Fast `for-of` already holds the stepped
+        // value in r_result; the slow / for-in path holds the
+        // iterator result object there and must read `.value`.
         try self.builder.emitOp(.ldar, s.span);
         try self.builder.emitU8(r_result);
-        try self.builder.emitOp(.lda_property, s.span);
-        try self.builder.emitU16(k_value);
+        if (!fast_for_of) {
+            try self.builder.emitOp(.lda_property, s.span);
+            try self.builder.emitU16(k_value);
+        }
 
         // §14.7.5.7 / §7.4.6 — handler range starts AFTER `lda_property
         // "value"` (§7.4.7 IteratorValue runs before LHS assignment; a

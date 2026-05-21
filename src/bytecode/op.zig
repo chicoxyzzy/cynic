@@ -449,6 +449,21 @@ pub const Op = enum(u8) {
     /// (§7.4.7 IteratorComplete / IteratorValue). Used by
     /// `[a, b, ...rest] = src` destructuring.
     iter_step,
+    /// `[op] [r_iter:u8] [r_next:u8] [r_done:u8]` — one plain
+    /// `for-of` step. Calls the iterator's `[[NextMethod]]`
+    /// (cached in `r_next` at loop entry, §7.4.5 GetIteratorDirect)
+    /// on the iterator in `r_iter`, then folds §7.4.2 IteratorNext
+    /// step 4 (result-not-object → TypeError) and §7.4.8
+    /// IteratorStepValue's `.done` / `.value` reads into the same
+    /// op: the stepped value lands in `acc`, the boolean `done` in
+    /// `r_done`. When `r_iter` is the unmodified built-in Array
+    /// iterator (chains to `%ArrayIteratorPrototype%`, `r_next`
+    /// still the original `next` native) a fast path steps the
+    /// backing storage directly and skips the per-step
+    /// CreateIterResultObject allocation. Emitted only for plain
+    /// sync `for-of`; `for-await-of` and `for-in` keep the
+    /// open-coded `call_method` + `lda_property` sequence.
+    for_of_next,
     /// `[op]` — §14.7.5.6 EnumerateObjectProperties. Reads the
     /// object from acc, walks its own + inherited string-keyed
     /// properties (deduplicated), and produces an iterator that
@@ -951,6 +966,7 @@ pub const Op = enum(u8) {
             .del_named_property => 3, // k:u16 + r_obj:u8
             .del_computed_property => 2, // r_obj:u8 + r_key:u8
             .call_method => 3, // r_recv:u8 + r_callee:u8 + argc:u8
+            .for_of_next => 3, // r_iter:u8 + r_next:u8 + r_done:u8
             .make_environment => 1, // slot_count:u8
             .lda_smi => 4, // i32 immediate
             .lda_global_slot,
@@ -1046,6 +1062,7 @@ pub const Op = enum(u8) {
             .iter_open => "IterOpen",
             .async_iter_open => "AsyncIterOpen",
             .iter_step => "IterStep",
+            .for_of_next => "ForOfNext",
             .for_in_open => "ForInOpen",
             .pop_env => "PopEnv",
             .module_load => "ModuleLoad",

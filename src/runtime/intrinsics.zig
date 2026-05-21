@@ -167,6 +167,13 @@ pub const Intrinsics = struct {
     /// so eager wiring would walk into a not-yet-built proto.
     array_iterator_prototype: ?*JSObject = null,
 
+    /// The original `%ArrayIteratorPrototype%.next` native, captured
+    /// when the prototype is built. The `for_of_next` opcode's fast
+    /// path compares the loop's cached `[[NextMethod]]` against this
+    /// to confirm the built-in Array iterator hasn't been replaced
+    /// before stepping the backing storage directly.
+    array_iterator_next: Value = Value.undefined_,
+
     /// `%StringIteratorPrototype%` (§22.1.5.2). Same shape — chains
     /// to `%IteratorPrototype%`. Lazily allocated alongside
     /// `array_iterator_prototype`.

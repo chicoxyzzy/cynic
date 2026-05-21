@@ -200,6 +200,10 @@ fn ensureArrayIteratorPrototype(realm: *Realm) !?*JSObject {
     // descriptor matches §17's "built-in Function object" shape.
     // Per-instance kind selection lives on the iter state.
     try intrinsics.installNativeMethodOnProto(realm, proto, "next", arrayIteratorProtoNext, 0);
+    // Capture the original `next` so the `for_of_next` opcode can
+    // confirm a loop's cached `[[NextMethod]]` is still the
+    // built-in before taking its allocation-free fast path.
+    realm.intrinsics.array_iterator_next = proto.get("next");
     const tag_str = try realm.heap.allocateString("Array Iterator");
     try proto.setWithFlags(realm.allocator, "@@toStringTag", Value.fromString(tag_str), .{
         .writable = false,
@@ -241,6 +245,33 @@ fn arrayIteratorProtoNext(realm: *Realm, this_value: Value, args: []const Value)
         .typed_array_oob => return throwTypeError(realm, "TypedArray iterator: backing buffer is out-of-bounds"),
         .propagated => return error.NativeThrew,
         .done => return iterResult(realm, Value.undefined_, true) catch return error.OutOfMemory,
+    }
+}
+
+/// `for_of_next` fast path — step an unmodified built-in Array
+/// iterator and return the stepped value directly (or `null` on
+/// completion), skipping the §7.4.2 CreateIterResultObject
+/// allocation `arrayIteratorProtoNext` would perform. The
+/// interpreter's `for_of_next` opcode brand-checks the receiver
+/// (plain object, `array_like_iter` state, chains to
+/// `%ArrayIteratorPrototype%`, cached `next` still the original)
+/// and excludes the `entries` kind before calling in, so this
+/// only ever shapes a `values` / `keys` step and never allocates
+/// a result-pair object.
+pub fn arrayIterStepFast(realm: *Realm, this_value: Value) NativeError!?Value {
+    const it = heap_mod.valueAsPlainObject(this_value).?;
+    const state = it.array_like_iter.?;
+    switch (arrayLikeIterStep(realm, this_value)) {
+        .step => |s| return switch (state.kind) {
+            .values => s.value,
+            .keys => Value.fromInt32(s.idx),
+            // `for_of_next` routes the `entries` kind to its slow
+            // path so the result-pair object is still allocated.
+            .entries => unreachable,
+        },
+        .typed_array_oob => return throwTypeError(realm, "TypedArray iterator: backing buffer is out-of-bounds"),
+        .propagated => return error.NativeThrew,
+        .done => return null,
     }
 }
 
@@ -500,6 +531,29 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) StepOutcome {
                 const off = tv.byte_offset + @as(usize, @intCast(idx)) * elem_size;
                 if (off + elem_size <= buf.len) {
                     elem = readTypedElement(realm, buf, tv.kind, off);
+                }
+            }
+        } else if (obj.is_array_exotic and !obj.is_sparse) {
+            // §23.1.5.2.1 step 6 — fast path for a dense Array
+            // exotic. `length` is a data property kept synced with
+            // `elements.items.len`, and in-range data slots live
+            // directly in `elements`, so `Get(O, "length")` and
+            // `Get(O, Pk)` are observably equivalent to a direct
+            // vector read. Holes and descriptor-flag-promoted slots
+            // read back as the hole sentinel — fall through to the
+            // generic [[Get]] path for those so accessor and
+            // prototype-chain semantics still hold.
+            length = obj.arrayLength();
+            if (idx < length) {
+                if (obj.tryGetIndexedOwn(@intCast(idx))) |v| {
+                    elem = v;
+                } else {
+                    var ibuf: [16]u8 = undefined;
+                    const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
+                    elem = intrinsics.getPropertyChain(realm, obj, islice) catch {
+                        state.done = true;
+                        return .propagated;
+                    };
                 }
             }
         } else {
