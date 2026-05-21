@@ -173,10 +173,16 @@ pub fn build(b: *std.Build) void {
     // in tools/test262.zig.
 
     const t262_exe = b.addExecutable(.{
-        .name = "test262",
+        .name = "cynic-test262",
         .root_module = t262_mod,
     });
+    // Install the harness binary so it can be invoked directly —
+    // `./zig-out/bin/cynic-test262 --filter=…` — without paying the
+    // `zig build` graph cost (and its flakiness) on every filtered
+    // iteration. `zig build test262` still builds + runs as before.
+    const install_t262 = b.addInstallArtifact(t262_exe, .{});
     const run_t262 = b.addRunArtifact(t262_exe);
+    run_t262.step.dependOn(&install_t262.step);
     if (b.args) |args| run_t262.addArgs(args);
     const t262_step = b.step("test262", "Run the test262 conformance suite (parser-only)");
     t262_step.dependOn(&run_t262.step);
