@@ -608,24 +608,47 @@ RegExp/` test corpus is already path-skipped.
 ## Performance
 
 Cynic targets edge runtimes — fast cold-start, small RSS,
-predictable latency. The interpreter has never been a perf-first
-target so far (correctness has dominated), but every item below
-is on the menu. Cross-engine measurement infrastructure lives at
+predictable latency. Correctness still leads, but the perf work
+has started: the dispatch loop, the GC, and string concatenation
+have all had a pass (see **Shipped** below). Cross-engine
+measurement infrastructure lives at
 [docs/benchmarking.md](benchmarking.md); per-commit micro-bench
 deltas are produced by the `/perf` slash command and hot-function
 sampling by `/profile`.
 
+**Shipped.**
+
+- **Threaded interpreter dispatch (rung-3 / 4 / 5).** The
+  `while + switch` dispatch loop became a Zig labeled switch with
+  per-opcode `continue :dispatch` tails (rung-3); opcode decode
+  dropped a per-step `std.enums.fromInt` enum scan for a raw
+  `@enumFromInt` cast (rung-4); arithmetic / comparison / bitwise
+  opcodes gained int32 fast paths (rung-5). Combined, `arith_loop`
+  fell ~20× — see `bench-results.md`.
+- **Generational GC.** A JSC-Riptide-style non-moving
+  generational collector — store-site routing, generation header
+  bits, a write barrier + remembered set, `collectYoung` with
+  promotion-by-relink, and a two-tier (alloc-count + byte)
+  trigger. See [docs/handbook/gc.md](handbook/gc.md).
+- **ConsString ropes.** `JSString` carries a flat/cons
+  discriminator; `concat` is O(1) and flattens lazily on first
+  observable use — removes the O(N²) `buildString +=` blow-up.
+- **Cross-engine micro-bench harness** (`tools/bench-cross.sh`) —
+  interpreter-tier comparison against QuickJS-NG / V8 /
+  SpiderMonkey / Hermes with their JITs disabled. Phase 2 of
+  [docs/benchmarking.md](benchmarking.md).
+
 **In progress.**
 
 - **Profile-driven hotspot list** — `samply` over a test262
-  runtime sweep, top-N hot functions exported as a per-commit
-  artifact. Drives what gets optimized next. Driver lives at
-  `tools/profile.sh`; slash command at `/profile`.
-- **`/perf` micro-bench harness** — `tools/bench.zig` runs a
-  fixed JS micro-bench suite under `zig-out/bin/cynic run`, prints
-  wall time + max RSS per fixture, diffs against a prior baseline
-  in `bench-results.md`. Phase 1 of [docs/benchmarking.md](benchmarking.md);
-  full JetStream 2 / Octane integration is Phase 2.
+  runtime sweep, top-N hot functions. Drives what gets optimized
+  next. Driver lives at `tools/profile.sh`; slash command at
+  `/profile`.
+- **`/perf` micro-bench harness** — `zig build bench` builds a
+  dedicated ReleaseFast `cynic-bench` binary and times the fixed
+  micro-bench suite in `bench/micros/`, median of 5, diffing
+  per-fixture wall time + RSS against the prior `bench-results.md`
+  baseline. Phase 1 of [docs/benchmarking.md](benchmarking.md).
 
 **Planned (largest-win-first, after the profile data points at one).**
 
@@ -642,68 +665,12 @@ sampling by `/profile`.
   `is_array_exotic` flag); a unified heap kind would let the
   arithmetic / loop opcodes skip the per-access `is_array_exotic`
   branch and read `elements.items.ptr[i]` directly.
-- **Generational GC** — nursery + tenuring. Most allocations die
-  young; today's full mark-sweep walks the whole heap on every
-  trigger. V8 Orinoco, SM nursery, Hermes YoungGen, JSC Riptide
-  all do this first. Incremental marking is the next step after
-  that, for long-pause amortization.
-- **Inlined `Value` ops in the dispatch loop.** Worth checking the
-  `ReleaseFast` disassembly of `Op.add` / `Op.lda` / property reads
-  — Zig inlines aggressively but the per-opcode handler structure
-  may still leave hot ops behind a function-call boundary. Cheap
-  if the disassembly is bad; no-op if it's already inlined.
-- **String concat in-place / ConsString**. Today every `result =
-  result + x` (and `result += x`) allocates a fresh
-  `len(result) + len(x)`-byte JSString. In tight build-string loops
-  this is O(N²) cumulative bytes — measurably so on test262: each
-  fixture under `built-ins/RegExp/CharacterClassEscapes/` allocates
-  ~270 MB cumulative for a final string of a few MB (12 fixtures
-  alloc ~1.6 GiB combined; surfaced by `--top-alloc`). The byte
-  trigger keeps RSS bounded (~255 MB peak across 35 GC cycles)
-  but the wall-time cost is real.
+- **Incremental / concurrent marking.** The generational
+  collector (shipped, above) still stop-the-world marks the
+  mature set on a major cycle; incremental marking would amortize
+  the long-pause tail. The next GC step after the generational
+  split.
 
-  **Done so far — `addValues` double-copy removed.** The `+`
-  operator (`src/runtime/interpreter_arith.zig` `addValues`)
-  previously allocated a throwaway intermediate buffer, memcpy'd
-  both operands into it, then handed it to `allocateString` which
-  copied it a *second* time into the JSString payload — two
-  full-size allocations per `+`. It now concatenates the two
-  ToString-coerced slices straight into the string payload via
-  `Heap.allocateStringConcat2` / `JSString.concatBytes` (one
-  allocation, two memcpys). This halves *allocator traffic* and
-  process RSS on the `buildString +=` pattern but does **not**
-  change the *charged* cumulative (`--mem-summary`) — each `+`
-  still copies the whole growing accumulator exactly once. The
-  O(N²) is inherent to flat immutable strings; only ConsString
-  removes it.
-
-  **Test262 score impact (measured):** in addition to the 12
-  CharacterClassEscapes fixtures, the same `buildString +=`
-  pattern in `harness/regExpUtils.js` blocks ~74 fixtures under
-  `built-ins/RegExp/property-escapes/generated/*` from completing.
-  The regex itself works (verified: `re.test(matchSymbols) → true`
-  for the small match set, all property-name aliases parse and
-  resolve, every individual codepoint matches correctly). What
-  hangs is constructing `nonMatchSymbols` — ~1.1M codepoints
-  across the full Unicode space minus the target category. Local
-  repro: `buildString` of that range is still running after 60 s
-  and was killed. Same root cause; both clusters unblock together
-  when ConsString lands.
-
-  **Cost re-estimate (after sketching):** a "compiler-only
-  `add_inplace`" that only checks closure capture is unsound —
-  intra-function aliasing (`let y = x; x = x + 'a';`) would let
-  `y` observe the mutation. Correctness needs either real alias
-  analysis (~2–3 days, brittle) or ConsString (the right answer):
-
-  - **ConsString / ropes** — V8 / JSC style. `JSString` gets a
-    `kind` discriminator (`flat` vs `cons (left, right, len)`);
-    `concat()` is O(1); first observable use flattens to a single
-    buffer. The ~412 `.bytes` access sites get a `flatten()`
-    accessor (mostly mechanical, audit-heavy). Multi-day, no
-    correctness risk because cons-strings are invisible at the
-    JS level. Right answer when the perf cost becomes the
-    bottleneck.
 ## Proper Tail Calls (PTC) — research
 
 ES2015 §10.2.4 + §15.6.1 + §15.10.1 — function calls *in tail
