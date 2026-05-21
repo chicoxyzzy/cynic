@@ -4323,6 +4323,83 @@ inline fn loopSafePoint(realm: *Realm, f: *CallFrame, ip: usize, acc: Value) Run
     return runSafePoint(realm);
 }
 
+// ── Int32 fast paths ───────────────────────────────────────────────
+// The arithmetic / comparison / bitwise opcodes route the general
+// case through `addValues` / `numericBinary` / `relational` /
+// `bitwiseBinary` — full §13.15 ApplyStringOrNumericBinaryOperator
+// machinery (ToPrimitive, BigInt, object coercion). When both
+// operands are already int32 — the overwhelmingly common case in a
+// counting loop — that's a 6-arg call for what is one machine
+// instruction. These helpers compute the int32 case inline and
+// return null to fall through to the general helper otherwise. The
+// results are bit-identical to the general path: §6.1.6.1 Number
+// addition is f64 arithmetic, so an overflowing sum/product is the
+// f64 result; §13.15 keeps an in-range integer sum as an int32.
+
+/// §13.15.3 — `+` / `-` / `*` on two int32 operands. Overflow falls
+/// back to the f64 result (the ECMAScript Number result).
+inline fn intArith(comptime op: enum { add, sub, mul }, a: Value, b: Value) ?Value {
+    if (!a.isInt32() or !b.isInt32()) return null;
+    const x = a.asInt32();
+    const y = b.asInt32();
+    const ov = switch (op) {
+        .add => @addWithOverflow(x, y),
+        .sub => @subWithOverflow(x, y),
+        .mul => @mulWithOverflow(x, y),
+    };
+    if (ov[1] == 0) return Value.fromInt32(ov[0]);
+    const fx: f64 = @floatFromInt(x);
+    const fy: f64 = @floatFromInt(y);
+    return Value.fromDouble(switch (op) {
+        .add => fx + fy,
+        .sub => fx - fy,
+        .mul => fx * fy,
+    });
+}
+
+/// §7.2.13 IsLessThan — relational compare on two int32 operands.
+inline fn intCompare(comptime op: enum { lt, gt, le, ge }, a: Value, b: Value) ?Value {
+    if (!a.isInt32() or !b.isInt32()) return null;
+    const x = a.asInt32();
+    const y = b.asInt32();
+    return Value.fromBool(switch (op) {
+        .lt => x < y,
+        .gt => x > y,
+        .le => x <= y,
+        .ge => x >= y,
+    });
+}
+
+/// §13.15 bitwise / shift on two int32 operands. `&` `|` `^` `<<`
+/// `>>` stay in int32; `>>>` yields a uint32 that promotes to a
+/// double when it exceeds the int32 range.
+inline fn intBitwise(comptime op: enum { band, bor, bxor, shl, shr, shr_u }, a: Value, b: Value) ?Value {
+    if (!a.isInt32() or !b.isInt32()) return null;
+    const x = a.asInt32();
+    const y = b.asInt32();
+    switch (op) {
+        .band => return Value.fromInt32(x & y),
+        .bor => return Value.fromInt32(x | y),
+        .bxor => return Value.fromInt32(x ^ y),
+        .shl => {
+            const sh: u5 = @truncate(@as(u32, @bitCast(y)));
+            return Value.fromInt32(@bitCast(@as(u32, @bitCast(x)) << sh));
+        },
+        .shr => {
+            const sh: u5 = @truncate(@as(u32, @bitCast(y)));
+            return Value.fromInt32(x >> sh);
+        },
+        .shr_u => {
+            const sh: u5 = @truncate(@as(u32, @bitCast(y)));
+            const ru = @as(u32, @bitCast(x)) >> sh;
+            return if (ru <= std.math.maxInt(i32))
+                Value.fromInt32(@intCast(ru))
+            else
+                Value.fromDouble(@floatFromInt(ru));
+        },
+    }
+}
+
 fn runFrames(
     allocator: std.mem.Allocator,
     realm: *Realm,
@@ -4440,6 +4517,10 @@ fn runFrames(
             .add => {
                 const r = code[ip];
                 ip += 1;
+                if (intArith(.add, registers[r], acc)) |res| {
+                    acc = res;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
                 if (try addValues(realm, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
@@ -4454,6 +4535,10 @@ fn runFrames(
             .sub => {
                 const r = code[ip];
                 ip += 1;
+                if (intArith(.sub, registers[r], acc)) |res| {
+                    acc = res;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
                 if (try numericBinary(realm, .sub, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
@@ -4468,6 +4553,10 @@ fn runFrames(
             .mul => {
                 const r = code[ip];
                 ip += 1;
+                if (intArith(.mul, registers[r], acc)) |res| {
+                    acc = res;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
                 if (try numericBinary(realm, .mul, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
@@ -4526,6 +4615,10 @@ fn runFrames(
             .bit_and => {
                 const r = code[ip];
                 ip += 1;
+                if (intBitwise(.band, registers[r], acc)) |res| {
+                    acc = res;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
                 if (try bitwiseBinary(realm, .bit_and, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
@@ -4540,6 +4633,10 @@ fn runFrames(
             .bit_or => {
                 const r = code[ip];
                 ip += 1;
+                if (intBitwise(.bor, registers[r], acc)) |res| {
+                    acc = res;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
                 if (try bitwiseBinary(realm, .bit_or, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
@@ -4554,6 +4651,10 @@ fn runFrames(
             .bit_xor => {
                 const r = code[ip];
                 ip += 1;
+                if (intBitwise(.bxor, registers[r], acc)) |res| {
+                    acc = res;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
                 if (try bitwiseBinary(realm, .bit_xor, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
@@ -4568,6 +4669,10 @@ fn runFrames(
             .shl => {
                 const r = code[ip];
                 ip += 1;
+                if (intBitwise(.shl, registers[r], acc)) |res| {
+                    acc = res;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
                 if (try bitwiseBinary(realm, .shl, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
@@ -4582,6 +4687,10 @@ fn runFrames(
             .shr => {
                 const r = code[ip];
                 ip += 1;
+                if (intBitwise(.shr, registers[r], acc)) |res| {
+                    acc = res;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
                 if (try bitwiseBinary(realm, .shr, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
@@ -4596,6 +4705,10 @@ fn runFrames(
             .shr_u => {
                 const r = code[ip];
                 ip += 1;
+                if (intBitwise(.shr_u, registers[r], acc)) |res| {
+                    acc = res;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
                 if (try bitwiseBinary(realm, .shr_u, registers[r], acc)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                     realm.pending_exception = null;
@@ -4682,6 +4795,10 @@ fn runFrames(
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .inc => {
+                if (intArith(.add, acc, Value.fromInt32(1))) |res| {
+                    acc = res;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
                 if (try arith.incOrDec(realm, acc, 1)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "Update failed");
                     realm.pending_exception = null;
@@ -4694,6 +4811,10 @@ fn runFrames(
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .dec => {
+                if (intArith(.sub, acc, Value.fromInt32(1))) |res| {
+                    acc = res;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
                 if (try arith.incOrDec(realm, acc, -1)) |res| acc = res else {
                     const ex = realm.pending_exception orelse try makeTypeError(realm, "Update failed");
                     realm.pending_exception = null;
@@ -4771,6 +4892,10 @@ fn runFrames(
             .lt => {
                 const r = code[ip];
                 ip += 1;
+                if (intCompare(.lt, registers[r], acc)) |res| {
+                    acc = res;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
                 const lhs = try coerceForCompare(allocator, realm, frames, f, ip, registers[r], .number);
                 if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
                 if (lhs == .handled) {
@@ -4800,6 +4925,10 @@ fn runFrames(
             .gt => {
                 const r = code[ip];
                 ip += 1;
+                if (intCompare(.gt, registers[r], acc)) |res| {
+                    acc = res;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
                 const lhs = try coerceForCompare(allocator, realm, frames, f, ip, registers[r], .number);
                 if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
                 if (lhs == .handled) {
@@ -4829,6 +4958,10 @@ fn runFrames(
             .le => {
                 const r = code[ip];
                 ip += 1;
+                if (intCompare(.le, registers[r], acc)) |res| {
+                    acc = res;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
                 const lhs = try coerceForCompare(allocator, realm, frames, f, ip, registers[r], .number);
                 if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
                 if (lhs == .handled) {
@@ -4858,6 +4991,10 @@ fn runFrames(
             .ge => {
                 const r = code[ip];
                 ip += 1;
+                if (intCompare(.ge, registers[r], acc)) |res| {
+                    acc = res;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
                 const lhs = try coerceForCompare(allocator, realm, frames, f, ip, registers[r], .number);
                 if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
                 if (lhs == .handled) {
