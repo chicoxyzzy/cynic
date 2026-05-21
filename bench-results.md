@@ -14,6 +14,36 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-05-21 — cynic `3cb87f9`, host `Darwin 25.5.0 arm64`
+
+Threaded dispatch (rung-3) + unchecked opcode decode (rung-4).
+rung-4 replaced a per-opcode `std.enums.fromInt` (an O(200)
+enum-field scan to validate the opcode byte) with an O(1)
+`@enumFromInt` cast — the dispatch loop was ~95% decode overhead.
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 146.93 | 145.40 | 149.32 | 3264 |
+| prop_access | 56.43 | 55.49 | 58.06 | 3328 |
+| array_iter | 251.12 | 247.26 | 255.38 | 6912 |
+| string_concat | 4.09 | 3.90 | 4.30 | 4144 |
+| promise_chain | 4.64 | 4.47 | 4.74 | 7968 |
+| object_alloc | 22.25 | 21.42 | 22.74 | 8800 |
+
+Δ vs the `fda6ce0` row below: every fixture dropped sharply.
+`arith_loop` −95.1 % (3024.10 → 146.93), `prop_access` −89.4 %
+(532.36 → 56.43), `array_iter` −66.7 % (753.19 → 251.12),
+`object_alloc` −75.9 % (92.21 → 22.25), `string_concat` −38.1 %
+(6.61 → 4.09), `promise_chain` −7.9 % (5.04 → 4.64). The
+dispatch-bound fixtures gain most — a pure arithmetic loop was
+almost entirely opcode-decode overhead — and the
+allocation-bound fixtures (`object_alloc`, `promise_chain`)
+gain least, as expected. Now ~3 ns/opcode vs ~62 ns before.
+Cross-engine context (interpreter tier, `tools/bench-cross.sh`,
+not recorded here): Cynic still trails QuickJS-NG ~2× on
+`arith_loop` and ~10× on `array_iter` — `array_iter` is the next
+target and looks algorithmic, not dispatch-bound.
+
 ### 2026-05-21 — cynic `fda6ce0`, host `Darwin 25.5.0 arm64`
 
 Regression check after GC Stages 0–2 (generational scaffolding —
