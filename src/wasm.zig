@@ -361,7 +361,10 @@ fn appendValueText(buf: *std.ArrayListUnmanaged(u8), v: Value) !void {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
         try buf.appendSlice(gpa, s.flatBytes());
     } else if (cynic.runtime.heap.valueAsBigInt(v)) |bi| {
-        try buf.appendSlice(gpa, try std.fmt.bufPrint(&scratch, "{d}n", .{bi.value}));
+        const digits = try cynic.runtime.bigint.toStringAlloc(gpa, bi, 10);
+        defer gpa.free(digits);
+        try buf.appendSlice(gpa, digits);
+        try buf.append(gpa, 'n');
     } else if (cynic.runtime.heap.isFunction(v)) {
         try buf.appendSlice(gpa, "[Function]");
     } else if (cynic.runtime.heap.isPlainObject(v)) {

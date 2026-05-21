@@ -3438,7 +3438,7 @@ pub fn toBoolean(v: Value) bool {
     // §7.1.2 step 8 — BigInt is falsy iff zero. Stored as
     // Object-tagged, so this must come before the catch-all
     // "all objects truthy" rule below.
-    if (heap_mod.valueAsBigInt(v)) |bi| return bi.value != 0;
+    if (heap_mod.valueAsBigInt(v)) |bi| return !bi.isZero();
     return true; // objects / functions are truthy
 }
 

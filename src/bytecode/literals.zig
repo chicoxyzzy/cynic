@@ -48,45 +48,9 @@ pub fn parseNumericLiteral(text: []const u8) !f64 {
     return std.fmt.parseFloat(f64, buf[0..n]) catch error.BadLiteral;
 }
 
-/// Parse a BigInt literal's digit text (sans the trailing `n`)
-/// into an i128. Supports decimal / hex / octal / binary
-/// prefixes plus `_` separators. Overflow throws — true
-/// arbitrary precision is later.
-pub fn parseBigIntLiteral(text: []const u8) !i128 {
-    var base: u8 = 10;
-    var rest = text;
-    if (text.len >= 2 and text[0] == '0') {
-        switch (text[1]) {
-            'x', 'X' => {
-                base = 16;
-                rest = text[2..];
-            },
-            'o', 'O' => {
-                base = 8;
-                rest = text[2..];
-            },
-            'b', 'B' => {
-                base = 2;
-                rest = text[2..];
-            },
-            else => {},
-        }
-    }
-    var acc: i128 = 0;
-    for (rest) |c| {
-        if (c == '_') continue;
-        const digit: u8 = switch (c) {
-            '0'...'9' => c - '0',
-            'a'...'f' => c - 'a' + 10,
-            'A'...'F' => c - 'A' + 10,
-            else => return error.BadLiteral,
-        };
-        if (digit >= base) return error.BadLiteral;
-        const product = std.math.mul(i128, acc, @intCast(base)) catch return error.BadLiteral;
-        acc = std.math.add(i128, product, @intCast(digit)) catch return error.BadLiteral;
-    }
-    return acc;
-}
+// BigInt literal parsing now lives in `runtime/bigint.zig`
+// (`parseLiteralToValue`) — it produces an arbitrary-precision
+// magnitude rather than a fixed-width i128.
 
 pub fn parseRadix(text: []const u8, comptime base: u8) !f64 {
     var acc: f64 = 0.0;

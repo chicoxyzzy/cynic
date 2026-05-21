@@ -61,7 +61,6 @@ const Diagnostics = @import("../diagnostic.zig").Diagnostics;
 const literals = @import("literals.zig");
 const asExactSmi = literals.asExactSmi;
 const parseNumericLiteral = literals.parseNumericLiteral;
-const parseBigIntLiteral = literals.parseBigIntLiteral;
 const decodeStringContent = literals.decodeStringContent;
 const normalizeTemplateLineTerminators = literals.normalizeTemplateLineTerminators;
 
@@ -2514,10 +2513,13 @@ pub const Compiler = struct {
     /// `intrinsics.stringifyArg`'s double / int32 path.
     fn canonicalNumericKey(self: *Compiler, src_slice: []const u8) CompileError![]const u8 {
         const arena = self.realm.classAllocator();
-        // BigInt literal — strip trailing `n` and format as decimal.
+        // BigInt literal — strip trailing `n`, parse the
+        // arbitrary-precision magnitude, and render as decimal.
         if (src_slice.len > 0 and src_slice[src_slice.len - 1] == 'n') {
-            const bi = parseBigIntLiteral(src_slice[0 .. src_slice.len - 1]) catch return error.UnsupportedExpression;
-            return std.fmt.allocPrint(arena, "{d}", .{bi}) catch return error.OutOfMemory;
+            const bigint_mod = @import("../runtime/bigint.zig");
+            const v = bigint_mod.parseLiteralToValue(arena, src_slice[0 .. src_slice.len - 1]) catch return error.UnsupportedExpression;
+            const tmp = bigint_mod.JSBigInt.initFromLimbs(arena, v.sign, v.limbs) catch return error.OutOfMemory;
+            return bigint_mod.toStringAlloc(arena, tmp, 10) catch return error.OutOfMemory;
         }
         const d = parseNumericLiteral(src_slice) catch return error.UnsupportedExpression;
         if (std.math.isNan(d)) return "NaN";
@@ -4258,16 +4260,19 @@ pub const Compiler = struct {
     }
 
     /// `0n` / `42n` / `0xffn` / `0b1010n` etc. — strip the `n`
-    /// suffix, parse the digits, allocate a `JSBigInt` in the
-    /// realm heap, and store it as a constant. later uses
-    /// i128 storage; literals exceeding ±2^127 throw at parse
-    /// time (real arbitrary-precision is later).
+    /// suffix, parse the digits into an arbitrary-precision
+    /// magnitude, allocate a `JSBigInt` in the realm heap, and
+    /// store it as a constant (§12.9.5 BigInt Literals).
     fn compileBigInt(self: *Compiler, span: Span) CompileError!void {
         const text = self.source[span.start..span.end];
         if (text.len == 0 or text[text.len - 1] != 'n') return error.BadNumericLiteral;
         const digits = text[0 .. text.len - 1];
-        const value = parseBigIntLiteral(digits) catch return error.BadNumericLiteral;
-        const bi = self.realm.heap.allocateBigInt(value) catch return error.OutOfMemory;
+        const bigint_mod = @import("../runtime/bigint.zig");
+        const v = bigint_mod.parseLiteralToValue(self.realm.heap.allocator, digits) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidBigInt => return error.BadNumericLiteral,
+        };
+        const bi = self.realm.heap.allocateBigIntValue(v) catch return error.OutOfMemory;
         const k = try self.builder.addConstant(@import("../runtime/heap.zig").taggedBigInt(bi));
         try self.builder.emitOp(.lda_constant, span);
         try self.builder.emitU16(k);

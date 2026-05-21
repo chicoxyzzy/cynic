@@ -1301,11 +1301,11 @@ fn numberConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
         if (args.len == 0) break :blk Value.fromInt32(0);
         const arg = args[0];
         if (heap_mod.valueAsBigInt(arg)) |bi| {
-            break :blk Value.fromDouble(@floatFromInt(bi.value));
+            break :blk Value.fromDouble(bi.toF64());
         }
         const prim = try toPrimitive(realm, arg, .number);
         if (heap_mod.valueAsBigInt(prim)) |bi| {
-            break :blk Value.fromDouble(@floatFromInt(bi.value));
+            break :blk Value.fromDouble(bi.toF64());
         }
         break :blk try toNumber(realm, prim);
     };
@@ -1683,7 +1683,10 @@ pub fn strictEqualsLite(a: Value, b: Value) bool {
     // strict equality.
     if (heap_mod.valueAsBigInt(a)) |ba| {
         if (heap_mod.valueAsBigInt(b)) |bb| {
-            return ba.value == bb.value;
+            return @import("bigint.zig").equals(
+                .{ .sign = ba.sign, .limbs = ba.limbs },
+                .{ .sign = bb.sign, .limbs = bb.limbs },
+            );
         }
     }
     return false;
@@ -1794,7 +1797,8 @@ pub fn stringifyArg(realm: *Realm, v: Value) NativeError!*JSString {
             return throwTypeError(realm, "Cannot convert a Symbol value to a string");
         }
         if (heap_mod.valueAsBigInt(v)) |bi| {
-            const buf = std.fmt.allocPrint(realm.allocator, "{d}", .{bi.value}) catch return error.OutOfMemory;
+            // §6.1.6.2.21 BigInt::toString(10).
+            const buf = @import("bigint.zig").toStringAlloc(realm.allocator, bi, 10) catch return error.OutOfMemory;
             defer realm.allocator.free(buf);
             return realm.heap.allocateString(buf) catch return error.OutOfMemory;
         }

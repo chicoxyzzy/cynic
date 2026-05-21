@@ -3048,7 +3048,7 @@ fn dvToBigInt64(realm: *Realm, v: Value) NativeError!i64 {
     // detection), `.number` is fine since BigInt-flavoured `valueOf`
     // returns a BigInt directly.
     const prim = try intrinsics.toPrimitive(realm, v, .number);
-    if (heap_mod.valueAsBigInt(prim)) |bi| return @as(i64, @truncate(bi.value));
+    if (heap_mod.valueAsBigInt(prim)) |bi| return bi.toI64Truncating();
     if (prim.isBool()) return if (prim.asBool()) 1 else 0;
     if (prim.isString()) {
         const s: *JSString = @ptrCast(@alignCast(prim.asString()));
@@ -3377,9 +3377,16 @@ fn taCompareNumeric(a: Value, b: Value) i32 {
     // branch is never reached for them.
     if (heap_mod.valueAsBigInt(a)) |abi| {
         if (heap_mod.valueAsBigInt(b)) |bbi| {
-            if (abi.value < bbi.value) return -1;
-            if (abi.value > bbi.value) return 1;
-            return 0;
+            // §23.2.3.32 — BigInt-element arrays compare by exact
+            // mathematical value.
+            return switch (@import("../bigint.zig").compare(
+                .{ .sign = abi.sign, .limbs = abi.limbs },
+                .{ .sign = bbi.sign, .limbs = bbi.limbs },
+            )) {
+                .lt => -1,
+                .gt => 1,
+                .eq => 0,
+            };
         }
     }
     const av: f64 = if (a.isInt32()) @floatFromInt(a.asInt32()) else if (a.isDouble()) a.asDouble() else 0;
@@ -3776,7 +3783,7 @@ pub fn writeTypedElement(buf: []u8, kind: ObjMod.TypedKind, byte_pos: usize, val
         },
         .bigint64, .biguint64 => {
             const bi = heap_mod.valueAsBigInt(value);
-            const u: u64 = if (bi) |b| @bitCast(@as(i64, @truncate(b.value))) else 0;
+            const u: u64 = if (bi) |b| b.toU64Truncating() else 0;
             std.mem.writeInt(u64, buf[byte_pos..][0..8], u, .little);
         },
     }

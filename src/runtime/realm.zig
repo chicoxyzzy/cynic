@@ -1099,7 +1099,8 @@ fn appendValueText(realm: *Realm, v: Value) !void {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
         try realm.output.appendSlice(realm.allocator, s.flatBytes());
     } else if (heap_mod.valueAsBigInt(v)) |bi| {
-        const m = try std.fmt.bufPrint(&buf, "{d}", .{bi.value});
+        const m = try @import("bigint.zig").toStringAlloc(realm.allocator, bi, 10);
+        defer realm.allocator.free(m);
         try realm.output.appendSlice(realm.allocator, m);
     } else if (heap_mod.isFunction(v)) {
         try realm.output.appendSlice(realm.allocator, "[function]");

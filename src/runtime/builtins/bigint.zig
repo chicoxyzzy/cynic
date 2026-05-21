@@ -1,8 +1,9 @@
 //! §21.2 BigInt — extracted from `intrinsics.zig`. The
 //! BigInt constructor (`BigInt(n)` ToBigInts; `new BigInt()`
 //! throws), prototype `toString` / `valueOf`, and statics
-//! `BigInt.asIntN` / `BigInt.asUintN`. Cynic's BigInt storage
-//! is `i128` (caps at ±2^127); arbitrary-precision is later.
+//! `BigInt.asIntN` / `BigInt.asUintN`. The arbitrary-precision
+//! arithmetic itself lives in `runtime/bigint.zig`; this file is
+//! the JS-visible API surface and mostly forwards into it.
 
 const std = @import("std");
 
@@ -11,7 +12,9 @@ const Value = @import("../value.zig").Value;
 const JSString = @import("../string.zig").JSString;
 const JSObject = @import("../object.zig").JSObject;
 const JSFunction = @import("../function.zig").JSFunction;
-const JSBigInt = @import("../bigint.zig").JSBigInt;
+const bigint_mod = @import("../bigint.zig");
+const JSBigInt = bigint_mod.JSBigInt;
+const BigIntValue = bigint_mod.BigIntValue;
 const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
@@ -22,6 +25,13 @@ const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
 const argOr = intrinsics.argOr;
 const throwTypeError = intrinsics.throwTypeError;
 const throwRangeError = intrinsics.throwRangeError;
+
+/// Borrow a `JSBigInt` as a `BigIntValue` view — limbs are shared,
+/// valid only while the `JSBigInt` lives. The arbitrary-precision
+/// ops never mutate their inputs, so a borrowed view is safe.
+fn borrow(bi: *const JSBigInt) BigIntValue {
+    return .{ .sign = bi.sign, .limbs = bi.limbs };
+}
 
 // ── §21.2 BigInt ────────────────────────────────────────────────────
 
@@ -71,10 +81,9 @@ fn bigintConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
         if (std.math.isNan(d) or std.math.isInf(d) or d != @trunc(d)) {
             return throwRangeError(realm, "Cannot convert non-integer Number to BigInt");
         }
-        if (d > @as(f64, @floatFromInt(std.math.maxInt(i128))) or d < @as(f64, @floatFromInt(std.math.minInt(i128)))) {
-            return throwRangeError(realm, "Number out of BigInt i128 range");
-        }
-        const bi = realm.heap.allocateBigInt(@intFromFloat(d)) catch return error.OutOfMemory;
+        // §21.2.1.1.1 NumberToBigInt — convert the integral double.
+        const v = bigint_mod.fromDouble(realm.heap.allocator, d) catch return error.OutOfMemory;
+        const bi = realm.heap.allocateBigIntValue(v) catch return error.OutOfMemory;
         return heap_mod.taggedBigInt(bi);
     }
     return toBigIntValue(realm, prim) catch |err| switch (err) {
@@ -131,47 +140,11 @@ pub fn toBigIntValue(realm: *Realm, v_in: Value) !Value {
 /// Failures throw SyntaxError. Whitespace-only / empty strings
 /// map to 0n.
 fn stringToBigInt(realm: *Realm, bytes: []const u8) NativeError!Value {
-    const trimmed = std.mem.trim(u8, bytes, " \t\n\r\u{000B}\u{000C}\u{00A0}\u{FEFF}");
-    if (trimmed.len == 0) {
-        const bi = realm.heap.allocateBigInt(0) catch return error.OutOfMemory;
-        return heap_mod.taggedBigInt(bi);
-    }
-    var rest = trimmed;
-    var negate = false;
-    var has_sign = false;
-    if (rest[0] == '-') {
-        negate = true;
-        has_sign = true;
-        rest = rest[1..];
-    } else if (rest[0] == '+') {
-        has_sign = true;
-        rest = rest[1..];
-    }
-    if (rest.len == 0) return throwSyntaxError(realm, "Cannot convert string to BigInt");
-    // Non-decimal radix prefixes (0b / 0o / 0x): sign is forbidden,
-    // and the body must be at least one digit in that radix.
-    if (rest.len >= 2 and rest[0] == '0') {
-        const radix: ?u8 = switch (rest[1]) {
-            'b', 'B' => @as(u8, 2),
-            'o', 'O' => @as(u8, 8),
-            'x', 'X' => @as(u8, 16),
-            else => null,
-        };
-        if (radix) |r| {
-            if (has_sign) return throwSyntaxError(realm, "Cannot convert signed radix-prefixed string to BigInt");
-            const body = rest[2..];
-            if (body.len == 0) return throwSyntaxError(realm, "Empty radix-prefixed BigInt literal");
-            const value = std.fmt.parseInt(i128, body, r) catch return throwSyntaxError(realm, "Invalid BigInt string");
-            const bi = realm.heap.allocateBigInt(value) catch return error.OutOfMemory;
-            return heap_mod.taggedBigInt(bi);
-        }
-    }
-    // Decimal — DecimalDigits only (no `.`, no exponent, no `Infinity`).
-    for (rest) |c| {
-        if (c < '0' or c > '9') return throwSyntaxError(realm, "Invalid BigInt string");
-    }
-    const value = std.fmt.parseInt(i128, rest, 10) catch return throwSyntaxError(realm, "BigInt string out of range");
-    const bi = realm.heap.allocateBigInt(if (negate) -value else value) catch return error.OutOfMemory;
+    const v = bigint_mod.parseStringToValue(realm.heap.allocator, bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidBigInt => return throwSyntaxError(realm, "Cannot convert string to BigInt"),
+    };
+    const bi = realm.heap.allocateBigIntValue(v) catch return error.OutOfMemory;
     return heap_mod.taggedBigInt(bi);
 }
 
@@ -197,38 +170,10 @@ fn bigintToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
             return throwRangeError(realm, "toString radix out of range [2, 36]");
         radix = @intFromFloat(@trunc(rd));
     }
-    var buf: [256]u8 = undefined;
-    var n: usize = 0;
-    var negate = false;
-    var u: u128 = 0;
-    if (bi.value < 0) {
-        negate = true;
-        u = @intCast(-bi.value);
-    } else {
-        u = @intCast(bi.value);
-    }
-    if (u == 0) {
-        buf[0] = '0';
-        n = 1;
-    } else {
-        var tmp: [256]u8 = undefined;
-        var t: usize = 0;
-        while (u > 0) : (u /= radix) {
-            const d: u8 = @intCast(u % radix);
-            tmp[t] = if (d < 10) '0' + d else 'a' + (d - 10);
-            t += 1;
-        }
-        if (negate) {
-            buf[0] = '-';
-            n = 1;
-        }
-        var k: usize = 0;
-        while (k < t) : (k += 1) {
-            buf[n + k] = tmp[t - 1 - k];
-        }
-        n += t;
-    }
-    const s = realm.heap.allocateString(buf[0..n]) catch return error.OutOfMemory;
+    // §6.1.6.2.21 BigInt::toString — arbitrary-precision render.
+    const digits = bigint_mod.toStringAlloc(realm.heap.allocator, bi, radix) catch return error.OutOfMemory;
+    defer realm.heap.allocator.free(digits);
+    const s = realm.heap.allocateString(digits) catch return error.OutOfMemory;
     return Value.fromString(s);
 }
 
@@ -283,23 +228,9 @@ fn bigintAsIntN(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const bits_i = try toIndex(realm, argOr(args, 0, Value.fromInt32(0)));
     const bi_v = try toBigIntValue(realm, argOr(args, 1, Value.undefined_));
     const bi = heap_mod.valueAsBigInt(bi_v) orelse return throwTypeError(realm, "BigInt.asIntN: ToBigInt failed");
-    if (bits_i == 0) {
-        const out = realm.heap.allocateBigInt(0) catch return error.OutOfMemory;
-        return heap_mod.taggedBigInt(out);
-    }
-    // Cynic stores BigInt as i128; mod 2^bits is only representable
-    // for bits ≤ 127. Saturating gracefully would require arbitrary
-    // precision; for now reject beyond 127 as RangeError (the
-    // alternative would be a silent truncation that masks bugs).
-    if (bits_i > 127) return throwRangeError(realm, "BigInt.asIntN bits exceed i128 storage");
-    const bits: u7 = @intCast(bits_i);
-    const mod_amount: i128 = @as(i128, 1) << bits;
-    var v = @rem(bi.value, mod_amount);
-    if (bits >= 1) {
-        const half: i128 = @as(i128, 1) << @intCast(bits - 1);
-        if (v >= half) v -= mod_amount else if (v < -half) v += mod_amount;
-    }
-    const out = realm.heap.allocateBigInt(v) catch return error.OutOfMemory;
+    // §21.2.2.1 — modulo 2^bits over arbitrary precision.
+    const v = bigint_mod.asIntN(realm.heap.allocator, @intCast(bits_i), borrow(bi)) catch return error.OutOfMemory;
+    const out = realm.heap.allocateBigIntValue(v) catch return error.OutOfMemory;
     return heap_mod.taggedBigInt(out);
 }
 
@@ -308,15 +239,8 @@ fn bigintAsUintN(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const bits_i = try toIndex(realm, argOr(args, 0, Value.fromInt32(0)));
     const bi_v = try toBigIntValue(realm, argOr(args, 1, Value.undefined_));
     const bi = heap_mod.valueAsBigInt(bi_v) orelse return throwTypeError(realm, "BigInt.asUintN: ToBigInt failed");
-    if (bits_i == 0) {
-        const out = realm.heap.allocateBigInt(0) catch return error.OutOfMemory;
-        return heap_mod.taggedBigInt(out);
-    }
-    if (bits_i > 127) return throwRangeError(realm, "BigInt.asUintN bits exceed i128 storage");
-    const bits: u7 = @intCast(bits_i);
-    const mod_amount: i128 = @as(i128, 1) << bits;
-    var v = @rem(bi.value, mod_amount);
-    if (v < 0) v += mod_amount;
-    const out = realm.heap.allocateBigInt(v) catch return error.OutOfMemory;
+    // §21.2.2.2 — modulo 2^bits over arbitrary precision.
+    const v = bigint_mod.asUintN(realm.heap.allocator, @intCast(bits_i), borrow(bi)) catch return error.OutOfMemory;
+    const out = realm.heap.allocateBigIntValue(v) catch return error.OutOfMemory;
     return heap_mod.taggedBigInt(out);
 }

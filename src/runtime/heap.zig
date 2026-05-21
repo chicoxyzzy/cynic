@@ -460,6 +460,25 @@ pub const Heap = struct {
         return b;
     }
 
+    /// Allocate a `JSBigInt` taking ownership of an arbitrary-
+    /// precision `BigIntValue` (sign + heap-owned limb slice). The
+    /// limb slice must have been allocated by `self.allocator`; the
+    /// new `JSBigInt` owns it directly with no copy. On failure the
+    /// limb slice is freed so the caller never leaks it.
+    pub fn allocateBigIntValue(self: *Heap, v: @import("bigint.zig").BigIntValue) !*JSBigInt {
+        const bigint_mod = @import("bigint.zig");
+        // Normalize defensively — `initOwned` asserts the top limb
+        // is non-zero, and a zero result must carry sign=false.
+        const b = bigint_mod.JSBigInt.initOwned(self.allocator, v.sign, v.limbs) catch |err| {
+            if (v.limbs.len != 0) self.allocator.free(v.limbs);
+            return err;
+        };
+        errdefer b.deinit(self.allocator);
+        try self.bigints_young.append(self.allocator, b);
+        self.allocs_since_gc +|= 1;
+        return b;
+    }
+
     /// Allocate a Symbol whose property-key string is generated
     /// from the heap's monotonic counter. Used for user-level
     /// `Symbol(desc)` and `Symbol.for(k)` — every call yields a

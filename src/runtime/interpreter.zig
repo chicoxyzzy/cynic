@@ -4733,7 +4733,7 @@ fn runFrames(
                     committed = true;
                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
-                acc = Value.fromBool(looseEq(lhs.ok, rhs.ok));
+                acc = Value.fromBool(looseEq(allocator, lhs.ok, rhs.ok));
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .strict_eq => {
@@ -4759,7 +4759,7 @@ fn runFrames(
                     committed = true;
                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
-                acc = Value.fromBool(!looseEq(lhs.ok, rhs.ok));
+                acc = Value.fromBool(!looseEq(allocator, lhs.ok, rhs.ok));
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .strict_neq => {
