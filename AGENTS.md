@@ -134,7 +134,7 @@ These are project rules — they apply to everyone.
 | Measure perf (micros) | `zig build bench` (or `/perf`); design in [docs/benchmarking.md](docs/benchmarking.md) |
 | Find a hot function | `tools/profile.sh "<filter>"` (or `/profile`); requires `samply` |
 | See engine memory shape | `zig build test262 -- --filter=<x> --mem-summary --top-alloc=10` (engine-side counters) |
-| Profile allocations with call stacks (macOS) | `xcrun xctrace record --template Allocations --launch -- <path-to-test262-binary> --filter=<x>` |
+| Profile allocations with call stacks (macOS) | `xcrun xctrace record --template Allocations --launch -- zig-out/bin/cynic-test262 --filter=<x>` (build it first with `zig build test262`) |
 | Find spec text | [tc39.es/ecma262](https://tc39.es/ecma262/), or via the `tc39` MCP server in `.mcp.json` — `search_spec` / `get_spec_section` (also `list_proposals`, `search_notes`) |
 | Look up papers (compiler / GC / interpreter / JS impl literature) | [arxiv.org](https://arxiv.org/), or via the `arxiv` MCP server in `.mcp.json` — `search_papers` (by query + categories), `download_paper`, `read_paper`. Cache lives under `/tmp/cynic-arxiv-cache`. Use this step in [`handbook/prior-art.md`](docs/handbook/prior-art.md) §3 (academic literature). |
 | Inspect test262 fixtures | `vendor/test262/test/<area>` |
@@ -196,6 +196,11 @@ rewritten only on full runs without `--filter` and without
 `0` = auto via `std.Thread.getCpuCount`, `1` = sequential
 reference path, `>1` = pool. Past ~4 threads diminishing
 returns kick in from libc malloc contention),
+`--timeout=<n>` (per-fixture watchdog deadline in seconds,
+default 60, `0` disables — the progress monitor names any worker
+stuck on one fixture past it and aborts that fixture so the sweep
+still completes; a hung fixture or a broken WIP engine can no
+longer wedge a whole run),
 `--gc-threshold=<n>` (per-fixture allocation-pressure GC
 threshold, default 32,768; lower values stress-test the GC
 trigger. The historical root gaps documented in
@@ -294,6 +299,15 @@ pass-set instead: any full sweep with `--write-results` populates
 `.test262-pass-cache.txt` (~34 k known-passing fixtures). The
 next run with `--only-failing` skip-as-passes those, so it only
 executes the ~7 k failing/skipped tests — typically ≤ 30 s.
+
+`zig build test262` installs the harness binary to
+`zig-out/bin/cynic-test262`. After one build, run it directly —
+`./zig-out/bin/cynic-test262 --quiet --only-failing --filter=<x>`
+— to skip the `zig build` graph cost (~100 s → tens of ms) on
+every filtered iteration. Wrap long or risky runs in
+`tools/guarded-run.sh --timeout=<s> --rss=<mb> -- <cmd>`: it caps
+wall-time and total memory and kills the whole process tree on
+exit, so a hung build or runaway test can't leak GBs or orphan.
 
 Iteration loop for a triage-and-fix session:
 
