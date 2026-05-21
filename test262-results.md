@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 92.75 % | 99.90 % | 37184 / 40092 | 37184 / 37222 |
+| **runtime** | 92.76 % | 99.91 % | 37187 / 40091 | 37187 / 37221 |
 
 
 ## Where the runtime stands, by area
@@ -24,9 +24,8 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_10–99 fails_** | | | | | |
-| `language/expressions` | 9750 | 19 | 972 | 91 % | 100 % |
+| `language/expressions` | 9752 | 16 | 972 | 91 % | 100 % |
 | **_1–9 fails_** | | | | | |
-| `built-ins/Array` | 3034 | 1 | 36 | 99 % | 100 % |
 | `built-ins/BigInt` | 73 | 3 | 0 | 96 % | 96 % |
 | `built-ins/Map` | 168 | 1 | 1 | 99 % | 99 % |
 | `built-ins/RegExp` | 1593 | 9 | 161 | 90 % | 99 % |
@@ -37,6 +36,7 @@ browser-era built-ins …).
 | **_0 fails (passing or wholly OOS)_** | | | | | |
 | ~~`built-ins/AbstractModuleSource`~~ | ~~0~~ | ~~0~~ | ~~8~~ | ~~0 %~~ | ~~0 %~~ |
 | `built-ins/AggregateError` | 23 | 0 | 0 | 100 % | 100 % |
+| `built-ins/Array` | 3035 | 0 | 36 | 99 % | 100 % |
 | `built-ins/ArrayBuffer` | 182 | 0 | 4 | 98 % | 100 % |
 | `built-ins/ArrayIteratorPrototype` | 19 | 0 | 8 | 70 % | 100 % |
 | ~~`built-ins/AsyncDisposableStack`~~ | ~~0~~ | ~~0~~ | ~~103~~ | ~~0 %~~ | ~~0 %~~ |
@@ -157,11 +157,16 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-21 — cynic `3cb87f9`, test262 `d0c1b455`
+### 2026-05-21 — cynic `3561bfc`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 92.75 % | 99.90 % | 37184 / 40092 | 37184 / 37222 | +9 | 50.6 s |
+| **runtime** | 92.76 % | 99.91 % | 37187 / 40091 | 37187 / 37221 | +12 | 1m 05s |
+
+Biggest movers (runtime):
+
+- `language/expressions` +2
+- `built-ins/Array` +1
 
 ### 2026-05-20 — cynic `1708084`, test262 `d0c1b455`
 
