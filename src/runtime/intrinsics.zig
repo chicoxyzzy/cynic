@@ -259,6 +259,11 @@ pub fn install(realm: *Realm) !void {
         "Function",
         obj_proto,
     );
+    // Hand the heap the freshly-built %Function.prototype% so
+    // `allocateFunctionNative` can wire every later-allocated
+    // native function's `[[Prototype]]` at creation time —
+    // including the ones installed lazily after this init pass.
+    realm.heap.function_prototype = realm.intrinsics.function_prototype;
     // §20.2.3 — %Function.prototype% is itself a built-in
     // function object that, when called, returns undefined.
     // §13.5.3 typeof routes through the `proxy_callable` flag for

@@ -212,6 +212,16 @@ pub const Heap = struct {
     functions_young: std.ArrayListUnmanaged(*JSFunction) = .empty,
     /// Mature `JSFunction` instances.
     functions_mature: std.ArrayListUnmanaged(*JSFunction) = .empty,
+    /// `%Function.prototype%` — handed to the heap by realm init
+    /// once it exists. `allocateFunctionNative` reads it to wire
+    /// each native function's `[[Prototype]]` at creation time, so
+    /// `.call` / `.apply` / `.bind` resolve on every native — even
+    /// ones built lazily after init's one-time proto-wiring pass.
+    /// `null` only during the early bootstrap before
+    /// `%Function.prototype%` is allocated; those functions are
+    /// caught by that init pass instead. Borrowed — the object is
+    /// rooted via the realm's intrinsics and outlives the heap.
+    function_prototype: ?*JSObject = null,
     /// Young plain `JSObject` instances (object literals,
     /// prototypes, built-in constructors' return values).
     objects_young: std.ArrayListUnmanaged(*JSObject) = .empty,
@@ -616,6 +626,12 @@ pub const Heap = struct {
     ) !*JSFunction {
         const f = try JSFunction.initNative(self.allocator, callback, param_count, name);
         errdefer f.deinit(self.allocator);
+        // §20.2.3 — a native function's `[[Prototype]]` is
+        // %Function.prototype%. Wire it here so it holds for
+        // functions allocated lazily after realm init (the init
+        // pass that backfills `proto` runs only once); `null`
+        // before the prototype exists, handled by that pass.
+        if (self.function_prototype) |fp| f.proto = fp;
         try self.installFunctionLengthAndName(f, param_count, name);
         try self.functions_young.append(self.allocator, f);
         self.allocs_since_gc +|= 1;

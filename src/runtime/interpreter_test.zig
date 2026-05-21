@@ -1007,6 +1007,29 @@ test "later: F.prototype.constructor === F" {
     , "yes");
 }
 
+test "native method on a lazily-built prototype inherits Function.prototype" {
+    // Regression: %ArrayIteratorPrototype% is built on the first
+    // array iteration — after realm init's one-time function-proto
+    // wiring pass. Its `next` (and every other lazily-installed
+    // native) must still chain to %Function.prototype% so the
+    // inherited `.call` / `.apply` / `.bind` resolve.
+    try expectScriptStringWithBuiltins(
+        \\const next = Object.getPrototypeOf([1, 2, 3][Symbol.iterator]()).next;
+        \\const ok = Object.getPrototypeOf(next) === Function.prototype
+        \\    && typeof next.call === "function"
+        \\    && typeof next.apply === "function"
+        \\    && typeof next.bind === "function";
+        \\ok ? "ok" : "broken";
+    , "ok");
+}
+
+test "lazily-installed native method is callable via Function.prototype.call" {
+    try expectScriptIntWithBuiltins(
+        \\const it = [10, 20, 30][Symbol.iterator]();
+        \\Object.getPrototypeOf(it).next.call(it).value;
+    , 10);
+}
+
 test "later: function .prototype is mutable" {
     // Test262 sets `Test262Error.prototype.toString = …` so the
     //.prototype object must be a real ordinary object that
