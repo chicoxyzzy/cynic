@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 92.72 % | 99.87 % | 37175 / 40094 | 37175 / 37224 |
+| **runtime** | 92.74 % | 99.89 % | 37182 / 40092 | 37182 / 37222 |
 
 
 ## Where the runtime stands, by area
@@ -24,7 +24,7 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_10–99 fails_** | | | | | |
-| `language/expressions` | 9745 | 26 | 972 | 91 % | 100 % |
+| `language/expressions` | 9750 | 19 | 972 | 91 % | 100 % |
 | **_1–9 fails_** | | | | | |
 | `built-ins/Array` | 3034 | 1 | 36 | 99 % | 100 % |
 | `built-ins/BigInt` | 73 | 3 | 0 | 96 % | 96 % |
@@ -36,7 +36,6 @@ browser-era built-ins …).
 | `built-ins/decodeURIComponent` | 55 | 1 | 0 | 98 % | 98 % |
 | `language/module-code` | 574 | 1 | 14 | 97 % | 100 % |
 | `language/statements` | 8407 | 2 | 672 | 93 % | 100 % |
-| `language/types` | 95 | 2 | 9 | 90 % | 98 % |
 | **_0 fails (passing or wholly OOS)_** | | | | | |
 | ~~`built-ins/AbstractModuleSource`~~ | ~~0~~ | ~~0~~ | ~~8~~ | ~~0 %~~ | ~~0 %~~ |
 | `built-ins/AggregateError` | 23 | 0 | 0 | 100 % | 100 % |
@@ -110,6 +109,7 @@ browser-era built-ins …).
 | `language/rest-parameters` | 11 | 0 | 0 | 100 % | 100 % |
 | `language/source-text` | 1 | 0 | 0 | 100 % | 100 % |
 | `language/statementList` | 40 | 0 | 0 | 100 % | 100 % |
+| `language/types` | 97 | 0 | 9 | 92 % | 100 % |
 | `language/white-space` | 51 | 0 | 0 | 100 % | 100 % |
 
 
@@ -157,18 +157,22 @@ features ship in mainline ECMA-262.
 
 ## History
 
+### 2026-05-21 — cynic `2d19a68`, test262 `d0c1b455`
+
+|         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
+|---|---|---|---|---|---:|---:|
+| **runtime** | 92.74 % | 99.89 % | 37182 / 40092 | 37182 / 37222 | +7 | 3m 05s |
+
+Biggest movers (runtime):
+
+- `language/expressions` +5
+- `language/types` +2
+
 ### 2026-05-20 — cynic `1708084`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 92.72 % | 99.87 % | 37175 / 40094 | 37175 / 37224 | +82 | 12m 23s |
-
-Biggest movers (runtime):
-
-- `built-ins/RegExp` +74
-- `built-ins/Number` +3
-- `built-ins/String` +2
-- `language/types` +1
+| **runtime** | 92.72 % | 99.87 % | 37175 / 40094 | 37175 / 37223 | +82 |  |
 
 ### 2026-05-19 — cynic `b2efa16`, test262 `d0c1b455`
 
