@@ -966,6 +966,11 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                     const scope = realm.heap.openScope() catch return error.OutOfMemory;
                     defer scope.close();
                     scope.push(iter) catch return error.OutOfMemory;
+                    // The instance object is a native-allocated GC
+                    // `*JSObject` held only on the Zig stack; root it
+                    // too, or a `next()`-triggered sweep frees it and
+                    // the `inst.typed_view = …` write below is a UAF.
+                    scope.push(heap_mod.taggedObject(inst)) catch return error.OutOfMemory;
                     const max_iter: usize = 1 << 24;
                     var step: usize = 0;
                     while (step < max_iter) : (step += 1) {
@@ -2898,11 +2903,20 @@ fn typedArrayFilter(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // ToNumber dispatches `undefined → NaN`).
     var kept: std.ArrayListUnmanaged(Value) = .empty;
     defer kept.deinit(realm.allocator);
+    // The retained values accumulate in a non-GC list across the
+    // callback loop and the species-create call below — both
+    // re-enter JS. Root each kept value on a HandleScope so a
+    // mid-loop sweep can't collect them.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
     var i: usize = 0;
     while (i < ctx.len) : (i += 1) {
         const v = taSafeRead(realm, ctx.tv, @intCast(i));
         const r = try invokeCallback(realm, ctx.callback, ctx.this_arg, v, @intCast(i), ctx.self_obj);
-        if (toBoolean(r)) kept.append(realm.allocator, v) catch return error.OutOfMemory;
+        if (toBoolean(r)) {
+            kept.append(realm.allocator, v) catch return error.OutOfMemory;
+            scope.push(v) catch return error.OutOfMemory;
+        }
     }
     // §23.2.3.10 step 12 — TypedArraySpeciesCreate(O, « kept.length »).
     const out = try taSpeciesCreate(realm, ctx.self_obj, ctx.tv.kind, kept.items.len);

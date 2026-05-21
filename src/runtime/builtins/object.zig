@@ -2041,7 +2041,17 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
     // §20.1.2.7 step 2 — `Let key be ? ToPropertyKey(P)`. Runs
     // after ToObject so a poisoned ToPropertyKey side-effect
     // can't fire when the target would already have thrown.
-    const key = (try descriptorKey(realm, argOr(args, 1, Value.undefined_))).key;
+    const dk = try descriptorKey(realm, argOr(args, 1, Value.undefined_));
+    const key = dk.key;
+    // Pin the target and the borrowed key slice across the proxy
+    // `getOwnPropertyDescriptor` trap re-entry below — a mid-trap
+    // GC would otherwise free the key's backing JSString (leaving
+    // the post-trap `hasOwn(key)` invariant checks reading freed
+    // memory) or collect a freshly boxed primitive target.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(target) catch return error.OutOfMemory;
+    if (dk.anchor) |ks| scope.push(Value.fromString(ks)) catch return error.OutOfMemory;
 
     // §10.5.5 Proxy [[GetOwnProperty]] — when target is a proxy,
     // dispatch through `handler.getOwnPropertyDescriptor`. Walks
@@ -2101,6 +2111,9 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
                         return error.NativeThrew;
                     },
                 };
+                // Root the trap result — `parseDescriptor` below can
+                // re-enter JS through descriptor-field getters.
+                scope.push(result_v) catch return error.OutOfMemory;
                 // §10.5.5 step 8 — trap result must be Object or
                 // Undefined. (Symbols / numbers / null all reject.)
                 if (!result_v.isUndefined() and heap_mod.valueAsPlainObject(result_v) == null) {
@@ -3307,6 +3320,7 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
     defer scope.close();
     scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     scope.push(iter) catch return error.OutOfMemory;
+    const scope_base = scope.handles.items.len;
 
     const max_iter: i64 = 1 << 24;
     var i: i64 = 0;
@@ -3368,6 +3382,12 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
                 return error.NativeThrew;
             },
         };
+        // Root the key object and the value across
+        // `propertyKeyForFromEntries` — its ToString re-enters JS
+        // (the key's `toString`) and a GC there would otherwise
+        // collect `v` before it is stored into `out`.
+        scope.push(k) catch return error.OutOfMemory;
+        scope.push(v) catch return error.OutOfMemory;
         // §7.1.19 ToPropertyKey — Symbol keys preserve as Symbol
         // (Cynic stores them as `<sym:N>` / `@@<name>`); other
         // values coerce to String via ToString. A throwing
@@ -3389,6 +3409,9 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
                 out.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
             }
         }
+        // `v` is now reachable via `out`; drop the per-iteration
+        // handles so the scope can't grow unboundedly.
+        scope.handles.shrinkRetainingCapacity(scope_base);
     }
     return heap_mod.taggedObject(out);
 }

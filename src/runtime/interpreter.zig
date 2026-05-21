@@ -9630,6 +9630,10 @@ fn runFrames(
                         }
                     }
                     try realm.globals.put(realm.allocator, key_s.flatBytes(), acc);
+                    // Generational write barrier — a top-level `var`
+                    // store can land a young value into the (mature)
+                    // global object; record the old→young edge.
+                    if (realm.globals.target) |gt| realm.heap.writeBarrier(.{ .object = gt }, acc);
                 }
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
@@ -9747,6 +9751,10 @@ fn runFrames(
                         }
                     }
                     try realm.globals.put(realm.allocator, key_s.flatBytes(), acc);
+                    // Generational write barrier — a top-level `var`
+                    // store can land a young value into the (mature)
+                    // global object; record the old→young edge.
+                    if (realm.globals.target) |gt| realm.heap.writeBarrier(.{ .object = gt }, acc);
                 }
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
