@@ -157,16 +157,11 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-21 — cynic `b53f2bf`, test262 `d0c1b455`
+### 2026-05-21 — cynic `3cb87f9`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 92.75 % | 99.90 % | 37184 / 40092 | 37184 / 37222 | +9 | 7m 06s |
-
-Biggest movers (runtime):
-
-- `built-ins/decodeURI` +1
-- `built-ins/decodeURIComponent` +1
+| **runtime** | 92.75 % | 99.90 % | 37184 / 40092 | 37184 / 37222 | +9 | 50.6 s |
 
 ### 2026-05-20 — cynic `1708084`, test262 `d0c1b455`
 
