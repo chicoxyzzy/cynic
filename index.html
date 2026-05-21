@@ -663,7 +663,7 @@
     <section class="compare" id="status">
       <div class="section-num">§02 · WHERE WE ARE</div>
       <h2 class="section-title">Pre-alpha. <span class="accent">Not pretending otherwise.</span></h2>
-      <p class="section-sub">Lexer, parser, and bytecode interpreter ship. The runtime is filling in. JITs and generational GC are future work. Below is what works, what kind-of works, and what Cynic refuses to pretend works yet.</p>
+      <p class="section-sub">Lexer, parser, and bytecode interpreter ship. The runtime is filling in. Generational GC landed; JIT tiers are still future work. Below is what works, what kind-of works, and what Cynic refuses to pretend works yet.</p>
 
       <div class="compare-table">
         <div class="compare-row compare-head">
@@ -729,7 +729,7 @@
         <div class="compare-row">
           <div>
             <div class="feature-name">Real <code>Symbol</code> &amp; <code>BigInt</code> primitives</div>
-            <div class="compare-note">NaN-boxed, pointer-tagged; well-known symbols, registry, full BigInt arithmetic</div>
+            <div class="compare-note">NaN-boxed, pointer-tagged; well-known symbols, registry, arbitrary-precision BigInt</div>
           </div>
           <div class="check">Works.</div>
           <div>Primitives. Not polyfills wearing a costume.</div>
@@ -819,10 +819,10 @@
         <div class="compare-row">
           <div>
             <div class="feature-name">Garbage collector</div>
-            <div class="compare-note">non-moving, stop-the-world mark-sweep; the generational machinery — write barrier, remembered set, young/mature split — has landed, minor collection is next</div>
+            <div class="compare-note">generational mark-sweep — short-lived objects collected without scanning the whole heap</div>
           </div>
           <div class="check">Works.</div>
-          <div>The write barrier works. It's just waiting for a nursery to protect.</div>
+          <div>Most objects die young. The collector finally agrees.</div>
         </div>
 
         <div class="compare-row">
