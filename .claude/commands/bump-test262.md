@@ -21,9 +21,10 @@ Bump the test262 corpus to upstream HEAD and produce fresh score rows.
 5. Run both modes with `--write-results` (runtime is the default
    mode — the runtime sweep includes the main + every pre-Stage-4
    feature phase in one invocation):
-   - `timeout 1800 zig build test262 -- --quiet --write-results`
-   - `timeout 1800 zig build test262 -- --quiet --mode=parser
-     --write-results`
+   - `tools/guarded-run.sh --timeout=1800 -- zig build test262
+     -- --quiet --write-results`
+   - `tools/guarded-run.sh --timeout=1800 -- zig build test262
+     -- --quiet --mode=parser --write-results`
 
 6. Show the score delta vs the prior row for each mode (which is
    now on the new corpus). Call out any per-bucket movers that

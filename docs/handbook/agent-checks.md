@@ -58,9 +58,12 @@ Before declaring a touch complete:
 
 4. **Session-end full sweep.** `--only-failing` is fine for
    the per-fix verification loop; a full
-   `zig build test262 -- --quiet --write-results` at session
-   end is the safety net that catches anything #1-3 missed
-   plus refreshes the cache.
+   `tools/guarded-run.sh --timeout=1800 -- zig build test262 --
+   --quiet --write-results` at session end is the safety net
+   that catches anything #1-3 missed plus refreshes the cache.
+   The harness's own `--timeout` watchdog aborts and names any
+   fixture a harness/engine change wedges, so the sweep still
+   completes instead of hanging.
 
 ## Buckets to filter per touch type
 

@@ -24,7 +24,8 @@ at 100 % attempted for a while); we still capture both.
    feature phase in one invocation, populating the per-feature
    scoreboard alongside the main row):
 
-       timeout 1800 zig build test262 -- --quiet --write-results
+       tools/guarded-run.sh --timeout=1800 -- \
+         zig build test262 -- --quiet --write-results
 
 3. Parser sweep — `zig build test262 -- --quiet --mode=parser
    --write-results`.

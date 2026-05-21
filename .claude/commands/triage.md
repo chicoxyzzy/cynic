@@ -13,7 +13,10 @@ asks for false-reject / false-accept triage specifically.
    `zig build test262 -- --quiet --only-failing --list-failures=2000`
    (runtime is the default mode) and capture the output. If
    `.test262-pass-cache.txt` is stale (no recent full sweep),
-   drop `--only-failing` and wrap in `timeout 1800`.
+   drop `--only-failing` and wrap the run in
+   `tools/guarded-run.sh --timeout=1800 -- …` — it caps time +
+   memory and kills the whole process tree (a bare `timeout`
+   orphans the build / test subprocesses).
 
 2. Parse out the failure paths and group by directory (everything
    before the basename). Show the top 10 directories by failure
