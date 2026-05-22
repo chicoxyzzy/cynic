@@ -11983,6 +11983,23 @@ fn strictSetPropertyAnchored(
         // into target.[[Set]]).
         var obj = obj_in;
         const receiver_is_proxy = obj_in.proxy_target != null or obj_in.proxy_target_fn != null or obj_in.proxy_revoked;
+        // Every Proxy `[[Set]]` path below — the `set` trap loop, the
+        // trapless GetOwnPropertyDescriptor / DefineProperty pair —
+        // re-enters JS and can GC. `key` is borrowed from `key_string`
+        // for a computed-key set (`o[expr] = v`), and the post-trap
+        // invariant checks (`nativeProxySet` reads
+        // `target.property_flags.get(key)`) would then hash a dangling
+        // slice and miss. Root `key_string` / `value` / `recv` for the
+        // whole proxy path; gated on `receiver_is_proxy` so a plain
+        // object set pays nothing.
+        const px_root_scope: ?*@import("heap.zig").HandleScope = if (receiver_is_proxy) blk: {
+            const sc = realm.heap.openScope() catch return error.OutOfMemory;
+            if (key_string) |ks| sc.push(Value.fromString(ks)) catch return error.OutOfMemory;
+            sc.push(value) catch return error.OutOfMemory;
+            sc.push(recv) catch return error.OutOfMemory;
+            break :blk sc;
+        } else null;
+        defer if (px_root_scope) |sc| sc.close();
         while (obj.proxy_target != null or obj.proxy_target_fn != null or obj.proxy_revoked) {
             // §10.5.9 [[Set]] on a callable Proxy whose `[[ProxyTarget]]`
             // is a function (`proxy_target_fn`). The trap, if present,
@@ -12102,19 +12119,8 @@ fn strictSetPropertyAnchored(
         // fire with Receiver as this — fall through to the
         // accessor walk below for that case.
         if (receiver_is_proxy and obj != obj_in) {
-            // The GetOwnPropertyDescriptor / DefineProperty traps
-            // below re-enter JS and trigger a GC. `key` is borrowed
-            // from `key_string` for a computed-key set (`o[expr]=v`),
-            // and `value` may be a young heap value — root both
-            // across the traps. Without this the gop trap's GC frees
-            // `key_string`, and the post-trap `allocateString(key)`
-            // for the defineProperty step copies freed bytes (the
-            // trap then logs a garbled key).
-            const px_scope = realm.heap.openScope() catch return error.OutOfMemory;
-            defer px_scope.close();
-            if (key_string) |ks| px_scope.push(Value.fromString(ks)) catch return error.OutOfMemory;
-            px_scope.push(value) catch return error.OutOfMemory;
-            px_scope.push(recv) catch return error.OutOfMemory;
+            // `key` / `value` / `recv` are kept rooted by
+            // `px_root_scope` above for the whole proxy path.
             const has_own_data = obj.properties.contains(key);
             const has_own_acc = obj.accessors.contains(key);
             if (has_own_data and !has_own_acc) {
