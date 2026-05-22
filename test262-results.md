@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 92.81 % | 99.97 % | 37208 / 40091 | 37208 / 37221 |
+| **runtime** | 92.82 % | 99.98 % | 37211 / 40090 | 37211 / 37220 |
 
 
 ## Where the runtime stands, by area
@@ -25,9 +25,6 @@ browser-era built-ins …).
 |---|---:|---:|---:|---:|---:|
 | **_1–9 fails_** | | | | | |
 | `built-ins/RegExp` | 1593 | 9 | 161 | 90 % | 99 % |
-| `built-ins/TypedArrayConstructors` | 655 | 1 | 16 | 97 % | 100 % |
-| `language/module-code` | 574 | 1 | 14 | 97 % | 100 % |
-| `language/statements` | 8407 | 2 | 672 | 93 % | 100 % |
 | **_0 fails (passing or wholly OOS)_** | | | | | |
 | ~~`built-ins/AbstractModuleSource`~~ | ~~0~~ | ~~0~~ | ~~8~~ | ~~0 %~~ | ~~0 %~~ |
 | `built-ins/AggregateError` | 23 | 0 | 0 | 100 % | 100 % |
@@ -72,6 +69,7 @@ browser-era built-ins …).
 | `built-ins/Symbol` | 75 | 0 | 6 | 93 % | 100 % |
 | `built-ins/ThrowTypeError` | 13 | 0 | 0 | 100 % | 100 % |
 | `built-ins/TypedArray` | 1423 | 0 | 8 | 99 % | 100 % |
+| `built-ins/TypedArrayConstructors` | 655 | 0 | 16 | 98 % | 100 % |
 | `built-ins/WeakMap` | 101 | 0 | 0 | 100 % | 100 % |
 | `built-ins/WeakRef` | 28 | 0 | 0 | 100 % | 100 % |
 | `built-ins/WeakSet` | 84 | 0 | 0 | 100 % | 100 % |
@@ -103,11 +101,13 @@ browser-era built-ins …).
 | `language/keywords` | 25 | 0 | 0 | 100 % | 100 % |
 | `language/line-terminators` | 32 | 0 | 0 | 100 % | 100 % |
 | `language/literals` | 384 | 0 | 97 | 80 % | 100 % |
+| `language/module-code` | 575 | 0 | 14 | 98 % | 100 % |
 | `language/punctuators` | 11 | 0 | 0 | 100 % | 100 % |
 | `language/reserved-words` | 27 | 0 | 0 | 100 % | 100 % |
 | `language/rest-parameters` | 11 | 0 | 0 | 100 % | 100 % |
 | `language/source-text` | 1 | 0 | 0 | 100 % | 100 % |
 | `language/statementList` | 40 | 0 | 0 | 100 % | 100 % |
+| `language/statements` | 8409 | 0 | 672 | 93 % | 100 % |
 | `language/types` | 97 | 0 | 9 | 92 % | 100 % |
 | `language/white-space` | 51 | 0 | 0 | 100 % | 100 % |
 
@@ -156,11 +156,16 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-22 — cynic `90cd69b`, test262 `d0c1b455`
+### 2026-05-22 — cynic `11b247c`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 92.81 % | 99.97 % | 37208 / 40091 | 37208 / 37221 | ±0 | 50.7 s |
+| **runtime** | 92.82 % | 99.98 % | 37211 / 40090 | 37211 / 37220 | +3 | 55.7 s |
+
+Biggest movers (runtime):
+
+- `language/statements` +2
+- `language/module-code` +1
 
 ### 2026-05-21 — cynic `0ad1d25`, test262 `d0c1b455`
 
