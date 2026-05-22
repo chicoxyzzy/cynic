@@ -14,6 +14,37 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-05-22 — cynic `8e8171e`, host `Darwin 25.5.0 arm64`
+
+The loop env-hoist (`f719ae3` — skip the per-iteration environment
+when the loop body captures nothing), measured. The BigInt
+arbitrary-precision rewrite, GC root-completeness, and the
+non-RegExp triage fixes also landed since the row below — all
+conformance / correctness work, perf-neutral on this suite.
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 87.55 | 86.39 | 93.91 | 3248 |
+| prop_access | 48.64 | 47.95 | 49.41 | 3280 |
+| array_iter | 21.84 | 21.31 | 22.24 | 4240 |
+| string_concat | 3.16 | 3.00 | 3.37 | 4144 |
+| promise_chain | 3.62 | 3.45 | 3.78 | 8176 |
+| object_alloc | 18.93 | 18.70 | 19.70 | 8768 |
+
+Δ vs the `a36af42` row below: `array_iter` −69.6 % (71.76 →
+21.84) — the env-hoist drops the per-iteration environment the
+loop body never needed. Broad gains follow as the same hoist
+thins loop scaffolding elsewhere: `string_concat` −22.7 %
+(4.09 → 3.16), `promise_chain` −22.0 % (4.64 → 3.62),
+`object_alloc` −14.9 % (22.25 → 18.93). `arith_loop` and
+`prop_access` are flat (±3 % run-to-run noise — a closure-free
+arithmetic loop has no per-iteration env to hoist). Spreads
+tight; machine load ~6 at measurement. Cross-engine context
+(`tools/bench-cross.sh`, interpreter tier, not recorded here):
+`array_iter` is now level with QuickJS-NG and JSC (~22 ms each);
+`prop_access` stays ~3× behind QuickJS — the next target, an
+inline-cache job.
+
 ### 2026-05-21 — cynic `a36af42`, host `Darwin 25.5.0 arm64`
 
 rung-5 (int32 fast paths for arithmetic / comparison / bitwise
