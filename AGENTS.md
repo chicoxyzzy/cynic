@@ -445,6 +445,7 @@ the workflow plainly and any agent or human can follow them by hand.
 | Workflow | What it does | File |
 |---|---|---|
 | `/triage` | Survey current test262 failures, group by pattern, suggest fixes (analysis only) | [.claude/commands/triage.md](.claude/commands/triage.md) |
+| `/gc-stress` | Sweep at `--gc-threshold=1`, diff against default to surface use-after-free clusters, fix by rooting / typed slots, verify | [.claude/commands/gc-stress.md](.claude/commands/gc-stress.md) |
 | `/score` | Append a fresh score row to `test262-results.md`, report the delta | [.claude/commands/score.md](.claude/commands/score.md) |
 | `/bump-test262` | Bump the test262 submodule to upstream HEAD, rerun, score (do not commit) | [.claude/commands/bump-test262.md](.claude/commands/bump-test262.md) |
 | `/perf` | Run the Phase 1 micro-bench suite; report per-fixture medians + RSS | [.claude/commands/perf.md](.claude/commands/perf.md) |
