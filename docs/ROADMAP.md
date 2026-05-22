@@ -187,6 +187,18 @@ code construction (aligns with SES).
   installed `add`; IteratorClose on all abrupt paths.
   Symbols-as-WeakSet/Map-keys (CanBeHeldWeakly) shipped.
 
+- **Genuinely weak `WeakRef` / `WeakMap` / `WeakSet` /
+  `FinalizationRegistry`.** The major collector
+  (`Heap.collectFull`) treats the weak slots as weak edges: a
+  §24.3 WeakMap ephemeron fixpoint (a value is live iff its key
+  is) plus a post-mark pass clears dead `WeakRef` targets,
+  tombstones dead WeakMap/WeakSet entries, and queues
+  `FinalizationRegistry` cleanup jobs onto the microtask drain.
+  `collectYoung` keeps strong-marking — a young weak target
+  tenures and is handled at the next major cycle (GC timing is
+  spec-unspecified, so this is conformant). See
+  [docs/handbook/gc.md](handbook/gc.md).
+
 - **Math.sumPrecise (§21.3.2.21) + JSON.rawJSON + JSON.isRawJSON
   (§25.5.{3,4})** — two ES2025 Stage-4 built-ins shipped
   (Shewchuk exact-floating-point summation with overflow-
@@ -456,9 +468,6 @@ automatically on the next full sweep.
   tz-data source.
 - `String.prototype.normalize` is a passthrough — needs UCD
   normalization tables for real NFC/NFD/NFKC/NFKD.
-- `WeakRef` / `FinalizationRegistry` — the API surface ships;
-  the actual weakness lands with generational GC (today the
-  references are strong so collection never happens).
 - `Function.prototype.toString` — returns the original source slice
   for declared functions; callable Proxy returns the spec sentinel
   `function () { [native code] }`. Remaining edge: CR vs LF
