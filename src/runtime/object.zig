@@ -21,6 +21,13 @@ const std = @import("std");
 const Value = @import("value.zig").Value;
 const HeapKind = @import("function.zig").HeapKind;
 
+test {
+    // Pull the property-shape module's unit tests into the suite.
+    // `shape.zig` is not yet wired into `JSObject` storage; this
+    // keeps its tests running while it is developed standalone.
+    _ = @import("shape.zig");
+}
+
 /// One instance-field initializer: a (name, function) pair that
 /// the constructor invokes during instance creation to compute
 /// `this.name = init_fn.call(this)`. Stored on the class's
@@ -293,6 +300,16 @@ pub const JSObject = struct {
     /// install with `enumerable: false`; user-level
     /// `Object.defineProperty` populates here too.
     property_flags: std.StringArrayHashMapUnmanaged(PropertyFlags) = .empty,
+    /// §10.1 shape-based named-property storage — not yet the
+    /// source of truth. `shape` describes this object's named-
+    /// property layout (see `shape.zig`); `slots[shape.lookup(key)
+    /// .slot]` holds each value. `get` / `set` are not yet routed
+    /// here, so `shape == null` on every object and property
+    /// access stays on `properties` / `property_flags` (the
+    /// dictionary representation). Routing access over and
+    /// retiring those two maps is the remaining work.
+    shape: ?*@import("shape.zig").Shape = null,
+    slots: std.ArrayListUnmanaged(Value) = .empty,
     /// Per-instance private slots — keyed by the class-identity-
     /// prefixed name produced by the compiler (`P<uid>#name`),
     /// so two unrelated classes both declaring `#x` get distinct
@@ -702,6 +719,9 @@ pub const JSObject = struct {
         self.own_key_order.deinit(allocator);
         self.elements.deinit(allocator);
         self.sparse_elements.deinit(allocator);
+        // `shape` itself is realm-lifetime arena memory (ShapeTree),
+        // not freed per-object; only the slot vector is owned here.
+        self.slots.deinit(allocator);
         // instance_field_inits / private_method_inits are
         // borrowed slices owned by class.zig (allocated against
         // the realm allocator and tracked by the realm); freeing
