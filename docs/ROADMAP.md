@@ -666,21 +666,51 @@ sampling by `/profile`.
   per-fixture wall time + RSS against the prior `bench-results.md`
   baseline. Phase 1 of [docs/benchmarking.md](benchmarking.md).
 
-**Planned (largest-win-first, after the profile data points at one).**
+**Planned — the path to interpreter-tier parity.**
 
-- **Inline property-shape caches** on hot member access. Every
-  major engine built this *first*: V8 hidden classes, JSC structure
-  IDs, SM shape trees. Today Cynic does an `ArrayHashMap` lookup
-  per `.x` access; ICs collapse that to a one-cmp guard on the hot
-  path. Biggest single win for typical JS workloads (10-100× on
-  hot member access). Architectural; expensive to add but pays for
-  itself many times over.
-- **Real `JSArray` heap kind** with packed indexed storage as the
-  base case, sparse fallback only for true sparse arrays. Some of
-  this exists (`elements: ArrayListUnmanaged(Value)` +
-  `is_array_exotic` flag); a unified heap kind would let the
-  arithmetic / loop opcodes skip the per-access `is_array_exotic`
-  branch and read `elements.items.ptr[i]` directly.
+The cross-engine harness (interpreter tier, JITs off) puts Cynic
+level with or ahead of QuickJS-NG on `array_iter`, `promise_chain`
+and `string_concat`, and within ~10 % on `arith_loop` and
+`object_alloc`. One gap is large — `prop_access` runs ~3× slower
+than QuickJS-NG. Closing that, then trimming the two mid-pack
+benches, is the work below, ordered largest-win-first. The goal
+is honest parity with QuickJS-NG — the fairest non-JIT peer;
+matching the JIT engines at full speed is a separate track (see
+*Proper Tail Calls* and the baseline-JIT note).
+
+1. **Inline property-shape caches** — the single biggest win, and
+   the cause of the `prop_access` gap. Every `.x` today is an
+   `ArrayHashMap` hash lookup; with shape (hidden-class) identity
+   a member access collapses to a one-compare shape guard plus a
+   direct slot index. Every major engine built this first — V8
+   hidden classes, JSC structures, SM shape trees. The
+   property-shape *transition tree* + storage scaffolding has
+   landed; the remaining work is wiring monomorphic / polymorphic
+   IC sites into the `lda_property` / `sta_property` opcodes and
+   the object model's slot layout. Architectural and expensive,
+   but it pays for itself many times over and is the prerequisite
+   for most later object-model speedups.
+
+2. **Packed `JSArray` heap kind + leaner object allocation** —
+   targets `object_alloc`. A unified array heap kind with packed
+   indexed storage as the base case (sparse fallback only when
+   genuinely sparse) lets the loop / arithmetic opcodes skip the
+   per-access `is_array_exotic` branch and index
+   `elements.items.ptr[i]` directly. Some of this exists already
+   (`elements: ArrayListUnmanaged(Value)` + the `is_array_exotic`
+   flag). The shape work above also thins ordinary-object
+   allocation — shape-sharing objects no longer each carry a full
+   hashmap.
+
+3. **Interpreter-core tuning for `arith_loop`** — Cynic is
+   already within ~10 % of QuickJS-NG here; the remaining
+   distance is to JSC's hand-written-assembly LLInt. Closing that
+   without a JIT is deep, diminishing-returns micro-tuning of the
+   dispatch core — lowest priority of the three, and the point
+   where a baseline JIT becomes the better investment.
+
+**Planned — GC latency.**
+
 - **Incremental / concurrent marking.** The generational
   collector (shipped, above) still stop-the-world marks the
   mature set on a major cycle; incremental marking would amortize
