@@ -6709,11 +6709,10 @@ fn runFrames(
                 if (heap_mod.valueAsPlainObject(iter_v)) |iter_obj| {
                     // §7.4.6 IteratorClose step 4 — only run when
                     // `iteratorRecord.[[Done]]` is false. Cynic
-                    // tracks this on the iter object itself via
-                    // the `__cynic_iter_done__` slot that
-                    // `iter_step` maintains.
-                    if (iter_obj.properties.get("__cynic_iter_done__")) |dv| {
-                        if (toBoolean(dv)) continue :dispatch try decodeNext(code, &ip, &committed);
+                    // tracks this on the iter object's typed
+                    // `iter_record` slot that `iter_step` maintains.
+                    if (iter_obj.iter_record) |rec| {
+                        if (rec.done) continue :dispatch try decodeNext(code, &ip, &committed);
                     }
                     // §7.4.6 IteratorClose step 4 → §7.3.10 GetMethod —
                     // a present but non-callable `return` throws
@@ -8312,26 +8311,32 @@ fn runFrames(
                     registers[r_done] = Value.true_;
                     continue :dispatch try decodeNext(code, &ip, &committed);
                 };
-                // Cynic-internal `__cynic_iter_done__` short-circuit:
-                // once the iter has surfaced `done: true` we stop
-                // calling `.next()` so subsequent pattern slots
-                // bind to `undefined` without re-entering the
-                // generator / iterator body.
-                if (iter_obj.properties.get("__cynic_iter_done__")) |dv| {
-                    if (toBoolean(dv)) {
-                        acc = Value.undefined_;
-                        registers[r_done] = Value.true_;
-                        continue :dispatch try decodeNext(code, &ip, &committed);
-                    }
+                // §7.4.1 Iterator Record — `iter_step` runs many
+                // times for one destructuring pattern (`[a, b, c]
+                // = src` → three iter_steps). The record caches
+                // `[[NextMethod]]` / `[[Done]]` on the iterated
+                // object's typed `iter_record` slot — off the
+                // property bag, so a user-supplied iterator gains
+                // no observable own property.
+                const iter_rec: *@import("object.zig").IterRecord = iter_obj.iter_record orelse blk: {
+                    const r = realm.allocator.create(@import("object.zig").IterRecord) catch return error.OutOfMemory;
+                    r.* = .{};
+                    iter_obj.iter_record = r;
+                    break :blk r;
+                };
+                // Once the iter has surfaced `done: true` we stop
+                // calling `.next()` so subsequent pattern slots bind
+                // to `undefined` without re-entering the iterator.
+                if (iter_rec.done) {
+                    acc = Value.undefined_;
+                    registers[r_done] = Value.true_;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
                 // §7.4.5 GetIteratorDirect — the spec captures
-                // \`[[NextMethod]]\` once at iterator open. \`iter_step\`
-                // can be called many times for one destructuring
-                // pattern (\`[a, b, c] = src\` → three iter_steps).
-                // Cache the resolved \`next\` on a hidden slot after
-                // the first read so subsequent steps don't re-fire
-                // a \`get next()\` accessor.
-                const next_v = if (iter_obj.properties.get("__cynic_iter_next__")) |cached| cached else nv: {
+                // [[NextMethod]] once at iterator open. Snapshot it
+                // on the first step so later steps don't re-fire a
+                // `get next()` accessor.
+                const next_v = if (iter_rec.next_cached) iter_rec.next else nv: {
                     const v = intrinsics_mod.getPropertyChain(realm, iter_obj, "next") catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => {
@@ -8345,7 +8350,8 @@ fn runFrames(
                             break :nv Value.undefined_;
                         },
                     };
-                    realm.heap.storeProperty(iter_obj, allocator, "__cynic_iter_next__", v) catch return error.OutOfMemory;
+                    iter_rec.next = v;
+                    iter_rec.next_cached = true;
                     break :nv v;
                 };
                 if (committed) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
@@ -8370,7 +8376,7 @@ fn runFrames(
                         // pattern walk doesn't re-enter `.return()`
                         // — §7.4.10 step 5 swallows the second
                         // throw.
-                        iter_obj.set(allocator, "__cynic_iter_done__", Value.true_) catch {};
+                        iter_rec.done = true;
                         f.ip = ip;
                         f.accumulator = acc;
                         committed = true;
@@ -8384,7 +8390,7 @@ fn runFrames(
                     const done_v = intrinsics_mod.getPropertyChain(realm, result_obj, "done") catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => {
-                            iter_obj.set(allocator, "__cynic_iter_done__", Value.true_) catch {};
+                            iter_rec.done = true;
                             const ex = consumePendingException(realm) orelse try makeTypeError(realm, "iterator result .done read failed");
                             f.ip = ip;
                             f.accumulator = acc;
@@ -8396,7 +8402,7 @@ fn runFrames(
                         },
                     };
                     if (toBoolean(done_v)) {
-                        iter_obj.set(allocator, "__cynic_iter_done__", Value.true_) catch return error.OutOfMemory;
+                        iter_rec.done = true;
                         acc = Value.undefined_;
                         registers[r_done] = Value.true_;
                         continue :dispatch try decodeNext(code, &ip, &committed);
@@ -8404,7 +8410,7 @@ fn runFrames(
                     const value_v = intrinsics_mod.getPropertyChain(realm, result_obj, "value") catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => {
-                            iter_obj.set(allocator, "__cynic_iter_done__", Value.true_) catch {};
+                            iter_rec.done = true;
                             const ex = consumePendingException(realm) orelse try makeTypeError(realm, "iterator result .value read failed");
                             f.ip = ip;
                             f.accumulator = acc;
@@ -8421,7 +8427,7 @@ fn runFrames(
                     // §7.4.4 step 5 — `next()` result is not an
                     // object → TypeError. Mark done so the
                     // pattern walk's trailing `iter_close` no-ops.
-                    iter_obj.set(allocator, "__cynic_iter_done__", Value.true_) catch return error.OutOfMemory;
+                    iter_rec.done = true;
                     const ex = try makeTypeError(realm, "iterator result is not an object");
                     f.ip = ip;
                     f.accumulator = acc;

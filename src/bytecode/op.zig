@@ -441,7 +441,7 @@ pub const Op = enum(u8) {
     /// `[op] [r_iter:u8] [r_done:u8]` — §7.4.4 IteratorStep on an
     /// iterator opened by `iter_open` (or any spec-shaped iterator
     /// in `r_iter`). If the iter is already marked done (via the
-    /// internal `__cynic_iter_done__` slot), or `.next()` returns
+    /// typed `iter_record` slot), or `.next()` returns
     /// `{done: true}`, `acc` ends as `undefined` and the boolean
     /// in `r_done` is set to `true`. Otherwise `acc` holds the
     /// stepped `.value` and `r_done` is `false`. Reading `.done`

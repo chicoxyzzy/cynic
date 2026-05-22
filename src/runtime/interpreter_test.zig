@@ -3194,6 +3194,116 @@ test "GC: Promise.all aggregator survives gc_threshold=1" {
     , 6);
 }
 
+test "GC: Iterator.concat survives gc_threshold=1" {
+    // Iterator.concat keeps its validated {iterable, openMethod}
+    // records on the typed `iter_helper.concat_inputs` slot. With
+    // threshold=1 a sweep fires after every alloc in the per-arg
+    // @@iterator GetMethod loop and the wrapper build; the records
+    // must stay rooted, or `concatNext` reads a freed method.
+    try expectScriptIntUnderGcPressure(
+        \\let s = 0;
+        \\for (const v of Iterator.concat([1, 2], [3, 4], [5])) s += v;
+        \\s;
+    , 15);
+}
+
+test "GC: Iterator.zip survives gc_threshold=1" {
+    // zip collects per-input {iter, next, active, pad} records into
+    // the typed `iter_helper.zip_inputs` slot; collectZipIters and
+    // buildZipWrapper must root them across every @@iterator and
+    // step re-entry.
+    try expectScriptIntUnderGcPressure(
+        \\let s = 0;
+        \\for (const t of Iterator.zip([[1, 2, 3], [10, 20, 30]])) s += t[0] + t[1];
+        \\s;
+    , 66);
+}
+
+test "GC: Map iterator survives gc_threshold=1" {
+    // The Map iterator's [[IteratedMap]] / [[MapNextIndex]] /
+    // [[MapIterationKind]] live on the typed `map_set_iter` slot;
+    // the iterated Map must stay marked across each next().
+    try expectScriptIntUnderGcPressure(
+        \\const m = new Map([["a", 1], ["b", 2], ["c", 3]]);
+        \\let s = 0;
+        \\for (const [k, v] of m) s += v;
+        \\s;
+    , 6);
+}
+
+test "GC: Set iterator survives gc_threshold=1" {
+    // The Set iterator's [[IteratedSet]] / [[SetNextIndex]] live on
+    // the typed `map_set_iter` slot.
+    try expectScriptIntUnderGcPressure(
+        \\const set = new Set([10, 20, 30]);
+        \\let s = 0;
+        \\for (const v of set) s += v;
+        \\s;
+    , 60);
+}
+
+test "GC: String.prototype.matchAll survives gc_threshold=1" {
+    // The RegExp String Iterator's [[IteratingRegExp]] /
+    // [[IteratedString]] live on the typed `regexp_string_iter`
+    // slot; both must stay marked across each RegExpExec.
+    try expectScriptStringUnderGcPressure(
+        \\let out = "";
+        \\for (const m of "a1b2c3".matchAll(/[a-z]\d/g)) out += m[0];
+        \\out;
+    , "a1b2c3");
+}
+
+test "GC: destructuring iterator record survives gc_threshold=1" {
+    // `[a, b, c] = src` runs three iter_steps; the cached
+    // [[NextMethod]] / [[Done]] live on the iterated object's typed
+    // `iter_record` slot and must survive each next() sweep.
+    try expectScriptIntUnderGcPressure(
+        \\const g = { [Symbol.iterator]() { return this; }, i: 0,
+        \\  next() { return { value: ++this.i, done: this.i > 4 }; } };
+        \\let [a, b, c] = g;
+        \\a + b + c;
+    , 6);
+}
+
+test "iterator internal state is not an observable own property" {
+    // Map / Set / RegExp-string / concat / zip iterators and the
+    // destructuring iterator record keep their state in typed
+    // internal slots, never as `__cynic_*` property-bag keys — a
+    // spec-conformant iterator exposes no such own property, and
+    // `__cynic_*` keys would still leak via direct get / `in` /
+    // getOwnPropertyDescriptor / hasOwn even though `recordKey`
+    // hides them from enumeration.
+    try expectScriptIntWithBuiltins(
+        \\const slots = ["__cynic_iter_input_0__", "__cynic_iter_method_0__",
+        \\  "__cynic_iter_zip_0__", "__cynic_iter_zipnext_0__", "__cynic_iter_active_0__",
+        \\  "__cynic_iter_key_0__", "__cynic_iter_pad_0__", "__cynic_map__", "__cynic_set__",
+        \\  "__cynic_kind__", "__cynic_idx__", "__cynic_matchall_re__",
+        \\  "__cynic_matchall_done__", "__cynic_iter_next__", "__cynic_iter_done__"];
+        \\function leaks(it) {
+        \\  let n = 0;
+        \\  for (const k of Object.getOwnPropertyNames(it))
+        \\    if (k.indexOf("__cynic") === 0) n++;
+        \\  for (const s of slots) {
+        \\    if (s in it) n++;
+        \\    if (Object.getOwnPropertyDescriptor(it, s) !== undefined) n++;
+        \\    if (Object.hasOwn(it, s)) n++;
+        \\  }
+        \\  return n;
+        \\}
+        \\let total = 0;
+        \\total += leaks(Iterator.concat([1, 2]));
+        \\total += leaks(Iterator.zip([[1], [2]]));
+        \\total += leaks(new Map([[1, 1]]).entries());
+        \\total += leaks(new Set([1]).values());
+        \\total += leaks("ab".matchAll(/./g));
+        \\const g = { [Symbol.iterator]() { return this; }, i: 0,
+        \\  next() { return { value: this.i++, done: this.i > 2 }; } };
+        \\let [da, db] = g;
+        \\total += leaks(g);
+        \\total;
+    , 0);
+}
+
 test "GC: property-bag growth survives gc_threshold=1" {
     // Loop writes 20 keys onto a single object, triggering at
     // least one `StringArrayHashMap.grow`. The keys are JSStrings

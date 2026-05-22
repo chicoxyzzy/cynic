@@ -197,6 +197,76 @@ pub const ArrayLikeIterState = struct {
     }
 };
 
+/// Per-instance state for Map / Set iterator objects
+/// (§24.1.5.1 CreateMapIterator, §24.2.5.1 CreateSetIterator).
+/// Kept off the property bag so the iterator exposes only internal
+/// slots — `MapIteratorPrototype` / `SetIteratorPrototype` carry
+/// the visible `next` / `@@toStringTag`.
+pub const MapSetIterState = struct {
+    /// Iteration kind — `[[MapIterationKind]]` /
+    /// `[[SetIterationKind]]`. Set iterators only use
+    /// `.entries` / `.values`.
+    pub const Kind = enum { entries, keys, values };
+    /// Distinguishes a Map Iterator from a Set Iterator for the
+    /// `next` brand check — the two have distinct internal-slot
+    /// sets (`[[IteratedMap]]` vs `[[IteratedSet]]`).
+    pub const Brand = enum { map, set };
+
+    brand: Brand,
+    /// `[[IteratedMap]]` / `[[IteratedSet]]`. Cleared to
+    /// `undefined` on exhaustion so a later source mutation can't
+    /// revive iteration.
+    source: Value = Value.undefined_,
+    /// `[[MapNextIndex]]` / `[[SetNextIndex]]` — the entry cursor.
+    idx: u32 = 0,
+    kind: Kind = .entries,
+
+    pub fn deinit(self: *MapSetIterState, allocator: std.mem.Allocator) void {
+        allocator.destroy(self);
+    }
+};
+
+/// §22.2.9.1 CreateRegExpStringIterator internal slots — the
+/// per-instance state of the iterator `String.prototype.matchAll`
+/// / `RegExp.prototype[@@matchAll]` return. Kept off the property
+/// bag so the iterator exposes only `next` / `@@iterator` /
+/// `@@toStringTag` from `%RegExpStringIteratorPrototype%`.
+pub const RegExpStringIterState = struct {
+    /// `[[IteratingRegExp]]` — the matcher RegExp object.
+    regexp: Value = Value.undefined_,
+    /// `[[IteratedString]]` — the subject string.
+    string: Value = Value.undefined_,
+    /// `[[Global]]`.
+    global: bool = false,
+    /// `[[Unicode]]`.
+    unicode: bool = false,
+    /// `[[Done]]`.
+    done: bool = false,
+
+    pub fn deinit(self: *RegExpStringIterState, allocator: std.mem.Allocator) void {
+        allocator.destroy(self);
+    }
+};
+
+/// §7.4.1 Iterator Record — the `{[[NextMethod]], [[Done]]}` an
+/// iteration step needs alongside the iterator object. `iter_step`
+/// caches it on the *iterated object's* typed `iter_record` slot
+/// (lazily, on the first step) so destructuring / for-of don't
+/// re-fire the `get next` accessor and don't leave observable own
+/// properties on a user-supplied iterator.
+pub const IterRecord = struct {
+    /// `[[NextMethod]]` — snapshotted once, on the first step.
+    next: Value = Value.undefined_,
+    /// Whether `[[NextMethod]]` has been snapshotted yet.
+    next_cached: bool = false,
+    /// `[[Done]]`.
+    done: bool = false,
+
+    pub fn deinit(self: *IterRecord, allocator: std.mem.Allocator) void {
+        allocator.destroy(self);
+    }
+};
+
 /// §27.2.1.5 PromiseCapability internal slots — populated by the
 /// per-cap executor closure (§27.2.1.5.1 GetCapabilitiesExecutor)
 /// and consulted by `newPromiseCapability` once the user
@@ -227,9 +297,8 @@ pub const PromiseCapabilityRecord = struct {
 ///   take    : source, next_fn, count (remaining), done, running
 ///   drop    : source, next_fn, count (remaining-to-drop), done, running, started
 ///   flatMap : source, next_fn, payload, active, count, done, running
-///   zip     : source (array of iters), payload (array of next_fns),
-///             active (array of last results), count, done, running,
-///             keyed, mode
+///   zip     : zip_inputs (per-input iter/next/active/key/pad),
+///             count, done, running, started, keyed, mode
 ///
 /// Hidden from JS — `Object.getOwnPropertyNames(iter)` no longer
 /// returns spec-internal slot names like `[[Iterated]]` / `[[Done]]`.
@@ -240,6 +309,23 @@ pub const PromiseCapabilityRecord = struct {
 pub const ConcatInput = struct {
     iterable: Value = Value.undefined_,
     method: Value = Value.undefined_,
+};
+
+/// §27.5.4 / §27.5.5 Iterator.zip / Iterator.zipKeyed — one
+/// per-input record. Held in `IteratorHelperState.zip_inputs` so
+/// the zip iterator carries its inputs as an internal slot rather
+/// than as observable own properties.
+pub const ZipInput = struct {
+    /// The opened sub-iterator.
+    iter: Value = Value.undefined_,
+    /// §7.4.2 GetIteratorDirect — the snapshotted `next` method.
+    next: Value = Value.undefined_,
+    /// Whether the sub-iterator is still open (in `openIters`).
+    active: bool = true,
+    /// zipKeyed only — the result key string for this input.
+    key: Value = Value.undefined_,
+    /// `longest` mode only — the precomputed padding value.
+    pad: Value = Value.undefined_,
 };
 
 pub const IteratorHelperState = struct {
@@ -257,9 +343,13 @@ pub const IteratorHelperState = struct {
     /// §27.1.4.2 Iterator.concat — the validated input records.
     /// `.empty` for every other iterator helper.
     concat_inputs: std.ArrayListUnmanaged(ConcatInput) = .empty,
+    /// §27.5.4 / §27.5.5 Iterator.zip / zipKeyed — the per-input
+    /// records. `.empty` for every other iterator helper.
+    zip_inputs: std.ArrayListUnmanaged(ZipInput) = .empty,
 
     pub fn deinit(self: *IteratorHelperState, allocator: std.mem.Allocator) void {
         self.concat_inputs.deinit(allocator);
+        self.zip_inputs.deinit(allocator);
         allocator.destroy(self);
     }
 };
@@ -411,6 +501,21 @@ pub const JSObject = struct {
     /// mirrors the spec's [[IteratedObject]] + [[NextIndex]]
     /// internal slots.
     array_like_iter: ?*ArrayLikeIterState = null,
+    /// Map / Set iterator state — present on the objects returned
+    /// by `Map.prototype.{entries,keys,values}` /
+    /// `Set.prototype.{entries,values}` and the respective
+    /// `@@iterator`. `null` for every other object.
+    map_set_iter: ?*MapSetIterState = null,
+    /// RegExp String Iterator state — present on the object
+    /// returned by `String.prototype.matchAll` /
+    /// `RegExp.prototype[@@matchAll]`. `null` for every other
+    /// object.
+    regexp_string_iter: ?*RegExpStringIterState = null,
+    /// §7.4.1 Iterator Record — lazily attached by `iter_step` to
+    /// whatever object is being iterated (a destructuring /
+    /// for-of source). Caches `[[NextMethod]]` and `[[Done]]` off
+    /// the property bag. `null` until first stepped.
+    iter_record: ?*IterRecord = null,
     /// `Iterator.prototype.*` helper state — present on the
     /// lazy wrapper objects produced by `Iterator.from`, `.map`,
     /// `.filter`, `.take`, `.drop`, `.flatMap`, and `Iterator.zip`.
@@ -722,6 +827,9 @@ pub const JSObject = struct {
         if (self.map_data) |m| m.deinit(allocator);
         if (self.set_data) |s| s.deinit(allocator);
         if (self.array_like_iter) |s| s.deinit(allocator);
+        if (self.map_set_iter) |s| s.deinit(allocator);
+        if (self.regexp_string_iter) |s| s.deinit(allocator);
+        if (self.iter_record) |s| s.deinit(allocator);
         if (self.iter_helper) |s| s.deinit(allocator);
         if (self.capability_record) |s| s.deinit(allocator);
         if (self.finalization_cells) |fc| fc.deinit(allocator);

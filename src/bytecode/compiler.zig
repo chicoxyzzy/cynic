@@ -917,7 +917,7 @@ pub const Compiler = struct {
             // next()` accessor, violating
             // `yield-star-async-next.js` (which logs each access
             // and asserts exactly one `get next`). Sync `yield*`
-            // also caches via the `__cynic_iter_next__` hidden slot
+            // also caches via the typed `iter_record` slot
             // (see `iter_step`); for the async path we use a stack
             // temp because the inner loop calls run through
             // `call_method`, not `iter_step`.

@@ -99,9 +99,10 @@ pub fn install(realm: *Realm) !void {
     // prototype object for the iterator that
     // String.prototype.matchAll returns. Owns `next`,
     // `@@iterator`, and the `RegExp String Iterator`
-    // toStringTag. Each instance only carries its `[[IteratingRegExp]]`
-    // / `[[IteratedString]]` / `[[Done]]` state in own slots,
-    // brand-checked here as the `__cynic_matchall_re__` slot.
+    // toStringTag. Each instance carries its `[[IteratingRegExp]]`
+    // / `[[IteratedString]]` / `[[Global]]` / `[[Unicode]]` /
+    // `[[Done]]` state on the typed `regexp_string_iter` slot,
+    // brand-checked by `next`.
     const re_iter_proto = try realm.heap.allocateObject();
     re_iter_proto.prototype = realm.intrinsics.object_prototype;
     try installNativeMethodOnProto(realm, re_iter_proto, "next", regexpStringIterNext, 0);
@@ -134,7 +135,7 @@ fn stringSymbolIterator(realm: *Realm, this_value: Value, args: []const Value) N
 }
 
 /// §22.2.9.2 %RegExpStringIteratorPrototype%.next — RequireInternalSlot
-/// on `[[IteratingRegExp]]` (presence of `__cynic_matchall_re__`).
+/// on `[[IteratingRegExp]]` (the typed `regexp_string_iter` slot).
 /// Yields each `RegExpExec(R, S)` result. When `[[Global]]` is
 /// false, the first non-null result is returned and the iterator
 /// is exhausted; when `[[Global]]` is true, iteration continues
@@ -145,31 +146,26 @@ fn regexpStringIterNext(realm: *Realm, this_value: Value, args: []const Value) N
     _ = args;
     const it = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "RegExpStringIteratorPrototype.next called on non-object");
-    if (!it.hasOwn("__cynic_matchall_re__"))
+    const st = it.regexp_string_iter orelse
         return throwTypeError(realm, "RegExpStringIteratorPrototype.next called on incompatible receiver");
-    if (it.get("__cynic_matchall_done__").asBool()) {
+    if (st.done) {
         return iterResult(realm, Value.undefined_, true);
     }
-    const re_v = it.get("__cynic_matchall_re__");
-    const re_obj = heap_mod.valueAsPlainObject(re_v) orelse return iterResult(realm, Value.undefined_, true);
-    const input_v = it.get("__cynic_matchall_input__");
-    const input: *JSString = if (input_v.isString()) @ptrCast(@alignCast(input_v.asString())) else return iterResult(realm, Value.undefined_, true);
-    // [[Global]] / [[Unicode]] (default false when the iterator was
-    // constructed by an older path that didn't seed them — the
-    // current `regexp.zig:regexpProtoMatchAll` always seeds both).
-    const is_global = it.get("__cynic_matchall_global__").asBool();
-    const full_unicode = it.get("__cynic_matchall_fullUnicode__").asBool();
+    const re_obj = heap_mod.valueAsPlainObject(st.regexp) orelse return iterResult(realm, Value.undefined_, true);
+    const input: *JSString = if (st.string.isString()) @ptrCast(@alignCast(st.string.asString())) else return iterResult(realm, Value.undefined_, true);
+    const is_global = st.global;
+    const full_unicode = st.unicode;
 
     const exec_result = try regexExecCall(realm, re_obj, input);
     if (exec_result.isNull()) {
-        it.set(realm.allocator, "__cynic_matchall_done__", Value.fromBool(true)) catch return error.OutOfMemory;
+        st.done = true;
         return iterResult(realm, Value.undefined_, true);
     }
     // §22.2.9.2 step 1.f.iii — when `[[Global]]` is false, the
     // first match exhausts the iterator. (Mirrors the `not-a-global-
     // regexp.js` family.)
     if (!is_global) {
-        it.set(realm.allocator, "__cynic_matchall_done__", Value.fromBool(true)) catch return error.OutOfMemory;
+        st.done = true;
         return iterResult(realm, exec_result, false);
     }
     // §22.2.9.2.1 step 11.a — `Let matchStr be ? ToString(? Get(match,

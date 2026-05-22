@@ -991,6 +991,12 @@ pub const Heap = struct {
                     self.markValue(s.target);
                     self.markValue(s.for_in_source);
                 }
+                if (o.map_set_iter) |s| self.markValue(s.source);
+                if (o.regexp_string_iter) |s| {
+                    self.markValue(s.regexp);
+                    self.markValue(s.string);
+                }
+                if (o.iter_record) |s| self.markValue(s.next);
                 if (o.iter_helper) |s| {
                     self.markValue(s.source);
                     self.markValue(s.next_fn);
@@ -999,6 +1005,12 @@ pub const Heap = struct {
                     for (s.concat_inputs.items) |ci| {
                         self.markValue(ci.iterable);
                         self.markValue(ci.method);
+                    }
+                    for (s.zip_inputs.items) |zi| {
+                        self.markValue(zi.iter);
+                        self.markValue(zi.next);
+                        self.markValue(zi.key);
+                        self.markValue(zi.pad);
                     }
                 }
                 if (o.capability_record) |c| {
@@ -1645,6 +1657,12 @@ pub const Heap = struct {
             self.markValue(s.target);
             self.markValue(s.for_in_source);
         }
+        if (o.map_set_iter) |s| self.markValue(s.source);
+        if (o.regexp_string_iter) |s| {
+            self.markValue(s.regexp);
+            self.markValue(s.string);
+        }
+        if (o.iter_record) |s| self.markValue(s.next);
         if (o.iter_helper) |s| {
             self.markValue(s.source);
             self.markValue(s.next_fn);
@@ -1653,6 +1671,12 @@ pub const Heap = struct {
             for (s.concat_inputs.items) |ci| {
                 self.markValue(ci.iterable);
                 self.markValue(ci.method);
+            }
+            for (s.zip_inputs.items) |zi| {
+                self.markValue(zi.iter);
+                self.markValue(zi.next);
+                self.markValue(zi.key);
+                self.markValue(zi.pad);
             }
         }
         if (o.capability_record) |c| {

@@ -136,29 +136,20 @@ pub fn installMap(realm: *Realm) !void {
 }
 
 /// Iterator factory for Map. `kind` selects entries / keys /
-/// values. The returned object has a `next` method whose
-/// `this`-borne state is `__cynic_map__` (the source map) and
-/// `__cynic_idx__` (next entry index). later: switch to a
-/// real iterator-prototype chain so users can swap in custom
-/// `[Symbol.iterator]` implementations.
-/// §24.1.5.1 CreateMapIterator — allocate an iterator instance
-/// with `[[Map]]`, `[[MapNextIndex]]`, and `[[MapIterationKind]]`
-/// internal slots, all chained to %MapIteratorPrototype% so
-/// `next` / `@@iterator` / `@@toStringTag` come from the shared
-/// proto (§24.1.5.2). The `__cynic_map__` own slot doubles as
-/// the brand check inside `next` (its presence == "has the
-/// internal slots of a Map Iterator Instance").
-fn makeMapIterator(realm: *Realm, src: Value, kind: enum { entries, keys, values }) !Value {
+/// values. §24.1.5.1 CreateMapIterator — allocate an iterator
+/// instance with `[[Map]]`, `[[MapNextIndex]]`, and
+/// `[[MapIterationKind]]` internal slots, all chained to
+/// %MapIteratorPrototype% so `next` / `@@iterator` /
+/// `@@toStringTag` come from the shared proto (§24.1.5.2). The
+/// three slots live on the typed `map_set_iter` slot, not the
+/// property bag — the iterator carries no observable own
+/// property; `next` brand-checks `map_set_iter.brand == .map`.
+fn makeMapIterator(realm: *Realm, src: Value, kind: ObjMod.MapSetIterState.Kind) !Value {
     const it = try realm.heap.allocateObject();
     it.prototype = realm.intrinsics.map_iterator_prototype orelse realm.intrinsics.object_prototype;
-    try it.set(realm.allocator, "__cynic_map__", src);
-    try it.set(realm.allocator, "__cynic_idx__", Value.fromInt32(0));
-    const kind_tag: i32 = switch (kind) {
-        .entries => 0,
-        .keys => 1,
-        .values => 2,
-    };
-    try it.set(realm.allocator, "__cynic_kind__", Value.fromInt32(kind_tag));
+    const st = try realm.allocator.create(ObjMod.MapSetIterState);
+    st.* = .{ .brand = .map, .source = src, .kind = kind };
+    it.map_set_iter = st;
     return heap_mod.taggedObject(it);
 }
 
@@ -647,50 +638,45 @@ fn iterResult(realm: *Realm, value: Value, done: bool) !Value {
     return heap_mod.taggedObject(r);
 }
 
-fn mapIterAdvance(realm: *Realm, this_value: Value) ?struct { key: Value, value: Value } {
-    const it = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    const src = it.get("__cynic_map__");
-    // §24.1.5.1 step 5 — once the iterator exhausts we set
-    // O.[[Map]] to undefined so a later mutation of the source
-    // can't revive iteration. We mirror that with a sentinel
-    // undefined in the `__cynic_map__` slot.
-    if (src.isUndefined()) return null;
-    const idx_v = it.get("__cynic_idx__");
-    var idx: usize = if (idx_v.isInt32()) @intCast(idx_v.asInt32()) else 0;
-    const d = mapDataOf(src) orelse return null;
+fn mapIterAdvance(st: *ObjMod.MapSetIterState) ?struct { key: Value, value: Value } {
+    // §24.1.5.1 step 5 — once the iterator exhausts, `[[Map]]` is
+    // set to undefined so a later mutation of the source can't
+    // revive iteration.
+    if (st.source.isUndefined()) return null;
+    const d = mapDataOf(st.source) orelse return null;
+    var idx: usize = st.idx;
     while (idx < d.entries.items.len) : (idx += 1) {
         if (!d.entries.items[idx].deleted) {
-            const next_idx_v = Value.fromInt32(@intCast(idx + 1));
-            it.set(realm.allocator, "__cynic_idx__", next_idx_v) catch return null;
+            st.idx = @intCast(idx + 1);
             return .{ .key = d.entries.items[idx].key, .value = d.entries.items[idx].value };
         }
     }
     // Exhausted — clear `[[Map]]` so subsequent next() calls
     // skip the data lookup and stay done even if entries grow.
-    it.set(realm.allocator, "__cynic_map__", Value.undefined_) catch return null;
+    st.source = Value.undefined_;
     return null;
 }
 
 /// §24.1.5.1 %MapIteratorPrototype%.next — single dispatch entry
 /// shared by entries/keys/values. Steps:
 ///   1. RequireInternalSlot(O, [[Map]]) — `this` must be an
-///      Object with the `__cynic_map__` own slot we install in
-///      makeMapIterator. Anything else (primitive, plain `{}`,
-///      a different iterator kind) is a TypeError.
+///      Object carrying the typed `map_set_iter` slot with brand
+///      `.map`. Anything else (primitive, plain `{}`, a Set
+///      iterator) is a TypeError.
 ///   2. Read `[[MapIterationKind]]` to decide value shape.
 fn mapIterNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const it = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "MapIteratorPrototype.next called on non-object");
-    if (!it.hasOwn("__cynic_map__"))
+    const st = it.map_set_iter orelse
         return throwTypeError(realm, "MapIteratorPrototype.next called on incompatible receiver");
-    const kind_v = it.get("__cynic_kind__");
-    const kind: i32 = if (kind_v.isInt32()) kind_v.asInt32() else 0;
-    if (mapIterAdvance(realm, this_value)) |kv| {
-        switch (kind) {
-            1 => return iterResult(realm, kv.key, false) catch return error.OutOfMemory,
-            2 => return iterResult(realm, kv.value, false) catch return error.OutOfMemory,
-            else => {
+    if (st.brand != .map)
+        return throwTypeError(realm, "MapIteratorPrototype.next called on incompatible receiver");
+    if (mapIterAdvance(st)) |kv| {
+        switch (st.kind) {
+            .keys => return iterResult(realm, kv.key, false) catch return error.OutOfMemory,
+            .values => return iterResult(realm, kv.value, false) catch return error.OutOfMemory,
+            .entries => {
                 const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
                 arr.prototype = realm.intrinsics.array_prototype;
                 arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
@@ -1514,18 +1500,15 @@ pub fn installSet(realm: *Realm) !void {
 }
 
 /// §24.2.5.1 CreateSetIterator. Mirrors makeMapIterator — the
-/// `__cynic_set__` own slot is the brand check; the kind tag
-/// (0 = values, 1 = entries) lets a single shared next dispatch.
-fn makeSetIterator(realm: *Realm, src: Value, kind: enum { values, entries }) !Value {
+/// state lives on the typed `map_set_iter` slot (brand `.set`),
+/// not the property bag, so the iterator has no observable own
+/// property; `next` brand-checks `map_set_iter.brand == .set`.
+fn makeSetIterator(realm: *Realm, src: Value, kind: ObjMod.MapSetIterState.Kind) !Value {
     const it = try realm.heap.allocateObject();
     it.prototype = realm.intrinsics.set_iterator_prototype orelse realm.intrinsics.object_prototype;
-    try it.set(realm.allocator, "__cynic_set__", src);
-    try it.set(realm.allocator, "__cynic_idx__", Value.fromInt32(0));
-    const kind_tag: i32 = switch (kind) {
-        .values => 0,
-        .entries => 1,
-    };
-    try it.set(realm.allocator, "__cynic_kind__", Value.fromInt32(kind_tag));
+    const st = try realm.allocator.create(ObjMod.MapSetIterState);
+    st.* = .{ .brand = .set, .source = src, .kind = kind };
+    it.map_set_iter = st;
     return heap_mod.taggedObject(it);
 }
 
@@ -1540,39 +1523,36 @@ fn setEntriesMethod(realm: *Realm, this_value: Value, args: []const Value) Nativ
     return makeSetIterator(realm, this_value, .entries) catch return error.OutOfMemory;
 }
 
-fn setIterAdvance(realm: *Realm, this_value: Value) ?Value {
-    const it = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    const src = it.get("__cynic_set__");
-    // §24.2.5.1 step 5 — once exhausted, [[IteratedSet]] is
+fn setIterAdvance(st: *ObjMod.MapSetIterState) ?Value {
+    // §24.2.5.1 step 5 — once exhausted, `[[IteratedSet]]` is
     // cleared so post-exhaustion `add()` calls don't revive
-    // iteration. Sentinel: undefined.
-    if (src.isUndefined()) return null;
-    const idx_v = it.get("__cynic_idx__");
-    var idx: usize = if (idx_v.isInt32()) @intCast(idx_v.asInt32()) else 0;
-    const d = setDataOf(src) orelse return null;
+    // iteration.
+    if (st.source.isUndefined()) return null;
+    const d = setDataOf(st.source) orelse return null;
+    var idx: usize = st.idx;
     while (idx < d.entries.items.len) : (idx += 1) {
         if (!d.entries.items[idx].deleted) {
-            it.set(realm.allocator, "__cynic_idx__", Value.fromInt32(@intCast(idx + 1))) catch return null;
+            st.idx = @intCast(idx + 1);
             return d.entries.items[idx].value;
         }
     }
-    it.set(realm.allocator, "__cynic_set__", Value.undefined_) catch return null;
+    st.source = Value.undefined_;
     return null;
 }
 
 /// §24.2.5.1 %SetIteratorPrototype%.next — RequireInternalSlot
-/// on `[[IteratedSet]]` (presence of `__cynic_set__`), then
-/// dispatch on the iteration kind.
+/// on `[[IteratedSet]]` (the typed `map_set_iter` slot with
+/// brand `.set`), then dispatch on the iteration kind.
 fn setIterNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const it = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "SetIteratorPrototype.next called on non-object");
-    if (!it.hasOwn("__cynic_set__"))
+    const st = it.map_set_iter orelse
         return throwTypeError(realm, "SetIteratorPrototype.next called on incompatible receiver");
-    const kind_v = it.get("__cynic_kind__");
-    const kind: i32 = if (kind_v.isInt32()) kind_v.asInt32() else 0;
-    if (setIterAdvance(realm, this_value)) |v| {
-        if (kind == 1) {
+    if (st.brand != .set)
+        return throwTypeError(realm, "SetIteratorPrototype.next called on incompatible receiver");
+    if (setIterAdvance(st)) |v| {
+        if (st.kind == .entries) {
             const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
             arr.prototype = realm.intrinsics.array_prototype;
             arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;

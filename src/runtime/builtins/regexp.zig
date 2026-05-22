@@ -15,6 +15,7 @@ const Realm = @import("../realm.zig").Realm;
 const Value = @import("../value.zig").Value;
 const JSString = @import("../string.zig").JSString;
 const JSObject = @import("../object.zig").JSObject;
+const RegExpStringIterState = @import("../object.zig").RegExpStringIterState;
 const JSFunction = @import("../function.zig").JSFunction;
 const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
@@ -1329,18 +1330,23 @@ fn regexpProtoMatchAll(realm: *Realm, this_value: Value, args: []const Value) Na
 
     // step 11 — `Return CreateRegExpStringIterator(matcher, S,
     // global, fullUnicode)`. Allocate an iterator object chained to
-    // `%RegExpStringIteratorPrototype%`; its own slots carry the
-    // [[IteratingRegExp]] / [[IteratedString]] / [[Global]] /
-    // [[Unicode]] / [[Done]] state. `string.zig:regexpStringIterNext`
-    // reads them.
+    // `%RegExpStringIteratorPrototype%`; the [[IteratingRegExp]] /
+    // [[IteratedString]] / [[Global]] / [[Unicode]] / [[Done]]
+    // state lives on the typed `regexp_string_iter` slot — not the
+    // property bag — so the iterator carries no observable own
+    // property. `string.zig:regexpStringIterNext` reads it.
     const iter = realm.heap.allocateObject() catch return error.OutOfMemory;
     scope.push(heap_mod.taggedObject(iter)) catch return error.OutOfMemory;
     iter.prototype = realm.intrinsics.regexp_string_iterator_prototype orelse realm.intrinsics.object_prototype;
-    iter.set(realm.allocator, "__cynic_matchall_re__", heap_mod.taggedObject(matcher)) catch return error.OutOfMemory;
-    iter.set(realm.allocator, "__cynic_matchall_input__", Value.fromString(s)) catch return error.OutOfMemory;
-    iter.set(realm.allocator, "__cynic_matchall_global__", Value.fromBool(is_global)) catch return error.OutOfMemory;
-    iter.set(realm.allocator, "__cynic_matchall_fullUnicode__", Value.fromBool(full_unicode)) catch return error.OutOfMemory;
-    iter.set(realm.allocator, "__cynic_matchall_done__", Value.fromBool(false)) catch return error.OutOfMemory;
+    const ri_state = realm.allocator.create(RegExpStringIterState) catch return error.OutOfMemory;
+    ri_state.* = .{
+        .regexp = heap_mod.taggedObject(matcher),
+        .string = Value.fromString(s),
+        .global = is_global,
+        .unicode = full_unicode,
+        .done = false,
+    };
+    iter.regexp_string_iter = ri_state;
     return heap_mod.taggedObject(iter);
 }
 
