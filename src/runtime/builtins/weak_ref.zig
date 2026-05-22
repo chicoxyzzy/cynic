@@ -1,17 +1,23 @@
-//! §26.1 WeakRef — a `WeakRef` instance holds a weak-ish reference
-//! to its target. `.deref()` returns the target if still live, else
-//! `undefined`. Cynic's WeakRef is a strong-ref impl (the target is
-//! marked as a GC root via `JSObject.weak_ref_target`); this matches
-//! the spec's observable behaviour given that test262 has no
-//! `$262.gc()` triggers in this folder, and mirrors the strong-ref
-//! WeakMap / WeakSet implementations in `collections.zig`. True
-//! GC weakness is later, alongside the FinalizationRegistry work.
+//! §26.1 WeakRef — a `WeakRef` instance holds a genuinely weak
+//! reference to its target. `.deref()` returns the target if still
+//! live, else `undefined`. The `[[WeakRefTarget]]` slot
+//! (`JSObject.weak_ref_target`) is NOT strong-marked by the major
+//! collector: `Heap.collectFull` records every reached WeakRef and,
+//! after the mark phase, clears `weak_ref_target` to `undefined` for
+//! any WeakRef whose referent did not survive the trace. The minor
+//! collector still strong-marks the slot, so a young target merely
+//! survives the minor cycle and is handled weakly at the next major
+//! cycle — fully conformant, since §26.1 only guarantees a WeakRef
+//! *eventually* clears.
 //!
 //! Spec anchors:
 //!   §26.1.1.1 WeakRef ( target )
 //!   §26.1.3.2 WeakRef.prototype.deref ( )
 //!   §6.2.10   CanBeHeldWeakly
-//!   §9.10     KeptAlive / AddToKeptObjects (no-op here, see above)
+//!   §9.10     KeptAlive / AddToKeptObjects (no-op here — Cynic does
+//!             not implement the per-job kept-alive set; a WeakRef
+//!             can clear immediately after the synchronous job that
+//!             created it, which §9.10 permits across job boundaries)
 
 const std = @import("std");
 
@@ -61,7 +67,8 @@ fn canBeHeldWeakly(v: Value) bool {
 ///    — the interpreter's `new` dispatch allocates `this_value`
 ///    with the right `[[Prototype]]` (NewTarget's `prototype`
 ///    property, falling back to %WeakRefPrototype%).
-/// 4. Perform AddToKeptObjects(target). — strong-ref impl: no-op.
+/// 4. Perform AddToKeptObjects(target). — no-op: Cynic does not
+///    model the §9.10 per-job kept-alive set.
 /// 5. Set weakRef.[[WeakRefTarget]] to target.
 /// 6. Return weakRef.
 fn weakRefConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -92,6 +99,8 @@ fn weakRefDeref(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         return throwTypeError(realm, "WeakRef.prototype.deref called on non-object");
     if (!inst.is_weak_ref)
         return throwTypeError(realm, "WeakRef.prototype.deref called on non-WeakRef");
-    // Strong-ref impl: target is never empty after construction.
+    // §26.1.4.1 — `weak_ref_target` is `undefined` (the engine's
+    // ~empty~ sentinel) once the major collector observed the
+    // target become unreachable; otherwise it is the live target.
     return inst.weak_ref_target;
 }

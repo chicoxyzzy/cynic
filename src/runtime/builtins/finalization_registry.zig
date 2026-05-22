@@ -1,16 +1,18 @@
 //! §26.2 FinalizationRegistry — registration of cleanup
 //! callbacks tied to weakly-held targets.
 //!
-//! Cynic's impl is strong-ref like the sibling WeakMap / WeakSet
-//! built-ins (see `collections.zig:7-9`). Observable behaviour
-//! matches the spec for everything except actual finalisation
-//! firing — and the spec explicitly permits implementations to
-//! skip cleanup ("If the implementation chooses not to call
-//! finalization callbacks, it is up to the implementation to
-//! decide when, if ever, the operation will be performed",
-//! §26.2 introductory note). The `Realm.runFinalizationCleanup`
-//! hook is wired in for when real weak refs land (parallel
-//! WeakRef agent); until then it has no swept targets to act on.
+//! FinalizationRegistry is genuinely weak. A registered cell's
+//! `[[WeakRefTarget]]` / `[[UnregisterToken]]` are weak edges:
+//! the major collector (`Heap.collectFull`) does not strong-mark
+//! them. When its post-mark weak pass observes a cell whose target
+//! did not survive the trace, it enqueues a host job that invokes
+//! `cleanupCallback(heldValue)` on the next microtask drain and
+//! tombstones the cell. The cleanup callback and each cell's
+//! `[[HeldValue]]` ARE strong-marked — they must survive to be
+//! passed to the callback. Cleanup never runs synchronously inside
+//! GC; §26.2's introductory note also permits an implementation to
+//! skip cleanup entirely, so a dropped job (e.g. OOM enqueuing)
+//! stays conformant.
 //!
 //! Spec layout:
 //!   §26.2.1 The FinalizationRegistry Constructor

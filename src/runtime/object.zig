@@ -126,7 +126,10 @@ pub const MapData = struct {
     /// Whether this map data belongs to a WeakMap instance.
     /// `WeakMap.prototype.{set, get, has, delete}` reject
     /// receivers whose map_data isn't a WeakMap; symmetric
-    /// rejection on the Map side.
+    /// rejection on the Map side. Also tells the major collector
+    /// to treat entry keys / values as weak edges (§24.3): a
+    /// WeakMap entry whose key becomes unreachable is tombstoned
+    /// by `Heap.processWeakReferences` after an ephemeron fixpoint.
     is_weak: bool = false,
 
     pub fn deinit(self: *MapData, allocator: std.mem.Allocator) void {
@@ -152,6 +155,9 @@ pub const SetData = struct {
     /// Set.prototype.{add, has, delete, clear, forEach, entries,
     /// values, keys, size, …} reject receivers whose set_data
     /// is a WeakSet's; symmetric rejection on the WeakSet side.
+    /// Also tells the major collector to treat members as weak
+    /// edges (§24.4): a WeakSet member that becomes unreachable
+    /// is tombstoned by `Heap.processWeakReferences`.
     is_weak: bool = false,
 
     pub fn deinit(self: *SetData, allocator: std.mem.Allocator) void {
@@ -365,11 +371,15 @@ pub const IteratorHelperState = struct {
 
 /// §26.2.1.1 [[Cells]] storage for FinalizationRegistry.
 /// `cleanup_callback` is the callable supplied at construction;
-/// `cells` holds the live registrations. Cynic's FinalizationRegistry
-/// is a strong-ref impl (mirrors WeakMap/WeakSet at `runtime/builtins/
-/// collections.zig:7-9` — observable behaviour matches; actual
-/// finalisation requires real weak refs). `register` appends; `unregister`
-/// flips `deleted = true` so an in-progress walk doesn't shift indices.
+/// `cells` holds the live registrations. FinalizationRegistry is
+/// genuinely weak: the major collector (`Heap.collectFull`) does
+/// not strong-mark a cell's `target` / `unregister_token`; its
+/// post-mark weak pass enqueues a `cleanupCallback(heldValue)`
+/// host job and tombstones the cell for any target that did not
+/// survive the trace. `cleanup_callback` and each cell's
+/// `held_value` ARE strong-marked — they must survive to be used.
+/// `register` appends; `unregister` (and cleanup) flips
+/// `deleted = true` so an in-progress walk doesn't shift indices.
 pub const FinalizationData = struct {
     cleanup_callback: Value = Value.undefined_,
     cells: std.ArrayListUnmanaged(FinalizationCell) = .empty,
@@ -680,18 +690,22 @@ pub const JSObject = struct {
     /// `[[Cells]]` (§26.2.1) — only set on `new FinalizationRegistry(cb)`
     /// instances. Carries the cleanup callback plus the list of
     /// registered cells. Allocated on construction; deinit releases
-    /// the storage. The cleanup callback and per-cell values are
-    /// strong-rooted via `Heap.markValue` (see `markValue` and
-    /// the `finalization_cells` walk there).
+    /// the storage. The cleanup callback and each cell's held value
+    /// are strong-marked by `Heap.markValue`; a cell's `target` and
+    /// `unregister_token` are weak — the major collector's post-mark
+    /// pass (`Heap.processWeakReferences`) queues a cleanup job and
+    /// tombstones the cell when the target becomes unreachable.
     finalization_cells: ?*FinalizationData = null,
     /// §26.1 WeakRef — `[[WeakRefTarget]]` internal slot. Set on
     /// `new WeakRef(target)` instances. `is_weak_ref` is the brand
     /// (`deref.call(plainObj)` must throw a TypeError per §26.1.3.2
     /// even when no target was supplied). `weak_ref_target` holds
     /// the live target Value (Object or non-registered Symbol per
-    /// §6.2.10 CanBeHeldWeakly). Cynic's WeakRef is a strong-ref
-    /// impl — observable behaviour matches the spec, GC weakness
-    /// is later (mirrors WeakMap / WeakSet, see collections.zig).
+    /// §6.2.10 CanBeHeldWeakly), or `undefined` once the major
+    /// collector observed the target become unreachable (the
+    /// engine's ~empty~ sentinel). The slot is a genuinely weak
+    /// edge: `Heap.collectFull` does not strong-mark it and its
+    /// post-mark pass clears it for a dead referent.
     is_weak_ref: bool = false,
     weak_ref_target: Value = Value.undefined_,
     /// §10.4.2 Array exotic — packed indexed elements storage.

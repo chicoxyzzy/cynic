@@ -3278,6 +3278,159 @@ test "GC: destructuring iterator record survives gc_threshold=1" {
     , 6);
 }
 
+test "GC: WeakRef to an unreachable target clears after a major GC" {
+    // §26.1 — a WeakRef whose target is no longer strongly
+    // reachable must `deref()` to `undefined` after a major
+    // collection. The target object `{tag: 1}` is allocated inside
+    // a helper whose frame is popped before `__collectGarbage()`
+    // runs, so the only edge to it is the WeakRef's weak slot —
+    // which `Heap.collectFull` does not strong-mark.
+    try expectScriptIntWithBuiltins(
+        \\function makeRef() { return new WeakRef({ tag: 1 }); }
+        \\const wr = makeRef();
+        \\globalThis.__collectGarbage();
+        \\wr.deref() === undefined ? 1 : 0;
+    , 1);
+}
+
+test "GC: WeakRef to a strongly-reachable target is NOT cleared" {
+    // §26.1 — the weak slot must NOT clear while the target is
+    // still strongly held. `keep` roots the target through the
+    // script-top environment, so the trace marks it and the
+    // post-mark pass leaves `weak_ref_target` intact.
+    try expectScriptIntWithBuiltins(
+        \\const keep = { tag: 2 };
+        \\const wr = new WeakRef(keep);
+        \\globalThis.__collectGarbage();
+        \\(wr.deref() === keep && wr.deref().tag === 2) ? 1 : 0;
+    , 1);
+}
+
+test "GC: WeakMap entry whose key is unreachable is gone after a major GC" {
+    // §24.3 — a WeakMap entry whose key object becomes unreachable
+    // is tombstoned by the collector's post-mark weak pass. The key
+    // is created inside `addEntry`, whose frame is gone before the
+    // GC; the WeakMap keeps a `WeakRef` to it only so the test can
+    // ask `has()` afterwards.
+    try expectScriptIntWithBuiltins(
+        \\const wm = new WeakMap();
+        \\function addEntry() {
+        \\  const k = { id: 3 };
+        \\  wm.set(k, "v");
+        \\  return new WeakRef(k);
+        \\}
+        \\const probe = addEntry();
+        \\globalThis.__collectGarbage();
+        \\let r = 0;
+        \\const k2 = probe.deref();
+        \\if (k2 === undefined) r += 1;          // key collected
+        \\if (k2 === undefined || !wm.has(k2)) r += 10; // entry gone
+        \\r;
+    , 11);
+}
+
+test "GC: WeakMap entry whose key stays reachable survives a major GC" {
+    // §24.3 — the symmetric case: a live key keeps its entry (and,
+    // via the ephemeron rule, its value) alive across a major GC.
+    try expectScriptIntWithBuiltins(
+        \\const wm = new WeakMap();
+        \\const key = { id: 4 };
+        \\wm.set(key, "kept");
+        \\globalThis.__collectGarbage();
+        \\(wm.has(key) && wm.get(key) === "kept") ? 1 : 0;
+    , 1);
+}
+
+test "GC: WeakMap ephemeron — value reachable only via map+key dies with the key" {
+    // §24.3 ephemeron semantics — a WeakMap value is reachable iff
+    // its key is. Here the value object is reachable ONLY through
+    // `wm` + the (live) key, so while the key lives the value lives;
+    // a WeakRef to the value still derefs. (The dies-with-the-key
+    // half is covered by the unreachable-key test above — once the
+    // key goes, the value's sole edge goes too.)
+    try expectScriptIntWithBuiltins(
+        \\const wm = new WeakMap();
+        \\const key = { id: 5 };
+        \\function attach() {
+        \\  const val = { payload: 99 };
+        \\  wm.set(key, val);
+        \\  return new WeakRef(val);
+        \\}
+        \\const valRef = attach();
+        \\globalThis.__collectGarbage();
+        \\// key is live → ephemeron keeps `val` alive → WeakRef holds.
+        \\let r = 0;
+        \\const v = valRef.deref();
+        \\if (v !== undefined && v.payload === 99) r += 1;
+        \\if (wm.get(key) === v) r += 10;
+        \\r;
+    , 11);
+}
+
+test "GC: WeakSet member that is unreachable is gone after a major GC" {
+    // §24.4 — a WeakSet member object that becomes unreachable is
+    // tombstoned by the collector's post-mark weak pass.
+    try expectScriptIntWithBuiltins(
+        \\const ws = new WeakSet();
+        \\function addMember() {
+        \\  const m = { id: 6 };
+        \\  ws.add(m);
+        \\  return new WeakRef(m);
+        \\}
+        \\const probe = addMember();
+        \\globalThis.__collectGarbage();
+        \\let r = 0;
+        \\const m2 = probe.deref();
+        \\if (m2 === undefined) r += 1;
+        \\if (m2 === undefined || !ws.has(m2)) r += 10;
+        \\r;
+    , 11);
+}
+
+test "GC: WeakSet member that stays reachable survives a major GC" {
+    // §24.4 — a live member is retained across a major GC.
+    try expectScriptIntWithBuiltins(
+        \\const ws = new WeakSet();
+        \\const member = { id: 7 };
+        \\ws.add(member);
+        \\globalThis.__collectGarbage();
+        \\ws.has(member) ? 1 : 0;
+    , 1);
+}
+
+test "GC: FinalizationRegistry fires cleanup for an unreachable target" {
+    // §26.2 — when a registered target becomes unreachable, the
+    // collector enqueues a `cleanupCallback(heldValue)` host job.
+    // The job runs on the next microtask drain (never synchronously
+    // inside GC), so the test drains explicitly and checks the
+    // held value reached the callback. The cell is also tombstoned.
+    try expectScriptIntWithBuiltins(
+        \\let cleaned = 0;
+        \\const fr = new FinalizationRegistry((held) => { cleaned = held; });
+        \\function register() {
+        \\  const target = { id: 8 };
+        \\  fr.register(target, 42);
+        \\}
+        \\register();
+        \\globalThis.__collectGarbage();
+        \\globalThis.__drainMicrotasks();
+        \\cleaned;
+    , 42);
+}
+
+test "GC: FinalizationRegistry does NOT fire for a live target" {
+    // §26.2 — a still-reachable target must not trigger cleanup.
+    try expectScriptIntWithBuiltins(
+        \\let cleaned = 0;
+        \\const fr = new FinalizationRegistry((held) => { cleaned = held; });
+        \\const target = { id: 9 };
+        \\fr.register(target, 77);
+        \\globalThis.__collectGarbage();
+        \\globalThis.__drainMicrotasks();
+        \\cleaned;
+    , 0);
+}
+
 test "iterator internal state is not an observable own property" {
     // Map / Set / RegExp-string / concat / zip iterators and the
     // destructuring iterator record keep their state in typed

@@ -73,6 +73,21 @@ const kind_object: u64 = 0x1;
 const kind_symbol: u64 = 0x2;
 const kind_bigint: u64 = 0x3;
 
+/// §26.2 FinalizationRegistry cleanup-job scheduler. The collector
+/// discovers a dead registry target during the post-mark weak pass
+/// and must enqueue a host job — `cleanupCallback(heldValue)` — to
+/// run later via the normal microtask drain, NOT synchronously
+/// inside GC. The `Heap` has no `Realm` in scope, so the realm
+/// installs this callback (`Heap.setFinalizationEnqueue`) at init;
+/// the collector invokes it with the opaque realm pointer. `ctx`
+/// is the `*Realm`; `callback` the registry's `[[CleanupCallback]]`;
+/// `held_value` the cell's `[[HeldValue]]`.
+pub const FinalizationEnqueueFn = *const fn (
+    ctx: *anyopaque,
+    callback: Value,
+    held_value: Value,
+) void;
+
 /// Generational-GC age of a heap object. A `.young` object lives
 /// in its kind's young list and is reclaimable by a cheap
 /// `collectYoung` cycle; a `.mature` object survived at least one
@@ -398,6 +413,45 @@ pub const Heap = struct {
     /// gc_cycles_total`.
     gc_time_ns_total: u64 = 0,
 
+    /// Weak-aware marking mode. `collectFull` sets this `true` for
+    /// the duration of its mark phase; `collectYoung` leaves it
+    /// `false`. When `true`, `markValue` does NOT strong-mark the
+    /// weak slots of a `WeakRef` / `WeakMap` / `WeakSet` /
+    /// `FinalizationRegistry` — instead each reached weak holder is
+    /// appended to one of the per-cycle lists below so the
+    /// post-mark weak-handling pass (§26.1 / §24.3 / §24.4 / §26.2)
+    /// can clear / prune / queue. A minor cycle keeps the old
+    /// strong-marking behaviour: a young weak target survives the
+    /// minor cycle, tenures, and is handled weakly at the next
+    /// `collectFull`. GC timing is spec-unspecified (§26.1 — a
+    /// WeakRef is only guaranteed to *eventually* clear), so
+    /// "weak refs clear at major GC" is fully conformant.
+    weak_aware_mark: bool = false,
+    /// Per-`collectFull`-cycle worklist: every reached `WeakRef`
+    /// object (`is_weak_ref`). Cleared at the start of each
+    /// `collectFull`. Used by the post-mark pass to clear a
+    /// `weak_ref_target` whose referent did not survive the trace.
+    weak_refs_seen: std.ArrayListUnmanaged(*JSObject) = .empty,
+    /// Per-`collectFull`-cycle worklist: every reached object that
+    /// carries a `WeakMap` / `WeakSet` `[[MapData]]` / `[[SetData]]`
+    /// with `is_weak == true`. Drives the ephemeron fixpoint and
+    /// the post-mark entry-pruning pass.
+    weak_collections_seen: std.ArrayListUnmanaged(*JSObject) = .empty,
+    /// Per-`collectFull`-cycle worklist: every reached
+    /// `FinalizationRegistry` object (`finalization_cells`).
+    /// The post-mark pass walks each cell and, for a dead target,
+    /// enqueues the cleanup job and tombstones the cell.
+    finalization_registries_seen: std.ArrayListUnmanaged(*JSObject) = .empty,
+    /// §26.2 FinalizationRegistry cleanup-job scheduler context —
+    /// the `*Realm`, type-erased (the heap can't import realm.zig
+    /// without a cycle). `null` on a bare `Heap` (unit tests that
+    /// drive `collectFull` directly), in which case the post-mark
+    /// pass still tombstones dead cells but queues no job.
+    finalization_ctx: ?*anyopaque = null,
+    /// §26.2 cleanup-job scheduler — see `FinalizationEnqueueFn`.
+    /// Installed by the realm at init via `setFinalizationEnqueue`.
+    finalization_enqueue_fn: ?FinalizationEnqueueFn = null,
+
     pub fn init(allocator: std.mem.Allocator) Heap {
         return .{ .allocator = allocator, .bytes_allocator = allocator };
     }
@@ -486,6 +540,9 @@ pub const Heap = struct {
         self.const_roots.deinit(self.allocator);
         self.native_ctor_roots.deinit(self.allocator);
         self.handle_scopes.deinit(self.allocator);
+        self.weak_refs_seen.deinit(self.allocator);
+        self.weak_collections_seen.deinit(self.allocator);
+        self.finalization_registries_seen.deinit(self.allocator);
     }
 
     pub fn allocateBigInt(self: *Heap, value: i128) !*JSBigInt {
@@ -975,16 +1032,35 @@ pub const Heap = struct {
                 // wrapper boxes; a typed slot, not a property.
                 if (o.boxed_string) |bs| self.markString(bs);
                 if (o.map_data) |md| {
-                    for (md.entries.items) |entry| {
-                        if (entry.deleted) continue;
-                        self.markValue(entry.key);
-                        self.markValue(entry.value);
+                    if (md.is_weak and self.weak_aware_mark) {
+                        // §24.3 WeakMap — the [[WeakMapData]] keys
+                        // and values are weak edges. Don't strong-
+                        // mark them here; defer to the post-mark
+                        // ephemeron fixpoint + pruning pass. Record
+                        // the holder so that pass can find it.
+                        self.weak_collections_seen.append(self.allocator, o) catch {};
+                    } else {
+                        // §24.1 Map (or a WeakMap during a minor
+                        // cycle) — strong-mark every live entry.
+                        for (md.entries.items) |entry| {
+                            if (entry.deleted) continue;
+                            self.markValue(entry.key);
+                            self.markValue(entry.value);
+                        }
                     }
                 }
                 if (o.set_data) |sd| {
-                    for (sd.entries.items) |entry| {
-                        if (entry.deleted) continue;
-                        self.markValue(entry.value);
+                    if (sd.is_weak and self.weak_aware_mark) {
+                        // §24.4 WeakSet — members are weak edges;
+                        // defer to the post-mark pruning pass.
+                        self.weak_collections_seen.append(self.allocator, o) catch {};
+                    } else {
+                        // §24.2 Set (or a WeakSet during a minor
+                        // cycle) — strong-mark every live member.
+                        for (sd.entries.items) |entry| {
+                            if (entry.deleted) continue;
+                            self.markValue(entry.value);
+                        }
                     }
                 }
                 if (o.array_like_iter) |s| {
@@ -1032,26 +1108,44 @@ pub const Heap = struct {
                         for (o.elements.items) |elem| self.markValue(elem);
                     }
                 }
-                // §26.1 WeakRef — strong-ref impl: keep target alive
-                // for the lifetime of the WeakRef. Once Cynic grows
-                // true GC-weak references this becomes conditional
-                // (only marked while inside a job that has observed
-                // `.deref()`, per §9.10 AddToKeptObjects).
-                if (o.is_weak_ref) self.markValue(o.weak_ref_target);
-                // §26.2 FinalizationRegistry — strong-mark the
-                // cleanup callback plus every live cell's target /
-                // heldValue / unregister token. Cynic's FR is a
-                // strong-ref impl (see object.zig FinalizationData
-                // doc); without these marks the cleanup closure
-                // and the still-registered targets would be swept
-                // out from under a reachable registry.
+                // §26.1 WeakRef — the `[[WeakRefTarget]]` is a weak
+                // edge. During a weak-aware full cycle, do NOT
+                // strong-mark it; record the WeakRef so the
+                // post-mark pass can clear `weak_ref_target` when
+                // the referent did not survive the trace. A minor
+                // cycle keeps strong-marking (the young target
+                // tenures and is handled weakly next `collectFull`).
+                if (o.is_weak_ref) {
+                    if (self.weak_aware_mark) {
+                        self.weak_refs_seen.append(self.allocator, o) catch {};
+                    } else {
+                        self.markValue(o.weak_ref_target);
+                    }
+                }
+                // §26.2 FinalizationRegistry — the cleanup callback
+                // and every cell's `[[HeldValue]]` are strong edges
+                // (they must survive to be passed to the callback);
+                // the cell `[[WeakRefTarget]]` and `[[UnregisterToken]]`
+                // are weak. During a weak-aware full cycle, strong-
+                // mark callback + held values, defer the weak slots
+                // to the post-mark pass (which queues a cleanup job
+                // for any dead target). A minor cycle keeps the old
+                // strong-marking of every slot.
                 if (o.finalization_cells) |fc| {
                     self.markValue(fc.cleanup_callback);
-                    for (fc.cells.items) |cell| {
-                        if (cell.deleted) continue;
-                        self.markValue(cell.target);
-                        self.markValue(cell.held_value);
-                        if (cell.has_token) self.markValue(cell.unregister_token);
+                    if (self.weak_aware_mark) {
+                        self.finalization_registries_seen.append(self.allocator, o) catch {};
+                        for (fc.cells.items) |cell| {
+                            if (cell.deleted) continue;
+                            self.markValue(cell.held_value);
+                        }
+                    } else {
+                        for (fc.cells.items) |cell| {
+                            if (cell.deleted) continue;
+                            self.markValue(cell.target);
+                            self.markValue(cell.held_value);
+                            if (cell.has_token) self.markValue(cell.unregister_token);
+                        }
                     }
                 }
                 // Heap-allocated JSStrings whose `.bytes` slice
@@ -1111,6 +1205,145 @@ pub const Heap = struct {
             }
         }
         // Doubles, ints, bools, null, undefined, hole: no heap pointer.
+    }
+
+    /// Whether the referent of a weak slot (`WeakRef` target,
+    /// `WeakMap`/`WeakSet` key/member, `FinalizationRegistry` cell
+    /// target) survived the trace. §6.2.10 CanBeHeldWeakly limits a
+    /// weak referent to an Object or a non-registered Symbol; only
+    /// those heap kinds carry a `marked` bit that matters here. A
+    /// primitive (number / bool / undefined / string) can never be
+    /// the referent of a live weak slot — but if one is encountered
+    /// it is trivially "live" (it isn't on the GC sweep list as a
+    /// reclaimable weak target). Returns `true` for anything that
+    /// is not a swept-away heap object/function/symbol.
+    fn isWeakReferentLive(v: Value) bool {
+        if (valueAsPlainObject(v)) |o| return o.marked;
+        if (valueAsFunction(v)) |f| return f.marked;
+        if (valueAsSymbol(v)) |s| return s.marked;
+        // Strings, BigInts, and primitives: not valid weak
+        // referents per §6.2.10, treated as trivially live.
+        return true;
+    }
+
+    /// §24.3 WeakMap ephemeron fixpoint. For each reached WeakMap,
+    /// for every entry whose KEY object survived the trace,
+    /// transitively strong-mark the entry's VALUE. Marking a value
+    /// can make another WeakMap's key live, so the whole set is
+    /// re-scanned until a pass adds no new marks. (§24.4 WeakSet has
+    /// no value column — it needs no fixpoint.) Called by
+    /// `collectFull` after the main mark loop, before the sweep.
+    fn weakMapEphemeronFixpoint(self: *Heap) void {
+        var changed = true;
+        while (changed) {
+            changed = false;
+            // Index-based walk: a `markValue` below can reach a new
+            // WeakMap and append it to `weak_collections_seen`,
+            // reallocating the backing buffer — so re-read `.items`
+            // and `.len` each step rather than capturing the slice
+            // once. A WeakMap appended mid-walk is still visited
+            // (this pass continues past the old length); the outer
+            // `changed` loop re-scans regardless.
+            var i: usize = 0;
+            while (i < self.weak_collections_seen.items.len) : (i += 1) {
+                const holder = self.weak_collections_seen.items[i];
+                const md = holder.map_data orelse continue;
+                if (!md.is_weak) continue;
+                for (md.entries.items) |entry| {
+                    if (entry.deleted) continue;
+                    if (!isWeakReferentLive(entry.key)) continue;
+                    // Key is live — the value must be too. Mark it
+                    // and note whether that introduced a new mark
+                    // (a freshly-marked object flips a bit, which a
+                    // later WeakMap key check can observe).
+                    if (!isWeakReferentLive(entry.value)) {
+                        self.markValue(entry.value);
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// §26.1 / §24.3 / §24.4 / §26.2 — post-mark weak handling.
+    /// Run by `collectFull` after the ephemeron fixpoint and before
+    /// the sweep:
+    ///
+    ///  • §26.1 WeakRef — a `weak_ref_target` whose referent did
+    ///    not survive the trace is reset to `undefined`, so a later
+    ///    `.deref()` returns `undefined` per §26.1.4.1.
+    ///  • §24.3 WeakMap / §24.4 WeakSet — every entry whose
+    ///    key / member object did not survive is tombstoned
+    ///    (`deleted = true`, matching `MapEntry`/`SetEntry`), so the
+    ///    entry is gone from `has` / `get` / iteration. The dead
+    ///    key/value pair is then unreachable and freed by the sweep.
+    ///  • §26.2 FinalizationRegistry — every non-deleted cell whose
+    ///    `target` did not survive has its `held_value` handed to
+    ///    `enqueue_fn` (the cleanup-job scheduler) and the cell is
+    ///    tombstoned. The job runs later via the normal microtask
+    ///    drain — never synchronously inside GC.
+    ///
+    /// A `null` `finalization_enqueue_fn` (the unit-test path that
+    /// calls `collectFull` on a bare `Heap`) skips FinalizationRegistry
+    /// queuing but still tombstones dead cells.
+    fn processWeakReferences(self: *Heap) void {
+        // §26.1 WeakRef.
+        for (self.weak_refs_seen.items) |wr| {
+            if (!wr.is_weak_ref) continue;
+            if (!isWeakReferentLive(wr.weak_ref_target)) {
+                wr.weak_ref_target = Value.undefined_;
+            }
+        }
+        // §24.3 WeakMap / §24.4 WeakSet — prune dead entries.
+        for (self.weak_collections_seen.items) |holder| {
+            if (holder.map_data) |md| {
+                if (md.is_weak) {
+                    for (md.entries.items) |*entry| {
+                        if (entry.deleted) continue;
+                        if (!isWeakReferentLive(entry.key)) {
+                            entry.deleted = true;
+                        }
+                    }
+                }
+            }
+            if (holder.set_data) |sd| {
+                if (sd.is_weak) {
+                    for (sd.entries.items) |*entry| {
+                        if (entry.deleted) continue;
+                        if (!isWeakReferentLive(entry.value)) {
+                            entry.deleted = true;
+                        }
+                    }
+                }
+            }
+        }
+        // §26.2 FinalizationRegistry — queue cleanup for dead
+        // targets, tombstone the cell.
+        for (self.finalization_registries_seen.items) |reg| {
+            const fc = reg.finalization_cells orelse continue;
+            for (fc.cells.items) |*cell| {
+                if (cell.deleted) continue;
+                if (!isWeakReferentLive(cell.target)) {
+                    if (self.finalization_enqueue_fn) |f| {
+                        if (self.finalization_ctx) |c| {
+                            f(c, fc.cleanup_callback, cell.held_value);
+                        }
+                    }
+                    cell.deleted = true;
+                }
+            }
+        }
+    }
+
+    /// Install the §26.2 FinalizationRegistry cleanup-job scheduler.
+    /// Called once by the realm at init — see `FinalizationEnqueueFn`.
+    pub fn setFinalizationEnqueue(
+        self: *Heap,
+        ctx: *anyopaque,
+        enqueue_fn: FinalizationEnqueueFn,
+    ) void {
+        self.finalization_ctx = ctx;
+        self.finalization_enqueue_fn = enqueue_fn;
     }
 
     /// Walk a `Chunk`'s constant pool and pin every JSString it
@@ -1269,6 +1502,25 @@ pub const Heap = struct {
         }
     }
 
+    /// Arm weak-aware marking for a full GC cycle. Sets
+    /// `weak_aware_mark` so `markValue` treats the weak slots of a
+    /// `WeakRef` / `WeakMap` / `WeakSet` / `FinalizationRegistry` as
+    /// weak edges, and resets the per-cycle weak-holder worklists so
+    /// they only collect holders reached by THIS trace.
+    ///
+    /// MUST run before any `markValue` for the cycle. `collectFull`
+    /// calls it; `Realm.collectGarbage` also marks the realm roots
+    /// *before* it reaches `collectFull`, so the realm path calls
+    /// this first — `collectFull`'s own call is then idempotent.
+    /// `collectYoung` never calls it: a minor cycle keeps the old
+    /// strong-marking of weak slots.
+    pub fn beginWeakAwareCycle(self: *Heap) void {
+        self.weak_aware_mark = true;
+        self.weak_refs_seen.clearRetainingCapacity();
+        self.weak_collections_seen.clearRetainingCapacity();
+        self.finalization_registries_seen.clearRetainingCapacity();
+    }
+
     /// Run a full mark-sweep cycle across BOTH generations. `roots`
     /// is every live value the caller wants to keep. Anything
     /// reachable only through values outside `roots` (and outside
@@ -1292,6 +1544,19 @@ pub const Heap = struct {
         // — the long-tail cycles are where investigation starts.
         const t_start = monotonicNs();
 
+        // §26.1 / §24.3 / §24.4 / §26.2 — a full cycle handles weak
+        // references properly. `beginWeakAwareCycle` sets
+        // `weak_aware_mark` and clears the per-cycle worklists; it
+        // MUST run before any `markValue` for this cycle.
+        // `Realm.collectGarbage` marks the realm roots *before* it
+        // reaches here, so it calls `beginWeakAwareCycle` itself —
+        // in which case `weak_aware_mark` is already `true` and this
+        // must NOT re-arm (re-arming would `clearRetainingCapacity`
+        // the worklists the realm-root mark already populated). A
+        // direct `collectFull` caller (the unit tests) leaves the
+        // flag `false`, so this arms the cycle for them.
+        if (!self.weak_aware_mark) self.beginWeakAwareCycle();
+
         // Mark phase.
         for (roots) |r| self.markValue(r);
         for (self.handle_scopes.items) |scope| {
@@ -1309,6 +1574,20 @@ pub const Heap = struct {
             var rit = self.symbol_registry.iterator();
             while (rit.next()) |e| e.value_ptr.*.marked = true;
         }
+
+        // §24.3 WeakMap ephemeron fixpoint — a WeakMap entry's value
+        // is reachable iff its key is. Run to a fixpoint: marking a
+        // value can make another WeakMap's key live. WeakSet has no
+        // value column, so it is unaffected.
+        self.weakMapEphemeronFixpoint();
+        // §26.1 / §24.3 / §24.4 / §26.2 — post-mark weak handling:
+        // clear dead WeakRef targets, prune dead WeakMap/WeakSet
+        // entries, queue FinalizationRegistry cleanup jobs. Must run
+        // BEFORE the sweep — `isWeakReferentLive` reads the `marked`
+        // bit the sweep is about to clear. Marking is now done, so
+        // turn weak-aware mode back off.
+        self.weak_aware_mark = false;
+        self.processWeakReferences();
 
         // Snapshot pre-sweep counts for the diagnostic report.
         const pre_objs = self.objectCount();

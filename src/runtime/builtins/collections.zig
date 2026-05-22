@@ -4,9 +4,16 @@
 //! `runtime/object.zig`) and several helpers; co-locating
 //! them avoids cross-file privacy thrash.
 //!
-//! Cynic's WeakMap / WeakSet are strong-ref impls with
-//! identical observable behaviour to the spec — GC-weakness
-//! is later.
+//! WeakMap / WeakSet are genuinely weak. The `is_weak` flag on
+//! `MapData` / `SetData` tells the major collector
+//! (`Heap.collectFull`) to treat the entry keys / members as weak
+//! edges: it does not strong-mark them, and an ephemeron fixpoint
+//! (§24.3 — a WeakMap value is live iff its key is) plus a
+//! post-mark pruning pass tombstone every entry whose key / member
+//! object did not survive the trace. The minor collector keeps the
+//! old strong-marking, so a young weak entry survives a minor cycle
+//! and is pruned at the next major cycle (spec-conformant — GC
+//! timing is unspecified).
 
 const std = @import("std");
 
@@ -1127,8 +1134,11 @@ fn mapForEach(realm: *Realm, this_value: Value, args: []const Value) NativeError
     return Value.undefined_;
 }
 
-// ── §24.3 WeakMap (strong-ref impl — observable behaviour matches; no GC weakness yet) ──
+// ── §24.3 WeakMap (genuinely weak — entries pruned at major GC) ──
 
+// §24.3.1 — genuinely weak: see the file header. WeakMap entries
+// whose key object becomes unreachable are tombstoned by the major
+// collector's post-mark weak pass (`Heap.processWeakReferences`).
 pub fn installWeakMap(realm: *Realm) !void {
     // §24.3.1 — `WeakMap.length` is 0 (the iterable arg is
     // optional and so is excluded from the [[Construct]] arity

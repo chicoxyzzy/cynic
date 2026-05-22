@@ -709,6 +709,21 @@ pub const Realm = struct {
         return r;
     }
 
+    /// §26.2 FinalizationRegistry cleanup-job scheduler. The major
+    /// collector (`Heap.collectFull`) calls this for every cell
+    /// whose target did not survive the trace; it enqueues a host
+    /// job that invokes `cleanupCallback(heldValue)` on the next
+    /// microtask drain. Installed onto the heap via
+    /// `Heap.setFinalizationEnqueue` so the heap — which can't
+    /// import `realm.zig` — can reach it. `ctx` is the `*Realm`.
+    /// An OOM from the queue append is swallowed: §26.2's
+    /// introductory note explicitly permits an implementation to
+    /// skip a cleanup callback, so a dropped job is conformant.
+    fn finalizationEnqueueJob(ctx: *anyopaque, callback: Value, held_value: Value) void {
+        const realm: *Realm = @ptrCast(@alignCast(ctx));
+        realm.enqueueMicrotask(callback, held_value) catch {};
+    }
+
     /// Variant of `init` that backs heap-side byte payloads
     /// (`JSString.bytes`, ArrayBuffer slabs) with a separate
     /// allocator from the realm's struct allocator. Used by the
@@ -1004,6 +1019,14 @@ pub const Realm = struct {
     /// `heap.allocs_since_gc` crosses `heap.gc_threshold`. The
     /// counter resets to zero at the end of `heap.collect`.
     pub fn collectGarbage(self: *Realm) void {
+        // §26.1 / §24.3 / §24.4 / §26.2 — arm weak-aware marking
+        // BEFORE `markRoots`. `markRoots` calls `markValue` on every
+        // realm root (including any WeakRef / WeakMap / WeakSet /
+        // FinalizationRegistry held by a global), so the
+        // `weak_aware_mark` flag must already be set or those weak
+        // slots would be strong-marked. `collectFull` calls this
+        // again, idempotently.
+        self.heap.beginWeakAwareCycle();
         self.markRoots();
         // Hand off to `heap.collectFull` for the handle-scope walk
         // and the actual sweep. The empty roots slice is fine —
@@ -1114,8 +1137,28 @@ pub const Realm = struct {
     /// the typed Error constructors, plus core prototypes.
     /// Call after `init` if the realm should run user scripts.
     pub fn installBuiltins(self: *Realm) !void {
+        // §26.2 — wire the FinalizationRegistry cleanup-job
+        // scheduler onto the heap. `self` is stable here (the realm
+        // has reached its final address by the time `installBuiltins`
+        // runs), so the collector's type-erased `*Realm` context is
+        // valid for the realm's lifetime. A child realm sharing the
+        // parent's heap (`initChild`) re-points this at itself — the
+        // last installer wins, which is fine: a cleanup job is host-
+        // queued and any realm sharing the heap can drain it.
+        self.heap.setFinalizationEnqueue(self, finalizationEnqueueJob);
+
         const print_fn = try self.heap.allocateFunctionNative(printNative, 1, "print");
         try self.globals.put(self.allocator, "print", heap_mod.taggedFunction(print_fn));
+
+        // Cynic-only host hook: forces a full (major) mark-sweep
+        // cycle. Not in the spec — `$262.gc()` is the test262
+        // equivalent, and a real host never exposes this — but
+        // inline unit tests covering genuinely-weak WeakRef /
+        // WeakMap / WeakSet / FinalizationRegistry need a
+        // deterministic trigger (GC timing is otherwise
+        // unspecified). Lives on `globalThis.__collectGarbage`.
+        const gc_fn = try self.heap.allocateFunctionNative(collectGarbageNative, 0, "__collectGarbage");
+        try self.globals.put(self.allocator, "__collectGarbage", heap_mod.taggedFunction(gc_fn));
 
         // Minimal `console` object with a `log` method bound to
         // the same printer. Lets test scripts that conventionally
@@ -1141,6 +1184,18 @@ fn printNative(realm: *Realm, this_value: Value, args: []const Value) @import("f
         appendValueText(realm, v) catch return error.OutOfMemory;
     }
     realm.output.append(realm.allocator, '\n') catch return error.OutOfMemory;
+    return Value.undefined_;
+}
+
+/// `globalThis.__collectGarbage()` — host hook backing the
+/// deterministic-GC test trigger. Runs a full (major) mark-sweep
+/// cycle so genuinely-weak WeakRef / WeakMap / WeakSet /
+/// FinalizationRegistry behaviour is observable from a unit test.
+/// Not a spec built-in.
+fn collectGarbageNative(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
+    _ = this_value;
+    _ = args;
+    realm.collectGarbage();
     return Value.undefined_;
 }
 
