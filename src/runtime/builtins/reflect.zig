@@ -933,6 +933,9 @@ fn reflectOwnKeys(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const obj_mod = @import("object.zig");
     const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer key_scope.close();
+    // Root the result array — `proxyOwnKeysOrNull` fires the Proxy
+    // `ownKeys` trap, which re-enters JS and can GC `out` mid-build.
+    key_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     const keys = if (try obj_mod.proxyOwnKeysOrNull(realm, target, key_scope)) |k| k else try obj_mod.ownPropertyKeysOrdered(realm, target, key_scope);
     defer realm.allocator.free(keys);
     for (keys) |k| {

@@ -12102,6 +12102,19 @@ fn strictSetPropertyAnchored(
         // fire with Receiver as this — fall through to the
         // accessor walk below for that case.
         if (receiver_is_proxy and obj != obj_in) {
+            // The GetOwnPropertyDescriptor / DefineProperty traps
+            // below re-enter JS and trigger a GC. `key` is borrowed
+            // from `key_string` for a computed-key set (`o[expr]=v`),
+            // and `value` may be a young heap value — root both
+            // across the traps. Without this the gop trap's GC frees
+            // `key_string`, and the post-trap `allocateString(key)`
+            // for the defineProperty step copies freed bytes (the
+            // trap then logs a garbled key).
+            const px_scope = realm.heap.openScope() catch return error.OutOfMemory;
+            defer px_scope.close();
+            if (key_string) |ks| px_scope.push(Value.fromString(ks)) catch return error.OutOfMemory;
+            px_scope.push(value) catch return error.OutOfMemory;
+            px_scope.push(recv) catch return error.OutOfMemory;
             const has_own_data = obj.properties.contains(key);
             const has_own_acc = obj.accessors.contains(key);
             if (has_own_data and !has_own_acc) {
