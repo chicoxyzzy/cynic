@@ -98,6 +98,16 @@ pub const Intrinsics = struct {
     /// (see `builtins/iterator.zig`).
     wrap_for_valid_iterator_prototype: ?*JSObject = null,
 
+    /// §27.1.4.1 %IteratorHelperPrototype% — the `[[Prototype]]`
+    /// of every Iterator Helper object: the results of
+    /// `Iterator.prototype.{map,filter,take,drop,flatMap}` and of
+    /// `Iterator.concat` / `Iterator.zip` / `Iterator.zipKeyed`.
+    /// Inherits `%IteratorPrototype%`; carries the generic `next`
+    /// / `return` (dispatched on the helper kind) and the
+    /// `"Iterator Helper"` `@@toStringTag`. Built by
+    /// `builtins/iterator.zig:install`.
+    iterator_helper_prototype: ?*JSObject = null,
+
     /// `%PromisePrototype%` — installed by `installPromise` so
     /// instances of the realm's `Promise` constructor share one
     /// proto. later still resolves synchronously through the

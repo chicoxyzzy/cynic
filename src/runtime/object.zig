@@ -329,10 +329,19 @@ pub const ZipInput = struct {
 };
 
 pub const IteratorHelperState = struct {
+    /// Which iterator helper this state drives. §27.1.4.1
+    /// `%IteratorHelperPrototype%.next` / `.return` are generic —
+    /// one shared method dispatches to the per-kind step on this
+    /// discriminator. `.map` for the `Iterator.from` wrapper too
+    /// (it never reaches the helper prototype, so the value is
+    /// unread there).
+    pub const HelperKind = enum { map, filter, take, drop, flat_map, concat, zip };
+
     source: Value = Value.undefined_,
     next_fn: Value = Value.undefined_,
     payload: Value = Value.undefined_,
     active: Value = Value.undefined_,
+    kind: HelperKind = .map,
     count: u32 = 0,
     idx: u32 = 0,
     done: bool = false,

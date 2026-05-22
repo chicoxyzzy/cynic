@@ -131,9 +131,6 @@ code construction (aligns with SES).
   `collectYoung` with promotion-by-relink — has shipped (see the
   Performance section); incremental marking of the mature set is
   the remaining GC step.
-- **`Iterator.zipKeyed` conformance.** The keyed variant is
-  installed but incomplete — see the `joint-iteration` bullet
-  under "Pre-Stage-4 proposals shipped".
 
 **Recently landed (was in progress; now done).**
 
@@ -410,27 +407,23 @@ place to revisit. The current set:
   `Iterator.zipKeyed(iterables, options?)` on the `Iterator`
   global. Installer in `src/runtime/builtins/iterator.zig`.
   Semantics of the `mode` option ("shortest" | "longest" |
-  "strict") and padding may still shift. **Known gaps —
-  `Iterator.zipKeyed` is incomplete:** it reads the `iterables`
-  argument's properties through internal maps rather than the
-  spec's [[OwnPropertyKeys]] / [[GetOwnProperty]] / [[Get]]
-  operations (so a Proxy-instrumented `iterables` observes no
-  accesses), emits `zip`-worded error messages from the
-  `zipKeyed` path, gets the IteratorClose order wrong on abrupt
-  completion, and `result-is-iterator.js` cannot reach
-  `%IteratorHelperPrototype%`. These are conformance bugs in an
-  experimental Stage-3 proposal — they fail identically at the
-  default and `--gc-threshold=1` thresholds. The earlier
-  GC-residual (zipKeyed result objects came back empty under
-  gc-threshold=1) was a key-anchoring dangle — `storeZipResult`
-  borrowed the result key slice from the zip wrapper's
-  `zip_inputs`, which dies with the wrapper — and is **fixed**:
-  the keyed path now `setComputedOwned`-anchors the key onto the
-  result object. The zip wrapper's per-input state lives in the
-  typed `IteratorHelperState.zip_inputs` slot, so it carries no
-  observable `__cynic_*` own property. Off by default in the CLI
-  and excluded from headline conformance, so it doesn't gate a
-  release.
+  "strict") and padding may still shift. The dedicated feature
+  phase is at 76 / 2: `Iterator.zip` and `Iterator.zipKeyed` are
+  conformant — the keyed-iterables walk routes through the spec
+  `[[OwnPropertyKeys]]` / `[[GetOwnProperty]]` / `[[Get]]`
+  operations (Proxy traps fire), padding is a keyed object for
+  `zipKeyed` and an iterable for `zip`, `IteratorClose` runs in
+  reverse, and the result tuples / per-input state live in typed
+  internal slots with no observable `__cynic_*` own property.
+  Helper results inherit `%IteratorHelperPrototype%`. The 2
+  remaining `result-is-iterator.js` fixtures are **environmentally
+  blocked, not an engine gap**: the test262 harness's
+  `getWellKnownIntrinsicObject` (`wellKnownIntrinsicObjects.js`)
+  populates every intrinsic by evaluating `new Function("return "
+  + source)()`, and Cynic deliberately ships no `new Function`
+  (SES alignment), so the helper can obtain no intrinsic at all.
+  Off by default in the CLI and excluded from headline
+  conformance.
 - **`upsert`** (Stage 3) — `Map.prototype.{getOrInsert,
   getOrInsertComputed}` and the corresponding pair on
   `WeakMap.prototype`. Installer in

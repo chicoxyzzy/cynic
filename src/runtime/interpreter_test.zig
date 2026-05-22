@@ -3317,6 +3317,28 @@ test "iterator internal state is not an observable own property" {
     , 0);
 }
 
+test "iterator helpers share %IteratorHelperPrototype%" {
+    // §27.1.4.1 — every iterator helper result (map / filter /
+    // take / drop / flatMap / concat / zip) inherits one shared
+    // %IteratorHelperPrototype%, which is distinct from
+    // %IteratorPrototype%, chains to it, and carries the
+    // "Iterator Helper" @@toStringTag.
+    try expectScriptStringWithBuiltins(
+        \\const a = [1, 2, 3].values();
+        \\const hp = Object.getPrototypeOf(a.map(x => x));
+        \\const shared = hp === Object.getPrototypeOf(a.filter(x => x)) &&
+        \\  hp === Object.getPrototypeOf(a.take(1)) &&
+        \\  hp === Object.getPrototypeOf(a.drop(0)) &&
+        \\  hp === Object.getPrototypeOf(a.flatMap(x => [x])) &&
+        \\  hp === Object.getPrototypeOf(Iterator.concat()) &&
+        \\  hp === Object.getPrototypeOf(Iterator.zip([]));
+        \\const placed = hp !== Iterator.prototype &&
+        \\  Object.getPrototypeOf(hp) === Iterator.prototype;
+        \\const tag = Object.prototype.toString.call(a.map(x => x));
+        \\((shared && placed) ? "ok:" : "BAD:") + tag;
+    , "ok:[object Iterator Helper]");
+}
+
 test "GC: property-bag growth survives gc_threshold=1" {
     // Loop writes 20 keys onto a single object, triggering at
     // least one `StringArrayHashMap.grow`. The keys are JSStrings

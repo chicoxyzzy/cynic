@@ -92,6 +92,21 @@ pub fn install(realm: *Realm) !void {
     // Iterators are themselves iterable.
     try installNativeMethodOnProto(realm, proto, "@@iterator", iteratorSymbolIterator, 0);
 
+    // §27.1.4.1 %IteratorHelperPrototype% — the `[[Prototype]]` of
+    // every Iterator Helper object: the results of
+    // `Iterator.prototype.{map,filter,take,drop,flatMap}` and of
+    // `Iterator.concat` / `Iterator.zip` / `Iterator.zipKeyed`.
+    // Inherits `%IteratorPrototype%`; `next` / `return` are generic
+    // (one method each, dispatched on `iter_helper.kind`).
+    {
+        const helper_proto = try realm.heap.allocateObject();
+        helper_proto.prototype = proto;
+        try installNativeMethodOnProto(realm, helper_proto, "next", iteratorHelperNext, 0);
+        try installNativeMethodOnProto(realm, helper_proto, "return", iteratorHelperReturn, 0);
+        try intrinsics.installToStringTag(realm, helper_proto, "Iterator Helper");
+        realm.intrinsics.iterator_helper_prototype = helper_proto;
+    }
+
     // §22.2.9 / §27.1.3 — the RegExp-string iterator prototype is
     // built eagerly inside `builtins/string.zig:install` (which runs
     // before this one), so its `[[Prototype]]` was wired to
@@ -644,7 +659,7 @@ fn iteratorMap(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     if (heap_mod.valueAsFunction(cb_v) == null) {
         return typeErrorAfterClose(realm, this_value, "Iterator.prototype.map callback is not callable");
     }
-    return buildLazy(realm, this_value, cb_v, mapNext);
+    return buildLazy(realm, this_value, cb_v, .map);
 }
 
 fn iteratorFilter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -653,7 +668,7 @@ fn iteratorFilter(realm: *Realm, this_value: Value, args: []const Value) NativeE
     if (heap_mod.valueAsFunction(cb_v) == null) {
         return typeErrorAfterClose(realm, this_value, "Iterator.prototype.filter predicate is not callable");
     }
-    return buildLazy(realm, this_value, cb_v, filterNext);
+    return buildLazy(realm, this_value, cb_v, .filter);
 }
 
 /// §27.1.4.4 Iterator.prototype.flatMap. Same lazy shape as
@@ -680,31 +695,17 @@ fn iteratorFlatMap(realm: *Realm, this_value: Value, args: []const Value) Native
         return err;
     };
     const wrap = realm.heap.allocateObject() catch return error.OutOfMemory;
-    wrap.prototype = ctor.prototype;
+    // §27.1.4.1 — the flatMap result inherits
+    // `%IteratorHelperPrototype%` (generic `next` / `return`).
+    wrap.prototype = realm.intrinsics.iterator_helper_prototype orelse ctor.prototype;
     const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
     state.* = .{
         .source = this_value,
         .next_fn = cached_next_v,
         .payload = cb_v,
+        .kind = .flat_map,
     };
     wrap.iter_helper = state;
-    const scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer scope.close();
-    scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
-    const next_fn = realm.heap.allocateFunctionNative(flatMapNext, 0, "next") catch return error.OutOfMemory;
-    next_fn.has_construct = false;
-    wrap.setWithFlags(realm.allocator, "next", heap_mod.taggedFunction(next_fn), .{
-        .writable = true,
-        .enumerable = false,
-        .configurable = true,
-    }) catch return error.OutOfMemory;
-    const ret_fn = realm.heap.allocateFunctionNative(flatMapReturn, 0, "return") catch return error.OutOfMemory;
-    ret_fn.has_construct = false;
-    wrap.setWithFlags(realm.allocator, "return", heap_mod.taggedFunction(ret_fn), .{
-        .writable = true,
-        .enumerable = false,
-        .configurable = true,
-    }) catch return error.OutOfMemory;
     return heap_mod.taggedObject(wrap);
 }
 
@@ -865,7 +866,7 @@ fn iteratorTake(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     }
     const limit_clamped: f64 = if (std.math.isInf(integer_limit)) @as(f64, std.math.maxInt(i32)) else integer_limit;
     const limit_i32: i32 = if (limit_clamped >= std.math.maxInt(i32)) std.math.maxInt(i32) else @intFromFloat(limit_clamped);
-    return buildLazy(realm, this_value, Value.fromInt32(limit_i32), takeNext);
+    return buildLazy(realm, this_value, Value.fromInt32(limit_i32), .take);
 }
 
 fn iteratorDrop(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -892,10 +893,10 @@ fn iteratorDrop(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     }
     const drop_clamped: f64 = if (std.math.isInf(integer_limit)) @as(f64, std.math.maxInt(i32)) else integer_limit;
     const drop_i32: i32 = if (drop_clamped >= std.math.maxInt(i32)) std.math.maxInt(i32) else @intFromFloat(drop_clamped);
-    return buildLazy(realm, this_value, Value.fromInt32(drop_i32), dropNext);
+    return buildLazy(realm, this_value, Value.fromInt32(drop_i32), .drop);
 }
 
-fn buildLazy(realm: *Realm, source: Value, payload: Value, next_fn: @import("../function.zig").NativeFn) NativeError!Value {
+fn buildLazy(realm: *Realm, source: Value, payload: Value, kind: IteratorHelperState.HelperKind) NativeError!Value {
     const ctor_v = realm.globals.get("Iterator") orelse return throwTypeError(realm, "Iterator constructor missing");
     const ctor = heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "Iterator constructor missing");
     // §27.1.4.x — every lazy helper does GetIteratorDirect on
@@ -914,35 +915,18 @@ fn buildLazy(realm: *Realm, source: Value, payload: Value, next_fn: @import("../
         return err;
     };
     const wrap = realm.heap.allocateObject() catch return error.OutOfMemory;
-    wrap.prototype = ctor.prototype;
+    // §27.1.4.1 — the lazy-helper result inherits
+    // `%IteratorHelperPrototype%`, which carries the generic
+    // `next` / `return`; the wrapper has no own iteration methods.
+    wrap.prototype = realm.intrinsics.iterator_helper_prototype orelse ctor.prototype;
     const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
     state.* = .{
         .source = source,
         .next_fn = cached_next_v,
         .payload = payload,
+        .kind = kind,
     };
     wrap.iter_helper = state;
-    // Pin `wrap` for the rest of construction — every subsequent
-    // `allocate*` call below can trigger GC, and `wrap` is only
-    // alive through this local variable. `source` rides along
-    // through `state.source` once the GC walker reaches `wrap`.
-    const scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer scope.close();
-    scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
-    const fn_obj = realm.heap.allocateFunctionNative(next_fn, 0, "next") catch return error.OutOfMemory;
-    fn_obj.has_construct = false;
-    wrap.setWithFlags(realm.allocator, "next", heap_mod.taggedFunction(fn_obj), .{
-        .writable = true,
-        .enumerable = false,
-        .configurable = true,
-    }) catch return error.OutOfMemory;
-    const ret_fn = realm.heap.allocateFunctionNative(lazyReturn, 0, "return") catch return error.OutOfMemory;
-    ret_fn.has_construct = false;
-    wrap.setWithFlags(realm.allocator, "return", heap_mod.taggedFunction(ret_fn), .{
-        .writable = true,
-        .enumerable = false,
-        .configurable = true,
-    }) catch return error.OutOfMemory;
     return heap_mod.taggedObject(wrap);
 }
 
@@ -960,6 +944,40 @@ fn lazyReturn(realm: *Realm, this_value: Value, args: []const Value) NativeError
     state.done = true;
     try closeIteratorPropagate(realm, state.source);
     return iterResult(realm, Value.undefined_, true);
+}
+
+/// §27.1.4.1.1 %IteratorHelperPrototype%.next — one generic method
+/// shared by every iterator helper; dispatches to the per-kind
+/// step on the receiver's typed `iter_helper.kind`.
+fn iteratorHelperNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "Iterator Helper.prototype.next called on non-object");
+    const state = obj.iter_helper orelse
+        return throwTypeError(realm, "Iterator Helper.prototype.next called on incompatible receiver");
+    return switch (state.kind) {
+        .map => mapNext(realm, this_value, args),
+        .filter => filterNext(realm, this_value, args),
+        .take => takeNext(realm, this_value, args),
+        .drop => dropNext(realm, this_value, args),
+        .flat_map => flatMapNext(realm, this_value, args),
+        .concat => concatNext(realm, this_value, args),
+        .zip => zipNext(realm, this_value, args),
+    };
+}
+
+/// §27.1.4.1.2 %IteratorHelperPrototype%.return — generic close,
+/// dispatched on `iter_helper.kind`.
+fn iteratorHelperReturn(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "Iterator Helper.prototype.return called on non-object");
+    const state = obj.iter_helper orelse
+        return throwTypeError(realm, "Iterator Helper.prototype.return called on incompatible receiver");
+    return switch (state.kind) {
+        .map, .filter, .take, .drop => lazyReturn(realm, this_value, args),
+        .flat_map => flatMapReturn(realm, this_value, args),
+        .concat => concatReturn(realm, this_value, args),
+        .zip => zipReturn(realm, this_value, args),
+    };
 }
 
 fn doneResult(realm: *Realm) NativeError!Value {
@@ -1549,9 +1567,10 @@ fn iteratorConcat(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const ctor_v = realm.globals.get("Iterator") orelse return throwTypeError(realm, "Iterator constructor missing");
     const ctor = heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "Iterator constructor missing");
     const wrap = realm.heap.allocateObject() catch return error.OutOfMemory;
-    wrap.prototype = ctor.prototype;
+    // §27.1.4.1 — the concat result inherits %IteratorHelperPrototype%.
+    wrap.prototype = realm.intrinsics.iterator_helper_prototype orelse ctor.prototype;
     const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
-    state.* = .{ .count = @intCast(args.len) };
+    state.* = .{ .count = @intCast(args.len), .kind = .concat };
     wrap.iter_helper = state;
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
@@ -1579,20 +1598,6 @@ fn iteratorConcat(realm: *Realm, this_value: Value, args: []const Value) NativeE
         }) catch return error.OutOfMemory;
     }
 
-    const next_fn = realm.heap.allocateFunctionNative(concatNext, 0, "next") catch return error.OutOfMemory;
-    next_fn.has_construct = false;
-    wrap.setWithFlags(realm.allocator, "next", heap_mod.taggedFunction(next_fn), .{
-        .writable = true,
-        .enumerable = false,
-        .configurable = true,
-    }) catch return error.OutOfMemory;
-    const ret_fn = realm.heap.allocateFunctionNative(concatReturn, 0, "return") catch return error.OutOfMemory;
-    ret_fn.has_construct = false;
-    wrap.setWithFlags(realm.allocator, "return", heap_mod.taggedFunction(ret_fn), .{
-        .writable = true,
-        .enumerable = false,
-        .configurable = true,
-    }) catch return error.OutOfMemory;
     return heap_mod.taggedObject(wrap);
 }
 
@@ -1888,12 +1893,14 @@ fn buildZipWrapper(
         scope.push(slot.next) catch return error.OutOfMemory;
     }
     const wrap = realm.heap.allocateObject() catch return error.OutOfMemory;
-    wrap.prototype = ctor.prototype;
+    // §27.1.4.1 — the zip / zipKeyed result inherits %IteratorHelperPrototype%.
+    wrap.prototype = realm.intrinsics.iterator_helper_prototype orelse ctor.prototype;
     const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
     state.* = .{
         .count = @intCast(iters.len),
         .mode = @intCast(@intFromEnum(mode)),
         .keyed = keys != null,
+        .kind = .zip,
     };
     wrap.iter_helper = state;
     scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
@@ -2031,20 +2038,6 @@ fn buildZipWrapper(
         }
     }
 
-    const next_fn = realm.heap.allocateFunctionNative(zipNext, 0, "next") catch return error.OutOfMemory;
-    next_fn.has_construct = false;
-    wrap.setWithFlags(realm.allocator, "next", heap_mod.taggedFunction(next_fn), .{
-        .writable = true,
-        .enumerable = false,
-        .configurable = true,
-    }) catch return error.OutOfMemory;
-    const ret_fn = realm.heap.allocateFunctionNative(zipReturn, 0, "return") catch return error.OutOfMemory;
-    ret_fn.has_construct = false;
-    wrap.setWithFlags(realm.allocator, "return", heap_mod.taggedFunction(ret_fn), .{
-        .writable = true,
-        .enumerable = false,
-        .configurable = true,
-    }) catch return error.OutOfMemory;
     return heap_mod.taggedObject(wrap);
 }
 
