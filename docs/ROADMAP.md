@@ -412,19 +412,24 @@ place to revisit. The current set:
   `Iterator.zipKeyed(iterables, options?)` on the `Iterator`
   global. Installer in `src/runtime/builtins/iterator.zig`.
   Semantics of the `mode` option ("shortest" | "longest" |
-  "strict") and padding may still shift. **Known GC residual:**
-  the `joint-iteration` feature phase has ~5 fixtures that pass at
-  the default allocation threshold but fail under
-  `--gc-threshold=1` — a use-after-free in the `zipNext` step path
-  not yet pinned down. The zip wrapper's per-input state was moved
-  off the property bag into the typed `IteratorHelperState.
-  zip_inputs` slot, and `collectZipIters` / `buildZipWrapper` root
-  the collected sub-iterators on a `HandleScope` — that closed the
-  equivalent default-threshold failures, but a dangling pointer
-  elsewhere in the step path survives. Chase it with `/gc-stress`
-  scoped to `--phase=feature:joint-iteration`. Off by default in
-  the CLI and excluded from headline conformance, so it doesn't
-  gate a release.
+  "strict") and padding may still shift. **Known gaps —
+  `Iterator.zipKeyed` is incomplete:** it reads the `iterables`
+  argument's properties through internal maps rather than the
+  spec's [[OwnPropertyKeys]] / [[GetOwnProperty]] / [[Get]]
+  operations (so a Proxy-instrumented `iterables` observes no
+  accesses and the result comes back empty), emits `zip`-worded
+  error messages from the `zipKeyed` path, gets the IteratorClose
+  order wrong on abrupt completion, and `result-is-iterator.js`
+  cannot reach `%IteratorHelperPrototype%`. These are conformance
+  bugs in an experimental Stage-3 proposal, **not** memory-safety
+  issues — a verifier-armed (`ReleaseSafe`, `verifyRememberedSet`
+  + freed-memory poison) `--gc-threshold=1` run over the
+  `joint-iteration` phase is clean: no un-barriered edge, no
+  freed-memory read. The zip wrapper's per-input state lives in
+  the typed `IteratorHelperState.zip_inputs` slot, so it carries
+  no observable `__cynic_*` own property. Off by default in the
+  CLI and excluded from headline conformance, so it doesn't gate
+  a release.
 - **`upsert`** (Stage 3) — `Map.prototype.{getOrInsert,
   getOrInsertComputed}` and the corresponding pair on
   `WeakMap.prototype`. Installer in
