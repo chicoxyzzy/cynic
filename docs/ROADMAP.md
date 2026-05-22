@@ -127,7 +127,11 @@ code construction (aligns with SES).
 - **Tail-call optimization (PTC).** See the dedicated section
   below.
 - **`typeof` of a callable proxy returning `"function"`.**
-- **Generational / incremental GC.**
+- **Incremental / concurrent GC marking.** The generational
+  collector — young/mature split, write barrier, remembered set,
+  `collectYoung` with promotion-by-relink — has shipped (see the
+  Performance section); incremental marking of the mature set is
+  the remaining GC step.
 - **Inner `yield*` `.return` non-Object → TypeError** and
   **yield-thenable resolving-fn metadata** (the remaining
   scattered async-generator residuals; the bulk of the
