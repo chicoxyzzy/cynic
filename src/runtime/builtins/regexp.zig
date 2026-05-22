@@ -1254,10 +1254,24 @@ fn regexpProtoMatchAll(realm: *Realm, this_value: Value, args: []const Value) Na
     // an Object, throw a TypeError`.
     const r = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.matchAll] called on non-object");
 
+    // §22.2.5.9 re-enters JS at several steps — SpeciesConstructor,
+    // the `flags` getter + ToString, the species `Construct`, the
+    // `lastIndex` getter, and `ToLength`'s `valueOf`/`toString` — each
+    // of which can GC. The receiver, subject string, species
+    // constructor, cloned flags string, freshly built `matcher`, and
+    // the iterator object are native-held raw pointers across those
+    // re-entries; root them. Without this, `this-lastindex-cached.js`
+    // frees `matcher` inside the `lastIndex.valueOf` call and step 8
+    // writes `lastIndex` through a dangling pointer.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(r)) catch return error.OutOfMemory;
+
     // step 3 — `Let S be ? ToString(string)`. The `string-tostring-
     // throws` fixture relies on this firing before any other
     // accessor on `R`.
     const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
+    scope.push(Value.fromString(s)) catch return error.OutOfMemory;
 
     // step 4 — `Let C be ? SpeciesConstructor(R, %RegExp%)`.
     const builtin_regexp = blk: {
@@ -1265,12 +1279,14 @@ fn regexpProtoMatchAll(realm: *Realm, this_value: Value, args: []const Value) Na
         break :blk heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.matchAll]: %RegExp% is not callable");
     };
     const c_fn = try speciesConstructor(realm, r, builtin_regexp);
+    scope.push(heap_mod.taggedFunction(c_fn)) catch return error.OutOfMemory;
 
     // step 5 — `Let flags be ? ToString(? Get(R, "flags"))`. The
     // `this-get-flags-throws` / `this-tostring-flags-throws`
     // fixtures rely on these firing in this order.
     const flags_v = try intrinsics.getPropertyChain(realm, r, "flags");
     const flags_s = try intrinsics.stringifyArg(realm, flags_v);
+    scope.push(Value.fromString(flags_s)) catch return error.OutOfMemory;
 
     // step 6 — `Let matcher be ? Construct(C, « R, flags »)`. The
     // `species-constructor` fixture observes the two-argument
@@ -1291,6 +1307,7 @@ fn regexpProtoMatchAll(realm: *Realm, this_value: Value, args: []const Value) Na
         },
     };
     const matcher = heap_mod.valueAsPlainObject(matcher_v) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.matchAll]: species constructor returned non-Object");
+    scope.push(matcher_v) catch return error.OutOfMemory;
 
     // step 7 — `Let lastIndex be ? ToLength(? Get(R, "lastIndex"))`.
     // The `this-lastindex-cached` fixture relies on this capturing
@@ -1317,6 +1334,7 @@ fn regexpProtoMatchAll(realm: *Realm, this_value: Value, args: []const Value) Na
     // [[Unicode]] / [[Done]] state. `string.zig:regexpStringIterNext`
     // reads them.
     const iter = realm.heap.allocateObject() catch return error.OutOfMemory;
+    scope.push(heap_mod.taggedObject(iter)) catch return error.OutOfMemory;
     iter.prototype = realm.intrinsics.regexp_string_iterator_prototype orelse realm.intrinsics.object_prototype;
     iter.set(realm.allocator, "__cynic_matchall_re__", heap_mod.taggedObject(matcher)) catch return error.OutOfMemory;
     iter.set(realm.allocator, "__cynic_matchall_input__", Value.fromString(s)) catch return error.OutOfMemory;
