@@ -29,22 +29,28 @@ dominate, or if a JIT ever lands.
 
 ## Landed so far
 
-Commit `51f03a6` on `main`:
+On `main` (`51f03a6`):
 
 - `src/runtime/shape.zig` — `Shape` transition node + `ShapeTree`
-  (realm-lifetime arena + root shape + find-or-create
-  `transition`); 6 unit tests.
-- `JSObject.shape: ?*Shape` + `JSObject.slots: []Value`, and
-  `Realm.shapes: ShapeTree` — additive scaffolding, **unused**.
-  Every object still has `shape == null`; access is on the
-  `properties` hash.
+  (arena + root shape + find-or-create `transition`); 6 unit tests.
+- `JSObject.shape: ?*Shape` + `JSObject.slots: []Value` — additive
+  scaffolding.
+
+On branch `worktree-inline-caches` (committed, not yet merged):
+
+- `7b7bcad` — `ShapeTree` moved `Realm` → `Heap`; `JSObject` gains a
+  `heap` back-pointer stamped in `Heap.allocateObject`.
+- `7a98b4d` — `JSObject.get` reads `slots` for a shaped object,
+  else `properties`. Inert today — nothing builds shapes yet.
+
+Every object still has `shape == null`; all property access is on
+the `properties` hash. `zig build test` green at this checkpoint.
 
 ## Architecture decisions
 
 - **`ShapeTree` lives on the `Heap`, not the `Realm`.** Agent-scoped,
   like V8's per-Isolate Maps; `Heap` is also pointer-stable whereas
-  `Realm` moves by value. (The scaffolding commit put it on `Realm`
-  as a placeholder — sub-step 2b-0 moves it.)
+  `Realm` moves by value. (Done in `7b7bcad`.)
 - **`JSObject` gets a `*Heap` back-pointer**, stamped in
   `Heap.allocateObject`. This is what lets the realm-agnostic
   `JSObject.set(allocator, key, v)` API — called from hundreds of
@@ -62,23 +68,62 @@ Commit `51f03a6` on `main`:
 Each builds green and is gated on `zig build test` + a full
 `zig build test262 -- --quiet` sweep (`fail` must not regress).
 
-- **2b-0** — move `ShapeTree` `Realm` → `Heap`; add the
-  `JSObject` → `*Heap` back-pointer (stamp in `allocateObject`).
-  Additive, no behaviour change.
-- **2b-1** — `get` / `getOwn` read both representations
-  (`shape` → `slots`, else the hash).
-- **2b-2** — `set` / `setWithFlags` build shapes (transition +
-  slot write) as the source of truth; objects become shaped. The
-  high-risk sub-step.
-- **2b-3** — `delete`, `defineProperty`, and dictionary-mode
-  demotion (delete → demote to the hash; shapes are append-only).
-- **2b-4** — §10.1.11 enumeration order from the transition
-  chain; GC object-marker walks `slots`.
-- **IC** — `Chunk` grows a mutable `inline_caches: []ICCell`
-  side-table (the `Chunk` is otherwise immutable); `lda_property`
-  / `sta_property` gain an `ic:u16` operand. Fast path: shape
-  pointer compare + `slots` load. Own data properties only; a
-  miss falls through to the full lookup and refills the cell.
+### 2b-2 — `set` builds shapes (the core; audit-heavy)
+
+`set` / `setWithFlags` build a shape (transition + slot write) for
+an eligible object. **This step cannot be salami-sliced** the way
+2b-0 / 2b-1 were, for a specific reason:
+
+`JSObject.get` (since `7a98b4d`) reads a shaped object's values
+from `slots`. So once an object is shaped its shape MUST stay
+consistent with *every* mutation — and several paths mutate
+`properties` **directly, bypassing `JSObject.set`**:
+
+- the `del_named_property` opcode (`delete obj.x`);
+- `Object.defineProperty` and the descriptor-define paths;
+- raw `obj.properties.put(...)` call sites (e.g.
+  `GlobalBindings.bindToObject` in `realm.zig`).
+
+Run on a shaped object without updating or demoting the shape,
+each leaves the shape stale → `get` returns a deleted / wrong
+value. **2b-2 therefore requires auditing every direct
+`properties` / `property_flags` / `accessors` mutation site** and
+giving each a demote-to-dictionary (or update-the-shape) step.
+
+Recommended sequencing — build the shape as a *write-only shadow*
+first, so the audit and the flip are separable:
+
+1. Make `get` read `properties` first again (the shape branch
+   non-authoritative) — `7a98b4d` wired `get` shape-first
+   prematurely; reorder it so a stale shadow shape has no effect.
+2. `set` builds the shadow shape + `slots` alongside `properties`.
+   Behaviour-neutral — commit; test262 confirms `set` still works.
+3. Audit the direct-mutation sites; add demote / update discipline.
+4. Flip: `get` / `hasOwn` / enumeration / the GC marker read the
+   shape; retire `properties` for shaped objects. test262 gates.
+
+Keep the *shaped* set of objects small at first — shape only a
+plain object gaining default-attribute data properties from an
+empty start; demote on anything else (accessors, non-default
+flags, `__cynic_*` keys, array exotics).
+
+### 2b-3 — `delete` / `defineProperty` / dictionary demotion
+
+In practice folded into the 2b-2 audit (step 3) above.
+
+### 2b-4 — enumeration + GC marker
+
+§10.1.11 enumeration order from the transition chain; the GC
+object-marker walks `slots` instead of `properties` for a shaped
+object. Part of the 2b-2 flip (step 4).
+
+### IC — monomorphic inline cache
+
+`Chunk` grows a mutable `inline_caches: []ICCell` side-table (the
+`Chunk` is otherwise immutable); `lda_property` / `sta_property`
+gain an `ic:u16` operand. Fast path: shape pointer compare +
+`slots` load. Own data properties only; a miss falls through to
+the full lookup and refills the cell.
 
 ## Conformance risks (where 2b can break test262)
 
