@@ -132,7 +132,7 @@ features ship in mainline ECMA-262.
 
 | feature | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
-| `joint-iteration` | 54 | 24 | 0 | 69 % | 69 % |
+| `joint-iteration` | 59 | 19 | 0 | 76 % | 76 % |
 | `upsert` | 72 | 0 | 0 | 100 % | 100 % |
 
 
@@ -156,11 +156,11 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-22 — cynic `762d811`, test262 `d0c1b455`
+### 2026-05-22 — cynic `99b6566`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 92.82 % | 99.98 % | 37211 / 40090 | 37211 / 37220 | +3 | 40.6 s |
+| **runtime** | 92.82 % | 99.98 % | 37211 / 40090 | 37211 / 37220 | +3 | 1m 00s |
 
 ### 2026-05-21 — cynic `0ad1d25`, test262 `d0c1b455`
 
