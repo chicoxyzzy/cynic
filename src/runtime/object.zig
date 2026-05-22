@@ -1018,6 +1018,7 @@ pub const JSObject = struct {
         } else {
             try self.property_flags.put(allocator, key, flags);
         }
+        self.shadowSet(allocator, key, v, flags);
     }
 
     /// `[[Set]]` (§10.1.9) — assign a property by name. The
@@ -1084,6 +1085,72 @@ pub const JSObject = struct {
         }
         try self.properties.put(allocator, key, v);
         try self.recordKey(allocator, key);
+        self.shadowSet(allocator, key, v, PropertyFlags.default);
+    }
+
+    /// Demote a shaped object back to dictionary mode. `properties`
+    /// already holds every value (the shadow co-maintains it), so
+    /// dropping the shape and slots loses nothing.
+    fn demoteFromShape(self: *JSObject) void {
+        self.shape = null;
+        self.slots.clearRetainingCapacity();
+    }
+
+    /// Maintain the shadow shape + `slots` alongside a named write
+    /// the caller has already applied to `properties`. Best-effort:
+    /// an object or property that does not map cleanly onto a shape
+    /// is left (or put back) in dictionary mode. Read behaviour
+    /// does not depend on the shadow — `get` consults `properties`
+    /// — so an absent or partial shape is harmless until the later
+    /// change that makes shapes the read path.
+    fn shadowSet(
+        self: *JSObject,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        v: Value,
+        flags: PropertyFlags,
+    ) void {
+        const heap = self.heap orelse return;
+        // Exotics and engine-internal slots stay dictionary-mode.
+        if (self.is_array_exotic or self.typed_view != null or
+            self.is_module_namespace or self.proxy_target != null or
+            std.mem.startsWith(u8, key, "__cynic_"))
+        {
+            self.demoteFromShape();
+            return;
+        }
+        // Key already in the shape: a same-descriptor value update
+        // keeps the shape; any other redefinition demotes.
+        if (self.shape) |s| {
+            if (s.lookup(key)) |e| {
+                if (e.kind == .data and
+                    e.attrs.writable == flags.writable and
+                    e.attrs.enumerable == flags.enumerable and
+                    e.attrs.configurable == flags.configurable)
+                {
+                    self.slots.items[e.slot] = v;
+                } else {
+                    self.demoteFromShape();
+                }
+                return;
+            }
+        }
+        // A key new to the shape. Begin shaping only from an empty
+        // object (`properties` holds just this write); otherwise
+        // the object already carries dictionary entries no shape
+        // would describe.
+        if (self.shape == null and self.properties.count() != 1) return;
+        const from = self.shape orelse heap.shapes.root;
+        const child = heap.shapes.transition(from, key, flags, .data) catch {
+            self.demoteFromShape();
+            return;
+        };
+        self.slots.resize(allocator, child.property_count) catch {
+            self.demoteFromShape();
+            return;
+        };
+        self.slots.items[child.slot] = v;
+        self.shape = child;
     }
 
     /// `[[Set]]` honoring §10.1.9 writability. Returns:
@@ -1136,18 +1203,11 @@ pub const JSObject = struct {
                 if (self.tryGetIndexedOwn(idx)) |v| return v;
             }
         }
-        // §10.1 own named-property read. A shaped object keeps its
-        // data values in `slots`, indexed via the shape; a
-        // dictionary-mode object (`shape == null`) keeps them in
-        // `properties`. Accessor entries are resolved by the
-        // caller's accessor path, so a shaped accessor falls
-        // through here. `set` does not build shapes yet, so today
-        // every object takes the `properties` branch.
-        if (self.shape) |s| {
-            if (s.lookup(key)) |e| {
-                if (e.kind == .data) return self.slots.items[e.slot];
-            }
-        }
+        // §10.1 own named-property read. `properties` is the
+        // source of truth; `shape` + `slots` are a shadow that
+        // `set` co-maintains but nothing reads yet. The shadow is
+        // made the read path by a later change that retires
+        // `properties` for shaped objects.
         if (self.properties.get(key)) |v| return v;
         if (self.prototype) |proto| return proto.get(key);
         return Value.undefined_;
