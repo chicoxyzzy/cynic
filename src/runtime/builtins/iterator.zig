@@ -1694,33 +1694,44 @@ fn concatNext(realm: *Realm, this_value: Value, args: []const Value) NativeError
 const ZipMode = enum(i32) { shortest = 0, longest = 1, strict = 2 };
 
 /// Read + validate `options.mode`. Returns the parsed mode.
-fn readZipMode(realm: *Realm, options_v: Value) NativeError!ZipMode {
+/// `method` is the calling builtin's name ("Iterator.zip" /
+/// "Iterator.zipKeyed") so the diagnostic names the right entry.
+fn readZipMode(realm: *Realm, options_v: Value, method: []const u8) NativeError!ZipMode {
     if (options_v.isUndefined()) return .shortest;
     const opts = heap_mod.valueAsPlainObject(options_v) orelse {
-        return throwTypeError(realm, "Iterator.zip options must be an object");
+        return zipMethodTypeError(realm, method, "options must be an object");
     };
     const mode_v = try iterGet(realm, heap_mod.taggedObject(opts), "mode");
     if (mode_v.isUndefined()) return .shortest;
-    if (!mode_v.isString()) return throwTypeError(realm, "Iterator.zip 'mode' must be a string");
+    if (!mode_v.isString()) return zipMethodTypeError(realm, method, "'mode' must be a string");
     const s: *JSString = @ptrCast(@alignCast(mode_v.asString()));
     if (std.mem.eql(u8, s.flatBytes(), "shortest")) return .shortest;
     if (std.mem.eql(u8, s.flatBytes(), "longest")) return .longest;
     if (std.mem.eql(u8, s.flatBytes(), "strict")) return .strict;
-    return throwTypeError(realm, "Iterator.zip 'mode' must be 'shortest', 'longest', or 'strict'");
+    return zipMethodTypeError(realm, method, "'mode' must be 'shortest', 'longest', or 'strict'");
 }
 
 /// Read + validate `options.padding`. Returns null when absent;
 /// returns the padding object otherwise. Only consulted in
 /// "longest" mode.
-fn readZipPadding(realm: *Realm, options_v: Value) NativeError!?*JSObject {
+fn readZipPadding(realm: *Realm, options_v: Value, method: []const u8) NativeError!?*JSObject {
     if (options_v.isUndefined()) return null;
     const opts = heap_mod.valueAsPlainObject(options_v) orelse return null;
     const pad_v = try iterGet(realm, heap_mod.taggedObject(opts), "padding");
     if (pad_v.isUndefined()) return null;
     const pad_obj = heap_mod.valueAsPlainObject(pad_v) orelse {
-        return throwTypeError(realm, "Iterator.zip 'padding' must be an object");
+        return zipMethodTypeError(realm, method, "'padding' must be an object");
     };
     return pad_obj;
+}
+
+/// Build a TypeError whose message is prefixed with the calling
+/// zip/zipKeyed builtin's name, so the diagnostic surfaced from a
+/// shared helper still names the correct entry point.
+fn zipMethodTypeError(realm: *Realm, method: []const u8, detail: []const u8) NativeError {
+    var buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s} {s}", .{ method, detail }) catch detail;
+    return throwTypeError(realm, msg);
 }
 
 /// A sub-iterator opened from the zip iterables list, with its
@@ -1911,79 +1922,112 @@ fn buildZipWrapper(
         }
     }
 
-    // Padding storage. §27.1.4.3 step 14b: open the padding via
-    // GetIterator(sync), pull `iterCount` values, fill the rest
-    // with undefined. We do this eagerly at construction time so
-    // a non-iterable padding throws here (matching the spec's
-    // up-front order: padding-iter is opened *before* any input
-    // iterator step). If we run out of padding values, the slot
-    // is left empty (reads return undefined).
-    if (mode == .longest and padding != null and iters.len > 0) {
+    // Padding storage. §27.5.4 (Iterator.zip) treats padding as an
+    // ITERABLE — positional, one value per input index, opened via
+    // GetIterator(sync). §27.5.5 (Iterator.zipKeyed) treats it as a
+    // KEYED OBJECT — one value per result key, read via Get. The two
+    // shapes diverge, so they branch on `keys != null` (zipKeyed).
+    if (mode == .longest and padding != null) {
         const pad_obj = padding.?;
-        // §27.5.4 step 14b — `Let paddingIter be ? GetIterator(padding, sync)`.
-        // Accessor-aware `@@iterator` read; then §7.4.2 snapshots next.
         const pad_v = heap_mod.taggedObject(pad_obj);
-        const pad_m_v = iterGet(realm, pad_v, "@@iterator") catch |err| {
-            closeAllSwallowSlots(realm, iters, 0);
-            return err;
-        };
-        if (pad_m_v.isUndefined() or pad_m_v.isNull()) {
-            closeAllSwallowSlots(realm, iters, 0);
-            return throwTypeError(realm, "Iterator.zip 'padding' is not iterable");
-        }
-        const pad_m_fn = heap_mod.valueAsFunction(pad_m_v) orelse {
-            closeAllSwallowSlots(realm, iters, 0);
-            return throwTypeError(realm, "Iterator.zip 'padding' @@iterator is not callable");
-        };
-        const pad_iter = callIteratorMethod(realm, pad_m_fn, pad_v) catch |err| {
-            closeAllSwallowSlots(realm, iters, 0);
-            return err;
-        };
-        // §7.4.2 step 1 — snapshot pad_iter.next once.
-        const pad_next_v = snapshotIterNextValue(realm, pad_iter) catch |err| {
-            closeAllSwallowSlots(realm, iters, 0);
-            return err;
-        };
-        var still_active = true;
-        for (iters, 0..) |_, i| {
-            if (still_active) {
-                const pad_next_fn = heap_mod.valueAsFunction(pad_next_v) orelse {
-                    closeAllSwallowSlots(realm, iters, 0);
-                    return throwTypeError(realm, "padding iterator has no callable next");
-                };
-                const r = invokeIterNextFn(realm, pad_iter, pad_next_fn) catch |err| {
-                    closeAllSwallowSlots(realm, iters, 0);
-                    return err;
-                };
-                if (heap_mod.valueAsPlainObject(r) == null) {
-                    closeAllSwallowSlots(realm, iters, 0);
-                    return typeErrorAfterClose(realm, pad_iter, "padding iterator result is not an object");
-                }
-                const done_v = iterGet(realm, r, "done") catch |err| {
-                    closeAllSwallowSlots(realm, iters, 0);
-                    return err;
-                };
-                if (intrinsics.toBoolean(done_v)) {
-                    still_active = false;
-                    state.zip_inputs.items[i].pad = Value.undefined_;
+        // The padding object is a user value not otherwise reachable
+        // from `wrap`; root it across the Get / GetIterator
+        // re-entries below, every one of which can GC.
+        scope.push(pad_v) catch return error.OutOfMemory;
+        if (keys != null) {
+            // §27.5.5 step 14.b.i — for each element key of keys,
+            // `Let value be Completion(Get(paddingOption, key))`;
+            // IfAbruptCloseIterators(value, iters). An absent key
+            // reads as undefined. The Get walk runs in `keys` order.
+            for (state.zip_inputs.items) |*zin| {
+                const k_v = zin.key;
+                if (!k_v.isString()) {
+                    zin.pad = Value.undefined_;
                     continue;
                 }
-                const value = iterGet(realm, r, "value") catch |err| {
+                const ks: *JSString = @ptrCast(@alignCast(k_v.asString()));
+                const value = iterGet(realm, pad_v, ks.flatBytes()) catch {
+                    // §7.4.13 IteratorCloseAll(iters, throw) — close
+                    // in reverse, propagate the throw completion.
+                    const ex = realm.pending_exception orelse Value.undefined_;
                     closeAllSwallowSlots(realm, iters, 0);
-                    return err;
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
                 };
-                state.zip_inputs.items[i].pad = value;
-            } else {
-                state.zip_inputs.items[i].pad = Value.undefined_;
+                zin.pad = value;
             }
-        }
-        // If we read every slot but the iterator wasn't exhausted,
-        // close it (NormalCompletion).
-        if (still_active) {
-            closeIteratorPropagate(realm, pad_iter) catch |err| {
+        } else {
+            // §27.5.4 step 14.b — `Let paddingIter be ?
+            // GetIterator(paddingOption, sync)`. Opened up front (the
+            // `iterables-iteration` log expects this even when
+            // iterCount is 0), then `iterCount` values pulled and the
+            // rest filled with undefined; if values remain when the
+            // last input slot is filled, IteratorClose it.
+            const pad_m_v = iterGet(realm, pad_v, "@@iterator") catch |err| {
                 closeAllSwallowSlots(realm, iters, 0);
                 return err;
             };
+            // §7.4.3 GetIterator step 3 — a missing / non-callable
+            // `@@iterator` is a TypeError: a non-iterable padding for
+            // Iterator.zip is rejected here (`zip/padding-iteration.js`).
+            if (pad_m_v.isUndefined() or pad_m_v.isNull()) {
+                closeAllSwallowSlots(realm, iters, 0);
+                return throwTypeError(realm, "Iterator.zip 'padding' is not iterable");
+            }
+            const pad_m_fn = heap_mod.valueAsFunction(pad_m_v) orelse {
+                closeAllSwallowSlots(realm, iters, 0);
+                return throwTypeError(realm, "Iterator.zip 'padding' @@iterator is not callable");
+            };
+            const pad_iter = callIteratorMethod(realm, pad_m_fn, pad_v) catch |err| {
+                closeAllSwallowSlots(realm, iters, 0);
+                return err;
+            };
+            // §7.4.2 step 1 — snapshot pad_iter.next once.
+            const pad_next_v = snapshotIterNextValue(realm, pad_iter) catch |err| {
+                closeAllSwallowSlots(realm, iters, 0);
+                return err;
+            };
+            var still_active = true;
+            for (iters, 0..) |_, i| {
+                if (still_active) {
+                    const pad_next_fn = heap_mod.valueAsFunction(pad_next_v) orelse {
+                        closeAllSwallowSlots(realm, iters, 0);
+                        return throwTypeError(realm, "padding iterator has no callable next");
+                    };
+                    const r = invokeIterNextFn(realm, pad_iter, pad_next_fn) catch |err| {
+                        closeAllSwallowSlots(realm, iters, 0);
+                        return err;
+                    };
+                    if (heap_mod.valueAsPlainObject(r) == null) {
+                        closeAllSwallowSlots(realm, iters, 0);
+                        return typeErrorAfterClose(realm, pad_iter, "padding iterator result is not an object");
+                    }
+                    const done_v = iterGet(realm, r, "done") catch |err| {
+                        closeAllSwallowSlots(realm, iters, 0);
+                        return err;
+                    };
+                    if (intrinsics.toBoolean(done_v)) {
+                        still_active = false;
+                        state.zip_inputs.items[i].pad = Value.undefined_;
+                        continue;
+                    }
+                    const value = iterGet(realm, r, "value") catch |err| {
+                        closeAllSwallowSlots(realm, iters, 0);
+                        return err;
+                    };
+                    state.zip_inputs.items[i].pad = value;
+                } else {
+                    state.zip_inputs.items[i].pad = Value.undefined_;
+                }
+            }
+            // If we read every slot but the iterator wasn't exhausted,
+            // close it (NormalCompletion).
+            if (still_active) {
+                closeIteratorPropagate(realm, pad_iter) catch |err| {
+                    closeAllSwallowSlots(realm, iters, 0);
+                    return err;
+                };
+            }
         }
     }
 
@@ -2158,8 +2202,15 @@ fn zipNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
             state.zip_inputs.items[@intCast(i)].active = false;
             switch (mode) {
                 .shortest => {
+                    // §27.5.4 step 14d.iii.2 — "If mode is shortest,
+                    // return ? IteratorCloseAll(openIters,
+                    // ReturnCompletion(undefined))." The close-all
+                    // starts from a normal completion, so the FIRST
+                    // `return()` throw becomes the running completion
+                    // and propagates out of `next()`; subsequent
+                    // closes swallow per §7.4.10 step 5.
                     state.done = true;
-                    closeAllExcept(realm, state, i);
+                    try closeAllExceptPropagate(realm, state, i);
                     return doneResult(realm);
                 },
                 .strict => {
@@ -2301,6 +2352,39 @@ fn closeAllExcept(realm: *Realm, state: *IteratorHelperState, skip_idx: i32) voi
     }
 }
 
+/// §7.4.13 IteratorCloseAll(openIters, ReturnCompletion(undefined))
+/// — close every still-active iter in `state.zip_inputs` (skipping
+/// `skip_idx`) in reverse order, starting from a NON-throw running
+/// completion. The first `return()` throw becomes the running
+/// completion and is propagated out; every later IteratorClose
+/// receives a throw completion and swallows further errors per
+/// §7.4.10 step 5. Used by shortest-mode `next()` exhaustion, where
+/// a `.return()` throw must surface as the iteration's completion.
+fn closeAllExceptPropagate(realm: *Realm, state: *IteratorHelperState, skip_idx: i32) NativeError!void {
+    var pending: ?Value = null;
+    var i: i32 = @as(i32, @intCast(state.zip_inputs.items.len)) - 1;
+    while (i >= 0) : (i -= 1) {
+        if (i == skip_idx) continue;
+        const zin = &state.zip_inputs.items[@intCast(i)];
+        if (!zin.active) continue;
+        const it_v = zin.iter;
+        zin.active = false;
+        if (pending == null) {
+            // No running throw yet — call return() and capture any.
+            closeIteratorPropagate(realm, it_v) catch {
+                pending = realm.pending_exception orelse Value.undefined_;
+            };
+        } else {
+            // Already a throw completion — swallow further errors.
+            closeIteratorSwallow(realm, it_v);
+        }
+    }
+    if (pending) |ex| {
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
+}
+
 /// `Iterator.zip(iterables, options?)` — §27.1.4.3.
 fn iteratorZip(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
@@ -2312,8 +2396,8 @@ fn iteratorZip(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     if (!options_v.isUndefined() and heap_mod.valueAsPlainObject(options_v) == null) {
         return throwTypeError(realm, "Iterator.zip options must be an object");
     }
-    const mode = try readZipMode(realm, options_v);
-    const padding = if (mode == .longest) try readZipPadding(realm, options_v) else null;
+    const mode = try readZipMode(realm, options_v, "Iterator.zip");
+    const padding = if (mode == .longest) try readZipPadding(realm, options_v, "Iterator.zip") else null;
 
     const iters = try collectZipIters(realm, iterables_v);
     defer realm.allocator.free(iters);
@@ -2331,13 +2415,18 @@ fn iteratorZipKeyed(realm: *Realm, this_value: Value, args: []const Value) Nativ
     if (!options_v.isUndefined() and heap_mod.valueAsPlainObject(options_v) == null) {
         return throwTypeError(realm, "Iterator.zipKeyed options must be an object");
     }
-    const mode = try readZipMode(realm, options_v);
-    const padding = if (mode == .longest) try readZipPadding(realm, options_v) else null;
+    const mode = try readZipMode(realm, options_v, "Iterator.zipKeyed");
+    const padding = if (mode == .longest) try readZipPadding(realm, options_v, "Iterator.zipKeyed") else null;
 
-    // §27.1.4.4 step 10-12 — walk own property keys (in spec
-    // order), filter to enumerable own data/accessor descriptors,
+    // §27.5.5 step 10-12 — walk own property keys (in spec order),
+    // filter to enumerable own descriptors via [[GetOwnProperty]],
     // skip undefined values, and open each via
-    // GetIteratorFlattenable.
+    // GetIteratorFlattenable. Every spec-visible step
+    // (`[[OwnPropertyKeys]]`, `[[GetOwnProperty]]`, `[[Get]]`) must
+    // dispatch through the spec abstract operations so a Proxy
+    // `iterables` observes its traps and an array's non-enumerable
+    // `length` is correctly filtered.
+    const builtins_object = @import("object.zig");
     const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer key_scope.close();
     // `iterables_obj` is dereferenced — and re-read via `iterGet` —
@@ -2346,7 +2435,13 @@ fn iteratorZipKeyed(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // without it gc-threshold=1 sweeps the user's object mid-walk
     // and the keys read back as undefined (empty result).
     key_scope.push(iterables_v) catch return error.OutOfMemory;
-    const all_keys = try @import("object.zig").ownPropertyKeysOrdered(realm, iterables_obj, key_scope);
+    // §27.5.5 step 10 — `Let allKeys be ? iterables.[[OwnPropertyKeys]]()`.
+    // Route through `proxyOwnKeysOrNull` so a Proxy's `ownKeys`
+    // trap fires; a non-Proxy falls back to `ownPropertyKeysOrdered`.
+    const all_keys = if (try builtins_object.proxyOwnKeysOrNull(realm, iterables_obj, key_scope)) |k|
+        k
+    else
+        try builtins_object.ownPropertyKeysOrdered(realm, iterables_obj, key_scope);
     defer realm.allocator.free(all_keys);
 
     var iters: std.ArrayListUnmanaged(ZipIterSlot) = .empty;
@@ -2358,13 +2453,46 @@ fn iteratorZipKeyed(realm: *Realm, this_value: Value, args: []const Value) Nativ
     }
 
     for (all_keys) |key| {
-        // §10.1.5 [[GetOwnProperty]] — only enumerable own
-        // descriptors qualify.
-        const flags = iterables_obj.flagsFor(key);
-        const has_data = iterables_obj.properties.contains(key);
-        const has_acc = iterables_obj.accessors.contains(key);
-        if (!has_data and !has_acc) continue;
-        if (!flags.enumerable) continue;
+        // §27.5.5 step 12.a-c — `Let desc be Completion(iterables.
+        // [[GetOwnProperty]](key))`; IfAbruptCloseIterators(desc,
+        // iters); skip when `desc` is undefined or not enumerable.
+        // For string keys, dispatch through the spec [[GetOwnProperty]]
+        // (`objectGetOwnPropertyDescriptor`) so a Proxy `getOwnProperty
+        // Descriptor` trap fires and a non-enumerable own property
+        // (e.g. an array's `length`) is filtered. For symbol-encoded
+        // keys we keep the internal `flagsFor` path — symbol+Proxy
+        // isn't exercised and building a JS symbol Value back from
+        // the encoded key would be the only alternative.
+        if (builtins_object.isSymbolKey(key)) {
+            const flags = iterables_obj.flagsFor(key);
+            const has_data = iterables_obj.properties.contains(key);
+            const has_acc = iterables_obj.accessors.contains(key);
+            if (!has_data and !has_acc) continue;
+            if (!flags.enumerable) continue;
+        } else {
+            const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+            const key_v = Value.fromString(key_str);
+            // Root the key string across the GOPD trap re-entry.
+            key_scope.push(key_v) catch return error.OutOfMemory;
+            const desc_args = [_]Value{ iterables_v, key_v };
+            const desc_v = builtins_object.objectGetOwnPropertyDescriptor(realm, Value.undefined_, &desc_args) catch |err| {
+                // §27.5.5 step 12.b — IfAbruptCloseIterators(desc,
+                // iters): close every opened iter in reverse, then
+                // propagate the throw completion.
+                if (err == error.NativeThrew) {
+                    const ex = realm.pending_exception orelse Value.undefined_;
+                    closeAllSwallowSlots(realm, iters.items, 0);
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                }
+                return err;
+            };
+            // step 12.c — skip absent / non-enumerable descriptors.
+            if (desc_v.isUndefined()) continue;
+            const desc_obj = heap_mod.valueAsPlainObject(desc_v) orelse continue;
+            const enum_v = desc_obj.get("enumerable");
+            if (!enum_v.isBool() or !enum_v.asBool()) continue;
+        }
         const v = iterGet(realm, iterables_v, key) catch |err| {
             closeAllSwallowSlots(realm, iters.items, 0);
             return err;

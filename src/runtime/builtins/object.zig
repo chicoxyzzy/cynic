@@ -2468,7 +2468,7 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
 /// installers can refer to them by literal), and
 /// `Symbol(desc)` allocates a unique `<sym:N>` key. This helper
 /// is the canonical "is this a symbol-keyed property?" check.
-fn isSymbolKey(key: []const u8) bool {
+pub fn isSymbolKey(key: []const u8) bool {
     return std.mem.startsWith(u8, key, "@@") or std.mem.startsWith(u8, key, "<sym:");
 }
 
