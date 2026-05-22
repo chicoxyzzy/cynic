@@ -1136,6 +1136,18 @@ pub const JSObject = struct {
                 if (self.tryGetIndexedOwn(idx)) |v| return v;
             }
         }
+        // §10.1 own named-property read. A shaped object keeps its
+        // data values in `slots`, indexed via the shape; a
+        // dictionary-mode object (`shape == null`) keeps them in
+        // `properties`. Accessor entries are resolved by the
+        // caller's accessor path, so a shaped accessor falls
+        // through here. `set` does not build shapes yet, so today
+        // every object takes the `properties` branch.
+        if (self.shape) |s| {
+            if (s.lookup(key)) |e| {
+                if (e.kind == .data) return self.slots.items[e.slot];
+            }
+        }
         if (self.properties.get(key)) |v| return v;
         if (self.prototype) |proto| return proto.get(key);
         return Value.undefined_;
