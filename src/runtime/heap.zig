@@ -30,6 +30,7 @@ const utf16 = @import("utf16.zig");
 const JSFunction = @import("function.zig").JSFunction;
 const HeapKind = @import("function.zig").HeapKind;
 const JSObject = @import("object.zig").JSObject;
+const ShapeTree = @import("shape.zig").ShapeTree;
 const Environment = @import("environment.zig").Environment;
 const Chunk = @import("../bytecode/chunk.zig").Chunk;
 const JSGenerator = @import("generator.zig").JSGenerator;
@@ -209,6 +210,12 @@ pub const Heap = struct {
     /// without the split, freed string bytes stay resident inside
     /// the arena's pages and per-fixture peak RSS never shrinks.
     bytes_allocator: std.mem.Allocator,
+    /// §10.1 property-shape transition tree, shared by every object
+    /// allocated on this heap (agent-scoped, like a V8 Isolate's
+    /// Maps). The realm-agnostic `JSObject.set` reaches it through
+    /// each object's `heap` back-pointer. Realm-lifetime arena —
+    /// the GC does not trace into shapes.
+    shapes: ShapeTree,
     // Per-kind live-object lists. Each kind is split into a
     // `young` list (fresh allocations — reclaimable by the cheap
     // `collectYoung` cycle) and a `mature` list (objects that
@@ -453,7 +460,11 @@ pub const Heap = struct {
     finalization_enqueue_fn: ?FinalizationEnqueueFn = null,
 
     pub fn init(allocator: std.mem.Allocator) Heap {
-        return .{ .allocator = allocator, .bytes_allocator = allocator };
+        return .{
+            .allocator = allocator,
+            .bytes_allocator = allocator,
+            .shapes = ShapeTree.init(allocator) catch unreachable,
+        };
     }
 
     /// Same as `init` but with a distinct allocator for large heap-
@@ -463,7 +474,11 @@ pub const Heap = struct {
         allocator: std.mem.Allocator,
         bytes_allocator: std.mem.Allocator,
     ) Heap {
-        return .{ .allocator = allocator, .bytes_allocator = bytes_allocator };
+        return .{
+            .allocator = allocator,
+            .bytes_allocator = bytes_allocator,
+            .shapes = ShapeTree.init(allocator) catch unreachable,
+        };
     }
 
     /// Set the GC pressure threshold from a single harness knob
@@ -507,6 +522,7 @@ pub const Heap = struct {
     /// Free every tracked object and the bookkeeping arrays.
     /// Idempotent — safe to call on a partially-initialized heap.
     pub fn deinit(self: *Heap) void {
+        self.shapes.deinit();
         for (self.strings_young.items) |s| s.deinit(self.allocator, self.bytes_allocator);
         for (self.strings_mature.items) |s| s.deinit(self.allocator, self.bytes_allocator);
         self.strings_young.deinit(self.allocator);
@@ -638,6 +654,7 @@ pub const Heap = struct {
     pub fn allocateObject(self: *Heap) !*JSObject {
         const o = try JSObject.init(self.allocator);
         errdefer o.deinit(self.allocator);
+        o.heap = self;
         try self.objects_young.append(self.allocator, o);
         self.allocs_since_gc +|= 1;
         return o;

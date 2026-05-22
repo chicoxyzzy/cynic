@@ -432,6 +432,13 @@ pub const JSObject = struct {
     /// retiring those two maps is the remaining work.
     shape: ?*@import("shape.zig").Shape = null,
     slots: std.ArrayListUnmanaged(Value) = .empty,
+    /// Back-pointer to the owning heap, stamped at allocation by
+    /// `Heap.allocateObject`. Lets the realm-agnostic `get` / `set`
+    /// API reach the agent-wide property-shape tree (`heap.shapes`)
+    /// without threading a realm or heap argument through every
+    /// call site. `null` only on an object built outside
+    /// `allocateObject` (none today).
+    heap: ?*@import("heap.zig").Heap = null,
     /// Per-instance private slots — keyed by the class-identity-
     /// prefixed name produced by the compiler (`P<uid>#name`),
     /// so two unrelated classes both declaring `#x` get distinct

@@ -15,7 +15,6 @@
 const std = @import("std");
 
 const Heap = @import("heap.zig").Heap;
-const ShapeTree = @import("shape.zig").ShapeTree;
 const Value = @import("value.zig").Value;
 const JSString = @import("string.zig").JSString;
 const JSFunction = @import("function.zig").JSFunction;
@@ -503,11 +502,6 @@ pub const Realm = struct {
     /// False for child realms created via `Realm.initChild` that
     /// borrow the parent's heap.
     owns_heap: bool = true,
-    /// §10.1 property-shape transition tree for this realm — the
-    /// realm-lifetime arena every `Shape` is allocated from, plus
-    /// the root (empty-object) shape. One per realm; child realms
-    /// get their own. Not yet consulted by property access.
-    shapes: ShapeTree,
     /// Child Realms allocated via `$262.createRealm()` or future
     /// `new ShadowRealm()`. Owned by the parent; deinit walks
     /// the list and tears each down before tearing itself down.
@@ -703,7 +697,6 @@ pub const Realm = struct {
             .allocator = allocator,
             .heap = heap_ptr,
             .owns_heap = true,
-            .shapes = ShapeTree.init(allocator) catch unreachable,
         };
         r.globals.heap = heap_ptr;
         return r;
@@ -739,7 +732,6 @@ pub const Realm = struct {
             .allocator = allocator,
             .heap = heap_ptr,
             .owns_heap = true,
-            .shapes = ShapeTree.init(allocator) catch unreachable,
         };
         r.globals.heap = heap_ptr;
         return r;
@@ -756,7 +748,6 @@ pub const Realm = struct {
             .heap = parent.heap,
             .owns_heap = false,
             .host_interrupt = parent.host_interrupt,
-            .shapes = ShapeTree.init(parent.allocator) catch unreachable,
         };
         r.globals.heap = parent.heap;
         return r;
@@ -795,7 +786,6 @@ pub const Realm = struct {
     }
 
     pub fn deinit(self: *Realm) void {
-        self.shapes.deinit();
         self.globals.deinit(self.allocator);
         self.output.deinit(self.allocator);
         self.microtask_queue.deinit(self.allocator);
