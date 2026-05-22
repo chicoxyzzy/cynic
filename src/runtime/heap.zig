@@ -996,6 +996,10 @@ pub const Heap = struct {
                     self.markValue(s.next_fn);
                     self.markValue(s.payload);
                     self.markValue(s.active);
+                    for (s.concat_inputs.items) |ci| {
+                        self.markValue(ci.iterable);
+                        self.markValue(ci.method);
+                    }
                 }
                 if (o.capability_record) |c| {
                     self.markValue(c.resolve);
@@ -1646,6 +1650,10 @@ pub const Heap = struct {
             self.markValue(s.next_fn);
             self.markValue(s.payload);
             self.markValue(s.active);
+            for (s.concat_inputs.items) |ci| {
+                self.markValue(ci.iterable);
+                self.markValue(ci.method);
+            }
         }
         if (o.capability_record) |c| {
             self.markValue(c.resolve);

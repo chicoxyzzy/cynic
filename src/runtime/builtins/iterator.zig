@@ -1540,13 +1540,35 @@ fn slotName(buf: *[40]u8, prefix: []const u8, i: usize) []const u8 {
 /// `Iterator.concat(...iterables)` — §27.1.4.2.
 fn iteratorConcat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    // Step 1-2: validate every input up-front. Each must be an
-    // Object whose `@@iterator` is callable. Capture the method
-    // here (accessor-aware) — spec records {[[OpenMethod]],
-    // [[Iterable]]} so a `get [Symbol.iterator]()` getter runs
-    // exactly once per arg, at construction.
-    var captured_methods = std.ArrayListUnmanaged(*JSFunction).empty;
-    defer captured_methods.deinit(realm.allocator);
+    // §27.1.4.2 Iterator.concat. The result is a Generator-shaped
+    // iterator whose state is internal slots only — so the validated
+    // {[[Iterable]], [[OpenMethod]]} records live on the typed
+    // `iter_helper` slot (`state.concat_inputs`), never as observable
+    // own properties.
+    //
+    // Build the wrapper + its state first and wire
+    // `wrap.iter_helper = state` before the validation loop. The
+    // per-arg `@@iterator` GetMethod re-enters JS and can GC; once a
+    // record is appended to `state.concat_inputs` the GC reaches it
+    // through wrap → iter_helper, and the rooted `wrap` keeps the
+    // whole graph alive across the `allocateFunctionNative` /
+    // `setWithFlags` allocations below.
+    const ctor_v = realm.globals.get("Iterator") orelse return throwTypeError(realm, "Iterator constructor missing");
+    const ctor = heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "Iterator constructor missing");
+    const wrap = realm.heap.allocateObject() catch return error.OutOfMemory;
+    wrap.prototype = ctor.prototype;
+    const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
+    state.* = .{ .count = @intCast(args.len) };
+    wrap.iter_helper = state;
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
+
+    // step 1-2 — validate every input up-front: each must be an
+    // Object whose `@@iterator` is callable. Capturing the method
+    // here (accessor-aware) makes a `get [Symbol.iterator]()` getter
+    // run exactly once per arg, at construction.
+    state.concat_inputs.ensureTotalCapacity(realm.allocator, args.len) catch return error.OutOfMemory;
     for (args) |item| {
         if (heap_mod.valueAsPlainObject(item) == null) {
             return throwTypeError(realm, "Iterator.concat argument is not an object");
@@ -1558,31 +1580,10 @@ fn iteratorConcat(realm: *Realm, this_value: Value, args: []const Value) NativeE
         const m_fn = heap_mod.valueAsFunction(m) orelse {
             return throwTypeError(realm, "Iterator.concat argument @@iterator is not callable");
         };
-        captured_methods.append(realm.allocator, m_fn) catch return error.OutOfMemory;
-    }
-
-    // Build the wrapper. Primary state (count/idx/done/running/active)
-    // lives on the typed `iter_helper` slot; per-input
-    // [[Iterable]] + [[OpenMethod]] still ride along as indexed
-    // properties (`__cynic_iter_input_<i>__` / `__cynic_iter_method_<i>__`)
-    // pending a dynamic-array typed slot for them. TODO: move
-    // indexed inputs off the property bag too.
-    const ctor_v = realm.globals.get("Iterator") orelse return throwTypeError(realm, "Iterator constructor missing");
-    const ctor = heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "Iterator constructor missing");
-    const wrap = realm.heap.allocateObject() catch return error.OutOfMemory;
-    wrap.prototype = ctor.prototype;
-    const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
-    state.* = .{ .count = @intCast(args.len) };
-    wrap.iter_helper = state;
-    const scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer scope.close();
-    scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
-    var sbuf: [40]u8 = undefined;
-    for (args, 0..) |item, i| {
-        const owned = realm.heap.allocateString(slotName(&sbuf, "__cynic_iter_input_", i)) catch return error.OutOfMemory;
-        wrap.set(realm.allocator, owned.flatBytes(), item) catch return error.OutOfMemory;
-        const m_owned = realm.heap.allocateString(slotName(&sbuf, "__cynic_iter_method_", i)) catch return error.OutOfMemory;
-        wrap.set(realm.allocator, m_owned.flatBytes(), heap_mod.taggedFunction(captured_methods.items[i])) catch return error.OutOfMemory;
+        state.concat_inputs.append(realm.allocator, .{
+            .iterable = item,
+            .method = heap_mod.taggedFunction(m_fn),
+        }) catch return error.OutOfMemory;
     }
 
     const next_fn = realm.heap.allocateFunctionNative(concatNext, 0, "next") catch return error.OutOfMemory;
@@ -1639,19 +1640,21 @@ fn concatNext(realm: *Realm, this_value: Value, args: []const Value) NativeError
 
     const count: u32 = state.count;
     var idx: u32 = state.idx;
-    var sbuf: [40]u8 = undefined;
 
     while (idx < count) {
         var active = state.active;
         if (heap_mod.valueAsPlainObject(active) == null) {
-            // Open input[idx]. Per spec, errors here propagate
-            // (no in-flight inner iterator to close).
-            const slot = slotName(&sbuf, "__cynic_iter_input_", idx);
-            const input_v = obj.get(slot);
-            var sbuf2: [40]u8 = undefined;
-            const m_slot = slotName(&sbuf2, "__cynic_iter_method_", idx);
-            const m_v = obj.get(m_slot);
-            const m_fn = heap_mod.valueAsFunction(m_v) orelse {
+            // Open input[idx]. Per spec, errors here propagate (no
+            // in-flight inner iterator to close). The validated
+            // {[[Iterable]], [[OpenMethod]]} record lives on the typed
+            // `iter_helper` slot — not the property bag.
+            if (idx >= state.concat_inputs.items.len) {
+                state.done = true;
+                return throwTypeError(realm, "Iterator.concat captured method missing");
+            }
+            const rec = state.concat_inputs.items[idx];
+            const input_v = rec.iterable;
+            const m_fn = heap_mod.valueAsFunction(rec.method) orelse {
                 state.done = true;
                 return throwTypeError(realm, "Iterator.concat captured method missing");
             };

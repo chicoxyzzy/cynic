@@ -233,6 +233,15 @@ pub const PromiseCapabilityRecord = struct {
 ///
 /// Hidden from JS — `Object.getOwnPropertyNames(iter)` no longer
 /// returns spec-internal slot names like `[[Iterated]]` / `[[Done]]`.
+/// §27.1.4.2 Iterator.concat — one validated input record,
+/// `{[[Iterable]], [[OpenMethod]]}`. Held inside
+/// `IteratorHelperState` so the concat iterator carries its inputs
+/// as an internal slot rather than as observable own properties.
+pub const ConcatInput = struct {
+    iterable: Value = Value.undefined_,
+    method: Value = Value.undefined_,
+};
+
 pub const IteratorHelperState = struct {
     source: Value = Value.undefined_,
     next_fn: Value = Value.undefined_,
@@ -245,8 +254,12 @@ pub const IteratorHelperState = struct {
     started: bool = false,
     keyed: bool = false,
     mode: u8 = 0,
+    /// §27.1.4.2 Iterator.concat — the validated input records.
+    /// `.empty` for every other iterator helper.
+    concat_inputs: std.ArrayListUnmanaged(ConcatInput) = .empty,
 
     pub fn deinit(self: *IteratorHelperState, allocator: std.mem.Allocator) void {
+        self.concat_inputs.deinit(allocator);
         allocator.destroy(self);
     }
 };

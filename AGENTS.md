@@ -20,6 +20,25 @@ These are project rules — they apply to everyone.
 - **Spec-faithful naming.** Internal function names mirror
   ECMA-262 abstract operations so test262 failures map cleanly to
   spec sections.
+- **No engine state on user-visible objects.** Internal engine
+  state — iterator cursors, aggregator records, cached methods,
+  captured inputs — must never be stored as ordinary property-bag
+  keys (the `__cynic_*` slot convention) on any object reachable
+  by user JavaScript: anything returned from a builtin, passed to
+  a user callback as a plain argument, or a user-provided object
+  the engine mutates. A spec-conformant object has no such
+  property, and `__cynic_*` keys stay observable through direct
+  get, the `in` operator, `Object.getOwnPropertyDescriptor`, and
+  `Object.hasOwn` — the `recordKey` filter only hides them from
+  *enumeration* (`Object.keys` / `for-in` / `Reflect.ownKeys`),
+  not from those four. They are also a GC hazard: the property
+  map borrows the key slice, so an unanchored heap key dangles
+  after a sweep. Put the state in a typed internal slot on
+  `JSObject` instead — see `iter_helper: ?*IteratorHelperState`
+  (and its `concat_inputs` field), `array_like_iter`,
+  `capability_record`. `__cynic_*` keys are tolerable ONLY on
+  engine-internal objects that never escape to user JS (e.g. the
+  record a bound function reaches through its `bound_this` slot).
 - **Microtasks are spec-conformant.** Cynic ships a real
   microtask queue (see `realm.microtask_queue` and
   `interpreter.drainMicrotasks`). `.then` always defers — settled
