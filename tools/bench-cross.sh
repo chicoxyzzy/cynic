@@ -109,8 +109,16 @@ register v8 - "$JSVU_BIN/v8" --jitless
 # SpiderMonkey — Baseline + Ion JITs off.
 register sm - "$JSVU_BIN/sm" --no-baseline --no-ion
 
-# JavaScriptCore — JIT off via env var.
-register jsc "JSC_useJIT=0" "$JSVU_BIN/jsc"
+# JavaScriptCore — JIT off via env var. Prefer a jsvu-installed
+# `jsc`; otherwise fall back to the macOS system JavaScriptCore
+# framework helper, which ships on every macOS and honours
+# `JSC_useJIT=0` just the same.
+jsc_bin="$JSVU_BIN/jsc"
+if [ ! -x "$jsc_bin" ]; then
+  sys_jsc="/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc"
+  [ -x "$sys_jsc" ] && jsc_bin="$sys_jsc"
+fi
+register jsc "JSC_useJIT=0" "$jsc_bin"
 
 # Hermes — natively interpreter-only.
 register hermes - "$JSVU_BIN/hermes"
