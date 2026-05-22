@@ -14,6 +14,29 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-05-22 — cynic `99b6566`, host `Darwin 25.5.0 arm64`
+
+Regression check after the `__cynic_` observable-slot fixes
+(iterator + matchAll internal state moved off the property bag
+into typed `JSObject` slots) and the GC proxy-receiver / matchAll
+rooting work — all correctness / conformance, expected
+perf-neutral.
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 81.99 | 81.75 | 84.23 | 3264 |
+| prop_access | 48.56 | 48.28 | 49.07 | 3328 |
+| array_iter | 20.83 | 20.74 | 21.07 | 4240 |
+| string_concat | 3.05 | 2.98 | 3.08 | 4128 |
+| promise_chain | 3.73 | 3.57 | 3.87 | 8240 |
+| object_alloc | 18.77 | 18.52 | 19.62 | 8816 |
+
+Δ vs the `8e8171e` row below: every fixture within ±6 % —
+`arith_loop` −6.3 % (87.55 → 81.99), the rest inside ±5 %. All
+run-to-run noise; nothing perf-shaped landed between the rows.
+The `__cynic_` slot moves and GC rooting are perf-neutral, as
+expected. Spreads tight (≤ ±2 %).
+
 ### 2026-05-22 — cynic `8e8171e`, host `Darwin 25.5.0 arm64`
 
 The loop env-hoist (`f719ae3` — skip the per-iteration environment
