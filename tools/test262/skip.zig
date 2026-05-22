@@ -470,6 +470,20 @@ pub const skip_ses_substrings = [_][]const u8{
     // throws. A permanent SES carve-out in a harness dependency, same
     // shape as the `Function('return this;')()` cases above.
     "async-arrow-function/prototype.js",
+
+    // `built-ins/TypedArrayConstructors/ctors/no-species.js` — the
+    // fixture's first assertion reads `mysteryTA.buffer.__proto__`
+    // and expects it to be `ArrayBuffer.prototype`. Cynic does not
+    // install the `Object.prototype.__proto__` accessor (Annex B
+    // §B.2.2.1 — see AGENTS.md "Annex B in its entirety — out"), so
+    // `.__proto__` reads back as `undefined` and `assert.sameValue`
+    // fails. The behaviour the fixture actually targets — that
+    // `TypedArray` construction doesn't look up `Symbol.species` —
+    // runs correctly; only the `__proto__` probe trips the permanent
+    // carve-out (the sibling `.buffer.constructor` assertion passes).
+    // The fixture isn't `[__proto__]`-feature-tagged so the feature
+    // skip doesn't catch it; substring it.
+    "TypedArrayConstructors/ctors/no-species.js",
 };
 
 /// Sputnik-era and cross-realm fixtures that exercise

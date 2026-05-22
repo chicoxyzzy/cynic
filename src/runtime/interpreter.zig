@@ -1202,38 +1202,62 @@ fn awaitForReturnCompletion(realm: *Realm, gen: *@import("generator.zig").JSGene
 /// register a reaction so the outer promise settles when `raw`
 /// does, with the value transformed into an iterator result.
 pub fn wrapAsyncGenResult(realm: *Realm, raw: Value, done: bool) @import("function.zig").NativeError!Value {
+    // §27.6.1.6 AsyncFromSyncIteratorContinuation steps 3-9.
+    // step 3: valueWrapper = PromiseResolve(%Promise%, value).
+    //   - value is a same-realm Promise → valueWrapper IS value.
+    //   - value is a non-Promise        → valueWrapper is a fresh
+    //                                     already-fulfilled Promise.
+    // step 5-6: onFulfilled = the value-unwrap closure that builds
+    //   CreateIterResultObject(v, done).
+    // step 9: PerformPromiseThen(valueWrapper, onFulfilled, ...).
+    //
+    // PerformPromiseThen ALWAYS schedules the reaction as a job —
+    // even when valueWrapper is already settled there is no
+    // synchronous fast path. So `next()` returns a *pending*
+    // capability Promise and the `{value, done}` unwrap is
+    // observable exactly one tick later. The fixture
+    // `for-await-of/ticks-with-sync-iter-resolved-promise-and-
+    // constructor-lookup.js` counts on that tick.
+    const outer = intrinsics_mod.allocatePromiseFor(realm, null, .pending, Value.undefined_) catch return error.OutOfMemory;
+    const wrap_fn = realm.heap.allocateFunctionNative(
+        if (done) iterResultDoneTrue else iterResultDoneFalse,
+        1,
+        "asyncGenYield",
+    ) catch return error.OutOfMemory;
+    wrap_fn.has_construct = false;
+    const wrap_v = heap_mod.taggedFunction(wrap_fn);
     const settled = unwrapSettledPromise(raw);
     switch (settled) {
         .fulfilled => |v| {
-            const result = genResultObject(realm, v, done) catch return error.OutOfMemory;
-            return intrinsics_mod.allocatePromiseFor(realm, null, .fulfilled, result) catch return error.OutOfMemory;
+            // valueWrapper already fulfilled → queue the unwrap
+            // reaction as a job (one tick of latency).
+            try realm.enqueuePromiseReaction(wrap_v, v, outer, false);
         },
         .rejected => |ex| {
-            return intrinsics_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
+            // valueWrapper rejected, onRejected is undefined here
+            // (the close-on-rejection branch is handled by
+            // `wrapAsyncGenResultWithClose`) → the rejection
+            // propagates to the capability Promise, still deferred
+            // one tick per PerformPromiseThen.
+            try realm.enqueuePromiseReaction(Value.undefined_, ex, outer, true);
         },
         .pending => |inner_obj| {
-            // Build the outer pending promise. Register a
-            // reaction on the inner promise that transforms the
-            // resolved value into `{value, done}`.
-            const outer = intrinsics_mod.allocatePromiseFor(realm, null, .pending, Value.undefined_) catch return error.OutOfMemory;
-            const wrap_fn = realm.heap.allocateFunctionNative(
-                if (done) iterResultDoneTrue else iterResultDoneFalse,
-                1,
-                "asyncGenYield",
-            ) catch return error.OutOfMemory;
-            wrap_fn.has_construct = false;
+            // valueWrapper still pending → register the unwrap
+            // reaction; it fires when the inner Promise settles.
             inner_obj.promise_reactions.append(realm.allocator, .{
-                .on_fulfilled = heap_mod.taggedFunction(wrap_fn),
+                .on_fulfilled = wrap_v,
                 .on_rejected = Value.undefined_,
                 .result_promise = outer,
             }) catch return error.OutOfMemory;
-            return outer;
         },
         .none => {
-            const result = genResultObject(realm, raw, done) catch return error.OutOfMemory;
-            return intrinsics_mod.allocatePromiseFor(realm, null, .fulfilled, result) catch return error.OutOfMemory;
+            // value is not a Promise → PromiseResolve made a fresh
+            // already-fulfilled valueWrapper; PerformPromiseThen
+            // then defers the unwrap one tick.
+            try realm.enqueuePromiseReaction(wrap_v, raw, outer, false);
         },
     }
+    return outer;
 }
 
 fn iterResultDoneFalse(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
@@ -2547,7 +2571,26 @@ pub fn wrapInPromise(realm: *Realm, fulfilled: bool, value: Value) !Value {
 /// call returns (FIFO), matching §9.4.
 pub fn drainMicrotasks(allocator: std.mem.Allocator, realm: *Realm) RunError!void {
     while (realm.microtask_queue.items.len > 0) {
-        const task = realm.microtask_queue.orderedRemove(0);
+        // §16.2.1.10 EvaluateImportCall — a deferred dynamic-import
+        // job (`.module_import`) must not run while a synchronous
+        // module-graph DFS is still in progress (`module_load_depth
+        // > 0`). `module_link_complete` drains the queue mid-DFS to
+        // settle async-module dependencies; if it ran a queued
+        // `import()` job there, that job would observe a sibling
+        // module mid-evaluation and "preempt DFS order". Skip past
+        // any `.module_import` tasks at the front and pick the first
+        // non-import task instead; the import jobs stay queued and
+        // run once the outermost evaluation has finished (depth 0).
+        var idx: usize = 0;
+        if (realm.module_load_depth > 0) {
+            while (idx < realm.microtask_queue.items.len and
+                realm.microtask_queue.items[idx].kind == .module_import) : (idx += 1)
+            {}
+            // Nothing but deferred import jobs left — stop draining;
+            // they'll run when the DFS unwinds to depth 0.
+            if (idx >= realm.microtask_queue.items.len) break;
+        }
+        const task = realm.microtask_queue.orderedRemove(idx);
         switch (task.kind) {
             .callback => {
                 const callback = heap_mod.valueAsFunction(task.callback) orelse continue;
@@ -2763,8 +2806,140 @@ pub fn drainMicrotasks(allocator: std.mem.Allocator, realm: *Realm) RunError!voi
             .thenable_job => {
                 try runThenableJob(allocator, realm, task.reaction_result, task.arg, task.reaction_handler);
             },
+            .module_import => {
+                try runModuleImportJob(
+                    allocator,
+                    realm,
+                    task.callback,
+                    task.reaction_result,
+                    task.module_import_base,
+                );
+            },
         }
     }
+}
+
+/// §13.3.10 / §16.2.1.10 EvaluateImportCall — the deferred
+/// dynamic-import job. Runs `loadModule` (parse + link +
+/// §16.2.1.5 InnerModuleEvaluation) for `specifier` and settles
+/// `result_promise` with the module namespace, or rejects it
+/// with the load/evaluation error. Deferring this to a job
+/// means a module already in the importer's static graph has
+/// been evaluated by the synchronous DFS before this runs, so
+/// the dynamic import only observes it.
+fn runModuleImportJob(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    specifier_v: Value,
+    result_promise: Value,
+    base_url: ?[]const u8,
+) RunError!void {
+    const promise_obj = heap_mod.valueAsPlainObject(result_promise) orelse return;
+    if (!specifier_v.isString()) {
+        const ex = try makeTypeError(realm, "import specifier is not a string");
+        try settlePromiseInternal(realm, promise_obj, .rejected, ex);
+        return;
+    }
+    const spec_str: *JSString = @ptrCast(@alignCast(specifier_v.asString()));
+
+    // Pin the specifier + result Promise across the load (the
+    // module body re-enters JS and may trigger GC).
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(specifier_v) catch return error.OutOfMemory;
+    scope.push(result_promise) catch return error.OutOfMemory;
+
+    const outcome = loadModule(allocator, realm, spec_str.flatBytes(), base_url) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            const ex = try makeTypeError(realm, "module load failed");
+            try settlePromiseInternal(realm, promise_obj, .rejected, ex);
+            return;
+        },
+    };
+    if (outcome.threw) {
+        try settlePromiseInternal(realm, promise_obj, .rejected, outcome.value);
+        return;
+    }
+
+    // §16.2.1.11 ContinueDynamicImport — the import() Promise
+    // settles with the namespace once the module's evaluation
+    // Promise settles. Sync modules are already `.evaluated` so
+    // `outcome.value` is the final namespace. An async module
+    // (top-level await) holds a pending `evaluation_promise`;
+    // per spec the import() Promise must mirror its settlement —
+    // hook a reaction onto it rather than draining inline (a
+    // drain here would settle nested import jobs inner-first,
+    // breaking the per-call ordering two `import()`s of the same
+    // waiting module rely on).
+    if (outcome.mr) |dep_mr| {
+        if (dep_mr.state == .evaluating_async) {
+            if (heap_mod.valueAsPlainObject(dep_mr.evaluation_promise)) |eval_p| {
+                if (eval_p.isPromise()) {
+                    // The namespace object identity is stable from
+                    // allocation; resolve it once and chain it on
+                    // fulfilment via a bound `return-this` handler
+                    // so the import() Promise fulfils with the
+                    // namespace (not the body's completion value),
+                    // and rejects straight through on rejection.
+                    const ns_obj = module_mod.getModuleNamespace(realm, dep_mr) catch return error.OutOfMemory;
+                    const ns_value = heap_mod.taggedObject(ns_obj);
+                    const fulfill_handler = makeReturnThisHandler(realm, ns_value) catch return error.OutOfMemory;
+                    switch (eval_p.promise_state) {
+                        .fulfilled => try realm.enqueuePromiseReaction(fulfill_handler, eval_p.promise_value, result_promise, false),
+                        .rejected => try realm.enqueuePromiseReaction(Value.undefined_, eval_p.promise_value, result_promise, true),
+                        .pending => try eval_p.promise_reactions.append(realm.allocator, .{
+                            .on_fulfilled = fulfill_handler,
+                            .on_rejected = Value.undefined_,
+                            .result_promise = result_promise,
+                        }),
+                        .none => try settlePromiseInternal(realm, promise_obj, .fulfilled, ns_value),
+                    }
+                    return;
+                }
+            }
+            // Async module without a usable evaluation Promise —
+            // fall through and resolve with the partial namespace.
+            try settlePromiseInternal(realm, promise_obj, .fulfilled, outcome.value);
+            return;
+        } else if (dep_mr.state == .errored) {
+            try settlePromiseInternal(realm, promise_obj, .rejected, dep_mr.error_value);
+            return;
+        }
+    }
+    // Sync module — `outcome.value` is the final namespace.
+    try settlePromiseInternal(realm, promise_obj, .fulfilled, outcome.value);
+}
+
+/// Build a bound native function that, when invoked, returns the
+/// captured `value` regardless of its argument. Used by the
+/// deferred dynamic-import job (§16.2.1.11) as the `onFulfilled`
+/// reaction on an async module's evaluation Promise: the reaction
+/// fires with the module body's completion value, but the
+/// import() Promise must fulfil with the module *namespace*, so
+/// the handler discards its argument and returns the captured
+/// namespace. Implemented as a bound function (`bound_this` =
+/// the value, `bound_target` = a `this`-returning native) so no
+/// per-call closure state is needed.
+fn makeReturnThisHandler(realm: *Realm, value: Value) !Value {
+    const impl = try realm.heap.allocateFunctionNative(returnThisValueNative, 1, "");
+    impl.proto = realm.intrinsics.function_prototype;
+    impl.has_construct = false;
+    const bound = try realm.heap.allocateFunctionNative(returnThisValueNative, 1, "");
+    bound.proto = realm.intrinsics.function_prototype;
+    bound.has_construct = false;
+    bound.bound_target = impl;
+    bound.bound_this = value;
+    return heap_mod.taggedFunction(bound);
+}
+
+/// Native body for `makeReturnThisHandler` — returns the
+/// receiver. As a bound function with `bound_this` set, the
+/// dispatch substitutes the captured value for `this_value`.
+fn returnThisValueNative(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
+    _ = realm;
+    _ = args;
+    return this_value;
 }
 
 /// §27.2.1.3 PromiseResolveThenableJob — call
@@ -7926,13 +8101,43 @@ fn runFrames(
                     var use_microtask: bool = true;
                     if (heap_mod.valueAsPlainObject(v)) |obj| {
                         if (obj.isPromise()) {
-                            if (obj.promise_state == .pending) {
+                            // §27.7.5.3 Await step 1 — PromiseResolve(
+                            // %Promise%, value). §27.2.4.7 step 1.a:
+                            // when the resolution is already a Promise,
+                            // the spec reads `value.constructor` to
+                            // honour the species hook before deciding
+                            // to return `value` unchanged. Cynic never
+                            // species-dispatches (we always reuse the
+                            // %Promise%), but the read itself is
+                            // observable — a poisoned `constructor`
+                            // getter throws, and the `?` on step 1
+                            // makes that abrupt completion the result
+                            // of Await (the body resumes with a
+                            // throw). Mirrors the same read in
+                            // `awaitForReturnCompletion`.
+                            const ctor_v = intrinsics_mod.getPropertyChain(realm, obj, "constructor") catch |err| switch (err) {
+                                error.OutOfMemory => return error.OutOfMemory,
+                                else => blk: {
+                                    const ex = realm.pending_exception orelse Value.undefined_;
+                                    realm.pending_exception = null;
+                                    resume_value = ex;
+                                    resume_throws = true;
+                                    use_microtask = true;
+                                    break :blk Value.undefined_;
+                                },
+                            };
+                            if (resume_throws and use_microtask) {
+                                // `constructor` getter threw — skip the
+                                // ordinary settled/pending dispatch and
+                                // resume the body with the thrown value.
+                            } else if (obj.promise_state == .pending) {
                                 suspend_target = obj;
                                 use_microtask = false;
                             } else {
                                 resume_value = obj.promise_value;
                                 resume_throws = (obj.promise_state == .rejected);
                             }
+                            _ = ctor_v;
                         } else {
                             // Thenable check — §27.7.5.3 step 1
                             // through §27.2.1.3.2 Promise Resolve
@@ -8459,48 +8664,28 @@ fn runFrames(
                     },
                 };
                 if (di_spec_string) |spec_string| {
-                    const outcome = loadModule(allocator, realm, spec_string.flatBytes(), local_chunk.base_url) catch |err| switch (err) {
-                        error.OutOfMemory => return error.OutOfMemory,
-                        else => return error.InvalidOpcode,
-                    };
-                    if (outcome.threw) {
-                        acc = try promise_mod.allocatePromiseFor(realm, null, .rejected, outcome.value);
-                    } else {
-                        // §13.3.10 / §16.2.1.11 HostImportModuleDynamically —
-                        // the import() Promise settles with the namespace
-                        // once the module's evaluation Promise settles. For
-                        // sync modules that's already done; for async modules
-                        // (state == .evaluating_async with a pending
-                        // evaluation_promise) drain microtasks until the
-                        // promise resolves so the import() Promise reflects
-                        // the final settlement, not the partial namespace
-                        // mid-await.
-                        var final_value = outcome.value;
-                        var rejected = false;
-                        if (outcome.mr) |dep_mr| {
-                            if (dep_mr.state == .evaluating_async) {
-                                if (heap_mod.valueAsPlainObject(dep_mr.evaluation_promise)) |p_obj| {
-                                    if (p_obj.isPromise()) {
-                                        while (p_obj.promise_state == .pending and realm.microtask_queue.items.len > 0) {
-                                            try drainMicrotasks(allocator, realm);
-                                        }
-                                        if (p_obj.promise_state == .rejected) {
-                                            final_value = p_obj.promise_value;
-                                            rejected = true;
-                                        }
-                                    }
-                                }
-                            } else if (dep_mr.state == .errored) {
-                                final_value = dep_mr.error_value;
-                                rejected = true;
-                            }
-                        }
-                        if (rejected) {
-                            acc = try promise_mod.allocatePromiseFor(realm, null, .rejected, final_value);
-                        } else {
-                            acc = try promise_mod.allocatePromiseFor(realm, null, .fulfilled, final_value);
-                        }
-                    }
+                    // §16.2.1.10 EvaluateImportCall — the module
+                    // load + link + InnerModuleEvaluation must NOT
+                    // run synchronously at the `import()` call site.
+                    // If it did, a dynamic import naming a module
+                    // that is also a *static* dependency of the
+                    // surrounding graph would evaluate that module
+                    // mid-body, before the synchronous §16.2.1.5
+                    // DFS reaches it — perturbing evaluation order
+                    // ("dynamic import can't preempt DFS order").
+                    // Allocate the pending result Promise now and
+                    // defer the actual `loadModule` to a microtask
+                    // job; the job settles this Promise once the
+                    // module (whether freshly loaded here or
+                    // already evaluated by the static DFS) is
+                    // ready.
+                    const pending = try promise_mod.allocatePromiseFor(realm, null, .pending, Value.undefined_);
+                    try realm.enqueueModuleImport(
+                        Value.fromString(spec_string),
+                        pending,
+                        local_chunk.base_url,
+                    );
+                    acc = pending;
                 }
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },

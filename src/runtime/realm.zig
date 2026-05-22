@@ -64,6 +64,16 @@ pub const Microtask = struct {
         /// thenable case follows the await machinery
         /// (PromiseResolve → suspend on resolved Promise).
         async_gen_return_after_await,
+        /// §13.3.10 / §16.2.1.10 EvaluateImportCall — a
+        /// dynamic `import(specifier)` whose load + evaluation
+        /// is deferred to a job so the importing module's
+        /// synchronous DFS (§16.2.1.5 InnerModuleEvaluation)
+        /// finishes first. `callback` holds the specifier
+        /// JSString, `module_import_base` the importer's base
+        /// URL, `reaction_result` the pending import() Promise
+        /// the job settles with the resolved namespace (or a
+        /// load error).
+        module_import,
     } = .callback,
     callback: Value = Value.undefined_,
     arg: Value = Value.undefined_,
@@ -90,6 +100,10 @@ pub const Microtask = struct {
     /// settled rejected (drives propagation in the no-handler
     /// case).
     reaction_was_rejected: bool = false,
+    /// For `.module_import` — the importing module's base URL
+    /// (or `null` at the entry point). Points into chunk-pinned
+    /// or realm-lifetime storage, so it needs no GC marking.
+    module_import_base: ?[]const u8 = null,
 };
 
 /// Host-supplied module loader. Given a specifier (string from
@@ -899,6 +913,30 @@ pub const Realm = struct {
             .arg = thenable,
             .reaction_handler = then_fn,
             .reaction_result = outer_promise,
+        });
+    }
+
+    /// §13.3.10 / §16.2.1.10 EvaluateImportCall — schedule a
+    /// deferred dynamic-import job. The actual `loadModule`
+    /// (parse + link + InnerModuleEvaluation) runs when the
+    /// microtask drains, NOT inline at the `import()` call site,
+    /// so a module already part of the importer's static graph
+    /// is evaluated by the synchronous DFS first and the dynamic
+    /// import merely observes it (it "can't preempt DFS order").
+    /// `specifier` is the already-coerced specifier JSString;
+    /// `result_promise` is the pending Promise `import()`
+    /// returned; `base_url` is the importer's base URL.
+    pub fn enqueueModuleImport(
+        self: *Realm,
+        specifier: Value,
+        result_promise: Value,
+        base_url: ?[]const u8,
+    ) !void {
+        try self.microtask_queue.append(self.allocator, .{
+            .kind = .module_import,
+            .callback = specifier,
+            .reaction_result = result_promise,
+            .module_import_base = base_url,
         });
     }
 
