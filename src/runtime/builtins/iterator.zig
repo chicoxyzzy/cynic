@@ -1748,11 +1748,13 @@ fn snapshotIterNextValue(realm: *Realm, iter: Value) NativeError!Value {
     return iterGet(realm, iter, "next");
 }
 
-/// Close every slot in `slots[start..]` (forward index order),
-/// swallowing errors so the caller's pending throw wins.
+/// Close every slot in `slots[start..]` in REVERSE index order,
+/// swallowing errors so the caller's pending throw wins. §7.4.13
+/// IteratorCloseAll closes the open iterators last-opened-first.
 fn closeAllSwallowSlots(realm: *Realm, slots: []const ZipIterSlot, start: usize) void {
-    var i: usize = start;
-    while (i < slots.len) : (i += 1) {
+    var i: usize = slots.len;
+    while (i > start) {
+        i -= 1;
         closeIteratorSwallow(realm, slots[i].iter);
     }
 }
