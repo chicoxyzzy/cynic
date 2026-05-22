@@ -1090,8 +1090,11 @@ pub const JSObject = struct {
 
     /// Demote a shaped object back to dictionary mode. `properties`
     /// already holds every value (the shadow co-maintains it), so
-    /// dropping the shape and slots loses nothing.
-    fn demoteFromShape(self: *JSObject) void {
+    /// dropping the shape and slots loses nothing. Public so the
+    /// paths that mutate `properties` directly — `delete`,
+    /// `defineProperty`, accessor installs — can keep the shape
+    /// from going stale by giving up on it.
+    pub fn demoteFromShape(self: *JSObject) void {
         self.shape = null;
         self.slots.clearRetainingCapacity();
     }
@@ -1187,6 +1190,7 @@ pub const JSObject = struct {
         }
         try self.properties.put(allocator, key, v);
         try self.recordKey(allocator, key);
+        self.shadowSet(allocator, key, v, self.flagsFor(key));
         return true;
     }
 

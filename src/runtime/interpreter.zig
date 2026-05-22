@@ -11813,6 +11813,12 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
     _ = realm;
     const obj_mod = @import("object.zig");
     if (heap_mod.valueAsPlainObject(recv)) |obj| {
+        // A property removal cannot be expressed as a shape
+        // transition (the transition tree is append-only), so
+        // demote the object to the dictionary representation —
+        // `properties` is unaffected and stays the source of
+        // truth, the shadow shape just stops describing it.
+        obj.demoteFromShape();
         // §9.4.6.6 Module Namespace [[Delete]]. Symbol keys
         // (Cynic's flattened `@@toStringTag` / `<sym:*>`) fall
         // through to OrdinaryDelete — `@@toStringTag` was
