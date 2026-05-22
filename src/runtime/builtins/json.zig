@@ -861,6 +861,13 @@ fn jsonParse(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     const root = realm.heap.allocateObject() catch return error.OutOfMemory;
     root.prototype = realm.intrinsics.object_prototype;
     root.set(realm.allocator, "", result) catch return error.OutOfMemory;
+    // §25.5.1.1 InternalizeJSONProperty walks the whole parsed tree
+    // calling the reviver at each node — every call re-enters JS and
+    // can GC. `root` is the only handle on the tree; without a root
+    // here a mid-walk collection frees it.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(root)) catch return error.OutOfMemory;
     return internalizeJsonProperty(realm, root, "", reviver_fn);
 }
 
@@ -1225,7 +1232,11 @@ const JsonParser = struct {
             if (self.peek() != @as(u8, ':')) return error.Malformed;
             self.advance();
             const val = try self.parseValue();
-            obj.set(self.realm.allocator, key_s.flatBytes(), val) catch return error.OutOfMemory;
+            // Anchor the key JSString on the object — plain `set`
+            // borrows the byte slice, leaving the string otherwise
+            // unreferenced for the GC to reclaim (the reviver walk
+            // would then see a dangling key).
+            obj.setComputedOwned(self.realm.allocator, key_s, val) catch return error.OutOfMemory;
             self.skipWs();
             switch (self.peek() orelse return error.Malformed) {
                 ',' => self.advance(),
