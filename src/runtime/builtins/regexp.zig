@@ -333,6 +333,17 @@ fn regexpProtoReplace(realm: *Realm, this_value: Value, args: []const Value) Nat
     // step 3 — `Let S be ? ToString(string)`.
     const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
 
+    // `regExpExecGeneric` and a functional replacer both re-enter JS
+    // and can trigger a GC. Root the receiver, the subject string,
+    // and (below) every collected exec result for the whole
+    // operation — the result objects accumulate in `results`, a
+    // native list the GC does not scan, so a later replacer call
+    // would otherwise free an earlier match's captures.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(rx)) catch return error.OutOfMemory;
+    scope.push(Value.fromString(s)) catch return error.OutOfMemory;
+
     // step 4 — `Let lengthS be the number of code unit elements
     // in S`.
     const utf16 = @import("../utf16.zig");
@@ -347,6 +358,9 @@ fn regexpProtoReplace(realm: *Realm, this_value: Value, args: []const Value) Nat
     // `toString` on the replacement fires before any matching
     // (mirrors `String.prototype.replace`).
     const repl_template: ?*JSString = if (functional) null else try intrinsics.stringifyArg(realm, repl_v_in);
+    if (repl_template) |rt| {
+        scope.push(Value.fromString(rt)) catch return error.OutOfMemory;
+    }
 
     // step 7 — `flags = ? ToString(? Get(rx, "flags"))`.
     const flags_v = try intrinsics.getPropertyChain(realm, rx, "flags");
@@ -377,6 +391,10 @@ fn regexpProtoReplace(realm: *Realm, this_value: Value, args: []const Value) Nat
         if (result_v.isNull()) break;
         const result_obj = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.replace]: RegExpExec returned non-Object");
         results.append(realm.allocator, result_obj) catch return error.OutOfMemory;
+        // Root the collected exec result — the next `regExpExecGeneric`
+        // (and, later, the replacer) will GC and would otherwise free
+        // this match's captures before step 15 reads them.
+        scope.push(heap_mod.taggedObject(result_obj)) catch return error.OutOfMemory;
         // step 12.c.ii — `If global is false, set done to true`.
         if (!is_global) break;
         // step 12.c.iii — `Let matchStr be ? ToString(? Get(result,
@@ -423,6 +441,11 @@ fn regexpProtoReplace(realm: *Realm, this_value: Value, args: []const Value) Nat
     var captures_buf: std.ArrayListUnmanaged(Value) = .empty;
     defer captures_buf.deinit(realm.allocator);
     for (results.items) |result_obj| {
+        // Per-iteration root scope — the matched string, each
+        // capture, and the named-captures object must survive the
+        // functional replacer's GC.
+        const iter_scope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer iter_scope.close();
         // step 15.a-b — `nCaptures = max(LengthOfArrayLike(result)
         // - 1, 0)`.
         const len_v = try intrinsics.getPropertyChain(realm, result_obj, "length");
@@ -433,6 +456,7 @@ fn regexpProtoReplace(realm: *Realm, this_value: Value, args: []const Value) Nat
         // "0"))`.
         const zero_v = try intrinsics.getPropertyChain(realm, result_obj, "0");
         const matched = try intrinsics.stringifyArg(realm, zero_v);
+        iter_scope.push(Value.fromString(matched)) catch return error.OutOfMemory;
 
         // step 15.d — `Let matchLength be the number of code unit
         // elements in matched`.
@@ -474,10 +498,12 @@ fn regexpProtoReplace(realm: *Realm, this_value: Value, args: []const Value) Nat
             else
                 Value.fromString(try intrinsics.stringifyArg(realm, cap_n));
             captures_buf.append(realm.allocator, cap_coerced) catch return error.OutOfMemory;
+            iter_scope.push(cap_coerced) catch return error.OutOfMemory;
         }
 
         // step 15.j — `Let namedCaptures be ? Get(result, "groups")`.
         const named_captures_raw = try intrinsics.getPropertyChain(realm, result_obj, "groups");
+        iter_scope.push(named_captures_raw) catch return error.OutOfMemory;
 
         // step 15.k / 15.l — compute replacement.
         var replacement_owned: ?*JSString = null;
@@ -1350,6 +1376,13 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
         fresh.prototype = realm.intrinsics.regexp_prototype;
         break :blk fresh;
     };
+    // The pattern / flags coercion below — `Get(pattern, "source")`,
+    // `Get(pattern, "flags")`, their `ToString` calls — can re-enter
+    // JS and trigger a GC. Root `inst` so the sweep can't free it
+    // before it is initialised and returned.
+    const inst_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer inst_scope.close();
+    inst_scope.push(heap_mod.taggedObject(inst)) catch return error.OutOfMemory;
     // §22.2.3.1 step 6 — when pattern has [[RegExpMatcher]],
     // reuse its `[[OriginalSource]]` / `[[OriginalFlags]]` slots.
     // Step 7 — else when patternIsRegExp (duck-typed), read

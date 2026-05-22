@@ -876,6 +876,20 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                 // processing. (The non-Object length branch above
                 // defers it past ToIndex per step 6.c.)
                 const inst = try allocateTypedArrayInstance(realm, new_target, default_proto);
+                // Every Object-source sub-branch below re-enters JS
+                // and can trigger a GC before `inst` is reachable
+                // from any root: the ArrayBuffer branch runs user
+                // `valueOf` / `toString` via `toIndex`; the iterable
+                // branch pumps `@@iterator` / `next()`; the array-
+                // like branch reads `length` and indexed elements.
+                // `inst` is a native-allocated `*JSObject` held only
+                // on the Zig stack until it is returned, so root it
+                // for the whole branch — a re-entrant sweep would
+                // otherwise free it and the `inst.typed_view = …`
+                // writes (and the returned handle) become a UAF.
+                const inst_scope = realm.heap.openScope() catch return error.OutOfMemory;
+                defer inst_scope.close();
+                inst_scope.push(heap_mod.taggedObject(inst)) catch return error.OutOfMemory;
                 if (src.has_array_buffer_data) {
                     // §23.2.5.1 InitializeTypedArrayFromArrayBuffer
                     // step 6 — `Let offset be ? ToIndex(byteOffset)`.
@@ -966,11 +980,8 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                     const scope = realm.heap.openScope() catch return error.OutOfMemory;
                     defer scope.close();
                     scope.push(iter) catch return error.OutOfMemory;
-                    // The instance object is a native-allocated GC
-                    // `*JSObject` held only on the Zig stack; root it
-                    // too, or a `next()`-triggered sweep frees it and
-                    // the `inst.typed_view = …` write below is a UAF.
-                    scope.push(heap_mod.taggedObject(inst)) catch return error.OutOfMemory;
+                    // `inst` itself is already rooted by `inst_scope`
+                    // (opened right after allocation, above).
                     const max_iter: usize = 1 << 24;
                     var step: usize = 0;
                     while (step < max_iter) : (step += 1) {

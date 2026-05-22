@@ -193,6 +193,15 @@ pub const GlobalBindings = struct {
     /// the host `Array` constructor. Entries are added by
     /// `installScriptVarBinding` / `installScriptFunctionBinding`.
     var_names: std.StringArrayHashMapUnmanaged(void) = .empty,
+    /// The realm's heap, wired at `Realm.init` time. Used by the
+    /// object-env-record store paths (`put`,
+    /// `installScriptVarBinding`, `installScriptFunctionBinding`) to
+    /// run the generational write barrier — those write the global
+    /// object's `properties` bag directly, bypassing the routed
+    /// `heap.storeProperty`. Optional only because a default-
+    /// constructed `GlobalBindings` exists briefly before `init`
+    /// wires it; every store path that matters runs after.
+    heap: ?*Heap = null,
 
     fn map(self: *GlobalBindings) *std.StringArrayHashMapUnmanaged(Value) {
         if (self.target) |t| return &t.properties;
@@ -226,6 +235,9 @@ pub const GlobalBindings = struct {
     pub fn put(self: *GlobalBindings, allocator: std.mem.Allocator, key: []const u8, value: Value) !void {
         if (self.target) |t| {
             const had_key = t.properties.contains(key);
+            // Generational write barrier — raw `properties.put`
+            // bypasses the routed `heap.storeProperty`.
+            if (self.heap) |h| h.writeBarrier(.{ .object = t }, value);
             try t.properties.put(allocator, key, value);
             if (!had_key) {
                 try t.property_flags.put(allocator, key, .{
@@ -369,6 +381,7 @@ pub const GlobalBindings = struct {
         if (self.target) |t| {
             const gop = try t.properties.getOrPut(allocator, key);
             if (!gop.found_existing) {
+                if (self.heap) |h| h.writeBarrier(.{ .object = t }, value);
                 gop.value_ptr.* = value;
                 try t.property_flags.put(allocator, key, .{
                     .writable = true,
@@ -404,6 +417,9 @@ pub const GlobalBindings = struct {
         try self.var_names.put(allocator, key, {});
         if (self.target) |t| {
             _ = t.accessors.swapRemove(key);
+            // Generational write barrier — raw `properties.put`
+            // bypasses the routed `heap.storeProperty`.
+            if (self.heap) |h| h.writeBarrier(.{ .object = t }, value);
             try t.properties.put(allocator, key, value);
             try t.property_flags.put(allocator, key, .{
                 .writable = true,
@@ -677,11 +693,13 @@ pub const Realm = struct {
     pub fn init(allocator: std.mem.Allocator) Realm {
         const heap_ptr = allocator.create(Heap) catch unreachable;
         heap_ptr.* = Heap.init(allocator);
-        return .{
+        var r: Realm = .{
             .allocator = allocator,
             .heap = heap_ptr,
             .owns_heap = true,
         };
+        r.globals.heap = heap_ptr;
+        return r;
     }
 
     /// Variant of `init` that backs heap-side byte payloads
@@ -695,11 +713,13 @@ pub const Realm = struct {
     ) Realm {
         const heap_ptr = allocator.create(Heap) catch unreachable;
         heap_ptr.* = Heap.initWithBytesAllocator(allocator, bytes_allocator);
-        return .{
+        var r: Realm = .{
             .allocator = allocator,
             .heap = heap_ptr,
             .owns_heap = true,
         };
+        r.globals.heap = heap_ptr;
+        return r;
     }
 
     /// Create a child Realm that shares `parent`'s heap. Used by
@@ -708,12 +728,14 @@ pub const Realm = struct {
     /// and globals but a single agent-wide heap so values can
     /// cross realm boundaries without GC roots being split.
     pub fn initChild(parent: *Realm) Realm {
-        return .{
+        var r: Realm = .{
             .allocator = parent.allocator,
             .heap = parent.heap,
             .owns_heap = false,
             .host_interrupt = parent.host_interrupt,
         };
+        r.globals.heap = parent.heap;
+        return r;
     }
 
     /// §6.1.5.1 — well-known symbols (`Symbol.iterator`,

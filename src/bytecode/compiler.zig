@@ -11050,7 +11050,7 @@ pub fn compileScriptAsChunk(
     // nested function / class templates). Chunks are realm-
     // lifetime; pinning lets the GC skip walking the chunk
     // tree on every collect. See `Heap.pinChunk`.
-    realm.heap.pinChunk(&chunk);
+    try realm.heap.pinChunk(&chunk);
     return chunk;
 }
 
@@ -11240,7 +11240,7 @@ pub fn compileModuleAsChunk(
     c.builder.is_async_module = c.module_has_top_level_await;
     var chunk = try c.finish();
     chunk.base_url = base_url;
-    realm.heap.pinChunk(&chunk);
+    try realm.heap.pinChunk(&chunk);
     return chunk;
 }
 
@@ -11270,7 +11270,7 @@ pub fn compileExpressionAsChunk(
     try c.compileExpression(expr);
     try c.builder.emitOp(.return_, expr.span());
     var chunk = try c.finish();
-    realm.heap.pinChunk(&chunk);
+    try realm.heap.pinChunk(&chunk);
     return chunk;
 }
 

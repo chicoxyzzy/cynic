@@ -606,6 +606,7 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
                         }
                     }
                 }
+                realm.heap.writeBarrier(.{ .object = o }, value);
                 o.setIndexed(realm.allocator, idx, value) catch return error.OutOfMemory;
                 return;
             }
@@ -2450,6 +2451,11 @@ fn createDataPropertyOrThrowGeneric(realm: *Realm, obj: *JSObject, key_str: *JSS
         _ = cur.properties.swapRemove(key);
         _ = cur.property_flags.swapRemove(key);
     }
+    // Generational write barrier — `setWithFlags` is a raw setter
+    // (bypasses the routed `heap.storeProperty` / `storeIndexed`),
+    // so a young `value` stored into a mature `cur` would otherwise
+    // be an un-remembered old→young edge the next minor cycle drops.
+    realm.heap.writeBarrier(.{ .object = cur }, value);
     cur.setWithFlags(realm.allocator, key, value, ObjMod.PropertyFlags.default) catch return error.OutOfMemory;
     // The key is a borrowed slice of a heap-allocated JSString. If it
     // landed in the named-property bag (rather than the array-exotic
@@ -2649,12 +2655,18 @@ fn arraySort(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 /// hundred) and keeps stability per §23.1.3.30 (Array.prototype.
 /// sort is required to be stable as of ES2019).
 fn sortBufferStable(realm: *Realm, buf: []Value, cmp_fn: ?*JSFunction) NativeError!void {
+    // One reusable root scope for `sortCompare`'s ToString
+    // intermediates — cleared per comparison, so the default
+    // (comparator-less) sort doesn't allocate a fresh scope on
+    // every compare.
+    const cmp_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer cmp_scope.close();
     var n: usize = 1;
     while (n < buf.len) : (n += 1) {
         const key = buf[n];
         var j: isize = @as(isize, @intCast(n)) - 1;
         while (j >= 0) : (j -= 1) {
-            const cmp = try sortCompare(realm, buf[@intCast(j)], key, cmp_fn);
+            const cmp = try sortCompare(realm, buf[@intCast(j)], key, cmp_fn, cmp_scope);
             // Stable: only shift left when strictly greater.
             if (cmp <= 0) break;
             buf[@intCast(j + 1)] = buf[@intCast(j)];
@@ -2671,7 +2683,7 @@ fn sortBufferStable(realm: *Realm, buf: []Value, cmp_fn: ?*JSFunction) NativeErr
 /// With a user comparator, ToNumber is applied to the result
 /// (NaN treated as +0). Without one, both operands go through
 /// ToString and are compared lexically.
-fn sortCompare(realm: *Realm, x: Value, y: Value, cmp_fn: ?*JSFunction) NativeError!i32 {
+fn sortCompare(realm: *Realm, x: Value, y: Value, cmp_fn: ?*JSFunction, cmp_scope: *heap_mod.HandleScope) NativeError!i32 {
     // §23.1.3.30.2 steps 1-3 — undefineds last, before the user
     // comparator runs.
     const x_undef = x.isUndefined();
@@ -2710,6 +2722,12 @@ fn sortCompare(realm: *Realm, x: Value, y: Value, cmp_fn: ?*JSFunction) NativeEr
     // Default: ToString both sides via §7.1.17 (consulting
     // `toString` / `valueOf` per the spec hint chain).
     const xs = try intrinsics.stringifyArg(realm, x);
+    // `stringifyArg(y)` can re-enter JS (a user `toString` /
+    // `valueOf`) and trigger a GC; `xs` is a native-stack-only
+    // local until the comparison below, so root it across the call
+    // on the caller's reusable scope (cleared per comparison).
+    cmp_scope.handles.clearRetainingCapacity();
+    cmp_scope.push(Value.fromString(xs)) catch return error.OutOfMemory;
     const ys = try intrinsics.stringifyArg(realm, y);
     return switch (std.mem.order(u8, xs.flatBytes(), ys.flatBytes())) {
         .lt => -1,
@@ -2776,6 +2794,10 @@ fn arrayToSorted(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 
     var w: usize = 0;
     while (w < items.items.len) : (w += 1) {
+        // Generational barrier — the comparator run by
+        // `sortBufferStable` above can promote `out` to mature
+        // while `items` still holds young values.
+        realm.heap.writeBarrier(.{ .object = out }, items.items[w]);
         out.setIndexed(realm.allocator, @intCast(w), items.items[w]) catch return error.OutOfMemory;
     }
     var u: i64 = 0;
@@ -2805,6 +2827,9 @@ fn arrayToReversed(realm: *Realm, this_value: Value, args: []const Value) Native
         var rb: [24]u8 = undefined;
         const rslice = std.fmt.bufPrint(&rb, "{d}", .{len - 1 - i}) catch unreachable;
         const v = try getPropertyChain(realm, obj, rslice);
+        // Generational barrier — `getPropertyChain` can re-enter JS
+        // (a source getter / Proxy trap) and promote `out`.
+        realm.heap.writeBarrier(.{ .object = out }, v);
         out.setIndexed(realm.allocator, @intCast(i), v) catch return error.OutOfMemory;
     }
     setLength(realm, out, len) catch return error.OutOfMemory;
@@ -2867,18 +2892,22 @@ fn arrayToSpliced(realm: *Realm, this_value: Value, args: []const Value) NativeE
     scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     scope.push(heap_mod.taggedObject(obj)) catch return error.OutOfMemory;
 
-    // [0..start) — copy from receiver.
+    // [0..start) — copy from receiver. `getPropertyChain` can
+    // re-enter JS and promote `out`, so barrier each store.
     var i: i64 = 0;
     while (i < start) : (i += 1) {
         var rb: [24]u8 = undefined;
         const rslice = std.fmt.bufPrint(&rb, "{d}", .{i}) catch unreachable;
         const v = try getPropertyChain(realm, obj, rslice);
+        realm.heap.writeBarrier(.{ .object = out }, v);
         out.setIndexed(realm.allocator, @intCast(i), v) catch return error.OutOfMemory;
     }
     // [start..start+insert_count) — items.
     var k: i64 = 0;
     while (k < insert_count) : (k += 1) {
-        out.setIndexed(realm.allocator, @intCast(start + k), args[2 + @as(usize, @intCast(k))]) catch return error.OutOfMemory;
+        const iv = args[2 + @as(usize, @intCast(k))];
+        realm.heap.writeBarrier(.{ .object = out }, iv);
+        out.setIndexed(realm.allocator, @intCast(start + k), iv) catch return error.OutOfMemory;
     }
     // [start+insert_count..new_len) — tail of receiver after the gap.
     var r: i64 = start + delete_count;
@@ -2890,6 +2919,7 @@ fn arrayToSpliced(realm: *Realm, this_value: Value, args: []const Value) NativeE
         var rb: [24]u8 = undefined;
         const rslice = std.fmt.bufPrint(&rb, "{d}", .{r}) catch unreachable;
         const v = try getPropertyChain(realm, obj, rslice);
+        realm.heap.writeBarrier(.{ .object = out }, v);
         out.setIndexed(realm.allocator, @intCast(w), v) catch return error.OutOfMemory;
     }
     setLength(realm, out, new_len) catch return error.OutOfMemory;
@@ -2934,6 +2964,7 @@ fn arrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         var rb: [24]u8 = undefined;
         const rslice = std.fmt.bufPrint(&rb, "{d}", .{i}) catch unreachable;
         const v = if (i == idx) value else try getPropertyChain(realm, obj, rslice);
+        realm.heap.writeBarrier(.{ .object = out }, v);
         out.setIndexed(realm.allocator, @intCast(i), v) catch return error.OutOfMemory;
     }
     setLength(realm, out, len) catch return error.OutOfMemory;
@@ -2988,6 +3019,14 @@ fn arrayReverse(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const half = @divFloor(len, 2);
     while (i < half) : (i += 1) {
         if ((i & 0x3FF) == 0) try intrinsics.checkInterruptInNative(realm);
+        // The `hasPropertyP` / `getPropertyAny` / `setOrThrow` /
+        // `deletePropertyOrThrow` calls below all re-enter JS for a
+        // Proxy receiver and can trigger a GC. Root the per-iteration
+        // key strings and the read values so the second `setOrThrow`
+        // doesn't hand the trap a swept key (observed as a garbled
+        // `Set:<key>` in the proxy trap log).
+        const iter_scope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer iter_scope.close();
         var ibuf: [24]u8 = undefined;
         var jbuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
@@ -3007,13 +3046,17 @@ fn arrayReverse(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             try getPropertyAny(realm, heap_mod.taggedObject(obj), islice)
         else
             Value.undefined_;
+        iter_scope.push(lower_v) catch return error.OutOfMemory;
         const upper_exists = try hasPropertyP(realm, obj, jslice);
         const upper_v = if (upper_exists)
             try getPropertyAny(realm, heap_mod.taggedObject(obj), jslice)
         else
             Value.undefined_;
+        iter_scope.push(upper_v) catch return error.OutOfMemory;
         const owned_i = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         const owned_j = realm.heap.allocateString(jslice) catch return error.OutOfMemory;
+        iter_scope.push(Value.fromString(owned_i)) catch return error.OutOfMemory;
+        iter_scope.push(Value.fromString(owned_j)) catch return error.OutOfMemory;
         if (lower_exists and upper_exists) {
             try setOrThrow(realm, obj, owned_i.flatBytes(), owned_i, upper_v);
             try setOrThrow(realm, obj, owned_j.flatBytes(), owned_j, lower_v);
@@ -3522,6 +3565,13 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
 
     const state = realm.heap.allocateObject() catch return error.OutOfMemory;
     state.prototype = realm.intrinsics.object_prototype;
+    // Root `state` for the rest of `arrayFromAsync` — the
+    // `@@asyncIterator` / `@@iterator` lookups, the iterator-method
+    // call, `LengthOfArrayLike`, and `Construct(C)` below all
+    // re-enter JS and can GC before the first driver step has
+    // registered a `state`-bound continuation.
+    const fa_sc = try faRootState(realm, state);
+    defer fa_sc.close();
     state.set(realm.allocator, k_fa_cap_resolve, heap_mod.taggedFunction(cap.resolve)) catch return error.OutOfMemory;
     state.set(realm.allocator, k_fa_cap_reject, heap_mod.taggedFunction(cap.reject)) catch return error.OutOfMemory;
     state.set(realm.allocator, k_fa_array, heap_mod.taggedObject(out)) catch return error.OutOfMemory;
@@ -3776,7 +3826,25 @@ fn makeBoundCb(realm: *Realm, impl: *const fn (*Realm, Value, []const Value) Nat
 
 // ── Iterator-path driver ────────────────────────────────────────────────────
 
+/// Root the `Array.fromAsync` `state` object for the duration of a
+/// driver step. Every step re-enters JS — `iter.next()`, the
+/// mapper, indexed-element reads, `iter.return()` — and a GC there
+/// would free `state` (and, transitively, the result array, the
+/// iterator, the capability functions) on the very first step,
+/// before any `state`-bound continuation callback exists to hold
+/// it. Caller pairs with `defer sc.close()`.
+fn faRootState(realm: *Realm, state: *JSObject) NativeError!*heap_mod.HandleScope {
+    const sc = realm.heap.openScope() catch return error.OutOfMemory;
+    sc.push(heap_mod.taggedObject(state)) catch {
+        sc.close();
+        return error.OutOfMemory;
+    };
+    return sc;
+}
+
 fn fromAsyncIterStep(realm: *Realm, state: *JSObject) NativeError!void {
+    const fa_sc = try faRootState(realm, state);
+    defer fa_sc.close();
     const iter_v = state.get(k_fa_iter);
     const next_fn = heap_mod.valueAsFunction(state.get(k_fa_next_fn)) orelse return;
     const next_outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
@@ -3801,6 +3869,8 @@ fn fromAsyncIterStep(realm: *Realm, state: *JSObject) NativeError!void {
 
 fn fromAsyncIterOnNextResult(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const state = heap_mod.valueAsPlainObject(this_value) orelse return Value.undefined_;
+    const fa_sc = try faRootState(realm, state);
+    defer fa_sc.close();
     const result = argOr(args, 0, Value.undefined_);
     const result_obj = heap_mod.valueAsPlainObject(result) orelse {
         return rejectWithTypeErrorFromState(realm, state, "Array.fromAsync: iterator next() did not return an object");
@@ -3856,6 +3926,8 @@ fn fromAsyncIterOnValueReject(realm: *Realm, this_value: Value, args: []const Va
 
 fn fromAsyncIterOnValueAwaited(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const state = heap_mod.valueAsPlainObject(this_value) orelse return Value.undefined_;
+    const fa_sc = try faRootState(realm, state);
+    defer fa_sc.close();
     const value = argOr(args, 0, Value.undefined_);
     const mapfn_v = state.get(k_fa_mapfn);
 
@@ -3957,6 +4029,10 @@ fn createDataPropertyOrThrow(
             return throwTypeError(realm, "Array.fromAsync: cannot redefine non-configurable property");
         }
     }
+    // Generational write barrier — raw setter bypasses the routed
+    // `heap.storeProperty` / `storeIndexed` (see
+    // `createDataPropertyOrThrowGeneric`).
+    realm.heap.writeBarrier(.{ .object = cur }, value);
     cur.setWithFlags(realm.allocator, key, value, ObjMod.PropertyFlags.default) catch return error.OutOfMemory;
     // Anchor the heap key string when the slice landed in the
     // named-property bag — see `createDataPropertyOrThrowGeneric`.
@@ -3966,6 +4042,8 @@ fn createDataPropertyOrThrow(
 }
 
 fn appendAndStepIter(realm: *Realm, state: *JSObject, value: Value) NativeError!Value {
+    const fa_sc = try faRootState(realm, state);
+    defer fa_sc.close();
     const out = heap_mod.valueAsPlainObject(state.get(k_fa_array)) orelse return Value.undefined_;
     const k = state.get(k_fa_index).asInt32();
     var ibuf: [24]u8 = undefined;
@@ -3991,6 +4069,8 @@ fn fromAsyncIterOnNextReject(realm: *Realm, this_value: Value, args: []const Val
 }
 
 fn closeIterAndReject(realm: *Realm, state: *JSObject) NativeError!Value {
+    const fa_sc = try faRootState(realm, state);
+    defer fa_sc.close();
     const iter_v = state.get(k_fa_iter);
     if (heap_mod.valueAsPlainObject(iter_v)) |obj| {
         const ret_v = getPropertyChain(realm, obj, "return") catch Value.undefined_;
@@ -4007,6 +4087,8 @@ fn closeIterAndReject(realm: *Realm, state: *JSObject) NativeError!Value {
 // ── Array-like driver ──────────────────────────────────────────────────────
 
 fn fromAsyncArrayLikeStep(realm: *Realm, state: *JSObject) NativeError!void {
+    const fa_sc = try faRootState(realm, state);
+    defer fa_sc.close();
     const k = state.get(k_fa_index).asInt32();
     const len_v = state.get(k_fa_length);
     const len: i64 = if (len_v.isInt32()) len_v.asInt32() else if (len_v.isDouble()) @intFromFloat(len_v.asDouble()) else 0;
@@ -4039,6 +4121,8 @@ fn fromAsyncArrayLikeStep(realm: *Realm, state: *JSObject) NativeError!void {
 
 fn fromAsyncArrayLikeOnAwaited(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const state = heap_mod.valueAsPlainObject(this_value) orelse return Value.undefined_;
+    const fa_sc = try faRootState(realm, state);
+    defer fa_sc.close();
     const value = argOr(args, 0, Value.undefined_);
     const mapfn_v = state.get(k_fa_mapfn);
 
@@ -4075,6 +4159,8 @@ fn fromAsyncArrayLikeOnReject(realm: *Realm, this_value: Value, args: []const Va
 }
 
 fn appendAndStepArrayLike(realm: *Realm, state: *JSObject, value: Value) NativeError!Value {
+    const fa_sc = try faRootState(realm, state);
+    defer fa_sc.close();
     const out = heap_mod.valueAsPlainObject(state.get(k_fa_array)) orelse return Value.undefined_;
     const k = state.get(k_fa_index).asInt32();
     var ibuf: [24]u8 = undefined;

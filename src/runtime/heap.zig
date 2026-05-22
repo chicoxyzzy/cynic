@@ -266,6 +266,17 @@ pub const Heap = struct {
     /// scanned during a collect.
     handle_scopes: std.ArrayListUnmanaged(*HandleScope) = .empty,
 
+    /// Chunk-constant heap values — permanently-live non-string
+    /// constants parked in a `Chunk`'s constant pool: the per-call-
+    /// site tagged-template `strs` / `raw` arrays, and `BigInt`
+    /// literal values (§12.9.5). Constant *strings* carry a `pinned`
+    /// flag the sweep honours directly; objects and bigints don't, so
+    /// `pinChunk` registers each here and every GC cycle marks them
+    /// as roots — `markValue`'s recursion then keeps the whole
+    /// template graph (the `raw` companion, segment strings, anchored
+    /// index keys) reachable. Realm-lifetime; freed in `deinit`.
+    const_roots: std.ArrayListUnmanaged(Value) = .empty,
+
     /// Remembered set — every mature container that the write
     /// barrier has observed storing a pointer to a young object.
     /// `collectYoung` scans these as additional roots so a young
@@ -459,6 +470,7 @@ pub const Heap = struct {
         self.bigints_young.deinit(self.allocator);
         self.bigints_mature.deinit(self.allocator);
         self.remembered.deinit(self.allocator);
+        self.const_roots.deinit(self.allocator);
         self.handle_scopes.deinit(self.allocator);
     }
 
@@ -887,6 +899,15 @@ pub const Heap = struct {
                 // the `bytes` slice — without this the key dangles.
                 for (f.key_anchors.items) |s| s.marked = true;
                 if (f.prototype) |p| self.markValue(taggedObject(p));
+                // §10.2.3 [[HomeObject]] — a method's home object
+                // (and, for the typed-slot split Cynic uses, the
+                // owning `home_function`) back `super` lookups.
+                // They can be the only reference keeping the
+                // prototype / constructor alive — without these marks
+                // a method's home object is swept and a later call
+                // copies the dangling pointer into the call frame.
+                if (f.home_object) |ho| self.markValue(taggedObject(ho));
+                if (f.home_function) |hf| self.markValue(taggedFunction(hf));
                 // §15.3 ArrowFunction lexical captures — `this` and
                 // `new.target` are stamped at MakeFunction time and
                 // may be the only roots holding their referents
@@ -1072,25 +1093,30 @@ pub const Heap = struct {
     /// of `script_chunks` and `JSFunction.chunk` (the heap's
     /// hottest mark-phase work, since chunk trees recurse into
     /// every method / static-block / field initializer).
-    pub fn pinChunk(self: *Heap, chunk: *const Chunk) void {
-        for (chunk.constants) |c| self.pinValue(c);
-        for (chunk.function_templates) |*ft| self.pinChunk(&ft.chunk);
+    pub fn pinChunk(self: *Heap, chunk: *const Chunk) !void {
+        for (chunk.constants) |c| try self.pinValue(c);
+        for (chunk.function_templates) |*ft| try self.pinChunk(&ft.chunk);
         for (chunk.class_templates) |*ct| {
-            self.pinChunk(&ct.constructor_chunk);
-            for (ct.instance_methods) |*m| self.pinChunk(&m.chunk);
-            for (ct.static_methods) |*m| self.pinChunk(&m.chunk);
-            for (ct.instance_fields) |*fd| if (fd.init_chunk) |*ic| self.pinChunk(ic);
-            for (ct.static_fields) |*fd| if (fd.init_chunk) |*ic| self.pinChunk(ic);
-            for (ct.static_blocks) |*sb| self.pinChunk(sb);
+            try self.pinChunk(&ct.constructor_chunk);
+            for (ct.instance_methods) |*m| try self.pinChunk(&m.chunk);
+            for (ct.static_methods) |*m| try self.pinChunk(&m.chunk);
+            for (ct.instance_fields) |*fd| if (fd.init_chunk) |*ic| try self.pinChunk(ic);
+            for (ct.static_fields) |*fd| if (fd.init_chunk) |*ic| try self.pinChunk(ic);
+            for (ct.static_blocks) |*sb| try self.pinChunk(sb);
         }
     }
 
-    /// Pin the heap-allocated payload of `v` if it's a string.
-    /// Other primitive kinds carry no heap pointer; symbols /
-    /// bigints don't appear in chunk constants (the compiler
-    /// allocates symbols at runtime). Idempotent.
-    fn pinValue(self: *Heap, v: Value) void {
-        _ = self;
+    /// Keep the heap-allocated payload of `v` permanently live.
+    /// Strings carry a `pinned` flag the sweep honours directly.
+    /// Objects (the per-call-site tagged-template `strs` / `raw`
+    /// arrays) and `BigInt` literal values can't — pinning one slot
+    /// of an object without pinning its whole transitive graph would
+    /// dangle — so they are registered in `const_roots` and re-marked
+    /// as roots every GC cycle, which keeps the graph alive through
+    /// `markValue`'s recursion. Symbols don't appear in chunk
+    /// constants (the compiler allocates them at runtime).
+    /// Idempotent for strings.
+    fn pinValue(self: *Heap, v: Value) !void {
         if (v.isString()) {
             const s: *JSString = @ptrCast(@alignCast(v.asString()));
             s.pinned = true;
@@ -1102,6 +1128,12 @@ pub const Heap = struct {
             // relinks any such pinned straggler into
             // `strings_mature` when it sweeps.
             s.generation = .mature;
+            return;
+        }
+        // Objects (template arrays) and BigInt literals — re-marked
+        // every cycle from `const_roots`.
+        if (valueAsPlainObject(v) != null or valueAsBigInt(v) != null) {
+            try self.const_roots.append(self.allocator, v);
         }
     }
 
@@ -1235,6 +1267,10 @@ pub const Heap = struct {
         for (self.handle_scopes.items) |scope| {
             for (scope.handles.items) |r| self.markValue(r);
         }
+        // Chunk-constant heap values (tagged-template `strs` / `raw`
+        // arrays, BigInt literals) — permanently live; `markValue`
+        // recursion keeps their whole graph reachable.
+        for (self.const_roots.items) |v| self.markValue(v);
         // Registered symbols stay alive forever (GlobalSymbolRegistry
         // is a strong reference). Mark them before the sweep.
         {
@@ -1382,6 +1418,11 @@ pub const Heap = struct {
         for (self.handle_scopes.items) |scope| {
             for (scope.handles.items) |r| self.markValue(r);
         }
+        // Chunk-constant heap values — permanently-live roots; the
+        // template graph / BigInt literals (built young at compile
+        // time) are promoted on the first minor cycle and stay
+        // reachable thereafter.
+        for (self.const_roots.items) |v| self.markValue(v);
         {
             var rit = self.symbol_registry.iterator();
             while (rit.next()) |e| {
@@ -1652,6 +1693,9 @@ pub const Heap = struct {
             if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
         }
         if (f.prototype) |p| self.markValue(taggedObject(p));
+        // §10.2.3 [[HomeObject]] — see the `markValue` function arm.
+        if (f.home_object) |ho| self.markValue(taggedObject(ho));
+        if (f.home_function) |hf| self.markValue(taggedFunction(hf));
         self.markValue(f.captured_this);
         self.markValue(f.captured_new_target);
         if (f.bound_target) |bt| self.markValue(taggedFunction(bt));

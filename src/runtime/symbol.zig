@@ -24,9 +24,13 @@ pub const JSSymbol = struct {
     /// the variant from a raw pointer (currently the
     /// pointer-tag bit suffices and `kind` is informational).
     kind: HeapKind = .symbol,
-    /// Optional description supplied to `Symbol(desc)`. Owned
-    /// by the heap's strings list (interned through allocation;
-    /// no per-Symbol allocation).
+    /// Optional description supplied to `Symbol(desc)`. Owned by
+    /// the Symbol itself — duplicated into allocator memory at
+    /// `init` and freed in `deinit`. It used to borrow a slice
+    /// from a heap `JSString`, but `markValue` only sets a
+    /// Symbol's mark bit (Symbols are leaves) and never traced
+    /// that backing string, so a GC swept it and the description
+    /// dangled — observed as garbled `String(symbol)` output.
     description: ?[]const u8,
     /// Stable property-key string used when this Symbol is the
     /// computed-key argument to `obj[sym]`. For well-known
@@ -55,12 +59,17 @@ pub const JSSymbol = struct {
     in_remembered_set: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, description: ?[]const u8, prop_key: []const u8) !*JSSymbol {
+        // Own the description: duplicate it so its lifetime is the
+        // Symbol's, not some heap string the GC may reclaim.
+        const owned_desc: ?[]const u8 = if (description) |d| try allocator.dupe(u8, d) else null;
+        errdefer if (owned_desc) |d| allocator.free(d);
         const s = try allocator.create(JSSymbol);
-        s.* = .{ .description = description, .prop_key = prop_key };
+        s.* = .{ .description = owned_desc, .prop_key = prop_key };
         return s;
     }
 
     pub fn deinit(self: *JSSymbol, allocator: std.mem.Allocator) void {
+        if (self.description) |d| allocator.free(d);
         allocator.free(self.prop_key);
         allocator.destroy(self);
     }

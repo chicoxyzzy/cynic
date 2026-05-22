@@ -4094,6 +4094,13 @@ pub fn constructValue(
         }
     }
     if (target.native_callback != null or target.is_generator or target.is_async or target.chunk == null) {
+        // Root the freshly allocated instance across the call — a
+        // native constructor that re-enters JS (a user `toString` /
+        // `valueOf` during argument coercion) can trigger a GC while
+        // `this_arg` is still only a native-stack local.
+        const ctor_scope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer ctor_scope.close();
+        ctor_scope.push(this_arg) catch return error.OutOfMemory;
         const outcome = try callJSFunction(allocator, realm, target, this_arg, args);
         switch (outcome) {
             .value, .yielded => |v| {
@@ -6133,6 +6140,16 @@ fn runFrames(
                     // For native constructors, `this` is the freshly
                     // allocated instance (the §13.3.5.1.1 fallback).
                     const native_this: Value = this_value;
+                    // The instance is reachable only through this Zig
+                    // local until the native returns and we publish it
+                    // to `acc`. A native constructor that re-enters JS
+                    // — a user `toString` / `valueOf` / `@@toPrimitive`
+                    // run while coercing an argument — can trigger a GC
+                    // mid-call; root the instance so the sweep can't
+                    // free it out from under the native.
+                    const ctor_scope = realm.heap.openScope() catch return error.OutOfMemory;
+                    defer ctor_scope.close();
+                    ctor_scope.push(this_value) catch return error.OutOfMemory;
                     const result = native(realm, native_this, args) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.NativeThrew => {

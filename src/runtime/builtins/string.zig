@@ -511,6 +511,14 @@ pub fn stringMatch(realm: *Realm, this_value: Value, args: []const Value) Native
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
     result.prototype = realm.intrinsics.array_prototype;
     result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    // The match loop calls `exec` (JS re-entry → GC) on every step;
+    // root the result array, the source string and the regex so a
+    // mid-loop sweep can't free a native-stack-only local.
+    const match_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer match_scope.close();
+    match_scope.push(heap_mod.taggedObject(result)) catch return error.OutOfMemory;
+    match_scope.push(Value.fromString(s)) catch return error.OutOfMemory;
+    match_scope.push(re) catch return error.OutOfMemory;
     var idx: i32 = 0;
     var ibuf: [16]u8 = undefined;
     var prev_last_index: i32 = -1;
@@ -1354,6 +1362,14 @@ pub fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) Native
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    // `out` is the result array. The separator `ToString` below and
+    // the `regexSplit` path both re-enter JS and can trigger a GC
+    // while `out` is still a native-stack-only local — root it (and
+    // the source string) for the whole builder.
+    const split_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer split_scope.close();
+    split_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+    split_scope.push(Value.fromString(s)) catch return error.OutOfMemory;
 
     // §22.1.3.23 — when separator is a regex (we already filtered
     // out the @@split dispatch in `stringSplitDispatched`), drive
@@ -1623,6 +1639,14 @@ fn regexSplit(
     const source_v = try intrinsics.getPropertyChain(realm, regex_obj, "source");
     const splitter_v = try regExpCreate(realm, source_v, new_flags);
     const splitter = heap_mod.valueAsPlainObject(splitter_v) orelse return throwTypeError(realm, "split: failed to construct splitter");
+    // The split loop drives `exec` on `splitter` repeatedly (JS
+    // re-entry → GC). Root the splitter regex, the source string and
+    // the result array so a mid-loop sweep can't free them.
+    const rs_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer rs_scope.close();
+    rs_scope.push(heap_mod.taggedObject(splitter)) catch return error.OutOfMemory;
+    rs_scope.push(Value.fromString(s)) catch return error.OutOfMemory;
+    rs_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
 
     // §22.2.6.14 step 15 — empty string fast path: one exec; if
     // null, return `[str]`; else `[]`.
@@ -1858,6 +1882,17 @@ pub fn regexReplace(
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
+    // §22.2.6.11 — both `RegExpExec` and a functional replacer
+    // re-enter JS and can trigger a GC. The source string, the
+    // (possibly freshly-coerced) replacement value and the regex
+    // object are all native-stack locals; root them across the
+    // whole match loop. The per-iteration `match_arr` / `whole`
+    // get their own inner scope inside the loop body.
+    const repl_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer repl_scope.close();
+    repl_scope.push(Value.fromString(s)) catch return error.OutOfMemory;
+    repl_scope.push(repl_v) catch return error.OutOfMemory;
+    repl_scope.push(heap_mod.taggedObject(regex_obj)) catch return error.OutOfMemory;
     // Two parallel cursors into the source: `byte_pos` walks the
     // UTF-8 bytes (for slicing into `s.flatBytes()`); `unit_pos` walks
     // UTF-16 code units (matching the index space that `exec`'s
@@ -1871,12 +1906,20 @@ pub fn regexReplace(
         const exec_result = try regexExecCall(realm, regex_obj, s);
         if (exec_result.isNull()) break;
         const match_arr = heap_mod.valueAsPlainObject(exec_result) orelse break;
+        // The match array and the whole-match string survive the
+        // functional-replacer GC only if rooted: the captures live
+        // in `match_arr.elements`, so rooting `match_arr` keeps the
+        // whole capture set reachable through `appendRegexReplacement`.
+        const iter_scope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer iter_scope.close();
+        iter_scope.push(exec_result) catch return error.OutOfMemory;
         // §22.2.6.11 step 13.c — read "0" first, ToString-coerce.
         // The spec ordering is: matchStr = ? ToString(? Get(result,
         // "0")) before any other field read. Use the accessor-aware
         // chain walk so a user-installed `get 0` getter fires.
         const whole_v = try intrinsics.getPropertyChain(realm, match_arr, "0");
         const whole: *JSString = try intrinsics.stringifyArg(realm, whole_v);
+        iter_scope.push(Value.fromString(whole)) catch return error.OutOfMemory;
         // §22.2.6.11 step 13.d — `position = ? ToIntegerOrInfinity(?
         // Get(result, "index"))`, clamped to [0, lengthS] (step 13.e).
         const idx_v = try intrinsics.getPropertyChain(realm, match_arr, "index");
