@@ -126,16 +126,14 @@ code construction (aligns with SES).
 
 - **Tail-call optimization (PTC).** See the dedicated section
   below.
-- **`typeof` of a callable proxy returning `"function"`.**
 - **Incremental / concurrent GC marking.** The generational
   collector — young/mature split, write barrier, remembered set,
   `collectYoung` with promotion-by-relink — has shipped (see the
   Performance section); incremental marking of the mature set is
   the remaining GC step.
-- **Inner `yield*` `.return` non-Object → TypeError** and
-  **yield-thenable resolving-fn metadata** (the remaining
-  scattered async-generator residuals; the bulk of the
-  `yield*` protocol landed in May 2026).
+- **`Iterator.zipKeyed` conformance.** The keyed variant is
+  installed but incomplete — see the `joint-iteration` bullet
+  under "Pre-Stage-4 proposals shipped".
 
 **Recently landed (was in progress; now done).**
 
@@ -417,19 +415,22 @@ place to revisit. The current set:
   argument's properties through internal maps rather than the
   spec's [[OwnPropertyKeys]] / [[GetOwnProperty]] / [[Get]]
   operations (so a Proxy-instrumented `iterables` observes no
-  accesses and the result comes back empty), emits `zip`-worded
-  error messages from the `zipKeyed` path, gets the IteratorClose
-  order wrong on abrupt completion, and `result-is-iterator.js`
-  cannot reach `%IteratorHelperPrototype%`. These are conformance
-  bugs in an experimental Stage-3 proposal, **not** memory-safety
-  issues — a verifier-armed (`ReleaseSafe`, `verifyRememberedSet`
-  + freed-memory poison) `--gc-threshold=1` run over the
-  `joint-iteration` phase is clean: no un-barriered edge, no
-  freed-memory read. The zip wrapper's per-input state lives in
-  the typed `IteratorHelperState.zip_inputs` slot, so it carries
-  no observable `__cynic_*` own property. Off by default in the
-  CLI and excluded from headline conformance, so it doesn't gate
-  a release.
+  accesses), emits `zip`-worded error messages from the
+  `zipKeyed` path, gets the IteratorClose order wrong on abrupt
+  completion, and `result-is-iterator.js` cannot reach
+  `%IteratorHelperPrototype%`. These are conformance bugs in an
+  experimental Stage-3 proposal — they fail identically at the
+  default and `--gc-threshold=1` thresholds. The earlier
+  GC-residual (zipKeyed result objects came back empty under
+  gc-threshold=1) was a key-anchoring dangle — `storeZipResult`
+  borrowed the result key slice from the zip wrapper's
+  `zip_inputs`, which dies with the wrapper — and is **fixed**:
+  the keyed path now `setComputedOwned`-anchors the key onto the
+  result object. The zip wrapper's per-input state lives in the
+  typed `IteratorHelperState.zip_inputs` slot, so it carries no
+  observable `__cynic_*` own property. Off by default in the CLI
+  and excluded from headline conformance, so it doesn't gate a
+  release.
 - **`upsert`** (Stage 3) — `Map.prototype.{getOrInsert,
   getOrInsertComputed}` and the corresponding pair on
   `WeakMap.prototype`. Installer in

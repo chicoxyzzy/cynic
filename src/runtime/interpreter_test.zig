@@ -3219,6 +3219,19 @@ test "GC: Iterator.zip survives gc_threshold=1" {
     , 66);
 }
 
+test "GC: Iterator.zipKeyed result keys survive gc_threshold=1" {
+    // `storeZipResult` must `setComputedOwned`-anchor each result
+    // key onto the tuple object — a plain `set` borrows the slice
+    // from the zip wrapper's `zip_inputs`, which dies when the
+    // iterator is dropped, leaving the tuple's keys dangling. The
+    // reads below run after the wrapper is unreachable, so a
+    // gc-threshold=1 sweep would reuse the freed key bytes.
+    try expectScriptIntUnderGcPressure(
+        \\const r = Array.from(Iterator.zipKeyed({ a: [1, 2], b: [10, 20] }));
+        \\r[0].a + r[0].b + r[1].a + r[1].b;
+    , 33);
+}
+
 test "GC: Map iterator survives gc_threshold=1" {
     // The Map iterator's [[IteratedMap]] / [[MapNextIndex]] /
     // [[MapIterationKind]] live on the typed `map_set_iter` slot;

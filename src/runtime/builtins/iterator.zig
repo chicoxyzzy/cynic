@@ -2102,6 +2102,13 @@ fn zipNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
         result_obj.prototype = realm.intrinsics.array_prototype;
         result_obj.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     }
+    // `result_obj` is filled across the step loop below, which
+    // re-enters JS (`stepZipIter`, `iterGet`) and can GC. Root it
+    // — without this, gc-threshold=1 sweeps the half-built result
+    // and `storeZipResult` writes into freed memory.
+    const result_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer result_scope.close();
+    result_scope.push(heap_mod.taggedObject(result_obj)) catch return error.OutOfMemory;
 
     var any_active: bool = false;
     var i: i32 = 0;
@@ -2215,6 +2222,9 @@ fn zipNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
             closeAllExcept(realm, state, -1);
             return err;
         };
+        // `storeZipResult` allocates (the result key string, the
+        // property-map slot) before it stores `value` — root it.
+        result_scope.push(value) catch return error.OutOfMemory;
         try storeZipResult(realm, state, result_obj, @intCast(i), value, keyed);
         any_active = true;
     }
@@ -2253,7 +2263,15 @@ fn storeZipResult(
         const k_v = state.zip_inputs.items[i].key;
         if (k_v.isString()) {
             const s: *JSString = @ptrCast(@alignCast(k_v.asString()));
-            result_obj.set(realm.allocator, s.flatBytes(), value) catch return error.OutOfMemory;
+            // Anchor the key JSString onto `result_obj`. A plain
+            // `set` would borrow the key slice from `s`, which is
+            // owned by the zip wrapper's `zip_inputs`; once the
+            // wrapper is collected (the user drops the iterator)
+            // that slice dangles and a gc-threshold=1 sweep reuses
+            // the bytes, so the result object's keys read as
+            // garbage. `setComputedOwned` keeps `s` alive for as
+            // long as the result object is reachable.
+            result_obj.setComputedOwned(realm.allocator, s, value) catch return error.OutOfMemory;
         }
     } else {
         var ibuf: [24]u8 = undefined;
@@ -2320,6 +2338,12 @@ fn iteratorZipKeyed(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // GetIteratorFlattenable.
     const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer key_scope.close();
+    // `iterables_obj` is dereferenced — and re-read via `iterGet` —
+    // for every key across the loop below, which re-enters JS and
+    // can GC. Root the `iterables` argument for the whole walk;
+    // without it gc-threshold=1 sweeps the user's object mid-walk
+    // and the keys read back as undefined (empty result).
+    key_scope.push(iterables_v) catch return error.OutOfMemory;
     const all_keys = try @import("object.zig").ownPropertyKeysOrdered(realm, iterables_obj, key_scope);
     defer realm.allocator.free(all_keys);
 
