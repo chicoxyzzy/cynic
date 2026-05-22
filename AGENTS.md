@@ -435,6 +435,13 @@ the workflow plainly and any agent or human can follow them by hand.
 
 - Comments cite the ECMA-262 section that motivates the code.
   `§13.3.1 NewTarget` beats `// new.target`.
+- Development-stage labels (a multi-phase perf effort's "Phase 1
+  / sub-step 2a", a "rung", a "Stage N") belong in a code comment
+  or commit message **only when the stage is documented somewhere
+  durable** — a ROADMAP entry, a design doc — so a reader can look
+  it up. Ad-hoc, session-internal plan labels don't: describe what
+  the code does (cite the spec section) and what the change is,
+  not its position in a plan only this session knew about.
 - Diagnostics over panics: lexer and parser accumulate
   `Diagnostic` records; the harness scores against the JS error
   class via `Code.errorClass()`.
