@@ -102,19 +102,62 @@ is now exposed to mid-call collection. Before the trigger landed,
 `heap.collect` was effectively unreachable, so this category of bug
 was silently inert.
 
-The contract: any native that holds a pointer across a JS sub-call
-must register it on a `HandleScope`. Open one with `heap.openScope()`,
-push values via `scope.push(v)`, close it with `scope.close()` (or
-`defer scope.close()` for the common case). Open scopes are walked as
-roots inside `heap.collect`. Natives that allocate-and-immediately-use
-without re-entering JS in between are safe without a scope.
+The contract: any native that holds a heap pointer (`*JSObject`,
+`*JSString`, …) across an operation that can re-enter JS must keep
+it reachable from a GC root for that window. The usual tool is a
+`HandleScope`: open one with `heap.openScope()`, push values via
+`scope.push(v)`, close it with `scope.close()` (`defer scope.close()`
+for the common case). Open scopes are walked as roots by every
+collection. A native that allocates and immediately uses a value
+without re-entering JS in between needs no scope.
 
-The 734-test unit suite plus the test262 runtime sweep both pass
-under the new trigger, which means the existing built-ins are
-mostly already in compliance — but the audit isn't finished. When a
-specific test starts failing only under high allocation pressure
-(reproducible with `realm.heap.gc_threshold = 1`), the suspect is a
-native missing a `HandleScope`.
+"Re-enters JS" is broader than an explicit `callJSFunction`: a
+`ToString` / `ToNumber` / `@@toPrimitive` argument coercion, an
+accessor getter reached through `getPropertyChain`, the iterator
+protocol, a Proxy trap, and a user callback all run JS and so all
+can trigger a collection. Three recurring shapes:
+
+  * **Result builders** — a native allocates an output object /
+    array, then loops calling user code (a comparator, a mapper,
+    `next()`); the output and any accumulators must be on a scope.
+  * **Native constructors** — the *interpreter* pre-allocates the
+    instance and hands it to the native as `this`; if the native
+    re-enters JS while coercing an argument the instance can be
+    swept. The `new_call` opcode and `constructValue` root it on the
+    `Heap.native_ctor_roots` stack; a native that allocates its own
+    instance (the `defers_proto_lookup` path) roots it itself.
+  * **Constants** — objects and BigInt literals parked in a chunk's
+    constant pool are not pinned the way constant strings are; they
+    are registered in `Heap.const_roots`. A new kind of heap
+    constant needs the same treatment.
+
+Two failure modes live next door but are NOT `HandleScope` bugs:
+a missing **generational write barrier** on a raw `setIndexed` /
+`properties.put` (route through `heap.storeProperty` /
+`storeIndexed`, or call `heap.writeBarrier` before the raw store);
+and a **missing mark edge** — a typed slot `markValue` /
+`markObjectInternalSlots` forgot to trace (e.g. a function's
+`home_object`, a symbol's description).
+
+### Finding these bugs
+
+Run any suspect area under maximum allocation pressure:
+
+    zig build test262 -Dtest262-debug=true -- \
+      --gc-threshold=1 --filter=<area>
+
+`--gc-threshold=1` collects on every allocation, so a pointer held
+unrooted across a re-entry is freed immediately — the failure is
+deterministic instead of a rare flake. Building the harness Debug
+(or `-Doptimize=ReleaseSafe`) also arms `Heap.verifyRememberedSet`,
+which before every minor cycle asserts every routed-setter
+mature→young edge is remembered and names the exact
+`(container, field, young-target)` triple of an un-barriered store.
+A use-after-free surfaces as a segfault at `0xaa…` (freed-memory
+poison) whose backtrace names the native. The verifier and the
+poison are compiled out of the default ReleaseFast harness, so a
+clean `zig build test262` does **not** prove the rooting contract
+holds — only the `--gc-threshold=1` Debug/ReleaseSafe run does.
 
 ## Tunables
 

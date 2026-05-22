@@ -4097,10 +4097,11 @@ pub fn constructValue(
         // Root the freshly allocated instance across the call — a
         // native constructor that re-enters JS (a user `toString` /
         // `valueOf` during argument coercion) can trigger a GC while
-        // `this_arg` is still only a native-stack local.
-        const ctor_scope = realm.heap.openScope() catch return error.OutOfMemory;
-        defer ctor_scope.close();
-        ctor_scope.push(this_arg) catch return error.OutOfMemory;
+        // `this_arg` is still only a native-stack local. The
+        // `native_ctor_roots` stack is allocation-free at steady
+        // state, unlike a `HandleScope` per construct.
+        realm.heap.pushNativeRoot(this_arg) catch return error.OutOfMemory;
+        defer realm.heap.popNativeRoot();
         const outcome = try callJSFunction(allocator, realm, target, this_arg, args);
         switch (outcome) {
             .value, .yielded => |v| {
@@ -6146,10 +6147,11 @@ fn runFrames(
                     // — a user `toString` / `valueOf` / `@@toPrimitive`
                     // run while coercing an argument — can trigger a GC
                     // mid-call; root the instance so the sweep can't
-                    // free it out from under the native.
-                    const ctor_scope = realm.heap.openScope() catch return error.OutOfMemory;
-                    defer ctor_scope.close();
-                    ctor_scope.push(this_value) catch return error.OutOfMemory;
+                    // free it out from under the native. The
+                    // `native_ctor_roots` stack is allocation-free at
+                    // steady state, unlike a `HandleScope` per `new`.
+                    realm.heap.pushNativeRoot(this_value) catch return error.OutOfMemory;
+                    defer realm.heap.popNativeRoot();
                     const result = native(realm, native_this, args) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.NativeThrew => {

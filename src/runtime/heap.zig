@@ -277,6 +277,19 @@ pub const Heap = struct {
     /// index keys) reachable. Realm-lifetime; freed in `deinit`.
     const_roots: std.ArrayListUnmanaged(Value) = .empty,
 
+    /// Native-constructor instance roots — a LIFO stack of the
+    /// freshly-allocated instances currently "in flight" inside a
+    /// native constructor call. The `new_call` opcode / `constructValue`
+    /// push the instance here before invoking the native and pop it
+    /// after; a GC triggered by the native re-entering JS (argument
+    /// coercion, an executor callback) marks the stack so the instance
+    /// can't be swept mid-construction. A plain `Value` stack rather
+    /// than a `HandleScope` per construct — the backing capacity is
+    /// retained across calls, so steady-state push/pop is allocation-
+    /// free (a `HandleScope` per `new` cost two allocs each). Balanced
+    /// push/pop keeps it bounded; freed in `deinit`.
+    native_ctor_roots: std.ArrayListUnmanaged(Value) = .empty,
+
     /// Remembered set — every mature container that the write
     /// barrier has observed storing a pointer to a young object.
     /// `collectYoung` scans these as additional roots so a young
@@ -471,6 +484,7 @@ pub const Heap = struct {
         self.bigints_mature.deinit(self.allocator);
         self.remembered.deinit(self.allocator);
         self.const_roots.deinit(self.allocator);
+        self.native_ctor_roots.deinit(self.allocator);
         self.handle_scopes.deinit(self.allocator);
     }
 
@@ -1271,6 +1285,8 @@ pub const Heap = struct {
         // arrays, BigInt literals) — permanently live; `markValue`
         // recursion keeps their whole graph reachable.
         for (self.const_roots.items) |v| self.markValue(v);
+        // Native-constructor instances currently in flight.
+        for (self.native_ctor_roots.items) |v| self.markValue(v);
         // Registered symbols stay alive forever (GlobalSymbolRegistry
         // is a strong reference). Mark them before the sweep.
         {
@@ -1423,6 +1439,8 @@ pub const Heap = struct {
         // time) are promoted on the first minor cycle and stay
         // reachable thereafter.
         for (self.const_roots.items) |v| self.markValue(v);
+        // Native-constructor instances currently in flight.
+        for (self.native_ctor_roots.items) |v| self.markValue(v);
         {
             var rit = self.symbol_registry.iterator();
             while (rit.next()) |e| {
@@ -1825,6 +1843,18 @@ pub const Heap = struct {
         scope.* = .{ .heap = self };
         try self.handle_scopes.append(self.allocator, scope);
         return scope;
+    }
+
+    /// Push a native-constructor instance onto the in-flight root
+    /// stack — see `native_ctor_roots`. Pair every call with a
+    /// `defer heap.popNativeRoot()`.
+    pub fn pushNativeRoot(self: *Heap, v: Value) !void {
+        try self.native_ctor_roots.append(self.allocator, v);
+    }
+
+    /// Pop the most recent native-constructor instance root.
+    pub fn popNativeRoot(self: *Heap) void {
+        _ = self.native_ctor_roots.pop();
     }
 
     // -----------------------------------------------------------------

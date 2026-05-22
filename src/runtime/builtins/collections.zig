@@ -729,6 +729,15 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const next_v = iter_obj.get("next");
     const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "iterator.next is not callable");
 
+    // The loop drives `next()` and the grouping callback — both
+    // re-enter JS and can GC. Root the result Map and the iterator
+    // for the whole loop; `markValue(out)` keeps every accumulated
+    // bucket reachable through `out.map_data`.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+    scope.push(iter) catch return error.OutOfMemory;
+
     const max_iter: i64 = 1 << 24;
     var i: i64 = 0;
     while (i < max_iter) : (i += 1) {

@@ -735,7 +735,10 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // default `{writable, enumerable, configurable}: true` flags.
     if (!receiver_obj.extensible) return Value.false_;
     const owned_k = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
-    receiver_obj.set(realm.allocator, owned_k.flatBytes(), v) catch return error.OutOfMemory;
+    // §10.1.9.2 CreateDataProperty — anchor the heap key string on
+    // the receiver. Plain `set` borrows the slice; the JSString is
+    // otherwise unreferenced and a GC frees it, dangling the key.
+    receiver_obj.setComputedOwned(realm.allocator, owned_k, v) catch return error.OutOfMemory;
     return Value.true_;
 }
 
@@ -803,7 +806,10 @@ fn reflectSetOnReceiver(realm: *Realm, receiver_v: Value, key_slice: []const u8,
     }
     if (!receiver_obj.extensible) return Value.false_;
     const owned_k = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
-    receiver_obj.set(realm.allocator, owned_k.flatBytes(), v) catch return error.OutOfMemory;
+    // §10.1.9.2 CreateDataProperty — anchor the heap key string on
+    // the receiver. Plain `set` borrows the slice; the JSString is
+    // otherwise unreferenced and a GC frees it, dangling the key.
+    receiver_obj.setComputedOwned(realm.allocator, owned_k, v) catch return error.OutOfMemory;
     return Value.true_;
 }
 

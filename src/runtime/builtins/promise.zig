@@ -1624,6 +1624,14 @@ fn promiseAll(realm: *Realm, this_value: Value, args: []const Value) NativeError
     values.prototype = realm.intrinsics.array_prototype;
     values.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     const state = try allocAggState(realm, .all, cap, values);
+    // `iterateAggregator` drives `resolveInputAsPromise` / `.then`
+    // per input — both re-enter JS and can GC. Root `state` for the
+    // whole walk; it holds the values/errors array and the
+    // capability closures (and, through the resolve closure's bound
+    // `this`, the result promise).
+    const agg_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer agg_scope.close();
+    agg_scope.push(heap_mod.taggedObject(state)) catch return error.OutOfMemory;
     var ctx = AggIterCtx{ .state = state, .cap = cap };
     iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, aggregatorAllProcess) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -1723,6 +1731,14 @@ fn promiseAllSettled(realm: *Realm, this_value: Value, args: []const Value) Nati
     values.prototype = realm.intrinsics.array_prototype;
     values.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     const state = try allocAggState(realm, .all_settled, cap, values);
+    // `iterateAggregator` drives `resolveInputAsPromise` / `.then`
+    // per input — both re-enter JS and can GC. Root `state` for the
+    // whole walk; it holds the values/errors array and the
+    // capability closures (and, through the resolve closure's bound
+    // `this`, the result promise).
+    const agg_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer agg_scope.close();
+    agg_scope.push(heap_mod.taggedObject(state)) catch return error.OutOfMemory;
     var ctx = AggIterCtx{ .state = state, .cap = cap };
     iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, aggregatorAllSettledProcess) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -1810,6 +1826,14 @@ fn promiseAny(realm: *Realm, this_value: Value, args: []const Value) NativeError
     errors.prototype = realm.intrinsics.array_prototype;
     errors.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     const state = try allocAggState(realm, .any, cap, errors);
+    // `iterateAggregator` drives `resolveInputAsPromise` / `.then`
+    // per input — both re-enter JS and can GC. Root `state` for the
+    // whole walk; it holds the values/errors array and the
+    // capability closures (and, through the resolve closure's bound
+    // `this`, the result promise).
+    const agg_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer agg_scope.close();
+    agg_scope.push(heap_mod.taggedObject(state)) catch return error.OutOfMemory;
     var ctx = AggIterCtx{ .state = state, .cap = cap };
     iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, aggregatorAnyProcess) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
