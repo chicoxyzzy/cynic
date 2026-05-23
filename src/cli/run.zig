@@ -20,7 +20,13 @@ const Value = cynic.runtime.Value;
 const JSString = cynic.runtime.JSString;
 const FeatureSet = cynic.runtime.FeatureSet;
 
-pub fn run(allocator: std.mem.Allocator, io: std.Io, paths: []const []const u8, feature_flags: FeatureSet) !void {
+pub fn run(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    paths: []const []const u8,
+    feature_flags: FeatureSet,
+    gc_threshold: ?u32,
+) !void {
     std.debug.assert(paths.len > 0);
 
     // Each chunk holds borrowed slices into its source buffer
@@ -36,6 +42,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, paths: []const []const u8, 
     var realm = Realm.init(allocator);
     defer realm.deinit();
     realm.feature_flags = feature_flags;
+    // Apply the `--gc-threshold` knob before `installBuiltins`
+    // so the builtin-install allocations themselves run at the
+    // requested cadence (matters at `--gc-threshold=1` where every
+    // alloc collects — exposes a missing root in builtin init).
+    if (gc_threshold) |n| realm.heap.setGcThreshold(n);
     try realm.installBuiltins();
 
     var last_outcome: cynic.runtime.interpreter.RunResult = .{ .value = Value.undefined_ };

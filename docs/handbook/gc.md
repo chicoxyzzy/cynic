@@ -300,10 +300,11 @@ The README has these as future work and they remain so:
 - **Concurrent / parallel sweep.** Useful once the heap is big enough
   that a single-threaded sweep eats real wall-time. Not a current
   bottleneck — test262's typical resident set is well under 50 MB.
-- **A `--gc-threshold` CLI flag for `cynic run`.** The test262
-  harness already exposes `--gc-threshold=N` (and `--top-rss=N`
-  for the per-fixture RSS-delta report); the runtime CLI doesn't
-  yet thread it through.
+- **A `--top-rss` CLI flag for `cynic run`.** The test262
+  harness exposes the per-fixture RSS-delta report; the runtime
+  CLI doesn't yet thread it through. (`--gc-threshold=<n>` is
+  now wired — `cynic --gc-threshold=1 run foo.js` collects on
+  every allocation for stress testing.)
 
 ## Prior art
 

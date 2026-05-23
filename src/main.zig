@@ -24,45 +24,27 @@ pub fn main(init: std.process.Init) !void {
     var args: []const []const u8 = raw.items;
 
     // Top-level flags — feature toggles for pre-Stage-4 proposals
-    // Cynic ships ahead of the published edition. Default is empty;
-    // flags below are processed in argument order so a later flag
-    // wins (e.g. `--enable-experimental --disable=upsert` enables
-    // every tracked feature *except* upsert). See
-    // `src/runtime/features.zig`.
-    var feature_flags: FeatureSet = FeatureSet.initEmpty();
-
-    while (args.len > 0) {
-        const a = args[0];
-        if (std.mem.eql(u8, a, "--list-features")) {
-            args = args[1..];
-            try listFeatures(io);
-            return;
-        } else if (std.mem.eql(u8, a, "--enable-experimental")) {
-            args = args[1..];
-            feature_flags = FeatureSet.initFull();
-        } else if (std.mem.eql(u8, a, "--disable-experimental")) {
-            args = args[1..];
-            feature_flags = FeatureSet.initEmpty();
-        } else if (std.mem.startsWith(u8, a, "--enable=")) {
-            args = args[1..];
-            const name = a["--enable=".len..];
-            const flag = FeatureFlag.fromName(name) orelse {
-                try unknownFeature(io, name);
-                std.process.exit(1);
-            };
-            feature_flags.insert(flag);
-        } else if (std.mem.startsWith(u8, a, "--disable=")) {
-            args = args[1..];
-            const name = a["--disable=".len..];
-            const flag = FeatureFlag.fromName(name) orelse {
-                try unknownFeature(io, name);
-                std.process.exit(1);
-            };
-            feature_flags.remove(flag);
-        } else {
-            break;
-        }
+    // Cynic ships ahead of the published edition, plus the
+    // `--gc-threshold=<n>` allocation-pressure GC knob. See
+    // `parseTopLevelFlags` for the option struct.
+    const parsed = parseTopLevelFlags(args);
+    if (parsed.err) |err| switch (err) {
+        .unknown_feature => {
+            try unknownFeature(io, parsed.bad_token.?);
+            std.process.exit(1);
+        },
+        .invalid_gc_threshold => {
+            try invalidGcThreshold(io, parsed.bad_token.?);
+            std.process.exit(1);
+        },
+    };
+    if (parsed.list_features) {
+        try listFeatures(io);
+        return;
     }
+    args = parsed.remaining;
+    const feature_flags = parsed.feature_flags;
+    const gc_threshold = parsed.gc_threshold;
 
     if (args.len == 0) {
         try printUsage(io);
@@ -114,7 +96,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.MissingArgument;
         }
-        try eval_cmd.run(allocator, io, args[0], feature_flags);
+        try eval_cmd.run(allocator, io, args[0], feature_flags, gc_threshold);
     } else if (std.mem.eql(u8, sub, "run")) {
         // `cynic run a.js b.js c.js` evaluates each file in order
         // against one realm — the same shape every other engine's
@@ -123,7 +105,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.MissingArgument;
         }
-        try run_cmd.run(allocator, io, args, feature_flags);
+        try run_cmd.run(allocator, io, args, feature_flags, gc_threshold);
     } else if (std.mem.eql(u8, sub, "help") or std.mem.eql(u8, sub, "--help") or std.mem.eql(u8, sub, "-h")) {
         try printUsage(io);
     } else {
@@ -164,6 +146,9 @@ fn printUsage(io: std.Io) !void {
         \\                                   proposal (the default).
         \\  --list-features                  Print available pre-Stage-4 proposals
         \\                                   and exit.
+        \\  --gc-threshold=<n>               Allocation-pressure GC threshold.
+        \\                                   Default 16384; `=1` collects on every
+        \\                                   allocation (stress mode).
         \\
     );
 }
@@ -191,6 +176,16 @@ fn unknownFeature(io: std.Io, name: []const u8) !void {
         &buf,
         "error: unknown feature '{s}'. Run `cynic --list-features` for the available set.\n",
         .{name},
+    );
+    try std.Io.File.stderr().writeStreamingAll(io, msg);
+}
+
+fn invalidGcThreshold(io: std.Io, raw: []const u8) !void {
+    var buf: [256]u8 = undefined;
+    const msg = try std.fmt.bufPrint(
+        &buf,
+        "error: invalid --gc-threshold value '{s}'. Expected a positive integer (default 16384, =1 collects on every allocation).\n",
+        .{raw},
     );
     try std.Io.File.stderr().writeStreamingAll(io, msg);
 }
@@ -260,4 +255,188 @@ fn cmdParse(allocator: std.mem.Allocator, io: std.Io, path: []const u8, mode: Pa
         break;
     };
     if (has_errors) std.process.exit(1);
+}
+
+// ── Top-level flag parser ──────────────────────────────────────────
+// The parsing pulled out of `main` so it's unit-testable. Returns
+// the parsed options plus the remaining args (the subcommand and
+// its own args), or — on a parse failure — the partial state with
+// `err` set and the offending token recorded. Returning the result
+// rather than an `error.X` lets the caller print a focused
+// "couldn't parse '--gc-threshold=abc'" message without re-walking
+// the argv to find the offender.
+
+pub const FlagError = enum {
+    unknown_feature,
+    invalid_gc_threshold,
+};
+
+pub const ParsedFlags = struct {
+    feature_flags: FeatureSet,
+    /// `--gc-threshold=<n>` — when non-null, overrides
+    /// `heap.gc_threshold` (and via `setGcThreshold` the paired
+    /// young threshold) before the realm sees its first
+    /// allocation. `null` ⇒ keep the heap default. The test262
+    /// harness already exposes the same flag; threading it through
+    /// here lets the runtime CLI run a `--gc-threshold=1` stress
+    /// pass without going through the harness binary.
+    gc_threshold: ?u32,
+    /// The unconsumed tail of the argv slice (subcommand + its
+    /// arguments). Empty when no subcommand was supplied — the
+    /// caller prints usage in that case.
+    remaining: []const []const u8,
+    /// On parse failure: which check tripped. `null` on success.
+    err: ?FlagError = null,
+    /// On parse failure: the literal offending token (the
+    /// `<bad>` from `--enable=<bad>` / `--gc-threshold=<bad>`).
+    /// `null` on success.
+    bad_token: ?[]const u8 = null,
+    /// Set when the user asked for `--list-features`. `main`
+    /// honours this short-circuit before checking `remaining`.
+    list_features: bool = false,
+};
+
+pub fn parseTopLevelFlags(args: []const []const u8) ParsedFlags {
+    var out: ParsedFlags = .{
+        .feature_flags = FeatureSet.initEmpty(),
+        .gc_threshold = null,
+        .remaining = args,
+    };
+    var rest = args;
+    while (rest.len > 0) {
+        const a = rest[0];
+        if (std.mem.eql(u8, a, "--list-features")) {
+            out.list_features = true;
+            rest = rest[1..];
+            out.remaining = rest;
+            return out;
+        } else if (std.mem.eql(u8, a, "--enable-experimental")) {
+            rest = rest[1..];
+            out.feature_flags = FeatureSet.initFull();
+        } else if (std.mem.eql(u8, a, "--disable-experimental")) {
+            rest = rest[1..];
+            out.feature_flags = FeatureSet.initEmpty();
+        } else if (std.mem.startsWith(u8, a, "--enable=")) {
+            const name = a["--enable=".len..];
+            const flag = FeatureFlag.fromName(name) orelse {
+                out.err = .unknown_feature;
+                out.bad_token = name;
+                out.remaining = rest;
+                return out;
+            };
+            out.feature_flags.insert(flag);
+            rest = rest[1..];
+        } else if (std.mem.startsWith(u8, a, "--disable=")) {
+            const name = a["--disable=".len..];
+            const flag = FeatureFlag.fromName(name) orelse {
+                out.err = .unknown_feature;
+                out.bad_token = name;
+                out.remaining = rest;
+                return out;
+            };
+            out.feature_flags.remove(flag);
+            rest = rest[1..];
+        } else if (std.mem.startsWith(u8, a, "--gc-threshold=")) {
+            const raw = a["--gc-threshold=".len..];
+            const n = std.fmt.parseInt(u32, raw, 10) catch {
+                out.err = .invalid_gc_threshold;
+                out.bad_token = raw;
+                out.remaining = rest;
+                return out;
+            };
+            // `0` is a valid value for the *internal* setter (the
+            // test262 harness uses it as "fall through to the engine
+            // default"), but a user typing `--gc-threshold=0` on the
+            // CLI almost certainly meant `1` (stress) or `16384`
+            // (default). Reject explicitly so a typo doesn't
+            // silently keep the heap default.
+            if (n == 0) {
+                out.err = .invalid_gc_threshold;
+                out.bad_token = raw;
+                out.remaining = rest;
+                return out;
+            }
+            out.gc_threshold = n;
+            rest = rest[1..];
+        } else {
+            break;
+        }
+    }
+    out.remaining = rest;
+    return out;
+}
+
+const testing = std.testing;
+
+test "parseTopLevelFlags: no flags returns empty feature set and null gc_threshold" {
+    const args = [_][]const u8{ "run", "foo.js" };
+    const parsed = parseTopLevelFlags(&args);
+    try testing.expectEqual(@as(?FlagError, null), parsed.err);
+    try testing.expect(parsed.feature_flags.eql(FeatureSet.initEmpty()));
+    try testing.expectEqual(@as(?u32, null), parsed.gc_threshold);
+    try testing.expectEqual(@as(usize, 2), parsed.remaining.len);
+    try testing.expectEqualStrings("run", parsed.remaining[0]);
+}
+
+test "parseTopLevelFlags: --gc-threshold=N is parsed into options" {
+    const args = [_][]const u8{ "--gc-threshold=1", "run", "foo.js" };
+    const parsed = parseTopLevelFlags(&args);
+    try testing.expectEqual(@as(?FlagError, null), parsed.err);
+    try testing.expectEqual(@as(?u32, 1), parsed.gc_threshold);
+    try testing.expectEqual(@as(usize, 2), parsed.remaining.len);
+    try testing.expectEqualStrings("run", parsed.remaining[0]);
+}
+
+test "parseTopLevelFlags: --gc-threshold accepts the documented default" {
+    const args = [_][]const u8{ "--gc-threshold=16384", "run", "foo.js" };
+    const parsed = parseTopLevelFlags(&args);
+    try testing.expectEqual(@as(?u32, 16384), parsed.gc_threshold);
+}
+
+test "parseTopLevelFlags: --gc-threshold=0 is rejected" {
+    const args = [_][]const u8{"--gc-threshold=0"};
+    const parsed = parseTopLevelFlags(&args);
+    try testing.expectEqual(@as(?FlagError, .invalid_gc_threshold), parsed.err);
+    try testing.expectEqualStrings("0", parsed.bad_token.?);
+}
+
+test "parseTopLevelFlags: --gc-threshold=abc is rejected as non-numeric" {
+    const args = [_][]const u8{"--gc-threshold=abc"};
+    const parsed = parseTopLevelFlags(&args);
+    try testing.expectEqual(@as(?FlagError, .invalid_gc_threshold), parsed.err);
+    try testing.expectEqualStrings("abc", parsed.bad_token.?);
+}
+
+test "parseTopLevelFlags: --gc-threshold composes with other flags in any order" {
+    const args = [_][]const u8{ "--enable-experimental", "--gc-threshold=42", "run", "foo.js" };
+    const parsed = parseTopLevelFlags(&args);
+    try testing.expectEqual(@as(?FlagError, null), parsed.err);
+    try testing.expect(parsed.feature_flags.eql(FeatureSet.initFull()));
+    try testing.expectEqual(@as(?u32, 42), parsed.gc_threshold);
+    try testing.expectEqualStrings("run", parsed.remaining[0]);
+}
+
+test "parseTopLevelFlags: stops at the first non-flag token" {
+    // A flag *after* the subcommand belongs to the subcommand, not
+    // to the top-level parser. (The subcommand's own arg parser
+    // sees `--gc-threshold=…` here and decides what to do with it
+    // — for `run` / `eval` / `parse` today: nothing, since they
+    // own no flags by that name.)
+    const args = [_][]const u8{ "run", "--gc-threshold=99", "foo.js" };
+    const parsed = parseTopLevelFlags(&args);
+    try testing.expectEqual(@as(?u32, null), parsed.gc_threshold);
+    try testing.expectEqual(@as(usize, 3), parsed.remaining.len);
+}
+
+test "parseTopLevelFlags: an unknown --enable=<feature> is rejected" {
+    const args = [_][]const u8{"--enable=bogus-feature-name"};
+    const parsed = parseTopLevelFlags(&args);
+    try testing.expectEqual(@as(?FlagError, .unknown_feature), parsed.err);
+    try testing.expectEqualStrings("bogus-feature-name", parsed.bad_token.?);
+}
+
+test "parseTopLevelFlags: --list-features short-circuits and signals via list_features" {
+    const args = [_][]const u8{ "--list-features", "run", "foo.js" };
+    const parsed = parseTopLevelFlags(&args);
+    try testing.expect(parsed.list_features);
 }
