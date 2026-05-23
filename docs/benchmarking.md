@@ -70,6 +70,31 @@ bench/micros/                    Cynic-specific microbenchmarks
 Web Tooling Benchmark is **deferred** — it needs Node-style module
 resolution, which we don't ship until the module loader lands.
 
+### Custom micro-fixtures
+
+The hand-picked suite in `bench/micros/*.js`. Each fixture targets
+one identifiable cost — dispatch density, allocation churn, GC,
+the property cache, etc. Iteration counts are sized so Cynic's
+wall-time is ~50-100 ms (small-time fixtures get hit by process-
+spawn overhead and timer granularity in the cross-engine harness,
+flagging cells as noisy at `*` >10% spread). Bump the count if
+the fixture drops below ~50 ms on the lead engine.
+
+| Fixture | Iters | Stresses |
+|---|---:|---|
+| `arith_loop` | 5,000,000 | Bytecode dispatch density on `Op.add` / `Op.lt` / `Op.jmp` — int32 fast-path + the threaded-dispatch loop with no property access. Smi-overflow paths are NOT exercised (every step stays int32-clean via `\| 0`). |
+| `prop_access` | 500,000 | Hot named-property reads on a same-shape object — `lda_property` IC hit-rate. Pre-IC: ~3× behind QuickJS-NG. Post-IC (e03f5cd): −66 % on Cynic. The headline cache-effectiveness bench. |
+| `prop_write` | 500,000 | Hot named-property writes on a same-shape object — `sta_property` IC + shape-shadow update + property-bag put. The mirror of `prop_access`. Post-IC (7bad504): −63 % on Cynic. |
+| `array_iter` | 10,000×100 passes | `for-of` over a packed Array — iterator protocol + indexed reads on §10.4.2 Array exotic. The env-hoist (`f719ae3`) was measured here at −69.6 %. |
+| `string_concat` | 300,000 | `s = s + chunk` loop — JSString allocation churn, GC byte-trigger, and the ConsString rope path (`min_cons_byte_len` + depth cap). Iteration count picked to balance Cynic ~70 ms against keeping QuickJS-NG under ~50 ms. |
+| `promise_chain` | 10,000 | `.then` chain — `promise_reaction` microtask queue + per-iter arrow env + per-iter reaction record. **Bounded by an open bug**: longer chains (≥15k at default GC, ≥100 at `--gc-threshold=1`) hit a SIGSEGV / SIGABRT in the reaction drain (see `docs/test262-upstream-gaps.md`). The bump is held below the failure threshold; lift when the bug lands. |
+| `object_alloc` | 400,000 | Fresh-object allocation churn — every iteration produces a new `JSObject` + two string-keyed properties. Heap alloc + GC frequency + property-bag write path. The leanness target for the packed-`JSArray` work (perf roadmap item 2). |
+
+Adding a fixture: drop a `.js` file in `bench/micros/`, append the
+fixture name to the `BENCHES` array in `tools/bench.zig`, then
+document it in the table above. Cross-engine picks it up
+automatically (`tools/bench-cross.sh` globs `bench/micros/*.js`).
+
 ## Measurement protocol
 
 For every (suite, subtest, engine) cell:

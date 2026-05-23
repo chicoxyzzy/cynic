@@ -14,6 +14,48 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-05-23 — cynic `679df99` (full session tip), host `Darwin 25.5.0 arm64`
+
+Session end-state, capturing the property-cache arc + the GC
+follow-ups: `e03f5cd` (lda IC) + `7bad504` (sta IC) + `2c89781`
+(call_method IC) + `9f677b9` (GC mark-colour flip) + `8a9cf22`
+(`--gc-threshold` CLI) + `bc22bc5` (registered-symbol pin) +
+`679df99` (score row refresh).
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 85.22 | 83.68 | 85.86 | 3392 |
+| prop_access | 15.55 | 15.22 | 15.81 | 3408 |
+| prop_write | 31.83 | 31.17 | 31.93 | 3456 |
+| array_iter | 22.91 | 22.45 | 23.06 | 4352 |
+| string_concat | 3.48 | 3.26 | 3.80 | 4288 |
+| promise_chain | 4.29 | 4.11 | 4.61 | 8464 |
+| object_alloc | 23.17 | 23.01 | 23.28 | 9568 |
+
+Δ vs the previous row below (write-IC patch in-session): every
+fixture within ±10 % — `prop_access` −5.6 % (16.47 → 15.55, IC
+hits even tighter), `prop_write` −5.5 % (33.70 → 31.83), the
+others noise. The GC mark-colour flip, registered-symbol pin,
+and `call_method` IC don't move these microbenches measurably
+(no method-heavy fixture exists; the mature heap is too small
+to surface the per-cycle clear-loop saving). Spreads tight
+(≤ ±3 %) except `prop_access` (3.9 %) which is still the
+tightest non-trivial cell.
+
+**Cross-engine context** (`tools/bench-cross.sh`, interpreter
+tier — JIT engines run with their JIT disabled, internal
+compass not recorded here): **`prop_access` 16 ms ties
+QuickJS-NG (16) and beats V8-jitless (35)**, closing the
+documented "~3× behind QuickJS" gap the IC was built to fix.
+`prop_write` 33 ms vs QuickJS 17 — the natural next target,
+likely `JSArray` packed storage (item 2 of the perf roadmap)
+since `prop_write` shares its allocation pattern with
+`object_alloc` (where QuickJS leads 16 vs 24). `arith_loop`
+14 % behind QuickJS, 54 % behind JSC-jitless's LLInt — the
+dispatch-core micro-tuning bucket. JSC ahead of every
+non-LLInt interpreter on every fixture by 30-60 %, the
+LLInt-vs-Zig-switch ceiling for a non-JIT engine.
+
 ### 2026-05-23 — cynic `e03f5cd` + write-IC patch, host `Darwin 25.5.0 arm64`
 
 Both halves of the monomorphic property cache landed: `lda_property`

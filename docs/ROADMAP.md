@@ -134,6 +134,30 @@ code construction (aligns with SES).
 
 **Recently landed (was in progress; now done).**
 
+- **Monomorphic property cache — `lda_property` + `sta_property`
+  + `call_method`.** Three opcodes grew a `u16` IC operand and a
+  chunk-local `inline_caches` / `inline_call_caches` table; the
+  fast path is a single pointer compare against the cached
+  receiver shape (or callee) and a direct `slots[slot]` load /
+  write. Backed by the existing shape transition tree (V8 /
+  JSC / SM lineage). Measured on `bench/micros/`: `prop_access`
+  −66 % (48.94 → 16.47 ms), `prop_write` −63 % (92.24 → 33.70 ms).
+  Polymorphic chain dispatch is the natural follow-up, deferred
+  until a workload surfaces a hot polymorphic site.
+
+- **GC — mark-colour flip replaces per-cycle clear loop.** Each
+  heap kind carries a `mark_color: u1` instead of `marked: bool`;
+  the cycle-start `live_color` flip ages every existing object's
+  `mark_color` to "unmarked" automatically. Eliminates seven
+  linear walks over the mature set per minor cycle. V8 ships
+  this inside `MarkingState`, SpiderMonkey in `MarkingTracer`,
+  JSC's Riptide uses the same idea. Plus: registered symbols
+  (`Symbol.for("k")`) now pin at registration time — the per-
+  cycle re-mark loop over `symbol_registry` is gone too. The
+  `cynic` CLI gained `--gc-threshold=<n>` (parity with the
+  test262 harness flag), so `cynic --gc-threshold=1 run foo.js`
+  runs a stress sweep without going through the harness.
+
 - **"Everything but RegExp" sweep — May 2026** moved Cynic from
   89.39 % to 91.48 % spec / 93.51 % to 98.52 % attempted (+847
   pass). Buckets fully cleared: top-level-await, WeakSet,
@@ -686,18 +710,20 @@ is honest parity with QuickJS-NG — the fairest non-JIT peer;
 matching the JIT engines at full speed is a separate track (see
 *Proper Tail Calls* and the baseline-JIT note).
 
-1. **Inline property-shape caches** — the single biggest win, and
-   the cause of the `prop_access` gap. Every `.x` today is an
-   `ArrayHashMap` hash lookup; with shape (hidden-class) identity
-   a member access collapses to a one-compare shape guard plus a
-   direct slot index. Every major engine built this first — V8
-   hidden classes, JSC structures, SM shape trees. The
-   property-shape *transition tree* + storage scaffolding has
-   landed; the remaining work is wiring monomorphic / polymorphic
-   IC sites into the `lda_property` / `sta_property` opcodes and
-   the object model's slot layout. Architectural and expensive,
-   but it pays for itself many times over and is the prerequisite
-   for most later object-model speedups.
+1. **Inline property-shape caches** — the single biggest win.
+   **Monomorphic shipped** — `lda_property`, `sta_property`, and
+   `call_method` each carry a chunk-local IC cell; the fast path
+   is a shape pointer compare and a `slots[slot]` load on reads,
+   a slot write + bag mirror on writes, and a cached-callee match
+   on call sites. `prop_access` measured at **−66 %** (48.94 →
+   16.47 ms), `prop_write` at **−63 %** (92.24 → 33.70 ms). Every
+   major engine built this first — V8 hidden classes, JSC
+   structures, SM shape trees. Remaining: polymorphic dispatch
+   (a small chain on the cell when the receiver's shape varies
+   between two or three callers — most engines cap at ~4 entries
+   before degrading to megamorphic / dictionary). Worth doing
+   once a real workload surfaces a polymorphic site that's
+   currently slow.
 
 2. **Packed `JSArray` heap kind + leaner object allocation** —
    targets `object_alloc`. A unified array heap kind with packed
