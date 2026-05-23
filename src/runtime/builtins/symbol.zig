@@ -206,6 +206,11 @@ fn symbolFor(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     }
     const sym = realm.heap.allocateSymbol(key_str.flatBytes()) catch return error.OutOfMemory;
     sym.is_registered = true;
+    // §20.4.2.2 GlobalSymbolRegistry has no spec'd eviction —
+    // pin so the GC keeps the entry alive for the realm's
+    // lifetime. Replaces the per-cycle re-mark loop the heap
+    // used to do over `symbol_registry`.
+    sym.pinned = true;
     realm.heap.symbol_registry.put(realm.allocator, key_str.flatBytes(), sym) catch return error.OutOfMemory;
     return heap_mod.taggedSymbol(sym);
 }

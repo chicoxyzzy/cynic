@@ -46,6 +46,15 @@ pub const JSSymbol = struct {
     /// `Symbol.keyFor(s)` consults this. Plain `Symbol(desc)`
     /// produces non-registered symbols.
     is_registered: bool = false,
+    /// Permanently-live: never collected, never needs marking.
+    /// Set on registered symbols (`Symbol.for("k")`) — §20.4.2.2
+    /// GlobalSymbolRegistry has no spec'd eviction path, so a
+    /// registered symbol is a strong root for the realm's lifetime.
+    /// The sweep skips pinned symbols (same mechanism as chunk-
+    /// constant strings); `isWeakReferentLive` short-circuits on
+    /// pinned so `WeakRef(Symbol.for("k"))` keeps observing it
+    /// even when its `mark_color` is stale.
+    pinned: bool = false,
     /// Mark color. `sym.mark_color == heap.live_color` means "live
     /// this cycle". See `JSObject.mark_color` for the protocol.
     mark_color: u1 = 0,
