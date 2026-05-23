@@ -61,7 +61,24 @@ pub const ICCell = struct {
     proto: ?*@import("../runtime/object.zig").JSObject = null,
     proto_shape: ?*Shape = null,
     proto_rev: u64 = 0,
+    /// Index into the receiver's `properties.values()` for the
+    /// shape's `slot`-th key. Cached on `sta_property` IC fill so
+    /// the IC-hit bag mirror collapses from a wyhash + bucket walk
+    /// + key compare (~41 % of `prop_write` samples) to a single
+    /// `values()[bag_index] = acc` store. Sentinel
+    /// `bag_index_uncached` means "not yet captured" (e.g. cell
+    /// filled by `lda_property` which doesn't need this) — in
+    /// that state the IC hit falls back to the hashing
+    /// `properties.put(...)` path.
+    ///
+    /// Stability: shape-stable objects' `properties` map only
+    /// appends on a shape transition (which invalidates the cell
+    /// via the shape pointer compare), so the cached index stays
+    /// valid as long as the cell matches.
+    bag_index: u32 = bag_index_uncached,
 };
+
+pub const bag_index_uncached: u32 = std.math.maxInt(u32);
 
 /// Inline-cache cell for `call_method`. Caches the last callee
 /// observed at the call site so subsequent calls can skip the

@@ -52,8 +52,9 @@ const heap_mod = @import("../heap.zig");
 const intrinsics_mod = @import("../intrinsics.zig");
 const Realm = @import("../realm.zig").Realm;
 const Op = @import("../../bytecode/op.zig").Op;
-const Chunk = @import("../../bytecode/chunk.zig").Chunk;
-const Handler = @import("../../bytecode/chunk.zig").Handler;
+const chunk_mod = @import("../../bytecode/chunk.zig");
+const Chunk = chunk_mod.Chunk;
+const Handler = chunk_mod.Handler;
 const parser_mod = @import("../../parser/parser.zig");
 const compiler_mod = @import("../../bytecode/compiler.zig");
 const module_mod = @import("../module.zig");
@@ -6925,13 +6926,24 @@ pub fn runFrames(
                     const cell = &local_chunk.inline_caches[ic_idx];
                     if (cell.shape != null and cell.shape == obj_in.shape) {
                         obj_in.slots.items[cell.slot] = acc;
-                        // Bag mirror keeps `JSObject.get` (the non-IC
-                        // read), `Object.keys`, `in`, `hasOwn` and the
-                        // `verifyShapeInvariant` GC check honest.
-                        // Hash lookup hits the existing entry — no
-                        // recordKey needed, the key was anchored when
-                        // the shape first transitioned to this slot.
-                        obj_in.properties.put(allocator, key_s.flatBytes(), acc) catch return error.OutOfMemory;
+                        // Bag mirror: keeps direct `obj.properties.get`
+                        // readers (a handful of slow-path builtins),
+                        // `verifyShapeInvariant`, and any caller that
+                        // hasn't migrated to `JSObject.get` (shape-first
+                        // since 4133c7f) honest. Hot path uses the
+                        // cached array index — `values()[bag_index] = acc`
+                        // — collapsing the wyhash + bucket walk + key
+                        // compare that profile flagged at ~41 % of
+                        // `prop_write` samples to a single Value store.
+                        // The cache is filled lazily on first miss (see
+                        // the slow-path refill below).
+                        if (cell.bag_index != chunk_mod.bag_index_uncached and
+                            cell.bag_index < obj_in.properties.count())
+                        {
+                            obj_in.properties.values()[cell.bag_index] = acc;
+                        } else {
+                            obj_in.properties.put(allocator, key_s.flatBytes(), acc) catch return error.OutOfMemory;
+                        }
                         realm.heap.storeInternalSlot(.{ .object = obj_in }, acc);
                         continue :dispatch try decodeNext(code, &ip, &committed);
                     }
@@ -6963,6 +6975,18 @@ pub fn runFrames(
                                     const cell = &local_chunk.inline_caches[ic_idx];
                                     cell.shape = sh;
                                     cell.slot = entry.slot;
+                                    // Capture the bag's array-index for
+                                    // the IC hot path's bag mirror. Safe
+                                    // for shape-stable receivers because
+                                    // shape transitions are the only
+                                    // bag-append site (and they
+                                    // invalidate the cell via the shape
+                                    // pointer compare).
+                                    if (obj_after.properties.getIndex(key_s.flatBytes())) |bi| {
+                                        cell.bag_index = @intCast(bi);
+                                    } else {
+                                        cell.bag_index = chunk_mod.bag_index_uncached;
+                                    }
                                 }
                             }
                         }
