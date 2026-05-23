@@ -1092,12 +1092,16 @@ pub const Heap = struct {
                 o.verifyShapeInvariant();
                 var it = o.properties.iterator();
                 while (it.next()) |entry| self.markValue(entry.value_ptr.*);
-                var pit = o.private_properties.iterator();
-                while (pit.next()) |entry| self.markValue(entry.value_ptr.*);
-                var pait = o.private_accessors.iterator();
-                while (pait.next()) |entry| {
-                    if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
-                    if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+                if (o.privatePropertyIterator()) |pit_outer| {
+                    var pit = pit_outer;
+                    while (pit.next()) |entry| self.markValue(entry.value_ptr.*);
+                }
+                if (o.privateAccessorIterator()) |pait_outer| {
+                    var pait = pait_outer;
+                    while (pait.next()) |entry| {
+                        if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
+                        if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+                    }
                 }
                 if (o.accessorIterator()) |ait_outer| {
                     var ait = ait_outer;
@@ -2169,12 +2173,16 @@ pub const Heap = struct {
         // object arm walks it; this abbreviated copy had dropped it,
         // so a mature instance's young `#field` value was swept out
         // from under it.
-        var ppit = o.private_properties.iterator();
-        while (ppit.next()) |entry| self.markValue(entry.value_ptr.*);
-        var pait = o.private_accessors.iterator();
-        while (pait.next()) |entry| {
-            if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
-            if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+        if (o.privatePropertyIterator()) |ppit_outer| {
+            var ppit = ppit_outer;
+            while (ppit.next()) |entry| self.markValue(entry.value_ptr.*);
+        }
+        if (o.privateAccessorIterator()) |pait_outer| {
+            var pait = pait_outer;
+            while (pait.next()) |entry| {
+                if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
+                if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+            }
         }
         if (o.accessorIterator()) |ait_outer| {
             var ait = ait_outer;

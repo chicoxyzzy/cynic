@@ -421,9 +421,29 @@ pub const JSObjectExtension = struct {
     /// pointer. The GC marker walks every accessor's getter /
     /// setter (which are heap pointers).
     accessors: std.StringArrayHashMapUnmanaged(Accessor) = .empty,
+    /// §7.3.27 class private fields. Per-instance data slots
+    /// installed by `init_private_field` from a class body's
+    /// `#x = value` initializer. The map is keyed by the private
+    /// name's mangled bytes (`#x` after lexing). Only class
+    /// instances carry private state — plain object literals
+    /// never.
+    private_properties: std.StringArrayHashMapUnmanaged(Value) = .empty,
+    /// §15.7 — names in `private_properties` whose [[Kind]] is
+    /// "method" (§7.3.30 PrivateSet step 4). Set semantics, not a
+    /// map: the function value itself lives in `private_properties`;
+    /// this is the brand membership check. Writes to these names
+    /// throw TypeError per spec.
+    private_methods: std.StringArrayHashMapUnmanaged(void) = .empty,
+    /// §15.7 class private accessors — `get #x()` / `set #x(v)`
+    /// pairs. Same shape as `accessors` above but keyed by the
+    /// mangled private name and never visible via reflection.
+    private_accessors: std.StringArrayHashMapUnmanaged(Accessor) = .empty,
 
     pub fn deinit(self: *JSObjectExtension, allocator: std.mem.Allocator) void {
         self.accessors.deinit(allocator);
+        self.private_properties.deinit(allocator);
+        self.private_methods.deinit(allocator);
+        self.private_accessors.deinit(allocator);
     }
 };
 
@@ -461,23 +481,12 @@ pub const JSObject = struct {
     /// call site. `null` only on an object built outside
     /// `allocateObject` (none today).
     heap: ?*@import("heap.zig").Heap = null,
-    /// Per-instance private slots — keyed by the class-identity-
-    /// prefixed name produced by the compiler (`P<uid>#name`),
-    /// so two unrelated classes both declaring `#x` get distinct
-    /// storage. §7.3.27 PrivateElementFind brand-checks via this
-    /// map: a lookup miss is a TypeError.
-    private_properties: std.StringArrayHashMapUnmanaged(Value) = .empty,
-    /// Names in `private_properties` whose [[Kind]] is "method"
-    /// (§7.3.30 PrivateSet step 4). Writes to these names throw
-    /// TypeError per the spec; plain data fields are absent from
-    /// this set and remain writable.
-    private_methods: std.StringArrayHashMapUnmanaged(void) = .empty,
-    /// §15.7 — private getters / setters declared as
-    /// `class C { get #x() {} set #x(v) {} }`. Parallel to
-    /// `private_properties` but routes reads through the getter
-    /// and writes through the setter when present. Read-only or
-    /// write-only pairs leave the other half `null`.
-    private_accessors: std.StringArrayHashMapUnmanaged(Accessor) = .empty,
+    // (`private_properties`, `private_methods`, `private_accessors`
+    // moved to `JSObjectExtension` — class private state is rare on
+    // a typical instance. Access through `hasPrivateProperty` /
+    // `getPrivateProperty` / `getOrPutPrivateProperty` /
+    // `removePrivateProperty` / `privatePropertyIterator` and the
+    // matching `*PrivateMethod` / `*PrivateAccessor` helpers below.)
     // (`accessors` field moved to `JSObjectExtension.accessors` —
     // access via the `hasAccessor` / `getAccessor` /
     // `getOrPutAccessor` / `removeAccessor` / `accessorIterator`
@@ -938,14 +947,96 @@ pub const JSObject = struct {
         return 0;
     }
 
+    // ── §7.3.27 class private slots — extension-backed cold maps ─
+    //
+    // Class instances with `#field` / `get #x()` etc. install state
+    // here. Plain object literals never touch these maps. Three
+    // parallel families (data / method-brand / accessor) mirror
+    // the accessor pattern above.
+
+    pub fn hasPrivateProperty(self: *const JSObject, key: []const u8) bool {
+        if (self.extension) |ext| return ext.private_properties.contains(key);
+        return false;
+    }
+
+    pub fn getPrivateProperty(self: *const JSObject, key: []const u8) ?Value {
+        if (self.extension) |ext| return ext.private_properties.get(key);
+        return null;
+    }
+
+    pub fn putPrivateProperty(
+        self: *JSObject,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        v: Value,
+    ) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        try ext.private_properties.put(allocator, key, v);
+    }
+
+    pub fn getOrPutPrivateProperty(
+        self: *JSObject,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+    ) !std.StringArrayHashMapUnmanaged(Value).GetOrPutResult {
+        const ext = try self.getOrCreateExtension(allocator);
+        return ext.private_properties.getOrPut(allocator, key);
+    }
+
+    pub fn removePrivateProperty(self: *JSObject, key: []const u8) bool {
+        if (self.extension) |ext| return ext.private_properties.swapRemove(key);
+        return false;
+    }
+
+    pub fn privatePropertyIterator(self: *const JSObject) ?std.StringArrayHashMapUnmanaged(Value).Iterator {
+        if (self.extension) |ext| return ext.private_properties.iterator();
+        return null;
+    }
+
+    pub fn hasPrivateMethod(self: *const JSObject, key: []const u8) bool {
+        if (self.extension) |ext| return ext.private_methods.contains(key);
+        return false;
+    }
+
+    pub fn putPrivateMethod(
+        self: *JSObject,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+    ) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        try ext.private_methods.put(allocator, key, {});
+    }
+
+    pub fn hasPrivateAccessor(self: *const JSObject, key: []const u8) bool {
+        if (self.extension) |ext| return ext.private_accessors.contains(key);
+        return false;
+    }
+
+    pub fn getPrivateAccessor(self: *const JSObject, key: []const u8) ?Accessor {
+        if (self.extension) |ext| return ext.private_accessors.get(key);
+        return null;
+    }
+
+    pub fn getOrPutPrivateAccessor(
+        self: *JSObject,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+    ) !std.StringArrayHashMapUnmanaged(Accessor).GetOrPutResult {
+        const ext = try self.getOrCreateExtension(allocator);
+        return ext.private_accessors.getOrPut(allocator, key);
+    }
+
+    pub fn privateAccessorIterator(self: *const JSObject) ?std.StringArrayHashMapUnmanaged(Accessor).Iterator {
+        if (self.extension) |ext| return ext.private_accessors.iterator();
+        return null;
+    }
+
     pub fn deinit(self: *JSObject, allocator: std.mem.Allocator) void {
         self.properties.deinit(allocator);
         self.property_flags.deinit(allocator);
-        self.private_properties.deinit(allocator);
-        self.private_methods.deinit(allocator);
-        self.private_accessors.deinit(allocator);
-        // `accessors` lives in `extension.accessors` — freed when
-        // the extension is freed below.
+        // `private_properties`, `private_methods`, `private_accessors`
+        // and `accessors` all live in the extension — freed below
+        // when the extension itself is freed.
         self.namespace_redirects.deinit(allocator);
         self.ambiguous_namespace_keys.deinit(allocator);
         if (self.map_data) |m| m.deinit(allocator);

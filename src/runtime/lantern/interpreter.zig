@@ -3829,10 +3829,10 @@ pub fn runFrames(
                                 // or vice versa), allow it. Otherwise the
                                 // key is already taken — throw.
                                 const already_present: bool = switch (entry.accessor_kind) {
-                                    .none => inst.private_properties.contains(entry.name) or inst.private_accessors.contains(entry.name),
+                                    .none => inst.hasPrivateProperty(entry.name) or inst.hasPrivateAccessor(entry.name),
                                     .getter => blk: {
-                                        if (inst.private_properties.contains(entry.name)) break :blk true;
-                                        if (inst.private_accessors.get(entry.name)) |existing| {
+                                        if (inst.hasPrivateProperty(entry.name)) break :blk true;
+                                        if (inst.getPrivateAccessor(entry.name)) |existing| {
                                             // Existing entry already has a
                                             // getter slot filled → conflict.
                                             break :blk existing.getter != null;
@@ -3840,8 +3840,8 @@ pub fn runFrames(
                                         break :blk false;
                                     },
                                     .setter => blk: {
-                                        if (inst.private_properties.contains(entry.name)) break :blk true;
-                                        if (inst.private_accessors.get(entry.name)) |existing| {
+                                        if (inst.hasPrivateProperty(entry.name)) break :blk true;
+                                        if (inst.getPrivateAccessor(entry.name)) |existing| {
                                             break :blk existing.setter != null;
                                         }
                                         break :blk false;
@@ -3860,17 +3860,17 @@ pub fn runFrames(
                                 }
                                 switch (entry.accessor_kind) {
                                     .none => {
-                                        inst.private_properties.put(allocator, entry.name, heap_mod.taggedFunction(fn_obj)) catch return error.OutOfMemory;
+                                        inst.putPrivateProperty(allocator, entry.name, heap_mod.taggedFunction(fn_obj)) catch return error.OutOfMemory;
                                         // §7.3.30 PrivateSet step 4 — methods are read-only.
-                                        inst.private_methods.put(allocator, entry.name, {}) catch return error.OutOfMemory;
+                                        inst.putPrivateMethod(allocator, entry.name) catch return error.OutOfMemory;
                                     },
                                     .getter => {
-                                        const ent = inst.private_accessors.getOrPut(allocator, entry.name) catch return error.OutOfMemory;
+                                        const ent = inst.getOrPutPrivateAccessor(allocator, entry.name) catch return error.OutOfMemory;
                                         if (!ent.found_existing) ent.value_ptr.* = .{};
                                         ent.value_ptr.*.getter = fn_obj;
                                     },
                                     .setter => {
-                                        const ent = inst.private_accessors.getOrPut(allocator, entry.name) catch return error.OutOfMemory;
+                                        const ent = inst.getOrPutPrivateAccessor(allocator, entry.name) catch return error.OutOfMemory;
                                         if (!ent.found_existing) ent.value_ptr.* = .{};
                                         ent.value_ptr.*.setter = fn_obj;
                                     },
@@ -3920,7 +3920,7 @@ pub fn runFrames(
                                 // empty, throw TypeError. Hit by
                                 // `new C(obj); new C(obj)` patterns where
                                 // C's base returns an existing instance.
-                                if (inst.private_properties.contains(entry.name) or inst.private_accessors.contains(entry.name)) {
+                                if (inst.hasPrivateProperty(entry.name) or inst.hasPrivateAccessor(entry.name)) {
                                     const ex = try makeTypeError(realm, "Cannot install duplicate private field on object");
                                     f.ip = ip;
                                     f.accumulator = acc;
@@ -3930,7 +3930,7 @@ pub fn runFrames(
                                     }
                                     break;
                                 }
-                                inst.private_properties.put(allocator, entry.name, v) catch return error.OutOfMemory;
+                                inst.putPrivateProperty(allocator, entry.name, v) catch return error.OutOfMemory;
                             } else {
                                 // §7.3.7 CreateDataPropertyOrThrow —
                                 // a public class field installs with
@@ -4079,7 +4079,7 @@ pub fn runFrames(
                 // data slots on read. A read of a write-only
                 // accessor (`set #x` without `get #x`) throws
                 // TypeError per §10.1.8.1 PrivateFieldGet step 6.b.
-                if (recv.private_accessors.get(lookup_key)) |pa| {
+                if (recv.getPrivateAccessor(lookup_key)) |pa| {
                     if (pa.getter) |getter| {
                         const outcome = try callJSFunction(allocator, realm, getter, heap_mod.taggedObject(recv), &.{});
                         switch (outcome) {
@@ -4104,7 +4104,7 @@ pub fn runFrames(
                         }
                         continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
-                } else if (recv.private_properties.get(lookup_key)) |v| {
+                } else if (recv.getPrivateProperty(lookup_key)) |v| {
                     acc = v;
                 } else {
                     const ex = try makeTypeError(realm, "Cannot read private field — brand check failed");
@@ -4166,7 +4166,7 @@ pub fn runFrames(
                     continue :dispatch try decodeNext(code, &ip, &committed);
                 }
                 if (heap_mod.valueAsPlainObject(acc)) |obj| {
-                    const present = obj.private_properties.contains(lookup_key) or obj.private_accessors.contains(lookup_key);
+                    const present = obj.hasPrivateProperty(lookup_key) or obj.hasPrivateAccessor(lookup_key);
                     acc = Value.fromBool(present);
                     continue :dispatch try decodeNext(code, &ip, &committed);
                 }
@@ -5498,7 +5498,7 @@ pub fn runFrames(
                 // data slots on write. A write to a read-only
                 // accessor (`get #x` without `set #x`) throws
                 // TypeError per §10.1.9.1 step 6.b.
-                if (recv.private_accessors.get(lookup_key)) |pa| {
+                if (recv.getPrivateAccessor(lookup_key)) |pa| {
                     if (pa.setter) |setter| {
                         const args_one = [_]Value{acc};
                         const outcome = try callJSFunction(allocator, realm, setter, heap_mod.taggedObject(recv), &args_one);
@@ -5524,7 +5524,7 @@ pub fn runFrames(
                         }
                         continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
-                } else if (!recv.private_properties.contains(lookup_key)) {
+                } else if (!recv.hasPrivateProperty(lookup_key)) {
                     const ex = try makeTypeError(realm, "Cannot write private field — brand check failed");
                     f.ip = ip;
                     f.accumulator = acc;
@@ -5533,7 +5533,7 @@ pub fn runFrames(
                         return .{ .thrown = ex };
                     }
                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                } else if (recv.private_methods.contains(lookup_key)) {
+                } else if (recv.hasPrivateMethod(lookup_key)) {
                     // §7.3.30 PrivateSet step 4 — methods aren't writable.
                     const ex = try makeTypeError(realm, "Cannot assign to private method");
                     f.ip = ip;
@@ -5544,13 +5544,11 @@ pub fn runFrames(
                     }
                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 } else {
-                    // The slot key already exists in the map
-                    // (brand-prefixed string in `class_arena`);
-                    // mutate the value in place so we don't store
-                    // the stack-buffered `lookup_key`.
-                    const slot = recv.private_properties.getPtr(lookup_key) orelse return error.InvalidOpcode;
+                    // The key is guaranteed present (the hasPrivateProperty
+                    // check just above); `put` overwrites the existing
+                    // slot rather than re-inserting the lookup_key buffer.
                     realm.heap.storeInternalSlot(.{ .object = recv }, acc);
-                    slot.* = acc;
+                    recv.putPrivateProperty(allocator, lookup_key, acc) catch return error.OutOfMemory;
                 }
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
