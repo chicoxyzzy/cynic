@@ -1641,11 +1641,20 @@ pub const JSObject = struct {
                 if (self.tryGetIndexedOwn(idx)) |v| return v;
             }
         }
-        // §10.1 own named-property read. `properties` is the
-        // source of truth; `shape` + `slots` are a shadow that
-        // `set` co-maintains but nothing reads yet. The shadow is
-        // made the read path by a later change that retires
-        // `properties` for shaped objects.
+        // §10.1 own named-property read. Shape-first when present:
+        // `slots[entry.slot]` is the source of truth for shape-stable
+        // objects. The bag is consulted only as the fallback (object
+        // not shape-managed, or the key isn't covered by the shape
+        // — possible during an in-flight transition or on a demoted
+        // object). This contract lets `sta_property` skip the bag
+        // mirror on IC hits without leaving slow-path readers stale.
+        if (self.shape) |sh| {
+            if (sh.lookup(key)) |entry| {
+                if (entry.kind == .data and entry.slot < self.slots.items.len) {
+                    return self.slots.items[entry.slot];
+                }
+            }
+        }
         if (self.properties.get(key)) |v| return v;
         if (self.prototype) |proto| return proto.get(key);
         return Value.undefined_;
@@ -2164,6 +2173,34 @@ test "JSObject: set/get round-trip" {
     defer o.deinit(testing.allocator);
     try o.set(testing.allocator, "x", Value.fromInt32(42));
     try testing.expectEqual(@as(i32, 42), o.get("x").asInt32());
+}
+
+test "JSObject: get prefers the shape slot when present" {
+    // The IC fast path serves shape-backed reads in the
+    // interpreter, but the JSObject.get fallback (called by
+    // every builtin reaching for `obj.get(...)`) must also
+    // honour the shape slot — otherwise skipping the
+    // property-bag mirror in `sta_property` would leave the
+    // slow path returning stale values. Pin the contract.
+    const heap_mod = @import("heap.zig");
+    var heap = heap_mod.Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const o = try heap.allocateObject();
+    try o.set(testing.allocator, "x", Value.fromInt32(42));
+    try o.set(testing.allocator, "y", Value.fromInt32(99));
+
+    // Shape was built — `set` routes through `shadowSet`.
+    try testing.expect(o.shape != null);
+    try testing.expectEqual(@as(usize, 2), o.slots.items.len);
+
+    // Stamp a different value directly into the slot, leaving
+    // the property bag stale. A shape-first `get` must see the
+    // slot value; a bag-first `get` would return the stale bag
+    // value. Bag-mirror skip in `sta_property` (future commit)
+    // relies on this ordering.
+    o.slots.items[0] = Value.fromInt32(7);
+    try testing.expectEqual(@as(i32, 7), o.get("x").asInt32());
 }
 
 test "JSObject: missing property is undefined" {
