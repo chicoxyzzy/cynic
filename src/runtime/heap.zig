@@ -342,7 +342,7 @@ pub const Heap = struct {
     /// effectively disables the trigger (the unit-test paths that
     /// call `collect` directly do this when they want full control
     /// over when GC fires).
-    gc_threshold: u32 = 16384,
+    gc_threshold: u32 = 32768,
     /// Allocation count that triggers a *minor* (young-only)
     /// collection. The two-tier dispatch: a minor cycle fires
     /// when `allocs_since_gc` crosses this; a major cycle when
@@ -352,7 +352,7 @@ pub const Heap = struct {
     /// young sweep absorbs the bulk of the churn and the
     /// expensive full trace stays rare. `setGcThreshold` keeps
     /// this coherent with `gc_threshold`.
-    gc_young_threshold: u32 = 4096,
+    gc_young_threshold: u32 = 8192,
     /// Number of minor cycles between forced major (full) cycles.
     /// The dispatch fires a minor cycle on young-threshold
     /// pressure; every `full_every_n_minor`-th minor cycle is
