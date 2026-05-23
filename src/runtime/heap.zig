@@ -498,6 +498,17 @@ pub const Heap = struct {
     /// Installed by the realm at init via `setFinalizationEnqueue`.
     finalization_enqueue_fn: ?FinalizationEnqueueFn = null,
 
+    /// Slab allocator for `JSObject` headers — free-list-backed,
+    /// O(1) per `create`/`destroy` after warmup. Dramatically
+    /// outperforms going through the general-purpose allocator on
+    /// the `object_alloc` churn (every literal is a malloc + free
+    /// pair the GP allocator services through a lock + size-class
+    /// walk; the pool just pops a header pointer). The pool's
+    /// arena reclaims everything in one `deinit`; per-object
+    /// sub-field cleanup goes through `JSObject.deinitFields`
+    /// before the header returns to the pool.
+    object_pool: std.heap.MemoryPool(JSObject) = .empty,
+
     pub fn init(allocator: std.mem.Allocator) Heap {
         return .{
             .allocator = allocator,
@@ -570,10 +581,14 @@ pub const Heap = struct {
         for (self.functions_mature.items) |f| f.deinit(self.allocator);
         self.functions_young.deinit(self.allocator);
         self.functions_mature.deinit(self.allocator);
-        for (self.objects_young.items) |o| o.deinit(self.allocator);
-        for (self.objects_mature.items) |o| o.deinit(self.allocator);
+        // JSObject headers live in the slab pool — drop sub-fields
+        // per-object, then let `object_pool.deinit` reclaim every
+        // header in one shot.
+        for (self.objects_young.items) |o| o.deinitFields(self.allocator);
+        for (self.objects_mature.items) |o| o.deinitFields(self.allocator);
         self.objects_young.deinit(self.allocator);
         self.objects_mature.deinit(self.allocator);
+        self.object_pool.deinit(self.allocator);
         for (self.environments_young.items) |e| e.deinit(self.allocator);
         for (self.environments_mature.items) |e| e.deinit(self.allocator);
         self.environments_young.deinit(self.allocator);
@@ -698,8 +713,17 @@ pub const Heap = struct {
     }
 
     pub fn allocateObject(self: *Heap) !*JSObject {
-        const o = try JSObject.init(self.allocator);
-        errdefer o.deinit(self.allocator);
+        // Pool the header (free-list-backed slab allocation —
+        // O(1) after warmup; no libsystem_malloc round-trip per
+        // literal). Sub-fields stay allocator-owned so test paths
+        // that construct objects through `JSObject.init` still
+        // free cleanly through the regular `deinit`.
+        const o = try self.object_pool.create(self.allocator);
+        o.* = .{ .kind = .object };
+        errdefer {
+            o.deinitFields(self.allocator);
+            self.object_pool.destroy(o);
+        }
         o.heap = self;
         o.mark_color = self.live_color;
         try self.objects_young.append(self.allocator, o);
@@ -1717,7 +1741,15 @@ pub const Heap = struct {
                 }
             } else {
                 _ = list.swapRemove(i);
-                @call(.auto, EntryT.deinit, .{entry} ++ deinit_args);
+                if (comptime EntryT == JSObject) {
+                    // Slab pool path — see promoteYoungList for the
+                    // matching logic; `deinit_args` is
+                    // `.{allocator, &heap.object_pool}` here.
+                    entry.deinitFields(deinit_args[0]);
+                    deinit_args[1].destroy(entry);
+                } else {
+                    @call(.auto, EntryT.deinit, .{entry} ++ deinit_args);
+                }
             }
         }
     }
@@ -1898,14 +1930,14 @@ pub const Heap = struct {
         const lc = self.live_color;
         sweepList(&self.strings_mature, lc, ba);
         sweepList(&self.functions_mature, lc, sa);
-        sweepList(&self.objects_mature, lc, sa);
+        sweepList(&self.objects_mature, lc, .{ self.allocator, &self.object_pool });
         sweepList(&self.environments_mature, lc, sa);
         sweepList(&self.generators_mature, lc, sa);
         sweepList(&self.symbols_mature, lc, sa);
         sweepList(&self.bigints_mature, lc, sa);
         promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, ba);
         promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, sa);
-        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, sa);
+        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, .{ self.allocator, &self.object_pool });
         promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, sa);
         promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, lc, self.allocator, sa);
         promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, lc, self.allocator, sa);
@@ -2091,7 +2123,7 @@ pub const Heap = struct {
         const lc = self.live_color;
         promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, .{ self.allocator, self.bytes_allocator });
         promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, .{self.allocator});
-        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, .{self.allocator});
+        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, .{ self.allocator, &self.object_pool });
         promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, .{self.allocator});
         promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, lc, self.allocator, .{self.allocator});
         promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, lc, self.allocator, .{self.allocator});
@@ -2185,7 +2217,19 @@ pub const Heap = struct {
                 };
             } else {
                 _ = young_list.swapRemove(i);
-                @call(.auto, EntryT.deinit, .{entry} ++ deinit_args);
+                if (comptime EntryT == JSObject) {
+                    // Slab pool path — drop sub-fields, then
+                    // return the header to the free-list instead
+                    // of dropping it through the GP allocator.
+                    // `deinit_args` is `.{allocator, &heap.object_pool}`
+                    // for JSObject specifically; the comptime
+                    // branch keeps the generic call shape unchanged
+                    // for every other heap type.
+                    entry.deinitFields(deinit_args[0]);
+                    deinit_args[1].destroy(entry);
+                } else {
+                    @call(.auto, EntryT.deinit, .{entry} ++ deinit_args);
+                }
             }
         }
     }

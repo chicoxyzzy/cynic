@@ -1235,7 +1235,13 @@ pub const JSObject = struct {
         ext.data_view = dv;
     }
 
-    pub fn deinit(self: *JSObject, allocator: std.mem.Allocator) void {
+    /// Drop every sub-allocation owned by this object — does NOT
+    /// release the `JSObject` struct itself. The full `deinit`
+    /// path calls this and then `allocator.destroy(self)`; the
+    /// `Heap` pool path calls this and then `pool.destroy(self)`
+    /// so the JSObject memory goes onto the slab free-list instead
+    /// of back through libsystem_malloc.
+    pub fn deinitFields(self: *JSObject, allocator: std.mem.Allocator) void {
         self.properties.deinit(allocator);
         self.property_flags.deinit(allocator);
         // `private_properties`, `private_methods`, `private_accessors`,
@@ -1267,6 +1273,10 @@ pub const JSObject = struct {
         // borrowed slices owned by class.zig (allocated against
         // the realm allocator and tracked by the realm); freeing
         // them happens at realm.deinit().
+    }
+
+    pub fn deinit(self: *JSObject, allocator: std.mem.Allocator) void {
+        self.deinitFields(allocator);
         allocator.destroy(self);
     }
 
