@@ -1014,9 +1014,9 @@ pub fn getPropertyChain(realm: *Realm, obj: *JSObject, key: []const u8) NativeEr
         // buffer). Lookup terminates at the TA — no proto-chain
         // fallthrough for the numeric form. Out-of-bounds reads
         // return undefined per ES2024 IntegerIndexedElementGet.
-        if (o.typed_view) |tv| {
+        if (o.getTypedView()) |tv| {
             if (std.fmt.parseInt(usize, key, 10)) |idx_u| {
-                if (tv.viewed.array_buffer) |buf| {
+                if (tv.viewed.getArrayBuffer()) |buf| {
                     const elem_size = tv.kind.elementSize();
                     const live_len: usize = if (tv.length_tracking) blk: {
                         if (tv.byte_offset > buf.len) break :blk 0;

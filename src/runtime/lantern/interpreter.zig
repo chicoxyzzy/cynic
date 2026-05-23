@@ -7073,11 +7073,11 @@ pub fn runFrames(
                     // `ta["-1"]`, `ta["1000000000000000000000"]` all
                     // bypass an accessor installed on
                     // TypedArray.prototype["<same key>"].
-                    if (obj.typed_view) |tv| {
+                    if (obj.getTypedView()) |tv| {
                         const ta_mod = @import("../builtins/typed_array.zig");
                         if (ta_mod.canonicalNumericIndex(key_slice)) |num| {
                             if (ta_mod.isValidIntegerIndexPub(tv, num)) {
-                                const buf = tv.viewed.array_buffer.?;
+                                const buf = tv.viewed.getArrayBuffer().?;
                                 const elem_size = tv.kind.elementSize();
                                 const idx: usize = @intFromFloat(num);
                                 acc = intrinsics_mod.readTypedElement(realm, buf, tv.kind, tv.byte_offset + idx * elem_size);
@@ -7302,7 +7302,7 @@ pub fn runFrames(
                 // negative/out-of-bounds) silently drops after the
                 // ToNumber/ToBigInt side effects fire.
                 if (heap_mod.valueAsPlainObject(recv)) |obj| {
-                    if (obj.typed_view) |tv| {
+                    if (obj.getTypedView()) |tv| {
                         const ta_mod = @import("../builtins/typed_array.zig");
                         if (ta_mod.canonicalNumericIndex(key_slice)) |num| {
                             // §10.4.5.13 SetTypedArrayElement — type
@@ -7347,11 +7347,11 @@ pub fn runFrames(
                             // Re-fetch the live view (a user `valueOf` could
                             // have detached / shrunk the buffer between
                             // ToNumber and the write).
-                            const live_tv = obj.typed_view orelse {
+                            const live_tv = obj.getTypedView() orelse {
                                 continue :dispatch try decodeNext(code, &ip, &committed);
                             };
                             if (ta_mod.isValidIntegerIndexPub(live_tv, num)) {
-                                const buf = live_tv.viewed.array_buffer.?;
+                                const buf = live_tv.viewed.getArrayBuffer().?;
                                 const elem_size = live_tv.kind.elementSize();
                                 const idx: usize = @intFromFloat(num);
                                 // Name-aware dispatch keeps Uint8ClampedArray
@@ -8021,7 +8021,7 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
         // numeric keys (e.g. "1.0", "+1", "0.0000001") fall through
         // to OrdinaryDelete, which lets the ordinary property bag
         // surface them normally.
-        if (obj.typed_view) |tv| {
+        if (obj.getTypedView()) |tv| {
             const ta_mod = @import("../builtins/typed_array.zig");
             if (ta_mod.canonicalNumericIndex(key)) |num| {
                 if (!ta_mod.isValidIntegerIndexPub(tv, num)) return .{ .ok = true };
@@ -8281,7 +8281,7 @@ fn strictSetPropertyAnchored(
         if (ta_decision.decision == .short_circuit) return .ok;
         if (ta_decision.decision == .coerce_and_write) {
             const ta_mod = @import("../builtins/typed_array.zig");
-            const tv0 = ta_decision.ta.?.typed_view orelse return .ok;
+            const tv0 = ta_decision.ta.?.getTypedView() orelse return .ok;
             const coerced = ta_mod.coerceForTypedSlot(realm, tv0.kind, value) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.NativeThrew => {
@@ -8290,9 +8290,9 @@ fn strictSetPropertyAnchored(
                     return throwInSetter(realm, frames, f, ip, value, ex);
                 },
             };
-            const live_tv = ta_decision.ta.?.typed_view orelse return .ok;
+            const live_tv = ta_decision.ta.?.getTypedView() orelse return .ok;
             if (ta_mod.isValidIntegerIndexPub(live_tv, ta_decision.num)) {
-                const buf = live_tv.viewed.array_buffer.?;
+                const buf = live_tv.viewed.getArrayBuffer().?;
                 const elem_size = live_tv.kind.elementSize();
                 const idx: usize = @intFromFloat(ta_decision.num);
                 @import("../intrinsics.zig").writeTypedElementForView(buf, live_tv, live_tv.byte_offset + idx * elem_size, coerced);
@@ -8754,7 +8754,7 @@ fn typedArrayChainSetDecision(obj: *JSObject, key: []const u8, recv: Value) TACh
     const num = ta_mod.canonicalNumericIndex(key) orelse return .{ .decision = .not_applicable };
     var cursor: ?*JSObject = obj;
     while (cursor) |c| : (cursor = c.prototype) {
-        if (c.typed_view) |tv| {
+        if (c.getTypedView()) |tv| {
             const recv_obj = heap_mod.valueAsPlainObject(recv);
             const same_receiver = (recv_obj == c);
             if (same_receiver) {
@@ -8976,7 +8976,7 @@ fn setThroughChain(
         // and MUST NOT fire when the receiver inherits from the
         // typed array. Match `is_array_exotic` above — short-circuit
         // so the caller creates a property on the receiver instead.
-        if (c.typed_view != null) {
+        if (c.getTypedView() != null) {
             const ta_mod = @import("../builtins/typed_array.zig");
             if (ta_mod.canonicalNumericIndex(key)) |_| {
                 return .{ .handled_set = false };

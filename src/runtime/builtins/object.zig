@@ -255,9 +255,9 @@ pub fn ownPropertyKeysOrdered(
     // length; a fixed-length view past the buffer's current
     // bound reports zero indices (per §10.4.5.13
     // IsValidIntegerIndex's IsTypedArrayOutOfBounds gate).
-    if (obj.typed_view) |tv| {
+    if (obj.getTypedView()) |tv| {
         const live_len: u32 = blk: {
-            const buf = tv.viewed.array_buffer orelse break :blk 0;
+            const buf = tv.viewed.getArrayBuffer() orelse break :blk 0;
             const elem_size = tv.kind.elementSize();
             if (tv.length_tracking) {
                 if (tv.byte_offset > buf.len) break :blk 0;
@@ -295,7 +295,7 @@ pub fn ownPropertyKeysOrdered(
         // The order list refuses integer-index keys at recordKey
         // time, so they never appear here. The guards stay
         // defensive in case a future code path adds one.
-        if (obj.typed_view != null) {
+        if (obj.getTypedView() != null) {
             if (canonicalIntegerIndex(k)) |_| continue;
         }
         if (canonicalIntegerIndex(k)) |i| {
@@ -317,7 +317,7 @@ pub fn ownPropertyKeysOrdered(
     while (it.next()) |entry| {
         const k = entry.key_ptr.*;
         if (std.mem.startsWith(u8, k, "__cynic_")) continue;
-        if (obj.typed_view != null) {
+        if (obj.getTypedView() != null) {
             if (canonicalIntegerIndex(k)) |_| continue;
         }
         // Already counted above?
@@ -335,7 +335,7 @@ pub fn ownPropertyKeysOrdered(
             const k = entry.key_ptr.*;
             if (std.mem.startsWith(u8, k, "__cynic_")) continue;
             if (obj.properties.contains(k)) continue; // already counted
-            if (obj.typed_view != null) {
+            if (obj.getTypedView() != null) {
                 if (canonicalIntegerIndex(k)) |_| continue;
             }
             if (orderListContains(obj, k)) continue;
@@ -1545,7 +1545,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             return target_v;
         }
         // §10.4.5.3 Integer-Indexed Exotic Object [[DefineOwnProperty]]
-        if (target.typed_view != null) {
+        if (target.getTypedView() != null) {
             const ta = @import("typed_array.zig");
             if (ta.canonicalNumericIndex(key)) |num| {
                 const res = try ta.typedArrayDefineOwnProperty(
@@ -2186,7 +2186,7 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
 
     if (heap_mod.valueAsPlainObject(target)) |obj| {
         // §10.4.5.2 Integer-Indexed Exotic Object [[GetOwnProperty]]
-        if (obj.typed_view != null) {
+        if (obj.getTypedView() != null) {
             const ta = @import("typed_array.zig");
             if (ta.canonicalNumericIndex(key)) |num| {
                 if (ta.typedArrayGetOwnPropertyValue(realm, obj, num)) |v| {
@@ -2913,8 +2913,8 @@ fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // through IsFixedLengthArrayBuffer). SetIntegrityLevel(O,
     // frozen) then throws TypeError. Only TAs backed by genuinely
     // fixed-length ArrayBuffers can be frozen.
-    if (obj.typed_view) |tv| {
-        if (tv.viewed.array_buffer_max_byte_length != null) {
+    if (obj.getTypedView()) |tv| {
+        if (tv.viewed.getArrayBufferMaxByteLength() != null) {
             return throwTypeError(realm, "Cannot freeze TypedArray backed by resizable buffer");
         }
     }
@@ -3930,7 +3930,7 @@ pub fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value
             // → `"[object Function]"`.
             if (isCallableProxy(obj)) break :blk "Function";
             if (obj.regex_bytecode != null) break :blk "RegExp";
-            if (obj.array_buffer != null) break :blk "Object"; // ArrayBuffer uses @@toStringTag
+            if (obj.getArrayBuffer() != null) break :blk "Object"; // ArrayBuffer uses @@toStringTag
             if (obj.boxed_primitive) |bp| {
                 if (bp.isBool()) break :blk "Boolean";
                 if (bp.isInt32() or bp.isDouble()) break :blk "Number";

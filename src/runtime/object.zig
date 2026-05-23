@@ -476,6 +476,20 @@ pub const JSObjectExtension = struct {
     /// entries. Only `new FinalizationRegistry(cb)` instances
     /// populate this. `null` everywhere else.
     finalization_cells: ?*FinalizationData = null,
+    /// §25.1 ArrayBuffer raw byte storage. Only `new
+    /// ArrayBuffer(n)` / `.transfer()` / `.slice()` instances
+    /// populate this. Heap-allocated slice; freed in deinit.
+    array_buffer: ?[]u8 = null,
+    /// §25.1 [[ArrayBufferMaxByteLength]] — resizable buffer
+    /// upper bound. `null` on fixed-length buffers.
+    array_buffer_max_byte_length: ?usize = null,
+    /// §23.2 [[ViewedArrayBuffer]] + element-kind metadata for
+    /// TypedArray instances. Borrowed pointer to the underlying
+    /// ArrayBuffer object's `array_buffer` slice.
+    typed_view: ?TypedView = null,
+    /// §25.3 DataView state — byte-offset / byte-length / endian
+    /// hooks over the source ArrayBuffer.
+    data_view: ?DataView = null,
 
     pub fn deinit(self: *JSObjectExtension, allocator: std.mem.Allocator) void {
         self.accessors.deinit(allocator);
@@ -489,6 +503,7 @@ pub const JSObjectExtension = struct {
         self.promise_waiters.deinit(allocator);
         self.promise_reactions.deinit(allocator);
         if (self.finalization_cells) |fc| fc.deinit(allocator);
+        if (self.array_buffer) |ab| allocator.free(ab);
     }
 };
 
@@ -653,31 +668,22 @@ pub const JSObject = struct {
     /// generator-prototype) read this slot to find the saved
     /// frame state to resume.
     generator_ref: ?*@import("generator.zig").JSGenerator = null,
-    /// `[[ArrayBufferData]]` (§25.1.1.1) — raw byte buffer.
-    /// Owned by the realm allocator; freed at object deinit.
-    /// Set on `new ArrayBuffer(N)` instances. `null` either means
-    /// "no ArrayBuffer brand" or "detached"; disambiguated by
-    /// `has_array_buffer_data` below.
-    array_buffer: ?[]u8 = null,
+    // (`array_buffer`, `array_buffer_max_byte_length`, `typed_view`,
+    // `data_view` moved to `JSObjectExtension` — only TypedArray /
+    // ArrayBuffer / DataView instances populate them. Access via
+    // `getArrayBuffer` / `setArrayBuffer` /
+    // `getArrayBufferMaxByteLength` / `setArrayBufferMaxByteLength`
+    // / `getTypedView` / `setTypedView` / `getDataView` /
+    // `setDataView` helpers below. `has_array_buffer_data` (brand
+    // bool) stays on JSObject — flat byte-aligned with the other
+    // brand flags and used in every typed-array hot path.)
     /// `[[ArrayBufferData]]` brand presence (§25.1.5.x
     /// RequireInternalSlot). True iff the object was produced by
     /// the ArrayBuffer constructor (or `.transfer` / `.slice`).
-    /// `array_buffer == null && has_array_buffer_data == true` is
-    /// the detached state. Plain objects keep the default `false`
+    /// `getArrayBuffer() == null && has_array_buffer_data == true`
+    /// is the detached state. Plain objects keep the default `false`
     /// so the prototype-method brand checks `TypeError` correctly.
     has_array_buffer_data: bool = false,
-    /// `[[ArrayBufferMaxByteLength]]` (§25.1.5.x). `null` on
-    /// fixed-length buffers; `Some(n)` on resizable ones — the
-    /// `resizable` getter is `has_array_buffer_data && this != null`.
-    array_buffer_max_byte_length: ?usize = null,
-    /// `[[ViewedArrayBuffer]]` + view metadata (§23.2.1).
-    /// Set on TypedArray instances. The view borrows bytes
-    /// from `viewed.array_buffer` (a separate JSObject).
-    typed_view: ?TypedView = null,
-    /// `[[ViewedArrayBuffer]]` + offset + length for DataView
-    /// instances (§25.3). Borrows bytes from
-    /// `data_view.viewed.array_buffer`.
-    data_view: ?DataView = null,
     /// `[[StringData]]` (§22.1.3) — the string primitive a
     /// `String` wrapper boxes. Set by `toObjectThis` when
     /// boxing a string primitive for a method call, and by
@@ -1165,6 +1171,70 @@ pub const JSObject = struct {
         ext.finalization_cells = fc;
     }
 
+    // ── §25 / §23 ArrayBuffer + TypedArray + DataView state ────
+    //
+    // The four heaviest cold fields by absolute byte count — the
+    // TypedView struct alone is ~56 bytes. Only TypedArray /
+    // ArrayBuffer / DataView instances populate them; every plain
+    // object skips the allocation.
+
+    pub fn getArrayBuffer(self: *const JSObject) ?[]u8 {
+        if (self.extension) |ext| return ext.array_buffer;
+        return null;
+    }
+
+    pub fn setArrayBuffer(self: *JSObject, allocator: std.mem.Allocator, bytes: ?[]u8) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        ext.array_buffer = bytes;
+    }
+
+    /// In-place mutate of the slice; safe only when the extension
+    /// already exists (the array_buffer setter ran).
+    pub fn arrayBufferSlot(self: *JSObject) ?*?[]u8 {
+        if (self.extension) |ext| return &ext.array_buffer;
+        return null;
+    }
+
+    pub fn getArrayBufferMaxByteLength(self: *const JSObject) ?usize {
+        if (self.extension) |ext| return ext.array_buffer_max_byte_length;
+        return null;
+    }
+
+    pub fn setArrayBufferMaxByteLength(self: *JSObject, allocator: std.mem.Allocator, n: ?usize) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        ext.array_buffer_max_byte_length = n;
+    }
+
+    pub fn getTypedView(self: *const JSObject) ?TypedView {
+        if (self.extension) |ext| return ext.typed_view;
+        return null;
+    }
+
+    pub fn getTypedViewPtr(self: *JSObject) ?*TypedView {
+        if (self.extension) |ext| if (ext.typed_view) |*tv| return tv;
+        return null;
+    }
+
+    pub fn setTypedView(self: *JSObject, allocator: std.mem.Allocator, view: ?TypedView) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        ext.typed_view = view;
+    }
+
+    pub fn getDataView(self: *const JSObject) ?DataView {
+        if (self.extension) |ext| return ext.data_view;
+        return null;
+    }
+
+    pub fn getDataViewPtr(self: *JSObject) ?*DataView {
+        if (self.extension) |ext| if (ext.data_view) |*dv| return dv;
+        return null;
+    }
+
+    pub fn setDataView(self: *JSObject, allocator: std.mem.Allocator, dv: ?DataView) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        ext.data_view = dv;
+    }
+
     pub fn deinit(self: *JSObject, allocator: std.mem.Allocator) void {
         self.properties.deinit(allocator);
         self.property_flags.deinit(allocator);
@@ -1179,8 +1249,9 @@ pub const JSObject = struct {
         if (self.iter_helper) |s| s.deinit(allocator);
         if (self.capability_record) |s| s.deinit(allocator);
         // `finalization_cells`, `promise_waiters`, `promise_reactions`,
-        // `weak_ref_target` all live in the extension — freed there.
-        if (self.array_buffer) |ab| allocator.free(ab);
+        // `weak_ref_target`, `array_buffer`, `typed_view`, `data_view`,
+        // `array_buffer_max_byte_length` all live in the extension —
+        // freed when it is.
         self.key_anchors.deinit(allocator);
         self.own_key_order.deinit(allocator);
         self.elements.deinit(allocator);
@@ -1376,7 +1447,7 @@ pub const JSObject = struct {
         // the call sites that need user coercion route through
         // the interpreter's sta_property bytecode instead. Drop
         // out-of-bounds writes silently per spec.
-        if (self.typed_view) |tv| {
+        if (self.getTypedView()) |tv| {
             // §10.4.5.5 [[Set]] for Integer-Indexed Exotic Objects —
             // the intercept gate is CanonicalNumericIndexString, NOT
             // Zig `parseInt` (which accepts a leading `+` / `-` that
@@ -1387,7 +1458,7 @@ pub const JSObject = struct {
             const ta_mod = @import("builtins/typed_array.zig");
             if (ta_mod.canonicalNumericIndex(key)) |num| {
                 if (ta_mod.isValidIntegerIndexPub(tv, num)) {
-                    const buf = tv.viewed.array_buffer.?;
+                    const buf = tv.viewed.getArrayBuffer().?;
                     const elem_size = tv.kind.elementSize();
                     const idx: usize = @intFromFloat(num);
                     const intrinsics_mod = @import("intrinsics.zig");
@@ -1478,7 +1549,7 @@ pub const JSObject = struct {
     ) void {
         const heap = self.heap orelse return;
         // Exotics and engine-internal slots stay dictionary-mode.
-        if (self.is_array_exotic or self.typed_view != null or
+        if (self.is_array_exotic or self.getTypedView() != null or
             self.is_module_namespace or self.proxy_target != null or
             std.mem.startsWith(u8, key, "__cynic_"))
         {
@@ -1610,7 +1681,7 @@ pub const JSObject = struct {
         // reports `hasOwn(i) === false` (and `i in ta === false`)
         // for every numeric index — the §10.4.5.2 lookup explicitly
         // does NOT walk the prototype chain on the numeric form.
-        if (self.typed_view) |tv| {
+        if (self.getTypedView()) |tv| {
             const ta_mod = @import("builtins/typed_array.zig");
             if (ta_mod.canonicalNumericIndex(key)) |num| {
                 return ta_mod.isValidIntegerIndexPub(tv, num);
@@ -1644,7 +1715,7 @@ pub const JSObject = struct {
         // numeric form). Out-of-bounds / detached / non-integer /
         // negative / -0 all resolve to `false` *without* walking
         // the prototype chain.
-        if (self.typed_view) |tv| {
+        if (self.getTypedView()) |tv| {
             const ta_mod = @import("builtins/typed_array.zig");
             if (ta_mod.canonicalNumericIndex(key)) |num| {
                 if (std.math.isNan(num) or std.math.isInf(num)) return false;
@@ -1652,7 +1723,7 @@ pub const JSObject = struct {
                 if (num == 0.0 and std.math.signbit(num)) return false;
                 if (num < 0) return false;
                 const idx_u: usize = @intFromFloat(num);
-                const buf = tv.viewed.array_buffer orelse return false;
+                const buf = tv.viewed.getArrayBuffer() orelse return false;
                 // §10.4.5.16 IsValidIntegerIndex — for a length-
                 // tracking view, the live length is recomputed from
                 // the current buffer size; for a fixed-length view
@@ -2025,7 +2096,7 @@ pub const TypedKind = enum(u8) {
 pub const TypedView = struct {
     kind: TypedKind,
     /// Source ArrayBuffer object — the byte buffer is at
-    /// `viewed.array_buffer`. Borrowed pointer.
+    /// `viewed.getArrayBuffer()`. Borrowed pointer.
     viewed: *JSObject,
     byte_offset: usize,
     /// Number of *elements* in the view (not bytes). Snapshot

@@ -369,13 +369,13 @@ fn validateTypedArrayIfPresent(realm: *Realm, this_value: Value) NativeError!voi
     // [[ViewedArrayBuffer]] / [[ByteOffset]] / [[ArrayLength]] slot
     // family; `null` means this object is plain / Array / DataView /
     // ArrayBuffer / %TypedArray%.prototype itself.
-    const tv = obj.typed_view orelse
+    const tv = obj.getTypedView() orelse
         return throwTypeError(realm, "TypedArray iterator requires a TypedArray receiver");
     // §23.2.4.4 ValidateTypedArray (called by entries / keys /
     // values) — throws TypeError when the buffer is detached
     // (IsTypedArrayOutOfBounds is `true` per ES2024 §25.1.3.x
     // for a detached buffer).
-    const buf = tv.viewed.array_buffer orelse
+    const buf = tv.viewed.getArrayBuffer() orelse
         return throwTypeError(realm, "TypedArray iterator on detached buffer");
     // §10.4.5 IsTypedArrayOutOfBounds — for a length-tracking view,
     // OOB means `byte_offset > buf.len`; for a fixed-length view it
@@ -504,7 +504,7 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) StepOutcome {
         // %TypedArray%.prototype and indexed access via
         // typed-view dispatch; iterate them directly off the
         // typed_view to avoid the per-step accessor call.
-        if (obj.typed_view) |tv| {
+        if (obj.getTypedView()) |tv| {
             // §23.2.5.1 / §10.4.5 — recompute the live length on
             // every step. A length-tracking view's backing buffer
             // may have been grown or shrunk between iterations;
@@ -512,7 +512,7 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) StepOutcome {
             // view is now OOB — throw TypeError per §23.1.5.1
             // step 3.e.iii (the Array iterator's per-step
             // ValidateTypedArray re-check, ES2024).
-            const buf = tv.viewed.array_buffer orelse {
+            const buf = tv.viewed.getArrayBuffer() orelse {
                 state.done = true;
                 return .typed_array_oob;
             };

@@ -467,8 +467,8 @@ pub fn openForInIterator(
             // Length comes from the LIVE buffer-witness count so a
             // length-tracking view (or a fixed-length view shrunk
             // OOB) reports the current state, not its snapshot.
-            if (cur.typed_view) |tv| {
-                const buf_opt = tv.viewed.array_buffer;
+            if (cur.getTypedView()) |tv| {
+                const buf_opt = tv.viewed.getArrayBuffer();
                 const live_len: u32 = blk: {
                     const buf = buf_opt orelse break :blk 0;
                     const elem_size = tv.kind.elementSize();

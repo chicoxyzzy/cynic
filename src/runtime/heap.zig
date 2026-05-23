@@ -1319,8 +1319,8 @@ pub const Heap = struct {
                 // without marking it here the buffer gets swept while
                 // the view is still reachable and indexed reads see
                 // freed bytes.
-                if (o.typed_view) |tv| self.markValue(taggedObject(tv.viewed));
-                if (o.data_view) |dv| self.markValue(taggedObject(dv.viewed));
+                if (o.getTypedView()) |tv| self.markValue(taggedObject(tv.viewed));
+                if (o.getDataView()) |dv| self.markValue(taggedObject(dv.viewed));
             }
         }
         // Doubles, ints, bools, null, undefined, hole: no heap pointer.
@@ -2296,8 +2296,8 @@ pub const Heap = struct {
         if (o.proxy_target) |pt| self.markValue(taggedObject(pt));
         if (o.proxy_handler) |ph| self.markValue(taggedObject(ph));
         if (o.proxy_target_fn) |ptf| self.markValue(taggedFunction(ptf));
-        if (o.typed_view) |tv| self.markValue(taggedObject(tv.viewed));
-        if (o.data_view) |dv| self.markValue(taggedObject(dv.viewed));
+        if (o.getTypedView()) |tv| self.markValue(taggedObject(tv.viewed));
+        if (o.getDataView()) |dv| self.markValue(taggedObject(dv.viewed));
     }
 
     /// Mark the typed internal-slot pointers of a `JSFunction` —

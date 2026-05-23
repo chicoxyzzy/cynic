@@ -205,7 +205,7 @@ fn hasPropertyProxyAware(realm: *Realm, root: *JSObject, key: []const u8) Native
     // fallthrough). Delegate to the on-shape helper for this case
     // so all the OOB / detached / non-integer / -0 / negative
     // sub-cases stay in one place.
-    if (root.typed_view != null) {
+    if (root.getTypedView() != null) {
         const ta_mod = @import("typed_array.zig");
         if (ta_mod.canonicalNumericIndex(key) != null) {
             return root.hasProperty(key);
@@ -443,7 +443,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     //   `true` WITHOUT coercing (the ToNumber side-effect is
     //   only observable on the same-receiver path).
     // [[Set]] always returns `true` in both branches.
-    if (target.typed_view) |tv| {
+    if (target.getTypedView()) |tv| {
         const ta_mod = @import("typed_array.zig");
         const same_receiver = blk: {
             if (heap_mod.valueAsPlainObject(receiver_v)) |r_obj| break :blk r_obj == target;
@@ -462,9 +462,9 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
                 // visible) and then drops the write when
                 // IsValidIntegerIndex is false. [[Set]] returns true.
                 const coerced = try ta_mod.coerceForTypedSlot(realm, tv.kind, v);
-                const live_tv = target.typed_view orelse return Value.true_;
+                const live_tv = target.getTypedView() orelse return Value.true_;
                 if (ta_mod.isValidIntegerIndexPub(live_tv, num)) {
-                    const buf = live_tv.viewed.array_buffer.?;
+                    const buf = live_tv.viewed.getArrayBuffer().?;
                     const elem_size = live_tv.kind.elementSize();
                     const idx: usize = @intFromFloat(num);
                     // Name-aware dispatch keeps Uint8ClampedArray on
@@ -503,19 +503,19 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // (ToNumber once, drop on invalid index, return true); otherwise
     // !valid short-circuits to true and valid falls through to
     // OrdinarySet on Receiver.
-    if (target.typed_view == null) {
+    if (target.getTypedView() == null) {
         const ta_mod = @import("typed_array.zig");
         if (ta_mod.canonicalNumericIndex(key_slice)) |num| {
             var cursor: ?*@import("../object.zig").JSObject = target.prototype;
             while (cursor) |c| : (cursor = c.prototype) {
-                if (c.typed_view) |tv2| {
+                if (c.getTypedView()) |tv2| {
                     const recv_obj = heap_mod.valueAsPlainObject(receiver_v);
                     const same_as_ta = (recv_obj == c);
                     if (same_as_ta) {
                         const coerced = try ta_mod.coerceForTypedSlot(realm, tv2.kind, v);
-                        const live_tv = c.typed_view orelse return Value.true_;
+                        const live_tv = c.getTypedView() orelse return Value.true_;
                         if (ta_mod.isValidIntegerIndexPub(live_tv, num)) {
-                            const buf = live_tv.viewed.array_buffer.?;
+                            const buf = live_tv.viewed.getArrayBuffer().?;
                             const elem_size = live_tv.kind.elementSize();
                             const idx: usize = @intFromFloat(num);
                             @import("../intrinsics.zig").writeTypedElementForView(buf, live_tv, live_tv.byte_offset + idx * elem_size, coerced);
@@ -768,7 +768,7 @@ fn reflectSetOnReceiver(realm: *Realm, receiver_v: Value, key_slice: []const u8,
     // index, IIE rejects out-of-bounds without coercion; in-bounds
     // routes through SetTypedArrayElement (ToNumber once, drop if
     // detached mid-coercion). Reflect.set surfaces a reject as false.
-    if (receiver_obj.typed_view) |recv_tv| {
+    if (receiver_obj.getTypedView()) |recv_tv| {
         const ta_mod = @import("typed_array.zig");
         if (ta_mod.canonicalNumericIndex(key_slice)) |recv_num| {
             if (!ta_mod.isValidIntegerIndexPub(recv_tv, recv_num)) {
@@ -777,9 +777,9 @@ fn reflectSetOnReceiver(realm: *Realm, receiver_v: Value, key_slice: []const u8,
                 return Value.false_;
             }
             const coerced = try ta_mod.coerceForTypedSlot(realm, recv_tv.kind, v);
-            const live_tv = receiver_obj.typed_view orelse return Value.true_;
+            const live_tv = receiver_obj.getTypedView() orelse return Value.true_;
             if (ta_mod.isValidIntegerIndexPub(live_tv, recv_num)) {
-                const buf = live_tv.viewed.array_buffer.?;
+                const buf = live_tv.viewed.getArrayBuffer().?;
                 const elem_size = live_tv.kind.elementSize();
                 const idx: usize = @intFromFloat(recv_num);
                 @import("../intrinsics.zig").writeTypedElementForView(buf, live_tv, live_tv.byte_offset + idx * elem_size, coerced);

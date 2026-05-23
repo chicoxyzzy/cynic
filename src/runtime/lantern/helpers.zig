@@ -58,7 +58,7 @@ pub fn lookupAccessor(obj: *JSObject, key: []const u8) ?Accessor {
         // `Object.create(ta)[0] = v` (§10.4.5.5 IIE [[Set]] falls
         // through to OrdinarySet which sees the IIE data
         // descriptor and creates the property on the receiver).
-        if (c.typed_view != null) {
+        if (c.getTypedView() != null) {
             const ta_mod = @import("../builtins/typed_array.zig");
             if (ta_mod.canonicalNumericIndex(key)) |_| return null;
         }

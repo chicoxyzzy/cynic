@@ -90,7 +90,7 @@ pub fn install(realm: *Realm) !void {
         // §25.1.4.3 ArrayBuffer.isView(arg) — returns true iff
         // arg is an Object with a `[[ViewedArrayBuffer]]` slot
         // (TypedArray or DataView instance). Cynic tracks both
-        // with `obj.typed_view`.
+        // with `obj.getTypedView()`.
         try intrinsics.installNativeMethod(realm, ctor, "isView", arrayBufferIsView, 1);
         // §25.1.4.2 `get ArrayBuffer [ @@species ]` returns `this`.
         // Subclasses pick up the inherited getter via
@@ -435,9 +435,9 @@ fn arrayBufferConstructor(realm: *Realm, this_value: Value, args: []const Value)
         return throwRangeError(realm, "ArrayBuffer length exceeds heap ceiling");
     const buf = realm.allocator.alloc(u8, len) catch return error.OutOfMemory;
     @memset(buf, 0);
-    inst.array_buffer = buf;
+    inst.setArrayBuffer(realm.allocator, buf) catch return error.OutOfMemory;
     inst.has_array_buffer_data = true;
-    inst.array_buffer_max_byte_length = max_byte_length_opt;
+    inst.setArrayBufferMaxByteLength(realm.allocator, max_byte_length_opt) catch return error.OutOfMemory;
     return heap_mod.taggedObject(inst);
 }
 
@@ -478,7 +478,7 @@ fn getMaxByteLengthOption(realm: *Realm, options: Value) NativeError!?usize {
 /// §25.1.4.3 ArrayBuffer.isView(arg) — true iff arg is an
 /// Object with a `[[ViewedArrayBuffer]]` internal slot (i.e.
 /// any TypedArray or DataView instance). Cynic tracks both via
-/// `obj.typed_view`.
+/// `obj.getTypedView()`.
 fn arrayBufferIsView(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = realm;
     _ = this_value;
@@ -487,7 +487,7 @@ fn arrayBufferIsView(realm: *Realm, this_value: Value, args: []const Value) Nati
     // §25.1.4.3 — true iff `[[ViewedArrayBuffer]]` is present.
     // Cynic stores TypedArrays under `typed_view` and DataViews
     // under `data_view`; either qualifies.
-    return Value.fromBool(obj.typed_view != null or obj.data_view != null);
+    return Value.fromBool(obj.getTypedView() != null or obj.getDataView() != null);
 }
 
 fn arrayBufferByteLength(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -499,7 +499,7 @@ fn arrayBufferByteLength(realm: *Realm, this_value: Value, args: []const Value) 
         return throwTypeError(realm, "get ArrayBuffer.prototype.byteLength requires an ArrayBuffer receiver");
     if (!obj.has_array_buffer_data)
         return throwTypeError(realm, "get ArrayBuffer.prototype.byteLength requires an ArrayBuffer receiver");
-    if (obj.array_buffer) |ab| return Value.fromInt32(@intCast(ab.len));
+    if (obj.getArrayBuffer()) |ab| return Value.fromInt32(@intCast(ab.len));
     // Detached buffer — §25.1.5.1 step 5 says return 0 (the
     // [[ArrayBufferByteLength]] field on a detached buffer is 0).
     return Value.fromInt32(0);
@@ -514,7 +514,7 @@ fn arrayBufferDetached(realm: *Realm, this_value: Value, args: []const Value) Na
         return throwTypeError(realm, "get ArrayBuffer.prototype.detached requires an ArrayBuffer receiver");
     if (!obj.has_array_buffer_data)
         return throwTypeError(realm, "get ArrayBuffer.prototype.detached requires an ArrayBuffer receiver");
-    return Value.fromBool(obj.array_buffer == null);
+    return Value.fromBool(obj.getArrayBuffer() == null);
 }
 
 /// §25.1.5.x `get ArrayBuffer.prototype.maxByteLength`. ES2024.
@@ -526,8 +526,8 @@ fn arrayBufferMaxByteLength(realm: *Realm, this_value: Value, args: []const Valu
         return throwTypeError(realm, "get ArrayBuffer.prototype.maxByteLength requires an ArrayBuffer receiver");
     if (!obj.has_array_buffer_data)
         return throwTypeError(realm, "get ArrayBuffer.prototype.maxByteLength requires an ArrayBuffer receiver");
-    if (obj.array_buffer == null) return Value.fromInt32(0);
-    const max = obj.array_buffer_max_byte_length orelse obj.array_buffer.?.len;
+    if (obj.getArrayBuffer() == null) return Value.fromInt32(0);
+    const max = obj.getArrayBufferMaxByteLength() orelse obj.getArrayBuffer().?.len;
     return numberFromUsize(max);
 }
 
@@ -538,7 +538,7 @@ fn arrayBufferResizable(realm: *Realm, this_value: Value, args: []const Value) N
         return throwTypeError(realm, "get ArrayBuffer.prototype.resizable requires an ArrayBuffer receiver");
     if (!obj.has_array_buffer_data)
         return throwTypeError(realm, "get ArrayBuffer.prototype.resizable requires an ArrayBuffer receiver");
-    return Value.fromBool(obj.array_buffer_max_byte_length != null);
+    return Value.fromBool(obj.getArrayBufferMaxByteLength() != null);
 }
 
 /// §25.1.5.3 ArrayBuffer.prototype.resize(newLength). ES2024.
@@ -548,7 +548,7 @@ fn arrayBufferResize(realm: *Realm, this_value: Value, args: []const Value) Nati
     // A fixed buffer doesn't carry the slot at all.
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "ArrayBuffer.prototype.resize requires a resizable ArrayBuffer receiver");
-    if (!obj.has_array_buffer_data or obj.array_buffer_max_byte_length == null)
+    if (!obj.has_array_buffer_data or obj.getArrayBufferMaxByteLength() == null)
         return throwTypeError(realm, "ArrayBuffer.prototype.resize requires a resizable ArrayBuffer receiver");
     // Step 5 — `Let newByteLength be ? ToIntegerOrInfinity(newLength)`.
     // The `coerced-new-length-detach.js` fixture asserts that
@@ -558,10 +558,10 @@ fn arrayBufferResize(realm: *Realm, this_value: Value, args: []const Value) Nati
     const raw: f64 = if (len_v.isInt32()) @floatFromInt(len_v.asInt32()) else len_v.asDouble();
     const trunc: f64 = if (std.math.isNan(raw)) 0 else if (std.math.isInf(raw)) raw else @trunc(raw);
     // Step 4 — IsDetachedBuffer(O) check happens *after* coercion.
-    if (obj.array_buffer == null)
+    if (obj.getArrayBuffer() == null)
         return throwTypeError(realm, "ArrayBuffer.prototype.resize on detached buffer");
     // Step 6 — newByteLength < 0 or > max → RangeError.
-    const max = obj.array_buffer_max_byte_length.?;
+    const max = obj.getArrayBufferMaxByteLength().?;
     const max_f: f64 = @floatFromInt(max);
     if (trunc < 0 or (std.math.isInf(trunc) and trunc > 0) or trunc > max_f)
         return throwRangeError(realm, "ArrayBuffer.prototype.resize newLength out of range");
@@ -569,11 +569,11 @@ fn arrayBufferResize(realm: *Realm, this_value: Value, args: []const Value) Nati
 
     // Step 7 / 8 — HostResizeArrayBuffer. We're the host: realloc
     // the backing buffer and zero-fill any growth tail.
-    const old = obj.array_buffer.?;
+    const old = obj.getArrayBuffer().?;
     if (new_len == old.len) return Value.undefined_;
     const new_bytes = realm.allocator.realloc(old, new_len) catch return error.OutOfMemory;
     if (new_len > old.len) @memset(new_bytes[old.len..], 0);
-    obj.array_buffer = new_bytes;
+    obj.setArrayBuffer(realm.allocator, new_bytes) catch return error.OutOfMemory;
     return Value.undefined_;
 }
 
@@ -596,14 +596,14 @@ fn arrayBufferTransferImpl(realm: *Realm, this_value: Value, args: []const Value
     // newLength defaults to source byteLength (or maxByteLength
     // when preserving resizability and source is resizable —
     // matches V8's transfer-preserves-cap semantics).
-    const src_buf = src.array_buffer orelse
+    const src_buf = src.getArrayBuffer() orelse
         return throwTypeError(realm, "Cannot transfer a detached ArrayBuffer");
     const new_len: usize = blk: {
         if (args.len == 0 or args[0].isUndefined()) break :blk src_buf.len;
         break :blk try toIndex(realm, args[0]);
     };
 
-    const max_byte_length: ?usize = if (preserve_resizability) src.array_buffer_max_byte_length else null;
+    const max_byte_length: ?usize = if (preserve_resizability) src.getArrayBufferMaxByteLength() else null;
     if (max_byte_length) |m| {
         if (new_len > m) return throwRangeError(realm, "ArrayBuffer.prototype.transfer: newLength exceeds maxByteLength");
     }
@@ -617,10 +617,10 @@ fn arrayBufferTransferImpl(realm: *Realm, this_value: Value, args: []const Value
 
     // Detach the source — DetachArrayBuffer per §25.1.3.4.
     realm.allocator.free(src_buf);
-    src.array_buffer = null;
+    src.setArrayBuffer(realm.allocator, null) catch return error.OutOfMemory;
     // Detaching clears the max-byte-length slot too; per spec a
     // detached buffer's `maxByteLength` reads 0.
-    src.array_buffer_max_byte_length = null;
+    src.setArrayBufferMaxByteLength(realm.allocator, null) catch return error.OutOfMemory;
 
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     if (heap_mod.valueAsFunction(realm.globals.get("ArrayBuffer") orelse Value.undefined_)) |ab_ctor| {
@@ -628,9 +628,9 @@ fn arrayBufferTransferImpl(realm: *Realm, this_value: Value, args: []const Value
     } else {
         out.prototype = realm.intrinsics.object_prototype;
     }
-    out.array_buffer = new_bytes;
+    out.setArrayBuffer(realm.allocator, new_bytes) catch return error.OutOfMemory;
     out.has_array_buffer_data = true;
-    out.array_buffer_max_byte_length = max_byte_length;
+    out.setArrayBufferMaxByteLength(realm.allocator, max_byte_length) catch return error.OutOfMemory;
     return heap_mod.taggedObject(out);
 }
 
@@ -692,7 +692,7 @@ fn arrayBufferSpeciesConstructor(realm: *Realm, exemplar: *JSObject, default_cto
 
 fn arrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const src = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "slice on non-ArrayBuffer");
-    const src_buf = src.array_buffer orelse return throwTypeError(realm, "slice on non-ArrayBuffer");
+    const src_buf = src.getArrayBuffer() orelse return throwTypeError(realm, "slice on non-ArrayBuffer");
     const total: i64 = @intCast(src_buf.len);
     // §25.1.5.5 ArrayBuffer.prototype.slice step 5-9 — start / end
     // go through ToIntegerOrInfinity. NaN -> 0; -Infinity stays
@@ -748,7 +748,7 @@ fn arrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) Nativ
         const out = realm.heap.allocateObject() catch return error.OutOfMemory;
         const new_buf = realm.allocator.alloc(u8, new_len) catch return error.OutOfMemory;
         @memset(new_buf, 0);
-        out.array_buffer = new_buf;
+        out.setArrayBuffer(realm.allocator, new_buf) catch return error.OutOfMemory;
         out.has_array_buffer_data = true;
         break :err heap_mod.taggedObject(out);
     };
@@ -757,7 +757,7 @@ fn arrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // internal slot (i.e. be a real ArrayBuffer, not a stub).
     const result_obj = heap_mod.valueAsPlainObject(result_v) orelse
         return throwTypeError(realm, "ArrayBuffer.prototype.slice: species ctor returned non-object");
-    const result_buf = result_obj.array_buffer orelse
+    const result_buf = result_obj.getArrayBuffer() orelse
         return throwTypeError(realm, "ArrayBuffer.prototype.slice: species ctor did not return an ArrayBuffer");
     // §25.1.5.5 step 19 — `SameValue(new, O)` is true → TypeError.
     // The fixture `species-returns-same-arraybuffer.js` returns
@@ -860,10 +860,10 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                 buf_obj.prototype = realm.intrinsics.array_buffer_prototype;
                 const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
                 @memset(buf_bytes, 0);
-                buf_obj.array_buffer = buf_bytes;
+                buf_obj.setArrayBuffer(realm.allocator, buf_bytes) catch return error.OutOfMemory;
                 buf_obj.has_array_buffer_data = true;
 
-                inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name };
+                inst.setTypedView(realm.allocator, .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name }) catch return error.OutOfMemory;
                 return heap_mod.taggedObject(inst);
             }
 
@@ -885,7 +885,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                 // `inst` is a native-allocated `*JSObject` held only
                 // on the Zig stack until it is returned, so root it
                 // for the whole branch — a re-entrant sweep would
-                // otherwise free it and the `inst.typed_view = …`
+                // otherwise free it and the `inst.getTypedView() = …`
                 // writes (and the returned handle) become a UAF.
                 const inst_scope = realm.heap.openScope() catch return error.OutOfMemory;
                 defer inst_scope.close();
@@ -911,7 +911,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                     // throw TypeError`. A detached buffer has
                     // `has_array_buffer_data == true` but
                     // `array_buffer == null`.
-                    const ab = src.array_buffer orelse return throwTypeError(realm, "TypedArray: ArrayBuffer is detached");
+                    const ab = src.getArrayBuffer() orelse return throwTypeError(realm, "TypedArray: ArrayBuffer is detached");
                     if (byte_offset > ab.len) return throwRangeError(realm, "byteOffset exceeds buffer");
                     const remaining = ab.len - byte_offset;
                     var length: usize = remaining / elem_size;
@@ -920,7 +920,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                     // length-tracking view (§10.4.5 [[ArrayLength]] =
                     // auto). Over a fixed-length buffer it's just the
                     // remaining size; the flag stays false.
-                    const is_resizable = src.array_buffer_max_byte_length != null;
+                    const is_resizable = src.getArrayBufferMaxByteLength() != null;
                     var length_tracking = false;
                     if (length_omitted) {
                         // §23.2.5.1 step 13 — when length is omitted
@@ -938,7 +938,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                         length = explicit_length.?;
                         if (length * elem_size > remaining) return throwRangeError(realm, "view exceeds buffer");
                     }
-                    inst.typed_view = .{ .kind = kind, .viewed = src, .byte_offset = byte_offset, .length = length, .name = ta_name, .length_tracking = length_tracking };
+                    inst.setTypedView(realm.allocator, .{ .kind = kind, .viewed = src, .byte_offset = byte_offset, .length = length, .name = ta_name, .length_tracking = length_tracking }) catch return error.OutOfMemory;
                     return heap_mod.taggedObject(inst);
                 }
 
@@ -1010,9 +1010,9 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                     buf_obj.prototype = realm.intrinsics.array_buffer_prototype;
                     const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
                     @memset(buf_bytes, 0);
-                    buf_obj.array_buffer = buf_bytes;
+                    buf_obj.setArrayBuffer(realm.allocator, buf_bytes) catch return error.OutOfMemory;
                     buf_obj.has_array_buffer_data = true;
-                    inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name };
+                    inst.setTypedView(realm.allocator, .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name }) catch return error.OutOfMemory;
                     // §23.2.6.4 / §7.1.11 — Uint8ClampedArray's
                     // [[ContentType]] is still Number but writes
                     // route through ToUint8Clamp instead of modular
@@ -1070,9 +1070,9 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                 buf_obj.prototype = realm.intrinsics.array_buffer_prototype;
                 const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
                 @memset(buf_bytes, 0);
-                buf_obj.array_buffer = buf_bytes;
+                buf_obj.setArrayBuffer(realm.allocator, buf_bytes) catch return error.OutOfMemory;
                 buf_obj.has_array_buffer_data = true;
-                inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name };
+                inst.setTypedView(realm.allocator, .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name }) catch return error.OutOfMemory;
                 // Copy each element via Get + ToNumber/ToBigInt.
                 const bigint_mod = @import("bigint.zig");
                 const clamped_al = std.mem.eql(u8, ta_name, "Uint8ClampedArray");
@@ -1167,9 +1167,9 @@ fn typedArrayCreate(
     };
     const result = heap_mod.valueAsPlainObject(result_v) orelse
         return throwTypeError(realm, "TypedArrayCreate: constructor did not return an object");
-    const tv = result.typed_view orelse
+    const tv = result.getTypedView() orelse
         return throwTypeError(realm, "TypedArrayCreate: constructor did not return a TypedArray");
-    _ = tv.viewed.array_buffer orelse
+    _ = tv.viewed.getArrayBuffer() orelse
         return throwTypeError(realm, "TypedArrayCreate: returned TypedArray has a detached buffer");
     if (expected_len) |min_len| {
         if (tv.length < min_len) {
@@ -1188,7 +1188,7 @@ fn typedArrayCreate(
 /// built-ins/TypedArray/from/from-*-mapper-detaches-result.js).
 fn typedArrayWriteIndex(realm: *Realm, target: *JSObject, idx: usize, v: Value) NativeError!void {
     const bigint_mod = @import("bigint.zig");
-    const tv = target.typed_view orelse return throwTypeError(realm, "TypedArray write on non-TypedArray");
+    const tv = target.getTypedView() orelse return throwTypeError(realm, "TypedArray write on non-TypedArray");
     const elem_size = tv.kind.elementSize();
     const coerced = switch (tv.kind) {
         .bigint64, .biguint64 => bigint_mod.toBigIntValue(realm, v) catch |err| switch (err) {
@@ -1200,7 +1200,7 @@ fn typedArrayWriteIndex(realm: *Realm, target: *JSObject, idx: usize, v: Value) 
     // §10.4.5.10 step 1 — IsValidIntegerIndex returns false for
     // detached / OOB; the spec then returns NormalCompletion
     // (silent drop). Throwing here is wrong.
-    const buf = tv.viewed.array_buffer orelse return;
+    const buf = tv.viewed.getArrayBuffer() orelse return;
     const byte_pos = tv.byte_offset + idx * elem_size;
     if (byte_pos + elem_size > buf.len) return;
     writeTypedElementForView(buf, tv, byte_pos, coerced);
@@ -1369,11 +1369,11 @@ fn typedArrayOf(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 fn typedArrayLength(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray accessor on non-object");
-    const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray.prototype.length called on a non-TypedArray");
+    const tv = obj.getTypedView() orelse return throwTypeError(realm, "TypedArray.prototype.length called on a non-TypedArray");
     // §23.2.3.18 — IsDetachedBuffer or IsTypedArrayOutOfBounds
     // → return 0. For a length-tracking view, the current length
     // is recomputed against the live buffer.
-    if (tv.viewed.array_buffer == null) return Value.fromInt32(0);
+    if (tv.viewed.getArrayBuffer() == null) return Value.fromInt32(0);
     if (taIsOutOfBounds(tv)) return Value.fromInt32(0);
     return Value.fromInt32(@intCast(taCurrentLength(tv)));
 }
@@ -1381,9 +1381,9 @@ fn typedArrayLength(realm: *Realm, this_value: Value, args: []const Value) Nativ
 fn typedArrayByteLength(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray accessor on non-object");
-    const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray.prototype.byteLength called on a non-TypedArray");
+    const tv = obj.getTypedView() orelse return throwTypeError(realm, "TypedArray.prototype.byteLength called on a non-TypedArray");
     // §23.2.3.2 — IsDetachedBuffer or IsTypedArrayOutOfBounds → 0.
-    if (tv.viewed.array_buffer == null) return Value.fromInt32(0);
+    if (tv.viewed.getArrayBuffer() == null) return Value.fromInt32(0);
     if (taIsOutOfBounds(tv)) return Value.fromInt32(0);
     return Value.fromInt32(@intCast(taCurrentLength(tv) * tv.kind.elementSize()));
 }
@@ -1391,9 +1391,9 @@ fn typedArrayByteLength(realm: *Realm, this_value: Value, args: []const Value) N
 fn typedArrayByteOffset(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray accessor on non-object");
-    const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray.prototype.byteOffset called on a non-TypedArray");
+    const tv = obj.getTypedView() orelse return throwTypeError(realm, "TypedArray.prototype.byteOffset called on a non-TypedArray");
     // §23.2.3.3 — IsDetachedBuffer or IsTypedArrayOutOfBounds → 0.
-    if (tv.viewed.array_buffer == null) return Value.fromInt32(0);
+    if (tv.viewed.getArrayBuffer() == null) return Value.fromInt32(0);
     if (taIsOutOfBounds(tv)) return Value.fromInt32(0);
     return Value.fromInt32(@intCast(tv.byte_offset));
 }
@@ -1409,7 +1409,7 @@ fn typedArrayToStringTagGetter(realm: *Realm, this_value: Value, args: []const V
     // a [[TypedArrayName]] slot, returns `undefined` (and the
     // getter never throws).
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return Value.undefined_;
-    const tv = obj.typed_view orelse return Value.undefined_;
+    const tv = obj.getTypedView() orelse return Value.undefined_;
     if (tv.name.len == 0) return Value.undefined_;
     const s = realm.heap.allocateString(tv.name) catch return error.OutOfMemory;
     return Value.fromString(s);
@@ -1418,7 +1418,7 @@ fn typedArrayToStringTagGetter(realm: *Realm, this_value: Value, args: []const V
 fn typedArrayBuffer(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray accessor on non-object");
-    const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray.prototype.buffer called on a non-TypedArray");
+    const tv = obj.getTypedView() orelse return throwTypeError(realm, "TypedArray.prototype.buffer called on a non-TypedArray");
     return heap_mod.taggedObject(tv.viewed);
 }
 
@@ -1509,7 +1509,7 @@ fn typedArraySet(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     // Step 1: brand check. .set.call({},…) → TypeError per spec.
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "TypedArray.prototype.set called on non-object");
-    const tv = obj.typed_view orelse
+    const tv = obj.getTypedView() orelse
         return throwTypeError(realm, "TypedArray.prototype.set called on non-TypedArray");
 
     // Step 5: targetOffset = ToIntegerOrInfinity(offset). Throwing
@@ -1546,7 +1546,7 @@ fn typedArraySet(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     // → 0), so \`ta.set(0)\` becomes a no-op.  Symbols / null /
     // undefined throw TypeError per ToObject.
     if (heap_mod.valueAsPlainObject(source_arg)) |po| {
-        if (po.typed_view != null) {
+        if (po.getTypedView() != null) {
             return try taSetFromTypedArray(realm, obj, tv, po, target_offset);
         }
         return try taSetFromArrayLike(realm, obj, tv, po, target_offset);
@@ -1581,10 +1581,10 @@ fn taSetFromTypedArray(
     target_offset: f64,
 ) NativeError!Value {
     _ = target;
-    const src_tv = src.typed_view orelse unreachable;
-    const dst_buf = tv.viewed.array_buffer orelse
+    const src_tv = src.getTypedView() orelse unreachable;
+    const dst_buf = tv.viewed.getArrayBuffer() orelse
         return throwTypeError(realm, "TypedArray.prototype.set: target buffer is detached");
-    const src_buf = src_tv.viewed.array_buffer orelse
+    const src_buf = src_tv.viewed.getArrayBuffer() orelse
         return throwTypeError(realm, "TypedArray.prototype.set: source buffer is detached");
 
     // §23.2.3.27.2 step 4 — `ValidateTypedArray(source, SEQ-CST)`
@@ -1709,7 +1709,7 @@ fn taSetFromArrayLike(
     // `length` getter (Proxy `get` trap) can resize the rab and
     // observably take the target view OOB, but the spec compares
     // against the pre-getter targetLength.
-    const tv_entry = target.typed_view orelse
+    const tv_entry = target.getTypedView() orelse
         return throwTypeError(realm, "TypedArray.prototype.set: target lost typed-view brand");
     if (taIsOutOfBounds(tv_entry)) {
         return throwTypeError(realm, "TypedArray.prototype.set: target is out-of-bounds");
@@ -1760,11 +1760,11 @@ fn taSetFromArrayLike(
         // length view that the proxy shrunk OOB, both conditions
         // collapse to "skip"; for a length-tracking view the
         // length is the live count over the current buffer size.
-        const cur_tv = target.typed_view orelse continue;
+        const cur_tv = target.getTypedView() orelse continue;
         if (taIsOutOfBounds(cur_tv)) continue;
         const cur_len = taCurrentLength(cur_tv);
         if (k + offset >= cur_len) continue;
-        const cur_buf = cur_tv.viewed.array_buffer orelse continue;
+        const cur_buf = cur_tv.viewed.getArrayBuffer() orelse continue;
         const slot = dst_base_offset + k * elem_size;
         if (slot + elem_size > cur_buf.len) continue;
         writeTypedElementForView(cur_buf, cur_tv, slot, converted);
@@ -1781,7 +1781,7 @@ fn taSetFromArrayLike(
 
 fn taViewOf(this_value: Value) ?ObjMod.TypedView {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    return obj.typed_view;
+    return obj.getTypedView();
 }
 
 /// §10.4.5 ValidateTypedArray — combines the "is a TypedArray?"
@@ -1813,7 +1813,7 @@ fn taValidatedView(realm: *Realm, this_value: Value, comptime label: []const u8)
 /// which returns undefined; the method completes without
 /// throwing. See `taSafeRead` for that path.
 fn taIsOutOfBounds(tv: ObjMod.TypedView) bool {
-    const buf = tv.viewed.array_buffer orelse return true;
+    const buf = tv.viewed.getArrayBuffer() orelse return true;
     // §10.4.5 IsTypedArrayOutOfBounds — for a length-tracking
     // view the only OOB condition is `byte_offset > buf.len`;
     // any remaining bytes (even zero) keep the view in-bounds.
@@ -1828,7 +1828,7 @@ fn taIsOutOfBounds(tv: ObjMod.TypedView) bool {
 /// `!taIsOutOfBounds(tv)` already; this routine only computes a
 /// value and does not throw.
 fn taCurrentLength(tv: ObjMod.TypedView) usize {
-    const buf = tv.viewed.array_buffer orelse return 0;
+    const buf = tv.viewed.getArrayBuffer() orelse return 0;
     const elem_size = tv.kind.elementSize();
     if (!tv.length_tracking) {
         // §10.4.5 IsTypedArrayOutOfBounds — a fixed-length view
@@ -1844,7 +1844,7 @@ fn taCurrentLength(tv: ObjMod.TypedView) usize {
 }
 
 fn taBufOf(tv: ObjMod.TypedView) ?[]u8 {
-    return tv.viewed.array_buffer;
+    return tv.viewed.getArrayBuffer();
 }
 
 /// §10.4.5.1 IntegerIndexedElementGet — reads `tv[i]` honoring the
@@ -1855,7 +1855,7 @@ fn taBufOf(tv: ObjMod.TypedView) ?[]u8 {
 /// `lastIndexOf` / `find*` / `at`) whose spec was relaxed in
 /// ES2024 to no longer throw on detached buffers.
 fn taSafeRead(realm: *Realm, tv: ObjMod.TypedView, i: i64) Value {
-    const buf = tv.viewed.array_buffer orelse return Value.undefined_;
+    const buf = tv.viewed.getArrayBuffer() orelse return Value.undefined_;
     const cur_len = taCurrentLength(tv);
     if (i < 0 or i >= @as(i64, @intCast(cur_len))) return Value.undefined_;
     const elem_size = tv.kind.elementSize();
@@ -1883,7 +1883,7 @@ fn taLiveLength(tv: ObjMod.TypedView) i64 {
 /// for views over a shrunk resizable buffer it can be less.
 /// Returned as `usize` because callers iterate with it.
 fn taInBoundsLength(tv: ObjMod.TypedView) usize {
-    const buf = tv.viewed.array_buffer orelse return 0;
+    const buf = tv.viewed.getArrayBuffer() orelse return 0;
     if (tv.byte_offset >= buf.len) return 0;
     const elem_size = tv.kind.elementSize();
     const avail_elems = (buf.len - tv.byte_offset) / elem_size;
@@ -1941,9 +1941,9 @@ fn taMakeNewNamed(realm: *Realm, kind: ObjMod.TypedKind, length: usize, name_hin
     }
     const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
     @memset(buf_bytes, 0);
-    buf_obj.array_buffer = buf_bytes;
+    buf_obj.setArrayBuffer(realm.allocator, buf_bytes) catch return error.OutOfMemory;
     buf_obj.has_array_buffer_data = true;
-    inst.typed_view = .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ctor_name };
+    inst.setTypedView(realm.allocator, .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ctor_name }) catch return error.OutOfMemory;
     return inst;
 }
 
@@ -2038,7 +2038,7 @@ fn taSpeciesCreate(realm: *Realm, exemplar: *JSObject, kind: ObjMod.TypedKind, l
     // Uint8ClampedArray (which share `kind = .uint8`) round-trip
     // through species fallback as themselves.
     if (species_v.isUndefined() or species_v.isNull()) {
-        const exemplar_name: []const u8 = if (exemplar.typed_view) |tv| tv.name else "";
+        const exemplar_name: []const u8 = if (exemplar.getTypedView()) |tv| tv.name else "";
         return taMakeNewNamed(realm, kind, length, exemplar_name);
     }
     // §7.3.22 step 6 — must be a constructor.
@@ -2075,7 +2075,7 @@ fn taSpeciesCreate(realm: *Realm, exemplar: *JSObject, kind: ObjMod.TypedKind, l
     //     (slice/filter/map post-allocate); we still do it here as
     //     the only common bottleneck.
     const result_obj = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "TypedArray species ctor returned non-object");
-    const result_tv = result_obj.typed_view orelse return throwTypeError(realm, "TypedArray species ctor returned non-TypedArray");
+    const result_tv = result_obj.getTypedView() orelse return throwTypeError(realm, "TypedArray species ctor returned non-TypedArray");
     if (result_tv.kind.isBigInt() != kind.isBigInt()) return throwTypeError(realm, "TypedArray species ctor returned wrong content type");
     if (taCurrentLength(result_tv) < length) return throwTypeError(realm, "TypedArray species ctor returned too-short TypedArray");
     // §23.2.4.4 step 2.b — if the species ctor returned the same
@@ -2123,7 +2123,7 @@ fn taCallbackPreamble(realm: *Realm, this_value: Value, args: []const Value) Nat
     len: usize,
 } {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "TypedArray method on non-object");
-    const tv = obj.typed_view orelse return throwTypeError(realm, "TypedArray method on non-TypedArray");
+    const tv = obj.getTypedView() orelse return throwTypeError(realm, "TypedArray method on non-TypedArray");
     // §10.4.5 ValidateTypedArray — a resizable backing buffer
     // may have been shrunk under us, leaving the view's window
     // off the end of the buffer. The spec requires this check
@@ -2131,7 +2131,7 @@ fn taCallbackPreamble(realm: *Realm, this_value: Value, args: []const Value) Nat
     if (taIsOutOfBounds(tv)) return throwTypeError(realm, "TypedArray method called on out-of-bounds TypedArray");
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "callback is not a function");
     const this_arg = argOr(args, 1, Value.undefined_);
-    return .{ .tv = tv, .buf = tv.viewed.array_buffer, .callback = callback, .this_arg = this_arg, .self_obj = obj, .len = taCurrentLength(tv) };
+    return .{ .tv = tv, .buf = tv.viewed.getArrayBuffer(), .callback = callback, .this_arg = this_arg, .self_obj = obj, .len = taCurrentLength(tv) };
 }
 
 fn typedArrayAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -2337,7 +2337,7 @@ fn typedArrayIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nati
     // §23.2.3.16 step 8 — HasProperty(O, k) is `false` once the
     // buffer is detached (mid-call via `fromIndex.valueOf`); the
     // spec's loop returns -1 in that case.
-    if (tv.viewed.array_buffer == null) return Value.fromInt32(-1);
+    if (tv.viewed.getArrayBuffer() == null) return Value.fromInt32(-1);
     // §23.2.3.16 step 8 — iterate to the step-3 snapshot `len`,
     // NOT a post-coercion length. HasProperty(O, F(k)) routes
     // through IsValidIntegerIndex (§10.4.5 [[HasProperty]]),
@@ -2405,7 +2405,7 @@ fn typedArrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) 
     // §23.2.3.18 step 8 — `kPresent` is `false` after detach
     // (the `fromIndex.valueOf` may have triggered it), so the
     // loop returns -1 without inspecting elements.
-    if (tv.viewed.array_buffer == null) return Value.fromInt32(-1);
+    if (tv.viewed.getArrayBuffer() == null) return Value.fromInt32(-1);
     // §23.2.3.18 step 8 — iterate down from `from` to 0 using the
     // step-4 snapshot `len`. HasProperty(O, F(k)) goes through
     // IsValidIntegerIndex (§10.4.5 [[HasProperty]]), which tests
@@ -2488,7 +2488,7 @@ fn typedArrayToLocaleString(realm: *Realm, this_value: Value, args: []const Valu
         if (i > 0) out.appendSlice(realm.allocator, ",") catch return error.OutOfMemory;
         // Re-witness the buffer each iteration — a previous
         // toLocaleString call may have detached / resized it.
-        const live_buf = tv.viewed.array_buffer;
+        const live_buf = tv.viewed.getArrayBuffer();
         const live_len_iter = taCurrentLength(tv);
         const v: Value = blk: {
             if (i >= live_len_iter) break :blk Value.undefined_;
@@ -2604,7 +2604,7 @@ fn typedArrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) 
 fn typedArrayReverse(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const tv = try taValidatedView(realm, this_value, "reverse");
-    const buf = tv.viewed.array_buffer orelse return error.NativeThrew;
+    const buf = tv.viewed.getArrayBuffer() orelse return error.NativeThrew;
     const elem_size = tv.kind.elementSize();
     var lo: usize = 0;
     var hi: usize = taCurrentLength(tv);
@@ -2656,7 +2656,7 @@ fn typedArraySlice(realm: *Realm, this_value: Value, args: []const Value) Native
     // TypeError. Catches the case where (a) ToIntegerOrInfinity
     // ran a user `valueOf` that shrunk the rab below the
     // fixed-length view's window, or (b) the species ctor did.
-    const tv_post = self.typed_view orelse return throwTypeError(realm, "TypedArray detached during slice");
+    const tv_post = self.getTypedView() orelse return throwTypeError(realm, "TypedArray detached during slice");
     if (taIsOutOfBounds(tv_post)) return throwTypeError(realm, "TypedArray.prototype.slice: source went out-of-bounds during coercion");
     // §23.2.3.27 step 15.c-d — refresh srcArrayLength after the
     // recheck and clamp `endIndex` to it. `startIndex` is *not*
@@ -2666,8 +2666,8 @@ fn typedArraySlice(realm: *Realm, this_value: Value, args: []const Value) Native
     const end_clamped: i64 = @min(end, src_array_length_post);
     const count: usize = if (end_clamped > start) @intCast(end_clamped - start) else 0;
     const buf = taBufOf(tv_post) orelse return throwTypeError(realm, "TypedArray detached during slice");
-    const out_tv = out.typed_view orelse return throwTypeError(realm, "Species ctor returned non-TypedArray");
-    const out_buf = out_tv.viewed.array_buffer orelse return throwTypeError(realm, "Species ctor returned detached buffer");
+    const out_tv = out.getTypedView() orelse return throwTypeError(realm, "Species ctor returned non-TypedArray");
+    const out_buf = out_tv.viewed.getArrayBuffer() orelse return throwTypeError(realm, "Species ctor returned detached buffer");
     const elem_size = kind.elementSize();
     const src_off = tv_post.byte_offset + @as(usize, @intCast(start)) * elem_size;
     const dst_off = out_tv.byte_offset;
@@ -2711,7 +2711,7 @@ fn typedArraySlice(realm: *Realm, this_value: Value, args: []const Value) Native
     while (n < count) : (n += 1) {
         const src_byte = src_off + n * elem_size;
         const v = readTypedElement(realm, buf, kind, src_byte);
-        const cur_out_buf = out_tv.viewed.array_buffer orelse break;
+        const cur_out_buf = out_tv.viewed.getArrayBuffer() orelse break;
         const dst_byte = dst_off + n * out_size;
         if (dst_byte + out_size > cur_out_buf.len) break;
         writeTypedElementForView(cur_out_buf, out_tv, dst_byte, v);
@@ -2727,7 +2727,7 @@ fn typedArraySubarray(realm: *Realm, this_value: Value, args: []const Value) Nat
     // *most* methods but subarray's behavior is to compute
     // against the current bounds — keep the brand check only.
     const self = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "subarray on non-TypedArray");
-    const tv = self.typed_view orelse return throwTypeError(realm, "subarray on non-TypedArray");
+    const tv = self.getTypedView() orelse return throwTypeError(realm, "subarray on non-TypedArray");
     // §23.2.3.30 subarray — uses GetArrayBufferMaxByteLength
     // and the buffer witness's `[[ArrayLength]]`. For a length-
     // tracking view this is the live count; for fixed-length
@@ -2803,33 +2803,33 @@ fn taSpeciesCreateSubarray(
         // earlier in `subarray`) may have detached the buffer
         // between the brand check and here; the spec defers the
         // throw to this inner TA construction.
-        if (buffer.array_buffer == null) return throwTypeError(realm, "TypedArray: ArrayBuffer is detached");
+        if (buffer.getArrayBuffer() == null) return throwTypeError(realm, "TypedArray: ArrayBuffer is detached");
         // §23.2.5.1.4 — the inlined TypedArrayCreate refuses a
         // byteOffset past the live buffer length, and (for fixed-
         // length views) refuses `byteOffset + length*elemSize` past
         // it.  Subarray inherits that throw via
         // TypedArraySpeciesCreate.
-        const buf_bytes = buffer.array_buffer.?;
+        const buf_bytes = buffer.getArrayBuffer().?;
         const elem_size = kind.elementSize();
         if (byte_offset > buf_bytes.len) return throwRangeError(realm, "subarray: byteOffset exceeds buffer");
         if (!length_tracking and byte_offset + length * elem_size > buf_bytes.len) return throwRangeError(realm, "subarray: view exceeds buffer");
         // Preserve [[TypedArrayName]] across the default-species
         // fallback so a Uint8ClampedArray subarray stays clamped.
-        const ctor_name: []const u8 = if (exemplar.typed_view) |etv|
+        const ctor_name: []const u8 = if (exemplar.getTypedView()) |etv|
             (if (etv.name.len != 0) etv.name else nameForTypedKind(kind))
         else
             nameForTypedKind(kind);
         const ctor = heap_mod.valueAsFunction(realm.globals.get(ctor_name) orelse Value.undefined_) orelse return throwTypeError(realm, "TypedArray constructor not found");
         const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
         inst.prototype = ctor.prototype;
-        inst.typed_view = .{
+        inst.setTypedView(realm.allocator, .{
             .kind = kind,
             .viewed = buffer,
             .byte_offset = byte_offset,
             .length = length,
             .name = ctor_name,
             .length_tracking = length_tracking,
-        };
+        }) catch return error.OutOfMemory;
         return inst;
     }
     const species_fn = heap_mod.valueAsFunction(species_v) orelse return throwTypeError(realm, "TypedArray @@species is not a constructor");
@@ -2873,7 +2873,7 @@ fn taSpeciesCreateSubarray(
         },
     };
     const result_obj = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "TypedArray species ctor returned non-object");
-    const result_tv = result_obj.typed_view orelse return throwTypeError(realm, "TypedArray species ctor returned non-TypedArray");
+    const result_tv = result_obj.getTypedView() orelse return throwTypeError(realm, "TypedArray species ctor returned non-TypedArray");
     // §23.2.4.4 TypedArrayCreate — content-type parity only
     // (BigInt vs Number); kind itself can differ across the
     // Uint8Array / Uint8ClampedArray boundary.
@@ -2888,8 +2888,8 @@ fn typedArrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     // §23.2.3.20 map writes through the species result's
     // [[ElementType]], which may differ from `O.[[ContentType]]`
     // when a custom @@species returns a different-kind TA.
-    const out_tv = out.typed_view.?;
-    const out_buf = out_tv.viewed.array_buffer.?;
+    const out_tv = out.getTypedView().?;
+    const out_buf = out_tv.viewed.getArrayBuffer().?;
     const out_elem_size = out_tv.kind.elementSize();
     var i: usize = 0;
     while (i < ctx.len) : (i += 1) {
@@ -2931,8 +2931,8 @@ fn typedArrayFilter(realm: *Realm, this_value: Value, args: []const Value) Nativ
     }
     // §23.2.3.10 step 12 — TypedArraySpeciesCreate(O, « kept.length »).
     const out = try taSpeciesCreate(realm, ctx.self_obj, ctx.tv.kind, kept.items.len);
-    const out_tv = out.typed_view.?;
-    const out_buf = out_tv.viewed.array_buffer.?;
+    const out_tv = out.getTypedView().?;
+    const out_buf = out_tv.viewed.getArrayBuffer().?;
     const out_elem_size = out_tv.kind.elementSize();
     // §23.2.3.10 step 14 — store each retained value via
     // SetTypedArrayElement, which dispatches ToNumber / ToBigInt
@@ -2978,7 +2978,7 @@ fn dataViewConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     // §25.3.2.1 step 7 — IsDetachedBuffer. The detach can happen
     // before the call or inside `byteOffset`'s `valueOf`; either
     // way `array_buffer == null` once we reach this point.
-    const buf1 = buf_obj.array_buffer orelse return throwTypeError(realm, "DataView: ArrayBuffer is detached");
+    const buf1 = buf_obj.getArrayBuffer() orelse return throwTypeError(realm, "DataView: ArrayBuffer is detached");
     if (byte_offset > buf1.len) return throwRangeError(realm, "DataView: byteOffset exceeds buffer");
 
     const length_arg = argOr(args, 2, Value.undefined_);
@@ -2988,13 +2988,13 @@ fn dataViewConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     // is `bufLen - byte_offset` (re-resolved on every access),
     // and going out of bounds throws TypeError on the accessor.
     var length_tracking = false;
-    const is_resizable_dv = buf_obj.array_buffer_max_byte_length != null;
+    const is_resizable_dv = buf_obj.getArrayBufferMaxByteLength() != null;
     if (length_arg.isUndefined()) {
         byte_length = buf1.len - byte_offset;
         if (is_resizable_dv) length_tracking = true;
     } else {
         byte_length = try dvToIndex(realm, length_arg);
-        const buf2 = buf_obj.array_buffer orelse return throwTypeError(realm, "DataView: ArrayBuffer detached during construction");
+        const buf2 = buf_obj.getArrayBuffer() orelse return throwTypeError(realm, "DataView: ArrayBuffer detached during construction");
         if (byte_offset > buf2.len or byte_length > buf2.len - byte_offset) return throwRangeError(realm, "DataView: byteLength exceeds buffer");
     }
     // §25.3.2.1 step 10 — OrdinaryCreateFromConstructor, performed
@@ -3020,14 +3020,14 @@ fn dataViewConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     // it OOB (custom-proto-access-resizes-buffer-invalid-by-
     // {offset,length}.js); either must surface as TypeError /
     // RangeError before the fresh instance is returned.
-    const buf3 = buf_obj.array_buffer orelse return throwTypeError(realm, "DataView: ArrayBuffer detached during construction");
+    const buf3 = buf_obj.getArrayBuffer() orelse return throwTypeError(realm, "DataView: ArrayBuffer detached during construction");
     if (byte_offset > buf3.len) return throwRangeError(realm, "DataView: byteOffset exceeds buffer");
     if (!length_tracking) {
         if (byte_length > buf3.len - byte_offset) return throwRangeError(realm, "DataView: byteLength exceeds buffer");
     }
     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
     inst.prototype = proto;
-    inst.data_view = .{ .viewed = buf_obj, .byte_offset = byte_offset, .byte_length = byte_length, .length_tracking = length_tracking };
+    inst.setDataView(realm.allocator, .{ .viewed = buf_obj, .byte_offset = byte_offset, .byte_length = byte_length, .length_tracking = length_tracking }) catch return error.OutOfMemory;
     return heap_mod.taggedObject(inst);
 }
 
@@ -3098,7 +3098,7 @@ fn dvToBigInt64(realm: *Realm, v: Value) NativeError!i64 {
 
 fn dvOf(this_value: Value) ?ObjMod.DataView {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    return obj.data_view;
+    return obj.getDataView();
 }
 
 fn dataViewByteLength(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -3108,7 +3108,7 @@ fn dataViewByteLength(realm: *Realm, this_value: Value, args: []const Value) Nat
     // tracking DataView the live byte length is recomputed from
     // the current buffer; the view is OOB only when its
     // `byte_offset` is past the end of the buffer.
-    const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: buffer is detached");
+    const buf = dv.viewed.getArrayBuffer() orelse return throwTypeError(realm, "DataView: buffer is detached");
     if (dv.length_tracking) {
         if (dv.byte_offset > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
         return Value.fromInt32(@intCast(buf.len - dv.byte_offset));
@@ -3121,7 +3121,7 @@ fn dataViewByteOffset(realm: *Realm, this_value: Value, args: []const Value) Nat
     _ = args;
     const dv = dvOf(this_value) orelse return throwTypeError(realm, "DataView accessor on non-DataView");
     // §25.3.4.2 — detached or OOB → TypeError.
-    const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: buffer is detached");
+    const buf = dv.viewed.getArrayBuffer() orelse return throwTypeError(realm, "DataView: buffer is detached");
     if (dv.length_tracking) {
         if (dv.byte_offset > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
     } else if (dv.byte_offset + dv.byte_length > buf.len) {
@@ -3154,7 +3154,7 @@ fn dvGetPrologue(realm: *Realm, this_value: Value, args: []const Value, elem_siz
     // §25.3.1.1 step 4 — ToIndex first (its valueOf could detach).
     const off = try dvToIndex(realm, argOr(args, 0, Value.undefined_));
     // step 8 — RequireInternalSlot already done; step 9 — IsDetachedBuffer.
-    const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: buffer is detached");
+    const buf = dv.viewed.getArrayBuffer() orelse return throwTypeError(realm, "DataView: buffer is detached");
     // §25.3.1.1 GetViewByteLength — live byte length for length-
     // tracking views; the stored snapshot for fixed-length ones.
     // If the view is itself OOB after a resize of the underlying
@@ -3187,7 +3187,7 @@ fn dvSetNumPrologue(realm: *Realm, this_value: Value, args: []const Value, elem_
     const dv = dvOf(this_value) orelse return throwTypeError(realm, "DataView method on non-DataView");
     const off = try dvToIndex(realm, argOr(args, 0, Value.undefined_));
     const num_v = try dvToNumber(realm, argOr(args, 1, Value.undefined_));
-    const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: buffer is detached");
+    const buf = dv.viewed.getArrayBuffer() orelse return throwTypeError(realm, "DataView: buffer is detached");
     const view_byte_len: usize = if (dv.length_tracking) blk: {
         if (dv.byte_offset > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
         break :blk buf.len - dv.byte_offset;
@@ -3356,7 +3356,7 @@ fn dataViewSetBigInt64(realm: *Realm, this_value: Value, args: []const Value) Na
     const dv = dvOf(this_value) orelse return throwTypeError(realm, "DataView method on non-DataView");
     const off = try dvToIndex(realm, argOr(args, 0, Value.undefined_));
     const i = try dvToBigInt64(realm, argOr(args, 1, Value.undefined_));
-    const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: buffer is detached");
+    const buf = dv.viewed.getArrayBuffer() orelse return throwTypeError(realm, "DataView: buffer is detached");
     const vbl: usize = if (dv.length_tracking) blk: {
         if (dv.byte_offset > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
         break :blk buf.len - dv.byte_offset;
@@ -3374,7 +3374,7 @@ fn dataViewSetBigUint64(realm: *Realm, this_value: Value, args: []const Value) N
     const dv = dvOf(this_value) orelse return throwTypeError(realm, "DataView method on non-DataView");
     const off = try dvToIndex(realm, argOr(args, 0, Value.undefined_));
     const i = try dvToBigInt64(realm, argOr(args, 1, Value.undefined_));
-    const buf = dv.viewed.array_buffer orelse return throwTypeError(realm, "DataView: buffer is detached");
+    const buf = dv.viewed.getArrayBuffer() orelse return throwTypeError(realm, "DataView: buffer is detached");
     const vbl: usize = if (dv.length_tracking) blk: {
         if (dv.byte_offset > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
         break :blk buf.len - dv.byte_offset;
@@ -3544,7 +3544,7 @@ fn taSortInPlace(realm: *Realm, tv: ObjMod.TypedView, buf_in: []u8, comparator: 
     // For length-tracking views the bound is the new live length;
     // OOB j just silently no-ops per-write.
     if (taIsOutOfBounds(tv)) return;
-    const buf = tv.viewed.array_buffer orelse return;
+    const buf = tv.viewed.getArrayBuffer() orelse return;
     const live_len = taCurrentLength(tv);
     var j: usize = 0;
     while (j < sort_len) : (j += 1) {
@@ -3574,10 +3574,10 @@ fn typedArrayToSorted(realm: *Realm, this_value: Value, args: []const Value) Nat
     // %TypedArray% per [[TypedArrayName]] so Uint8ClampedArray
     // round-trips as itself.
     const out = try taMakeNewNamed(realm, tv.kind, ts_len, tv.name);
-    const out_buf = out.typed_view.?.viewed.array_buffer.?;
+    const out_buf = out.getTypedView().?.viewed.getArrayBuffer().?;
     const elem_size = tv.kind.elementSize();
     @memcpy(out_buf[0 .. ts_len * elem_size], buf[tv.byte_offset .. tv.byte_offset + ts_len * elem_size]);
-    try taSortInPlace(realm, out.typed_view.?, out_buf, cmp_fn);
+    try taSortInPlace(realm, out.getTypedView().?, out_buf, cmp_fn);
     return heap_mod.taggedObject(out);
 }
 
@@ -3589,7 +3589,7 @@ fn typedArrayToReversed(realm: *Realm, this_value: Value, args: []const Value) N
     // §23.2.3.33 toReversed — ignores @@species; preserve
     // [[TypedArrayName]] so Uint8ClampedArray stays clamped.
     const out = try taMakeNewNamed(realm, tv.kind, tr_len, tv.name);
-    const out_buf = out.typed_view.?.viewed.array_buffer.?;
+    const out_buf = out.getTypedView().?.viewed.getArrayBuffer().?;
     const elem_size = tv.kind.elementSize();
     var i: usize = 0;
     while (i < tr_len) : (i += 1) {
@@ -3668,7 +3668,7 @@ fn typedArrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // copy + overwrite. SameType means default ctor for the
     // exemplar's [[TypedArrayName]] — preserve clamped vs unclamped.
     const out = try taMakeNewNamed(realm, tv.kind, out_len_us, tv.name);
-    const out_buf = out.typed_view.?.viewed.array_buffer.?;
+    const out_buf = out.getTypedView().?.viewed.getArrayBuffer().?;
     const buf_now = taBufOf(tv) orelse return throwTypeError(realm, "TypedArray detached after coercion");
     const elem_size = tv.kind.elementSize();
     const src_byte_len = out_len_us * elem_size;
@@ -3688,7 +3688,7 @@ fn typedArrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeE
     if (actual_index < initial_len) {
         // `out` preserves [[TypedArrayName]] via taMakeNewNamed, so
         // a clamped exemplar writes through ToUint8Clamp.
-        writeTypedElementForView(out_buf, out.typed_view.?, @as(usize, @intCast(actual_index)) * elem_size, numeric_value);
+        writeTypedElementForView(out_buf, out.getTypedView().?, @as(usize, @intCast(actual_index)) * elem_size, numeric_value);
     }
     return heap_mod.taggedObject(out);
 }
@@ -3894,7 +3894,7 @@ pub fn typedArrayDefineOwnProperty(
     has_writable: bool,
     writable: bool,
 ) NativeError!TypedArrayDefineResult {
-    const tv = obj.typed_view orelse unreachable;
+    const tv = obj.getTypedView() orelse unreachable;
     // §10.4.5.3 step b.i — IsValidIntegerIndex(O, numericIndex).
     // Rejects NaN, ±Infinity, non-integer, -0, negatives, ≥ length,
     // and any index against a detached or OOB-resizable view.
@@ -3916,9 +3916,9 @@ pub fn typedArrayDefineOwnProperty(
         // returning `.applied` so the caller reports the [[DefineOwnProperty]]
         // result as true.
         const coerced = try coerceForTypedSlot(realm, tv.kind, value);
-        const live_tv = obj.typed_view orelse return .applied;
+        const live_tv = obj.getTypedView() orelse return .applied;
         if (!isValidIntegerIndex(live_tv, num)) return .applied;
-        const buf = live_tv.viewed.array_buffer orelse return .applied;
+        const buf = live_tv.viewed.getArrayBuffer() orelse return .applied;
         const elem_size = live_tv.kind.elementSize();
         const idx: usize = @intFromFloat(num);
         // §7.1.11 ToUint8Clamp vs §7.1.6 ToUint8 — Uint8ClampedArray
@@ -3955,7 +3955,7 @@ fn isValidIntegerIndex(tv: ObjMod.TypedView, num: f64) bool {
     if (num == 0.0 and std.math.signbit(num)) return false;
     if (num < 0) return false;
     if (num >= @as(f64, @floatFromInt(std.math.maxInt(usize)))) return false;
-    const buf = tv.viewed.array_buffer orelse return false;
+    const buf = tv.viewed.getArrayBuffer() orelse return false;
     const elem_size = tv.kind.elementSize();
     const live_len: usize = if (tv.length_tracking) blk: {
         if (tv.byte_offset > buf.len) break :blk 0;
@@ -3989,9 +3989,9 @@ pub fn coerceForTypedSlot(realm: *Realm, kind: ObjMod.TypedKind, value: Value) N
 /// `{writable, enumerable, configurable}: true` descriptor) or
 /// `null` for any key that isn't a valid integer index.
 pub fn typedArrayGetOwnPropertyValue(realm: *Realm, obj: *JSObject, num: f64) ?Value {
-    const tv = obj.typed_view orelse return null;
+    const tv = obj.getTypedView() orelse return null;
     if (!isValidIntegerIndex(tv, num)) return null;
-    const buf = tv.viewed.array_buffer orelse return null;
+    const buf = tv.viewed.getArrayBuffer() orelse return null;
     const elem_size = tv.kind.elementSize();
     const idx: usize = @intFromFloat(num);
     return readTypedElement(realm, buf, tv.kind, tv.byte_offset + idx * elem_size);

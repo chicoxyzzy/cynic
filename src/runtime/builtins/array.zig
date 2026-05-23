@@ -473,12 +473,12 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
     // (fill/typed-array-resize.js: Array.prototype.fill called on a
     // TA whose `valueOf` shrinks the rab during coercion expects
     // zero writes once the index falls OOB.)
-    if (obj.typed_view) |tv0| {
+    if (obj.getTypedView()) |tv0| {
         const ta_mod = @import("typed_array.zig");
         if (ta_mod.canonicalNumericIndex(key)) |num| {
             _ = tv0;
             const bigint_mod = @import("bigint.zig");
-            const coerced: Value = if (obj.typed_view.?.kind.isBigInt())
+            const coerced: Value = if (obj.getTypedView().?.kind.isBigInt())
                 bigint_mod.toBigIntValue(realm, value) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
@@ -487,9 +487,9 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
                 try intrinsics.toNumber(realm, value);
             // Re-witness — a user `valueOf` could have detached /
             // resized the buffer between ToNumber and the write.
-            const live_tv = obj.typed_view orelse return;
+            const live_tv = obj.getTypedView() orelse return;
             if (!ta_mod.isValidIntegerIndexPub(live_tv, num)) return;
-            const buf = live_tv.viewed.array_buffer orelse return;
+            const buf = live_tv.viewed.getArrayBuffer() orelse return;
             const elem_size = live_tv.kind.elementSize();
             const idx: usize = @intFromFloat(num);
             const byte_pos = live_tv.byte_offset + idx * elem_size;
