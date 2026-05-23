@@ -9046,6 +9046,10 @@ fn runFrames(
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
                 const obj = heap_mod.valueAsPlainObject(registers[r_obj]) orelse return error.InvalidOpcode;
                 const fn_obj = heap_mod.valueAsFunction(acc) orelse return error.InvalidOpcode;
+                // The shadow shape only models data properties; an
+                // accessor install demotes to dictionary mode so the
+                // shape never claims the accessor key.
+                obj.demoteFromShape();
                 const entry = obj.accessors.getOrPut(allocator, key_s.flatBytes()) catch return error.OutOfMemory;
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 realm.heap.storeInternalSlot(.{ .object = obj }, acc);
@@ -9082,6 +9086,9 @@ fn runFrames(
                 const key_slice = computedKeyToString(key_v, &key_buf);
                 const obj = heap_mod.valueAsPlainObject(registers[r_obj]) orelse return error.InvalidOpcode;
                 const fn_obj = heap_mod.valueAsFunction(acc) orelse return error.InvalidOpcode;
+                // Accessor install: the shadow shape only models data
+                // properties, so demote before recording the accessor.
+                obj.demoteFromShape();
                 const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
                 const entry = obj.accessors.getOrPut(allocator, owned.flatBytes()) catch return error.OutOfMemory;
                 if (!entry.found_existing) {
@@ -10655,6 +10662,13 @@ fn runFrames(
                         const ex = try makeTypeError(realm, "Cannot redefine non-configurable property");
                         return .{ .thrown = ex };
                     }
+                    // A redefine drops the existing slot and writes a
+                    // fresh entry — the shadow shape's append-only
+                    // transition chain can't express that, so demote
+                    // to dictionary mode before the swap. The
+                    // subsequent storePropertyWithFlags re-runs the
+                    // shadow build from an empty slot table.
+                    obj.demoteFromShape();
                     _ = obj.properties.swapRemove(key_s.flatBytes());
                     _ = obj.property_flags.swapRemove(key_s.flatBytes());
                 }
@@ -11064,6 +11078,9 @@ fn runFrames(
                         const ex = try makeTypeError(realm, "Cannot redefine non-configurable property");
                         return .{ .thrown = ex };
                     }
+                    // Append-only shadow shape can't express a slot
+                    // drop; demote so the next write rebuilds.
+                    obj.demoteFromShape();
                     _ = obj.properties.swapRemove(key_slice);
                     _ = obj.property_flags.swapRemove(key_slice);
                 }
