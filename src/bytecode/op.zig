@@ -730,9 +730,15 @@ pub const Op = enum(u8) {
     /// (§10.1.8). Throws if the receiver isn't object-typed —
     /// runtime check, like every other dynamic dispatch.
     lda_property,
-    /// `[op] [k:u16] [r_obj:u8]` — store acc into property `k` of
-    /// the object held in register `r_obj`. The compiler arranges
-    /// for `obj.x = v` to leave `obj` in `r_obj` and `v` in acc.
+    /// `[op] [k:u16] [r_obj:u8] [ic:u16]` — store acc into property
+    /// `k` of the object held in register `r_obj`. The compiler
+    /// arranges for `obj.x = v` to leave `obj` in `r_obj` and `v`
+    /// in acc. `ic` indexes the chunk's `inline_caches` table; the
+    /// interpreter's hit path is a shape pointer compare + a direct
+    /// `slots[cell.slot] = v` (paired with a `properties` bag
+    /// update). Misses fall through to `strictSetProperty`, which
+    /// re-probes the shape and refills the cell on existing own-data
+    /// writable keys.
     sta_property,
     /// `[op] [k:u16] [r_obj:u8]` — §7.3.7 CreateDataPropertyOrThrow.
     /// Define an own data property on `r_obj` with the key `JSString`
@@ -957,7 +963,8 @@ pub const Op = enum(u8) {
             .lda_env,
             .sta_env,
             => 2, // u8 + u8
-            .sta_property, .sta_private, .super_set, .def_property => 3, // k:u16 + r_obj:u8
+            .sta_private, .super_set, .def_property => 3, // k:u16 + r_obj:u8
+            .sta_property => 5, // k:u16 + r_obj:u8 + ic:u16 (inline-cache slot)
             .def_accessor => 4, // k:u16 + r_obj:u8 + is_setter:u8
             .def_computed_accessor => 3, // r_obj:u8 + r_key:u8 + is_setter:u8
             .lda_computed => 1, // r_obj:u8 (key in acc)
@@ -1141,4 +1148,8 @@ test "Op: operandSize agrees with the documented encoding" {
     // so unit-test failures stay hidden — playground/source-map
     // hover would be the user-visible signal).
     try testing.expectEqual(@as(u8, 4), Op.operandSize(.lda_property));
+    // `sta_property` is `[op] [k:u16] [r_obj:u8] [ic:u16]` — 5 bytes
+    // of operand. Same disassembler-PC-walk hazard as `lda_property`
+    // if this gets out of sync with the encoding.
+    try testing.expectEqual(@as(u8, 5), Op.operandSize(.sta_property));
 }

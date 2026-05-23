@@ -10644,12 +10644,45 @@ fn runFrames(
             .sta_property => {
                 const k = readU16(code, ip);
                 const r_obj = code[ip + 2];
-                ip += 3;
+                const ic_idx = readU16(code, ip + 3);
+                ip += 5;
                 if (k >= local_chunk.constants.len) return error.InvalidOpcode;
                 const key_v = local_chunk.constants[k];
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
                 const recv = registers[r_obj];
+                // Monomorphic IC fast path. A cached shape pointer
+                // implies a shaped plain ordinary object (shadowSet
+                // demotes any exotic before stamping), and the cell
+                // is only filled for existing own-data writable
+                // entries — so a hit means the prototype walk for
+                // a non-writable ancestor was already mooted by the
+                // own shadow. The slow path below refills the cell
+                // only on same-shape rewrites (no transition).
+                const recv_obj_opt = heap_mod.valueAsPlainObject(recv);
+                if (recv_obj_opt) |obj_in| {
+                    const cell = &local_chunk.inline_caches[ic_idx];
+                    if (cell.shape != null and cell.shape == obj_in.shape) {
+                        obj_in.slots.items[cell.slot] = acc;
+                        // Bag mirror keeps `JSObject.get` (the non-IC
+                        // read), `Object.keys`, `in`, `hasOwn` and the
+                        // `verifyShapeInvariant` GC check honest.
+                        // Hash lookup hits the existing entry — no
+                        // recordKey needed, the key was anchored when
+                        // the shape first transitioned to this slot.
+                        obj_in.properties.put(allocator, key_s.flatBytes(), acc) catch return error.OutOfMemory;
+                        realm.heap.storeInternalSlot(.{ .object = obj_in }, acc);
+                        continue :dispatch try decodeNext(code, &ip, &committed);
+                    }
+                }
+                // Capture the pre-write shape so the refill below
+                // can distinguish a same-shape rewrite (cacheable
+                // — next iteration hits) from a shape transition
+                // (uncacheable — the cached post-shape never
+                // matches the next pre-shape, so caching it would
+                // burn one shape lookup per slow-path execution
+                // for zero hits, e.g. literal-construction loops).
+                const pre_shape: ?*const @import("shape.zig").Shape = if (recv_obj_opt) |o| o.shape else null;
                 {
                     const set_outcome = try strictSetProperty(allocator, realm, frames, f, ip, recv, key_s.flatBytes(), acc);
                     switch (set_outcome) {
@@ -10659,6 +10692,19 @@ fn runFrames(
                             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                         .uncaught => |ex| return .{ .thrown = ex },
+                    }
+                }
+                if (recv_obj_opt) |obj_after| {
+                    if (obj_after.shape) |sh| {
+                        if (pre_shape == sh) {
+                            if (sh.lookup(key_s.flatBytes())) |entry| {
+                                if (entry.kind == .data and entry.attrs.writable) {
+                                    const cell = &local_chunk.inline_caches[ic_idx];
+                                    cell.shape = sh;
+                                    cell.slot = entry.slot;
+                                }
+                            }
+                        }
                     }
                 }
                 continue :dispatch try decodeNext(code, &ip, &committed);

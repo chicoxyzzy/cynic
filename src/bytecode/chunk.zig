@@ -478,6 +478,16 @@ pub const Builder = struct {
         try self.emitU16(try self.allocIC());
     }
 
+    /// Emit `sta_property` plus its key constant index, receiver
+    /// register, and a freshly allocated IC slot. Encoding:
+    /// `[op] [k:u16] [r_obj:u8] [ic:u16]`.
+    pub fn emitStaProperty(self: *Builder, span: Span, k: u16, r_obj: u8) !void {
+        try self.emitOp(.sta_property, span);
+        try self.emitU16(k);
+        try self.emitU8(r_obj);
+        try self.emitU16(try self.allocIC());
+    }
+
     /// Append `v` to the constant pool, returning its index.
     /// Identical doubles, ints, etc. are not deduplicated — the
     /// optimizer (M5+) can do that. Keep simple here.

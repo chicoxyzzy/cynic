@@ -1584,9 +1584,7 @@ pub const Compiler = struct {
         // Store back — acc holds the bumped value.
         switch (mode) {
             .ident => {
-                try self.builder.emitOp(.sta_property, u.span);
-                try self.builder.emitU16(k_const);
-                try self.builder.emitU8(r_obj);
+                try self.builder.emitStaProperty(u.span, k_const, r_obj);
             },
             .computed => {
                 try self.builder.emitOp(.sta_computed, u.span);
@@ -2162,18 +2160,14 @@ pub const Compiler = struct {
             } else {
                 return error.UnsupportedExpression;
             }
-            try self.builder.emitOp(.sta_property, lit.span);
-            try self.builder.emitU16(k_length);
-            try self.builder.emitU8(r_arr);
+            try self.builder.emitStaProperty(lit.span, k_length, r_arr);
         } else {
             // length starts at 0 — array_spread / arrayPush rely
             // on the existing length. Initialise it explicitly.
             const k_length = try self.internString("length");
             try self.builder.emitOp(.lda_smi, lit.span);
             try self.builder.emitI32(0);
-            try self.builder.emitOp(.sta_property, lit.span);
-            try self.builder.emitU16(k_length);
-            try self.builder.emitU8(r_arr);
+            try self.builder.emitStaProperty(lit.span, k_length, r_arr);
 
             for (lit.elements) |maybe_elem| {
                 if (maybe_elem) |elem| {
@@ -2218,9 +2212,7 @@ pub const Compiler = struct {
                         try self.builder.emitI32(1);
                         try self.builder.emitOp(.add, lit.span);
                         try self.builder.emitU8(r_idx);
-                        try self.builder.emitOp(.sta_property, lit.span);
-                        try self.builder.emitU16(k_length);
-                        try self.builder.emitU8(r_arr);
+                        try self.builder.emitStaProperty(lit.span, k_length, r_arr);
 
                         self.releaseTemp(); // r_idx
                         self.releaseTemp(); // r_val
@@ -2237,9 +2229,7 @@ pub const Compiler = struct {
                     try self.builder.emitI32(1);
                     try self.builder.emitOp(.add, lit.span);
                     try self.builder.emitU8(r_idx);
-                    try self.builder.emitOp(.sta_property, lit.span);
-                    try self.builder.emitU16(k_length);
-                    try self.builder.emitU8(r_arr);
+                    try self.builder.emitStaProperty(lit.span, k_length, r_arr);
                     self.releaseTemp();
                 }
             }
@@ -2882,9 +2872,7 @@ pub const Compiler = struct {
             }
             fn emitStore(this_: *Compiler, span_: Span, ro: u8, nk: ?u16, pk: ?u16, ck: ?u8) CompileError!void {
                 if (nk) |k| {
-                    try this_.builder.emitOp(.sta_property, span_);
-                    try this_.builder.emitU16(k);
-                    try this_.builder.emitU8(ro);
+                    try this_.builder.emitStaProperty(span_, k, ro);
                 } else if (pk) |k| {
                     try this_.builder.emitOp(.sta_private, span_);
                     try this_.builder.emitU16(k);
@@ -3171,9 +3159,7 @@ pub const Compiler = struct {
                 const k_length = try self.internString("length");
                 try self.builder.emitOp(.lda_smi, c.span);
                 try self.builder.emitI32(0);
-                try self.builder.emitOp(.sta_property, c.span);
-                try self.builder.emitU16(k_length);
-                try self.builder.emitU8(r_args);
+                try self.builder.emitStaProperty(c.span, k_length, r_args);
                 for (c.arguments) |*arg| {
                     if (arg.* == .spread) {
                         try self.compileExpression(arg.spread.argument);
@@ -3202,9 +3188,7 @@ pub const Compiler = struct {
                         try self.builder.emitI32(1);
                         try self.builder.emitOp(.add, c.span);
                         try self.builder.emitU8(r_idx);
-                        try self.builder.emitOp(.sta_property, c.span);
-                        try self.builder.emitU16(k_length);
-                        try self.builder.emitU8(r_args);
+                        try self.builder.emitStaProperty(c.span, k_length, r_args);
                     }
                 }
                 try self.builder.emitOp(.super_call_spread, c.span);
@@ -3402,9 +3386,7 @@ pub const Compiler = struct {
         const k_length = try self.internString("length");
         try self.builder.emitOp(.lda_smi, c.span);
         try self.builder.emitI32(0);
-        try self.builder.emitOp(.sta_property, c.span);
-        try self.builder.emitU16(k_length);
-        try self.builder.emitU8(r_args);
+        try self.builder.emitStaProperty(c.span, k_length, r_args);
 
         for (c.arguments) |*arg| {
             if (arg.* == .spread) {
@@ -3433,9 +3415,7 @@ pub const Compiler = struct {
                 try self.builder.emitI32(1);
                 try self.builder.emitOp(.add, c.span);
                 try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.sta_property, c.span);
-                try self.builder.emitU16(k_length);
-                try self.builder.emitU8(r_args);
+                try self.builder.emitStaProperty(c.span, k_length, r_args);
                 self.releaseTemp(); // r_idx
                 self.releaseTemp(); // r_val
             }
@@ -3617,9 +3597,7 @@ pub const Compiler = struct {
         const k_length = try self.internString("length");
         try self.builder.emitOp(.lda_smi, c.span);
         try self.builder.emitI32(0);
-        try self.builder.emitOp(.sta_property, c.span);
-        try self.builder.emitU16(k_length);
-        try self.builder.emitU8(r_args);
+        try self.builder.emitStaProperty(c.span, k_length, r_args);
 
         for (c.arguments) |*arg| {
             if (arg.* == .spread) {
@@ -3648,9 +3626,7 @@ pub const Compiler = struct {
                 try self.builder.emitI32(1);
                 try self.builder.emitOp(.add, c.span);
                 try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.sta_property, c.span);
-                try self.builder.emitU16(k_length);
-                try self.builder.emitU8(r_args);
+                try self.builder.emitStaProperty(c.span, k_length, r_args);
                 self.releaseTemp();
                 self.releaseTemp();
             }
@@ -3792,9 +3768,7 @@ pub const Compiler = struct {
         const k_length = try self.internString("length");
         try self.builder.emitOp(.lda_smi, c.span);
         try self.builder.emitI32(0);
-        try self.builder.emitOp(.sta_property, c.span);
-        try self.builder.emitU16(k_length);
-        try self.builder.emitU8(r_args);
+        try self.builder.emitStaProperty(c.span, k_length, r_args);
 
         for (c.arguments) |*arg| {
             if (arg.* == .spread) {
@@ -3823,9 +3797,7 @@ pub const Compiler = struct {
                 try self.builder.emitI32(1);
                 try self.builder.emitOp(.add, c.span);
                 try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.sta_property, c.span);
-                try self.builder.emitU16(k_length);
-                try self.builder.emitU8(r_args);
+                try self.builder.emitStaProperty(c.span, k_length, r_args);
                 self.releaseTemp();
                 self.releaseTemp();
             }
@@ -3918,9 +3890,7 @@ pub const Compiler = struct {
         const k_length = try self.internString("length");
         try self.builder.emitOp(.lda_smi, n.span);
         try self.builder.emitI32(0);
-        try self.builder.emitOp(.sta_property, n.span);
-        try self.builder.emitU16(k_length);
-        try self.builder.emitU8(r_args);
+        try self.builder.emitStaProperty(n.span, k_length, r_args);
         for (n.arguments) |*arg| {
             if (arg.* == .spread) {
                 try self.compileExpression(arg.spread.argument);
@@ -3948,9 +3918,7 @@ pub const Compiler = struct {
                 try self.builder.emitI32(1);
                 try self.builder.emitOp(.add, n.span);
                 try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.sta_property, n.span);
-                try self.builder.emitU16(k_length);
-                try self.builder.emitU8(r_args);
+                try self.builder.emitStaProperty(n.span, k_length, r_args);
                 self.releaseTemp();
                 self.releaseTemp();
             }
@@ -5717,9 +5685,7 @@ pub const Compiler = struct {
                 const k = try self.internString(key);
                 try self.builder.emitOp(.ldar, span);
                 try self.builder.emitU8(r_value);
-                try self.builder.emitOp(.sta_property, span);
-                try self.builder.emitU16(k);
-                try self.builder.emitU8(r_obj);
+                try self.builder.emitStaProperty(span, k, r_obj);
             },
             .computed => |key_expr| {
                 try self.compileExpression(key_expr);
@@ -8032,9 +7998,7 @@ pub const Compiler = struct {
                     const k_length = try self.internString("length");
                     try self.builder.emitOp(.lda_smi, target.span());
                     try self.builder.emitI32(@intCast(obj_pat.properties.len));
-                    try self.builder.emitOp(.sta_property, target.span());
-                    try self.builder.emitU16(k_length);
-                    try self.builder.emitU8(r_excl);
+                    try self.builder.emitStaProperty(target.span(), k_length, r_excl);
                 }
 
                 var excl_idx: u32 = 0;
@@ -8064,9 +8028,7 @@ pub const Compiler = struct {
                             var ibuf: [16]u8 = undefined;
                             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{excl_idx}) catch unreachable;
                             const ik = try self.internString(islice);
-                            try self.builder.emitOp(.sta_property, prop.span);
-                            try self.builder.emitU16(ik);
-                            try self.builder.emitU8(r_excl);
+                            try self.builder.emitStaProperty(prop.span, ik, r_excl);
                             excl_idx += 1;
                         }
                         try self.builder.emitOp(.ldar, prop.span);
@@ -8114,9 +8076,7 @@ pub const Compiler = struct {
                         var ibuf: [16]u8 = undefined;
                         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{excl_idx}) catch unreachable;
                         const ik = try self.internString(islice);
-                        try self.builder.emitOp(.sta_property, prop.span);
-                        try self.builder.emitU16(ik);
-                        try self.builder.emitU8(r_excl);
+                        try self.builder.emitStaProperty(prop.span, ik, r_excl);
                         excl_idx += 1;
                     }
                     try self.builder.emitOp(.ldar, prop.span);
@@ -8402,9 +8362,7 @@ pub const Compiler = struct {
                     const k_length = try self.internString("length");
                     try self.builder.emitOp(.lda_smi, rest_span);
                     try self.builder.emitI32(bound_count);
-                    try self.builder.emitOp(.sta_property, rest_span);
-                    try self.builder.emitU16(k_length);
-                    try self.builder.emitU8(r_excl);
+                    try self.builder.emitStaProperty(rest_span, k_length, r_excl);
                 }
 
                 // Object pattern leaves can include `{...rest}` —
@@ -8443,9 +8401,7 @@ pub const Compiler = struct {
                                 var ibuf: [16]u8 = undefined;
                                 const islice = std.fmt.bufPrint(&ibuf, "{d}", .{excl_idx}) catch unreachable;
                                 const ik = try self.internString(islice);
-                                try self.builder.emitOp(.sta_property, op.span);
-                                try self.builder.emitU16(ik);
-                                try self.builder.emitU8(r_excl);
+                                try self.builder.emitStaProperty(op.span, ik, r_excl);
                                 excl_idx += 1;
                             }
                         } else if (r_excl_opt) |r_excl| {
@@ -8461,9 +8417,7 @@ pub const Compiler = struct {
                             var ibuf: [16]u8 = undefined;
                             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{excl_idx}) catch unreachable;
                             const ik = try self.internString(islice);
-                            try self.builder.emitOp(.sta_property, op.span);
-                            try self.builder.emitU16(ik);
-                            try self.builder.emitU8(r_excl);
+                            try self.builder.emitStaProperty(op.span, ik, r_excl);
                             excl_idx += 1;
                         }
                         // §13.15.5.6 KeyedDestructuringAssignmentEval
@@ -8654,9 +8608,7 @@ pub const Compiler = struct {
                 try self.builder.emitU8(r_value);
                 switch (pm.key) {
                     .name => |k| {
-                        try self.builder.emitOp(.sta_property, pm.span);
-                        try self.builder.emitU16(k);
-                        try self.builder.emitU8(pm.r_obj);
+                        try self.builder.emitStaProperty(pm.span, k, pm.r_obj);
                     },
                     .private => |k| {
                         try self.builder.emitOp(.sta_private, pm.span);
@@ -8798,9 +8750,7 @@ pub const Compiler = struct {
                 const k = try self.internString(key);
                 try self.builder.emitOp(.ldar, span);
                 try self.builder.emitU8(r_value);
-                try self.builder.emitOp(.sta_property, span);
-                try self.builder.emitU16(k);
-                try self.builder.emitU8(r_obj);
+                try self.builder.emitStaProperty(span, k, r_obj);
             },
             .computed => |key_expr| {
                 try self.compileExpression(key_expr);

@@ -14,6 +14,50 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-05-23 — cynic `e03f5cd` + write-IC patch, host `Darwin 25.5.0 arm64`
+
+Both halves of the monomorphic property cache landed: `lda_property`
+took its IC operand in `e03f5cd` ("shapes: wire monomorphic inline
+cache into lda_property"), and this run measures the symmetric
+write-side cache on `sta_property`. New bench `prop_write` mirrors
+`prop_access` — same shape, same four hot keys, write instead of
+read — to measure the write IC's payoff (the prior suite had no
+hot-write-to-same-shape fixture).
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 90.31 | 88.16 | 91.67 | 3376 |
+| prop_access | 17.57 | 17.36 | 18.02 | 3440 |
+| prop_write | 33.70 | 32.61 | 34.59 | 3472 |
+| array_iter | 22.82 | 22.58 | 23.43 | 4336 |
+| string_concat | 3.67 | 3.49 | 3.79 | 4256 |
+| promise_chain | 4.49 | 4.34 | 4.60 | 8400 |
+| object_alloc | 24.30 | 23.89 | 24.83 | 9536 |
+
+Δ on **prop_write** specifically: with the write IC stashed out
+(read IC only, `e03f5cd` state) the same fixture measures 92.24 ms
+in-session — the write IC drops it to 33.70 ms, a **−63.4 %**
+speedup that mirrors `prop_access`'s `-66 %` read-side win.
+Mechanism: the fast path pointer-compares the receiver's shape
+against the IC cell and writes `slots[cell.slot] = v` + a hash-map
+update on `properties`, skipping the full strictSetProperty walk
+(proxy / module-namespace / typed-array / array-exotic / accessor /
+ancestor-non-writable / extensibility checks, plus the function
+call into strictSetPropertyAnchored). The slow path captures the
+pre-write shape and refills the cell only on same-shape rewrites,
+so transitioning writes (literal construction at fresh receivers)
+don't burn a shape lookup per slow-path call for zero hits.
+
+Other benches vs the `39b5e31` scaffolding-only row: `prop_access`
+−64 % (the read-IC win, still the dominant mover). `arith_loop`
++9 %, `array_iter` +11 %, `string_concat` +21 %, `promise_chain`
++27 %, `object_alloc` +2 % — within-session re-runs against an
+identically-built binary (read-IC only) put these benches at the
+same numbers (±2 %), so the apparent regression is cross-session
+machine noise on benches with no `lda_property` / `sta_property`
+in the hot path, not a real cost of the IC. Spreads tight (≤ ±3
+% within this session).
+
 ### 2026-05-23 — cynic `39b5e31`, host `Darwin 25.5.0 arm64`
 
 Regression check after the shapes-scaffolding commits (`0704c9a`
