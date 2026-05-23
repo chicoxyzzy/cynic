@@ -20,7 +20,7 @@ const JSFunction = @import("../function.zig").JSFunction;
 const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics_mod = @import("../intrinsics.zig");
-const lantern = @import("../lantern/lantern.zig");
+const lantern = @import("../lantern/interpreter.zig");
 const toBoolean = @import("../lantern/arith.zig").toBoolean;
 
 const SYNC_ITER_SLOT = "__cynic_sync_iter__";

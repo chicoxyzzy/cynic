@@ -1,5 +1,5 @@
 //! Generator + async-generator machinery — extracted from
-//! `lantern.zig` to keep the dispatch-loop file focused.
+//! `interpreter.zig` to keep the dispatch-loop file focused.
 //!
 //! Hosts the `wrapGenerator` / `wrapAsyncGenerator` entry
 //! points, the prototype installers (`ensureGeneratorPrototype`,
@@ -10,7 +10,7 @@
 //! `asyncGeneratorResumeNext` → `resumeAsyncGenBody` →
 //! `settleAsyncGenRequest`).
 //!
-//! Three callbacks land back in `lantern.zig`: `runFrames` to
+//! Three callbacks land back in `interpreter.zig`: `runFrames` to
 //! drive a fresh dispatch, `resumeGenerator` to step a suspended
 //! generator's body, and `settlePromiseInternal` to honour the
 //! Promise capability associated with each async-generator
@@ -28,10 +28,10 @@ const heap_mod = @import("../heap.zig");
 const intrinsics_mod = @import("../intrinsics.zig");
 const Realm = @import("../realm.zig").Realm;
 
-// Circular back to lantern.zig for the dispatch entry points,
+// Circular back to interpreter.zig for the dispatch entry points,
 // shared types, and the promise-settlement / generator-resume
 // hooks the async-generator pump invokes.
-const lantern = @import("lantern.zig");
+const lantern = @import("interpreter.zig");
 const CallFrame = lantern.CallFrame;
 const RunError = lantern.RunError;
 const RunResult = lantern.RunResult;

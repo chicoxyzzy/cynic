@@ -1,4 +1,4 @@
-//! Call + construct machinery — extracted from `lantern.zig` to
+//! Call + construct machinery — extracted from `interpreter.zig` to
 //! keep the dispatch-loop file focused.
 //!
 //! Hosts the call dispatch helpers that the bytecode `Call` /
@@ -31,9 +31,9 @@ const intrinsics_mod = @import("../intrinsics.zig");
 const Realm = @import("../realm.zig").Realm;
 const Chunk = @import("../../bytecode/chunk.zig").Chunk;
 
-// Circular back to lantern.zig for shared types + the dispatch
+// Circular back to interpreter.zig for shared types + the dispatch
 // loop entry + a handful of helpers that bracket call/construct.
-const lantern = @import("lantern.zig");
+const lantern = @import("interpreter.zig");
 const CallFrame = lantern.CallFrame;
 const RunError = lantern.RunError;
 const RunResult = lantern.RunResult;

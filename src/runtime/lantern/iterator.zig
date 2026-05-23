@@ -1,4 +1,4 @@
-//! Iterator opening + for-in walker — extracted from `lantern.zig`
+//! Iterator opening + for-in walker — extracted from `interpreter.zig`
 //! to keep the dispatch-loop file focused.
 //!
 //! Hosts the `IterError` set, the §7.4.2 GetIterator family
@@ -8,7 +8,7 @@
 //! the `arrayLikeIterNext` native callback used by the array-
 //! like fallback iterator's `next` slot.
 //!
-//! Each public entry calls back into lantern.zig for
+//! Each public entry calls back into interpreter.zig for
 //! `callJSFunction` (the dispatch-loop entry the iterator's
 //! `@@iterator` method invocation routes through).
 
@@ -23,9 +23,9 @@ const heap_mod = @import("../heap.zig");
 const intrinsics_mod = @import("../intrinsics.zig");
 const Realm = @import("../realm.zig").Realm;
 
-// Circular back to lantern.zig for the dispatch entry point the
+// Circular back to interpreter.zig for the dispatch entry point the
 // iterator setup routes user `@@iterator` method calls through.
-const lantern = @import("lantern.zig");
+const lantern = @import("interpreter.zig");
 const callJSFunction = lantern.callJSFunction;
 const RunError = lantern.RunError;
 const helpers = @import("helpers.zig");

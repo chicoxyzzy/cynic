@@ -123,7 +123,7 @@ fn promiseSpeciesGetter(realm: *Realm, this_value: Value, args: []const Value) N
 fn microtaskDrainNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     _ = args;
-    const lantern = @import("../lantern/lantern.zig");
+    const lantern = @import("../lantern/interpreter.zig");
     lantern.drainMicrotasks(realm.allocator, realm) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
@@ -213,7 +213,7 @@ pub fn newPromiseCapability(realm: *Realm, ctor: *JSFunction) NativeError!Promis
     executor.bound_this = heap_mod.taggedObject(state);
 
     // §27.2.1.5 step 6 — Construct(C, «executor»).
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     const ctor_v = heap_mod.taggedFunction(ctor);
     const construct_outcome = interp.constructValue(realm.allocator, realm, ctor_v, &.{heap_mod.taggedFunction(executor)}, ctor_v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -238,7 +238,7 @@ pub fn newPromiseCapability(realm: *Realm, ctor: *JSFunction) NativeError!Promis
 /// us — could be the standard Cynic resolve closure (settles the
 /// Promise), could be user-supplied (subclasses).
 pub fn capabilityResolve(realm: *Realm, cap: PromiseCapability, value: Value) NativeError!Value {
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     const outcome = interp.callJSFunction(realm.allocator, realm, cap.resolve, Value.undefined_, &.{value}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
@@ -253,7 +253,7 @@ pub fn capabilityResolve(realm: *Realm, cap: PromiseCapability, value: Value) Na
 }
 
 pub fn capabilityReject(realm: *Realm, cap: PromiseCapability, reason: Value) NativeError!Value {
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     const outcome = interp.callJSFunction(realm.allocator, realm, cap.reject, Value.undefined_, &.{reason}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
@@ -365,7 +365,7 @@ fn promiseConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
     reject_fn.bound_this = this_value;
 
     // Run the executor synchronously with (resolve, reject).
-    const lantern = @import("../lantern/lantern.zig");
+    const lantern = @import("../lantern/interpreter.zig");
     const exec_args = [_]Value{ heap_mod.taggedFunction(resolve_fn), heap_mod.taggedFunction(reject_fn) };
     const outcome = lantern.callJSFunction(realm.allocator, realm, executor, Value.undefined_, &exec_args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -414,7 +414,7 @@ pub const promiseThenExported = promiseThen;
 fn promiseResolveImpl(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const target = heap_mod.valueAsPlainObject(this_value) orelse return Value.undefined_;
     const v = argOr(args, 0, Value.undefined_);
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     // §27.2.1.3.2 Promise Resolve Functions step 2 —
     // alreadyResolved guard. Set TRUE on first call regardless
     // of which path the resolution ultimately settles through.
@@ -441,7 +441,7 @@ fn promiseResolveImpl(realm: *Realm, this_value: Value, args: []const Value) Nat
         // capability via SpeciesConstructor (§27.2.5.3 species-count
         // fixtures).
         if (v_obj.isPromise()) {
-            const interp_mod = @import("../lantern/lantern.zig");
+            const interp_mod = @import("../lantern/interpreter.zig");
             if (interp_mod.isVanillaPromiseChainExported(realm, target, v_obj)) {
                 chainPromiseToInner(realm, v_obj, target) catch return error.OutOfMemory;
                 return Value.undefined_;
@@ -479,7 +479,7 @@ fn promiseResolveImpl(realm: *Realm, this_value: Value, args: []const Value) Nat
 /// `promiseResolveImpl` (when resolution is itself a Promise)
 /// and the aggregator forwarding path.
 fn chainPromiseToInner(realm: *Realm, inner: *@import("../object.zig").JSObject, outer: *@import("../object.zig").JSObject) !void {
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     switch (inner.promise_state) {
         .fulfilled => try realm.enqueuePromiseReaction(Value.undefined_, inner.promise_value, heap_mod.taggedObject(outer), false),
         .rejected => try realm.enqueuePromiseReaction(Value.undefined_, inner.promise_value, heap_mod.taggedObject(outer), true),
@@ -498,7 +498,7 @@ fn chainPromiseToInner(realm: *Realm, inner: *@import("../object.zig").JSObject,
 fn promiseRejectImpl(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const target = heap_mod.valueAsPlainObject(this_value) orelse return Value.undefined_;
     const v = argOr(args, 0, Value.undefined_);
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     // §27.2.1.3.1 Promise Reject Functions step 2 — alreadyResolved
     // guard. Sets the shared flag so a subsequent executor-threw
     // path (or duplicate reject) no-ops.
@@ -602,7 +602,7 @@ fn promiseCatch(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const this_obj = try intrinsics.toObjectThis(realm, this_value);
     const then_v = getPropertyChain(realm, this_obj, "then") catch return error.NativeThrew;
     const then_fn = heap_mod.valueAsFunction(then_v) orelse return throwTypeError(realm, "Promise.prototype.catch: this.then is not callable");
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     const then_args = [_]Value{ Value.undefined_, cb };
     const outcome = interp.callJSFunction(realm.allocator, realm, then_fn, this_value, &then_args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -692,7 +692,7 @@ fn promiseFinally(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // subclasses dispatch correctly.
     const then_v = getPropertyChain(realm, this_obj, "then") catch return error.NativeThrew;
     const then_fn = heap_mod.valueAsFunction(then_v) orelse return throwTypeError(realm, "Promise.prototype.finally: this.then is not callable");
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     const then_args = [_]Value{ then_arg, catch_arg };
     const outcome = interp.callJSFunction(realm.allocator, realm, then_fn, this_value, &then_args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -721,7 +721,7 @@ fn finallyThenReaction(realm: *Realm, this_value: Value, args: []const Value) Na
     const value = argOr(args, 0, Value.undefined_);
     const ctx = heap_mod.valueAsPlainObject(this_value) orelse return value;
     const cb = ctx.finally_callback orelse return value;
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     const cb_outcome = interp.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &.{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
@@ -749,7 +749,7 @@ fn finallyCatchReaction(realm: *Realm, this_value: Value, args: []const Value) N
         realm.pending_exception = reason;
         return error.NativeThrew;
     };
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     const cb_outcome = interp.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &.{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
@@ -814,7 +814,7 @@ fn chainFinallyResult(realm: *Realm, result: Value, carry: Value, is_throw: bool
             if (result_obj) |obj| if (obj.isPromise()) break :blk result;
             // Default constructor + thenable result: synthesise via
             // PromiseResolveThenableJob.
-            const new_p_v = try @import("../lantern/lantern.zig").wrapInPromise(realm, true, Value.undefined_);
+            const new_p_v = try @import("../lantern/interpreter.zig").wrapInPromise(realm, true, Value.undefined_);
             const new_p = heap_mod.valueAsPlainObject(new_p_v) orelse return error.OutOfMemory;
             new_p.promise_state = .pending;
             new_p.promise_value = Value.undefined_;
@@ -836,7 +836,7 @@ fn chainFinallyResult(realm: *Realm, result: Value, carry: Value, is_throw: bool
         const cap = try newPromiseCapability(realm, C);
         // Call cap.resolve(result) so adoption (thenable or plain)
         // routes through the capability's resolve closure.
-        const interp_mod = @import("../lantern/lantern.zig");
+        const interp_mod = @import("../lantern/interpreter.zig");
         const resolve_args = [_]Value{result};
         const r_outcome = interp_mod.callJSFunction(realm.allocator, realm, cap.resolve, Value.undefined_, &resolve_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -869,7 +869,7 @@ fn chainFinallyResult(realm: *Realm, result: Value, carry: Value, is_throw: bool
     const wrapped_obj = heap_mod.valueAsPlainObject(wrapped) orelse return error.OutOfMemory;
     const then_v = getPropertyChain(realm, wrapped_obj, "then") catch return error.NativeThrew;
     const then_fn = heap_mod.valueAsFunction(then_v) orelse return error.NativeThrew;
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     const then_args = [_]Value{heap_mod.taggedFunction(thunk_fn)};
     const outcome = interp.callJSFunction(realm.allocator, realm, then_fn, wrapped, &then_args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -983,7 +983,7 @@ const IteratorRecord = struct {
 /// `@@iterator` invocation, `next` lookup, or shape checks raise
 /// `error.NativeThrew` with `realm.pending_exception` set.
 fn iteratorOpen(realm: *Realm, source_v: Value) NativeError!?IteratorRecord {
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     // §7.4.2 GetIterator: ToObject the source first so primitive
     // wrappers (`""`, `42`, …) get their prototype's `@@iterator`
     // (e.g. `String.prototype[@@iterator]`). null / undefined
@@ -1033,7 +1033,7 @@ fn iteratorOpen(realm: *Realm, source_v: Value) NativeError!?IteratorRecord {
 /// descriptors invoke their getters and an abrupt completion
 /// from a getter propagates as a NativeThrew.
 fn iteratorStep(realm: *Realm, rec: *IteratorRecord) NativeError!?Value {
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     const result_outcome = interp.callJSFunction(realm.allocator, realm, rec.next_fn, rec.iter_v, &.{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
@@ -1076,7 +1076,7 @@ fn iteratorStep(realm: *Realm, rec: *IteratorRecord) NativeError!?Value {
 fn iteratorClose(realm: *Realm, rec: *IteratorRecord) void {
     if (rec.done) return;
     rec.done = true;
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     const ret_v = getPropertyChain(realm, rec.iter, "return") catch return;
     const ret_fn = heap_mod.valueAsFunction(ret_v) orelse return;
     const outcome = interp.callJSFunction(realm.allocator, realm, ret_fn, rec.iter_v, &.{}) catch return;
@@ -1141,7 +1141,7 @@ fn collectIterable(realm: *Realm, source_v: Value) NativeError!std.ArrayList(Val
 fn ctorGetMember(realm: *Realm, ctor: *JSFunction, key: []const u8) NativeError!Value {
     if (ctor.accessors.get(key)) |acc| {
         if (acc.getter) |getter| {
-            const interp = @import("../lantern/lantern.zig");
+            const interp = @import("../lantern/interpreter.zig");
             const outcome = interp.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(ctor), &.{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
@@ -1167,7 +1167,7 @@ fn iterateAggregator(
     ctx: *anyopaque,
     process: *const fn (ctx: *anyopaque, realm: *Realm, ctor: *JSFunction, idx: usize, resolved: Value) NativeError!IterStepAction,
 ) NativeError!void {
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     // §7.4.2 GetIterator is delegated to `iteratorOpen` below;
     // it ToObject-coerces primitive sources (so `Promise.any("")`
     // sees `String.prototype[@@iterator]`) and throws TypeError
@@ -1289,7 +1289,7 @@ fn resolveInputAsPromise(realm: *Realm, ctor: *JSFunction, v: Value) NativeError
             reject_fn.bound_target = reject_impl;
             reject_fn.bound_this = target_v;
 
-            const interp = @import("../lantern/lantern.zig");
+            const interp = @import("../lantern/interpreter.zig");
             const then_args = [_]Value{ heap_mod.taggedFunction(resolve_fn), heap_mod.taggedFunction(reject_fn) };
             const outcome = interp.callJSFunction(realm.allocator, realm, then_fn, v, &then_args) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -1487,7 +1487,7 @@ fn decrementRemaining(realm: *Realm, state: *JSObject) NativeError!Value {
 }
 
 fn invokeCapResolve(realm: *Realm, state: *JSObject, value: Value) NativeError!Value {
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     const fn_obj = heap_mod.valueAsFunction(state.get(k_cap_resolve)) orelse return Value.undefined_;
     const outcome = interp.callJSFunction(realm.allocator, realm, fn_obj, Value.undefined_, &.{value}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -1503,7 +1503,7 @@ fn invokeCapResolve(realm: *Realm, state: *JSObject, value: Value) NativeError!V
 }
 
 fn invokeCapReject(realm: *Realm, state: *JSObject, reason: Value) NativeError!Value {
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     const fn_obj = heap_mod.valueAsFunction(state.get(k_cap_reject)) orelse return Value.undefined_;
     const outcome = interp.callJSFunction(realm.allocator, realm, fn_obj, Value.undefined_, &.{reason}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -1599,7 +1599,7 @@ fn aggregatorAnyProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, i
 }
 
 fn invokeThenWithClosures(realm: *Realm, resolved: Value, resolve_fn: *JSFunction, reject_fn: *JSFunction) NativeError!IterStepAction {
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     const obj = heap_mod.valueAsPlainObject(resolved) orelse return throwTypeError(realm, "Promise aggregator: resolve did not return an object");
     const then_v = try getPropertyChain(realm, obj, "then");
     const then_fn = heap_mod.valueAsFunction(then_v) orelse return throwTypeError(realm, "Promise aggregator: 'then' is not callable");
@@ -1786,7 +1786,7 @@ fn raceProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, idx: usize
 /// `realm.pending_exception` and returns `error.NativeThrew`
 /// so the surrounding aggregator does IteratorClose.
 fn invokeThenForward(realm: *Realm, resolved: Value, cap: PromiseCapability) NativeError!IterStepAction {
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     const obj = heap_mod.valueAsPlainObject(resolved) orelse return throwTypeError(realm, "Promise aggregator: resolve did not return an object");
     const then_v = try getPropertyChain(realm, obj, "then");
     const then_fn = heap_mod.valueAsFunction(then_v) orelse return throwTypeError(realm, "Promise aggregator: 'then' is not callable");
@@ -1884,7 +1884,7 @@ fn promiseTry(realm: *Realm, this_value: Value, args: []const Value) NativeError
         return cap.promise;
     };
     const rest_args: []const Value = if (args.len > 1) args[1..] else &[_]Value{};
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     const outcome = interp.callJSFunction(realm.allocator, realm, callback_fn, Value.undefined_, rest_args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,

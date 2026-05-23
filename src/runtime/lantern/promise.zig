@@ -1,5 +1,5 @@
 //! Promise + async-function/async-generator resumption — extracted
-//! from `lantern.zig` to keep the dispatch-loop file focused.
+//! from `interpreter.zig` to keep the dispatch-loop file focused.
 //!
 //! Hosts the microtask drainer (`drainMicrotasks`), the Promise
 //! capability + reaction plumbing (`settlePromiseInternal`,
@@ -8,7 +8,7 @@
 //! settled await: `resumeAsyncFunction`, `resumeAsyncGeneratorOnSettle`,
 //! and `resumeGenerator`.
 //!
-//! Callbacks back into lantern.zig: `callJSFunction`,
+//! Callbacks back into interpreter.zig: `callJSFunction`,
 //! `callJSFunctionAsSuper`, `unwindThrow`, `runFrames` — every
 //! resumption ultimately re-enters the dispatch loop.
 
@@ -26,9 +26,9 @@ const Realm = @import("../realm.zig").Realm;
 const Chunk = @import("../../bytecode/chunk.zig").Chunk;
 const module_mod = @import("../module.zig");
 
-// Circular back to lantern.zig for the dispatch entry points,
+// Circular back to interpreter.zig for the dispatch entry points,
 // shared types, and the call machinery the resumers re-enter.
-const lantern = @import("lantern.zig");
+const lantern = @import("interpreter.zig");
 const CallFrame = lantern.CallFrame;
 const RunError = lantern.RunError;
 const RunResult = lantern.RunResult;

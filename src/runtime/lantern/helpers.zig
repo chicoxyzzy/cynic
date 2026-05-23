@@ -1,12 +1,12 @@
-//! Standalone helpers extracted from `lantern.zig` — accessor
+//! Standalone helpers extracted from `interpreter.zig` — accessor
 //! lookup, double formatting, array-length coercion + truncation,
 //! error makers. No dispatch-loop state; each function is callable
 //! from the interpreter, the JITs (when they land), or any
 //! built-in.
 //!
 //! The originals lived intermixed with the dispatch loop; pulling
-//! them here keeps `lantern.zig` focused on the loop itself.
-//! Public names are re-exported from `lantern.zig` so external
+//! them here keeps `interpreter.zig` focused on the loop itself.
+//! Public names are re-exported from `interpreter.zig` so external
 //! callers (built-ins reaching for `lantern.makeTypeError`,
 //! `lantern.lookupAccessor`, etc.) keep working unchanged.
 
@@ -22,7 +22,7 @@ const PropertyFlags = @import("../object.zig").PropertyFlags;
 const intrinsics_mod = @import("../intrinsics.zig");
 const heap_mod = @import("../heap.zig");
 
-const RunError = @import("lantern.zig").RunError;
+const RunError = @import("interpreter.zig").RunError;
 const arith = @import("arith.zig");
 
 // ── Pending exception drain ─────────────────────────────────────────

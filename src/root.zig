@@ -57,7 +57,7 @@ test {
     _ = @import("runtime/heap.zig");
     _ = @import("runtime/c_alloc.zig");
     _ = @import("runtime/realm.zig");
-    _ = @import("runtime/lantern/lantern.zig");
+    _ = @import("runtime/lantern/interpreter.zig");
     _ = @import("runtime/lantern/arith.zig");
     _ = @import("runtime/lantern/tests.zig");
     _ = @import("runtime/surface_audit_test.zig");

@@ -522,7 +522,7 @@ fn regexpProtoReplace(realm: *Realm, this_value: Value, args: []const Value) Nat
             if (!named_captures_raw.isUndefined()) {
                 rargs.append(realm.allocator, named_captures_raw) catch return error.OutOfMemory;
             }
-            const interp = @import("../lantern/lantern.zig");
+            const interp = @import("../lantern/interpreter.zig");
             const fn_obj = heap_mod.valueAsFunction(repl_v_in).?;
             const outcome = interp.callJSFunction(realm.allocator, realm, fn_obj, Value.undefined_, rargs.items) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -873,7 +873,7 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
     // step 10 — `Let splitter be ? Construct(C, « rx, newFlags »)`.
     const splitter_args = [_]Value{ heap_mod.taggedObject(rx), Value.fromString(new_flags_js) };
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     const ctor_v = heap_mod.taggedFunction(c_fn);
     const ctor_outcome = interp.constructValue(realm.allocator, realm, ctor_v, &splitter_args, ctor_v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -1064,7 +1064,7 @@ fn speciesConstructor(realm: *Realm, source: *JSObject, default_ctor: *JSFunctio
         // walk on the function's accessors table.
         if (f.accessors.get("@@species")) |acc| {
             if (acc.getter) |getter| {
-                const interp = @import("../lantern/lantern.zig");
+                const interp = @import("../lantern/interpreter.zig");
                 const outcome = interp.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(f), &.{}) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
@@ -1107,7 +1107,7 @@ fn speciesConstructor(realm: *Realm, source: *JSObject, default_ctor: *JSFunctio
 pub fn regExpExecGeneric(realm: *Realm, r: *JSObject, s: *JSString) NativeError!Value {
     const exec_v = try intrinsics.getPropertyChain(realm, r, "exec");
     if (heap_mod.valueAsFunction(exec_v)) |exec_fn| {
-        const interp = @import("../lantern/lantern.zig");
+        const interp = @import("../lantern/interpreter.zig");
         const call_args = [_]Value{Value.fromString(s)};
         const outcome = interp.callJSFunction(realm.allocator, realm, exec_fn, heap_mod.taggedObject(r), &call_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -1152,7 +1152,7 @@ fn setPropertyChainOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, value
     while (cur) |o| {
         if (o.accessors.get(key)) |acc| {
             if (acc.setter) |setter| {
-                const interp = @import("../lantern/lantern.zig");
+                const interp = @import("../lantern/interpreter.zig");
                 const args_one = [_]Value{value};
                 const outcome = interp.callJSFunction(realm.allocator, realm, setter, heap_mod.taggedObject(obj), &args_one) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -1294,7 +1294,7 @@ fn regexpProtoMatchAll(realm: *Realm, this_value: Value, args: []const Value) Na
     // call shape with the original RegExp and the cloned flag
     // string.
     const splitter_args = [_]Value{ heap_mod.taggedObject(r), Value.fromString(flags_s) };
-    const interp = @import("../lantern/lantern.zig");
+    const interp = @import("../lantern/interpreter.zig");
     const ctor_v = heap_mod.taggedFunction(c_fn);
     const ctor_outcome = interp.constructValue(realm.allocator, realm, ctor_v, &splitter_args, ctor_v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -2152,7 +2152,7 @@ fn regexpTest(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // built-in path may take the allocation-free match shortcut.
     const exec_v = try intrinsics.getPropertyChain(realm, regex_obj, "exec");
     if (heap_mod.valueAsFunction(exec_v)) |exec_fn| {
-        const interp = @import("../lantern/lantern.zig");
+        const interp = @import("../lantern/interpreter.zig");
         const call_args = [_]Value{Value.fromString(input_s)};
         const outcome = interp.callJSFunction(realm.allocator, realm, exec_fn, this_value, &call_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,

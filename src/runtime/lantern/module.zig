@@ -1,4 +1,4 @@
-//! Module-load entry + helpers — extracted from `lantern.zig`
+//! Module-load entry + helpers — extracted from `interpreter.zig`
 //! to keep the dispatch-loop file focused.
 //!
 //! Hosts the §16.2.1.5 module load pipeline:
@@ -13,7 +13,7 @@
 //!   - mergeStarKey (§15.2.1.16.3 redirect-with-ambiguity-check
 //!     used by `export * from`)
 //!
-//! Callbacks back into lantern.zig: `runFrames` to evaluate the
+//! Callbacks back into interpreter.zig: `runFrames` to evaluate the
 //! module body, `unwindThrow` to surface link-time SyntaxErrors,
 //! plus the error makers.
 
@@ -34,9 +34,9 @@ const compiler_mod = @import("../../bytecode/compiler.zig");
 const module_mod = @import("../module.zig");
 const Code = @import("../../diagnostic.zig").Code;
 
-// Circular back to lantern.zig for the dispatch entry, error
+// Circular back to interpreter.zig for the dispatch entry, error
 // makers, and the per-fixture unwind helper used at link errors.
-const lantern = @import("lantern.zig");
+const lantern = @import("interpreter.zig");
 const CallFrame = lantern.CallFrame;
 const RunError = lantern.RunError;
 const RunResult = lantern.RunResult;

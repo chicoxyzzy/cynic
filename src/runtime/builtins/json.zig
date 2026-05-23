@@ -18,7 +18,7 @@ const JSFunction = @import("../function.zig").JSFunction;
 const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
-const lantern = @import("../lantern/lantern.zig");
+const lantern = @import("../lantern/interpreter.zig");
 
 const installToStringTag = intrinsics.installToStringTag;
 const argOr = intrinsics.argOr;

@@ -130,7 +130,7 @@ fn proxyRevokeNoop(realm: *Realm, this_value: Value, args: []const Value) Native
 }
 
 const JSObject = @import("../object.zig").JSObject;
-const lantern = @import("../lantern/lantern.zig");
+const lantern = @import("../lantern/interpreter.zig");
 
 /// Outcome of a native-side proxy dispatch. `.fallthrough` means
 /// the caller should perform the ordinary internal-method action

@@ -16,7 +16,7 @@ const NativeError = @import("../function.zig").NativeError;
 const NativeFn = @import("../function.zig").NativeFn;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
-const lantern = @import("../lantern/lantern.zig");
+const lantern = @import("../lantern/interpreter.zig");
 
 const argOr = intrinsics.argOr;
 const coerceToNumber = intrinsics.coerceToNumber;
