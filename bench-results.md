@@ -14,6 +14,45 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-05-23 — cynic `5b3fd1a` (post `JSObjectExtension` shrink), host `Darwin 25.5.0 arm64`
+
+Cumulative measurement after the 7-phase JSObject-shrink arc
+(`4071f50` scaffolding → `662d00e` accessors → `8b45019`
+private_* → `9365965` namespace_* → `39dbfe1` map/set_data →
+`4916864` promise/weak/finreg → `5b3fd1a` ArrayBuffer/
+TypedView/DataView). `@sizeOf(JSObject)` dropped 960 → 512
+bytes (-47 %). Cold fields lazy-alloc into a side-table
+`JSObjectExtension` pointer; plain `{a, b}` literals pay a
+single null pointer instead of the multi-kilobyte cold state.
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 86.07 | 85.38 | 86.60 | 3360 |
+| prop_access | 15.39 | 15.14 | 15.60 | 3376 |
+| prop_write | 30.17 | 30.14 | 30.35 | 3472 |
+| array_iter | 20.80 | 20.77 | 21.01 | 4320 |
+| string_concat | 80.59 | 79.86 | 84.70 | 34224 |
+| promise_chain | 16.87 | 15.89 | 17.41 | 26768 |
+| object_alloc | 70.01 | 69.57 | 70.86 | 7952 |
+
+Δ vs the `679df99` row below (per-iteration normalized, since
+`302029d` bumped iteration counts in between):
+**`object_alloc`** 232 ns/alloc → **175 ns/alloc (-25 %)** —
+the headline payoff. A 47 % smaller JSObject ≈ proportionate
+drop in memset/write traffic per allocation. The other
+fixtures sit inside noise after iteration-count
+normalization; `prop_access` 15.39 ms (matches prior, the IC
+already does the heavy lifting), `arith_loop` 86 ms (unchanged
+— a pure-arithmetic loop never allocates). RSS is up on
+fixtures that allocate huge backing buffers (`string_concat`,
+`promise_chain`) — that's the iteration-count bump, not the
+extension work.
+
+GC stress (`--gc-threshold=1`) clean across every touched
+bucket (Object, Map, Set, WeakMap, WeakSet, WeakRef, FinReg,
+Promise, TypedArray, language/statements/class, …) — 0 fails,
+no segfaults, no panics.
+
 ### 2026-05-23 — cynic `679df99` (full session tip), host `Darwin 25.5.0 arm64`
 
 Session end-state, capturing the property-cache arc + the GC
