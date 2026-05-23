@@ -467,6 +467,17 @@ pub const Heap = struct {
     /// The post-mark pass walks each cell and, for a dead target,
     /// enqueues the cleanup job and tombstones the cell.
     finalization_registries_seen: std.ArrayListUnmanaged(*JSObject) = .empty,
+    /// Deferred-mark worklist — values whose traversal would
+    /// otherwise blow the call stack. Currently used for the
+    /// `promise_reactions[i].result_promise` walk: a long `.then`
+    /// chain forms an N-deep `promise → reaction → result_promise →
+    /// reaction → …` graph; recursing through `markValue` on each
+    /// link overflows at ~5k frames. Items pushed here are
+    /// processed iteratively by `drainMarkWorklist` at cycle
+    /// boundaries (before sweep), so chain length stops mattering.
+    /// V8 / JSC / SM ship iterative markers globally; we pay the
+    /// worklist cost only on the promise path for now.
+    mark_worklist: std.ArrayListUnmanaged(Value) = .empty,
     /// §26.2 FinalizationRegistry cleanup-job scheduler context —
     /// the `*Realm`, type-erased (the heap can't import realm.zig
     /// without a cycle). `null` on a bare `Heap` (unit tests that
@@ -577,6 +588,7 @@ pub const Heap = struct {
         self.weak_refs_seen.deinit(self.allocator);
         self.weak_collections_seen.deinit(self.allocator);
         self.finalization_registries_seen.deinit(self.allocator);
+        self.mark_worklist.deinit(self.allocator);
     }
 
     pub fn allocateBigInt(self: *Heap, value: i128) !*JSBigInt {
@@ -1219,7 +1231,18 @@ pub const Heap = struct {
                 for (o.promise_reactions.items) |r| {
                     self.markValue(r.on_fulfilled);
                     self.markValue(r.on_rejected);
-                    self.markValue(r.result_promise);
+                    // Defer the chained sub-Promise: a `.then` chain
+                    // of length N walks N deep through reactions if
+                    // we recurse, overflowing past ~5k frames under
+                    // GC pressure. `drainMarkWorklist` (called at
+                    // cycle boundaries) processes these iteratively
+                    // — chain length stops mattering. On OOM (the
+                    // append's only failure mode), fall back to the
+                    // recursive mark so a missed mark can't become
+                    // a missed sweep.
+                    self.mark_worklist.append(self.allocator, r.result_promise) catch {
+                        self.markValue(r.result_promise);
+                    };
                 }
                 for (o.promise_waiters.items) |w| self.markGenerator(w);
                 // §27.2 `[[PromiseResult]]` — the settled value on
@@ -1608,19 +1631,36 @@ pub const Heap = struct {
         }
     }
 
-    /// Arm a major (full) GC cycle. Flips `live_color` so every
-    /// existing object's `mark_color` reads as "unmarked this
-    /// cycle", sets `cycle_started` so `collectFull` skips its
-    /// idempotent self-arm, sets `weak_aware_mark` + clears the
-    /// per-cycle weak-holder worklists so `markValue` treats
-    /// `WeakRef` / `WeakMap` / `WeakSet` / `FinalizationRegistry`
-    /// slots as weak edges. MUST run before any `markValue` for the
-    /// cycle. Two callers: `Realm.collectGarbage` (which calls it
-    /// BEFORE `markRoots` so the flip precedes any mark), and
-    /// `collectFull` itself for the unit-test path that doesn't go
-    /// through a realm.
+    /// Arm a major (full) GC cycle. Flips `live_color`, clears
+    /// every mature object's `mark_color` so a stale mark from a
+    /// previous cycle can't spuriously match the new `live_color`
+    /// (cross-cycle stale-mark hazard: u1 has period 2, so a
+    /// mature object unreached across two minor cycles has its
+    /// old colour back when the major cycle flips), sets
+    /// `cycle_started` so `collectFull` skips its idempotent self-
+    /// arm, sets `weak_aware_mark` + clears the per-cycle weak-
+    /// holder worklists so `markValue` treats `WeakRef` /
+    /// `WeakMap` / `WeakSet` / `FinalizationRegistry` slots as
+    /// weak edges. MUST run before any `markValue` for the cycle.
+    /// Two callers: `Realm.collectGarbage` (which calls it BEFORE
+    /// `markRoots` so the flip precedes any mark), and `collectFull`
+    /// itself for the unit-test path that doesn't go through a
+    /// realm.
+    ///
+    /// The pre-mark clear walks every mature list once per *major*
+    /// cycle. Minor cycles still skip the walk (`full_every_n_minor`
+    /// is 8 by default, so the per-cycle savings of the colour-flip
+    /// are preserved).
     pub fn beginMajorCycle(self: *Heap) void {
         self.live_color = ~self.live_color;
+        const unmarked: u1 = ~self.live_color;
+        for (self.strings_mature.items) |s| s.mark_color = unmarked;
+        for (self.functions_mature.items) |f| f.mark_color = unmarked;
+        for (self.objects_mature.items) |o| o.mark_color = unmarked;
+        for (self.environments_mature.items) |e| e.mark_color = unmarked;
+        for (self.generators_mature.items) |g| g.mark_color = unmarked;
+        for (self.symbols_mature.items) |s| s.mark_color = unmarked;
+        for (self.bigints_mature.items) |b| b.mark_color = unmarked;
         self.cycle_started = true;
         self.weak_aware_mark = true;
         self.weak_refs_seen.clearRetainingCapacity();
@@ -1638,6 +1678,20 @@ pub const Heap = struct {
     pub fn beginMinorCycle(self: *Heap) void {
         self.live_color = ~self.live_color;
         self.cycle_started = true;
+    }
+
+    /// Iteratively process every value pushed onto `mark_worklist`
+    /// during the mark phase. Each pop's `markValue` may push more
+    /// — the loop accommodates growth. The point is to avoid
+    /// stack-depth recursion through long graphs (currently only
+    /// the promise-reaction chain). Must be called before sweep
+    /// so deferred-mark items are accounted for.
+    pub fn drainMarkWorklist(self: *Heap) void {
+        while (self.mark_worklist.items.len > 0) {
+            const w = self.mark_worklist.items[self.mark_worklist.items.len - 1];
+            self.mark_worklist.items.len -= 1;
+            self.markValue(w);
+        }
     }
 
     /// Run a full mark-sweep cycle across BOTH generations. `roots`
@@ -1688,11 +1742,20 @@ pub const Heap = struct {
         // loop the heap used to do over `symbol_registry` is
         // gone.
 
+        // Drain deferred-mark items pushed during the main mark
+        // walk (currently `promise_reactions[i].result_promise`)
+        // BEFORE the ephemeron fixpoint, so its `isWeakReferentLive`
+        // probes see complete marks.
+        self.drainMarkWorklist();
+
         // §24.3 WeakMap ephemeron fixpoint — a WeakMap entry's value
         // is reachable iff its key is. Run to a fixpoint: marking a
         // value can make another WeakMap's key live. WeakSet has no
         // value column, so it is unaffected.
         self.weakMapEphemeronFixpoint();
+        // Fixpoint may have pushed more deferred items. Drain again
+        // before the post-mark weak pass.
+        self.drainMarkWorklist();
         // §26.1 / §24.3 / §24.4 / §26.2 — post-mark weak handling:
         // clear dead WeakRef targets, prune dead WeakMap/WeakSet
         // entries, queue FinalizationRegistry cleanup jobs. Must run
@@ -1905,6 +1968,11 @@ pub const Heap = struct {
         const pre_gens = self.generators_young.items.len;
         const pre_syms = self.symbols_young.items.len;
         const pre_bigs = self.bigints_young.items.len;
+
+        // Drain deferred-mark items (promise reaction chain) before
+        // the young sweep — a deferred mark whose target is young
+        // would otherwise be unmarked at sweep time and freed.
+        self.drainMarkWorklist();
 
         // ── Sweep + promote phase ───────────────────────────────
         // Young survivors are relinked into the mature list; young

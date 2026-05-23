@@ -3070,6 +3070,30 @@ test "GC: closures keep captured envs alive under gc_threshold=1" {
     , 36);
 }
 
+/// Stress variant — uses `setGcThreshold(1)` instead of just
+/// `gc_threshold = 1`. That sets BOTH the young threshold (1) and
+/// the major threshold (8), so minor cycles fire every allocation
+/// and major cycles fire every 8 — the alternating-cycle pattern
+/// that surfaces the colour-flip cross-cycle stale-mark hazard and
+/// the recursive-marker stack-overflow on long chains. Matches the
+/// CLI's `--gc-threshold=1` behaviour. Used by tests whose chain
+/// depth needs both kinds of cycle to fire interleaved.
+fn expectScriptIntUnderAlternatingGcPressure(source: []const u8, expected: i32) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    realm.heap.setGcThreshold(1);
+    const v = switch (try evaluateScriptResult(&realm, source)) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    if (v.isInt32()) {
+        try testing.expectEqual(expected, v.asInt32());
+    } else if (v.isDouble()) {
+        try testing.expectEqual(@as(f64, @floatFromInt(expected)), v.asDouble());
+    } else return error.NotANumber;
+}
+
 fn expectScriptStringUnderGcPressure(source: []const u8, expected: []const u8) !void {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
@@ -3113,6 +3137,92 @@ test "GC: Promise microtask chain survives gc_threshold=1" {
         \\globalThis.__drainMicrotasks();
         \\acc;
     , 111);
+}
+
+test "GC: long Promise microtask chain survives alternating GC pressure" {
+    // The 3-deep chain above doesn't surface two interacting
+    // hazards: (1) the colour-flip cross-cycle stale-mark hazard
+    // where an unreachable mature object's mark_color happens to
+    // match the post-flip live_color (fixed by the major-cycle
+    // pre-mark clear in `beginMajorCycle`); and (2) the recursive
+    // marker stack-overflow on deep `promise → reaction →
+    // result_promise → reaction → …` graphs (fixed by deferring
+    // `result_promise` to `mark_worklist` and draining iteratively
+    // at cycle boundaries). A 250-deep chain churns enough cycles
+    // to fire both — each handler increments by 1, final value 250.
+    // Uses the alternating-pressure helper because the bugs require
+    // *interleaved* minor + major cycles to surface.
+    try expectScriptIntUnderAlternatingGcPressure(
+        \\let p = Promise.resolve(0);
+        \\for (let i = 0; i < 250; i++) p = p.then(v => v + 1);
+        \\let acc = 0;
+        \\p.then(v => { acc = v; });
+        \\globalThis.__drainMicrotasks();
+        \\acc;
+    , 250);
+}
+
+test "GC: long closure chain survives alternating GC pressure" {
+    // Sibling to the Promise-chain regression — synchronous control
+    // flow. Each iteration's arrow captures its own `let` binding,
+    // so each iteration's env survives to be referenced by the next
+    // arrow. Long parent-env chains stress `markEnvironment`'s
+    // recursion. Final call sums 1..200 = 20100.
+    try expectScriptIntUnderAlternatingGcPressure(
+        \\let f = (acc) => acc;
+        \\for (let i = 1; i <= 200; i++) {
+        \\  const prev = f;
+        \\  const step = i;
+        \\  f = (acc) => prev(acc + step);
+        \\}
+        \\f(0);
+    , 20100);
+}
+
+test "GC: class instance churn survives alternating GC pressure" {
+    // Allocates 500 short-lived class instances, summing one field
+    // from each. Tests that prototype-shape sharing, method-table
+    // lookups, and the constructor / methods are all kept alive
+    // through long-lived references (the class) while the instances
+    // come and go. Sum 1..500 = 125250.
+    try expectScriptIntUnderAlternatingGcPressure(
+        \\class Box { constructor(n) { this.n = n; } add(o) { return this.n + o.n; } }
+        \\const zero = new Box(0);
+        \\let s = 0;
+        \\for (let i = 1; i <= 500; i++) s = new Box(i).add(zero) + s;
+        \\s;
+    , 125250);
+}
+
+test "GC: Symbol.for registry churn survives alternating GC pressure" {
+    // 200 `Symbol.for(k)` calls with distinct keys — each
+    // allocates a registered symbol, pinned via the registry's
+    // `pinned` bit (added in the GC pin commit). The pin must keep
+    // every symbol alive across all cycles even when nothing else
+    // references the symbol values directly. `Symbol.keyFor`
+    // resolves each back to its key string at the end; total length
+    // of "k0".."k199" = 10·2 + 90·3 + 100·4 = 690.
+    try expectScriptIntUnderAlternatingGcPressure(
+        \\for (let i = 0; i < 200; i++) Symbol.for("k" + i);
+        \\let total = 0;
+        \\for (let i = 0; i < 200; i++) total += Symbol.keyFor(Symbol.for("k" + i)).length;
+        \\total;
+    , 690);
+}
+
+test "GC: deep object property writes survive alternating GC pressure" {
+    // Builds a tower of objects, each holding the previous one in
+    // a property. Walks the chain to verify every link is alive.
+    // The shape transition tree and per-object `properties` bag
+    // both get exercised under high allocation pressure. 150 deep.
+    try expectScriptIntUnderAlternatingGcPressure(
+        \\let cur = { d: 0 };
+        \\for (let i = 1; i <= 150; i++) cur = { prev: cur, d: i };
+        \\let s = 0;
+        \\let walk = cur;
+        \\while (walk) { s += walk.d; walk = walk.prev; }
+        \\s;
+    , 11325);
 }
 
 test "GC: Promise constructor executor survives gc_threshold=1" {
