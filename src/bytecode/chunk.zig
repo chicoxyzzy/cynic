@@ -23,6 +23,24 @@ const std = @import("std");
 const Op = @import("op.zig").Op;
 const Span = @import("../source.zig").Span;
 const Value = @import("../runtime/value.zig").Value;
+const Shape = @import("../runtime/shape.zig").Shape;
+
+/// Inline-cache cell — one per property-access callsite. The
+/// interpreter records the last receiver's `(shape, slot)` after a
+/// successful own-data lookup; on the next hit, a shape pointer
+/// compare and a `slots[slot]` load skip the full lookup.
+///
+/// Monomorphic: a miss overwrites the cell, no polymorphism / chain.
+/// Hermes-style: no JIT, the cache lives entirely in the interpreter.
+///
+/// `shape == null` is the cold / un-cacheable state (the last lookup
+/// hit a dictionary-mode object, an accessor, the prototype chain,
+/// or simply hasn't run yet). Initialised that way at chunk
+/// finalisation.
+pub const ICCell = struct {
+    shape: ?*Shape = null,
+    slot: u32 = 0,
+};
 
 /// A single (code-offset → source-span) record. The list is sorted
 /// by `offset` ascending; the source span is the parser's range
@@ -286,6 +304,13 @@ pub const Chunk = struct {
     /// modules (module top-levels are never slotted) and for any
     /// chunk that emits no slot opcodes.
     global_lexical_base: u32 = 0,
+    /// Mutable per-callsite IC table — one cell per property-access
+    /// op (`lda_property` today; `sta_property` and `call_method`
+    /// next). The interpreter overwrites cells as receiver shapes
+    /// change; the rest of the `Chunk` is logically immutable.
+    /// Sized at `finish`; index range `[0, inline_cache_count)` is
+    /// the operand space the compiler hands out.
+    inline_caches: []ICCell = &.{},
 
     pub fn deinit(self: *Chunk, allocator: std.mem.Allocator) void {
         allocator.free(self.code);
@@ -296,6 +321,7 @@ pub const Chunk = struct {
         allocator.free(self.function_templates);
         for (self.class_templates) |*t| t.deinit(allocator);
         allocator.free(self.class_templates);
+        allocator.free(self.inline_caches);
     }
 };
 
@@ -322,6 +348,9 @@ pub const Builder = struct {
     /// script body chunk AND every nested-function sub-chunk
     /// carry the same base. See `Chunk.global_lexical_base`.
     global_lexical_base: u32 = 0,
+    /// Running count of IC cells handed out via `allocIC`. The
+    /// `finish` step uses this to size `Chunk.inline_caches`.
+    inline_cache_count: u16 = 0,
 
     pub fn init(allocator: std.mem.Allocator) Builder {
         return .{ .allocator = allocator };
@@ -429,6 +458,26 @@ pub const Builder = struct {
         self.code.items[at + 1] = bytes[1];
     }
 
+    /// Allocate a fresh inline-cache slot, returning its index. The
+    /// caller emits the index as a `u16` operand on a property-access
+    /// op; the interpreter indexes `Chunk.inline_caches` with it.
+    pub fn allocIC(self: *Builder) !u16 {
+        if (self.inline_cache_count == std.math.maxInt(u16)) {
+            return error.TooManyInlineCaches;
+        }
+        const k = self.inline_cache_count;
+        self.inline_cache_count += 1;
+        return k;
+    }
+
+    /// Emit `lda_property` plus its key constant index and a freshly
+    /// allocated IC slot. Encoding: `[op] [k:u16] [ic:u16]`.
+    pub fn emitLdaProperty(self: *Builder, span: Span, k: u16) !void {
+        try self.emitOp(.lda_property, span);
+        try self.emitU16(k);
+        try self.emitU16(try self.allocIC());
+    }
+
     /// Append `v` to the constant pool, returning its index.
     /// Identical doubles, ints, etc. are not deduplicated — the
     /// optimizer (M5+) can do that. Keep simple here.
@@ -444,6 +493,8 @@ pub const Builder = struct {
     /// Transfer ownership of the accumulated buffers into a Chunk.
     /// The builder is empty after this call; `deinit` is a no-op.
     pub fn finish(self: *Builder) !Chunk {
+        const ics = try self.allocator.alloc(ICCell, self.inline_cache_count);
+        for (ics) |*c| c.* = .{};
         return .{
             .code = try self.code.toOwnedSlice(self.allocator),
             .constants = try self.constants.toOwnedSlice(self.allocator),
@@ -454,6 +505,7 @@ pub const Builder = struct {
             .register_count = self.register_count,
             .is_async_module = self.is_async_module,
             .global_lexical_base = self.global_lexical_base,
+            .inline_caches = ics,
         };
     }
 };

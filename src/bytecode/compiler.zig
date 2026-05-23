@@ -74,6 +74,12 @@ pub const CompileError = error{
     TooManyConstants,
     TooManyFunctions,
     TooManyClasses,
+    /// Exceeded the per-`Chunk` 16-bit inline-cache slot index space.
+    /// Surfaces when `Builder.allocIC` runs out — a single chunk
+    /// emitted more than 65 535 property-access callsites. Distinct
+    /// from `TooManyConstants` because the IC table is a separate
+    /// `u16`-indexed side-table.
+    TooManyInlineCaches,
     JumpTooFar,
     /// A statement or expression that is well-formed at parse
     /// time but not yet implementable — e.g. later doesn't compile
@@ -482,8 +488,7 @@ pub const Compiler = struct {
             try self.builder.emitU8(depth);
             try self.builder.emitU8(binding.import_ns_slot);
             const k_imp = try self.internString(binding.import_name);
-            try self.builder.emitOp(.lda_property, span);
-            try self.builder.emitU16(k_imp);
+            try self.builder.emitLdaProperty(span, k_imp);
             // §8.1.1.5.5 — accessing an indirect import binding
             // whose source-module slot is still uninitialised must
             // throw a ReferenceError. The source module pre-seeds
@@ -925,8 +930,7 @@ pub const Compiler = struct {
             defer self.releaseTemp();
             try self.builder.emitOp(.ldar, y.span);
             try self.builder.emitU8(r_iter);
-            try self.builder.emitOp(.lda_property, y.span);
-            try self.builder.emitU16(k_next);
+            try self.builder.emitLdaProperty(y.span, k_next);
             try self.builder.emitOp(.star, y.span);
             try self.builder.emitU8(r_next);
 
@@ -962,8 +966,7 @@ pub const Compiler = struct {
             try self.builder.emitU8(r_result);
             try self.builder.emitOp(.ldar, y.span);
             try self.builder.emitU8(r_result);
-            try self.builder.emitOp(.lda_property, y.span);
-            try self.builder.emitU16(k_done_key);
+            try self.builder.emitLdaProperty(y.span, k_done_key);
             try self.builder.emitOp(.jmp_if_true, y.span);
             const exit_patch = self.builder.here();
             try self.builder.emitI16(0);
@@ -976,8 +979,7 @@ pub const Compiler = struct {
             const body_after_done = self.builder.here();
             try self.builder.emitOp(.ldar, y.span);
             try self.builder.emitU8(r_result);
-            try self.builder.emitOp(.lda_property, y.span);
-            try self.builder.emitU16(k_value);
+            try self.builder.emitLdaProperty(y.span, k_value);
             try self.builder.emitOp(.star, y.span);
             try self.builder.emitU8(r_val);
             try self.builder.emitOp(.ldar, y.span);
@@ -998,8 +1000,7 @@ pub const Compiler = struct {
             try self.builder.emitU8(r_received);
             try self.builder.emitOp(.ldar, y.span);
             try self.builder.emitU8(r_iter);
-            try self.builder.emitOp(.lda_property, y.span);
-            try self.builder.emitU16(k_throw);
+            try self.builder.emitLdaProperty(y.span, k_throw);
             try self.builder.emitOp(.jmp_if_nullish, y.span);
             const no_throw_patch = self.builder.here();
             try self.builder.emitI16(0);
@@ -1042,8 +1043,7 @@ pub const Compiler = struct {
             try self.builder.emitU8(r_received);
             try self.builder.emitOp(.ldar, y.span);
             try self.builder.emitU8(r_iter);
-            try self.builder.emitOp(.lda_property, y.span);
-            try self.builder.emitU16(k_return);
+            try self.builder.emitLdaProperty(y.span, k_return);
             try self.builder.emitOp(.jmp_if_nullish, y.span);
             const no_return_patch = self.builder.here();
             try self.builder.emitI16(0);
@@ -1072,15 +1072,13 @@ pub const Compiler = struct {
             try self.builder.emitU8(r_result);
             try self.builder.emitOp(.ldar, y.span);
             try self.builder.emitU8(r_result);
-            try self.builder.emitOp(.lda_property, y.span);
-            try self.builder.emitU16(k_done_key);
+            try self.builder.emitLdaProperty(y.span, k_done_key);
             try self.builder.emitOp(.jmp_if_false, y.span);
             const return_not_done_patch = self.builder.here();
             try self.builder.emitI16(0);
             try self.builder.emitOp(.ldar, y.span);
             try self.builder.emitU8(r_result);
-            try self.builder.emitOp(.lda_property, y.span);
-            try self.builder.emitU16(k_value);
+            try self.builder.emitLdaProperty(y.span, k_value);
             try self.builder.emitOp(.return_, y.span);
             const return_not_done_target = self.builder.here();
             try self.builder.patchI16(return_not_done_patch, return_not_done_target);
@@ -1113,8 +1111,7 @@ pub const Compiler = struct {
             try self.builder.patchI16(exit_patch, exit_target);
             try self.builder.emitOp(.ldar, y.span);
             try self.builder.emitU8(r_result);
-            try self.builder.emitOp(.lda_property, y.span);
-            try self.builder.emitU16(k_value);
+            try self.builder.emitLdaProperty(y.span, k_value);
 
             try self.builder.addHandler(.{
                 .start_pc = yield_start_pc,
@@ -1177,8 +1174,7 @@ pub const Compiler = struct {
         defer self.releaseTemp();
         try self.builder.emitOp(.ldar, y.span);
         try self.builder.emitU8(r_iter);
-        try self.builder.emitOp(.lda_property, y.span);
-        try self.builder.emitU16(k_next);
+        try self.builder.emitLdaProperty(y.span, k_next);
         try self.builder.emitOp(.star, y.span);
         try self.builder.emitU8(r_next);
 
@@ -1213,8 +1209,7 @@ pub const Compiler = struct {
         try self.builder.emitU8(r_result);
         try self.builder.emitOp(.ldar, y.span);
         try self.builder.emitU8(r_result);
-        try self.builder.emitOp(.lda_property, y.span);
-        try self.builder.emitU16(k_done_key);
+        try self.builder.emitLdaProperty(y.span, k_done_key);
         try self.builder.emitOp(.jmp_if_true, y.span);
         const exit_patch = self.builder.here();
         try self.builder.emitI16(0);
@@ -1248,8 +1243,7 @@ pub const Compiler = struct {
         // GetMethod(r_iter, "throw").
         try self.builder.emitOp(.ldar, y.span);
         try self.builder.emitU8(r_iter);
-        try self.builder.emitOp(.lda_property, y.span);
-        try self.builder.emitU16(k_throw);
+        try self.builder.emitLdaProperty(y.span, k_throw);
         try self.builder.emitOp(.jmp_if_nullish, y.span);
         const no_throw_patch = self.builder.here();
         try self.builder.emitI16(0);
@@ -1294,8 +1288,7 @@ pub const Compiler = struct {
         try self.builder.emitU8(r_received);
         try self.builder.emitOp(.ldar, y.span);
         try self.builder.emitU8(r_iter);
-        try self.builder.emitOp(.lda_property, y.span);
-        try self.builder.emitU16(k_return);
+        try self.builder.emitLdaProperty(y.span, k_return);
         try self.builder.emitOp(.jmp_if_nullish, y.span);
         const no_return_patch = self.builder.here();
         try self.builder.emitI16(0);
@@ -1328,8 +1321,7 @@ pub const Compiler = struct {
         // strict check for now; landed as a follow-up.
         try self.builder.emitOp(.ldar, y.span);
         try self.builder.emitU8(r_result);
-        try self.builder.emitOp(.lda_property, y.span);
-        try self.builder.emitU16(k_done_key);
+        try self.builder.emitLdaProperty(y.span, k_done_key);
         try self.builder.emitOp(.jmp_if_false, y.span);
         const return_not_done_patch = self.builder.here();
         try self.builder.emitI16(0);
@@ -1342,8 +1334,7 @@ pub const Compiler = struct {
         // value, walk the finally chain, restore, return.
         try self.builder.emitOp(.ldar, y.span);
         try self.builder.emitU8(r_result);
-        try self.builder.emitOp(.lda_property, y.span);
-        try self.builder.emitU16(k_value);
+        try self.builder.emitLdaProperty(y.span, k_value);
         if (self.finally_chain != null) {
             const r_save = try self.reserveTemp();
             defer self.releaseTemp();
@@ -1386,8 +1377,7 @@ pub const Compiler = struct {
         try self.builder.patchI16(exit_patch, exit_target);
         try self.builder.emitOp(.ldar, y.span);
         try self.builder.emitU8(r_result);
-        try self.builder.emitOp(.lda_property, y.span);
-        try self.builder.emitU16(k_value);
+        try self.builder.emitLdaProperty(y.span, k_value);
 
         try self.builder.addHandler(.{
             .start_pc = yield_start_pc,
@@ -1570,8 +1560,7 @@ pub const Compiler = struct {
         try self.builder.emitU8(r_obj);
         switch (mode) {
             .ident => {
-                try self.builder.emitOp(.lda_property, u.span);
-                try self.builder.emitU16(k_const);
+                try self.builder.emitLdaProperty(u.span, k_const);
             },
             .computed => {
                 try self.builder.emitOp(.ldar, u.span);
@@ -1885,8 +1874,7 @@ pub const Compiler = struct {
                     const k = try self.internString(decoded);
                     try self.builder.emitOp(.ldar, tt.span);
                     try self.builder.emitU8(r_recv);
-                    try self.builder.emitOp(.lda_property, tt.span);
-                    try self.builder.emitU16(k);
+                    try self.builder.emitLdaProperty(tt.span, k);
                 },
                 .computed => |key_expr| {
                     try self.compileExpression(key_expr);
@@ -2211,8 +2199,7 @@ pub const Compiler = struct {
                         // r_idx = r_arr.length
                         try self.builder.emitOp(.ldar, lit.span);
                         try self.builder.emitU8(r_arr);
-                        try self.builder.emitOp(.lda_property, lit.span);
-                        try self.builder.emitU16(k_length);
+                        try self.builder.emitLdaProperty(lit.span, k_length);
                         const r_idx = try self.reserveTemp();
                         try self.builder.emitOp(.star, lit.span);
                         try self.builder.emitU8(r_idx);
@@ -2242,8 +2229,7 @@ pub const Compiler = struct {
                     // Elision in spread context — still bumps length.
                     try self.builder.emitOp(.ldar, lit.span);
                     try self.builder.emitU8(r_arr);
-                    try self.builder.emitOp(.lda_property, lit.span);
-                    try self.builder.emitU16(k_length);
+                    try self.builder.emitLdaProperty(lit.span, k_length);
                     const r_idx = try self.reserveTemp();
                     try self.builder.emitOp(.star, lit.span);
                     try self.builder.emitU8(r_idx);
@@ -2660,8 +2646,7 @@ pub const Compiler = struct {
                     const k = try self.internString(key_slice);
                     try self.compileExpression(m.object);
                     if (m.optional) try self.emitOptionalShortCircuit(m.span);
-                    try self.builder.emitOp(.lda_property, m.span);
-                    try self.builder.emitU16(k);
+                    try self.builder.emitLdaProperty(m.span, k);
                 }
             },
             .computed => |key_expr| {
@@ -2885,8 +2870,7 @@ pub const Compiler = struct {
                 try this_.builder.emitOp(.ldar, span_);
                 try this_.builder.emitU8(ro);
                 if (nk) |k| {
-                    try this_.builder.emitOp(.lda_property, span_);
-                    try this_.builder.emitU16(k);
+                    try this_.builder.emitLdaProperty(span_, k);
                 } else if (pk) |k| {
                     try this_.builder.emitOp(.lda_private, span_);
                     try this_.builder.emitU16(k);
@@ -3203,8 +3187,7 @@ pub const Compiler = struct {
                         try self.builder.emitU8(r_val);
                         try self.builder.emitOp(.ldar, c.span);
                         try self.builder.emitU8(r_args);
-                        try self.builder.emitOp(.lda_property, c.span);
-                        try self.builder.emitU16(k_length);
+                        try self.builder.emitLdaProperty(c.span, k_length);
                         const r_idx = try self.reserveTemp();
                         defer self.releaseTemp();
                         try self.builder.emitOp(.star, c.span);
@@ -3435,8 +3418,7 @@ pub const Compiler = struct {
                 try self.builder.emitU8(r_val);
                 try self.builder.emitOp(.ldar, c.span);
                 try self.builder.emitU8(r_args);
-                try self.builder.emitOp(.lda_property, c.span);
-                try self.builder.emitU16(k_length);
+                try self.builder.emitLdaProperty(c.span, k_length);
                 const r_idx = try self.reserveTemp();
                 try self.builder.emitOp(.star, c.span);
                 try self.builder.emitU8(r_idx);
@@ -3463,8 +3445,7 @@ pub const Compiler = struct {
         const k_apply = try self.internString("apply");
         try self.builder.emitOp(.ldar, c.span);
         try self.builder.emitU8(r_callee);
-        try self.builder.emitOp(.lda_property, c.span);
-        try self.builder.emitU16(k_apply);
+        try self.builder.emitLdaProperty(c.span, k_apply);
         const r_apply = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.star, c.span);
@@ -3534,8 +3515,7 @@ pub const Compiler = struct {
                     const k = try self.internString(decoded);
                     try self.builder.emitOp(.ldar, c.span);
                     try self.builder.emitU8(r_recv);
-                    try self.builder.emitOp(.lda_property, c.span);
-                    try self.builder.emitU16(k);
+                    try self.builder.emitLdaProperty(c.span, k);
                 }
             },
             .computed => |key_expr| {
@@ -3613,8 +3593,7 @@ pub const Compiler = struct {
                     const k = try self.internString(decoded);
                     try self.builder.emitOp(.ldar, c.span);
                     try self.builder.emitU8(r_recv);
-                    try self.builder.emitOp(.lda_property, c.span);
-                    try self.builder.emitU16(k);
+                    try self.builder.emitLdaProperty(c.span, k);
                 }
             },
             .computed => |key_expr| {
@@ -3654,8 +3633,7 @@ pub const Compiler = struct {
                 try self.builder.emitU8(r_val);
                 try self.builder.emitOp(.ldar, c.span);
                 try self.builder.emitU8(r_args);
-                try self.builder.emitOp(.lda_property, c.span);
-                try self.builder.emitU16(k_length);
+                try self.builder.emitLdaProperty(c.span, k_length);
                 const r_idx = try self.reserveTemp();
                 try self.builder.emitOp(.star, c.span);
                 try self.builder.emitU8(r_idx);
@@ -3683,8 +3661,7 @@ pub const Compiler = struct {
         const k_apply = try self.internString("apply");
         try self.builder.emitOp(.ldar, c.span);
         try self.builder.emitU8(r_callee);
-        try self.builder.emitOp(.lda_property, c.span);
-        try self.builder.emitU16(k_apply);
+        try self.builder.emitLdaProperty(c.span, k_apply);
         const r_apply = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.star, c.span);
@@ -3831,8 +3808,7 @@ pub const Compiler = struct {
                 try self.builder.emitU8(r_val);
                 try self.builder.emitOp(.ldar, c.span);
                 try self.builder.emitU8(r_args);
-                try self.builder.emitOp(.lda_property, c.span);
-                try self.builder.emitU16(k_length);
+                try self.builder.emitLdaProperty(c.span, k_length);
                 const r_idx = try self.reserveTemp();
                 try self.builder.emitOp(.star, c.span);
                 try self.builder.emitU8(r_idx);
@@ -3859,8 +3835,7 @@ pub const Compiler = struct {
         const k_apply = try self.internString("apply");
         try self.builder.emitOp(.ldar, c.span);
         try self.builder.emitU8(r_callee);
-        try self.builder.emitOp(.lda_property, c.span);
-        try self.builder.emitU16(k_apply);
+        try self.builder.emitLdaProperty(c.span, k_apply);
         const r_apply = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.star, c.span);
@@ -3958,8 +3933,7 @@ pub const Compiler = struct {
                 try self.builder.emitU8(r_val);
                 try self.builder.emitOp(.ldar, n.span);
                 try self.builder.emitU8(r_args);
-                try self.builder.emitOp(.lda_property, n.span);
-                try self.builder.emitU16(k_length);
+                try self.builder.emitLdaProperty(n.span, k_length);
                 const r_idx = try self.reserveTemp();
                 try self.builder.emitOp(.star, n.span);
                 try self.builder.emitU8(r_idx);
@@ -3987,8 +3961,7 @@ pub const Compiler = struct {
         try self.builder.emitOp(.lda_global, n.span);
         try self.builder.emitU16(k_reflect);
         const k_construct = try self.internString("construct");
-        try self.builder.emitOp(.lda_property, n.span);
-        try self.builder.emitU16(k_construct);
+        try self.builder.emitLdaProperty(n.span, k_construct);
         const r_construct = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.star, n.span);
@@ -5432,8 +5405,7 @@ pub const Compiler = struct {
         defer self.releaseTemp();
         try self.builder.emitOp(.ldar, s.span);
         try self.builder.emitU8(r_iter);
-        try self.builder.emitOp(.lda_property, s.span);
-        try self.builder.emitU16(k_next);
+        try self.builder.emitLdaProperty(s.span, k_next);
         try self.builder.emitOp(.star, s.span);
         try self.builder.emitU8(r_next_fn);
 
@@ -5509,8 +5481,7 @@ pub const Compiler = struct {
             // acc = r_result.done, for the loop-exit test below.
             try self.builder.emitOp(.ldar, s.span);
             try self.builder.emitU8(r_result);
-            try self.builder.emitOp(.lda_property, s.span);
-            try self.builder.emitU16(k_done);
+            try self.builder.emitLdaProperty(s.span, k_done);
         }
         // if (done) jmp exit
         try self.builder.emitOp(.jmp_if_true, s.span);
@@ -5571,8 +5542,7 @@ pub const Compiler = struct {
         try self.builder.emitOp(.ldar, s.span);
         try self.builder.emitU8(r_result);
         if (!fast_for_of) {
-            try self.builder.emitOp(.lda_property, s.span);
-            try self.builder.emitU16(k_value);
+            try self.builder.emitLdaProperty(s.span, k_value);
         }
 
         // §14.7.5.7 / §7.4.6 — handler range starts AFTER `lda_property
@@ -8151,8 +8121,7 @@ pub const Compiler = struct {
                     }
                     try self.builder.emitOp(.ldar, prop.span);
                     try self.builder.emitU8(r_src);
-                    try self.builder.emitOp(.lda_property, prop.span);
-                    try self.builder.emitU16(k);
+                    try self.builder.emitLdaProperty(prop.span, k);
                     try self.applyDefaultIfNeeded(prop.value);
                     try self.assignPatternLeaf(prop.value.target, is_init);
                 }
@@ -8522,8 +8491,7 @@ pub const Compiler = struct {
                         const k = try self.internString(key_slice);
                         try self.builder.emitOp(.ldar, op.span);
                         try self.builder.emitU8(r_src);
-                        try self.builder.emitOp(.lda_property, op.span);
-                        try self.builder.emitU16(k);
+                        try self.builder.emitLdaProperty(op.span, k);
                         // Shorthand `{a}` is target `a` (assign back to a).
                         // `{a = 1}` is shorthand with default — the parser
                         // wraps the value as `assignment(eq, identifier_reference, default)`.

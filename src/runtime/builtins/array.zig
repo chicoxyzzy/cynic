@@ -624,6 +624,8 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
         // §6.1.6.1 NumberValue — length is a Number; preserve the
         // value bit-pattern (don't down-cast a double to int32).
         o.properties.put(realm.allocator, key, value) catch return error.OutOfMemory;
+        // Mirror the write into the shadow shape's slot.
+        o.shadowSet(realm.allocator, key, value, flags);
         return;
     }
     if (!o.extensible) {

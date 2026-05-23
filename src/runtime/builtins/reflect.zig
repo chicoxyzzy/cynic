@@ -728,6 +728,9 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         const flags = receiver_obj.flagsFor(key_slice);
         if (!flags.writable) return Value.false_;
         receiver_obj.properties.put(realm.allocator, key_slice, v) catch return error.OutOfMemory;
+        // Mirror the write into the shadow shape's slot so the IC
+        // doesn't serve a stale value on the next lda_property.
+        receiver_obj.shadowSet(realm.allocator, key_slice, v, flags);
         return Value.true_;
     }
     // §10.1.9.2 step 3.f — CreateDataProperty(Receiver, P, V).
@@ -790,6 +793,8 @@ fn reflectSetOnReceiver(realm: *Realm, receiver_v: Value, key_slice: []const u8,
         const flags = receiver_obj.flagsFor(key_slice);
         if (!flags.writable) return Value.false_;
         receiver_obj.properties.put(realm.allocator, key_slice, v) catch return error.OutOfMemory;
+        // Mirror the write into the shadow shape's slot.
+        receiver_obj.shadowSet(realm.allocator, key_slice, v, flags);
         return Value.true_;
     }
     // §10.4.2.1 Array exotic [[DefineOwnProperty]] — for indexed

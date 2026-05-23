@@ -1714,6 +1714,11 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
         if (parsed.has_configurable) flags.configurable = parsed.configurable;
 
         if (parsed.isAccessor()) {
+            // The shadow shape only models data properties, so an
+            // accessor install demotes — otherwise the property
+            // removal below would leave the shape claiming a data
+            // slot whose value the IC would still serve.
+            target.demoteFromShape();
             // Replace any existing data slot — including the
             // Array exotic's packed `elements` slot for indexed
             // keys, otherwise reads via `JSObject.get` would
@@ -2657,6 +2662,8 @@ fn assignSetOrThrow(
             return;
         }
         target.properties.put(allocator, key, value) catch return error.OutOfMemory;
+        // Mirror the write into the shadow shape's slot.
+        target.shadowSet(allocator, key, value, flags);
         return;
     }
     if (!had_indexed and !target.extensible) {

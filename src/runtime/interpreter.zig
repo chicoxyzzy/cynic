@@ -10306,12 +10306,42 @@ fn runFrames(
 
             .lda_property => {
                 const k = readU16(code, ip);
-                ip += 2;
+                const ic_idx = readU16(code, ip + 2);
+                ip += 4;
                 if (k >= local_chunk.constants.len) return error.InvalidOpcode;
                 const key_v = local_chunk.constants[k];
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
                 if (heap_mod.valueAsPlainObject(acc)) |obj_in| {
+                    // Monomorphic inline cache. The fast path is a
+                    // pointer compare against the last receiver's
+                    // shape: a hit serves the value straight out of
+                    // the slot vector. shadowSet demotes any exotic
+                    // (proxy, namespace, typed view, array, engine-
+                    // internal key) before stamping a shape, so a
+                    // shaped object is guaranteed to be a plain
+                    // ordinary object with own-data properties only.
+                    const cell = &local_chunk.inline_caches[ic_idx];
+                    if (cell.shape != null and cell.shape == obj_in.shape) {
+                        acc = obj_in.slots.items[cell.slot];
+                        continue :dispatch try decodeNext(code, &ip, &committed);
+                    }
+                    // Cold or shape-changed callsite: probe the
+                    // shape directly. If the obj is shaped and has
+                    // the key as own-data, refill the cell and
+                    // serve from slots. Anything else (no shape,
+                    // accessor, prototype-inherited) falls through
+                    // to the full lookup below.
+                    if (obj_in.shape) |sh| {
+                        if (sh.lookup(key_s.flatBytes())) |entry| {
+                            if (entry.kind == .data) {
+                                cell.shape = sh;
+                                cell.slot = entry.slot;
+                                acc = obj_in.slots.items[entry.slot];
+                                continue :dispatch try decodeNext(code, &ip, &committed);
+                            }
+                        }
+                    }
                     // §10.5 Proxy [[Get]] — if `obj_in` is a proxy
                     // exotic, dispatch through `handler.get` first;
                     // a missing trap falls through to default lookup
@@ -12368,6 +12398,12 @@ fn strictSetPropertyAnchored(
             }
             realm.heap.storeInternalSlot(.{ .object = obj }, value);
             obj.properties.put(allocator, key, value) catch return error.OutOfMemory;
+            // Keep the shape-indexed `slots` vector in sync with the
+            // property bag so the IC fast-path read of
+            // `slots.items[cell.slot]` doesn't return the pre-write
+            // value. The bag write above bypasses `JSObject.set`, so
+            // we mirror it explicitly here.
+            obj.shadowSet(allocator, key, value, flags);
         } else {
             // §10.1.9.2 OrdinarySetWithOwnDescriptor step 2 —
             // when no own descriptor exists, the spec walks

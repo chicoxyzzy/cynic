@@ -1019,6 +1019,14 @@ pub const Heap = struct {
         } else if (valueAsPlainObject(v)) |o| {
             if (!o.marked) {
                 o.marked = true;
+                // Debug-only: every reachable shaped object's shadow
+                // shape must agree with its `properties` dictionary.
+                // Catches any direct property-bag mutation that
+                // bypassed `shadowSet` / `demoteFromShape`, at the
+                // next collection — regardless of which call site
+                // introduced the divergence. Compiled out in
+                // ReleaseFast.
+                o.verifyShapeInvariant();
                 var it = o.properties.iterator();
                 while (it.next()) |entry| self.markValue(entry.value_ptr.*);
                 var pit = o.private_properties.iterator();

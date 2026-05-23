@@ -14,6 +14,38 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-05-23 — cynic `39b5e31`, host `Darwin 25.5.0 arm64`
+
+Regression check after the shapes-scaffolding commits (`0704c9a`
+ShapeTree to heap, `ab9970d` route `JSObject.get` through shape
+slots, `ba773fb` build a shadow shape on every named-property
+write, `39b5e31` shadow the user-assignment write path / demote
+on delete) and the genuinely-weak `WeakRef`/`WeakMap`/`WeakSet`/
+`FinalizationRegistry` change (`55f00df`). Inline-cache *sites*
+on `lda_property` / `sta_property` aren't wired yet — that's the
+follow-up that turns the scaffolding into a win.
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 82.75 | 81.45 | 83.26 | 3344 |
+| prop_access | 48.94 | 48.05 | 49.59 | 3392 |
+| array_iter | 20.63 | 20.45 | 21.40 | 4320 |
+| string_concat | 3.04 | 2.98 | 3.11 | 4192 |
+| promise_chain | 3.54 | 3.47 | 3.60 | 8352 |
+| object_alloc | 23.80 | 21.22 | 24.81 | 9536 |
+
+Δ vs the `99b6566` row below: `object_alloc` +26.8 % (18.77 →
+23.80) — every named-property write now routes through the
+shape transition tree (`addPropertyTransition` lookup + slot
+assignment) instead of a flat property-bag insert; the
+allocation-heavy fixture takes the hit twice per object.
+Expected as scaffolding cost ahead of the IC wiring, which will
+pay it back. `prop_access` is flat (+0.8 %) — reads route
+through shape slots too but `get` was already shape-aware and
+the lookup is unchanged shape-to-shape. The other four fixtures
+sit inside ±5 % run-to-run noise (`promise_chain` −5.1 % the
+biggest mover, RSS within 2 %). Spreads tight (≤ ±3 %).
+
 ### 2026-05-22 — cynic `99b6566`, host `Darwin 25.5.0 arm64`
 
 Regression check after the `__cynic_` observable-slot fixes

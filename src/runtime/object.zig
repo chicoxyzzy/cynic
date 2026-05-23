@@ -937,6 +937,7 @@ pub const JSObject = struct {
         try self.properties.put(allocator, key_str.flatBytes(), v);
         try self.key_anchors.append(allocator, key_str);
         try self.recordKey(allocator, key_str.flatBytes());
+        self.shadowSet(allocator, key_str.flatBytes(), v, PropertyFlags.default);
     }
 
     /// Read the (possibly defaulted) descriptor flags for
@@ -1099,6 +1100,49 @@ pub const JSObject = struct {
         self.slots.clearRetainingCapacity();
     }
 
+    /// Debug-only consistency check on the shadow shape: every
+    /// shape-claimed (key, slot) data entry must agree with the
+    /// `properties` dictionary by both presence and bit-identical
+    /// value. A divergence means a direct `properties` /
+    /// `property_flags` / `accessors` mutation bypassed `shadowSet`
+    /// or `demoteFromShape` and left the shape stale — which makes
+    /// the IC fast path serve wrong values.
+    ///
+    /// The GC mark walk (`heap.markValue`) runs this on every
+    /// reachable shaped object, so a bypass surfaces at the next
+    /// collection regardless of which call site introduced it.
+    /// Compiled out when `runtime_safety` is off (ReleaseFast).
+    /// V8 ships the equivalent under `--verify-heap`;
+    /// SpiderMonkey has `JSObject::checkShapeConsistency`.
+    pub fn verifyShapeInvariant(self: *const JSObject) void {
+        if (!std.debug.runtime_safety) return;
+        const shape = self.shape orelse return;
+        var node: ?*const @import("shape.zig").Shape = shape;
+        while (node) |n| : (node = n.parent) {
+            if (n.parent == null) break;
+            if (n.kind != .data) continue;
+            if (n.slot >= self.slots.items.len) {
+                std.debug.panic(
+                    "shape invariant: slot {} out of range (slots.len={}) for key '{s}'",
+                    .{ n.slot, self.slots.items.len, n.key },
+                );
+            }
+            const slot_val = self.slots.items[n.slot];
+            const props_val = self.properties.get(n.key) orelse {
+                std.debug.panic(
+                    "shape invariant: key '{s}' in shape but absent from properties",
+                    .{n.key},
+                );
+            };
+            if (slot_val.bits != props_val.bits) {
+                std.debug.panic(
+                    "shape invariant: key '{s}' diverges — slot=0x{x} properties=0x{x}",
+                    .{ n.key, slot_val.bits, props_val.bits },
+                );
+            }
+        }
+    }
+
     /// Maintain the shadow shape + `slots` alongside a named write
     /// the caller has already applied to `properties`. Best-effort:
     /// an object or property that does not map cleanly onto a shape
@@ -1106,7 +1150,7 @@ pub const JSObject = struct {
     /// does not depend on the shadow — `get` consults `properties`
     /// — so an absent or partial shape is harmless until the later
     /// change that makes shapes the read path.
-    fn shadowSet(
+    pub fn shadowSet(
         self: *JSObject,
         allocator: std.mem.Allocator,
         key: []const u8,
