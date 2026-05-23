@@ -392,11 +392,14 @@ fn runModuleImportJob(
                     switch (eval_p.promise_state) {
                         .fulfilled => try realm.enqueuePromiseReaction(fulfill_handler, eval_p.promise_value, result_promise, false),
                         .rejected => try realm.enqueuePromiseReaction(Value.undefined_, eval_p.promise_value, result_promise, true),
-                        .pending => try eval_p.promise_reactions.append(realm.allocator, .{
-                            .on_fulfilled = fulfill_handler,
-                            .on_rejected = Value.undefined_,
-                            .result_promise = result_promise,
-                        }),
+                        .pending => {
+                            const reactions = try eval_p.promiseReactionsPtr(realm.allocator);
+                            try reactions.append(realm.allocator, .{
+                                .on_fulfilled = fulfill_handler,
+                                .on_rejected = Value.undefined_,
+                                .result_promise = result_promise,
+                            });
+                        },
                         .none => try settlePromiseInternal(realm, promise_obj, .fulfilled, ns_value),
                     }
                     return;
@@ -705,7 +708,8 @@ fn chainPromiseToInner(realm: *Realm, inner: *JSObject, outer: *JSObject) !void 
         .pending, .none => {},
     }
     // Pending — register a no-handler reaction so settlement propagates.
-    try inner.promise_reactions.append(realm.allocator, .{
+    const reactions = try inner.promiseReactionsPtr(realm.allocator);
+    try reactions.append(realm.allocator, .{
         .on_fulfilled = Value.undefined_,
         .on_rejected = Value.undefined_,
         .result_promise = heap_mod.taggedObject(outer),
@@ -975,10 +979,14 @@ pub fn settlePromiseInternal(
         .rejected => .rejected,
     }, value);
 
-    // Fire async-await waiters as resume microtasks.
-    const waiters = inst.promise_waiters;
-    inst.promise_waiters = .empty;
-    var w_iter = waiters;
+    // Fire async-await waiters as resume microtasks. Pull the
+    // list out of the extension and swap in an empty one so any
+    // recursive call paths don't trip over the iteration.
+    var w_iter: std.ArrayListUnmanaged(*@import("../generator.zig").JSGenerator) = .empty;
+    if (inst.promiseWaitersPtr(realm.allocator) catch null) |waiters| {
+        w_iter = waiters.*;
+        waiters.* = .empty;
+    }
     defer w_iter.deinit(realm.allocator);
     for (w_iter.items) |w_gen| {
         // §27.6.3.7 step 8.b — when the gen was suspended on
@@ -995,10 +1003,14 @@ pub fn settlePromiseInternal(
         }
     }
 
-    // Fire user-level `.then` reactions.
-    const reactions = inst.promise_reactions;
-    inst.promise_reactions = .empty;
-    var r_iter = reactions;
+    // Fire user-level `.then` reactions. Snapshot the list out of
+    // the extension and swap an empty one in so recursive paths
+    // don't trip on it.
+    var r_iter: std.ArrayListUnmanaged(@import("../object.zig").PromiseReaction) = .empty;
+    if (inst.promiseReactionsPtr(realm.allocator) catch null) |reactions| {
+        r_iter = reactions.*;
+        reactions.* = .empty;
+    }
     defer r_iter.deinit(realm.allocator);
     for (r_iter.items) |r| {
         const handler = if (state == .fulfilled) r.on_fulfilled else r.on_rejected;

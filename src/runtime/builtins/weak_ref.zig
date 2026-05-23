@@ -78,7 +78,7 @@ fn weakRefConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
     if (!canBeHeldWeakly(target))
         return throwTypeError(realm, "WeakRef: target must be an object or non-registered symbol");
     inst.is_weak_ref = true;
-    inst.weak_ref_target = target;
+    inst.setWeakRefTarget(realm.allocator, target) catch return error.OutOfMemory;
     return this_value;
 }
 
@@ -102,5 +102,5 @@ fn weakRefDeref(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // §26.1.4.1 — `weak_ref_target` is `undefined` (the engine's
     // ~empty~ sentinel) once the major collector observed the
     // target become unreachable; otherwise it is the live target.
-    return inst.weak_ref_target;
+    return inst.getWeakRefTarget();
 }

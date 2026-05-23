@@ -457,6 +457,25 @@ pub const JSObjectExtension = struct {
     /// `WeakSet` instances populate this. `null` means "not a Set
     /// instance".
     set_data: ?*SetData = null,
+    /// §27.2 — generators awaiting a pending Promise's settlement.
+    /// Populated only on Promise instances; cleared when the
+    /// Promise settles. Microtask scheduler drains this list.
+    promise_waiters: std.ArrayListUnmanaged(*@import("generator.zig").JSGenerator) = .empty,
+    /// §27.2.5 PerformPromiseThen — `.then` reaction records queued
+    /// on a pending Promise. Drained at settlement time when each
+    /// reaction is scheduled as a microtask.
+    promise_reactions: std.ArrayListUnmanaged(PromiseReaction) = .empty,
+    /// §26.1.1 [[WeakRefTarget]] — the cell a `WeakRef` watches.
+    /// Genuinely weak: the GC marker skips this slot on a full
+    /// cycle and clears it post-mark for a dead referent. Defaults
+    /// to `undefined` (no live target). Only WeakRef instances
+    /// populate this; the read API still returns `undefined` for
+    /// plain objects, just via the null-extension path.
+    weak_ref_target: Value = Value.undefined_,
+    /// §26.2.1 [[Cells]] — pending FinalizationRegistry cleanup
+    /// entries. Only `new FinalizationRegistry(cb)` instances
+    /// populate this. `null` everywhere else.
+    finalization_cells: ?*FinalizationData = null,
 
     pub fn deinit(self: *JSObjectExtension, allocator: std.mem.Allocator) void {
         self.accessors.deinit(allocator);
@@ -467,6 +486,9 @@ pub const JSObjectExtension = struct {
         self.ambiguous_namespace_keys.deinit(allocator);
         if (self.map_data) |m| m.deinit(allocator);
         if (self.set_data) |s| s.deinit(allocator);
+        self.promise_waiters.deinit(allocator);
+        self.promise_reactions.deinit(allocator);
+        if (self.finalization_cells) |fc| fc.deinit(allocator);
     }
 };
 
@@ -671,20 +693,10 @@ pub const JSObject = struct {
     /// can dispatch to it. Not GC-traced; the harness keeps the
     /// child Realm rooted in `parent.child_realms` separately.
     host_data: ?*anyopaque = null,
-    /// Internal async-await waiters for a pending Promise.
-    /// Each entry is a `*JSGenerator` representing a suspended
-    /// `async function` frame that is awaiting this Promise.
-    /// On settlement, each waiter is enqueued as an
-    /// `async_resume` microtask. Distinct from user-level
-    /// `then` handlers (which use a separate property-bag list)
-    /// because waiters bypass the JS-callable layer.
-    promise_waiters: std.ArrayListUnmanaged(*@import("generator.zig").JSGenerator) = .empty,
-    /// User-level `.then(onFulfilled, onRejected)` reactions
-    /// registered on a pending Promise. On settlement, each
-    /// reaction is enqueued as a `promise_reaction` microtask
-    /// that runs the appropriate handler and settles the
-    /// reaction's `result_promise`.
-    promise_reactions: std.ArrayListUnmanaged(PromiseReaction) = .empty,
+    // (`promise_waiters` + `promise_reactions` moved to
+    // `JSObjectExtension` — only Promise instances populate them.
+    // Access via the `promiseWaiters*` / `promiseReactions*`
+    // helpers below.)
     /// §27.2.6 `[[PromiseState]]`. `.none` means this object isn't
     /// a Promise; the runtime brand-checks for `!= .none` rather
     /// than walking the prototype chain. Hidden from JS — never
@@ -747,27 +759,15 @@ pub const JSObject = struct {
     /// call to `.exec`/`.test` parses the `source` + `flags` and
     /// caches the bytecode here. The runtime owns the allocation.
     regex_bytecode: ?[]u8 = null,
-    /// `[[Cells]]` (§26.2.1) — only set on `new FinalizationRegistry(cb)`
-    /// instances. Carries the cleanup callback plus the list of
-    /// registered cells. Allocated on construction; deinit releases
-    /// the storage. The cleanup callback and each cell's held value
-    /// are strong-marked by `Heap.markValue`; a cell's `target` and
-    /// `unregister_token` are weak — the major collector's post-mark
-    /// pass (`Heap.processWeakReferences`) queues a cleanup job and
-    /// tombstones the cell when the target becomes unreachable.
-    finalization_cells: ?*FinalizationData = null,
-    /// §26.1 WeakRef — `[[WeakRefTarget]]` internal slot. Set on
-    /// `new WeakRef(target)` instances. `is_weak_ref` is the brand
-    /// (`deref.call(plainObj)` must throw a TypeError per §26.1.3.2
-    /// even when no target was supplied). `weak_ref_target` holds
-    /// the live target Value (Object or non-registered Symbol per
-    /// §6.2.10 CanBeHeldWeakly), or `undefined` once the major
-    /// collector observed the target become unreachable (the
-    /// engine's ~empty~ sentinel). The slot is a genuinely weak
-    /// edge: `Heap.collectFull` does not strong-mark it and its
-    /// post-mark pass clears it for a dead referent.
+    // (`finalization_cells` + `weak_ref_target` moved to
+    // `JSObjectExtension` — only `FinalizationRegistry` /
+    // `WeakRef` instances populate them. Access via
+    // `getFinalizationCells` / `setFinalizationCells` /
+    // `getWeakRefTarget` / `setWeakRefTarget` below.)
+    /// §26.1 WeakRef brand — `(deref.call(plainObj))` must throw
+    /// a TypeError per §26.1.3.2 even when the slot is empty, so
+    /// the brand is checked separately from the target slot.
     is_weak_ref: bool = false,
-    weak_ref_target: Value = Value.undefined_,
     /// §10.4.2 Array exotic — packed indexed elements storage.
     /// Array instances set `is_array_exotic = true` and use
     /// `elements` as the source of truth for integer-indexed
@@ -1107,6 +1107,64 @@ pub const JSObject = struct {
         ext.set_data = data;
     }
 
+    // ── §27.2 Promise reaction queue + §26 WeakRef / FinReg ────
+    //
+    // Promise instances and WeakRef / FinalizationRegistry
+    // instances carry their backing state here. Plain objects
+    // pay the null-extension fast path.
+
+    pub fn promiseWaitersPtr(self: *JSObject, allocator: std.mem.Allocator) !*std.ArrayListUnmanaged(*@import("generator.zig").JSGenerator) {
+        const ext = try self.getOrCreateExtension(allocator);
+        return &ext.promise_waiters;
+    }
+
+    pub fn promiseWaitersConst(self: *const JSObject) ?*const std.ArrayListUnmanaged(*@import("generator.zig").JSGenerator) {
+        if (self.extension) |ext| return &ext.promise_waiters;
+        return null;
+    }
+
+    pub fn promiseReactionsPtr(self: *JSObject, allocator: std.mem.Allocator) !*std.ArrayListUnmanaged(PromiseReaction) {
+        const ext = try self.getOrCreateExtension(allocator);
+        return &ext.promise_reactions;
+    }
+
+    pub fn promiseReactionsConst(self: *const JSObject) ?*const std.ArrayListUnmanaged(PromiseReaction) {
+        if (self.extension) |ext| return &ext.promise_reactions;
+        return null;
+    }
+
+    /// Returns `Value.undefined_` when no extension yet (read API
+    /// preserves the original semantics — every plain object behaves
+    /// like an empty WeakRef target slot, matching the old behaviour
+    /// where the field defaulted to undefined).
+    pub fn getWeakRefTarget(self: *const JSObject) Value {
+        if (self.extension) |ext| return ext.weak_ref_target;
+        return Value.undefined_;
+    }
+
+    pub fn setWeakRefTarget(self: *JSObject, allocator: std.mem.Allocator, v: Value) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        ext.weak_ref_target = v;
+    }
+
+    /// Pointer-mutate the slot in place. Only safe when the
+    /// extension is known to exist (GC post-mark clear, never on
+    /// a plain object).
+    pub fn weakRefTargetSlot(self: *JSObject) ?*Value {
+        if (self.extension) |ext| return &ext.weak_ref_target;
+        return null;
+    }
+
+    pub fn getFinalizationCells(self: *const JSObject) ?*FinalizationData {
+        if (self.extension) |ext| return ext.finalization_cells;
+        return null;
+    }
+
+    pub fn setFinalizationCells(self: *JSObject, allocator: std.mem.Allocator, fc: ?*FinalizationData) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        ext.finalization_cells = fc;
+    }
+
     pub fn deinit(self: *JSObject, allocator: std.mem.Allocator) void {
         self.properties.deinit(allocator);
         self.property_flags.deinit(allocator);
@@ -1120,10 +1178,9 @@ pub const JSObject = struct {
         if (self.iter_record) |s| s.deinit(allocator);
         if (self.iter_helper) |s| s.deinit(allocator);
         if (self.capability_record) |s| s.deinit(allocator);
-        if (self.finalization_cells) |fc| fc.deinit(allocator);
+        // `finalization_cells`, `promise_waiters`, `promise_reactions`,
+        // `weak_ref_target` all live in the extension — freed there.
         if (self.array_buffer) |ab| allocator.free(ab);
-        self.promise_waiters.deinit(allocator);
-        self.promise_reactions.deinit(allocator);
         self.key_anchors.deinit(allocator);
         self.own_key_order.deinit(allocator);
         self.elements.deinit(allocator);

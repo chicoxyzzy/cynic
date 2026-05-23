@@ -89,13 +89,13 @@ fn finalizationRegistryConstructor(realm: *Realm, this_value: Value, args: []con
     // §26.2.1.1 steps 3-5 — allocate [[Cells]] + [[CleanupCallback]].
     const data = realm.allocator.create(ObjMod.FinalizationData) catch return error.OutOfMemory;
     data.* = .{ .cleanup_callback = cb };
-    inst.finalization_cells = data;
+    inst.setFinalizationCells(realm.allocator, data) catch return error.OutOfMemory;
     return this_value;
 }
 
 fn finalizationDataOf(this_value: Value) ?*ObjMod.FinalizationData {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    return obj.finalization_cells;
+    return obj.getFinalizationCells();
 }
 
 /// §26.2.3.2 FinalizationRegistry.prototype.register

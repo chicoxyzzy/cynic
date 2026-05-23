@@ -4394,7 +4394,8 @@ pub fn runFrames(
                     if (use_microtask) {
                         realm.enqueueAsyncResume(gen, resume_value, resume_throws) catch return error.OutOfMemory;
                     } else if (suspend_target) |obj| {
-                        obj.promise_waiters.append(realm.allocator, gen) catch return error.OutOfMemory;
+                        const waiters = obj.promiseWaitersPtr(realm.allocator) catch return error.OutOfMemory;
+                        waiters.append(realm.allocator, gen) catch return error.OutOfMemory;
                     }
                     // §27.6.3.4 — async-gen suspended in
                     // await must not pop its head request when

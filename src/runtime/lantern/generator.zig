@@ -782,7 +782,8 @@ fn awaitForReturnCompletion(realm: *Realm, gen: *@import("../generator.zig").JSG
                 // normal `async_resume` (which drives a normal
                 // yield-resume).
                 gen.awaiting_return_completion = true;
-                try obj.promise_waiters.append(realm.allocator, gen);
+                const waiters = try obj.promiseWaitersPtr(realm.allocator);
+                try waiters.append(realm.allocator, gen);
                 return;
             }
             try realm.enqueueAsyncGenReturnAfterAwait(gen, obj.promise_value, obj.promise_state == .rejected);
@@ -809,7 +810,8 @@ fn awaitForReturnCompletion(realm: *Realm, gen: *@import("../generator.zig").JSG
             const promise_obj = heap_mod.valueAsPlainObject(promise_v) orelse return error.OutOfMemory;
             try realm.enqueueThenableJob(promise_v, v, then_v);
             gen.awaiting_return_completion = true;
-            try promise_obj.promise_waiters.append(realm.allocator, gen);
+            const waiters = try promise_obj.promiseWaitersPtr(realm.allocator);
+            try waiters.append(realm.allocator, gen);
             return;
         }
         // Non-callable `.then` (or thenable with falsy `.then`):
@@ -872,7 +874,8 @@ pub fn wrapAsyncGenResult(realm: *Realm, raw: Value, done: bool) @import("../fun
         .pending => |inner_obj| {
             // valueWrapper still pending → register the unwrap
             // reaction; it fires when the inner Promise settles.
-            inner_obj.promise_reactions.append(realm.allocator, .{
+            const reactions = inner_obj.promiseReactionsPtr(realm.allocator) catch return error.OutOfMemory;
+            reactions.append(realm.allocator, .{
                 .on_fulfilled = wrap_v,
                 .on_rejected = Value.undefined_,
                 .result_promise = outer,

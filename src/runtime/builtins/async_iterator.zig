@@ -315,7 +315,8 @@ fn wrapAsyncGenResultWithClose(
             const reject_fn = realm.heap.allocateFunctionNative(closeIteratorOnReject, 1, "closeIterator") catch return error.OutOfMemory;
             reject_fn.has_construct = false;
             reject_fn.properties.put(realm.allocator, "__cynic_sync_iter__", sync_iter_v) catch return error.OutOfMemory;
-            p.promise_reactions.append(realm.allocator, .{
+            const p_reactions = p.promiseReactionsPtr(realm.allocator) catch return error.OutOfMemory;
+            p_reactions.append(realm.allocator, .{
                 .on_fulfilled = heap_mod.taggedFunction(fulfill_fn),
                 .on_rejected = heap_mod.taggedFunction(reject_fn),
                 .result_promise = outer,

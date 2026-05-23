@@ -1215,7 +1215,7 @@ pub const Heap = struct {
                     if (self.weak_aware_mark) {
                         self.weak_refs_seen.append(self.allocator, o) catch {};
                     } else {
-                        self.markValue(o.weak_ref_target);
+                        self.markValue(o.getWeakRefTarget());
                     }
                 }
                 // §26.2 FinalizationRegistry — the cleanup callback
@@ -1227,7 +1227,7 @@ pub const Heap = struct {
                 // to the post-mark pass (which queues a cleanup job
                 // for any dead target). A minor cycle keeps the old
                 // strong-marking of every slot.
-                if (o.finalization_cells) |fc| {
+                if (o.getFinalizationCells()) |fc| {
                     self.markValue(fc.cleanup_callback);
                     if (self.weak_aware_mark) {
                         self.finalization_registries_seen.append(self.allocator, o) catch {};
@@ -1256,23 +1256,27 @@ pub const Heap = struct {
                 // `result_promise` is the chained sub-Promise that
                 // a later `.then` is registered on; without marking
                 // it here, mid-drain GC collects the chain.
-                for (o.promise_reactions.items) |r| {
-                    self.markValue(r.on_fulfilled);
-                    self.markValue(r.on_rejected);
-                    // Defer the chained sub-Promise: a `.then` chain
-                    // of length N walks N deep through reactions if
-                    // we recurse, overflowing past ~5k frames under
-                    // GC pressure. `drainMarkWorklist` (called at
-                    // cycle boundaries) processes these iteratively
-                    // — chain length stops mattering. On OOM (the
-                    // append's only failure mode), fall back to the
-                    // recursive mark so a missed mark can't become
-                    // a missed sweep.
-                    self.mark_worklist.append(self.allocator, r.result_promise) catch {
-                        self.markValue(r.result_promise);
-                    };
+                if (o.promiseReactionsConst()) |reactions| {
+                    for (reactions.items) |r| {
+                        self.markValue(r.on_fulfilled);
+                        self.markValue(r.on_rejected);
+                        // Defer the chained sub-Promise: a `.then` chain
+                        // of length N walks N deep through reactions if
+                        // we recurse, overflowing past ~5k frames under
+                        // GC pressure. `drainMarkWorklist` (called at
+                        // cycle boundaries) processes these iteratively
+                        // — chain length stops mattering. On OOM (the
+                        // append's only failure mode), fall back to the
+                        // recursive mark so a missed mark can't become
+                        // a missed sweep.
+                        self.mark_worklist.append(self.allocator, r.result_promise) catch {
+                            self.markValue(r.result_promise);
+                        };
+                    }
                 }
-                for (o.promise_waiters.items) |w| self.markGenerator(w);
+                if (o.promiseWaitersConst()) |waiters| {
+                    for (waiters.items) |w| self.markGenerator(w);
+                }
                 // §27.2 `[[PromiseResult]]` — the settled value on
                 // a fulfilled / rejected Promise. Held in the typed
                 // `promise_value` slot rather than a property bag,
@@ -1413,8 +1417,9 @@ pub const Heap = struct {
         // §26.1 WeakRef.
         for (self.weak_refs_seen.items) |wr| {
             if (!wr.is_weak_ref) continue;
-            if (!self.isWeakReferentLive(wr.weak_ref_target)) {
-                wr.weak_ref_target = Value.undefined_;
+            const slot = wr.weakRefTargetSlot() orelse continue;
+            if (!self.isWeakReferentLive(slot.*)) {
+                slot.* = Value.undefined_;
             }
         }
         // §24.3 WeakMap / §24.4 WeakSet — prune dead entries.
@@ -1443,7 +1448,7 @@ pub const Heap = struct {
         // §26.2 FinalizationRegistry — queue cleanup for dead
         // targets, tombstone the cell.
         for (self.finalization_registries_seen.items) |reg| {
-            const fc = reg.finalization_cells orelse continue;
+            const fc = reg.getFinalizationCells() orelse continue;
             for (fc.cells.items) |*cell| {
                 if (cell.deleted) continue;
                 if (!self.isWeakReferentLive(cell.target)) {
@@ -2248,8 +2253,8 @@ pub const Heap = struct {
         self.markValue(o.finally_value);
         if (o.finally_constructor) |f| self.markValue(taggedFunction(f));
         if (o.generator_ref) |gen| self.markGenerator(gen);
-        if (o.is_weak_ref) self.markValue(o.weak_ref_target);
-        if (o.finalization_cells) |fc| {
+        if (o.is_weak_ref) self.markValue(o.getWeakRefTarget());
+        if (o.getFinalizationCells()) |fc| {
             self.markValue(fc.cleanup_callback);
             for (fc.cells.items) |cell| {
                 if (cell.deleted) continue;
@@ -2259,12 +2264,16 @@ pub const Heap = struct {
             }
         }
         for (o.key_anchors.items) |s| self.markString(s);
-        for (o.promise_reactions.items) |r| {
-            self.markValue(r.on_fulfilled);
-            self.markValue(r.on_rejected);
-            self.markValue(r.result_promise);
+        if (o.promiseReactionsConst()) |reactions| {
+            for (reactions.items) |r| {
+                self.markValue(r.on_fulfilled);
+                self.markValue(r.on_rejected);
+                self.markValue(r.result_promise);
+            }
         }
-        for (o.promise_waiters.items) |w| self.markGenerator(w);
+        if (o.promiseWaitersConst()) |waiters| {
+            for (waiters.items) |w| self.markGenerator(w);
+        }
         if (o.promise_state != .none) self.markValue(o.promise_value);
         if (o.regexp_source) |s| self.markString(s);
         if (o.regexp_flags) |s| self.markString(s);
@@ -3189,12 +3198,12 @@ test "Heap: WeakRef to a pinned symbol observes the live referent after GC" {
     // and decides whether to clear its target slot.
     const wr = try heap.allocateObject();
     wr.is_weak_ref = true;
-    wr.weak_ref_target = sym_v;
+    try wr.setWeakRefTarget(testing.allocator, sym_v);
 
     heap.collect(&.{taggedObject(wr)});
 
     // Target slot must still point at the same symbol.
-    const after = valueAsSymbol(wr.weak_ref_target) orelse {
+    const after = valueAsSymbol(wr.getWeakRefTarget()) orelse {
         return error.TestExpectedNonNullTarget;
     };
     try testing.expectEqual(sym, after);

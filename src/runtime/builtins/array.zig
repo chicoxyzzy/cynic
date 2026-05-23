@@ -3798,11 +3798,14 @@ fn awaitAndThen(
     switch (source.promise_state) {
         .fulfilled => realm.enqueuePromiseReaction(on_resolve_v, source.promise_value, result_promise, false) catch return error.OutOfMemory,
         .rejected => realm.enqueuePromiseReaction(on_reject_v, source.promise_value, result_promise, true) catch return error.OutOfMemory,
-        else => source.promise_reactions.append(realm.allocator, .{
-            .on_fulfilled = on_resolve_v,
-            .on_rejected = on_reject_v,
-            .result_promise = result_promise,
-        }) catch return error.OutOfMemory,
+        else => {
+            const reactions = source.promiseReactionsPtr(realm.allocator) catch return error.OutOfMemory;
+            reactions.append(realm.allocator, .{
+                .on_fulfilled = on_resolve_v,
+                .on_rejected = on_reject_v,
+                .result_promise = result_promise,
+            }) catch return error.OutOfMemory;
+        },
     }
 }
 

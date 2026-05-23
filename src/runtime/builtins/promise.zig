@@ -483,11 +483,14 @@ fn chainPromiseToInner(realm: *Realm, inner: *@import("../object.zig").JSObject,
     switch (inner.promise_state) {
         .fulfilled => try realm.enqueuePromiseReaction(Value.undefined_, inner.promise_value, heap_mod.taggedObject(outer), false),
         .rejected => try realm.enqueuePromiseReaction(Value.undefined_, inner.promise_value, heap_mod.taggedObject(outer), true),
-        .pending => try inner.promise_reactions.append(realm.allocator, .{
-            .on_fulfilled = Value.undefined_,
-            .on_rejected = Value.undefined_,
-            .result_promise = heap_mod.taggedObject(outer),
-        }),
+        .pending => {
+            const reactions = try inner.promiseReactionsPtr(realm.allocator);
+            try reactions.append(realm.allocator, .{
+                .on_fulfilled = Value.undefined_,
+                .on_rejected = Value.undefined_,
+                .result_promise = heap_mod.taggedObject(outer),
+            });
+        },
         .none => {
             // Treated as plain object — defensive; shouldn't happen.
             interp.settlePromiseInternal(realm, outer, .fulfilled, heap_mod.taggedObject(inner)) catch return error.OutOfMemory;
@@ -565,11 +568,14 @@ fn promiseThen(realm: *Realm, this_value: Value, args: []const Value) NativeErro
         switch (source.promise_state) {
             .fulfilled => realm.enqueuePromiseReaction(on_fulfilled_fn, value, result_promise, false) catch return error.OutOfMemory,
             .rejected => realm.enqueuePromiseReaction(on_rejected_fn, value, result_promise, true) catch return error.OutOfMemory,
-            else => source.promise_reactions.append(realm.allocator, .{
-                .on_fulfilled = on_fulfilled_fn,
-                .on_rejected = on_rejected_fn,
-                .result_promise = result_promise,
-            }) catch return error.OutOfMemory,
+            else => {
+                const reactions = source.promiseReactionsPtr(realm.allocator) catch return error.OutOfMemory;
+                reactions.append(realm.allocator, .{
+                    .on_fulfilled = on_fulfilled_fn,
+                    .on_rejected = on_rejected_fn,
+                    .result_promise = result_promise,
+                }) catch return error.OutOfMemory;
+            },
         }
         return result_promise;
     }
@@ -581,11 +587,14 @@ fn promiseThen(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     switch (source.promise_state) {
         .fulfilled => realm.enqueuePromiseReaction(on_fulfilled_fn, value, cap.promise, false) catch return error.OutOfMemory,
         .rejected => realm.enqueuePromiseReaction(on_rejected_fn, value, cap.promise, true) catch return error.OutOfMemory,
-        else => source.promise_reactions.append(realm.allocator, .{
-            .on_fulfilled = on_fulfilled_fn,
-            .on_rejected = on_rejected_fn,
-            .result_promise = cap.promise,
-        }) catch return error.OutOfMemory,
+        else => {
+            const reactions = source.promiseReactionsPtr(realm.allocator) catch return error.OutOfMemory;
+            reactions.append(realm.allocator, .{
+                .on_fulfilled = on_fulfilled_fn,
+                .on_rejected = on_rejected_fn,
+                .result_promise = cap.promise,
+            }) catch return error.OutOfMemory;
+        },
     }
     return cap.promise;
 }
