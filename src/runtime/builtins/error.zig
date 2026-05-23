@@ -202,7 +202,7 @@ fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) N
 /// `@@iterator`) and array-likes (`length` + indexed get). Throws
 /// `TypeError` on non-object input.
 fn aggregateErrorMaterialiseErrors(realm: *Realm, errors_v: Value) NativeError!Value {
-    const interpreter = @import("../interpreter.zig");
+    const lantern = @import("../lantern.zig");
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
 
@@ -222,7 +222,7 @@ fn aggregateErrorMaterialiseErrors(realm: *Realm, errors_v: Value) NativeError!V
         return intrinsics.throwTypeError(realm, "AggregateError: @@iterator is not callable");
     }
     if (heap_mod.valueAsFunction(iter_method_v)) |iter_method| {
-        const iter_outcome = interpreter.callJSFunction(realm.allocator, realm, iter_method, errors_v, &.{}) catch |err| switch (err) {
+        const iter_outcome = lantern.callJSFunction(realm.allocator, realm, iter_method, errors_v, &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -240,7 +240,7 @@ fn aggregateErrorMaterialiseErrors(realm: *Realm, errors_v: Value) NativeError!V
         const max_iter: usize = 1 << 24;
         var step: usize = 0;
         while (step < max_iter) : (step += 1) {
-            const result_outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
+            const result_outcome = lantern.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };

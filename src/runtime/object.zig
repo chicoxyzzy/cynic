@@ -831,7 +831,7 @@ pub const JSObject = struct {
     /// `setComputedOwned`). Append-only on first insertion;
     /// removed when the key is deleted. Only mutated through the
     /// `recordKey` / `forgetKey` helpers below; the raw `put`
-    /// callsites in object.zig / interpreter.zig / builtins/object.zig
+    /// callsites in object.zig / lantern.zig / builtins/object.zig
     /// route through them. Built-in proto installation that
     /// bypasses the helpers (e.g. realm wiring) doesn't land in
     /// this list; that's intentional — those keys are
@@ -904,7 +904,7 @@ pub const JSObject = struct {
 
     /// §10.1.11 OrdinaryOwnPropertyKeys — drop `key` from the
     /// unified insertion-order list. Called from the delete /
-    /// swapRemove paths in builtins/object.zig / interpreter.zig
+    /// swapRemove paths in builtins/object.zig / lantern.zig
     /// when both the data and accessor map entries for `key` go
     /// away. Cheap linear scan — the list is bounded by the
     /// object's own-key count.

@@ -31,7 +31,7 @@ const Shape = @import("../runtime/shape.zig").Shape;
 /// compare and a `slots[slot]` load skip the full lookup.
 ///
 /// Monomorphic: a miss overwrites the cell, no polymorphism / chain.
-/// Hermes-style: no JIT, the cache lives entirely in the interpreter.
+/// Hermes-style: no JIT, the cache lives entirely in the lantern.
 ///
 /// `shape == null` is the cold / un-cacheable state (the last lookup
 /// hit a dictionary-mode object, an accessor, the prototype chain,
@@ -303,7 +303,7 @@ pub const Chunk = struct {
     exported_names: []const []const u8 = &.{},
     /// §16.2.1.5.1 [[IsAsync]] — true for a module whose body
     /// contains a *top-level* `await` (lexically outside any
-    /// function or arrow). Drives `interpreter.run` to route the
+    /// function or arrow). Drives `lantern.run` to route the
     /// chunk through `startAsyncCall` so the body runs as a
     /// JSGenerator-backed async frame and the `await_` opcode has
     /// a place to suspend. Always false for scripts and for

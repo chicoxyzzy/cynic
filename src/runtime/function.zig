@@ -203,7 +203,7 @@ pub const JSFunction = struct {
     defers_proto_lookup: bool = false,
     /// `function*` — calling allocates a `JSGenerator` instead
     /// of running the body. The generator's `.next()` method
-    /// resumes the body via `interpreter.resumeGenerator`.
+    /// resumes the body via `lantern.resumeGenerator`.
     is_generator: bool = false,
     /// `async function` — body always returns a Promise.
     is_async: bool = false,

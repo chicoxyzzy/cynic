@@ -270,7 +270,7 @@ fn reflectGet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         while (cur) |o| : (cur = o.prototype) {
             if (o.accessors.get(key_slice)) |acc| {
                 if (acc.getter) |getter| {
-                    const interp2 = @import("../interpreter.zig");
+                    const interp2 = @import("../lantern.zig");
                     const outcome = interp2.callJSFunction(realm.allocator, realm, getter, receiver, &[_]Value{}) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => return error.NativeThrew,
@@ -309,7 +309,7 @@ fn reflectGet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     while (cursor) |o| : (cursor = o.prototype) {
         if (o.accessors.get(key_slice)) |acc| {
             if (acc.getter) |getter| {
-                const interp = @import("../interpreter.zig");
+                const interp = @import("../lantern.zig");
                 const outcome = interp.callJSFunction(realm.allocator, realm, getter, receiver, &[_]Value{}) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
@@ -395,14 +395,14 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
                     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'set' trap is not callable");
                     const key_str = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
                     const trap_args = [_]Value{ heap_mod.taggedFunction(proxy_cur.proxy_target_fn.?), Value.fromString(key_str), v, receiver_v };
-                    const interp = @import("../interpreter.zig");
+                    const interp = @import("../lantern.zig");
                     const outcome = interp.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => return error.NativeThrew,
                     };
                     switch (outcome) {
                         .value, .yielded => |trap_ret| {
-                            const arith = @import("../interpreter_arith.zig");
+                            const arith = @import("../lantern_arith.zig");
                             return Value.fromBool(arith.toBoolean(trap_ret));
                         },
                         .thrown => |ex| {
@@ -537,11 +537,11 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // returns false here instead of throwing on a non-writable
     // length (the strict-mode bytecode path throws TypeError).
     if (target.is_array_exotic and std.mem.eql(u8, key_slice, "length")) {
-        const interpreter = @import("../interpreter.zig");
+        const lantern = @import("../lantern.zig");
         if (target.property_flags.get("length")) |flags| {
             if (!flags.writable) return Value.false_;
         }
-        const new_len = (try interpreter.arrayLengthCoerceSpec(realm, v)) orelse {
+        const new_len = (try lantern.arrayLengthCoerceSpec(realm, v)) orelse {
             return throwRangeError(realm, "Invalid array length");
         };
         // Re-check writability after the spec-mandated coercions —
@@ -551,7 +551,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         if (target.property_flags.get("length")) |flags| {
             if (!flags.writable) return Value.false_;
         }
-        const tr = interpreter.truncateArrayAtLength(realm.allocator, target, new_len);
+        const tr = lantern.truncateArrayAtLength(realm.allocator, target, new_len);
         target.setArrayLength(realm.allocator, tr.final_length) catch return error.OutOfMemory;
         if (tr.blocked) return Value.false_;
         return Value.true_;
@@ -586,14 +586,14 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
                         const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'set' trap is not callable");
                         const key_str_t = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
                         const trap_args = [_]Value{ heap_mod.taggedFunction(proxy_cur.proxy_target_fn.?), Value.fromString(key_str_t), v, receiver_v };
-                        const interp = @import("../interpreter.zig");
+                        const interp = @import("../lantern.zig");
                         const outcome = interp.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             else => return error.NativeThrew,
                         };
                         switch (outcome) {
                             .value, .yielded => |trap_ret| {
-                                const arith = @import("../interpreter_arith.zig");
+                                const arith = @import("../lantern_arith.zig");
                                 return Value.fromBool(arith.toBoolean(trap_ret));
                             },
                             .thrown => |ex| {
@@ -630,7 +630,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         // descriptor-with-receiver.js).
         if (o.accessors.get(key_slice)) |acc| {
             if (acc.setter) |setter| {
-                const interp = @import("../interpreter.zig");
+                const interp = @import("../lantern.zig");
                 const setter_args = [_]Value{v};
                 const outcome = interp.callJSFunction(realm.allocator, realm, setter, receiver_v, &setter_args) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -1091,8 +1091,8 @@ fn reflectApply(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         return throwTypeError(realm, "Reflect.apply: argumentsList is not an object");
     }
 
-    const interpreter = @import("../interpreter.zig");
-    const outcome = interpreter.callValue(realm.allocator, realm, target_v, this_arg, apply_args.items) catch |err| switch (err) {
+    const lantern = @import("../lantern.zig");
+    const outcome = lantern.callValue(realm.allocator, realm, target_v, this_arg, apply_args.items) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -1110,7 +1110,7 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const target_v = argOr(args, 0, Value.undefined_);
     const args_v = argOr(args, 1, Value.undefined_);
     const new_target_v = argOr(args, 2, Value.undefined_);
-    const interpreter = @import("../interpreter.zig");
+    const lantern = @import("../lantern.zig");
 
     // §28.1.2 step 3 — `CreateListFromArrayLike(argumentsList)`.
     // Reject non-object argumentsList per §7.3.18 step 2. Read
@@ -1141,7 +1141,7 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     if (heap_mod.valueAsPlainObject(target_v)) |po| {
         if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
             const newt: Value = if (new_target_v.isUndefined()) target_v else new_target_v;
-            const outcome = interpreter.constructValue(realm.allocator, realm, target_v, ctor_args.items, newt) catch |err| switch (err) {
+            const outcome = lantern.constructValue(realm.allocator, realm, target_v, ctor_args.items, newt) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };
@@ -1204,7 +1204,7 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     if (effective_target.defers_proto_lookup and effective_target.native_callback != null) {
         realm.pending_native_new_target = if (new_target_v.isUndefined()) target_v else new_target_v;
         defer realm.pending_native_new_target = Value.undefined_;
-        const interp = @import("../interpreter.zig");
+        const interp = @import("../lantern.zig");
         const outcome = interp.callJSFunction(realm.allocator, realm, effective_target, Value.undefined_, ctor_args.items) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
@@ -1231,7 +1231,7 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // trap on "prototype" fires (AggregateError/
     // newtarget-proto-custom.js).
     const new_target_for_proto: Value = if (new_target_v.isUndefined()) heap_mod.taggedFunction(effective_new_target) else new_target_v;
-    const proto_lookup = interpreter.getPrototypeFromConstructorValue(realm.allocator, realm, new_target_for_proto, effective_target.prototype) catch |err| switch (err) {
+    const proto_lookup = lantern.getPrototypeFromConstructorValue(realm.allocator, realm, new_target_for_proto, effective_target.prototype) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -1252,7 +1252,7 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // unwrap and threads new_target into the final-target frame
     // (see the bound-construct fixtures under
     // built-ins/Function/prototype/bind/instance-construct-*).
-    const outcome = interpreter.callJSFunctionAsSuper(realm.allocator, realm, target, this_arg, ctor_args.items, heap_mod.taggedFunction(effective_new_target)) catch |err| switch (err) {
+    const outcome = lantern.callJSFunctionAsSuper(realm.allocator, realm, target, this_arg, ctor_args.items, heap_mod.taggedFunction(effective_new_target)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -1270,7 +1270,7 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
 }
 
 /// Stringify a Value for use as a property key in Reflect ops.
-/// Mirrors `computedKeyToString` in interpreter.zig.
+/// Mirrors `computedKeyToString` in lantern.zig.
 fn computedKeyForReflect(v: Value, scratch: *[64]u8) []const u8 {
     if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));

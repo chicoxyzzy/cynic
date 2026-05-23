@@ -549,9 +549,9 @@ pub fn proxyOwnKeysOrNull(
         return try ownPropertyKeysOrdered(realm, proxy_target, key_scope);
     }
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'ownKeys' trap is not callable");
-    const interpreter = @import("../interpreter.zig");
+    const lantern = @import("../lantern.zig");
     const trap_args = [_]Value{heap_mod.taggedObject(proxy_target)};
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+    const outcome = lantern.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -1042,9 +1042,9 @@ pub fn objectGetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
             // A non-callable, non-nullish value throws TypeError.
             if (!trap_v.isUndefined() and !trap_v.isNull()) {
                 const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'getPrototypeOf' trap is not callable");
-                const interpreter = @import("../interpreter.zig");
+                const lantern = @import("../lantern.zig");
                 const trap_args = [_]Value{heap_mod.taggedObject(proxy_target)};
-                const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+                const outcome = lantern.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
                 };
@@ -1414,7 +1414,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             // non-callable is a TypeError.
             if (!trap_v.isUndefined() and !trap_v.isNull()) {
                 const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'defineProperty' trap is not callable");
-                const interpreter = @import("../interpreter.zig");
+                const lantern = @import("../lantern.zig");
                 // §10.5.6 step 7 — pass the property key as a Symbol
                 // when the slot is symbol-keyed (Cynic flattens
                 // symbols into `@@<name>` / `<sym:N>` slugs internally
@@ -1429,7 +1429,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
                     break :blk_key Value.fromString(key_str);
                 };
                 const trap_args = [_]Value{ proxy_target_v, key_v, desc_v };
-                const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+                const outcome = lantern.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
                 };
@@ -1580,7 +1580,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
         // so the descriptor that lands stores the coerced length.
         var array_length_new: ?u32 = null;
         if (target.is_array_exotic and std.mem.eql(u8, key, "length") and parsed.has_value) {
-            const arith = @import("../interpreter_arith.zig");
+            const arith = @import("../lantern_arith.zig");
             // §10.4.2.4 ArraySetLength runs ToNumber TWICE on the
             // descriptor value — once via ToUint32 (step 3) and once
             // standalone (step 4) — then SameValueZero-compares the
@@ -1792,8 +1792,8 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             // Done AFTER the property update so the length
             // property already reads as `newLen`.
             if (array_length_new) |new_len| {
-                const interpreter = @import("../interpreter.zig");
-                const trunc = interpreter.truncateArrayAtLength(realm.allocator, target, new_len);
+                const lantern = @import("../lantern.zig");
+                const trunc = lantern.truncateArrayAtLength(realm.allocator, target, new_len);
                 if (trunc.blocked) {
                     // Restore length to the floor and throw.
                     const restore: Value = if (trunc.final_length <= std.math.maxInt(i32))
@@ -2009,8 +2009,8 @@ fn defineFromFunctionProps(
         const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
         var desc_v: Value = Value.undefined_;
         if (entry.value_ptr.getter) |getter| {
-            const interpreter = @import("../interpreter.zig");
-            const outcome = interpreter.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(props_fn), &.{}) catch |err| switch (err) {
+            const lantern = @import("../lantern.zig");
+            const outcome = lantern.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(props_fn), &.{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };
@@ -2093,7 +2093,7 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
             }
             {
                 const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'getOwnPropertyDescriptor' trap is not callable");
-                const interpreter = @import("../interpreter.zig");
+                const lantern = @import("../lantern.zig");
                 // §10.5.5 step 7 — invoke trap with the original
                 // property key. Symbol-keyed properties must be
                 // passed back as the Symbol primitive (not the
@@ -2105,7 +2105,7 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
                 else
                     Value.fromString(realm.heap.allocateString(key) catch return error.OutOfMemory);
                 const trap_args = [_]Value{ target_value, key_value };
-                const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+                const outcome = lantern.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
                 };
@@ -2603,16 +2603,16 @@ fn assignSetOrThrow(
     key_string: *JSString,
     value: Value,
 ) NativeError!void {
-    const interpreter = @import("../interpreter.zig");
+    const lantern = @import("../lantern.zig");
     const allocator = realm.allocator;
     const key = key_string.flatBytes();
     // §10.1.9.2 — accessor descriptor on the receiver or its
     // proto chain wins. A getter-only accessor (no `set`) is a
     // TypeError under strict-mode Set.
-    if (interpreter.lookupAccessor(target, key)) |acc| {
+    if (lantern.lookupAccessor(target, key)) |acc| {
         if (acc.setter) |setter| {
             const setter_args = [_]Value{value};
-            const outcome = interpreter.callJSFunction(allocator, realm, setter, heap_mod.taggedObject(target), &setter_args) catch |err| switch (err) {
+            const outcome = lantern.callJSFunction(allocator, realm, setter, heap_mod.taggedObject(target), &setter_args) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };
@@ -2652,9 +2652,9 @@ fn assignSetOrThrow(
             // §10.4.2.4 ArraySetLength — coerce to uint32 via §7.1.6
             // ToUint32, then truncate / grow the indexed backing,
             // then sync the `length` property.
-            const arith = @import("../interpreter_arith.zig");
+            const arith = @import("../lantern_arith.zig");
             const new_len: u32 = arith.toUint32(value);
-            const tr = interpreter.truncateArrayAtLength(allocator, target, new_len);
+            const tr = lantern.truncateArrayAtLength(allocator, target, new_len);
             target.setArrayLength(allocator, tr.final_length) catch return error.OutOfMemory;
             if (tr.blocked) {
                 return throwTypeError(realm, "Cannot delete non-configurable array index");
@@ -3207,9 +3207,9 @@ pub fn proxyPreventExtensionsBool(realm: *Realm, obj: *JSObject) NativeError!boo
         return true;
     }
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'preventExtensions' trap is not callable");
-    const interpreter = @import("../interpreter.zig");
+    const lantern = @import("../lantern.zig");
     const trap_args = [_]Value{heap_mod.taggedObject(proxy_target)};
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+    const outcome = lantern.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -3280,9 +3280,9 @@ pub fn objectIsExtensible(realm: *Realm, this_value: Value, args: []const Value)
         // §10.5.3 step 5 — GetMethod: non-callable non-nullish → TypeError.
         if (!trap_v.isUndefined() and !trap_v.isNull()) {
             const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'isExtensible' trap is not callable");
-            const interpreter = @import("../interpreter.zig");
+            const lantern = @import("../lantern.zig");
             const trap_args = [_]Value{heap_mod.taggedObject(proxy_target)};
-            const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+            const outcome = lantern.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };
@@ -3310,8 +3310,8 @@ pub fn objectIsExtensible(realm: *Realm, this_value: Value, args: []const Value)
 
 fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const interpreter = @import("../interpreter.zig");
-    const iter = interpreter.openIterator(realm.allocator, realm, argOr(args, 0, Value.undefined_)) catch |err| switch (err) {
+    const lantern = @import("../lantern.zig");
+    const iter = lantern.openIterator(realm.allocator, realm, argOr(args, 0, Value.undefined_)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return throwTypeError(realm, "Object.fromEntries argument is not iterable"),
     };
@@ -3334,7 +3334,7 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
     while (i < max_iter) : (i += 1) {
         // §7.4.2 IteratorNext — throwing `next()` does NOT close;
         // the iterator is already "done" per §7.4.6 step 6.b.
-        const step = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
+        const step = lantern.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -3429,12 +3429,12 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
 /// completion"). The pre-existing pending exception is what
 /// propagates upward.
 fn invokeFromEntriesReturn(realm: *Realm, iter_obj: *JSObject, iter_v: Value) void {
-    const interpreter = @import("../interpreter.zig");
+    const lantern = @import("../lantern.zig");
     const ret_v = intrinsics.getPropertyChain(realm, iter_obj, "return") catch return;
     if (ret_v.isUndefined() or ret_v.isNull()) return;
     const ret_fn = heap_mod.valueAsFunction(ret_v) orelse return;
     const saved_ex = realm.pending_exception;
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, ret_fn, iter_v, &.{}) catch {
+    const outcome = lantern.callJSFunction(realm.allocator, realm, ret_fn, iter_v, &.{}) catch {
         realm.pending_exception = saved_ex;
         return;
     };
@@ -3486,9 +3486,9 @@ pub fn proxySetPrototypeOfBool(realm: *Realm, obj: *JSObject, proto_v: Value) Na
         return true;
     }
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'setPrototypeOf' trap is not callable");
-    const interpreter = @import("../interpreter.zig");
+    const lantern = @import("../lantern.zig");
     const trap_args = [_]Value{ heap_mod.taggedObject(proxy_target), proto_v };
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
+    const outcome = lantern.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -3609,7 +3609,7 @@ pub fn objectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
 /// Each bucket is an Array of the items that produced that key.
 fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
-    const interpreter = @import("../interpreter.zig");
+    const lantern = @import("../lantern.zig");
     const items_v = argOr(args, 0, Value.undefined_);
     const cb_v = argOr(args, 1, Value.undefined_);
     const cb = heap_mod.valueAsFunction(cb_v) orelse return throwTypeError(realm, "Object.groupBy callback is not callable");
@@ -3617,7 +3617,7 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = null; // null-prototype per spec
 
-    const iter = interpreter.openIterator(realm.allocator, realm, items_v) catch |err| switch (err) {
+    const iter = lantern.openIterator(realm.allocator, realm, items_v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return throwTypeError(realm, "Object.groupBy items is not iterable"),
     };
@@ -3640,7 +3640,7 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         // propagate the original throw value; record the exception
         // on the realm so the JS `assert.throws(Test262Error, …)`
         // catches it instead of a synthetic TypeError.
-        const step = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
+        const step = lantern.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -3659,7 +3659,7 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         // A user callback throw (test262
         // built-ins/Object/groupBy/callback-throws.js) must surface
         // intact — register the exception on the realm.
-        const key_outcome = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &cb_args) catch |err| switch (err) {
+        const key_outcome = lantern.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &cb_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -3774,7 +3774,7 @@ fn objectProtoPropertyIsEnumerable(realm: *Realm, this_value: Value, args: []con
             if (desc_v.isUndefined()) return Value.false_;
             const desc_obj = heap_mod.valueAsPlainObject(desc_v) orelse return Value.false_;
             const enum_v = desc_obj.get("enumerable");
-            const arith = @import("../interpreter_arith.zig");
+            const arith = @import("../lantern_arith.zig");
             return Value.fromBool(arith.toBoolean(enum_v));
         }
         if (!obj.hasOwn(key)) return Value.false_;
@@ -3974,7 +3974,7 @@ pub fn objectProtoToLocaleString(realm: *Realm, this_value: Value, args: []const
     const func = try getVProperty(realm, this_value, "toString");
     const fn_obj = heap_mod.valueAsFunction(func) orelse
         return throwTypeError(realm, "Object.prototype.toLocaleString: toString is not callable");
-    const interp = @import("../interpreter.zig");
+    const interp = @import("../lantern.zig");
     const outcome = interp.callJSFunction(realm.allocator, realm, fn_obj, this_value, &[_]Value{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
@@ -4001,7 +4001,7 @@ fn getVProperty(realm: *Realm, v: Value, key: []const u8) NativeError!Value {
     if (heap_mod.valueAsFunction(v)) |fn_obj| {
         if (fn_obj.ownAccessor(key)) |acc| {
             if (acc.getter) |getter| {
-                const interp = @import("../interpreter.zig");
+                const interp = @import("../lantern.zig");
                 const outcome = interp.callJSFunction(realm.allocator, realm, getter, v, &[_]Value{}) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
@@ -4065,7 +4065,7 @@ fn getPropertyWithReceiver(realm: *Realm, obj: *JSObject, key: []const u8, recei
     while (cur) |o| {
         if (o.accessors.get(key)) |acc| {
             if (acc.getter) |getter| {
-                const interp = @import("../interpreter.zig");
+                const interp = @import("../lantern.zig");
                 const outcome = interp.callJSFunction(realm.allocator, realm, getter, receiver, &[_]Value{}) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,

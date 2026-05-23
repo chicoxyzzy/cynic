@@ -3,26 +3,115 @@
 Long-running design sketch. Treat anything labelled "TBD" as an open question
 that will be settled with an ADR when the time comes.
 
-## Pipeline
+## Overview
 
 ```
-source bytes  ──►  Lexer  ──►  Parser  ──►  AST
-                                            │
-                                            ▼
-                                   Bytecode Compiler
-                                            │
-                                            ▼
-                                   Interpreter (T0)
-                                            │
-                            hot ─►  Baseline JIT (T1)        ── future
-                                            │
-                          hotter ─►  Optimizing JIT (T2)     ── future
-```
+╔══════════════════════════════════════════════════════════════════════╗
+║                         CYNIC ENGINE                                 ║
+║         strict-only ECMAScript engine, built from scratch            ║
+╚══════════════════════════════════════════════════════════════════════╝
 
-Each tier is a separate compilation strategy producing code that runs over the
-same value representation and the same heap. All upper tiers can deopt back
-into the interpreter; data flows one way (T0 → T1 → T2) but execution can fall
-all the way back.
+  EXECUTION PIPELINE
+  ──────────────────
+   source bytes
+        │
+        ▼
+   ┌─────────┐   Diagnostic records (severity + code + span),
+   │  Lexer  │   accumulated — not panics
+   └────┬────┘
+        ▼
+   ┌─────────┐   arena-per-parse, no global state,
+   │ Parser  │   every AST node carries a source span
+   └────┬────┘
+        ▼
+   ┌─────────┐
+   │   AST   │
+   └────┬────┘
+        ▼
+   ┌──────────────────┐
+   │ Bytecode Compiler│  register file + accumulator (Ignition/Hermes)
+   └────┬─────────────┘  bytecode = source of truth for IR
+        ▼
+   ┌──────────────────┐
+   │   Lantern (T0)   │  ◄── ships today
+   └────┬─────────────┘
+        │  hot
+        ▼
+   ┌──────────────────┐
+   │ Bistromath (T1)  │  ◄── future (M5)
+   └────┬─────────────┘
+        │  hotter
+        ▼
+   ┌──────────────────┐
+   │  Ohaimark (T2)   │  ◄── future (M6)
+   └──────────────────┘
+   data flows T0→T1→T2; deopt can fall all the way back to Lantern (T0)
+
+
+  ENGINE STATE  (owned by an `Engine` struct, explicit allocator threading)
+  ────────────
+   ┌────────────────────────── Realm (realm.zig) ───────────────────────┐
+   │                                                                    │
+   │  ┌──────────┐  ┌────────────┐  ┌───────────────┐  ┌──────────────┐ │
+   │  │   Heap   │  │ Intrinsics │  │ Microtask     │  │ Module cache │ │
+   │  │ + Metla  │  │   table    │  │ queue         │  │              │ │
+   │  └──────────┘  └────────────┘  └───────────────┘  └──────────────┘ │
+   │                                                                    │
+   │  ┌─────────────── GlobalBindings (GlobalEnvironmentRecord) ───────┐ │
+   │  │  object env   : global object — var/function + host bindings   │ │
+   │  │  declarative  : let/const/class  (NOT on globalThis)           │ │
+   │  │  [[VarNames]] : §9.1.1.4 set                                   │ │
+   │  └────────────────────────────────────────────────────────────────┘│
+   │                                                                    │
+   │  Realm.output : ArrayListUnmanaged(u8)  — buffers print/console.log │
+   └────────────────────────────────────────────────────────────────────┘
+
+
+  VALUE REPRESENTATION                    HEAP / METLA (GC)
+  ────────────────────                    ─────────────────
+   NaN-boxing, JSC encoding                Metla: stop-the-world mark-sweep
+   64-bit Value word:                      over per-type free lists,
+    • doubles stored unboxed inline         triggered on allocation pressure
+    • non-doubles: 16-bit tag in NaN       per-type lists tracked:
+      payload + 48-bit ptr/immediate        JSString  JSFunction JSObject
+   tags: Int32 String Object Bool          Environment JSGenerator
+         Null Undefined Hole                JSSymbol  JSBigInt
+   Object tag = JSFunction|JSObject,       triggers: allocs_since_gc vs
+     discriminated by ptr bit 0             gc_threshold (16,384)  OR
+   Hole (0xFFFF) = TDZ sentinel             bytes_since_gc vs 16 MiB
+     → reading raises ReferenceError       roots: globals, intrinsics,
+                                            microtasks, modules, frames,
+                                            open HandleScopes
+
+
+  OBJECT MODEL & ENVIRONMENTS
+  ───────────────────────────
+   Object: hashtable-backed props          Environment records (one struct,
+     (+ proto slot reserved;                flags per binding):
+      shapes/hidden classes = later)        • Declarative  — blocks, bodies
+                                            • Function     — args/this/home
+   Every named binding is heap-allocated      via JSFunction
+   in a declarative Environment;            • Module       — imports = live
+   closures capture enclosing env ptr         aliases, TDZ-Hole-seeded
+                                            • Global       — object+decl split
+
+
+  BUILT-IN LAYER  (data ─vs─ API split)
+  ──────────────
+   runtime/<X>.zig          ──►  heap-side JSX struct (fields, init/deinit)
+   runtime/builtins/<X>.zig ──►  JS-visible API surface, `install(realm)`
+   runtime/intrinsics.zig   ──►  orchestrator + shared helpers; calls each
+                                  builtin's install() at startup
+   families: Object Array String Number Map/Set Promise TypedArray Date
+             BigInt Symbol Proxy Reflect RegExp JSON Math Error …
+
+
+  MODULE SYSTEM
+  ─────────────
+   Source Text Module Record (§16) — static import/export, indirect live
+   aliases, dynamic import(), import.meta, top-level await.
+   No CommonJS. Loading is host-driven via Realm.module_loader callback.
+```
 
 ## Strict-only
 
@@ -84,25 +173,26 @@ bits.
 Cynic uses one `Object` tag for both `JSFunction` and `JSObject`.
 Discrimination happens at bit 0 of the stored pointer: heap allocations
 are 8-byte-aligned, so bit 0 is free. `taggedFunction` leaves it
-clear; `taggedObject` sets it. This avoids depending on Zig field
-layout (Zig 0.14+ reorders fields by default), which previously broke
-a kind-discriminator-as-first-field design.
+clear; `taggedObject` sets it. This avoids depending on
+compiler-determined struct field layout, which previously broke a
+kind-discriminator-as-first-field design.
 
 `Hole` (tag `0xFFFF`) is a distinct sentinel for `let` / `const`
 slots in TDZ; reading it raises `ReferenceError`.
 
 The pointer-tagged-Smi alternative (V8 style) was considered and
 rejected: it exists to interop with V8's pointer compression, which is
-unrelated to a from-scratch interpreter.
+unrelated to a from-scratch interpreter like Lantern.
 
-## Garbage collection
+## Garbage collection — Metla
 
-Stop-the-world mark-sweep over per-type free lists, triggered on
-allocation pressure. See [src/runtime/heap.zig](../src/runtime/heap.zig)
-for the collector itself; the trigger and the realm-wide root walker
-live in [src/runtime/realm.zig](../src/runtime/realm.zig) and the
-interpreter dispatch loop in
-[src/runtime/interpreter.zig](../src/runtime/interpreter.zig). The
+**Metla** is Cynic's stop-the-world mark-sweep collector over per-type
+free lists, triggered on allocation pressure. See
+[src/runtime/heap.zig](../src/runtime/heap.zig) for the collector itself
+(the `Heap` struct holds storage; the `collect*` functions are Metla);
+the trigger and the realm-wide root walker live in
+[src/runtime/realm.zig](../src/runtime/realm.zig) and Lantern's dispatch
+loop in [src/runtime/lantern.zig](../src/runtime/lantern.zig). The
 operational details — root set, threshold, the `HandleScope` contract
 for natives — are in [docs/handbook/gc.md](handbook/gc.md).
 
@@ -133,14 +223,14 @@ Register file + accumulator, Ignition / Hermes style. Decided at
 later; see [src/bytecode/op.zig](../src/bytecode/op.zig).
 
 Per-frame register file; an implicit accumulator threads through
-binary and unary ops to keep the dispatch loop tight. One-byte
+binary and unary ops to keep Lantern's dispatch loop tight. One-byte
 opcodes for the common case. Bytecode is the source of truth for IR
-— JIT tiers (M5, M6) will consume bytecode + profile data, not the
-AST.
+— Bistromath and Ohaimark (the future JIT tiers) will consume
+bytecode + profile data, not the AST.
 
 A pure-stack design (QuickJS) was considered and rejected: higher
-dispatch counts, and worse fit for the M5 baseline JIT, which wants
-a register file (Sparkplug, JSC Baseline both work that way).
+dispatch counts, and worse fit for Bistromath, which wants a register
+file (Sparkplug, JSC Baseline both work that way).
 
 ## Object model
 
@@ -207,35 +297,10 @@ Cynic ships a sizable spec surface (Object, Array, String, Number,
 Map, Set, Promise, TypedArray, Date, …). Each lives in its own
 file under `src/runtime/builtins/`, exporting a `pub fn install(realm)`
 that wires the constructor + prototype methods + statics. The
-top-level `intrinsics.install(realm)` calls each in turn:
-
-```
-runtime/intrinsics.zig          orchestrator + shared helpers
-└── runtime/builtins/
-    ├── array.zig                Array.prototype + Array statics
-    ├── async_iterator.zig       %AsyncFromSyncIteratorPrototype% etc.
-    ├── bigint.zig               BigInt constructor + statics
-    ├── collections.zig          Map / Set / WeakMap / WeakSet
-    ├── date.zig                 Date
-    ├── error.zig                Error class hierarchy
-    ├── finalization_registry.zig FinalizationRegistry
-    ├── function.zig             Function.prototype
-    ├── iterator.zig             Iterator helpers (Stage 4 + drafts)
-    ├── json.zig                 JSON.{stringify, parse}
-    ├── math.zig                 Math object
-    ├── number.zig               Number + parseInt / parseFloat globals
-    ├── object.zig               Object statics + Object.prototype
-    ├── promise.zig              Promise + then-chaining + statics
-    ├── proxy.zig                Proxy
-    ├── reflect.zig              Reflect static methods
-    ├── regexp.zig               RegExp (vendored libregexp + spec
-    │                             surface — see AGENTS.md "Regex")
-    ├── string.zig               String.prototype methods
-    ├── symbol.zig               Symbol constructor + well-known
-    ├── typed_array.zig          ArrayBuffer / DataView / TypedArray
-    ├── uri.zig                  encodeURI / decodeURI family
-    └── weak_ref.zig             WeakRef
-```
+top-level `intrinsics.install(realm)` calls each in turn. The
+current set of builtin files is discoverable from `src/runtime/builtins/`
+directly; this document avoids enumerating them so it doesn't drift
+on every add.
 
 **Layer split.** The `src/runtime/<X>.zig` file holds the heap-side
 `JSX` struct (fields, init / deinit, internal slot access). The
@@ -271,14 +336,14 @@ single realm and the API is shaped so adding more later is a
 structural addition, not a refactor.
 
 `print` and friends are wired as `JSFunction` instances with a
-`native_callback: ?NativeFn` field (a Zig function pointer). The
-interpreter's `Call` op fast-paths native callees: it forms an args
-slice over the register window and invokes the Zig function directly.
+`native_callback: ?NativeFn` field (a native function pointer).
+Lantern's `Call` op fast-paths native callees: it forms an args slice
+over the register window and invokes the native function directly.
 
-`Realm.output: ArrayListUnmanaged(u8)` buffers `print` / `console.log`
-output. The host (CLI or test runner) flushes it after a script
-finishes. Buffering avoids threading `std.Io` into the runtime, which
-would touch every allocation site.
+`Realm.output` buffers `print` / `console.log` output. The host (CLI
+or test runner) flushes it after a script finishes. Buffering avoids
+threading an I/O abstraction into the runtime, which would touch
+every allocation site.
 
 ## Module system
 
@@ -335,8 +400,8 @@ disk; the test262 harness reads from `vendor/test262/test/`).
 
 ## Testing
 
-- Inline `test` blocks per file for unit coverage
-  (`zig build test`).
+- Inline `test` blocks per file for unit coverage, run via the
+  project's test build target. See AGENTS.md for commands.
 - Custom test262 harness (`tools/test262.zig`, ~3 k lines)
   scored against the Cynic-targeted scope: Annex B,
   `intl402/`, `staging/`, `harness/`, and the browser-era

@@ -204,7 +204,7 @@ pub const Compiler = struct {
     /// arrow / method body — i.e. the enclosing function-like
     /// scope is `.script` and `is_module` is true). Drives the
     /// `Chunk.is_async_module` flag set in `compileModuleAsChunk`,
-    /// which tells `interpreter.run` to wrap the body via
+    /// which tells `lantern.run` to wrap the body via
     /// `startAsyncCall` so the `await_` opcode can suspend onto a
     /// JSGenerator-backed frame.
     module_has_top_level_await: bool = false,
@@ -11183,7 +11183,7 @@ fn expectChunk(source: []const u8, expected: []const u8) !void {
 // removed in the later refactor. Every chunk now begins with
 // `MakeEnvironment` and named bindings live in env slots, so the
 // pinned byte-by-byte expectations no longer fit. Coverage moved
-// to the interpreter-level tests in `runtime/interpreter.zig`,
+// to the interpreter-level tests in `runtime/lantern.zig`,
 // which assert on observed *values* and stay stable across
 // bytecode-shape changes.
 

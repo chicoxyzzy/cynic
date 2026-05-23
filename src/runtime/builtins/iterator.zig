@@ -30,7 +30,7 @@ const JSFunction = @import("../function.zig").JSFunction;
 const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
-const interpreter = @import("../interpreter.zig");
+const lantern = @import("../lantern.zig");
 
 const installConstructor = intrinsics.installConstructor;
 const installNativeMethod = intrinsics.installNativeMethod;
@@ -397,7 +397,7 @@ fn wrappedReturn(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const ret_fn = heap_mod.valueAsFunction(ret_v) orelse return throwTypeError(realm, "wrapped iterator .return is not callable");
     _ = src_obj;
     // Step 7 — Return ? Call(returnMethod, iterator).
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, ret_fn, source, &.{}) catch |err| switch (err) {
+    const outcome = lantern.callJSFunction(realm.allocator, realm, ret_fn, source, &.{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -433,7 +433,7 @@ fn invokeIterNext(realm: *Realm, iter: Value) NativeError!Value {
 /// source iterator's `next` function once, at construction time,
 /// so subsequent steps don't re-trigger the source's `get next`.
 fn invokeIterNextFn(realm: *Realm, iter: Value, next_fn: *JSFunction) NativeError!Value {
-    const out = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
+    const out = lantern.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -522,9 +522,9 @@ fn iterGet(realm: *Realm, recv: Value, key: []const u8) NativeError!Value {
 /// receiver — accessor getters fire with `this = recv` per
 /// §10.1.8.1 step 5.
 fn iterGetPlain(realm: *Realm, obj: *JSObject, key: []const u8, this_for_getter: Value) NativeError!Value {
-    if (interpreter.lookupAccessor(obj, key)) |acc| {
+    if (lantern.lookupAccessor(obj, key)) |acc| {
         if (acc.getter) |getter| {
-            const out = interpreter.callJSFunction(realm.allocator, realm, getter, this_for_getter, &.{}) catch |err| switch (err) {
+            const out = lantern.callJSFunction(realm.allocator, realm, getter, this_for_getter, &.{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };
@@ -574,7 +574,7 @@ fn closeIteratorSwallow(realm: *Realm, iter: Value) void {
         realm.pending_exception = saved;
         return;
     };
-    const result = interpreter.callJSFunction(realm.allocator, realm, ret_fn, iter, &.{}) catch {
+    const result = lantern.callJSFunction(realm.allocator, realm, ret_fn, iter, &.{}) catch {
         realm.pending_exception = saved;
         return;
     };
@@ -617,7 +617,7 @@ fn closeIteratorPropagate(realm: *Realm, iter: Value) NativeError!void {
     const ret_fn = heap_mod.valueAsFunction(ret_v) orelse {
         return throwTypeError(realm, "iterator return is not callable");
     };
-    const out = interpreter.callJSFunction(realm.allocator, realm, ret_fn, iter, &.{}) catch |err| switch (err) {
+    const out = lantern.callJSFunction(realm.allocator, realm, ret_fn, iter, &.{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -810,7 +810,7 @@ fn flatMapNext(realm: *Realm, this_value: Value, args: []const Value) NativeErro
 
         // 3. Apply mapper(value, idx).
         const args_call = [_]Value{ value, Value.fromInt32(idx) };
-        const out = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &args_call) catch |err| switch (err) {
+        const out = lantern.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &args_call) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
                 state.done = true;
@@ -1030,7 +1030,7 @@ fn mapNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
     const idx: i32 = @intCast(state.count);
     state.count += 1;
     const args_call = [_]Value{ value, Value.fromInt32(idx) };
-    const out = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &args_call) catch |err| switch (err) {
+    const out = lantern.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &args_call) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
             // Mapper threw. Mark wrapper done and run §7.4.10
@@ -1086,7 +1086,7 @@ fn filterNext(realm: *Realm, this_value: Value, args: []const Value) NativeError
             return err;
         };
         const args_call = [_]Value{ value, Value.fromInt32(idx) };
-        const out = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &args_call) catch |err| switch (err) {
+        const out = lantern.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &args_call) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
                 state.done = true;
@@ -1266,7 +1266,7 @@ fn iteratorForEach(realm: *Realm, this_value: Value, args: []const Value) Native
         if (intrinsics.toBoolean(done_v)) break;
         const value = try iterGet(realm, r, "value");
         const args_call = [_]Value{ value, Value.fromInt32(idx) };
-        const out = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &args_call) catch |err| switch (err) {
+        const out = lantern.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &args_call) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return callbackErrored(realm, this_value),
         };
@@ -1299,7 +1299,7 @@ fn iteratorFind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         if (intrinsics.toBoolean(done_v)) break;
         const value = try iterGet(realm, r, "value");
         const args_call = [_]Value{ value, Value.fromInt32(idx) };
-        const out = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &args_call) catch |err| switch (err) {
+        const out = lantern.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &args_call) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return callbackErrored(realm, this_value),
         };
@@ -1339,7 +1339,7 @@ fn iteratorSome(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         if (intrinsics.toBoolean(done_v)) break;
         const value = try iterGet(realm, r, "value");
         const args_call = [_]Value{ value, Value.fromInt32(idx) };
-        const out = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &args_call) catch |err| switch (err) {
+        const out = lantern.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &args_call) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return callbackErrored(realm, this_value),
         };
@@ -1379,7 +1379,7 @@ fn iteratorEvery(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         if (intrinsics.toBoolean(done_v)) break;
         const value = try iterGet(realm, r, "value");
         const args_call = [_]Value{ value, Value.fromInt32(idx) };
-        const out = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &args_call) catch |err| switch (err) {
+        const out = lantern.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &args_call) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return callbackErrored(realm, this_value),
         };
@@ -1427,7 +1427,7 @@ fn iteratorReduce(realm: *Realm, this_value: Value, args: []const Value) NativeE
             continue;
         }
         const args_call = [_]Value{ acc, value, Value.fromInt32(idx) };
-        const out = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &args_call) catch |err| switch (err) {
+        const out = lantern.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &args_call) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return callbackErrored(realm, this_value),
         };
@@ -1465,7 +1465,7 @@ fn getIteratorMethod(realm: *Realm, v: Value) NativeError!?*JSFunction {
 /// `iterable[Symbol.iterator]()` — calls the method, validates the
 /// result is an Object, returns the raw iterator.
 fn callIteratorMethod(realm: *Realm, iter_fn: *JSFunction, this_v: Value) NativeError!Value {
-    const out = interpreter.callJSFunction(realm.allocator, realm, iter_fn, this_v, &.{}) catch |err| switch (err) {
+    const out = lantern.callJSFunction(realm.allocator, realm, iter_fn, this_v, &.{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -1503,7 +1503,7 @@ fn getIteratorFlattenable(realm: *Realm, v: Value, reject_strings: bool) NativeE
         const sp = realm.intrinsics.string_prototype orelse return throwTypeError(realm, "String.prototype not installed");
         if (sp.accessors.get("@@iterator")) |acc| {
             if (acc.getter) |getter| {
-                const out = interpreter.callJSFunction(realm.allocator, realm, getter, v, &.{}) catch |err| switch (err) {
+                const out = lantern.callJSFunction(realm.allocator, realm, getter, v, &.{}) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
                 };
@@ -1516,7 +1516,7 @@ fn getIteratorFlattenable(realm: *Realm, v: Value, reject_strings: bool) NativeE
                 };
                 if (m_v.isUndefined() or m_v.isNull()) {
                     // Fall through to default string iteration.
-                    return interpreter.openIteratorAllowArrayLike(realm.allocator, realm, v) catch return throwTypeError(realm, "could not open string iterator");
+                    return lantern.openIteratorAllowArrayLike(realm.allocator, realm, v) catch return throwTypeError(realm, "could not open string iterator");
                 }
                 const m_fn = heap_mod.valueAsFunction(m_v) orelse return throwTypeError(realm, "@@iterator is not callable");
                 return callIteratorMethod(realm, m_fn, v);
@@ -1531,7 +1531,7 @@ fn getIteratorFlattenable(realm: *Realm, v: Value, reject_strings: bool) NativeE
             }
         }
         // Default String iteration — array-like over code units.
-        return interpreter.openIteratorAllowArrayLike(realm.allocator, realm, v) catch return throwTypeError(realm, "could not open string iterator");
+        return lantern.openIteratorAllowArrayLike(realm.allocator, realm, v) catch return throwTypeError(realm, "could not open string iterator");
     }
     // §7.4.6 step 2 — accessor-aware `@@iterator` read so the
     // `iterables-iteration*.js` family observes the spec's exact

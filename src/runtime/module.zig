@@ -112,7 +112,7 @@ pub const ModuleRecord = struct {
     /// the same ordinary object (test262
     /// `language/expressions/import.meta/same-object-returned.js`,
     /// `distinct-for-each-module.js`). Lazily-initialised in
-    /// `interpreter.import_meta`. The object's [[Prototype]] is
+    /// `lantern.import_meta`. The object's [[Prototype]] is
     /// `%Object.prototype%` (the spec leaves the prototype
     /// implementation-defined via HostFinalizeImportMeta; every
     /// shipping engine returns an ordinary object — matches

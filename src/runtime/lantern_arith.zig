@@ -1,10 +1,10 @@
 //! Arithmetic + coercion helpers — extracted from
-//! `interpreter.zig`. Pure(-ish) functions called from inside
+//! `lantern.zig`. Pure(-ish) functions called from inside
 //! the dispatch loop's `add` / `sub` / `mul` / `eq` / `lt` /
 //! etc. handlers. They take `Value`s and return `Value`s; the
 //! BigInt-aware ones thread `realm` through for heap
 //! allocation. No `CallFrame` access, no opcode-pointer
-//! manipulation — those stay in `interpreter.zig`.
+//! manipulation — those stay in `lantern.zig`.
 //!
 //! Spec anchors mostly in §13 (operators) and §7.1
 //! (abstract conversion operations: ToNumber, ToInt32,
@@ -30,11 +30,11 @@ fn borrowBigInt(bi: *const JSBigInt) BigIntValue {
     return .{ .sign = bi.sign, .limbs = bi.limbs };
 }
 
-pub const RunError = @import("interpreter.zig").RunError;
+pub const RunError = @import("lantern.zig").RunError;
 pub const NativeError = @import("function.zig").NativeError;
-const makeTypeError = @import("interpreter.zig").makeTypeError;
-const makeRangeError = @import("interpreter.zig").makeRangeError;
-const formatDoubleSafe = @import("interpreter.zig").formatDoubleSafe;
+const makeTypeError = @import("lantern.zig").makeTypeError;
+const makeRangeError = @import("lantern.zig").makeRangeError;
+const formatDoubleSafe = @import("lantern.zig").formatDoubleSafe;
 
 pub fn toBoolean(v: Value) bool {
     if (v.isString()) {

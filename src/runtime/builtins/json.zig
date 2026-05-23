@@ -18,7 +18,7 @@ const JSFunction = @import("../function.zig").JSFunction;
 const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
-const interpreter = @import("../interpreter.zig");
+const lantern = @import("../lantern.zig");
 
 const installToStringTag = intrinsics.installToStringTag;
 const argOr = intrinsics.argOr;
@@ -85,7 +85,7 @@ fn getPropertyWithReceiver(realm: *Realm, obj: *JSObject, key: []const u8, recei
     while (cur) |o| {
         if (o.accessors.get(key)) |acc| {
             if (acc.getter) |getter| {
-                const outcome = interpreter.callJSFunction(realm.allocator, realm, getter, receiver, &[_]Value{}) catch |err| switch (err) {
+                const outcome = lantern.callJSFunction(realm.allocator, realm, getter, receiver, &[_]Value{}) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
                 };
@@ -402,7 +402,7 @@ fn serializeJSONProperty(
         if (heap_mod.valueAsFunction(tj)) |fn_obj| {
             const key_s = realm.heap.allocateString(key) catch return error.OutOfMemory;
             const cb_args = [_]Value{Value.fromString(key_s)};
-            const outcome = interpreter.callJSFunction(realm.allocator, realm, fn_obj, value, &cb_args) catch |err| switch (err) {
+            const outcome = lantern.callJSFunction(realm.allocator, realm, fn_obj, value, &cb_args) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };
@@ -429,7 +429,7 @@ fn serializeJSONProperty(
             if (heap_mod.valueAsFunction(tj)) |fn_obj| {
                 const key_s = realm.heap.allocateString(key) catch return error.OutOfMemory;
                 const cb_args = [_]Value{Value.fromString(key_s)};
-                const outcome = interpreter.callJSFunction(realm.allocator, realm, fn_obj, value, &cb_args) catch |err| switch (err) {
+                const outcome = lantern.callJSFunction(realm.allocator, realm, fn_obj, value, &cb_args) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
                 };
@@ -449,7 +449,7 @@ fn serializeJSONProperty(
     if (state.replacer_fn) |rf| {
         const key_s = realm.heap.allocateString(key) catch return error.OutOfMemory;
         const cb_args = [_]Value{ Value.fromString(key_s), value };
-        const outcome = interpreter.callJSFunction(realm.allocator, realm, rf, holder_v, &cb_args) catch |err| switch (err) {
+        const outcome = lantern.callJSFunction(realm.allocator, realm, rf, holder_v, &cb_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -980,7 +980,7 @@ fn internalizeJsonProperty(
     // §25.5.1.1 step 3 — `? Call(reviver, holder, « name, val »)`.
     const name_js = realm.heap.allocateString(name) catch return error.OutOfMemory;
     const call_args = [_]Value{ Value.fromString(name_js), val };
-    const outcome = interpreter.callJSFunction(
+    const outcome = lantern.callJSFunction(
         realm.allocator,
         realm,
         reviver,

@@ -53,7 +53,7 @@ pub fn install(realm: *Realm) !void {
     // with a description that doubles as the property-key string
     // when used as a computed key (so `obj[Symbol.iterator]` and
     // `obj["@@iterator"]` resolve to the same slot — see
-    // computedKeyToString in interpreter.zig). Identity matches
+    // computedKeyToString in lantern.zig). Identity matches
     // (`Symbol.iterator === Symbol.iterator`) because the
     // constructor stores a fixed JSSymbol pointer per well-known
     // name. Real symbol-keyed property tables are later.

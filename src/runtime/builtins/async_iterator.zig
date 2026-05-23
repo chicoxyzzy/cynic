@@ -20,8 +20,8 @@ const JSFunction = @import("../function.zig").JSFunction;
 const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics_mod = @import("../intrinsics.zig");
-const interpreter = @import("../interpreter.zig");
-const toBoolean = @import("../interpreter_arith.zig").toBoolean;
+const lantern = @import("../lantern.zig");
+const toBoolean = @import("../lantern_arith.zig").toBoolean;
 
 const SYNC_ITER_SLOT = "__cynic_sync_iter__";
 
@@ -32,7 +32,7 @@ const SYNC_ITER_SLOT = "__cynic_sync_iter__";
 pub fn ensureAsyncFromSyncIteratorPrototype(realm: *Realm) !*JSObject {
     if (realm.intrinsics.async_from_sync_iterator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
-    proto.prototype = try interpreter.ensureAsyncIteratorPrototype(realm);
+    proto.prototype = try lantern.ensureAsyncIteratorPrototype(realm);
 
     try installMethod(realm, proto, "next", afsiNext, 1);
     try installMethod(realm, proto, "return", afsiReturn, 1);
@@ -108,7 +108,7 @@ fn afsiNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
     };
     const next_v = if (rec.next_cached) rec.next else nv: {
         const v = intrinsics_mod.getPropertyChain(realm, sync_iter_obj, "next") catch {
-            const ex = interpreter.consumePendingException(realm) orelse
+            const ex = lantern.consumePendingException(realm) orelse
                 (intrinsics_mod.newTypeError(realm, "sync iterator .next read failed") catch return error.OutOfMemory);
             return rejectedPromise(realm, ex);
         };
@@ -123,9 +123,9 @@ fn afsiNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
 
     // §27.6.1.2 steps 5–6 — forward `value` only when present.
     const call_result = if (args.len > 0)
-        interpreter.callJSFunction(realm.allocator, realm, next_fn, sync_iter_v, args) catch return error.OutOfMemory
+        lantern.callJSFunction(realm.allocator, realm, next_fn, sync_iter_v, args) catch return error.OutOfMemory
     else
-        interpreter.callJSFunction(realm.allocator, realm, next_fn, sync_iter_v, &.{}) catch return error.OutOfMemory;
+        lantern.callJSFunction(realm.allocator, realm, next_fn, sync_iter_v, &.{}) catch return error.OutOfMemory;
 
     const result_v = switch (call_result) {
         .value, .yielded => |v| v,
@@ -142,7 +142,7 @@ fn afsiReturn(realm: *Realm, this_value: Value, args: []const Value) NativeError
 
     // §27.6.1.3 step 5 — GetMethod(syncIterator, "return").
     const ret_v = intrinsics_mod.getPropertyChain(realm, sync_iter_obj, "return") catch {
-        const ex = interpreter.consumePendingException(realm) orelse
+        const ex = lantern.consumePendingException(realm) orelse
             (intrinsics_mod.newTypeError(realm, "sync iterator .return read failed") catch return error.OutOfMemory);
         return rejectedPromise(realm, ex);
     };
@@ -159,9 +159,9 @@ fn afsiReturn(realm: *Realm, this_value: Value, args: []const Value) NativeError
 
     // §27.6.1.3 step 9 — Call(return, syncIterator, « value »).
     const call_result = if (args.len > 0)
-        interpreter.callJSFunction(realm.allocator, realm, ret_fn, sync_iter_v, args) catch return error.OutOfMemory
+        lantern.callJSFunction(realm.allocator, realm, ret_fn, sync_iter_v, args) catch return error.OutOfMemory
     else
-        interpreter.callJSFunction(realm.allocator, realm, ret_fn, sync_iter_v, &.{}) catch return error.OutOfMemory;
+        lantern.callJSFunction(realm.allocator, realm, ret_fn, sync_iter_v, &.{}) catch return error.OutOfMemory;
     const result_v = switch (call_result) {
         .value, .yielded => |v| v,
         .thrown => |ex| return rejectedPromise(realm, ex),
@@ -185,7 +185,7 @@ fn afsiThrow(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 
     // §27.6.1.4 step 5 — GetMethod(syncIterator, "throw").
     const throw_v = intrinsics_mod.getPropertyChain(realm, sync_iter_obj, "throw") catch {
-        const ex = interpreter.consumePendingException(realm) orelse
+        const ex = lantern.consumePendingException(realm) orelse
             (intrinsics_mod.newTypeError(realm, "sync iterator .throw read failed") catch return error.OutOfMemory);
         return rejectedPromise(realm, ex);
     };
@@ -193,7 +193,7 @@ fn afsiThrow(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     // it a chance to clean up) and reject with a fresh TypeError.
     if (throw_v.isUndefined() or throw_v.isNull()) {
         const cret_v = intrinsics_mod.getPropertyChain(realm, sync_iter_obj, "return") catch {
-            const ex_inner = interpreter.consumePendingException(realm) orelse Value.undefined_;
+            const ex_inner = lantern.consumePendingException(realm) orelse Value.undefined_;
             return rejectedPromise(realm, ex_inner);
         };
         if (!cret_v.isUndefined() and !cret_v.isNull()) {
@@ -201,7 +201,7 @@ fn afsiThrow(realm: *Realm, this_value: Value, args: []const Value) NativeError!
                 const ex = intrinsics_mod.newTypeError(realm, "sync iterator .return is not callable") catch return error.OutOfMemory;
                 return rejectedPromise(realm, ex);
             };
-            const close_outcome = interpreter.callJSFunction(realm.allocator, realm, cret_fn, sync_iter_v, &.{}) catch return error.OutOfMemory;
+            const close_outcome = lantern.callJSFunction(realm.allocator, realm, cret_fn, sync_iter_v, &.{}) catch return error.OutOfMemory;
             switch (close_outcome) {
                 .thrown => |ex| return rejectedPromise(realm, ex),
                 .value, .yielded => {},
@@ -216,7 +216,7 @@ fn afsiThrow(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     };
 
     // §27.6.1.4 step 9 — Call(throw, syncIterator, « value »).
-    const call_result = interpreter.callJSFunction(realm.allocator, realm, throw_fn, sync_iter_v, &.{passed_value}) catch return error.OutOfMemory;
+    const call_result = lantern.callJSFunction(realm.allocator, realm, throw_fn, sync_iter_v, &.{passed_value}) catch return error.OutOfMemory;
     const result_v = switch (call_result) {
         .value, .yielded => |v| v,
         .thrown => |ex| return rejectedPromise(realm, ex),
@@ -250,14 +250,14 @@ fn processIterResult(
     };
     // §7.4.4 IteratorComplete — read `done` first.
     const done_v = intrinsics_mod.getPropertyChain(realm, result_obj, "done") catch {
-        const ex = interpreter.consumePendingException(realm) orelse
+        const ex = lantern.consumePendingException(realm) orelse
             (intrinsics_mod.newTypeError(realm, "iterator result .done read failed") catch return error.OutOfMemory);
         return rejectedPromise(realm, ex);
     };
     const done = toBoolean(done_v);
     // §7.4.5 IteratorValue — read `value`.
     const value_v = intrinsics_mod.getPropertyChain(realm, result_obj, "value") catch {
-        const ex = interpreter.consumePendingException(realm) orelse
+        const ex = lantern.consumePendingException(realm) orelse
             (intrinsics_mod.newTypeError(realm, "iterator result .value read failed") catch return error.OutOfMemory);
         return rejectedPromise(realm, ex);
     };
@@ -273,7 +273,7 @@ fn processIterResult(
         // `value.constructor` to honour species. A throw here
         // surfaces as IteratorClose then reject.
         const ctor_v = intrinsics_mod.getPropertyChain(realm, v_obj, "constructor") catch {
-            const ex = interpreter.consumePendingException(realm) orelse Value.undefined_;
+            const ex = lantern.consumePendingException(realm) orelse Value.undefined_;
             return closeAndReject(realm, sync_iter_obj, sync_iter_v, ex);
         };
         _ = ctor_v;
@@ -286,7 +286,7 @@ fn processIterResult(
         const wrapped = try wrapAsyncGenResultWithClose(realm, value_v, done, sync_iter_obj, sync_iter_v);
         return wrapped;
     }
-    return interpreter.wrapAsyncGenResult(realm, value_v, done);
+    return lantern.wrapAsyncGenResult(realm, value_v, done);
 }
 
 /// §27.6.1.6 step 13.a — close iterator on rejection then reject
@@ -325,7 +325,7 @@ fn wrapAsyncGenResultWithClose(
     }
     // Non-Promise / fulfilled-Promise / settled-fulfilled: no
     // rejection branch needed — defer to the ordinary wrap.
-    return interpreter.wrapAsyncGenResult(realm, raw, done);
+    return lantern.wrapAsyncGenResult(realm, raw, done);
 }
 
 /// §7.4.7 IteratorClose — invoke `iterator.return()` and swallow
@@ -338,12 +338,12 @@ fn closeAndReject(
     reject_value: Value,
 ) NativeError!Value {
     const ret_v = intrinsics_mod.getPropertyChain(realm, sync_iter_obj, "return") catch {
-        _ = interpreter.consumePendingException(realm);
+        _ = lantern.consumePendingException(realm);
         return rejectedPromise(realm, reject_value);
     };
     if (!ret_v.isUndefined() and !ret_v.isNull()) {
         if (heap_mod.valueAsFunction(ret_v)) |ret_fn| {
-            const close_outcome = interpreter.callJSFunction(realm.allocator, realm, ret_fn, sync_iter_v, &.{}) catch
+            const close_outcome = lantern.callJSFunction(realm.allocator, realm, ret_fn, sync_iter_v, &.{}) catch
                 return rejectedPromise(realm, reject_value);
             _ = close_outcome; // §7.4.7 step 6 — discard close result.
         }
@@ -374,13 +374,13 @@ fn closeIteratorOnReject(realm: *Realm, this_value: Value, args: []const Value) 
                 // result — the original rejection is what we
                 // re-throw.
                 const ret_v = intrinsics_mod.getPropertyChain(realm, sync_iter_obj, "return") catch {
-                    _ = interpreter.consumePendingException(realm);
+                    _ = lantern.consumePendingException(realm);
                     realm.pending_exception = ex;
                     return error.NativeThrew;
                 };
                 if (!ret_v.isUndefined() and !ret_v.isNull()) {
                     if (heap_mod.valueAsFunction(ret_v)) |ret_fn| {
-                        _ = interpreter.callJSFunction(realm.allocator, realm, ret_fn, sync_iter_v, &.{}) catch {};
+                        _ = lantern.callJSFunction(realm.allocator, realm, ret_fn, sync_iter_v, &.{}) catch {};
                     }
                 }
             }

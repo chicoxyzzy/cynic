@@ -16,7 +16,7 @@ const NativeError = @import("../function.zig").NativeError;
 const NativeFn = @import("../function.zig").NativeFn;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
-const interpreter = @import("../interpreter.zig");
+const lantern = @import("../lantern.zig");
 
 const argOr = intrinsics.argOr;
 const coerceToNumber = intrinsics.coerceToNumber;
@@ -469,7 +469,7 @@ fn mathSumPrecise(realm: *Realm, this_value: Value, args: []const Value) NativeE
     defer scope.close();
     scope.push(items) catch return error.OutOfMemory;
 
-    const iter = interpreter.openIterator(realm.allocator, realm, items) catch |err| switch (err) {
+    const iter = lantern.openIterator(realm.allocator, realm, items) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NotIterable => return throwTypeError(realm, "Math.sumPrecise: items is not iterable"),
         error.Propagated => return error.NativeThrew,
@@ -503,7 +503,7 @@ fn mathSumPrecise(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
     while (step < max_iter) : (step += 1) {
-        const result_outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
+        const result_outcome = lantern.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -592,7 +592,7 @@ fn closeIteratorSwallow(realm: *Realm, iter: Value) void {
     if (ret_v.isUndefined() or ret_v.isNull()) return;
     const ret_fn = heap_mod.valueAsFunction(ret_v) orelse return;
     const saved = realm.pending_exception;
-    const result = interpreter.callJSFunction(realm.allocator, realm, ret_fn, iter, &.{}) catch {
+    const result = lantern.callJSFunction(realm.allocator, realm, ret_fn, iter, &.{}) catch {
         realm.pending_exception = saved;
         return;
     };

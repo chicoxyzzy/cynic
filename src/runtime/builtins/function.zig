@@ -19,7 +19,7 @@ const JSFunction = @import("../function.zig").JSFunction;
 const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
-const interpreter = @import("../interpreter.zig");
+const lantern = @import("../lantern.zig");
 
 const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
 const setNonEnumerable = intrinsics.setNonEnumerable;
@@ -28,7 +28,7 @@ const argOr = intrinsics.argOr;
 const throwTypeError = intrinsics.throwTypeError;
 const lengthOfArray = intrinsics.lengthOfArray;
 const clampArrayLength = intrinsics.clampArrayLength;
-const callJSFunction = interpreter.callJSFunction;
+const callJSFunction = lantern.callJSFunction;
 
 /// Accessor-aware `Get(target, key)` for a callable receiver.
 /// `JSFunction.get` only consults the data-property bag and the
@@ -44,7 +44,7 @@ const GetOutcome = union(enum) {
 };
 
 fn getAccessorAwareOnFunction(realm: *Realm, target: *JSFunction, key: []const u8) NativeError!GetOutcome {
-    if (interpreter.lookupFunctionAccessor(target, key)) |acc| {
+    if (lantern.lookupFunctionAccessor(target, key)) |acc| {
         if (acc.getter) |getter| {
             const outcome = callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(target), &[_]Value{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -230,7 +230,7 @@ fn functionHasInstance(realm: *Realm, this_value: Value, args: []const Value) Na
     const target_proto_v = blk: {
         if (target_fn.accessors.get("prototype")) |acc| {
             if (acc.getter) |getter| {
-                const out = interpreter.callJSFunction(realm.allocator, realm, getter, this_value, &.{}) catch |err| switch (err) {
+                const out = lantern.callJSFunction(realm.allocator, realm, getter, this_value, &.{}) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
                 };
@@ -292,7 +292,7 @@ fn functionCall(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const this_arg = argOr(args, 0, Value.undefined_);
     const rest: []const Value = if (args.len > 1) args[1..] else &.{};
 
-    const outcome = interpreter.callValue(realm.allocator, realm, this_value, this_arg, rest) catch |err| switch (err) {
+    const outcome = lantern.callValue(realm.allocator, realm, this_value, this_arg, rest) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -360,7 +360,7 @@ fn functionApply(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         }
     }
 
-    const outcome = interpreter.callValue(realm.allocator, realm, this_value, this_arg, apply_args.items) catch |err| switch (err) {
+    const outcome = lantern.callValue(realm.allocator, realm, this_value, this_arg, apply_args.items) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -524,7 +524,7 @@ pub fn installVariantPrototypes(realm: *Realm) !void {
 /// `[[Prototype]]` resolves to `%Iterator.prototype%` per
 /// §27.5.1 step 1.b of OrdinaryGeneratorObjectPrototype.
 pub fn wireVariantInstancePrototypes(realm: *Realm) !void {
-    const interp = @import("../interpreter.zig");
+    const interp = @import("../lantern.zig");
     if (realm.intrinsics.generator_function_prototype) |gfp| {
         const gp = try interp.ensureGeneratorPrototype(realm);
         // §27.3.4.3 — GeneratorFunction.prototype.prototype attributes

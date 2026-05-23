@@ -17,7 +17,7 @@ const JSFunction = @import("../function.zig").JSFunction;
 const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
-const interpreter = @import("../interpreter.zig");
+const lantern = @import("../lantern.zig");
 
 const installNativeMethod = intrinsics.installNativeMethod;
 const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
@@ -35,7 +35,7 @@ const toInt = intrinsics.toInt;
 const lengthOfArray = intrinsics.lengthOfArray;
 const clampArrayLength = intrinsics.clampArrayLength;
 const max_iter_length = intrinsics.max_iter_length;
-const callJSFunction = interpreter.callJSFunction;
+const callJSFunction = lantern.callJSFunction;
 const collections = @import("collections.zig");
 const objectFromThis = intrinsics.objectFromThis;
 
@@ -171,7 +171,7 @@ fn arraySpeciesGetter(realm: *Realm, this_value: Value, args: []const Value) Nat
 fn getFunctionMember(realm: *Realm, fn_obj: *JSFunction, key: []const u8) NativeError!Value {
     if (fn_obj.accessors.get(key)) |acc| {
         if (acc.getter) |getter| {
-            const outcome = interpreter.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(fn_obj), &[_]Value{}) catch |err| switch (err) {
+            const outcome = lantern.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(fn_obj), &[_]Value{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };
@@ -248,7 +248,7 @@ pub fn arraySpeciesCreate(realm: *Realm, original: *JSObject, length: i64) Nativ
     // Construct(species, [length]) — go through the public path so a
     // user-defined ctor sees `new.target = species`.
     const ctor_args = [_]Value{numberFromI64(length)};
-    const result = interpreter.constructValue(realm.allocator, realm, heap_mod.taggedFunction(species_fn), &ctor_args, heap_mod.taggedFunction(species_fn)) catch |err| switch (err) {
+    const result = lantern.constructValue(realm.allocator, realm, heap_mod.taggedFunction(species_fn), &ctor_args, heap_mod.taggedFunction(species_fn)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -543,10 +543,10 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
     // accessor setter; own data on the way shadows the inherited
     // accessor (`lookupAccessor` handles that contract).
     const o = cur;
-    if (interpreter.lookupAccessor(o, key)) |acc_pair| {
+    if (lantern.lookupAccessor(o, key)) |acc_pair| {
         if (acc_pair.setter) |setter| {
             const args = [_]Value{value};
-            const outcome = interpreter.callJSFunction(realm.allocator, realm, setter, heap_mod.taggedObject(o), &args) catch |err| switch (err) {
+            const outcome = lantern.callJSFunction(realm.allocator, realm, setter, heap_mod.taggedObject(o), &args) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };
@@ -574,7 +574,7 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
         // §10.4.2.4 ArraySetLength — drives the spec-mandated TWO
         // ToNumber calls (step 3 via ToUint32, step 4 standalone).
         // User valueOf throws propagate via error.NativeThrew.
-        const new_len = (try interpreter.arrayLengthCoerceSpec(realm, value)) orelse {
+        const new_len = (try lantern.arrayLengthCoerceSpec(realm, value)) orelse {
             return throwRangeError(realm, "Invalid array length");
         };
         // Re-check writability — a user valueOf could have flipped
@@ -584,7 +584,7 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
                 return throwTypeError(realm, "Cannot assign to read-only property 'length'");
             }
         }
-        const tr = interpreter.truncateArrayAtLength(realm.allocator, o, new_len);
+        const tr = lantern.truncateArrayAtLength(realm.allocator, o, new_len);
         o.setArrayLength(realm.allocator, tr.final_length) catch return error.OutOfMemory;
         if (tr.blocked) {
             return throwTypeError(realm, "Cannot delete non-configurable array index");
@@ -810,7 +810,7 @@ fn arrayToString(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     // proto-chain walk finds `Array.prototype.join` and calls it).
     const func_v = try getPropertyAny(realm, heap_mod.taggedObject(obj), "join");
     if (heap_mod.valueAsFunction(func_v)) |func| {
-        const outcome = interpreter.callJSFunction(realm.allocator, realm, func, heap_mod.taggedObject(obj), &.{}) catch |err| switch (err) {
+        const outcome = lantern.callJSFunction(realm.allocator, realm, func, heap_mod.taggedObject(obj), &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -902,7 +902,7 @@ fn arrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) Na
         const method_v = try getPropertyChain(realm, boxed, "toLocaleString");
         var str_v: Value = v;
         if (heap_mod.valueAsFunction(method_v)) |_| {
-            const outcome = interpreter.callValue(realm.allocator, realm, method_v, v, &.{}) catch |err| switch (err) {
+            const outcome = lantern.callValue(realm.allocator, realm, method_v, v, &.{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };
@@ -1137,7 +1137,7 @@ fn getPropertyAny(realm: *Realm, v: Value, key: []const u8) NativeError!Value {
         // static_parent / proto) for data slots.
         if (fn_obj.ownAccessor(key)) |acc| {
             if (acc.getter) |getter| {
-                const outcome = interpreter.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(fn_obj), &[_]Value{}) catch |err| switch (err) {
+                const outcome = lantern.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(fn_obj), &[_]Value{}) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
                 };
@@ -1318,7 +1318,7 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
                 if (mapfn) |mf| {
                     const cb_args = [_]Value{ Value.fromString(ch), numberFromI64(@intCast(i)) };
 
-                    const outcome = interpreter.callJSFunction(realm.allocator, realm, mf, this_arg, &cb_args) catch return error.NativeThrew;
+                    const outcome = lantern.callJSFunction(realm.allocator, realm, mf, this_arg, &cb_args) catch return error.NativeThrew;
                     switch (outcome) {
                         .value, .yielded => |v| break :blk v,
                         .thrown => |ex| {
@@ -1377,7 +1377,7 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         // §7.4.2 GetIterator(items, sync) — `Call(@@iterator, items)`.
         // A throw from the iterator factory (iter-get-iter-err) must
         // propagate as the user's exception, NOT a generic TypeError.
-        const iter_outcome = interpreter.callJSFunction(realm.allocator, realm, iter_method, items, &.{}) catch |err| switch (err) {
+        const iter_outcome = lantern.callJSFunction(realm.allocator, realm, iter_method, items, &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -1401,7 +1401,7 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
             // A throw from `next()` (iter-adv-err) is *not* closed: the
             // iterator's `return` is only invoked when the failure comes
             // from steps *after* a successful `next` per §7.4.10.
-            const result_outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
+            const result_outcome = lantern.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };
@@ -1425,7 +1425,7 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
             const elem: Value = blk: {
                 if (mapfn) |mf| {
                     const cb_args = [_]Value{ raw_v, numberFromI64(k) };
-                    const outcome = interpreter.callJSFunction(realm.allocator, realm, mf, this_arg, &cb_args) catch |err| switch (err) {
+                    const outcome = lantern.callJSFunction(realm.allocator, realm, mf, this_arg, &cb_args) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => {
                             closeIterOnAbrupt(realm, iter_obj, iter);
@@ -1493,7 +1493,7 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         const elem: Value = blk: {
             if (mapfn) |mf| {
                 const cb_args = [_]Value{ raw_v, numberFromI64(i) };
-                const outcome = interpreter.callJSFunction(realm.allocator, realm, mf, this_arg, &cb_args) catch |err| switch (err) {
+                const outcome = lantern.callJSFunction(realm.allocator, realm, mf, this_arg, &cb_args) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
                 };
@@ -1536,7 +1536,7 @@ fn closeIterOnAbrupt(realm: *Realm, iter_obj: *JSObject, iter_v: Value) void {
     };
     if (ret_v.isUndefined() or ret_v.isNull()) return;
     const ret_fn = heap_mod.valueAsFunction(ret_v) orelse return;
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, ret_fn, iter_v, &.{}) catch {
+    const outcome = lantern.callJSFunction(realm.allocator, realm, ret_fn, iter_v, &.{}) catch {
         realm.pending_exception = saved;
         return;
     };
@@ -1895,7 +1895,7 @@ fn arrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) Nativ
             const k = ks[idx];
             const elem = obj.sparse_elements.get(k) orelse continue;
             const cb_args = [_]Value{ acc, elem, numberFromI64(@as(i64, k)), heap_mod.taggedObject(obj) };
-            const outcome = interpreter.callJSFunction(realm.allocator, realm, callback, Value.undefined_, &cb_args) catch |err| switch (err) {
+            const outcome = lantern.callJSFunction(realm.allocator, realm, callback, Value.undefined_, &cb_args) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };
@@ -1944,7 +1944,7 @@ fn arrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) Nativ
         const elem = try getPropertyChain(realm, obj, islice);
 
         const cb_args = [_]Value{ acc, elem, numberFromI64(i), heap_mod.taggedObject(obj) };
-        const outcome = interpreter.callJSFunction(realm.allocator, realm, callback, Value.undefined_, &cb_args) catch |err| switch (err) {
+        const outcome = lantern.callJSFunction(realm.allocator, realm, callback, Value.undefined_, &cb_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -2013,7 +2013,7 @@ fn reduceRightOwnIndicesDescending(
         if (!obj.hasProperty(isl)) continue;
         const elem = try getPropertyChain(realm, obj, isl);
         const cb_args = [_]Value{ acc, elem, numberFromI64(k), heap_mod.taggedObject(obj) };
-        const outcome = interpreter.callJSFunction(realm.allocator, realm, callback, Value.undefined_, &cb_args) catch |err| switch (err) {
+        const outcome = lantern.callJSFunction(realm.allocator, realm, callback, Value.undefined_, &cb_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -2695,7 +2695,7 @@ fn sortCompare(realm: *Realm, x: Value, y: Value, cmp_fn: ?*JSFunction, cmp_scop
     if (y_undef) return -1;
     if (cmp_fn) |c| {
         const cb_args = [_]Value{ x, y };
-        const outcome = interpreter.callJSFunction(realm.allocator, realm, c, Value.undefined_, &cb_args) catch |err| switch (err) {
+        const outcome = lantern.callJSFunction(realm.allocator, realm, c, Value.undefined_, &cb_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -3174,7 +3174,7 @@ fn arrayUnshift(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 // These all share the same shape: walk own indices [0, length),
 // for each element invoke `callback(element, index, array)` with
 // the supplied `thisArg`, and combine the results per the
-// method's contract. They use `interpreter.callJSFunction` to
+// method's contract. They use `lantern.callJSFunction` to
 // recurse into JS — the reentrant entry point opens its own
 // frame stack so the outer dispatch loop is unaffected.
 
@@ -3187,7 +3187,7 @@ pub fn invokeCallback(
     array: *JSObject,
 ) NativeError!Value {
     const cb_args = [_]Value{ elem, numberFromI64(index), heap_mod.taggedObject(array) };
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, callback, this_arg, &cb_args) catch |err| switch (err) {
+    const outcome = lantern.callJSFunction(realm.allocator, realm, callback, this_arg, &cb_args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -3451,7 +3451,7 @@ fn arrayReduce(realm: *Realm, this_value: Value, args: []const Value) NativeErro
         const elem = try getPropertyChain(realm, obj, islice);
 
         const cb_args = [_]Value{ acc, elem, numberFromI64(i), heap_mod.taggedObject(obj) };
-        const outcome = interpreter.callJSFunction(realm.allocator, realm, callback, Value.undefined_, &cb_args) catch |err| switch (err) {
+        const outcome = lantern.callJSFunction(realm.allocator, realm, callback, Value.undefined_, &cb_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -3618,7 +3618,7 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
             };
             state.set(realm.allocator, k_fa_array, ctor_v) catch return error.OutOfMemory;
         }
-        const iter_outcome = interpreter.callJSFunction(realm.allocator, realm, async_iter_fn, items, &.{}) catch {
+        const iter_outcome = lantern.callJSFunction(realm.allocator, realm, async_iter_fn, items, &.{}) catch {
             return rejectPendingException(realm, cap);
         };
         const iter_v = switch (iter_outcome) {
@@ -3657,7 +3657,7 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
         // promise values, which matches the observable behavior for
         // the simple fixtures (sync iterator yielding non-promise
         // values).
-        const iter_outcome = interpreter.callJSFunction(realm.allocator, realm, sync_iter_fn, items, &.{}) catch {
+        const iter_outcome = lantern.callJSFunction(realm.allocator, realm, sync_iter_fn, items, &.{}) catch {
             return rejectPendingException(realm, cap);
         };
         const iter_v = switch (iter_outcome) {
@@ -3729,7 +3729,7 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
 /// `newTarget = F`. Errors bubble through `realm.pending_exception`
 /// so the caller can route them into the result capability.
 fn constructForFromAsync(realm: *Realm, ctor: *JSFunction, ctor_args: []const Value) NativeError!Value {
-    const outcome = interpreter.constructValue(
+    const outcome = lantern.constructValue(
         realm.allocator,
         realm,
         heap_mod.taggedFunction(ctor),
@@ -3849,7 +3849,7 @@ fn fromAsyncIterStep(realm: *Realm, state: *JSObject) NativeError!void {
     defer fa_sc.close();
     const iter_v = state.get(k_fa_iter);
     const next_fn = heap_mod.valueAsFunction(state.get(k_fa_next_fn)) orelse return;
-    const next_outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
+    const next_outcome = lantern.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
             _ = try rejectFromState(realm, state);
@@ -3937,7 +3937,7 @@ fn fromAsyncIterOnValueAwaited(realm: *Realm, this_value: Value, args: []const V
         const k = state.get(k_fa_index).asInt32();
         const this_arg = state.get(k_fa_this_arg);
         const cb_args = [_]Value{ value, Value.fromInt32(k) };
-        const mapped_outcome = interpreter.callJSFunction(realm.allocator, realm, mapfn, this_arg, &cb_args) catch {
+        const mapped_outcome = lantern.callJSFunction(realm.allocator, realm, mapfn, this_arg, &cb_args) catch {
             // mapfn threw — IfAbruptCloseAsyncIterator.
             return closeIterAndReject(realm, state);
         };
@@ -4077,7 +4077,7 @@ fn closeIterAndReject(realm: *Realm, state: *JSObject) NativeError!Value {
     if (heap_mod.valueAsPlainObject(iter_v)) |obj| {
         const ret_v = getPropertyChain(realm, obj, "return") catch Value.undefined_;
         if (heap_mod.valueAsFunction(ret_v)) |ret_fn| {
-            const outcome = interpreter.callJSFunction(realm.allocator, realm, ret_fn, iter_v, &.{}) catch null;
+            const outcome = lantern.callJSFunction(realm.allocator, realm, ret_fn, iter_v, &.{}) catch null;
             _ = outcome;
             // §7.4.11 — original abrupt wins; clear any thrown
             // exception from `return` itself.
@@ -4132,7 +4132,7 @@ fn fromAsyncArrayLikeOnAwaited(realm: *Realm, this_value: Value, args: []const V
         const k = state.get(k_fa_index).asInt32();
         const this_arg = state.get(k_fa_this_arg);
         const cb_args = [_]Value{ value, Value.fromInt32(k) };
-        const mapped_outcome = interpreter.callJSFunction(realm.allocator, realm, mapfn, this_arg, &cb_args) catch {
+        const mapped_outcome = lantern.callJSFunction(realm.allocator, realm, mapfn, this_arg, &cb_args) catch {
             return rejectFromState(realm, state);
         };
         const mapped = switch (mapped_outcome) {
@@ -4185,7 +4185,7 @@ fn appendAndStepArrayLike(realm: *Realm, state: *JSObject, value: Value) NativeE
 
 fn resolveFromState(realm: *Realm, state: *JSObject, value: Value) NativeError!Value {
     const resolve_fn = heap_mod.valueAsFunction(state.get(k_fa_cap_resolve)) orelse return Value.undefined_;
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, resolve_fn, Value.undefined_, &.{value}) catch |err| switch (err) {
+    const outcome = lantern.callJSFunction(realm.allocator, realm, resolve_fn, Value.undefined_, &.{value}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return Value.undefined_,
     };
@@ -4201,7 +4201,7 @@ fn rejectFromState(realm: *Realm, state: *JSObject) NativeError!Value {
 
 fn rejectFromStateWithReason(realm: *Realm, state: *JSObject, reason: Value) NativeError!Value {
     const reject_fn = heap_mod.valueAsFunction(state.get(k_fa_cap_reject)) orelse return Value.undefined_;
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, reject_fn, Value.undefined_, &.{reason}) catch |err| switch (err) {
+    const outcome = lantern.callJSFunction(realm.allocator, realm, reject_fn, Value.undefined_, &.{reason}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return Value.undefined_,
     };

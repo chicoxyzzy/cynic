@@ -36,7 +36,7 @@ const module_mod = @import("module.zig");
 // Arithmetic / coercion helpers live in `interpreter_arith.zig`.
 // Pull every fn the dispatch loop calls into local aliases so
 // callsites stay short.
-const arith = @import("interpreter_arith.zig");
+const arith = @import("lantern_arith.zig");
 const StringSlice = arith.StringSlice;
 const toBoolean = arith.toBoolean;
 const toNumber = arith.toNumber;
@@ -1841,7 +1841,7 @@ pub fn openForInIterator(
                             const enum_ok = blk: {
                                 if (desc_v.isUndefined()) break :blk false;
                                 if (heap_mod.valueAsPlainObject(desc_v)) |desc_obj| {
-                                    const arith_mod = @import("interpreter_arith.zig");
+                                    const arith_mod = @import("lantern_arith.zig");
                                     break :blk arith_mod.toBoolean(desc_obj.get("enumerable"));
                                 }
                                 break :blk false;

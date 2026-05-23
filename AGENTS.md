@@ -41,7 +41,7 @@ These are project rules — they apply to everyone.
   record a bound function reaches through its `bound_this` slot).
 - **Microtasks are spec-conformant.** Cynic ships a real
   microtask queue (see `realm.microtask_queue` and
-  `interpreter.drainMicrotasks`). `.then` always defers — settled
+  `lantern.drainMicrotasks`). `.then` always defers — settled
   Promises queue the reaction at `.then` time, pending Promises
   register on the source and queue at settlement. The aggregators
   (`Promise.{all, allSettled, race, any}`) build a fresh
@@ -370,12 +370,16 @@ reviewed in PRs against `test262-results.md`.
     src/         lexer, parser, AST, bytecode, runtime, CLI — see README.md
                  for the per-file breakdown
     src/runtime/          Engine internals — heap-side data structures
-                          (`value.zig`, `heap.zig`, `string.zig`, `function.zig`,
-                          `object.zig`, `symbol.zig`, `bigint.zig`,
-                          `generator.zig`, `environment.zig`, `module.zig`,
-                          `class.zig`), the interpreter (`interpreter.zig`),
-                          the realm (`realm.zig`), and the built-in
-                          orchestrator (`intrinsics.zig`).
+                          (`value.zig`, `heap.zig` (storage + Metla GC),
+                          `string.zig`, `function.zig`, `object.zig`,
+                          `symbol.zig`, `bigint.zig`, `generator.zig`,
+                          `environment.zig`, `module.zig`, `class.zig`),
+                          Lantern — the T0 bytecode interpreter
+                          (`lantern.zig`), the realm (`realm.zig`),
+                          and the built-in orchestrator
+                          (`intrinsics.zig`). Future JIT tiers will live
+                          alongside as `bistromath/` (T1, planned) and
+                          `ohaimark/` (T2, planned).
     src/runtime/builtins/ JS-visible API surface, one file per global /
                           prototype family. Each exports `pub fn install(realm)`
                           (or named installers) wired from `intrinsics.install`.
@@ -391,8 +395,8 @@ reviewed in PRs against `test262-results.md`.
 data-vs-API:
 
 - **`runtime/<X>.zig`** holds the `JSX` Zig struct — fields, allocator-
-  aware `init` / `deinit`, internal getters/setters. The interpreter,
-  heap, and realm touch these directly.
+  aware `init` / `deinit`, internal getters/setters. Lantern, the heap,
+  and the realm touch these directly.
 - **`runtime/builtins/<X>.zig`** holds the JS spec surface — the global
   constructor body, the `<X>.prototype.*` methods, the statics, plus
   a `pub fn install(realm)` that wires everything to the realm at
@@ -450,6 +454,7 @@ the workflow plainly and any agent or human can follow them by hand.
 | `/bump-test262` | Bump the test262 submodule to upstream HEAD, rerun, score (do not commit) | [.claude/commands/bump-test262.md](.claude/commands/bump-test262.md) |
 | `/perf` | Run the Phase 1 micro-bench suite; report per-fixture medians + RSS | [.claude/commands/perf.md](.claude/commands/perf.md) |
 | `/profile` | Sample a `--filter`-scoped test262 sweep under `samply`; emit a top-N hot-function list (needs `samply` on PATH) | [.claude/commands/profile.md](.claude/commands/profile.md) |
+| `/checkpoint` | End-of-session housekeeping — refresh test262 + bench + cross-engine results, audit docs / commands for staleness | [.claude/commands/checkpoint.md](.claude/commands/checkpoint.md) |
 
 ## Style & code health
 

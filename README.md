@@ -31,9 +31,11 @@ Cynic targets non-browser hosts — edge runtimes, Workers, server-side JS
   WarpMonkey) — without copying any one of them. Smaller engines like
   Hermes (AOT bytecode) and QuickJS (compact single-tier) are useful
   reference points; we vendor QuickJS-NG's `libregexp.c` for §22.2 RegExp.
-  The plan is a clean bytecode interpreter first, then tiered compilation;
-  the exact tier shape stays open until we have a working interpreter to
-  measure against.
+  The plan is a clean bytecode interpreter first — **Lantern** (T0) —
+  then tiered compilation: a baseline JIT (**Bistromath**, T1) and an
+  optimizing JIT (**Ohaimark**, T2). The garbage collector is **Metla**.
+  The exact tier shape stays open until we have working measurements
+  against Lantern.
 - Stay friendly to [SES / Hardened JavaScript](https://github.com/endojs/endo/tree/main/packages/ses)
   and the [Compartments](https://github.com/tc39/proposal-compartments) direction
   — strict-only and no Annex B *language* extensions already align Cynic
@@ -43,9 +45,10 @@ Cynic targets non-browser hosts — edge runtimes, Workers, server-side JS
 
 ## Status
 
-Pre-alpha. Lexer + parser + bytecode interpreter ship; the runtime is
-filling in. JITs and generational GC are future work. See
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
+Pre-alpha. Lexer + parser + Lantern (the T0 bytecode interpreter) ship,
+with Metla (mark-sweep GC) underneath; the runtime is filling in.
+The JIT tiers (Bistromath, Ohaimark) and generational GC are future
+work. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
 
 ### Conformance
 

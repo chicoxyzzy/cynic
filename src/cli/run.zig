@@ -49,7 +49,7 @@ pub fn run(
     if (gc_threshold) |n| realm.heap.setGcThreshold(n);
     try realm.installBuiltins();
 
-    var last_outcome: cynic.runtime.interpreter.RunResult = .{ .value = Value.undefined_ };
+    var last_outcome: cynic.runtime.lantern.RunResult = .{ .value = Value.undefined_ };
 
     for (paths) |path| {
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, sa, .limited(64 * 1024 * 1024));
@@ -70,7 +70,7 @@ pub fn run(
     // this, `Promise.resolve(v).then(cb)` at the top of a script
     // never runs `cb` and the user sees the unresolved Promise as
     // the script's final value.
-    cynic.runtime.interpreter.drainMicrotasks(allocator, &realm) catch {};
+    cynic.runtime.lantern.drainMicrotasks(allocator, &realm) catch {};
 
     // Flush anything `print` / `console.log` buffered.
     if (realm.output.items.len > 0) {

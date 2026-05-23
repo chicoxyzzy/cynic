@@ -174,7 +174,7 @@ pub fn buildClass(
             // shape that observes a single read on every extends.
             // Use the accessor-aware path. A non-null, non-Object
             // result is a TypeError per step 7.h.
-            const interp = @import("interpreter.zig");
+            const interp = @import("lantern.zig");
             const parent_proto_v = if (fn_obj.ownAccessor("prototype")) |acc_pair| blk_acc: {
                 if (acc_pair.getter) |getter| {
                     const recv = heap_mod.taggedFunction(fn_obj);
@@ -389,7 +389,7 @@ pub fn buildClass(
             // default ctor + null [[Prototype]] — fix both here.
             _ = gp.properties.swapRemove("constructor");
             _ = gp.property_flags.swapRemove("constructor");
-            const interp_mod = @import("interpreter.zig");
+            const interp_mod = @import("lantern.zig");
             gp.prototype = if (m.is_async)
                 interp_mod.ensureAsyncGeneratorPrototype(realm) catch realm.intrinsics.object_prototype
             else
@@ -567,7 +567,7 @@ pub fn buildClass(
             // the inherited chain.
             _ = gp.properties.swapRemove("constructor");
             _ = gp.property_flags.swapRemove("constructor");
-            const interp_mod = @import("interpreter.zig");
+            const interp_mod = @import("lantern.zig");
             gp.prototype = if (m.is_async)
                 interp_mod.ensureAsyncGeneratorPrototype(realm) catch realm.intrinsics.object_prototype
             else
@@ -664,7 +664,7 @@ pub fn buildClass(
 
     // 8. Static fields — evaluate each init with this=ctor and
     // install on ctor. §15.7.10 step 1 ClassInitialization.
-    const interpreter = @import("interpreter.zig");
+    const lantern = @import("lantern.zig");
     const ctor_value = heap_mod.taggedFunction(ctor);
 
     // §15.7.14 step 27.b — publish the constructor into the
@@ -715,7 +715,7 @@ pub fn buildClass(
             // surface — instance methods, not statics).
             blk_fn.home_function = ctor;
             blk_fn.proto = realm.intrinsics.function_prototype;
-            const outcome = interpreter.callJSFunction(realm.allocator, realm, blk_fn, ctor_value, &.{}) catch |err| switch (err) {
+            const outcome = lantern.callJSFunction(realm.allocator, realm, blk_fn, ctor_value, &.{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.OutOfMemory,
             };
@@ -748,7 +748,7 @@ pub fn buildClass(
             // own properties.
             init_fn.home_function = ctor;
             init_fn.proto = realm.intrinsics.function_prototype;
-            const outcome = interpreter.callJSFunction(realm.allocator, realm, init_fn, ctor_value, &.{}) catch |err| switch (err) {
+            const outcome = lantern.callJSFunction(realm.allocator, realm, init_fn, ctor_value, &.{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.OutOfMemory,
             };

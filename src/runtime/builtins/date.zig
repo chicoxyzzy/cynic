@@ -165,7 +165,7 @@ fn dateToPrimitive(realm: *Realm, this_value: Value, args: []const Value) Native
 /// `toString`. Inlined here so `Date.prototype[@@toPrimitive]` can
 /// bypass the user-installed `@@toPrimitive` trap on the receiver.
 fn ordinaryToPrimitive(realm: *Realm, obj: *JSObject, this_value: Value, try_first_string: bool) NativeError!Value {
-    const interp = @import("../interpreter.zig");
+    const interp = @import("../lantern.zig");
     const first_name: []const u8 = if (try_first_string) "toString" else "valueOf";
     const second_name: []const u8 = if (try_first_string) "valueOf" else "toString";
     for ([_][]const u8{ first_name, second_name }) |name| {
@@ -1127,7 +1127,7 @@ fn dateToJSON(realm: *Realm, this_value: Value, args: []const Value) NativeError
     };
     const iso_fn = heap_mod.valueAsFunction(iso_v) orelse
         return throwTypeError(realm, "toISOString is not callable");
-    const interp = @import("../interpreter.zig");
+    const interp = @import("../lantern.zig");
     const outcome = interp.callJSFunction(realm.allocator, realm, iso_fn, o_val, &[_]Value{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,

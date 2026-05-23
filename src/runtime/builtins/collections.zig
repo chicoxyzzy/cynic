@@ -27,7 +27,7 @@ const NativeFn = @import("../function.zig").NativeFn;
 const heap_mod = @import("../heap.zig");
 const ObjMod = @import("../object.zig");
 const intrinsics = @import("../intrinsics.zig");
-const interpreter = @import("../interpreter.zig");
+const lantern = @import("../lantern.zig");
 
 const installConstructor = intrinsics.installConstructor;
 const installNativeGetter = intrinsics.installNativeGetter;
@@ -37,7 +37,7 @@ const numberFromI64 = intrinsics.numberFromI64;
 const throwTypeError = intrinsics.throwTypeError;
 const sameValueZero = intrinsics.sameValueZero;
 const lengthOfArray = intrinsics.lengthOfArray;
-const callJSFunction = interpreter.callJSFunction;
+const callJSFunction = lantern.callJSFunction;
 const readTypedElement = intrinsics.readTypedElement;
 
 // ── §24.1 Map ───────────────────────────────────────────────────────────────
@@ -192,7 +192,7 @@ fn iteratorReturnsSelf(realm: *Realm, this_value: Value, args: []const Value) Na
 fn ensureArrayIteratorPrototype(realm: *Realm) !?*JSObject {
     if (realm.intrinsics.array_iterator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
-    proto.prototype = @import("../interpreter.zig").iteratorPrototypeOrObjectPrototypePub(realm);
+    proto.prototype = @import("../lantern.zig").iteratorPrototypeOrObjectPrototypePub(realm);
     // §23.1.5.3.1 %ArrayIteratorPrototype%.next — installed on the
     // prototype (writable + configurable, non-enumerable) so the
     // descriptor matches §17's "built-in Function object" shape.
@@ -284,7 +284,7 @@ pub fn arrayIterStepFast(realm: *Realm, this_value: Value) NativeError!?Value {
 fn ensureStringIteratorPrototype(realm: *Realm) !?*JSObject {
     if (realm.intrinsics.string_iterator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
-    proto.prototype = @import("../interpreter.zig").iteratorPrototypeOrObjectPrototypePub(realm);
+    proto.prototype = @import("../lantern.zig").iteratorPrototypeOrObjectPrototypePub(realm);
     try intrinsics.installNativeMethodOnProto(realm, proto, "next", stringIteratorProtoNext, 0);
     try intrinsics.installNativeMethodOnProto(realm, proto, "@@iterator", iteratorReturnsSelf, 0);
     const tag_str = try realm.heap.allocateString("String Iterator");
@@ -714,7 +714,7 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
     data.* = .{};
     out.map_data = data;
 
-    const iter = interpreter.openIterator(realm.allocator, realm, items_v) catch |err| switch (err) {
+    const iter = lantern.openIterator(realm.allocator, realm, items_v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return throwTypeError(realm, "Map.groupBy items is not iterable"),
     };
@@ -734,7 +734,7 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const max_iter: i64 = 1 << 24;
     var i: i64 = 0;
     while (i < max_iter) : (i += 1) {
-        const step = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
+        const step = lantern.callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -749,7 +749,7 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
         if (intrinsics.toBoolean(try intrinsics.getPropertyChain(realm, result, "done"))) break;
         const item = try intrinsics.getPropertyChain(realm, result, "value");
         const cb_args = [_]Value{ item, Value.fromInt32(@intCast(i)) };
-        const key_outcome = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &cb_args) catch |err| switch (err) {
+        const key_outcome = lantern.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &cb_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -819,7 +819,7 @@ fn mapConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeE
     //   - `nextItem` is not Object → TypeError + close.
     //   - `Get(nextItem, "0")` or `"1"` throws → close + propagate.
     //   - `adder.call(map, k, v)` throws → close + propagate.
-    const iter_v = interpreter.openIterator(realm.allocator, realm, args[0]) catch |err| switch (err) {
+    const iter_v = lantern.openIterator(realm.allocator, realm, args[0]) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NotIterable => return throwTypeError(realm, "Map constructor: argument is not iterable"),
         error.Propagated => return error.NativeThrew,
@@ -848,7 +848,7 @@ fn mapAddEntriesFromIterable(
     while (step < max_iter) : (step += 1) {
         const next_v = iter_obj.get("next");
         const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "Map iterator missing next");
-        const outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
+        const outcome = lantern.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -912,7 +912,7 @@ fn mapAddEntriesFromIterable(
         // every entry; a throwing `set` is closed
         // (`iterator-close-after-set-failure.js`).
         const adder_args = [_]Value{ key, val };
-        const set_outcome = interpreter.callJSFunction(realm.allocator, realm, adder, target_v, &adder_args) catch |err| switch (err) {
+        const set_outcome = lantern.callJSFunction(realm.allocator, realm, adder, target_v, &adder_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
                 invokeIteratorReturn(realm, iter_obj, iter_v);
@@ -944,7 +944,7 @@ fn invokeIteratorReturn(realm: *Realm, iter_obj: *@import("../object.zig").JSObj
     // can flip `pending_exception` if `return` itself throws, and
     // we must drop that throw to keep the original surfacing.
     const saved_ex = realm.pending_exception;
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, ret_fn, iter_v, &.{}) catch {
+    const outcome = lantern.callJSFunction(realm.allocator, realm, ret_fn, iter_v, &.{}) catch {
         realm.pending_exception = saved_ex;
         return;
     };
@@ -1058,7 +1058,7 @@ fn mapGetOrInsertComputed(realm: *Realm, this_value: Value, args: []const Value)
     // §24.1.5 / §24.3.5 (proposal) step 6 — `Call(callbackfn, undefined, « key »)`.
     // The `this` argument is `undefined`, NOT the Map instance.
     const cb_args = [_]Value{key};
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &cb_args) catch |err| switch (err) {
+    const outcome = lantern.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &cb_args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -1119,7 +1119,7 @@ fn mapForEach(realm: *Realm, this_value: Value, args: []const Value) NativeError
         const e = d.entries.items[i];
         if (e.deleted) continue;
         const cb_args = [_]Value{ e.value, e.key, this_value };
-        const outcome = interpreter.callJSFunction(realm.allocator, realm, callback, this_arg, &cb_args) catch |err| switch (err) {
+        const outcome = lantern.callJSFunction(realm.allocator, realm, callback, this_arg, &cb_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -1229,7 +1229,7 @@ fn weakMapGetOrInsertComputed(realm: *Realm, this_value: Value, args: []const Va
     if (mapEntryIndex(d, key)) |i| return d.entries.items[i].value;
 
     const cb_args = [_]Value{key};
-    const outcome = interpreter.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &cb_args) catch |err| switch (err) {
+    const outcome = lantern.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &cb_args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -1265,7 +1265,7 @@ fn weakMapConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
         // §24.3.1.1 step 7.b — non-callable adder is TypeError.
         return throwTypeError(realm, "WeakMap: 'set' is not callable");
     };
-    const iter_v = interpreter.openIterator(realm.allocator, realm, args[0]) catch |err| switch (err) {
+    const iter_v = lantern.openIterator(realm.allocator, realm, args[0]) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NotIterable => return throwTypeError(realm, "WeakMap constructor: argument is not iterable"),
         error.Propagated => return error.NativeThrew,
@@ -1354,7 +1354,7 @@ fn weakSetConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
         // §24.4.1.1 step 7.b — non-callable adder is TypeError.
         return throwTypeError(realm, "WeakSet: 'add' is not callable");
     };
-    const iter_v = interpreter.openIterator(realm.allocator, realm, args[0]) catch |err| switch (err) {
+    const iter_v = lantern.openIterator(realm.allocator, realm, args[0]) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NotIterable => return throwTypeError(realm, "WeakSet constructor: argument is not iterable"),
         error.Propagated => return error.NativeThrew,
@@ -1381,7 +1381,7 @@ fn weakSetAddValuesFromIterable(
     while (step < max_iter) : (step += 1) {
         const next_v = iter_obj.get("next");
         const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "WeakSet iterator missing next");
-        const outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
+        const outcome = lantern.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -1416,7 +1416,7 @@ fn weakSetAddValuesFromIterable(
         // `add` closes the iterator
         // (`iterator-close-after-add-failure.js`).
         const adder_args = [_]Value{value_v};
-        const add_outcome = interpreter.callJSFunction(realm.allocator, realm, adder, target_v, &adder_args) catch |err| switch (err) {
+        const add_outcome = lantern.callJSFunction(realm.allocator, realm, adder, target_v, &adder_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
                 invokeIteratorReturn(realm, iter_obj, iter_v);
@@ -1596,7 +1596,7 @@ fn setConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeE
         // §24.2.1.1 step 7.c — non-callable adder is TypeError.
         return throwTypeError(realm, "Set: 'add' is not callable");
     };
-    const iter_v = interpreter.openIterator(realm.allocator, realm, args[0]) catch |err| switch (err) {
+    const iter_v = lantern.openIterator(realm.allocator, realm, args[0]) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NotIterable => return throwTypeError(realm, "Set constructor: argument is not iterable"),
         error.Propagated => return error.NativeThrew,
@@ -1621,7 +1621,7 @@ fn setAddValuesFromIterable(
     while (step < max_iter) : (step += 1) {
         const next_v = iter_obj.get("next");
         const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "Set iterator missing next");
-        const outcome = interpreter.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
+        const outcome = lantern.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
@@ -1653,7 +1653,7 @@ fn setAddValuesFromIterable(
         // overridden `add` sees every value, and a throwing `add`
         // closes the iterator (`set-iterator-close-after-add-failure.js`).
         const adder_args = [_]Value{value_v};
-        const add_outcome = interpreter.callJSFunction(realm.allocator, realm, adder, target_v, &adder_args) catch |err| switch (err) {
+        const add_outcome = lantern.callJSFunction(realm.allocator, realm, adder, target_v, &adder_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
                 invokeIteratorReturn(realm, iter_obj, iter_v);
@@ -1756,7 +1756,7 @@ fn setForEach(realm: *Realm, this_value: Value, args: []const Value) NativeError
         // Spec: callback(value, value, this_set) — yes, value
         // appears twice (Set has no key separate from value).
         const cb_args = [_]Value{ e.value, e.value, this_value };
-        const outcome = interpreter.callJSFunction(realm.allocator, realm, callback, this_arg, &cb_args) catch |err| switch (err) {
+        const outcome = lantern.callJSFunction(realm.allocator, realm, callback, this_arg, &cb_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };

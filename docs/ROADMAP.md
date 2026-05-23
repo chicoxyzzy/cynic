@@ -814,8 +814,9 @@ PTC + inline-cache shape guards + dead-store elimination.
 
 ## Future work (post-strict-only-runtime)
 
-- **Baseline JIT** — direct opcode-to-native, inline caches for
-  property access. Modeled on JSC Baseline / V8 Sparkplug.
-- **Optimizing JIT** — IR (SSA), type speculation from inline
-  caches, deopt back to interpreter on guard failure. Modeled on
-  JSC DFG / V8 TurboFan or Maglev.
+- **Bistromath** — baseline JIT (T1). Direct opcode-to-native,
+  inline caches for property access. Modeled on JSC Baseline /
+  V8 Sparkplug.
+- **Ohaimark** — optimizing JIT (T2). IR (SSA), type speculation
+  from inline caches, deopt back to Lantern on guard failure.
+  Modeled on JSC DFG / V8 TurboFan or Maglev.

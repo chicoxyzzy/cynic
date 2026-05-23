@@ -71,7 +71,7 @@ pub const Intrinsics = struct {
     aggregate_error_prototype: ?*JSObject = null,
 
     /// `%GeneratorPrototype%` (§27.5.1). Lazily installed on the
-    /// first `function*` call by `interpreter.ensureGeneratorPrototype`;
+    /// first `function*` call by `lantern.ensureGeneratorPrototype`;
     /// `null` until then. Carries `next` / `return` / `throw` and
     /// the well-known iterator dispatcher under `"@@iterator"`.
     generator_prototype: ?*JSObject = null,
@@ -983,8 +983,8 @@ pub fn getPropertyChain(realm: *Realm, obj: *JSObject, key: []const u8) NativeEr
     while (cur) |o| {
         if (o.accessors.get(key)) |acc| {
             if (acc.getter) |getter| {
-                const interpreter = @import("interpreter.zig");
-                const outcome = interpreter.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedObject(obj), &[_]Value{}) catch |err| switch (err) {
+                const lantern = @import("lantern.zig");
+                const outcome = lantern.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedObject(obj), &[_]Value{}) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
                 };
@@ -1508,7 +1508,7 @@ pub const ToPrimitiveHint = enum { default, number, string };
 /// Primitive inputs return as-is.
 pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeError!Value {
     if (!value.isObject()) return value;
-    const interp = @import("interpreter.zig");
+    const interp = @import("lantern.zig");
 
     // §7.1.1.1 OrdinaryToPrimitive maps "default"→"number" for
     // non-Date objects, but the @@toPrimitive trap receives the

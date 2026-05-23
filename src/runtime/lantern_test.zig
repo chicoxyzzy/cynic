@@ -1,5 +1,5 @@
 //! Tests for the bytecode interpreter — extracted from
-//! `interpreter.zig` to keep the dispatch loop module focused
+//! `lantern.zig` to keep the dispatch loop module focused
 //! on production code (the host file dropped from ~5,960 to
 //! ~3,730 lines after this split). All tests run end-to-end:
 //! parse → compile → run → assert on the resulting `Value`.
@@ -7,10 +7,10 @@
 const std = @import("std");
 const testing = std.testing;
 
-const interpreter = @import("interpreter.zig");
-const RunResult = interpreter.RunResult;
-const run = interpreter.run;
-const evaluateScript = interpreter.evaluateScript;
+const lantern = @import("lantern.zig");
+const RunResult = lantern.RunResult;
+const run = lantern.run;
+const evaluateScript = lantern.evaluateScript;
 
 const Value = @import("value.zig").Value;
 const JSString = @import("string.zig").JSString;

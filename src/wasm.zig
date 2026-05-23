@@ -243,7 +243,7 @@ export fn cynic_eval(src: [*]const u8, len: u32) [*]u8 {
 
     // §9.4 — finish the current Job before returning to the host
     // so `Promise.resolve(v).then(cb)` runs `cb`.
-    cynic.runtime.interpreter.drainMicrotasks(gpa, &realm) catch {};
+    cynic.runtime.lantern.drainMicrotasks(gpa, &realm) catch {};
 
     var value_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer value_buf.deinit(gpa);
