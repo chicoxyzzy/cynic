@@ -1,18 +1,43 @@
-//! Switch-dispatched bytecode interpreter — Cynic's T0 tier.
+//! **Lantern** — Cynic's T0 bytecode interpreter. Hosts the
+//! switch-dispatched `runFrames` loop plus the top-level entry
+//! points (`run`, `evaluateScript`) and the inline dispatch
+//! helpers (`decodeNext`, `reEnterDispatch`, `runSafePoint`,
+//! `intArith` / `intCompare` / `intBitwise`).
 //!
 //! Reads a `Chunk` produced by the bytecode compiler and runs it
 //! against a `Realm`'s heap. The dispatch loop is a single
-//! `while` + `switch (op)` — clean, portable, branch-predictor-
-//! friendly enough for an interpreter at this stage. Computed-
-//! goto / threaded dispatch is a known optimisation (V8 Ignition,
-//! JSC LLInt) — applied later, behind a configuration flag.
+//! `while` + labeled `switch` with `continue :dispatch <next>` at
+//! each arm — emits a separate indirect branch per arm so the
+//! branch predictor learns per-opcode-pair patterns (the
+//! computed-goto equivalent that V8 Ignition / JSC LLInt use).
 //!
 //! Numeric arithmetic uses an int32 fast path when both operands
 //! are Smis and the result also fits. Mixed-type and overflow
 //! paths fall back to f64 doubles, matching the spec's Number
 //! semantics (§6.1.6.1). String concatenation in `+` is the only
-//! non-numeric arithmetic shortcut later supports — every other
-//! operator coerces non-numbers via `ToNumber`.
+//! non-numeric arithmetic shortcut; every other operator coerces
+//! non-numbers via `ToNumber`.
+//!
+//! ## Siblings in this directory
+//!
+//! - `arith.zig`      — numeric coercion + arithmetic helpers
+//! - `call.zig`       — callValue / callJSFunction / constructValue
+//!                      / unwrapBoundCall / startAsyncCall
+//! - `generator.zig`  — wrapGenerator / wrapAsyncGenerator
+//!                      / asyncGen* request pump
+//! - `promise.zig`    — drainMicrotasks / settlePromiseInternal
+//!                      / resolvePromiseWithValue / async-resume
+//! - `iterator.zig`   — openIterator family + openForInIterator
+//! - `module.zig`     — loadModule + the §16.2.1.5 pipeline
+//! - `helpers.zig`    — accessor lookup, double formatting,
+//!                      array-length coercion + truncation, error
+//!                      makers
+//! - `tests.zig`      — the unit test suite
+//!
+//! Public surface from siblings is re-exported below as
+//! `pub const X = sibling.X;` so the dispatch loop and external
+//! callers (built-ins, the wasm host) keep reaching them through
+//! `lantern.X(...)` or by bare name inside this file.
 
 const std = @import("std");
 
@@ -33,14 +58,14 @@ const parser_mod = @import("../../parser/parser.zig");
 const compiler_mod = @import("../../bytecode/compiler.zig");
 const module_mod = @import("../module.zig");
 
-// Arithmetic / coercion helpers live in `lantern_arith.zig`.
-// Pull every fn the dispatch loop calls into local aliases so
-// callsites stay short.
+// Arithmetic / coercion helpers live in `arith.zig`. Pull every
+// fn the dispatch loop calls into local aliases so callsites
+// stay short.
 const arith = @import("arith.zig");
 
-// Standalone helpers live in `lantern_helpers.zig` — accessor
-// lookup, double formatting, array-length coercion + truncation,
-// error makers. Re-exported `pub const`s so external callers
+// Standalone helpers live in `helpers.zig` — accessor lookup,
+// double formatting, array-length coercion + truncation, error
+// makers. Re-exported `pub const`s so external callers
 // (`lantern.makeTypeError` from built-ins, etc.) keep working, and
 // dispatch-loop callsites can use the bare names.
 const helpers = @import("helpers.zig");
