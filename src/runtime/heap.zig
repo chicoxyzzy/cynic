@@ -467,17 +467,27 @@ pub const Heap = struct {
     /// The post-mark pass walks each cell and, for a dead target,
     /// enqueues the cleanup job and tombstones the cell.
     finalization_registries_seen: std.ArrayListUnmanaged(*JSObject) = .empty,
-    /// Deferred-mark worklist — values whose traversal would
-    /// otherwise blow the call stack. Currently used for the
-    /// `promise_reactions[i].result_promise` walk: a long `.then`
-    /// chain forms an N-deep `promise → reaction → result_promise →
-    /// reaction → …` graph; recursing through `markValue` on each
-    /// link overflows at ~5k frames. Items pushed here are
-    /// processed iteratively by `drainMarkWorklist` at cycle
-    /// boundaries (before sweep), so chain length stops mattering.
-    /// V8 / JSC / SM ship iterative markers globally; we pay the
-    /// worklist cost only on the promise path for now.
+    /// Deferred-mark worklists — values / environments whose
+    /// traversal would otherwise blow the call stack. Three
+    /// recursion chains that overflow at ~5-10k frames under GC
+    /// pressure pay the worklist cost: (1) Promise reaction chain
+    /// (`reaction.result_promise`), (2) closure-env chain
+    /// (`env.slots[i]` is a function whose captured_env contains
+    /// another function …), (3) proto chain
+    /// (`obj.prototype` walking up a 10k-deep `Object.create` tower).
+    /// Items pushed here are processed iteratively by
+    /// `drainMarkWorklist` at cycle boundaries (before sweep),
+    /// alternating between the two worklists until both are empty.
+    /// V8 / JSC / SM ship fully iterative markers; this is a
+    /// scoped subset covering the chains that actually hit
+    /// today's stack limit.
     mark_worklist: std.ArrayListUnmanaged(Value) = .empty,
+    /// Companion to `mark_worklist` for `*Environment` traversals.
+    /// `markEnvironment` pushes `env.parent` here instead of
+    /// recursing, breaking the markValue ↔ markEnvironment chain
+    /// that 10k-deep closure scopes would otherwise blow the stack
+    /// through.
+    mark_env_worklist: std.ArrayListUnmanaged(*Environment) = .empty,
     /// §26.2 FinalizationRegistry cleanup-job scheduler context —
     /// the `*Realm`, type-erased (the heap can't import realm.zig
     /// without a cycle). `null` on a bare `Heap` (unit tests that
@@ -589,6 +599,7 @@ pub const Heap = struct {
         self.weak_collections_seen.deinit(self.allocator);
         self.finalization_registries_seen.deinit(self.allocator);
         self.mark_worklist.deinit(self.allocator);
+        self.mark_env_worklist.deinit(self.allocator);
     }
 
     pub fn allocateBigInt(self: *Heap, value: i128) !*JSBigInt {
@@ -1001,7 +1012,16 @@ pub const Heap = struct {
         } else if (valueAsFunction(v)) |f| {
             if (f.mark_color != self.live_color) {
                 f.mark_color = self.live_color;
-                if (f.captured_env) |env| self.markEnvironment(env);
+                // Defer captured_env to break the closure-chain
+                // recursion (each function's captured env contains
+                // another function whose captured env …).
+                // `drainMarkWorklist` walks `mark_env_worklist`
+                // iteratively after markRoots returns.
+                if (f.captured_env) |env| {
+                    self.mark_env_worklist.append(self.allocator, env) catch {
+                        self.markEnvironment(env);
+                    };
+                }
                 var it = f.properties.iterator();
                 while (it.next()) |entry| self.markValue(entry.value_ptr.*);
                 // §10.1.8 accessor descriptors on the function
@@ -1265,7 +1285,15 @@ pub const Heap = struct {
                         if (fi.init_fn) |fnp| self.markValue(taggedFunction(fnp));
                     }
                 }
-                if (o.prototype) |p| self.markValue(taggedObject(p));
+                // Defer the prototype walk to break the proto-chain
+                // recursion (a 10k-deep `Object.create` tower forms
+                // an N-deep prototype chain). `drainMarkWorklist`
+                // walks the worklist iteratively after markRoots.
+                if (o.prototype) |p| {
+                    self.mark_worklist.append(self.allocator, taggedObject(p)) catch {
+                        self.markValue(taggedObject(p));
+                    };
+                }
                 // §10.5 Proxy exotic — `[[ProxyTarget]]` /
                 // `[[ProxyHandler]]` are typed slots, not properties;
                 // a reachable Proxy must keep both alive.
@@ -1533,8 +1561,21 @@ pub const Heap = struct {
     pub fn markEnvironment(self: *Heap, env: *Environment) void {
         if (env.mark_color == self.live_color) return;
         env.mark_color = self.live_color;
+        // Defer the parent walk to break the markEnvironment-
+        // recurses-on-parent chain (a 10k-deep nested-let scope
+        // builds an N-deep parent chain). Slot values stay
+        // recursive — they're shallow per env; the chain that
+        // overflows on closures goes via markValue → captured_env
+        // → markEnvironment, which is broken by markValue's own
+        // worklist push on the captured_env edge (see below).
         for (env.slots) |s| self.markValue(s);
-        if (env.parent) |p| self.markEnvironment(p);
+        if (env.parent) |p| {
+            self.mark_env_worklist.append(self.allocator, p) catch {
+                // OOM fallback — accept the stack-depth risk
+                // over leaving the env unmarked.
+                self.markEnvironment(p);
+            };
+        }
     }
 
     /// Mark a suspended generator's saved frame state. Idempotent.
@@ -1687,10 +1728,24 @@ pub const Heap = struct {
     /// the promise-reaction chain). Must be called before sweep
     /// so deferred-mark items are accounted for.
     pub fn drainMarkWorklist(self: *Heap) void {
-        while (self.mark_worklist.items.len > 0) {
-            const w = self.mark_worklist.items[self.mark_worklist.items.len - 1];
-            self.mark_worklist.items.len -= 1;
-            self.markValue(w);
+        // Drain both worklists, alternating between them, until
+        // both are empty. Either drain can refill the other:
+        // `markValue` of a function pushes its captured_env onto
+        // `mark_env_worklist`; `markEnvironment` of an env pushes
+        // its slot values onto `mark_worklist` (and pushes
+        // `env.parent` onto `mark_env_worklist`). An outer while
+        // re-checks both after each inner drain.
+        while (self.mark_worklist.items.len > 0 or self.mark_env_worklist.items.len > 0) {
+            while (self.mark_worklist.items.len > 0) {
+                const w = self.mark_worklist.items[self.mark_worklist.items.len - 1];
+                self.mark_worklist.items.len -= 1;
+                self.markValue(w);
+            }
+            while (self.mark_env_worklist.items.len > 0) {
+                const env = self.mark_env_worklist.items[self.mark_env_worklist.items.len - 1];
+                self.mark_env_worklist.items.len -= 1;
+                self.markEnvironment(env);
+            }
         }
     }
 
@@ -2193,7 +2248,12 @@ pub const Heap = struct {
                 if (fi.init_fn) |fnp| self.markValue(taggedFunction(fnp));
             }
         }
-        if (o.prototype) |p| self.markValue(taggedObject(p));
+        // Same proto-chain rationale as markValue's object arm.
+        if (o.prototype) |p| {
+            self.mark_worklist.append(self.allocator, taggedObject(p)) catch {
+                self.markValue(taggedObject(p));
+            };
+        }
         if (o.proxy_target) |pt| self.markValue(taggedObject(pt));
         if (o.proxy_handler) |ph| self.markValue(taggedObject(ph));
         if (o.proxy_target_fn) |ptf| self.markValue(taggedFunction(ptf));
@@ -2204,7 +2264,12 @@ pub const Heap = struct {
     /// Mark the typed internal-slot pointers of a `JSFunction` —
     /// the `markValue` function arm minus the property bag.
     fn markFunctionInternalSlots(self: *Heap, f: *JSFunction) void {
-        if (f.captured_env) |env| self.markEnvironment(env);
+        // Same closure-chain rationale as markValue's function arm.
+        if (f.captured_env) |env| {
+            self.mark_env_worklist.append(self.allocator, env) catch {
+                self.markEnvironment(env);
+            };
+        }
         for (f.key_anchors.items) |s| self.markString(s);
         var fait = f.accessors.iterator();
         while (fait.next()) |entry| {

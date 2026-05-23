@@ -3256,6 +3256,49 @@ test "GC: Iterator.prototype.map chain survives alternating GC pressure" {
     , 24);
 }
 
+test "GC: 2k-deep closure chain survives the iterative env worklist" {
+    // Each iteration wraps the previous closure, so the env chain
+    // (and the closure chain through each captured_env's slot 0)
+    // grows linearly. Pre-fix, `markValue → markEnvironment →
+    // markValue(captured_env slot=function) → markEnvironment(…)`
+    // recurses 2k deep and aborts on the Debug call stack.
+    // Post-fix, `markValue`'s function arm pushes captured_env to
+    // `mark_env_worklist` and `markEnvironment` pushes parent to
+    // the same worklist; the iterative drain at cycle boundaries
+    // walks them flat.
+    //
+    // We DON'T invoke the chain (`f(0)` would overflow the JS
+    // call stack at 2k depth, independent of GC). Building it is
+    // enough — every alloc under setGcThreshold(1) triggers a GC
+    // cycle whose mark phase walks the full reachable closure
+    // chain. Return 1 as a trivial assertion.
+    try expectScriptIntUnderAlternatingGcPressure(
+        \\let f = (acc) => acc;
+        \\for (let i = 1; i <= 2000; i++) {
+        \\  const prev = f;
+        \\  const step = i;
+        \\  f = (acc) => prev(acc + step);
+        \\}
+        \\1;
+    , 1);
+}
+
+test "GC: 1k-deep prototype chain survives the iterative proto worklist" {
+    // `Object.create(prev)` builds an N-deep `[[Prototype]]`
+    // chain. Pre-fix, marking an object recursed through
+    // `o.prototype` via `markValue(taggedObject(p))`, so a 1k-
+    // deep chain overflowed the marker stack. Post-fix, both
+    // `markValue`'s object arm and `markObjectInternalSlots`
+    // push the prototype to `mark_worklist` instead of recursing.
+    // Constructing the chain is the test — reaching the end
+    // without aborting is the assertion. Return 1 to confirm.
+    try expectScriptIntUnderAlternatingGcPressure(
+        \\let cur = {};
+        \\for (let i = 0; i < 1000; i++) cur = Object.create(cur);
+        \\1;
+    , 1);
+}
+
 test "GC: Promise constructor executor survives gc_threshold=1" {
     // `new Promise(executor)` runs the executor synchronously
     // with the bound capability state as `this`. The cap record
