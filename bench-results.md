@@ -14,6 +14,60 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-05-23 — cynic `9871171` (post six-commit perf arc), host `Darwin 25.5.0 arm64`
+
+Cumulative measurement after six perf commits landed on top of
+the `JSObjectExtension` shrink:
+
+- `de390b7` writeBarrier primitive fast-path
+- `4133c7f` shape-first `JSObject.get`
+- `4b06eb4` shape-first `JSObject.hasOwn`
+- `4dc8f0f` IC bag-index cache on `sta_property`
+- `10eb7cf` rope-depth cap 96 → 8192 + iterative `markString`
+- `77e71b9` GC trigger 16k/4k → 32k/8k
+- `9871171` slab pool for `JSObject` headers
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 83.85 | 82.75 | 85.09 | 3456 |
+| prop_access | 16.03 | 15.88 | 16.12 | 3504 |
+| prop_write | 19.86 | 19.54 | 21.37 | 3584 |
+| array_iter | 22.61 | 22.47 | 23.19 | 4704 |
+| string_concat | 56.74 | 56.15 | 57.06 | 12864 |
+| promise_chain | 14.10 | 13.78 | 14.96 | 26752 |
+| object_alloc | 63.67 | 63.27 | 64.22 | 12368 |
+
+Δ vs the `5b3fd1a` row below:
+- **`prop_write` −34 %** (30.17 → 19.86) — the IC bag-index
+  cache collapses the per-hit `wyhash` + bucket walk + key
+  compare to a single `values()[bag_index] = acc` store.
+- **`string_concat` −30 %** (80.59 → 56.74) — bumping the
+  rope-depth cap from 96 to 8192 cuts the quadratic flatten
+  cost; `_platform_memmove` (was 74 % of samples) is no
+  longer the bottleneck. RSS halved (34 → 13 MB peak).
+- **`object_alloc` −9 %** (70.01 → 63.67) — slab pool replaces
+  the per-allocation libsystem_malloc round-trip with an O(1)
+  free-list pop. Per-allocation: 175 → ~159 ns/alloc.
+- **`promise_chain` −16 %** (16.87 → 14.10) — GC threshold
+  doubled (16k/4k → 32k/8k), halving cycle frequency on the
+  marker-bound chain. RSS bump (8 → 27 MB) was the trade-off
+  on `object_alloc` at 4×; 2× lands in the safe zone.
+- `prop_access` (16.03 vs 15.39), `arith_loop` (83.85 vs
+  86.07), `array_iter` (22.61 vs 20.80) — within run-to-run
+  noise.
+
+Cross-engine context (interpreter tier; `tools/bench-cross.sh`
+snapshot, not committed): closes every historical gap vs
+QuickJS-NG to within 13–31 %. `prop_access` matched (16 vs 15
+ms); `array_iter` ahead or tied across every peer. The
+remaining `object_alloc` 19 % gap to qjs is structural — qjs
+uses arena allocation + a ~64-byte object header against
+Cynic's 512-byte shape-aware design.
+
+Verified per commit: `zig build test` green, runtime sweep
+37211/9 (RegExp cluster only — unchanged), `/gc-stress` clean
+on every touched bucket.
+
 ### 2026-05-23 — cynic `5b3fd1a` (post `JSObjectExtension` shrink), host `Darwin 25.5.0 arm64`
 
 Cumulative measurement after the 7-phase JSObject-shrink arc

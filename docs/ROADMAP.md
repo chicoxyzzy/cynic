@@ -733,18 +733,49 @@ matching the JIT engines at full speed is a separate track (see
    `typed_view`, `data_view`) behind a lazy
    `?*JSObjectExtension` pointer. Plain `{a, b}` literals now
    pay a single null pointer instead of the multi-kilobyte cold
-   state. `object_alloc` measured at **-25 % per allocation**
-   (232 → 175 ns), a direct consequence of less memset / write
-   traffic per header.
+   state. A follow-up slab pool for `JSObject` headers (`9871171`)
+   replaced the per-allocation `libsystem_malloc` round-trip with
+   an O(1) free-list pop. Combined: `object_alloc` 232 ns/alloc
+   → ~159 ns/alloc — **-32 % per allocation** vs the original
+   baseline.
 
-   Remaining: **brand-bool bit-packing.** ~10 single-byte bools
-   on `JSObject` (`has_error_data`, `is_raw_json`,
-   `is_module_namespace`, `is_weak_ref`, `is_arguments_exotic`,
-   `proxy_revoked`, `proxy_callable`, `promise_already_resolved`,
-   `has_array_buffer_data`, `is_sparse`) could pack into a
-   single `u32` flags word. Saves ~10-16 bytes per `JSObject`
-   after alignment — marginal; defer until measurement shows
-   it matters.
+   Remaining structural wins on `object_alloc` (Cynic 63 ms vs
+   QuickJS-NG 53 ms, +19 % gap):
+
+   - **Literal-shape template cache** — `make_object` for an
+     object-literal sequence (always the same key list, in the
+     same order) could carry a chunk-side template index pointing
+     at a pre-built shape. First execution walks the keys via
+     `ShapeTree.transition` and caches the result; subsequent
+     executions stamp `obj.shape = cached_shape` directly and the
+     follow-up `def_property` opcodes skip the per-key transition
+     lookup. V8 / JSC ship the equivalent as "literal boilerplate".
+     Estimated `object_alloc` -10 %; the headline interpreter-tier
+     win still on the table. Touches the compiler (emit a template
+     index), `Chunk` (new template table), and the runtime
+     (`make_object` + `def_property` fast paths).
+
+   - **Brand-bool bit-packing.** ~10 single-byte bools on
+     `JSObject` (`has_error_data`, `is_raw_json`,
+     `is_module_namespace`, `is_weak_ref`, `is_arguments_exotic`,
+     `proxy_revoked`, `proxy_callable`, `promise_already_resolved`,
+     `has_array_buffer_data`, `is_sparse`) could pack into a
+     single `u32` flags word. Saves ~10-16 bytes per `JSObject`
+     after alignment — marginal; defer until measurement shows
+     it matters.
+
+   - **Bag-mirror skip on shape-stable writes.** `sta_property`'s
+     IC hot path already caches the bag's array-index (`4dc8f0f`,
+     -33 % on `prop_write`); skipping the bag write entirely on a
+     shape-stable object would shave another ~30 % on `prop_write`
+     and adjacent fixtures. `JSObject.get` / `.hasOwn` are
+     shape-first (`4133c7f`, `4b06eb4`), so the bag-stale value
+     wouldn't bite through those paths — but ~27 direct
+     `obj.properties.get(key)` call sites across builtins
+     (Reflect, JSON, Proxy traps, Object.defineProperty) need
+     auditing and either migrating to the shape-first
+     `JSObject.get` or accepting the divergence. Real work but
+     well-scoped — one focused session.
 
 3. **Packed `JSArray` element-kinds.** V8 / JSC distinguish
    `PackedSmiElements` (i32-flat), `PackedDoubleElements`
