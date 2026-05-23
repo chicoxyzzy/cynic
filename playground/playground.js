@@ -93,6 +93,55 @@ try {
   console.log(e.name + ": cannot write to a frozen object");
 }
 frozen.locked;`,
+
+  'BigInt — arbitrary precision': `// BigInt is sign-magnitude with a u64 limb array — same
+// representation V8 / JSC ship. Below: 100! computed exactly,
+// no rounding, no Infinity.
+let n = 1n;
+for (let i = 2n; i <= 100n; i++) n *= i;
+console.log("100! =");
+console.log(n.toString());
+n.toString().length + " digits";`,
+
+  'Iterator helpers': `// Iterator.prototype.{map,filter,take,toArray} — the
+// pre-Stage-4 iterator-helper proposal, lazy by construction.
+function* nats() { let n = 1; while (true) yield n++; }
+nats()
+  .map(n => n * n)
+  .filter(n => n % 2 === 1)
+  .take(5)
+  .toArray();`,
+
+  'Async + microtasks': `// .then defers; await yields. The log order proves the
+// microtask queue runs spec-correctly (ECMA-262 §9.4).
+console.log("1 — sync");
+Promise.resolve().then(() => console.log("3 — microtask"));
+(async () => {
+  console.log("2 — async body (sync prefix)");
+  await null;
+  console.log("4 — after await");
+})();
+"queued";`,
+
+  'Class + private field': `// Private fields (#x) live in a separate slot the property
+// bag can't see. Cross-instance access is a TypeError.
+class Counter {
+  #n = 0;
+  inc() { this.#n++; return this; }
+  get value() { return this.#n; }
+}
+const c = new Counter().inc().inc().inc();
+\`value = \${c.value}\`;`,
+
+  'WeakRef — genuinely weak': `// WeakRef holds a target without keeping it alive. After
+// the strong reference goes out of scope and GC runs, the
+// ref dereferences to undefined.
+let target = { tag: "doomed" };
+const ref = new WeakRef(target);
+console.log("before:", ref.deref()?.tag);
+target = null;
+// (in-browser GC is opaque — this is best-effort)
+ref.deref()?.tag ?? "collected";`,
 };
 
 const DEFAULT_SNIPPET = SAMPLES['Hello, strict world'];
@@ -101,7 +150,7 @@ const els = {
   editorHost: document.getElementById('editor-host'),
   run: document.getElementById('run'),
   share: document.getElementById('share'),
-  inspector: document.getElementById('inspector'),
+  mode: document.getElementById('mode'),
   status: document.getElementById('status'),
   output: document.getElementById('output'),
   outputLabel: document.getElementById('output-label'),
@@ -122,8 +171,17 @@ let view = null; // the CodeMirror EditorView
 // of the user's real selection — no .focus() needed.
 const setHotRange = StateEffect.define();
 
+// A second effect carries the error-range to underline. Separate from
+// the hot-range so a hover doesn't clobber an error squiggle and an
+// error doesn't compete with a hover. The two ride parallel fields,
+// not a single combined one, to keep the update logic obvious.
+const setErrorRange = StateEffect.define();
+
 // A single yellow mark over the hovered instruction's source span.
 const hotMark = Decoration.mark({ class: 'cm-hot' });
+// A red wavy underline over the source range a parse / runtime error
+// fingers — TypeScript-playground style.
+const errorMark = Decoration.mark({ class: 'cm-error-range' });
 
 const hotRangeField = StateField.define({
   create() {
@@ -138,6 +196,29 @@ const hotRangeField = StateField.define({
           e.value === null
             ? Decoration.none
             : Decoration.set([hotMark.range(e.value.from, e.value.to)]);
+      }
+    }
+    return deco;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+
+// Error squiggles auto-clear the moment the user touches the source
+// (the diagnostic was about the *previous* state of the document).
+// Hover marks deliberately don't — they live only as long as the
+// pointer hovers the disasm line.
+const errorRangeField = StateField.define({
+  create() {
+    return Decoration.none;
+  },
+  update(deco, tr) {
+    if (tr.docChanged) return Decoration.none;
+    for (const e of tr.effects) {
+      if (e.is(setErrorRange)) {
+        deco =
+          e.value === null
+            ? Decoration.none
+            : Decoration.set([errorMark.range(e.value.from, e.value.to)]);
       }
     }
     return deco;
@@ -178,6 +259,19 @@ const cynicTheme = EditorView.theme({
   '.cm-hot': {
     backgroundColor: 'var(--skin)',
     borderRadius: '2px',
+  },
+  // Parse / runtime error range — wavy red underline. The SVG data
+  // URI ships its own colour so the squiggle stays legible against
+  // the paper background regardless of the syntax-highlight palette.
+  '.cm-error-range': {
+    backgroundImage:
+      'url("data:image/svg+xml;utf8,' +
+      '<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%224%22 height=%223%22>' +
+      '<path d=%22M0,2 Q1,0 2,2 T4,2%22 stroke=%22%23c91414%22 fill=%22none%22 stroke-width=%221%22/>' +
+      '</svg>")',
+    backgroundRepeat: 'repeat-x',
+    backgroundPosition: 'left bottom',
+    paddingBottom: '2px',
   },
 });
 
@@ -221,6 +315,7 @@ function createEditor(initialDoc) {
         syntaxHighlighting(cynicHighlight),
         indentUnit.of('  '),
         hotRangeField,
+        errorRangeField,
         keymap.of([runShortcut, indentWithTab, ...defaultKeymap, ...historyKeymap]),
         cynicTheme,
         EditorState.tabSize.of(2),
@@ -245,6 +340,27 @@ function setSource(text) {
 function setEditorHotRange(range) {
   if (!view) return;
   view.dispatch({ effects: setHotRange.of(range) });
+}
+
+// Mark a source range with the error squiggle (or clear it with null).
+function setEditorErrorRange(range) {
+  if (!view) return;
+  view.dispatch({ effects: setErrorRange.of(range) });
+}
+
+// Translate a frame's byte-offset span into the editor's code-unit
+// range. Returns null if the span is null, empty, or falls outside
+// the current document. The byteToCodeUnit map is shared with the
+// disasm hover-link so the conversion stays consistent.
+function frameSpanToEditorRange(errorSpan) {
+  if (!errorSpan) return null;
+  const map = buildByteToCodeUnitMap(getSource());
+  const startByte = Math.min(errorSpan.startByte, map.length - 1);
+  const endByte = Math.min(errorSpan.endByte, map.length - 1);
+  const docLength = view.state.doc.length;
+  let from = Math.max(0, Math.min(map[startByte], docLength));
+  let to = Math.max(from, Math.min(map[endByte], docLength));
+  return to > from ? { from, to } : null;
 }
 
 // --------------------------------------------------------------------------
@@ -342,7 +458,13 @@ function readFrame() {
   const framePtr = ex.cynic_result_ptr();
   const frameLen = ex.cynic_result_len();
   if (framePtr === 0 || frameLen === 0) {
-    return { status: -1, stdout: '', value: '', error: 'engine returned no result' };
+    return {
+      status: -1,
+      stdout: '',
+      value: '',
+      error: 'engine returned no result',
+      errorSpan: null,
+    };
   }
   const view = new DataView(wasm.memory.buffer, framePtr, frameLen);
   let off = 0;
@@ -357,12 +479,25 @@ function readFrame() {
     return text;
   };
 
-  return {
-    status,
-    stdout: section(),
-    value: section(),
-    error: section(),
-  };
+  const stdout = section();
+  const value = section();
+  const error = section();
+
+  // The engine appends an 8-byte error_span (start:u32 + end:u32, big-
+  // endian byte offsets into source) past the textual error section.
+  // `start == end` is the wire sentinel for "no source range"; null
+  // here so the renderer skips the wavy-underline decoration. Older
+  // WASM bundles without the span tail still parse cleanly because
+  // the section lengths are explicit — `off` simply stops before the
+  // missing bytes.
+  let errorSpan = null;
+  if (off + 8 <= frameLen) {
+    const start = view.getUint32(off, false); off += 4;
+    const end = view.getUint32(off, false); off += 4;
+    if (end > start) errorSpan = { startByte: start, endByte: end };
+  }
+
+  return { status, stdout, value, error, errorSpan };
 }
 
 // --------------------------------------------------------------------------
@@ -386,6 +521,7 @@ function appendLine(text, cls) {
 
 function renderError(text) {
   clearOutput();
+  setEditorErrorRange(null);
   appendLine(text, 'out-error');
 }
 
@@ -403,12 +539,15 @@ function renderEvalResult(frame) {
   }
 
   if (frame.status === 0) {
+    setEditorErrorRange(null);
     if (frame.value.length > 0) {
       appendLine((printedAnything ? '\n' : '') + frame.value, 'out-value');
       printedAnything = true;
     }
   } else {
-    // status 1 (throw) or 2 (parse/compile error).
+    // status 1 (throw) or 2 (parse/compile error). Underline the
+    // source range the engine fingered, if it surfaced one.
+    setEditorErrorRange(frameSpanToEditorRange(frame.errorSpan));
     appendLine(
       (printedAnything ? '\n' : '') + (frame.error || 'unknown error'),
       'out-error',
@@ -452,15 +591,77 @@ function buildByteToCodeUnitMap(source) {
 // Match a trailing ` [start..end]` source span on a disasm line.
 const SPAN_RE = /\[(\d+)\.\.(\d+)\]\s*$/;
 
+// Disasm-line token classification. Patterns match the format
+// produced by `src/bytecode/disasm.zig` — keep both sides in sync
+// when adding a new operand shape.
+//   • 4-hex-digit offset at line start (`0005`)
+//   • Mnemonic — UpperCamelCase identifier
+//   • Register / index sigils: `r0`, `k1`, `t2`, `c0`, `s5`, `^1`
+//   • Jump form: `+12 -> 0024` / `-5 -> 0010`
+//   • Square-bracketed source span at line end
+const DISASM_TOKEN_RE = new RegExp(
+  [
+    '(?<offset>^[0-9a-f]{4})',            // 0005
+    '(?<mnem>\\b[A-Z][A-Za-z]+\\b)',      // LdaSmi, JmpIfFalse, …
+    '(?<reg>\\br[0-9]+\\b)',              // r0, r12
+    '(?<index>\\b[kctsi][0-9]+\\b)',      // k1, t0, c2, s5
+    '(?<envdepth>\\^[0-9]+)',             // ^1 (lda_env / sta_env)
+    '(?<jump>[+-]\\d+\\s*->\\s*[0-9a-f]{4})', // +12 -> 0024
+    '(?<span>\\[\\d+\\.\\.\\d+\\])',      // [0..6]
+    '(?<num>[+-]?\\b\\d+\\b)',            // 42
+    '(?<paren>\\([^)]*\\))',              // (2 args), (chunk …)
+  ].join('|'),
+  'g',
+);
+
+function appendDisasmTokens(parent, line) {
+  let last = 0;
+  for (const m of line.matchAll(DISASM_TOKEN_RE)) {
+    if (m.index > last) {
+      parent.appendChild(document.createTextNode(line.slice(last, m.index)));
+    }
+    const token = m[0];
+    const span = document.createElement('span');
+    const cls =
+      m.groups.offset    ? 'bc-tok-offset' :
+      m.groups.mnem      ? 'bc-tok-mnem' :
+      m.groups.reg       ? 'bc-tok-reg' :
+      m.groups.index     ? 'bc-tok-index' :
+      m.groups.envdepth  ? 'bc-tok-index' :
+      m.groups.jump      ? 'bc-tok-jump' :
+      m.groups.span      ? 'bc-tok-span' :
+      m.groups.num       ? 'bc-tok-num' :
+      m.groups.paren     ? 'bc-tok-paren' :
+      '';
+    if (cls) span.className = cls;
+    span.textContent = token;
+    parent.appendChild(span);
+    last = m.index + token.length;
+  }
+  if (last < line.length) {
+    parent.appendChild(document.createTextNode(line.slice(last)));
+  }
+  parent.appendChild(document.createTextNode('\n'));
+}
+
+// All disasm `.bc-hot` lines from the most recent inspector render,
+// in source order. Used by the reverse hover-link (mouse-in-editor ->
+// highlight the matching disasm line) so we don't rescan the DOM on
+// every mousemove. Reset on every render and on mode switch.
+let lastDisasmHotLines = [];
+
 function renderInspectorResult(frame) {
   clearOutput();
   els.outputLabel.textContent = 'bytecode disassembly';
   setEditorHotRange(null);
+  lastDisasmHotLines = [];
 
   if (frame.status !== 0 || frame.value.length === 0) {
+    setEditorErrorRange(frameSpanToEditorRange(frame.errorSpan));
     appendLine(frame.error || 'could not disassemble', 'out-error');
     return;
   }
+  setEditorErrorRange(null);
 
   // The hover-link maps byte offsets in the *source the engine
   // disassembled* — that's the current editor document.
@@ -471,7 +672,7 @@ function renderInspectorResult(frame) {
   for (const line of lines) {
     const el = document.createElement('span');
     el.className = 'bc-line out-stdout';
-    el.textContent = line + '\n';
+    appendDisasmTokens(el, line);
 
     const m = line.match(SPAN_RE);
     if (m) {
@@ -488,6 +689,7 @@ function renderInspectorResult(frame) {
       el.classList.add('bc-hot');
       el.dataset.from = String(from);
       el.dataset.to = String(to);
+      lastDisasmHotLines.push(el);
     }
 
     els.output.appendChild(el);
@@ -513,6 +715,63 @@ function wireInspectorHover() {
   });
 }
 
+// Reverse direction of the hover-link: while the pointer is over the
+// editor in bytecode mode, light up the disasm lines whose source
+// range contains the doc position under the cursor. Uses
+// `view.posAtCoords` (CodeMirror's hit-test) and walks the cached
+// `lastDisasmHotLines` set; the disasm DOM is at most a few hundred
+// elements so a linear scan per mousemove is fine.
+function wireSourceToDisasmHover() {
+  els.editorHost.addEventListener('mousemove', (e) => {
+    if (lastDisasmHotLines.length === 0) return;
+    if (!view) return;
+    const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+    if (pos == null) {
+      clearDisasmActive();
+      return;
+    }
+    let firstActive = null;
+    for (const el of lastDisasmHotLines) {
+      const from = Number(el.dataset.from);
+      const to = Number(el.dataset.to);
+      const inside = pos >= from && pos < to;
+      el.classList.toggle('bc-active', inside);
+      if (inside && firstActive === null) firstActive = el;
+    }
+    // Scroll the first match into view so a long disasm doesn't hide
+    // the activated line below the fold. `block: nearest` keeps the
+    // scroll quiet — no jump if the line is already visible.
+    if (firstActive) {
+      firstActive.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+    }
+  });
+  els.editorHost.addEventListener('mouseleave', clearDisasmActive);
+}
+
+function clearDisasmActive() {
+  for (const el of lastDisasmHotLines) el.classList.remove('bc-active');
+}
+
+// --------------------------------------------------------------------------
+// AST inspector — S-expression dump of the parser's AST. Same panel
+// surface as the bytecode inspector, but no hover-link (the AST printer
+// already labels each node with its source span in the text, which is
+// the natural form here).
+// --------------------------------------------------------------------------
+
+function renderAstResult(frame) {
+  clearOutput();
+  els.outputLabel.textContent = 'AST';
+
+  if (frame.status !== 0 || frame.value.length === 0) {
+    setEditorErrorRange(frameSpanToEditorRange(frame.errorSpan));
+    appendLine(frame.error || 'could not parse', 'out-error');
+    return;
+  }
+  setEditorErrorRange(null);
+  appendLine(frame.value, 'out-stdout');
+}
+
 // --------------------------------------------------------------------------
 // Actions
 // --------------------------------------------------------------------------
@@ -522,11 +781,21 @@ function run() {
   const source = getSource();
   setStatus('running…');
   try {
-    if (els.inspector.checked) {
-      renderInspectorResult(callEngine('cynic_parse', source));
-    } else {
-      setEditorHotRange(null);
-      renderEvalResult(callEngine('cynic_eval', source));
+    // Reset the hover-link decoration on every run — it's a stale
+    // pointer otherwise (the disasm that produced it is gone in
+    // eval / AST mode).
+    setEditorHotRange(null);
+    switch (els.mode.value) {
+      case 'bytecode':
+        renderInspectorResult(callEngine('cynic_parse', source));
+        break;
+      case 'ast':
+        renderAstResult(callEngine('cynic_parse_ast', source));
+        break;
+      case 'eval':
+      default:
+        renderEvalResult(callEngine('cynic_eval', source));
+        break;
     }
     setStatus('ready');
   } catch (err) {
@@ -607,9 +876,13 @@ function init() {
   createEditor(seedFromHash() || DEFAULT_SNIPPET);
   wireSnippets();
   wireInspectorHover();
+  wireSourceToDisasmHover();
   els.run.addEventListener('click', run);
   els.share.addEventListener('click', shareLink);
-  els.inspector.addEventListener('change', () => {
+  els.mode.addEventListener('change', () => {
+    // Switching modes invalidates the bytecode hover-link state — the
+    // disasm DOM is about to be replaced or removed entirely.
+    lastDisasmHotLines = [];
     if (wasm) run();
   });
   loadWasm();
