@@ -374,10 +374,14 @@ reviewed in PRs against `test262-results.md`.
                           `string.zig`, `function.zig`, `object.zig`,
                           `symbol.zig`, `bigint.zig`, `generator.zig`,
                           `environment.zig`, `module.zig`, `class.zig`),
-                          Lantern — the T0 bytecode interpreter
-                          (`lantern.zig`), the realm (`realm.zig`),
-                          and the built-in orchestrator
-                          (`intrinsics.zig`). Future JIT tiers will live
+                          the realm (`realm.zig`), and the built-in
+                          orchestrator (`intrinsics.zig`).
+    src/runtime/lantern/  Lantern — the T0 bytecode interpreter.
+                          `lantern.zig` is the dispatch loop entry;
+                          siblings hold arithmetic + coercion (`arith.zig`),
+                          accessor lookup + error makers + array-length
+                          coercion (`helpers.zig`), and the test suite
+                          (`tests.zig`). Future JIT tiers will live
                           alongside as `bistromath/` (T1, planned) and
                           `ohaimark/` (T2, planned).
     src/runtime/builtins/ JS-visible API surface, one file per global /

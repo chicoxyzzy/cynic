@@ -202,7 +202,7 @@ fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) N
 /// `@@iterator`) and array-likes (`length` + indexed get). Throws
 /// `TypeError` on non-object input.
 fn aggregateErrorMaterialiseErrors(realm: *Realm, errors_v: Value) NativeError!Value {
-    const lantern = @import("../lantern.zig");
+    const lantern = @import("../lantern/lantern.zig");
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     out.prototype = realm.intrinsics.array_prototype;
 

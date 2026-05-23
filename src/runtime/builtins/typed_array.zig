@@ -401,7 +401,7 @@ fn arrayBufferConstructor(realm: *Realm, this_value: Value, args: []const Value)
     // exception (DummyError per data-allocation-after-object-
     // creation.js) — the byte-block charge fires only if OCFC
     // succeeded.
-    const interp = @import("../lantern.zig");
+    const interp = @import("../lantern/lantern.zig");
     const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, realm.intrinsics.array_buffer_prototype) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
@@ -727,7 +727,7 @@ fn arrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) Nativ
     defer scope.close();
 
     const ctor_args = [_]Value{numberFromI64(@intCast(new_len))};
-    const lantern = @import("../lantern.zig");
+    const lantern = @import("../lantern/lantern.zig");
     const result_v = if (ctor_fn) |cf| blk: {
         const callee_v = heap_mod.taggedFunction(cf);
         const outcome = lantern.constructValue(realm.allocator, realm, callee_v, &ctor_args, callee_v) catch |err| switch (err) {
@@ -783,7 +783,7 @@ fn arrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) Nativ
 /// newTarget surfaces here and never before the spec-mandated
 /// brand checks / ToIndex coercions.
 fn allocateTypedArrayInstance(realm: *Realm, new_target: Value, default_proto: ?*JSObject) NativeError!*JSObject {
-    const interp = @import("../lantern.zig");
+    const interp = @import("../lantern/lantern.zig");
     const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, default_proto) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
@@ -952,7 +952,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                     else => return error.NativeThrew,
                 };
                 if (heap_mod.valueAsFunction(iter_method_v)) |iter_method| {
-                    const interp = @import("../lantern.zig");
+                    const interp = @import("../lantern/lantern.zig");
                     const iter_outcome = interp.callJSFunction(realm.allocator, realm, iter_method, arg, &.{}) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => return error.NativeThrew,
@@ -1112,7 +1112,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                 // §7.4.4 GetMethod(arg, @@iterator).
                 if (fn_obj.accessors.get("@@iterator")) |acc| {
                     if (acc.getter) |getter| {
-                        const interp = @import("../lantern.zig");
+                        const interp = @import("../lantern/lantern.zig");
                         const outcome = interp.callJSFunction(realm.allocator, realm, getter, arg, &.{}) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             else => return error.NativeThrew,
@@ -1153,7 +1153,7 @@ fn typedArrayCreate(
     args: []const Value,
     expected_len: ?usize,
 ) NativeError!*JSObject {
-    const interp = @import("../lantern.zig");
+    const interp = @import("../lantern/lantern.zig");
     const outcome = interp.constructValue(realm.allocator, realm, ctor_v, args, ctor_v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
@@ -1227,7 +1227,7 @@ fn typedArrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeE
         break :blk f;
     };
 
-    const interp = @import("../lantern.zig");
+    const interp = @import("../lantern/lantern.zig");
 
     if (source.isUndefined() or source.isNull())
         return throwTypeError(realm, "%TypedArray%.from: source is null or undefined");
@@ -1984,7 +1984,7 @@ fn taGetFunctionMember(realm: *Realm, fn_obj: *JSFunction, key: []const u8) Nati
     while (cur) |f| {
         if (f.accessors.get(key)) |acc| {
             if (acc.getter) |getter| {
-                const interp = @import("../lantern.zig");
+                const interp = @import("../lantern/lantern.zig");
                 const outcome = interp.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(fn_obj), &[_]Value{}) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.NativeThrew,
@@ -2051,7 +2051,7 @@ fn taSpeciesCreate(realm: *Realm, exemplar: *JSObject, kind: ObjMod.TypedKind, l
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
     const ctor_args = [_]Value{Value.fromInt32(@as(i32, @intCast(@min(length, std.math.maxInt(i32)))))};
-    const lantern = @import("../lantern.zig");
+    const lantern = @import("../lantern/lantern.zig");
     const callee_v = heap_mod.taggedFunction(species_fn);
     const outcome = lantern.constructValue(realm.allocator, realm, callee_v, &ctor_args, callee_v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -2472,7 +2472,7 @@ fn typedArrayToLocaleString(realm: *Realm, this_value: Value, args: []const Valu
     const elem_size = tv.kind.elementSize();
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
-    const lantern = @import("../lantern.zig");
+    const lantern = @import("../lantern/lantern.zig");
     // §23.2.3.34 step 4 — `len` is captured BEFORE the iteration
     // starts. The loop visits each of the original `len` slots;
     // a user `Number.prototype.toLocaleString` that shrinks the
@@ -2549,7 +2549,7 @@ fn typedArrayReduce(realm: *Realm, this_value: Value, args: []const Value) Nativ
     var i: usize = if (has_init) 0 else 1;
     while (i < reduce_len) : (i += 1) {
         const v = taSafeRead(realm, tv, @intCast(i));
-        const lantern = @import("../lantern.zig");
+        const lantern = @import("../lantern/lantern.zig");
         const cb_args = [_]Value{ acc, v, numberFromI64(@intCast(i)), heap_mod.taggedObject(obj) };
         const outcome = lantern.callJSFunction(realm.allocator, realm, callback, Value.undefined_, &cb_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -2584,7 +2584,7 @@ fn typedArrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) 
     };
     while (i >= 0) : (i -= 1) {
         const v = taSafeRead(realm, tv, i);
-        const lantern = @import("../lantern.zig");
+        const lantern = @import("../lantern/lantern.zig");
         const cb_args = [_]Value{ acc, v, numberFromI64(i), heap_mod.taggedObject(obj) };
         const outcome = lantern.callJSFunction(realm.allocator, realm, callback, Value.undefined_, &cb_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -2859,7 +2859,7 @@ fn taSpeciesCreateSubarray(
         Value.fromInt32(@as(i32, @intCast(@min(byte_offset, std.math.maxInt(i32))))),
     };
     const ctor_args: []const Value = if (length_tracking) ctor_args_two[0..] else ctor_args_three[0..];
-    const lantern = @import("../lantern.zig");
+    const lantern = @import("../lantern/lantern.zig");
     const callee_v = heap_mod.taggedFunction(species_fn);
     const outcome = lantern.constructValue(realm.allocator, realm, callee_v, ctor_args, callee_v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -3002,7 +3002,7 @@ fn dataViewConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     // on newTarget surfaces only if all the spec-mandated arg
     // checks already passed (byteOffset-validated-against-initial-
     // buffer-length.js).
-    const interp = @import("../lantern.zig");
+    const interp = @import("../lantern/lantern.zig");
     const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, realm.intrinsics.data_view_prototype) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
@@ -3500,7 +3500,7 @@ fn taSortInPlace(realm: *Realm, tv: ObjMod.TypedView, buf_in: []u8, comparator: 
             const prev = items[@intCast(j)];
             const cmp: i32 = blk: {
                 if (comparator) |cf| {
-                    const lantern = @import("../lantern.zig");
+                    const lantern = @import("../lantern/lantern.zig");
                     const cb_args = [_]Value{ prev, cur };
                     const outcome = lantern.callJSFunction(realm.allocator, realm, cf, Value.undefined_, &cb_args) catch return error.NativeThrew;
                     switch (outcome) {
@@ -3859,7 +3859,7 @@ pub fn canonicalNumericIndex(s: []const u8) ?f64 {
     // spec compares against. Plain `{d}` would emit a decimal
     // expansion for `1e21` and falsely accept "1000000000000000000000".
     var buf: [64]u8 = undefined;
-    const printed = @import("../lantern.zig").formatDoubleSafe(&buf, n);
+    const printed = @import("../lantern/lantern.zig").formatDoubleSafe(&buf, n);
     if (!std.mem.eql(u8, printed, s)) return null;
     return n;
 }

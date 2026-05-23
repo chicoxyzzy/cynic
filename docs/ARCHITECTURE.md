@@ -192,7 +192,7 @@ free lists, triggered on allocation pressure. See
 (the `Heap` struct holds storage; the `collect*` functions are Metla);
 the trigger and the realm-wide root walker live in
 [src/runtime/realm.zig](../src/runtime/realm.zig) and Lantern's dispatch
-loop in [src/runtime/lantern.zig](../src/runtime/lantern.zig). The
+loop in [src/runtime/lantern/lantern.zig](../src/runtime/lantern/lantern.zig). The
 operational details — root set, threshold, the `HandleScope` contract
 for natives — are in [docs/handbook/gc.md](handbook/gc.md).
 

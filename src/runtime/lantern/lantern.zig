@@ -16,34 +16,34 @@
 
 const std = @import("std");
 
-const Value = @import("value.zig").Value;
-const JSString = @import("string.zig").JSString;
-const utf16 = @import("utf16.zig");
-const JSFunction = @import("function.zig").JSFunction;
-const object_mod = @import("object.zig");
+const Value = @import("../value.zig").Value;
+const JSString = @import("../string.zig").JSString;
+const utf16 = @import("../utf16.zig");
+const JSFunction = @import("../function.zig").JSFunction;
+const object_mod = @import("../object.zig");
 const JSObject = object_mod.JSObject;
-const Environment = @import("environment.zig").Environment;
-const heap_mod = @import("heap.zig");
-const intrinsics_mod = @import("intrinsics.zig");
-const Realm = @import("realm.zig").Realm;
-const Op = @import("../bytecode/op.zig").Op;
-const Chunk = @import("../bytecode/chunk.zig").Chunk;
-const Handler = @import("../bytecode/chunk.zig").Handler;
-const parser_mod = @import("../parser/parser.zig");
-const compiler_mod = @import("../bytecode/compiler.zig");
-const module_mod = @import("module.zig");
+const Environment = @import("../environment.zig").Environment;
+const heap_mod = @import("../heap.zig");
+const intrinsics_mod = @import("../intrinsics.zig");
+const Realm = @import("../realm.zig").Realm;
+const Op = @import("../../bytecode/op.zig").Op;
+const Chunk = @import("../../bytecode/chunk.zig").Chunk;
+const Handler = @import("../../bytecode/chunk.zig").Handler;
+const parser_mod = @import("../../parser/parser.zig");
+const compiler_mod = @import("../../bytecode/compiler.zig");
+const module_mod = @import("../module.zig");
 
 // Arithmetic / coercion helpers live in `lantern_arith.zig`.
 // Pull every fn the dispatch loop calls into local aliases so
 // callsites stay short.
-const arith = @import("lantern_arith.zig");
+const arith = @import("arith.zig");
 
 // Standalone helpers live in `lantern_helpers.zig` — accessor
 // lookup, double formatting, array-length coercion + truncation,
 // error makers. Re-exported `pub const`s so external callers
 // (`lantern.makeTypeError` from built-ins, etc.) keep working, and
 // dispatch-loop callsites can use the bare names.
-const helpers = @import("lantern_helpers.zig");
+const helpers = @import("helpers.zig");
 pub const consumePendingException = helpers.consumePendingException;
 pub const lookupAccessor = helpers.lookupAccessor;
 pub const lookupFunctionAccessor = helpers.lookupFunctionAccessor;
@@ -166,7 +166,7 @@ pub const CallFrame = struct {
     /// `function*` body. Set on resume; null for ordinary
     /// frames. When `gen_yield` fires, the dispatch loop saves
     /// state into this generator and unwinds the loop.
-    generator: ?*@import("generator.zig").JSGenerator = null,
+    generator: ?*@import("../generator.zig").JSGenerator = null,
     /// Whether `Return` should free `registers`. Generators own
     /// their register file separately, so the dispatch loop
     /// must not free it on Return.
@@ -187,7 +187,7 @@ pub const CallFrame = struct {
     /// frames whose body never references `import.meta`; the
     /// `import_meta` op falls back to `realm.current_module`
     /// when this is unset (matches the legacy module-body case).
-    owning_module: ?*@import("module.zig").ModuleRecord = null,
+    owning_module: ?*@import("../module.zig").ModuleRecord = null,
 };
 
 pub const RunError = error{
@@ -442,7 +442,7 @@ pub fn run(allocator: std.mem.Allocator, realm: *Realm, chunk: *const Chunk) Run
 pub fn wrapGenerator(
     allocator: std.mem.Allocator,
     realm: *Realm,
-    chunk: *const @import("../bytecode/chunk.zig").Chunk,
+    chunk: *const @import("../../bytecode/chunk.zig").Chunk,
     captured_env: ?*Environment,
     this_value: Value,
     args: []const Value,
@@ -529,7 +529,7 @@ pub fn wrapGenerator(
 pub fn wrapAsyncGenerator(
     allocator: std.mem.Allocator,
     realm: *Realm,
-    chunk: *const @import("../bytecode/chunk.zig").Chunk,
+    chunk: *const @import("../../bytecode/chunk.zig").Chunk,
     captured_env: ?*Environment,
     this_value: Value,
     args: []const Value,
@@ -722,7 +722,7 @@ pub fn ensureAsyncGeneratorPrototype(realm: *Realm) !*JSObject {
     return proto;
 }
 
-fn asyncGenNext(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
+fn asyncGenNext(realm: *Realm, this_value: Value, args: []const Value) @import("../function.zig").NativeError!Value {
     // §27.6.1.2 step 2 — IfAbruptRejectPromise on the
     // brand-check. `this` must be an async-generator object;
     // anything else turns into Promise.reject(TypeError), NOT a
@@ -746,9 +746,9 @@ fn asyncGenNext(realm: *Realm, this_value: Value, args: []const Value) @import("
 /// / asyncGenReturn / asyncGenThrow) hands it back to user JS.
 fn asyncGenDispatch(
     realm: *Realm,
-    gen: *@import("generator.zig").JSGenerator,
-    completion: @import("generator.zig").Completion,
-) @import("function.zig").NativeError!Value {
+    gen: *@import("../generator.zig").JSGenerator,
+    completion: @import("../generator.zig").Completion,
+) @import("../function.zig").NativeError!Value {
     const cap_promise_v = intrinsics_mod.allocatePromiseFor(realm, null, .pending, Value.undefined_) catch return error.OutOfMemory;
     const cap_promise_obj = heap_mod.valueAsPlainObject(cap_promise_v).?;
     // Pin the capability across any allocations the drain may
@@ -774,8 +774,8 @@ fn asyncGenDispatch(
 /// (yield / return / throw / await-settle).
 fn asyncGeneratorEnqueue(
     realm: *Realm,
-    gen: *@import("generator.zig").JSGenerator,
-    completion: @import("generator.zig").Completion,
+    gen: *@import("../generator.zig").JSGenerator,
+    completion: @import("../generator.zig").Completion,
     cap_promise: *JSObject,
 ) RunError!void {
     try gen.queue.append(realm.allocator, .{
@@ -819,7 +819,7 @@ fn asyncGeneratorEnqueue(
 fn asyncGeneratorResumeNext(
     allocator: std.mem.Allocator,
     realm: *Realm,
-    gen: *@import("generator.zig").JSGenerator,
+    gen: *@import("../generator.zig").JSGenerator,
 ) RunError!void {
     while (gen.queue.items.len > 0) {
         // Re-entrancy / await guard: if the body is currently
@@ -984,8 +984,8 @@ fn asyncGeneratorResumeNext(
 fn resumeAsyncGenBody(
     allocator: std.mem.Allocator,
     realm: *Realm,
-    gen: *@import("generator.zig").JSGenerator,
-    completion: @import("generator.zig").Completion,
+    gen: *@import("../generator.zig").JSGenerator,
+    completion: @import("../generator.zig").Completion,
 ) RunError!RunResult {
     switch (completion) {
         .normal => |v| {
@@ -1123,7 +1123,7 @@ fn asyncGenBrandCheck(realm: *Realm, this_value: Value, msg: []const u8) ?Value 
 /// kind, which feeds the awaited value into
 /// `resumeAsyncGenBody(.return_value)` so the body's finally
 /// machinery sees a return-completion with the unwrapped value.
-fn awaitForReturnCompletion(realm: *Realm, gen: *@import("generator.zig").JSGenerator, v: Value) !void {
+fn awaitForReturnCompletion(realm: *Realm, gen: *@import("../generator.zig").JSGenerator, v: Value) !void {
     // For Promise / thenable values the inner await may itself
     // suspend on a pending Promise. To keep the implementation
     // self-contained we don't try to chain waiters at this layer
@@ -1198,7 +1198,7 @@ fn awaitForReturnCompletion(realm: *Realm, gen: *@import("generator.zig").JSGene
             // Callable thenable: §27.2.1.3.2 step 12 enqueues
             // PromiseResolveThenableJob; we then register the
             // gen as a waiter on the synthesised Promise.
-            const promise_v = @import("builtins/promise.zig").allocatePromise(realm, .pending, Value.undefined_) catch return error.OutOfMemory;
+            const promise_v = @import("../builtins/promise.zig").allocatePromise(realm, .pending, Value.undefined_) catch return error.OutOfMemory;
             const promise_obj = heap_mod.valueAsPlainObject(promise_v) orelse return error.OutOfMemory;
             try realm.enqueueThenableJob(promise_v, v, then_v);
             gen.awaiting_return_completion = true;
@@ -1222,7 +1222,7 @@ fn awaitForReturnCompletion(realm: *Realm, gen: *@import("generator.zig").JSGene
 /// If `raw` is already-settled, unwrap synchronously. If pending,
 /// register a reaction so the outer promise settles when `raw`
 /// does, with the value transformed into an iterator result.
-pub fn wrapAsyncGenResult(realm: *Realm, raw: Value, done: bool) @import("function.zig").NativeError!Value {
+pub fn wrapAsyncGenResult(realm: *Realm, raw: Value, done: bool) @import("../function.zig").NativeError!Value {
     // §27.6.1.6 AsyncFromSyncIteratorContinuation steps 3-9.
     // step 3: valueWrapper = PromiseResolve(%Promise%, value).
     //   - value is a same-realm Promise → valueWrapper IS value.
@@ -1281,12 +1281,12 @@ pub fn wrapAsyncGenResult(realm: *Realm, raw: Value, done: bool) @import("functi
     return outer;
 }
 
-fn iterResultDoneFalse(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
+fn iterResultDoneFalse(realm: *Realm, this_value: Value, args: []const Value) @import("../function.zig").NativeError!Value {
     _ = this_value;
     const v = if (args.len > 0) args[0] else Value.undefined_;
     return genResultObject(realm, v, false) catch return error.OutOfMemory;
 }
-fn iterResultDoneTrue(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
+fn iterResultDoneTrue(realm: *Realm, this_value: Value, args: []const Value) @import("../function.zig").NativeError!Value {
     _ = this_value;
     const v = if (args.len > 0) args[0] else Value.undefined_;
     return genResultObject(realm, v, true) catch return error.OutOfMemory;
@@ -1312,7 +1312,7 @@ fn unwrapSettledPromise(v: Value) SettledOutcome {
     };
 }
 
-fn asyncGenReturn(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
+fn asyncGenReturn(realm: *Realm, this_value: Value, args: []const Value) @import("../function.zig").NativeError!Value {
     // §27.6.1.3 step 2 — IfAbruptRejectPromise on brand check.
     if (asyncGenBrandCheck(realm, this_value, "AsyncGenerator.prototype.return called on non-async-generator")) |ex| {
         return intrinsics_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
@@ -1323,7 +1323,7 @@ fn asyncGenReturn(realm: *Realm, this_value: Value, args: []const Value) @import
     return asyncGenDispatch(realm, gen, .{ .return_value = ret_v });
 }
 
-fn asyncGenThrow(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
+fn asyncGenThrow(realm: *Realm, this_value: Value, args: []const Value) @import("../function.zig").NativeError!Value {
     // §27.6.1.4 step 2 — IfAbruptRejectPromise on brand check.
     if (asyncGenBrandCheck(realm, this_value, "AsyncGenerator.prototype.throw called on non-async-generator")) |ex| {
         return intrinsics_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
@@ -1338,7 +1338,7 @@ fn asyncGenThrow(realm: *Realm, this_value: Value, args: []const Value) @import(
 /// `this` to have a real `[[GeneratorState]]` slot. Cynic
 /// tracks it via `obj.generator_ref` (which must point at a
 /// non-async generator). Wrong-receiver → TypeError per spec.
-fn genBrandCheckTypeError(realm: *Realm, this_value: Value, msg: []const u8) ?@import("function.zig").NativeError {
+fn genBrandCheckTypeError(realm: *Realm, this_value: Value, msg: []const u8) ?@import("../function.zig").NativeError {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse {
         const ex = intrinsics_mod.newTypeError(realm, msg) catch return error.OutOfMemory;
         realm.pending_exception = ex;
@@ -1357,7 +1357,7 @@ fn genBrandCheckTypeError(realm: *Realm, this_value: Value, msg: []const u8) ?@i
     return null;
 }
 
-fn genNext(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
+fn genNext(realm: *Realm, this_value: Value, args: []const Value) @import("../function.zig").NativeError!Value {
     if (genBrandCheckTypeError(realm, this_value, "Generator method called on non-generator")) |err| return err;
     const obj = heap_mod.valueAsPlainObject(this_value).?;
     const gen = obj.generator_ref.?;
@@ -1386,7 +1386,7 @@ fn genNext(realm: *Realm, this_value: Value, args: []const Value) @import("funct
     }
 }
 
-fn genReturn(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
+fn genReturn(realm: *Realm, this_value: Value, args: []const Value) @import("../function.zig").NativeError!Value {
     if (genBrandCheckTypeError(realm, this_value, "Generator.prototype.return called on non-generator")) |err| return err;
     const obj = heap_mod.valueAsPlainObject(this_value).?;
     const gen = obj.generator_ref.?;
@@ -1449,7 +1449,7 @@ fn genReturn(realm: *Realm, this_value: Value, args: []const Value) @import("fun
     return genResultObject(realm, arg, true) catch return error.OutOfMemory;
 }
 
-fn genThrow(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
+fn genThrow(realm: *Realm, this_value: Value, args: []const Value) @import("../function.zig").NativeError!Value {
     if (genBrandCheckTypeError(realm, this_value, "Generator.prototype.throw called on non-generator")) |err| return err;
     const obj = heap_mod.valueAsPlainObject(this_value).?;
     const gen = obj.generator_ref.?;
@@ -1496,7 +1496,7 @@ fn genThrow(realm: *Realm, this_value: Value, args: []const Value) @import("func
     }
 }
 
-fn genSymbolIterator(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
+fn genSymbolIterator(realm: *Realm, this_value: Value, args: []const Value) @import("../function.zig").NativeError!Value {
     _ = realm;
     _ = args;
     return this_value;
@@ -1573,7 +1573,7 @@ pub fn openAsyncIterator(
     // each `.next()` / `.return()` / `.throw()` returns a fresh
     // Promise per §27.6.1.{2,3,4}.
     const sync_iter = try openIterator(realm.allocator, realm, iterable);
-    const afsi = @import("builtins/async_iterator.zig");
+    const afsi = @import("../builtins/async_iterator.zig");
     return afsi.createAsyncFromSyncIterator(realm, sync_iter) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
     };
@@ -1839,7 +1839,7 @@ pub fn openForInIterator(
             // trap). We materialise both via the helpers in
             // builtins/object.zig.
             if (cur.proxy_target != null or cur.proxy_target_fn != null or cur.proxy_revoked) {
-                const obj_mod = @import("builtins/object.zig");
+                const obj_mod = @import("../builtins/object.zig");
                 const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
                 defer key_scope.close();
                 if (obj_mod.proxyOwnKeysOrNull(realm, cur, key_scope)) |maybe_keys| {
@@ -1862,7 +1862,7 @@ pub fn openForInIterator(
                             const enum_ok = blk: {
                                 if (desc_v.isUndefined()) break :blk false;
                                 if (heap_mod.valueAsPlainObject(desc_v)) |desc_obj| {
-                                    const arith_mod = @import("lantern_arith.zig");
+                                    const arith_mod = @import("arith.zig");
                                     break :blk arith_mod.toBoolean(desc_obj.get("enumerable"));
                                 }
                                 break :blk false;
@@ -1911,7 +1911,7 @@ pub fn openForInIterator(
                 if (cur.is_sparse) {
                     var sit = cur.sparse_elements.iterator();
                     while (sit.next()) |entry| {
-                        if (@import("object.zig").JSObject.isElementHole(entry.value_ptr.*)) continue;
+                        if (@import("../object.zig").JSObject.isElementHole(entry.value_ptr.*)) continue;
                         const idx = entry.key_ptr.*;
                         var ibuf: [16]u8 = undefined;
                         const ks = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch continue;
@@ -1921,7 +1921,7 @@ pub fn openForInIterator(
                 } else {
                     var ei: u32 = 0;
                     while (ei < cur.elements.items.len) : (ei += 1) {
-                        if (@import("object.zig").JSObject.isElementHole(cur.elements.items[ei])) continue;
+                        if (@import("../object.zig").JSObject.isElementHole(cur.elements.items[ei])) continue;
                         var ibuf: [16]u8 = undefined;
                         const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ei}) catch continue;
                         const key_owned_str = realm.heap.allocateString(ks) catch return error.OutOfMemory;
@@ -2074,7 +2074,7 @@ pub fn openForInIterator(
     // enumeration is deleted, then it will not be visited.")
     const iter = realm.heap.allocateObject() catch return error.OutOfMemory;
     iter.prototype = realm.intrinsics.object_prototype;
-    const state = realm.allocator.create(@import("object.zig").ArrayLikeIterState) catch return error.OutOfMemory;
+    const state = realm.allocator.create(@import("../object.zig").ArrayLikeIterState) catch return error.OutOfMemory;
     state.* = .{ .target = heap_mod.taggedObject(arr), .idx = 0, .done = false, .for_in_source = obj_v };
     iter.array_like_iter = state;
     const next_fn = realm.heap.allocateFunctionNative(arrayLikeIterNext, 0, "next") catch return error.OutOfMemory;
@@ -2096,7 +2096,7 @@ pub fn openForInIterator(
 /// (1 byte for ASCII, 4 bytes for an astral codepoint, 3 bytes
 /// for a lone surrogate stored as WTF-8). Done when `idx >=
 /// bytes.len`.
-fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
+fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @import("../function.zig").NativeError!Value {
     _ = args;
     const iter_obj = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
     const state = iter_obj.array_like_iter orelse return error.NativeThrew;
@@ -2107,7 +2107,7 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
     result.prototype = realm.intrinsics.object_prototype;
 
     if (target.isString()) {
-        const s: *@import("string.zig").JSString = @ptrCast(@alignCast(target.asString()));
+        const s: *@import("../string.zig").JSString = @ptrCast(@alignCast(target.asString()));
         const start: usize = idx;
         if (start >= s.flatBytes().len) {
             result.set(realm.allocator, "value", Value.undefined_) catch return error.OutOfMemory;
@@ -2170,7 +2170,7 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
             // Live-check the key on the original source object.
             // The snapshot stores keys as JSString values.
             if (elem.isString()) {
-                const key_str: *@import("string.zig").JSString = @ptrCast(@alignCast(elem.asString()));
+                const key_str: *@import("../string.zig").JSString = @ptrCast(@alignCast(elem.asString()));
                 if (heap_mod.valueAsPlainObject(state.for_in_source)) |src| {
                     // Proxy [[HasProperty]] would dispatch the `has`
                     // trap with side effects; the live-deletion check
@@ -2466,7 +2466,7 @@ fn loadModuleInner(
     // error-severity diagnostics on the side. Both shapes are
     // SyntaxError per spec — collect diagnostics and treat any
     // `severity == .err` entry as a parse failure.
-    var diags: @import("../diagnostic.zig").Diagnostics = .empty;
+    var diags: @import("../../diagnostic.zig").Diagnostics = .empty;
     const program = parser_mod.parseModule(parse_arena, result.source, &diags) catch {
         mr.state = .errored;
         const ex = makeSyntaxError(realm, "module parse error") catch return error.OutOfMemory;
@@ -2957,7 +2957,7 @@ fn makeReturnThisHandler(realm: *Realm, value: Value) !Value {
 /// Native body for `makeReturnThisHandler` — returns the
 /// receiver. As a bound function with `bound_this` set, the
 /// dispatch substitutes the captured value for `this_value`.
-fn returnThisValueNative(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
+fn returnThisValueNative(realm: *Realm, this_value: Value, args: []const Value) @import("../function.zig").NativeError!Value {
     _ = realm;
     _ = args;
     return this_value;
@@ -2998,7 +2998,7 @@ fn runThenableJob(
     // surfaces a constructor-flagged reject to user code (test262 catches it
     // via `isConstructor(reject)` from `harness/isConstructor.js`, which
     // tries `Reflect.construct(function(){}, [], reject)`).
-    const promise_mod = @import("builtins/promise.zig");
+    const promise_mod = @import("../builtins/promise.zig");
     const resolve_impl = realm.heap.allocateFunctionNative(promise_mod.promiseResolveImplExported, 1, "") catch return error.OutOfMemory;
     resolve_impl.proto = realm.intrinsics.function_prototype;
     resolve_impl.has_construct = false;
@@ -3110,7 +3110,7 @@ pub fn resolvePromiseWithValue(realm: *Realm, target: *JSObject, v: Value) !void
     if (target.promise_state != .pending) return;
     if (heap_mod.valueAsPlainObject(v)) |v_obj| {
         if (v_obj == target) {
-            const intrinsics = @import("intrinsics.zig");
+            const intrinsics = @import("../intrinsics.zig");
             const ex = intrinsics.newTypeError(realm, "Chaining cycle detected for promise") catch return error.OutOfMemory;
             try settlePromiseInternal(realm, target, .rejected, ex);
             return;
@@ -3131,7 +3131,7 @@ pub fn resolvePromiseWithValue(realm: *Realm, target: *JSObject, v: Value) !void
                 try chainPromiseToInner(realm, v_obj, target);
                 return;
             }
-            const intrinsics2 = @import("intrinsics.zig");
+            const intrinsics2 = @import("../intrinsics.zig");
             const then_v2 = intrinsics2.getPropertyChain(realm, v_obj, "then") catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => {
@@ -3149,7 +3149,7 @@ pub fn resolvePromiseWithValue(realm: *Realm, target: *JSObject, v: Value) !void
             try realm.enqueueThenableJob(heap_mod.taggedObject(target), v, then_v2);
             return;
         }
-        const intrinsics = @import("intrinsics.zig");
+        const intrinsics = @import("../intrinsics.zig");
         const then_v = intrinsics.getPropertyChain(realm, v_obj, "then") catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
@@ -3199,7 +3199,7 @@ fn isVanillaPromiseChain(realm: *Realm, target: *JSObject, v_obj: *JSObject) boo
     // `.then` invocation is observable.
     const then_v = proto.get("then");
     const then_fn = heap_mod.valueAsFunction(then_v) orelse return false;
-    const promise_mod = @import("builtins/promise.zig");
+    const promise_mod = @import("../builtins/promise.zig");
     const cb = then_fn.native_callback orelse return false;
     if (cb != promise_mod.promiseThenExported) return false;
     return true;
@@ -3243,7 +3243,7 @@ fn chainPromiseToInner(realm: *Realm, inner: *JSObject, outer: *JSObject) !void 
 pub fn resumeAsyncFunction(
     allocator: std.mem.Allocator,
     realm: *Realm,
-    gen: *@import("generator.zig").JSGenerator,
+    gen: *@import("../generator.zig").JSGenerator,
     sent_value: Value,
     throws_in: bool,
 ) RunError!void {
@@ -3349,7 +3349,7 @@ pub fn resumeAsyncFunction(
 pub fn resumeAsyncGeneratorOnSettle(
     allocator: std.mem.Allocator,
     realm: *Realm,
-    gen: *@import("generator.zig").JSGenerator,
+    gen: *@import("../generator.zig").JSGenerator,
     sent_value: Value,
     throws_in: bool,
 ) RunError!void {
@@ -3532,7 +3532,7 @@ pub fn settlePromiseInternal(
 pub fn resumeGenerator(
     allocator: std.mem.Allocator,
     realm: *Realm,
-    gen: *@import("generator.zig").JSGenerator,
+    gen: *@import("../generator.zig").JSGenerator,
     sent_value: Value,
 ) RunError!RunResult {
     if (gen.state == .completed) {
@@ -4351,13 +4351,13 @@ pub fn callJSFunctionAsSuper(
 pub fn startAsyncCall(
     allocator: std.mem.Allocator,
     realm: *Realm,
-    chunk: *const @import("../bytecode/chunk.zig").Chunk,
+    chunk: *const @import("../../bytecode/chunk.zig").Chunk,
     captured_env: ?*Environment,
     this_value: Value,
     args: []const Value,
     home_object: ?*JSObject,
     home_function: ?*JSFunction,
-    owning_module: ?*@import("module.zig").ModuleRecord,
+    owning_module: ?*@import("../module.zig").ModuleRecord,
 ) RunError!RunResult {
     // Pre-allocate the Promise so the gen can settle it.
     const promise_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
@@ -6353,7 +6353,7 @@ fn runFrames(
                     // so this branch is unreachable in practice;
                     // throw a defensive SyntaxError if a future code
                     // path (host-script eval, etc.) ever reaches it.
-                    const ex = @import("builtins/error.zig").newSyntaxError(realm, "import.meta is only valid inside a Module") catch return error.OutOfMemory;
+                    const ex = @import("../builtins/error.zig").newSyntaxError(realm, "import.meta is only valid inside a Module") catch return error.OutOfMemory;
                     f.ip = ip;
                     f.accumulator = acc;
                     committed = true;
@@ -6600,7 +6600,7 @@ fn runFrames(
                     // §10.5.5 trap for every non-excluded key, even
                     // when the descriptor will ultimately be
                     // ignored.
-                    const obj_mod_inner = @import("builtins/object.zig");
+                    const obj_mod_inner = @import("../builtins/object.zig");
                     const is_src_proxy = src_obj.proxy_target != null or src_obj.proxy_revoked;
                     const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
                     defer key_scope.close();
@@ -6670,7 +6670,7 @@ fn runFrames(
                         // accessor support. A throw propagates as an
                         // abrupt completion through the destructuring.
                         const v: Value = if (is_src_proxy) blk_v: {
-                            const proxy_mod = @import("builtins/proxy.zig");
+                            const proxy_mod = @import("../builtins/proxy.zig");
                             const outcome = proxy_mod.nativeProxyGet(realm, src_obj, k, heap_mod.taggedObject(src_obj)) catch |err| switch (err) {
                                 error.OutOfMemory => return error.OutOfMemory,
                                 else => {
@@ -7025,7 +7025,7 @@ fn runFrames(
                         keys_buf[ki] = f.registers[r_keys_base + ki];
                     }
                 }
-                const class_mod = @import("class.zig");
+                const class_mod = @import("../class.zig");
                 acc = class_mod.buildClass(realm, tmpl, f.env, heritage, keys_buf[0..key_count], inner_class_slot) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.HeritageNotConstructor => blk: {
@@ -7840,7 +7840,7 @@ fn runFrames(
                                     realm.heap.storeProperty(desc, allocator, "enumerable", Value.fromBool(true)) catch return error.OutOfMemory;
                                     realm.heap.storeProperty(desc, allocator, "configurable", Value.fromBool(true)) catch return error.OutOfMemory;
                                     const key_s = realm.heap.allocateString(entry.name) catch return error.OutOfMemory;
-                                    const obj_builtin = @import("builtins/object.zig");
+                                    const obj_builtin = @import("../builtins/object.zig");
                                     const args_three = [_]Value{
                                         heap_mod.taggedObject(inst),
                                         Value.fromString(key_s),
@@ -8159,7 +8159,7 @@ fn runFrames(
                 // microtask drain at the next await / Promise
                 // settlement), not synchronously here.
                 const v = acc;
-                const gen_opt: ?*@import("generator.zig").JSGenerator = if (f.generator) |g| (if (g.is_async) g else null) else null;
+                const gen_opt: ?*@import("../generator.zig").JSGenerator = if (f.generator) |g| (if (g.is_async) g else null) else null;
                 if (gen_opt) |gen| {
                     var suspend_target: ?*JSObject = null;
                     var resume_value: Value = v;
@@ -8239,7 +8239,7 @@ fn runFrames(
                                 },
                             };
                             if (heap_mod.valueAsFunction(then_v) != null) {
-                                const promise_v = @import("builtins/promise.zig").allocatePromise(realm, .pending, Value.undefined_) catch return error.OutOfMemory;
+                                const promise_v = @import("../builtins/promise.zig").allocatePromise(realm, .pending, Value.undefined_) catch return error.OutOfMemory;
                                 const promise_obj = heap_mod.valueAsPlainObject(promise_v) orelse return error.OutOfMemory;
                                 realm.enqueueThenableJob(promise_v, v, then_v) catch return error.OutOfMemory;
                                 suspend_target = promise_obj;
@@ -8366,8 +8366,8 @@ fn runFrames(
                 // object's typed `iter_record` slot — off the
                 // property bag, so a user-supplied iterator gains
                 // no observable own property.
-                const iter_rec: *@import("object.zig").IterRecord = iter_obj.iter_record orelse blk: {
-                    const r = realm.allocator.create(@import("object.zig").IterRecord) catch return error.OutOfMemory;
+                const iter_rec: *@import("../object.zig").IterRecord = iter_obj.iter_record orelse blk: {
+                    const r = realm.allocator.create(@import("../object.zig").IterRecord) catch return error.OutOfMemory;
                     r.* = .{};
                     iter_obj.iter_record = r;
                     break :blk r;
@@ -8515,7 +8515,7 @@ fn runFrames(
                     if (st.kind == .entries) break :fast;
                     if (iter_obj.prototype != realm.intrinsics.array_iterator_prototype) break :fast;
                     if (next_v.bits != realm.intrinsics.array_iterator_next.bits) break :fast;
-                    const collections_mod = @import("builtins/collections.zig");
+                    const collections_mod = @import("../builtins/collections.zig");
                     const stepped = collections_mod.arrayIterStepFast(realm, iter_v) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => {
@@ -8719,7 +8719,7 @@ fn runFrames(
                 //   7. IfAbruptRejectPromise(specifierString, promiseCapability).
                 //   8. Perform HostImportModuleDynamically(...).
                 //   9. Return promiseCapability.[[Promise]].
-                const promise_mod = @import("builtins/promise.zig");
+                const promise_mod = @import("../builtins/promise.zig");
 
                 // §13.3.10.1 step 6 — ToString(specifier). For
                 // primitives this is the trivial branch; for objects
@@ -10240,7 +10240,7 @@ fn runFrames(
                     // and trips object-rest tests; revisit later).
                     continue :dispatch try decodeNext(code, &ip, &committed);
                 };
-                const obj_mod = @import("builtins/object.zig");
+                const obj_mod = @import("../builtins/object.zig");
                 // §7.3.27 CopyDataProperties step 4 — fire the
                 // Proxy `ownKeys` trap when `src` is a proxy
                 // exotic, then iterate the trap result. When
@@ -10304,7 +10304,7 @@ fn runFrames(
                         // receiver. `getPropertyChain` walks the
                         // ordinary property bag + prototype chain
                         // and would silently miss the trap.
-                        const proxy_mod = @import("builtins/proxy.zig");
+                        const proxy_mod = @import("../builtins/proxy.zig");
                         const outcome = proxy_mod.nativeProxyGet(realm, src_obj, key, src_v) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             else => {
@@ -10730,7 +10730,7 @@ fn runFrames(
                 // matches the next pre-shape, so caching it would
                 // burn one shape lookup per slow-path execution
                 // for zero hits, e.g. literal-construction loops).
-                const pre_shape: ?*const @import("shape.zig").Shape = if (recv_obj_opt) |o| o.shape else null;
+                const pre_shape: ?*const @import("../shape.zig").Shape = if (recv_obj_opt) |o| o.shape else null;
                 {
                     const set_outcome = try strictSetProperty(allocator, realm, frames, f, ip, recv, key_s.flatBytes(), acc);
                     switch (set_outcome) {
@@ -10861,7 +10861,7 @@ fn runFrames(
                     // bypass an accessor installed on
                     // TypedArray.prototype["<same key>"].
                     if (obj.typed_view) |tv| {
-                        const ta_mod = @import("builtins/typed_array.zig");
+                        const ta_mod = @import("../builtins/typed_array.zig");
                         if (ta_mod.canonicalNumericIndex(key_slice)) |num| {
                             if (ta_mod.isValidIntegerIndexPub(tv, num)) {
                                 const buf = tv.viewed.array_buffer.?;
@@ -11090,7 +11090,7 @@ fn runFrames(
                 // ToNumber/ToBigInt side effects fire.
                 if (heap_mod.valueAsPlainObject(recv)) |obj| {
                     if (obj.typed_view) |tv| {
-                        const ta_mod = @import("builtins/typed_array.zig");
+                        const ta_mod = @import("../builtins/typed_array.zig");
                         if (ta_mod.canonicalNumericIndex(key_slice)) |num| {
                             // §10.4.5.13 SetTypedArrayElement — type
                             // coercion runs FIRST, with full side-effect
@@ -11101,7 +11101,7 @@ fn runFrames(
                             // negative, ≥ length, detached) silently drops the
                             // write. [[Set]] still returns true in both branches.
                             const coerce_outcome: union(enum) { value: Value, thrown: Value } = if (tv.kind.isBigInt()) blk: {
-                                const r = @import("builtins/bigint.zig").toBigIntValue(realm, acc) catch |err| switch (err) {
+                                const r = @import("../builtins/bigint.zig").toBigIntValue(realm, acc) catch |err| switch (err) {
                                     error.OutOfMemory => return error.OutOfMemory,
                                     else => {
                                         const ex = consumePendingException(realm) orelse try makeTypeError(realm, "TypedArray element type-coercion failed");
@@ -11777,7 +11777,7 @@ const DeleteResult = union(enum) {
 
 fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
     _ = realm;
-    const obj_mod = @import("object.zig");
+    const obj_mod = @import("../object.zig");
     if (heap_mod.valueAsPlainObject(recv)) |obj| {
         // A property removal cannot be expressed as a shape
         // transition (the transition tree is append-only), so
@@ -11809,7 +11809,7 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
         // to OrdinaryDelete, which lets the ordinary property bag
         // surface them normally.
         if (obj.typed_view) |tv| {
-            const ta_mod = @import("builtins/typed_array.zig");
+            const ta_mod = @import("../builtins/typed_array.zig");
             if (ta_mod.canonicalNumericIndex(key)) |num| {
                 if (!ta_mod.isValidIntegerIndexPub(tv, num)) return .{ .ok = true };
                 return .{ .throw_typeerror = "Cannot delete TypedArray index property" };
@@ -11970,7 +11970,7 @@ fn strictSetPropertyAnchored(
         // slice and miss. Root `key_string` / `value` / `recv` for the
         // whole proxy path; gated on `receiver_is_proxy` so a plain
         // object set pays nothing.
-        const px_root_scope: ?*@import("heap.zig").HandleScope = if (receiver_is_proxy) blk: {
+        const px_root_scope: ?*@import("../heap.zig").HandleScope = if (receiver_is_proxy) blk: {
             const sc = realm.heap.openScope() catch return error.OutOfMemory;
             if (key_string) |ks| sc.push(Value.fromString(ks)) catch return error.OutOfMemory;
             sc.push(value) catch return error.OutOfMemory;
@@ -12064,7 +12064,7 @@ fn strictSetPropertyAnchored(
         const ta_decision = typedArrayChainSetDecision(obj, key, recv);
         if (ta_decision.decision == .short_circuit) return .ok;
         if (ta_decision.decision == .coerce_and_write) {
-            const ta_mod = @import("builtins/typed_array.zig");
+            const ta_mod = @import("../builtins/typed_array.zig");
             const tv0 = ta_decision.ta.?.typed_view orelse return .ok;
             const coerced = ta_mod.coerceForTypedSlot(realm, tv0.kind, value) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -12079,7 +12079,7 @@ fn strictSetPropertyAnchored(
                 const buf = live_tv.viewed.array_buffer.?;
                 const elem_size = live_tv.kind.elementSize();
                 const idx: usize = @intFromFloat(ta_decision.num);
-                @import("intrinsics.zig").writeTypedElementForView(buf, live_tv, live_tv.byte_offset + idx * elem_size, coerced);
+                @import("../intrinsics.zig").writeTypedElementForView(buf, live_tv, live_tv.byte_offset + idx * elem_size, coerced);
             }
             return .ok;
         }
@@ -12110,7 +12110,7 @@ fn strictSetPropertyAnchored(
                 // §10.1.9.2 step 3.c — existingDescriptor =
                 // Receiver.[[GetOwnProperty]](P). Fires the proxy's
                 // `getOwnPropertyDescriptor` trap as a side effect.
-                const obj_mod = @import("builtins/object.zig");
+                const obj_mod = @import("../builtins/object.zig");
                 const key_owned_gop = realm.heap.allocateString(key) catch return error.OutOfMemory;
                 const gop_args = [_]Value{ recv, Value.fromString(key_owned_gop) };
                 _ = obj_mod.objectGetOwnPropertyDescriptor(realm, Value.undefined_, &gop_args) catch |err| switch (err) {
@@ -12142,7 +12142,7 @@ fn strictSetPropertyAnchored(
             // CreateDataProperty on Receiver = proxy via the GOPD +
             // defineProperty pair so both traps observe each call.
             if (!has_own_data and !has_own_acc) {
-                const obj_mod = @import("builtins/object.zig");
+                const obj_mod = @import("../builtins/object.zig");
                 const key_owned_gop = realm.heap.allocateString(key) catch return error.OutOfMemory;
                 const gop_args = [_]Value{ recv, Value.fromString(key_owned_gop) };
                 _ = obj_mod.objectGetOwnPropertyDescriptor(realm, Value.undefined_, &gop_args) catch |err| switch (err) {
@@ -12534,7 +12534,7 @@ const TAChainSetResult = struct {
 };
 
 fn typedArrayChainSetDecision(obj: *JSObject, key: []const u8, recv: Value) TAChainSetResult {
-    const ta_mod = @import("builtins/typed_array.zig");
+    const ta_mod = @import("../builtins/typed_array.zig");
     const num = ta_mod.canonicalNumericIndex(key) orelse return .{ .decision = .not_applicable };
     var cursor: ?*JSObject = obj;
     while (cursor) |c| : (cursor = c.prototype) {
@@ -12644,7 +12644,7 @@ fn getThroughChain(
             return .{ .value = Value.undefined_ };
         }
         if (c.is_array_exotic) {
-            if (@import("object.zig").JSObject.canonicalIntegerIndex(key)) |idx| {
+            if (@import("../object.zig").JSObject.canonicalIntegerIndex(key)) |idx| {
                 if (c.tryGetIndexedOwn(idx)) |v| return .{ .value = v };
             }
         }
@@ -12741,7 +12741,7 @@ fn setThroughChain(
             return .{ .handled_set = false };
         }
         if (c.is_array_exotic) {
-            if (@import("object.zig").JSObject.canonicalIntegerIndex(key)) |idx| {
+            if (@import("../object.zig").JSObject.canonicalIntegerIndex(key)) |idx| {
                 if (c.tryGetIndexedOwn(idx) != null) {
                     // Writable by default; let caller handle the
                     // receiver-side write.
@@ -12761,7 +12761,7 @@ fn setThroughChain(
         // typed array. Match `is_array_exotic` above — short-circuit
         // so the caller creates a property on the receiver instead.
         if (c.typed_view != null) {
-            const ta_mod = @import("builtins/typed_array.zig");
+            const ta_mod = @import("../builtins/typed_array.zig");
             if (ta_mod.canonicalNumericIndex(key)) |_| {
                 return .{ .handled_set = false };
             }

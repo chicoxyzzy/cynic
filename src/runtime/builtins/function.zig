@@ -19,7 +19,7 @@ const JSFunction = @import("../function.zig").JSFunction;
 const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
-const lantern = @import("../lantern.zig");
+const lantern = @import("../lantern/lantern.zig");
 
 const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
 const setNonEnumerable = intrinsics.setNonEnumerable;
@@ -524,7 +524,7 @@ pub fn installVariantPrototypes(realm: *Realm) !void {
 /// `[[Prototype]]` resolves to `%Iterator.prototype%` per
 /// §27.5.1 step 1.b of OrdinaryGeneratorObjectPrototype.
 pub fn wireVariantInstancePrototypes(realm: *Realm) !void {
-    const interp = @import("../lantern.zig");
+    const interp = @import("../lantern/lantern.zig");
     if (realm.intrinsics.generator_function_prototype) |gfp| {
         const gp = try interp.ensureGeneratorPrototype(realm);
         // §27.3.4.3 — GeneratorFunction.prototype.prototype attributes

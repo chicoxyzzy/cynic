@@ -12,18 +12,18 @@
 
 const std = @import("std");
 
-const Realm = @import("realm.zig").Realm;
-const Value = @import("value.zig").Value;
-const JSString = @import("string.zig").JSString;
-const JSObject = @import("object.zig").JSObject;
-const JSFunction = @import("function.zig").JSFunction;
-const Accessor = @import("object.zig").Accessor;
-const PropertyFlags = @import("object.zig").PropertyFlags;
-const intrinsics_mod = @import("intrinsics.zig");
-const heap_mod = @import("heap.zig");
+const Realm = @import("../realm.zig").Realm;
+const Value = @import("../value.zig").Value;
+const JSString = @import("../string.zig").JSString;
+const JSObject = @import("../object.zig").JSObject;
+const JSFunction = @import("../function.zig").JSFunction;
+const Accessor = @import("../object.zig").Accessor;
+const PropertyFlags = @import("../object.zig").PropertyFlags;
+const intrinsics_mod = @import("../intrinsics.zig");
+const heap_mod = @import("../heap.zig");
 
 const RunError = @import("lantern.zig").RunError;
-const arith = @import("lantern_arith.zig");
+const arith = @import("arith.zig");
 
 // ── Pending exception drain ─────────────────────────────────────────
 
@@ -59,7 +59,7 @@ pub fn lookupAccessor(obj: *JSObject, key: []const u8) ?Accessor {
         // through to OrdinarySet which sees the IIE data
         // descriptor and creates the property on the receiver).
         if (c.typed_view != null) {
-            const ta_mod = @import("builtins/typed_array.zig");
+            const ta_mod = @import("../builtins/typed_array.zig");
             if (ta_mod.canonicalNumericIndex(key)) |_| return null;
         }
     }
@@ -208,7 +208,7 @@ pub fn computedKeyToString(v: Value, scratch: *[64]u8) []const u8 {
 /// `null` when the resulting number isn't a clean uint32 index
 /// (NaN, infinity, fractional, negative, or >= 2^32), in which
 /// case the caller throws RangeError.
-pub fn arrayLengthCoerceSpec(realm: *Realm, value: Value) @import("function.zig").NativeError!?u32 {
+pub fn arrayLengthCoerceSpec(realm: *Realm, value: Value) @import("../function.zig").NativeError!?u32 {
     // §7.1.6 ToUint32 first ⇒ first ToNumber (step 3).
     const prim1 = try intrinsics_mod.toPrimitive(realm, value, .number);
     if (heap_mod.valueAsSymbol(prim1) != null) {

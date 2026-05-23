@@ -130,7 +130,7 @@ fn proxyRevokeNoop(realm: *Realm, this_value: Value, args: []const Value) Native
 }
 
 const JSObject = @import("../object.zig").JSObject;
-const lantern = @import("../lantern.zig");
+const lantern = @import("../lantern/lantern.zig");
 
 /// Outcome of a native-side proxy dispatch. `.fallthrough` means
 /// the caller should perform the ordinary internal-method action
@@ -255,7 +255,7 @@ pub fn nativeProxySet(realm: *Realm, proxy: *JSObject, key: []const u8, value: V
     const key_v = try trapKeyValue(realm, key);
     const args = [_]Value{ heap_mod.taggedObject(target), key_v, value, receiver };
     const v = try callTrap(realm, trap_fn, handler, &args);
-    const arith = @import("../lantern_arith.zig");
+    const arith = @import("../lantern/arith.zig");
     if (!arith.toBoolean(v)) return .{ .boolean = false };
     // §10.5.6 invariants.
     if (target.property_flags.get(key)) |flags| {
@@ -287,7 +287,7 @@ pub fn nativeProxyHas(realm: *Realm, proxy: *JSObject, key: []const u8) NativeEr
     const key_v = try trapKeyValue(realm, key);
     const args = [_]Value{ heap_mod.taggedObject(target), key_v };
     const v = try callTrap(realm, trap_fn, handler, &args);
-    const arith = @import("../lantern_arith.zig");
+    const arith = @import("../lantern/arith.zig");
     const b = arith.toBoolean(v);
     // §10.5.7 invariants — can't pretend a non-configurable own
     // property doesn't exist, nor an own property of a non-
@@ -363,7 +363,7 @@ pub fn nativeProxyDefineProperty(realm: *Realm, proxy: *JSObject, key: []const u
     const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
     const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str), heap_mod.taggedObject(desc) };
     const v = try callTrap(realm, trap_fn, handler, &args);
-    const arith = @import("../lantern_arith.zig");
+    const arith = @import("../lantern/arith.zig");
     return .{ .boolean = arith.toBoolean(v) };
 }
 
@@ -378,7 +378,7 @@ pub fn nativeProxyDelete(realm: *Realm, proxy: *JSObject, key: []const u8) Nativ
     const key_v = try trapKeyValue(realm, key);
     const args = [_]Value{ heap_mod.taggedObject(target), key_v };
     const v = try callTrap(realm, trap_fn, handler, &args);
-    const arith = @import("../lantern_arith.zig");
+    const arith = @import("../lantern/arith.zig");
     const b = arith.toBoolean(v);
     if (b) {
         // §10.5.10 invariants — can't report success for a non-

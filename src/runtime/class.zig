@@ -174,7 +174,7 @@ pub fn buildClass(
             // shape that observes a single read on every extends.
             // Use the accessor-aware path. A non-null, non-Object
             // result is a TypeError per step 7.h.
-            const interp = @import("lantern.zig");
+            const interp = @import("lantern/lantern.zig");
             const parent_proto_v = if (fn_obj.ownAccessor("prototype")) |acc_pair| blk_acc: {
                 if (acc_pair.getter) |getter| {
                     const recv = heap_mod.taggedFunction(fn_obj);
@@ -389,7 +389,7 @@ pub fn buildClass(
             // default ctor + null [[Prototype]] — fix both here.
             _ = gp.properties.swapRemove("constructor");
             _ = gp.property_flags.swapRemove("constructor");
-            const interp_mod = @import("lantern.zig");
+            const interp_mod = @import("lantern/lantern.zig");
             gp.prototype = if (m.is_async)
                 interp_mod.ensureAsyncGeneratorPrototype(realm) catch realm.intrinsics.object_prototype
             else
@@ -567,7 +567,7 @@ pub fn buildClass(
             // the inherited chain.
             _ = gp.properties.swapRemove("constructor");
             _ = gp.property_flags.swapRemove("constructor");
-            const interp_mod = @import("lantern.zig");
+            const interp_mod = @import("lantern/lantern.zig");
             gp.prototype = if (m.is_async)
                 interp_mod.ensureAsyncGeneratorPrototype(realm) catch realm.intrinsics.object_prototype
             else
@@ -664,7 +664,7 @@ pub fn buildClass(
 
     // 8. Static fields — evaluate each init with this=ctor and
     // install on ctor. §15.7.10 step 1 ClassInitialization.
-    const lantern = @import("lantern.zig");
+    const lantern = @import("lantern/lantern.zig");
     const ctor_value = heap_mod.taggedFunction(ctor);
 
     // §15.7.14 step 27.b — publish the constructor into the

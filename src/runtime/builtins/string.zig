@@ -17,8 +17,8 @@ const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
 const c_alloc = @import("../c_alloc.zig");
-const lantern = @import("../lantern.zig");
-const interpreter_arith = @import("../lantern_arith.zig");
+const lantern = @import("../lantern/lantern.zig");
+const interpreter_arith = @import("../lantern/arith.zig");
 const utf16 = @import("../utf16.zig");
 
 const arith_toUint32 = interpreter_arith.toUint32;
@@ -487,7 +487,7 @@ pub fn stringMatch(realm: *Realm, this_value: Value, args: []const Value) Native
     const is_global = std.mem.indexOfScalar(u8, flags_str, 'g') != null;
     const exec_fn_v = try intrinsics.getPropertyChain(realm, re_obj, "exec");
     const exec_fn = heap_mod.valueAsFunction(exec_fn_v) orelse return Value.null_;
-    const interp = @import("../lantern.zig");
+    const interp = @import("../lantern/lantern.zig");
     if (!is_global) {
         const args_call = [_]Value{Value.fromString(s)};
         const out = interp.callJSFunction(realm.allocator, realm, exec_fn, re, &args_call) catch |err| switch (err) {
@@ -596,7 +596,7 @@ pub fn stringSearch(realm: *Realm, this_value: Value, args: []const Value) Nativ
     re_obj.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
     const exec_fn_v = try intrinsics.getPropertyChain(realm, re_obj, "exec");
     const exec_fn = heap_mod.valueAsFunction(exec_fn_v) orelse return Value.fromInt32(-1);
-    const interp = @import("../lantern.zig");
+    const interp = @import("../lantern/lantern.zig");
     const args_call = [_]Value{Value.fromString(s)};
     const out = interp.callJSFunction(realm.allocator, realm, exec_fn, re, &args_call) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -643,7 +643,7 @@ fn ensureRegExp(realm: *Realm, arg: Value) NativeError!Value {
 fn regExpCreate(realm: *Realm, pattern: Value, flags: ?[]const u8) NativeError!Value {
     const ctor_v = realm.globals.get("RegExp") orelse Value.undefined_;
     const ctor = heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "RegExp constructor is missing");
-    const interp = @import("../lantern.zig");
+    const interp = @import("../lantern/lantern.zig");
     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
     inst.prototype = ctor.prototype;
     var argbuf: [2]Value = .{ pattern, Value.undefined_ };

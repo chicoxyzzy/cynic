@@ -27,7 +27,7 @@ const NativeFn = @import("../function.zig").NativeFn;
 const heap_mod = @import("../heap.zig");
 const ObjMod = @import("../object.zig");
 const intrinsics = @import("../intrinsics.zig");
-const lantern = @import("../lantern.zig");
+const lantern = @import("../lantern/lantern.zig");
 
 const installConstructor = intrinsics.installConstructor;
 const installNativeGetter = intrinsics.installNativeGetter;
@@ -192,7 +192,7 @@ fn iteratorReturnsSelf(realm: *Realm, this_value: Value, args: []const Value) Na
 fn ensureArrayIteratorPrototype(realm: *Realm) !?*JSObject {
     if (realm.intrinsics.array_iterator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
-    proto.prototype = @import("../lantern.zig").iteratorPrototypeOrObjectPrototypePub(realm);
+    proto.prototype = @import("../lantern/lantern.zig").iteratorPrototypeOrObjectPrototypePub(realm);
     // §23.1.5.3.1 %ArrayIteratorPrototype%.next — installed on the
     // prototype (writable + configurable, non-enumerable) so the
     // descriptor matches §17's "built-in Function object" shape.
@@ -284,7 +284,7 @@ pub fn arrayIterStepFast(realm: *Realm, this_value: Value) NativeError!?Value {
 fn ensureStringIteratorPrototype(realm: *Realm) !?*JSObject {
     if (realm.intrinsics.string_iterator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
-    proto.prototype = @import("../lantern.zig").iteratorPrototypeOrObjectPrototypePub(realm);
+    proto.prototype = @import("../lantern/lantern.zig").iteratorPrototypeOrObjectPrototypePub(realm);
     try intrinsics.installNativeMethodOnProto(realm, proto, "next", stringIteratorProtoNext, 0);
     try intrinsics.installNativeMethodOnProto(realm, proto, "@@iterator", iteratorReturnsSelf, 0);
     const tag_str = try realm.heap.allocateString("String Iterator");

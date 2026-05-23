@@ -12,13 +12,13 @@
 
 const std = @import("std");
 
-const Value = @import("value.zig").Value;
-const JSString = @import("string.zig").JSString;
-const Realm = @import("realm.zig").Realm;
-const heap_mod = @import("heap.zig");
-const intrinsics_mod = @import("intrinsics.zig");
-const utf16 = @import("utf16.zig");
-const bigint_mod = @import("bigint.zig");
+const Value = @import("../value.zig").Value;
+const JSString = @import("../string.zig").JSString;
+const Realm = @import("../realm.zig").Realm;
+const heap_mod = @import("../heap.zig");
+const intrinsics_mod = @import("../intrinsics.zig");
+const utf16 = @import("../utf16.zig");
+const bigint_mod = @import("../bigint.zig");
 const JSBigInt = bigint_mod.JSBigInt;
 const BigIntValue = bigint_mod.BigIntValue;
 
@@ -31,7 +31,7 @@ fn borrowBigInt(bi: *const JSBigInt) BigIntValue {
 }
 
 pub const RunError = @import("lantern.zig").RunError;
-pub const NativeError = @import("function.zig").NativeError;
+pub const NativeError = @import("../function.zig").NativeError;
 const makeTypeError = @import("lantern.zig").makeTypeError;
 const makeRangeError = @import("lantern.zig").makeRangeError;
 const formatDoubleSafe = @import("lantern.zig").formatDoubleSafe;

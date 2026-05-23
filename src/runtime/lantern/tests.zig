@@ -12,15 +12,15 @@ const RunResult = lantern.RunResult;
 const run = lantern.run;
 const evaluateScript = lantern.evaluateScript;
 
-const Value = @import("value.zig").Value;
-const JSString = @import("string.zig").JSString;
-const Realm = @import("realm.zig").Realm;
-const features = @import("features.zig");
-const parser_mod = @import("../parser/parser.zig");
-const compiler_mod = @import("../bytecode/compiler.zig");
+const Value = @import("../value.zig").Value;
+const JSString = @import("../string.zig").JSString;
+const Realm = @import("../realm.zig").Realm;
+const features = @import("../features.zig");
+const parser_mod = @import("../../parser/parser.zig");
+const compiler_mod = @import("../../bytecode/compiler.zig");
 const compileExpressionAsChunk = compiler_mod.compileExpressionAsChunk;
 const compileScriptAsChunk = compiler_mod.compileScriptAsChunk;
-const cynic_diag = @import("../diagnostic.zig");
+const cynic_diag = @import("../../diagnostic.zig");
 
 /// Unit tests run against the full engine surface — every gated
 /// pre-Stage-4 proposal is enabled. Embedders / the `cynic` CLI
@@ -4811,7 +4811,7 @@ test "globalThis: late-installed host binding is visible via globalThis.X" {
     // Install a fresh global after intrinsics setup.
     const name_v = try realm.heap.allocateString("LATE_HOST_BINDING");
     _ = name_v;
-    try realm.globals.put(realm.allocator, "LATE_HOST_BINDING", @import("value.zig").Value.fromInt32(42));
+    try realm.globals.put(realm.allocator, "LATE_HOST_BINDING", @import("../value.zig").Value.fromInt32(42));
     // Read it back via `globalThis.LATE_HOST_BINDING` — the
     // snapshot-era implementation returned `undefined` here.
     const v = switch (try evaluateScriptResult(&realm, "globalThis.LATE_HOST_BINDING")) {
@@ -4830,7 +4830,7 @@ test "globalThis: bare-identifier read sees a late-installed host binding" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
     try installBuiltinsAllFeatures(&realm);
-    try realm.globals.put(realm.allocator, "LATE_BARE_BINDING", @import("value.zig").Value.fromInt32(7));
+    try realm.globals.put(realm.allocator, "LATE_BARE_BINDING", @import("../value.zig").Value.fromInt32(7));
     const v = switch (try evaluateScriptResult(&realm, "LATE_BARE_BINDING + 1")) {
         .value, .yielded => |val| val,
         .thrown => return error.UncaughtException,

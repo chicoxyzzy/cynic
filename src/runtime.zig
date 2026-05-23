@@ -47,6 +47,6 @@ pub const JSBigInt = bigint.JSBigInt;
 pub const module = @import("runtime/module.zig");
 pub const ModuleRecord = module.ModuleRecord;
 
-pub const lantern = @import("runtime/lantern.zig");
+pub const lantern = @import("runtime/lantern/lantern.zig");
 pub const run = lantern.run;
 pub const evaluateScript = lantern.evaluateScript;
