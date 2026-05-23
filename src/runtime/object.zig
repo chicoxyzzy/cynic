@@ -405,6 +405,26 @@ pub const FinalizationCell = struct {
     deleted: bool = false,
 };
 
+/// Lazy side allocation for cold JSObject state. See the trailing
+/// scaffolding-tests block in this file for the contract; the
+/// short version is "things a plain `{a, b}` literal never reads
+/// or writes." Subsequent commits migrate the cold fields here
+/// one at a time. Anything the JIT will speculate on stays in the
+/// hot JSObject prefix and MUST NOT move here — keep `shape`,
+/// `slots`, `properties`, `elements`, `prototype` out of this
+/// struct forever.
+pub const JSObjectExtension = struct {
+    /// Empty for now. Cold fields land here in follow-up commits
+    /// (accessors, private_*, namespace_*, map_data, set_data,
+    /// array_buffer, typed_view, promise_*, weak_ref_target,
+    /// finalization_cells, brand bools …).
+
+    pub fn deinit(self: *JSObjectExtension, allocator: std.mem.Allocator) void {
+        _ = self;
+        _ = allocator;
+    }
+};
+
 pub const JSObject = struct {
     /// Discriminator — must remain the first field. Mirrors the
     /// `kind` field on `JSFunction` so runtime dispatch on a
@@ -841,11 +861,29 @@ pub const JSObject = struct {
     /// `properties` + `accessors` directly when this list is
     /// empty.
     own_key_order: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// Lazy side allocation for cold state — see `JSObjectExtension`
+    /// above. `null` on every fresh JSObject; allocated on first
+    /// `getOrCreateExtension` call. Owned by this JSObject; freed
+    /// in `deinit`. Currently empty (scaffolding commit); fields
+    /// migrate here one at a time in follow-up commits.
+    extension: ?*JSObjectExtension = null,
 
     pub fn init(allocator: std.mem.Allocator) !*JSObject {
         const o = try allocator.create(JSObject);
         o.* = .{ .kind = .object };
         return o;
+    }
+
+    /// Return the extension if already allocated, otherwise allocate
+    /// a zero-init extension and stash it on this object. The
+    /// caller mutates the returned pointer in place; subsequent
+    /// calls return the same pointer.
+    pub fn getOrCreateExtension(self: *JSObject, allocator: std.mem.Allocator) !*JSObjectExtension {
+        if (self.extension) |ext| return ext;
+        const ext = try allocator.create(JSObjectExtension);
+        ext.* = .{};
+        self.extension = ext;
+        return ext;
     }
 
     pub fn deinit(self: *JSObject, allocator: std.mem.Allocator) void {
@@ -876,6 +914,10 @@ pub const JSObject = struct {
         // `shape` itself is realm-lifetime arena memory (ShapeTree),
         // not freed per-object; only the slot vector is owned here.
         self.slots.deinit(allocator);
+        if (self.extension) |ext| {
+            ext.deinit(allocator);
+            allocator.destroy(ext);
+        }
         // instance_field_inits / private_method_inits are
         // borrowed slices owned by class.zig (allocated against
         // the realm allocator and tracked by the realm); freeing
@@ -1897,4 +1939,72 @@ test "JSObject: defineProperty-style flagged write past threshold goes sparse" {
     try testing.expectEqual(@as(usize, 0), o.elements.items.len);
     try testing.expectEqual(@as(u32, 4_294_967_295), o.arrayLength());
     try testing.expectEqual(@as(i32, 100), o.get("4294967294").asInt32());
+}
+
+// ── JSObjectExtension — lazy cold-field side allocation ────────────
+//
+// Plain `{a, b}` literals carry the full JSObject header (~kilobyte
+// of struct, most of it ArrayHashMap / ArrayList scaffolding for
+// fields a typical object never touches: accessors, private slots,
+// namespace state, Map/Set data, TypedArray view, Promise reactions,
+// WeakRef target, FinalizationRegistry cells). Moving the cold
+// fields behind a single `extension: ?*JSObjectExtension` pointer
+// lazy-allocates that scaffolding on first cold-field use; the
+// common case pays for one null pointer instead of a thousand bytes
+// of dead state.
+//
+// Initial commit lands the scaffolding only — the extension struct
+// is empty and no fields move yet. Subsequent commits migrate one
+// cold field at a time, each gated on `zig build test`, a runtime
+// sweep, and `/gc-stress` on the touched bucket. Anything the JIT
+// will speculate on (`shape`, `slots`, `properties`, `elements`,
+// `prototype`) stays in the hot JSObject prefix — never moves
+// here.
+
+test "JSObjectExtension: footprint probe (size measurement, not an invariant)" {
+    // Surfaces the JSObject header size on every test run so a
+    // future migration can be checked against the recorded
+    // baseline. The current ~960-byte header is the cost the
+    // extension-pointer pattern attacks; field-by-field moves
+    // should drop this number.
+    std.debug.print("[footprint] @sizeOf(JSObject)          = {d} bytes\n", .{@sizeOf(JSObject)});
+    std.debug.print("[footprint] @sizeOf(JSObjectExtension) = {d} bytes\n", .{@sizeOf(JSObjectExtension)});
+}
+
+test "JSObjectExtension: extension is null on a fresh object" {
+    const o = try JSObject.init(testing.allocator);
+    defer o.deinit(testing.allocator);
+    try testing.expect(o.extension == null);
+}
+
+test "JSObjectExtension: getOrCreateExtension lazy-allocates on first call" {
+    const o = try JSObject.init(testing.allocator);
+    defer o.deinit(testing.allocator);
+    try testing.expect(o.extension == null);
+    _ = try o.getOrCreateExtension(testing.allocator);
+    try testing.expect(o.extension != null);
+}
+
+test "JSObjectExtension: getOrCreateExtension returns the same extension on second call" {
+    const o = try JSObject.init(testing.allocator);
+    defer o.deinit(testing.allocator);
+    const first = try o.getOrCreateExtension(testing.allocator);
+    const second = try o.getOrCreateExtension(testing.allocator);
+    try testing.expectEqual(first, second);
+}
+
+test "JSObjectExtension: deinit cleans up the extension if present" {
+    // Doubles as a leak check — `testing.allocator` panics on the
+    // following test entry if the extension's allocation isn't
+    // freed by `deinit`.
+    const o = try JSObject.init(testing.allocator);
+    _ = try o.getOrCreateExtension(testing.allocator);
+    o.deinit(testing.allocator);
+}
+
+test "JSObjectExtension: deinit is a no-op when extension is null" {
+    // Parity test — confirms the deinit path doesn't crash on
+    // objects that never reached for the extension.
+    const o = try JSObject.init(testing.allocator);
+    o.deinit(testing.allocator);
 }
