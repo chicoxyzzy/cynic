@@ -1127,7 +1127,7 @@ pub const Heap = struct {
                 // §22.1.3 `[[StringData]]` — the JSString a `String`
                 // wrapper boxes; a typed slot, not a property.
                 if (o.boxed_string) |bs| self.markString(bs);
-                if (o.map_data) |md| {
+                if (o.getMapData()) |md| {
                     if (md.is_weak and self.weak_aware_mark) {
                         // §24.3 WeakMap — the [[WeakMapData]] keys
                         // and values are weak edges. Don't strong-
@@ -1145,7 +1145,7 @@ pub const Heap = struct {
                         }
                     }
                 }
-                if (o.set_data) |sd| {
+                if (o.getSetData()) |sd| {
                     if (sd.is_weak and self.weak_aware_mark) {
                         // §24.4 WeakSet — members are weak edges;
                         // defer to the post-mark pruning pass.
@@ -1370,7 +1370,7 @@ pub const Heap = struct {
             var i: usize = 0;
             while (i < self.weak_collections_seen.items.len) : (i += 1) {
                 const holder = self.weak_collections_seen.items[i];
-                const md = holder.map_data orelse continue;
+                const md = holder.getMapData() orelse continue;
                 if (!md.is_weak) continue;
                 for (md.entries.items) |entry| {
                     if (entry.deleted) continue;
@@ -1419,7 +1419,7 @@ pub const Heap = struct {
         }
         // §24.3 WeakMap / §24.4 WeakSet — prune dead entries.
         for (self.weak_collections_seen.items) |holder| {
-            if (holder.map_data) |md| {
+            if (holder.getMapData()) |md| {
                 if (md.is_weak) {
                     for (md.entries.items) |*entry| {
                         if (entry.deleted) continue;
@@ -1429,7 +1429,7 @@ pub const Heap = struct {
                     }
                 }
             }
-            if (holder.set_data) |sd| {
+            if (holder.getSetData()) |sd| {
                 if (sd.is_weak) {
                     for (sd.entries.items) |*entry| {
                         if (entry.deleted) continue;
@@ -2201,14 +2201,14 @@ pub const Heap = struct {
         }
         if (o.boxed_primitive) |bp| self.markValue(bp);
         if (o.boxed_string) |bs| self.markString(bs);
-        if (o.map_data) |md| {
+        if (o.getMapData()) |md| {
             for (md.entries.items) |entry| {
                 if (entry.deleted) continue;
                 self.markValue(entry.key);
                 self.markValue(entry.value);
             }
         }
-        if (o.set_data) |sd| {
+        if (o.getSetData()) |sd| {
             for (sd.entries.items) |entry| {
                 if (entry.deleted) continue;
                 self.markValue(entry.value);

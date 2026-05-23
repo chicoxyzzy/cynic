@@ -448,6 +448,15 @@ pub const JSObjectExtension = struct {
     /// by every reflection / lookup path. Module Namespace exotic
     /// only.
     ambiguous_namespace_keys: std.StringArrayHashMapUnmanaged(void) = .empty,
+    /// §24.1 — backing store for a Map instance (chained entry
+    /// bucket with insertion-order iteration). Only `Map` /
+    /// `WeakMap` instances populate this; plain objects never.
+    /// `null` means "not a Map instance".
+    map_data: ?*MapData = null,
+    /// §24.2 — backing store for a Set instance. Only `Set` /
+    /// `WeakSet` instances populate this. `null` means "not a Set
+    /// instance".
+    set_data: ?*SetData = null,
 
     pub fn deinit(self: *JSObjectExtension, allocator: std.mem.Allocator) void {
         self.accessors.deinit(allocator);
@@ -456,6 +465,8 @@ pub const JSObjectExtension = struct {
         self.private_accessors.deinit(allocator);
         self.namespace_redirects.deinit(allocator);
         self.ambiguous_namespace_keys.deinit(allocator);
+        if (self.map_data) |m| m.deinit(allocator);
+        if (self.set_data) |s| s.deinit(allocator);
     }
 };
 
@@ -558,14 +569,10 @@ pub const JSObject = struct {
     /// / ToString / ToBoolean coercions check this first to
     /// return the underlying primitive.
     boxed_primitive: ?Value = null,
-    /// `[[MapData]]` (§24.1.1.1) — only set on `new Map(...)`
-    /// instances. Keeps insertion order; lookups use
-    /// SameValueZero. later uses linear-scan storage; a hashmap
-    /// is a later optimization.
-    map_data: ?*MapData = null,
-    /// `[[SetData]]` (§24.2.1.1) — same shape as map_data but
-    /// values-only.
-    set_data: ?*SetData = null,
+    // (`map_data`, `set_data` moved to `JSObjectExtension` — only
+    // Map/Set/WeakMap/WeakSet instances populate them. Access via
+    // `getMapData` / `setMapData` / `getSetData` / `setSetData`
+    // helpers below.)
     /// Array-like iterator state — present on the synthetic
     /// iterator objects produced by the §7.4.1 fallback path
     /// (`openIterator`) and the `Map` / `Set` `fromIterable`
@@ -1074,14 +1081,39 @@ pub const JSObject = struct {
         return null;
     }
 
+    // ── §24 Map / Set / WeakMap / WeakSet backing store ─────────
+    //
+    // Each instance type carries a single pointer field on the
+    // extension. Non-collection objects return null from the
+    // getter without ever materialising the extension.
+
+    pub fn getMapData(self: *const JSObject) ?*MapData {
+        if (self.extension) |ext| return ext.map_data;
+        return null;
+    }
+
+    pub fn setMapData(self: *JSObject, allocator: std.mem.Allocator, data: ?*MapData) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        ext.map_data = data;
+    }
+
+    pub fn getSetData(self: *const JSObject) ?*SetData {
+        if (self.extension) |ext| return ext.set_data;
+        return null;
+    }
+
+    pub fn setSetData(self: *JSObject, allocator: std.mem.Allocator, data: ?*SetData) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        ext.set_data = data;
+    }
+
     pub fn deinit(self: *JSObject, allocator: std.mem.Allocator) void {
         self.properties.deinit(allocator);
         self.property_flags.deinit(allocator);
         // `private_properties`, `private_methods`, `private_accessors`,
-        // `accessors`, `namespace_redirects`, `ambiguous_namespace_keys`
-        // all live in the extension — freed when it is.
-        if (self.map_data) |m| m.deinit(allocator);
-        if (self.set_data) |s| s.deinit(allocator);
+        // `accessors`, `namespace_redirects`, `ambiguous_namespace_keys`,
+        // `map_data`, `set_data` all live in the extension — freed
+        // when it is.
         if (self.array_like_iter) |s| s.deinit(allocator);
         if (self.map_set_iter) |s| s.deinit(allocator);
         if (self.regexp_string_iter) |s| s.deinit(allocator);

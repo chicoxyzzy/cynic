@@ -717,7 +717,7 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
     out.prototype = map_proto;
     const data = realm.allocator.create(ObjMod.MapData) catch return error.OutOfMemory;
     data.* = .{};
-    out.map_data = data;
+    out.setMapData(realm.allocator, data) catch return error.OutOfMemory;
 
     const iter = lantern.openIterator(realm.allocator, realm, items_v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -793,7 +793,7 @@ fn mapConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Map constructor requires 'new'");
     const data = realm.allocator.create(ObjMod.MapData) catch return error.OutOfMemory;
     data.* = .{};
-    inst.map_data = data;
+    inst.setMapData(realm.allocator, data) catch return error.OutOfMemory;
     // §24.1.1.1 Map constructor steps 5-7:
     //
     //   5. If iterable is undefined or null, return map.
@@ -959,7 +959,7 @@ fn invokeIteratorReturn(realm: *Realm, iter_obj: *@import("../object.zig").JSObj
 
 fn mapDataOf(this_value: Value) ?*@import("../object.zig").MapData {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    const d = obj.map_data orelse return null;
+    const d = obj.getMapData() orelse return null;
     // §24.1.3 RequireInternalSlot([[MapData]]) — a WeakMap shares
     // the same Zig slot but is tagged `is_weak`. The check rejects
     // `Map.prototype.get.call(new WeakMap(), …)` per spec.
@@ -986,7 +986,7 @@ fn mapEntryIndex(d: *@import("../object.zig").MapData, key: Value) ?usize {
 }
 
 fn mapSetInternal(realm: *Realm, inst: *@import("../object.zig").JSObject, key: Value, value: Value) !void {
-    const d = inst.map_data orelse return error.NativeThrew;
+    const d = inst.getMapData() orelse return error.NativeThrew;
     if (mapEntryIndex(d, key)) |idx| {
         d.entries.items[idx].value = value;
     } else {
@@ -1019,8 +1019,8 @@ fn mapGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Val
 /// `getOrInsertComputed`.
 fn mapGetOrInsert(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Map.prototype.getOrInsert called on non-Map");
-    if (inst.map_data == null) return throwTypeError(realm, "Map.prototype.getOrInsert called on non-Map");
-    const d = inst.map_data.?;
+    if (inst.getMapData() == null) return throwTypeError(realm, "Map.prototype.getOrInsert called on non-Map");
+    const d = inst.getMapData().?;
     // §24.1.5 step 2 — `RequireInternalSlot(M, [[MapData]])` rejects
     // a WeakMap (which has [[WeakMapData]] instead). Cynic stores
     // both under `map_data`, distinguished by `is_weak`; reject the
@@ -1043,8 +1043,8 @@ fn mapGetOrInsert(realm: *Realm, this_value: Value, args: []const Value) NativeE
 /// be callable per the proposal.
 fn mapGetOrInsertComputed(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Map.prototype.getOrInsertComputed called on non-Map");
-    if (inst.map_data == null) return throwTypeError(realm, "Map.prototype.getOrInsertComputed called on non-Map");
-    const d = inst.map_data.?;
+    if (inst.getMapData() == null) return throwTypeError(realm, "Map.prototype.getOrInsertComputed called on non-Map");
+    const d = inst.getMapData().?;
     // §24.1.5 step 2 — RequireInternalSlot rejects WeakMap. See
     // `mapGetOrInsert` above for the same gate.
     if (d.is_weak) return throwTypeError(realm, "Map.prototype.getOrInsertComputed called on a WeakMap");
@@ -1172,7 +1172,7 @@ pub fn installWeakMap(realm: *Realm) !void {
 
 fn weakMapDataOf(this_value: Value) ?*@import("../object.zig").MapData {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    const d = obj.map_data orelse return null;
+    const d = obj.getMapData() orelse return null;
     if (!d.is_weak) return null;
     return d;
 }
@@ -1214,7 +1214,7 @@ fn canBeHeldWeakly(key: Value) bool {
 
 fn weakMapGetOrInsert(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "WeakMap.prototype.getOrInsert called on non-WeakMap");
-    const d = inst.map_data orelse return throwTypeError(realm, "WeakMap.prototype.getOrInsert called on non-WeakMap");
+    const d = inst.getMapData() orelse return throwTypeError(realm, "WeakMap.prototype.getOrInsert called on non-WeakMap");
     if (!d.is_weak) return throwTypeError(realm, "WeakMap.prototype.getOrInsert called on non-WeakMap");
     const key = argOr(args, 0, Value.undefined_);
     if (!canBeHeldWeakly(key)) return throwTypeError(realm, "WeakMap key cannot be held weakly");
@@ -1226,7 +1226,7 @@ fn weakMapGetOrInsert(realm: *Realm, this_value: Value, args: []const Value) Nat
 
 fn weakMapGetOrInsertComputed(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "WeakMap.prototype.getOrInsertComputed called on non-WeakMap");
-    const d = inst.map_data orelse return throwTypeError(realm, "WeakMap.prototype.getOrInsertComputed called on non-WeakMap");
+    const d = inst.getMapData() orelse return throwTypeError(realm, "WeakMap.prototype.getOrInsertComputed called on non-WeakMap");
     if (!d.is_weak) return throwTypeError(realm, "WeakMap.prototype.getOrInsertComputed called on non-WeakMap");
     const key = argOr(args, 0, Value.undefined_);
     if (!canBeHeldWeakly(key)) return throwTypeError(realm, "WeakMap key cannot be held weakly");
@@ -1253,7 +1253,7 @@ fn weakMapConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "WeakMap constructor requires 'new'");
     const data = realm.allocator.create(ObjMod.MapData) catch return error.OutOfMemory;
     data.* = .{ .is_weak = true };
-    inst.map_data = data;
+    inst.setMapData(realm.allocator, data) catch return error.OutOfMemory;
     // §24.3.1.1 WeakMap constructor steps 5-7 — same shape as
     // Map: `Get(map, "set")` MUST NOT fire when iterable is
     // absent. `WeakMap/get-set-method-failure.js` poisons the
@@ -1318,7 +1318,7 @@ pub fn installWeakSet(realm: *Realm) !void {
 
 fn weakSetDataOf(this_value: Value) ?*@import("../object.zig").SetData {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    const d = obj.set_data orelse return null;
+    const d = obj.getSetData() orelse return null;
     // Symmetric brand check: WeakSet methods reject Set receivers.
     if (!d.is_weak) return null;
     return d;
@@ -1342,7 +1342,7 @@ fn weakSetConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "WeakSet constructor requires 'new'");
     const data = realm.allocator.create(ObjMod.SetData) catch return error.OutOfMemory;
     data.* = .{ .is_weak = true };
-    inst.set_data = data;
+    inst.setSetData(realm.allocator, data) catch return error.OutOfMemory;
     // §24.4.1.1 WeakSet constructor steps 5-7 — same shape as
     // Map / WeakMap: `Get(set, "add")` MUST NOT fire when iterable
     // is absent. `WeakSet/get-add-method-failure.js` poisons the
@@ -1442,7 +1442,7 @@ fn weakSetAddValuesFromIterable(
 
 fn weakSetAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "WeakSet.prototype.add called on non-WeakSet");
-    const d = inst.set_data orelse return throwTypeError(realm, "WeakSet.prototype.add called on non-WeakSet");
+    const d = inst.getSetData() orelse return throwTypeError(realm, "WeakSet.prototype.add called on non-WeakSet");
     if (!d.is_weak) return throwTypeError(realm, "WeakSet.prototype.add called on non-WeakSet");
     const v = argOr(args, 0, Value.undefined_);
     // §24.4.3.1 step 3 — `If CanBeHeldWeakly(value) is false,
@@ -1585,7 +1585,7 @@ fn setConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Set constructor requires 'new'");
     const data = realm.allocator.create(ObjMod.SetData) catch return error.OutOfMemory;
     data.* = .{};
-    inst.set_data = data;
+    inst.setSetData(realm.allocator, data) catch return error.OutOfMemory;
     // §24.2.1.1 Set constructor steps 6-8 — `Get(set, "add")`
     // MUST NOT fire when iterable is undefined/null
     // (`set-get-add-method-failure.js` poisons the accessor and
@@ -1679,7 +1679,7 @@ fn setAddValuesFromIterable(
 
 fn setDataOf(this_value: Value) ?*@import("../object.zig").SetData {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    const d = obj.set_data orelse return null;
+    const d = obj.getSetData() orelse return null;
     // Set.prototype methods reject WeakSet receivers — §24.2.3
     // brand-checks the [[SetData]] internal slot, which is
     // distinct from WeakSet's [[WeakSetData]].
@@ -1696,7 +1696,7 @@ fn setIndex(d: *@import("../object.zig").SetData, key: Value) ?usize {
 }
 
 fn setAddInternal(realm: *Realm, inst: *@import("../object.zig").JSObject, value: Value) !void {
-    const d = inst.set_data orelse return error.NativeThrew;
+    const d = inst.getSetData() orelse return error.NativeThrew;
     // §24.2.4.x — set composition methods (union, intersection,
     // difference, symmetricDifference) normalise `-0𝔽` to `+0𝔽`
     // on the inserted value per spec step "If nextValue is -0𝔽,
@@ -1712,7 +1712,7 @@ fn setAddInternal(realm: *Realm, inst: *@import("../object.zig").JSObject, value
 
 fn setAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Set.prototype.add called on non-Set");
-    const d = inst.set_data orelse return throwTypeError(realm, "Set.prototype.add called on non-Set");
+    const d = inst.getSetData() orelse return throwTypeError(realm, "Set.prototype.add called on non-Set");
     if (d.is_weak) return throwTypeError(realm, "Set.prototype.add called on non-Set");
     setAddInternal(realm, inst, canonicalizeKey(argOr(args, 0, Value.undefined_))) catch return error.OutOfMemory;
     return this_value;
@@ -1971,7 +1971,7 @@ fn allocateEmptySet(realm: *Realm) NativeError!*JSObject {
     if (realm.intrinsics.set_prototype) |sp| obj.prototype = sp;
     const data = realm.allocator.create(ObjMod.SetData) catch return error.OutOfMemory;
     data.* = .{};
-    obj.set_data = data;
+    obj.setSetData(realm.allocator, data) catch return error.OutOfMemory;
     return obj;
 }
 
@@ -2069,7 +2069,7 @@ fn setDifference(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         if (e.deleted) continue;
         setAddInternal(realm, out, e.value) catch return error.OutOfMemory;
     }
-    const out_d = out.set_data.?;
+    const out_d = out.getSetData().?;
     if (this_size <= sl.size) {
         // Iterate `this`; remove from result anything `other.has`.
         i = 0;
@@ -2129,7 +2129,7 @@ fn setSymmetricDifference(realm: *Realm, this_value: Value, args: []const Value)
         }
     }
 
-    const out_d = out.set_data.?;
+    const out_d = out.getSetData().?;
     const Ctx = struct {
         realm: *Realm,
         this_d: *ObjMod.SetData,
