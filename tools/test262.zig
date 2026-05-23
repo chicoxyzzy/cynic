@@ -1915,7 +1915,7 @@ fn classifyAndRun(
     }
 
     var entry_chunk_async = false;
-    const run_result: cynic.runtime.interpreter.RunResult = blk: {
+    const run_result: cynic.runtime.lantern.RunResult = blk: {
         if (is_module) {
             const chunk_ptr = realm.allocator.create(@import("cynic").bytecode.chunk.Chunk) catch return error.OutOfMemory;
             chunk_ptr.* = cynic.bytecode.compiler.compileModuleAsChunk(
@@ -1988,7 +1988,7 @@ fn classifyAndRun(
     // $DONE(e))`); standalone microtask throws are discarded
     // (real hosts dispatch HostPromiseRejectionTracker, which
     // Cynic doesn't model).
-    cynic.runtime.interpreter.drainMicrotasks(arena, &realm) catch {
+    cynic.runtime.lantern.drainMicrotasks(arena, &realm) catch {
         test_threw = true;
     };
 
