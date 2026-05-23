@@ -1502,6 +1502,14 @@ pub fn runFrames(
                 // the generator variants and rewire the proto chain.
                 if (tmpl.is_generator) {
                     if (fn_obj.prototype) |proto| {
+                        // The shadow shape only describes ADDITIONS; a
+                        // removal can't be encoded as a transition, so
+                        // demote to dictionary mode before mutating the
+                        // bag. Without this, `verifyShapeInvariant`
+                        // panics under GC stress because the shape
+                        // still claims `constructor` is at its slot
+                        // while `properties` no longer has the entry.
+                        proto.demoteFromShape();
                         _ = proto.properties.swapRemove("constructor");
                         _ = proto.property_flags.swapRemove("constructor");
                         proto.prototype = if (tmpl.is_async)
@@ -4989,7 +4997,9 @@ pub fn runFrames(
                         // Drop the placeholder so `'X' in ns`
                         // still resolves through the redirect
                         // walk without an empty data slot getting
-                        // in the way.
+                        // in the way. Demote first: the shadow
+                        // shape can't encode a removal.
+                        mr.exports.demoteFromShape();
                         _ = mr.exports.properties.swapRemove(exp_s.flatBytes());
                     }
                 }
@@ -7972,6 +7982,9 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
         if (!obj.properties.contains(key)) return .{ .ok = true };
         const flags = obj.flagsFor(key);
         if (!flags.configurable) return .{ .throw_typeerror = "Cannot delete non-configurable property" };
+        // Demote: the shadow shape can't encode a removal — leaving
+        // it would trip `verifyShapeInvariant` under GC stress.
+        obj.demoteFromShape();
         _ = obj.properties.swapRemove(key);
         _ = obj.property_flags.swapRemove(key);
         if (!obj.accessors.contains(key)) obj.forgetKey(key);

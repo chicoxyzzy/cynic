@@ -340,6 +340,8 @@ pub fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, targe
             // floor — delete it from the bag. The packed
             // `elements` slot at this index is already a hole
             // (`setWithFlags` calls `holeIndexed` when demoting).
+            // Demote: the shadow shape can't encode a removal.
+            obj.demoteFromShape();
             _ = obj.properties.swapRemove(key);
             _ = obj.accessors.swapRemove(key);
             _ = obj.property_flags.swapRemove(key);
@@ -372,6 +374,9 @@ pub fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, targe
                 return .{ .final_length = idx + 1, .blocked = true };
             }
         }
+        // Demote: the shadow shape can't encode a removal — see the
+        // matching site above.
+        obj.demoteFromShape();
         _ = obj.properties.swapRemove(key);
         _ = obj.property_flags.swapRemove(key);
     }

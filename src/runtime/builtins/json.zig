@@ -1152,6 +1152,10 @@ fn jsonCreateDataProperty(realm: *Realm, obj: *JSObject, key: []const u8, value:
     if (!cur_flags.configurable) return false;
     // Clear any demoted bag entry so the replacement lands clean
     // (mirrors `createDataPropertyOrThrowGeneric` in builtins/array.zig).
+    // Demote the shadow shape first — it can't encode a removal,
+    // and a subsequent write would otherwise leave shape and
+    // properties out of sync.
+    obj.demoteFromShape();
     _ = obj.properties.swapRemove(key);
     _ = obj.property_flags.swapRemove(key);
     _ = obj.accessors.swapRemove(key);

@@ -387,6 +387,11 @@ pub fn buildClass(
             // `make_function` path for non-class generator function
             // expressions). `allocateFunction` allocated `gp` with a
             // default ctor + null [[Prototype]] — fix both here.
+            // Demote first: the shadow shape can't encode a removal,
+            // so the shape would otherwise still claim `constructor`
+            // is at its slot while `properties` no longer has it
+            // (`verifyShapeInvariant` panics under GC stress).
+            gp.demoteFromShape();
             _ = gp.properties.swapRemove("constructor");
             _ = gp.property_flags.swapRemove("constructor");
             const interp_mod = @import("lantern/interpreter.zig");
@@ -564,7 +569,9 @@ pub fn buildClass(
             // %GeneratorPrototype% / %AsyncGeneratorPrototype% and
             // which has no own `constructor`. Mirror the instance
             // gen-method path so `C.gen()` wrappers find `.next` via
-            // the inherited chain.
+            // the inherited chain. Demote first (shadow shape can't
+            // encode removals — see the matching site above).
+            gp.demoteFromShape();
             _ = gp.properties.swapRemove("constructor");
             _ = gp.property_flags.swapRemove("constructor");
             const interp_mod = @import("lantern/interpreter.zig");

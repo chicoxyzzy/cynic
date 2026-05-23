@@ -463,6 +463,11 @@ pub fn stringIteratorMethod(realm: *Realm, this_value: Value, args: []const Valu
     // (§22.1.5.2.1 step 1, `next-missing-internal-slots.js`).
     if (heap_mod.valueAsPlainObject(v)) |obj| {
         if (try ensureStringIteratorPrototype(realm)) |sip| obj.prototype = sip;
+        // Demote: the shadow shape can't encode a removal — leaving
+        // the shape claiming these keys at their slots while
+        // `properties` no longer has them trips
+        // `verifyShapeInvariant` under GC stress.
+        obj.demoteFromShape();
         _ = obj.properties.swapRemove("next");
         _ = obj.property_flags.swapRemove("next");
         _ = obj.properties.swapRemove("@@iterator");

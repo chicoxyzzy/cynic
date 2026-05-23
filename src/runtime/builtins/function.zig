@@ -72,6 +72,10 @@ pub fn installPrototypeMethods(realm: *Realm) !void {
     // mistakenly leaves a `name: "Function"` slot; replace it.
     // `length` is installed first so the §17 property-order
     // convention (length before name) holds.
+    // Demote before the removal — the shadow shape can't encode
+    // a removal, so leaving it trips `verifyShapeInvariant` under
+    // GC stress.
+    fn_proto.demoteFromShape();
     _ = fn_proto.properties.swapRemove("name");
     _ = fn_proto.property_flags.swapRemove("name");
     const builtin_fn_flags: @import("../object.zig").PropertyFlags = .{

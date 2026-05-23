@@ -3225,6 +3225,37 @@ test "GC: deep object property writes survive alternating GC pressure" {
     , 11325);
 }
 
+test "GC: generator wrapper iteration survives alternating GC pressure" {
+    // The 5-yield generator survives the looser gc_threshold=1
+    // test (above), but used to abort under the alternating-
+    // cycle CLI behaviour because `make_function` for a generator
+    // function removed the inherited `constructor` from the
+    // function's `.prototype` bag without demoting the shadow
+    // shape — `verifyShapeInvariant` then panicked on the next
+    // mark. Fix sites: `lantern/interpreter.zig` (make_function
+    // generator-prototype rewire), `class.zig` (instance + static
+    // class generator methods), `builtins/iterator.zig`
+    // (Iterator.prototype constructor / @@toStringTag).
+    try expectScriptIntUnderAlternatingGcPressure(
+        \\function* g() { for (let i = 0; i < 5; i++) yield i * 100; }
+        \\let s = 0; for (const v of g()) s += v;
+        \\s;
+    , 1000);
+}
+
+test "GC: Iterator.prototype.map chain survives alternating GC pressure" {
+    // `.map().filter().toArray()` pipeline — every helper allocates
+    // an IteratorHelperState + a fresh wrapper. The chain shares
+    // its prototype graph with the generator path above; same
+    // shadow-shape removal hazard surfaces here under alternating
+    // cycles.
+    try expectScriptIntUnderAlternatingGcPressure(
+        \\let s = 0;
+        \\Iterator.from([1, 2, 3, 4, 5]).map(x => x * 2).filter(x => x > 4).toArray().forEach(v => s += v);
+        \\s;
+    , 24);
+}
+
 test "GC: Promise constructor executor survives gc_threshold=1" {
     // `new Promise(executor)` runs the executor synchronously
     // with the bound capability state as `this`. The cap record
@@ -5430,4 +5461,154 @@ test "call IC: callable Proxy as method stays on slow path" {
         \\for (let i = 0; i < 3; i++) acc += o.f();
         \\acc;
     , 42 * 3);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Prototype-load IC correctness — coverage for `lda_property` when
+// the property is inherited from the prototype chain (the dominant
+// real-world case: built-in methods, class instance methods, user
+// hierarchies). The IC must catch invalidation when:
+//   1. `Object.setPrototypeOf` swaps the chain
+//   2. `Reflect.setPrototypeOf` swaps the chain
+//   3. A prototype's property is reassigned (same shape, new slot value)
+//   4. A prototype's property is deleted (shape change on the proto)
+//   5. A prototype's property is redefined data→accessor (shape change)
+//   6. The chain has depth > 1
+// ─────────────────────────────────────────────────────────────────────
+
+test "proto-load IC: built-in Array.prototype.push hot loop" {
+    // Array.prototype.push is the canonical inherited method. Slow
+    // path walks Array.prototype every call today; with a working
+    // proto-load IC, the cell hits on the chain shape after the
+    // first miss + refill. Result asserts cumulative correctness.
+    try expectScriptIntWithBuiltins(
+        \\const a = [];
+        \\for (let i = 1; i <= 100; i++) a.push(i);
+        \\a.length;
+    , 100);
+}
+
+test "proto-load IC: class instance method on hot loop" {
+    // Class methods land on `C.prototype.m`, so every `c.m()` is a
+    // prototype-load. Without the proto IC, the slow path walks
+    // C.prototype every call.
+    try expectScriptIntWithBuiltins(
+        \\class C { add(x) { return x + 1; } }
+        \\const c = new C();
+        \\let acc = 0;
+        \\for (let i = 0; i < 100; i++) acc = c.add(acc);
+        \\acc;
+    , 100);
+}
+
+test "proto-load IC: setPrototypeOf invalidates the cached proto" {
+    // First call caches `obj.greeting` from proto1. After
+    // Object.setPrototypeOf swaps to proto2 (different greeting),
+    // the next read MUST observe proto2's value — not the cached
+    // proto1 slot.
+    try expectScriptStringWithBuiltins(
+        \\const proto1 = { greeting: "first" };
+        \\const proto2 = { greeting: "second" };
+        \\const obj = Object.create(proto1);
+        \\// Warm the IC against proto1.
+        \\for (let i = 0; i < 5; i++) obj.greeting;
+        \\Object.setPrototypeOf(obj, proto2);
+        \\obj.greeting;
+    , "second");
+}
+
+test "proto-load IC: Reflect.setPrototypeOf invalidates" {
+    // Same shape as above but via Reflect.setPrototypeOf — must
+    // bump the same invalidation counter.
+    try expectScriptStringWithBuiltins(
+        \\const p1 = { tag: "alpha" };
+        \\const p2 = { tag: "beta" };
+        \\const o = Object.create(p1);
+        \\for (let i = 0; i < 5; i++) o.tag;
+        \\Reflect.setPrototypeOf(o, p2);
+        \\o.tag;
+    , "beta");
+}
+
+test "proto-load IC: reassigning the prototype's property serves the new value" {
+    // Cell caches `obj.x` inherited from proto. Mutating
+    // `proto.x = newValue` keeps proto's shape but updates the
+    // slot value (shadowSet path). Next obj.x must see newValue.
+    try expectScriptIntWithBuiltins(
+        \\const proto = { x: 10 };
+        \\const obj = Object.create(proto);
+        \\let acc = 0;
+        \\for (let i = 0; i < 3; i++) acc += obj.x;
+        \\proto.x = 100;
+        \\acc + obj.x;
+    , 10 * 3 + 100);
+}
+
+test "proto-load IC: deleting the prototype's property invalidates" {
+    // After `delete proto.x`, proto's shape changes (demote /
+    // dictionary) so the proto-load IC must miss — next obj.x is
+    // undefined.
+    try expectScriptStringWithBuiltins(
+        \\const proto = { x: "live" };
+        \\const obj = Object.create(proto);
+        \\for (let i = 0; i < 5; i++) obj.x;
+        \\delete proto.x;
+        \\typeof obj.x;
+    , "undefined");
+}
+
+test "proto-load IC: data→accessor conversion on proto fires the getter" {
+    // Cache `obj.x` as inherited data. Object.defineProperty
+    // converts proto.x to an accessor; the IC must miss (proto's
+    // shape demoted on accessor install). Next obj.x runs getter.
+    try expectScriptIntWithBuiltins(
+        \\const proto = { x: 1 };
+        \\const obj = Object.create(proto);
+        \\for (let i = 0; i < 5; i++) obj.x;
+        \\Object.defineProperty(proto, "x", { get() { return 999; } });
+        \\obj.x;
+    , 999);
+}
+
+test "proto-load IC: chain depth 2 — inherited from grandparent" {
+    // obj → mid → grand, property only on grand. The IC must
+    // either cache the resolved (grand-side) slot or miss safely;
+    // either way the read returns grand's value.
+    try expectScriptIntWithBuiltins(
+        \\const grand = { value: 77 };
+        \\const mid = Object.create(grand);
+        \\const obj = Object.create(mid);
+        \\let acc = 0;
+        \\for (let i = 0; i < 20; i++) acc += obj.value;
+        \\acc;
+    , 77 * 20);
+}
+
+test "proto-load IC: setPrototypeOf to chain lacking the key reads undefined" {
+    // Warm the cache. Then setPrototypeOf to an object that
+    // doesn't have the key. Reading it must return undefined,
+    // not the stale cached value.
+    try expectScriptStringWithBuiltins(
+        \\const p1 = { x: "yes" };
+        \\const p2 = {};
+        \\const o = Object.create(p1);
+        \\for (let i = 0; i < 5; i++) o.x;
+        \\Object.setPrototypeOf(o, p2);
+        \\typeof o.x;
+    , "undefined");
+}
+
+test "proto-load IC: polymorphic receivers sharing one prototype" {
+    // Two different objects, both inheriting from the same proto,
+    // pass through the same call site. The proto-load IC should
+    // hit on both (chain identity preserved) and return the right
+    // proto-side value each time.
+    try expectScriptIntWithBuiltins(
+        \\const proto = { fn() { return 5; } };
+        \\const a = Object.create(proto);
+        \\const b = Object.create(proto);
+        \\let acc = 0;
+        \\for (let i = 0; i < 50; i++) { acc += a.fn(); acc += b.fn(); }
+        \\acc;
+    , 5 * 100);
 }

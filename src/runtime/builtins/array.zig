@@ -2450,6 +2450,8 @@ fn createDataPropertyOrThrowGeneric(realm: *Realm, obj: *JSObject, key_str: *JSS
         // demoted indexed-slot entry from `properties` so the
         // subsequent `setWithFlags(default)` lands in `elements`
         // again rather than leaving the bag-promoted descriptor.
+        // Demote first — the shadow shape can't encode a removal.
+        cur.demoteFromShape();
         _ = cur.properties.swapRemove(key);
         _ = cur.property_flags.swapRemove(key);
     }

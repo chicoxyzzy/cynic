@@ -887,6 +887,9 @@ fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) 
     // §10.1.10.1 — non-configurable own property → return false
     // (no mutation). Includes frozen / sealed objects.
     if (target.flagsFor(key_slice).configurable == false and (target.properties.contains(key_slice) or target.accessors.contains(key_slice))) return Value.false_;
+    // Demote: the shadow shape can't encode a removal — leaving it
+    // would trip `verifyShapeInvariant` under GC stress.
+    target.demoteFromShape();
     _ = target.properties.swapRemove(key_slice);
     _ = target.accessors.swapRemove(key_slice);
     _ = target.property_flags.swapRemove(key_slice);
