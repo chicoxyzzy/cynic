@@ -725,23 +725,43 @@ matching the JIT engines at full speed is a separate track (see
    once a real workload surfaces a polymorphic site that's
    currently slow.
 
-2. **Packed `JSArray` heap kind + leaner object allocation** —
-   targets `object_alloc`. A unified array heap kind with packed
-   indexed storage as the base case (sparse fallback only when
-   genuinely sparse) lets the loop / arithmetic opcodes skip the
-   per-access `is_array_exotic` branch and index
-   `elements.items.ptr[i]` directly. Some of this exists already
-   (`elements: ArrayListUnmanaged(Value)` + the `is_array_exotic`
-   flag). The shape work above also thins ordinary-object
-   allocation — shape-sharing objects no longer each carry a full
-   hashmap.
+2. **Leaner `JSObject` allocation — shipped.**
+   `@sizeOf(JSObject)` dropped 960 → 512 bytes (-47 %, nearly
+   halved) by moving every cold field (`accessors`, `private_*`,
+   `namespace_*`, `map_data`, `set_data`, `promise_*`,
+   `weak_ref_target`, `finalization_cells`, `array_buffer`,
+   `typed_view`, `data_view`) behind a lazy
+   `?*JSObjectExtension` pointer. Plain `{a, b}` literals now
+   pay a single null pointer instead of the multi-kilobyte cold
+   state. `object_alloc` measured at **-25 % per allocation**
+   (232 → 175 ns), a direct consequence of less memset / write
+   traffic per header.
 
-3. **Interpreter-core tuning for `arith_loop`** — Cynic is
+   Remaining: **brand-bool bit-packing.** ~10 single-byte bools
+   on `JSObject` (`has_error_data`, `is_raw_json`,
+   `is_module_namespace`, `is_weak_ref`, `is_arguments_exotic`,
+   `proxy_revoked`, `proxy_callable`, `promise_already_resolved`,
+   `has_array_buffer_data`, `is_sparse`) could pack into a
+   single `u32` flags word. Saves ~10-16 bytes per `JSObject`
+   after alignment — marginal; defer until measurement shows
+   it matters.
+
+3. **Packed `JSArray` element-kinds.** V8 / JSC distinguish
+   `PackedSmiElements` (i32-flat), `PackedDoubleElements`
+   (f64-flat), and `PackedElements` (Value-flat). Cynic stays on
+   `PackedElements` everywhere (`elements: ArrayList(Value)`).
+   The interpreter-tier payoff is small without a JIT — the
+   kind-check dispatch overhead eats most of the per-element
+   memory savings, and Hermes (the interpreter-tier engine Cynic
+   most resembles) deliberately doesn't do this. Worth doing
+   only when a baseline JIT lands and can speculate on the kind.
+
+4. **Interpreter-core tuning for `arith_loop`** — Cynic is
    already within ~10 % of QuickJS-NG here; the remaining
    distance is to JSC's hand-written-assembly LLInt. Closing that
    without a JIT is deep, diminishing-returns micro-tuning of the
-   dispatch core — lowest priority of the three, and the point
-   where a baseline JIT becomes the better investment.
+   dispatch core — lowest priority, and the point where a
+   baseline JIT becomes the better investment.
 
 **Planned — GC latency.**
 
