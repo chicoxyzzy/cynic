@@ -50,8 +50,9 @@ pub const JSBigInt = struct {
     /// limb (most significant) is non-zero. An empty slice is the
     /// canonical zero. Heap-owned; freed by `deinit`.
     limbs: []Limb = &.{},
-    /// Mark-sweep bit, written by `Heap.markValue`.
-    marked: bool = false,
+    /// Mark color. `bi.mark_color == heap.live_color` means "live
+    /// this cycle". See `JSObject.mark_color` for the protocol.
+    mark_color: u1 = 0,
     /// Generational-GC age. Fresh allocations start `.young`; a
     /// young bigint surviving a `collectYoung` is promoted to
     /// `.mature` and relinked into the mature list.

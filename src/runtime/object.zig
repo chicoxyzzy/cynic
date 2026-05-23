@@ -489,9 +489,12 @@ pub const JSObject = struct {
     /// resolves member access through `[[Get]]` (§10.1.8) which
     /// walks this chain when the own property is absent.
     prototype: ?*JSObject = null,
-    /// Mark-sweep bit, written by `Heap.markValue` and cleared
-    /// after each sweep.
-    marked: bool = false,
+    /// Mark color. `obj.mark_color == heap.live_color` means "live
+    /// this cycle". The mark phase sets it to `heap.live_color`; the
+    /// sweep keeps survivors and frees mismatches. No explicit clear
+    /// — the cycle-start `live_color` flip ages every entry to the
+    /// "unmarked" colour automatically.
+    mark_color: u1 = 0,
     /// Generational-GC age. Fresh allocations start `.young`; a
     /// young object surviving a `collectYoung` is promoted to
     /// `.mature` and relinked into the mature list (the object

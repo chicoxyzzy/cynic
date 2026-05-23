@@ -415,6 +415,24 @@ pub const Heap = struct {
     /// Total `collect()` cycles run on this heap. Independent of
     /// `gc_stats_cycle` (which only bumps when `gc_stats` is on).
     gc_cycles_total: u32 = 0,
+    /// Current mark color (V8 / JSC / SM trick). An object is "live
+    /// this cycle" iff `obj.mark_color == heap.live_color`. The mark
+    /// phase sets `obj.mark_color = live_color` on every reachable
+    /// object; the sweep keeps `mark_color == live_color` and frees
+    /// everything else. Flipped exactly once per cycle (in
+    /// `beginMajorCycle` / `beginMinorCycle`), so survivors of the
+    /// previous cycle automatically look "unmarked" until the trace
+    /// re-marks them — replacing the per-cycle linear walk that
+    /// used to clear `marked = false` on every mature object. Fresh
+    /// allocations seed `mark_color` from `live_color` so they look
+    /// "alive" until the next flip.
+    live_color: u1 = 0,
+    /// Set by `beginMajorCycle` / `beginMinorCycle`; cleared at the
+    /// end of `collectFull` / `collectYoung`. Lets the realm-driven
+    /// path (which calls the begin-cycle helpers before `markRoots`)
+    /// skip a redundant arm-cycle inside collectFull / collectYoung,
+    /// and lets a direct unit-test caller arm the cycle implicitly.
+    cycle_started: bool = false,
     /// Accumulated GC pause time in nanoseconds across every
     /// `collect()` cycle. Average pause = `gc_time_ns_total /
     /// gc_cycles_total`.
@@ -564,6 +582,7 @@ pub const Heap = struct {
     pub fn allocateBigInt(self: *Heap, value: i128) !*JSBigInt {
         const b = try JSBigInt.init(self.allocator, value);
         errdefer b.deinit(self.allocator);
+        b.mark_color = self.live_color;
         try self.bigints_young.append(self.allocator, b);
         self.allocs_since_gc +|= 1;
         return b;
@@ -583,6 +602,7 @@ pub const Heap = struct {
             return err;
         };
         errdefer b.deinit(self.allocator);
+        b.mark_color = self.live_color;
         try self.bigints_young.append(self.allocator, b);
         self.allocs_since_gc +|= 1;
         return b;
@@ -601,6 +621,7 @@ pub const Heap = struct {
         const owned = try self.allocator.dupe(u8, slice);
         const s = try JSSymbol.init(self.allocator, description, owned);
         errdefer s.deinit(self.allocator);
+        s.mark_color = self.live_color;
         try self.symbols_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
@@ -632,6 +653,7 @@ pub const Heap = struct {
         const owned = try self.allocator.dupe(u8, prop_key);
         const s = try JSSymbol.init(self.allocator, description, owned);
         errdefer s.deinit(self.allocator);
+        s.mark_color = self.live_color;
         try self.symbols_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
@@ -646,6 +668,7 @@ pub const Heap = struct {
     ) !*JSGenerator {
         const g = try JSGenerator.init(self.allocator, chunk, register_count, captured_env, this_value);
         errdefer g.deinit(self.allocator);
+        g.mark_color = self.live_color;
         try self.generators_young.append(self.allocator, g);
         self.allocs_since_gc +|= 1;
         return g;
@@ -655,6 +678,7 @@ pub const Heap = struct {
         const o = try JSObject.init(self.allocator);
         errdefer o.deinit(self.allocator);
         o.heap = self;
+        o.mark_color = self.live_color;
         try self.objects_young.append(self.allocator, o);
         self.allocs_since_gc +|= 1;
         return o;
@@ -665,6 +689,7 @@ pub const Heap = struct {
     pub fn allocateEnvironment(self: *Heap, parent: ?*Environment, slot_count: u8) !*Environment {
         const env = try Environment.init(self.allocator, parent, slot_count);
         errdefer env.deinit(self.allocator);
+        env.mark_color = self.live_color;
         try self.environments_young.append(self.allocator, env);
         self.allocs_since_gc +|= 1;
         return env;
@@ -697,6 +722,7 @@ pub const Heap = struct {
         // ordinary path and `Object.getOwnPropertyDescriptor`
         // sees the right flags.
         try self.installFunctionLengthAndName(f, param_count, name);
+        f.mark_color = self.live_color;
         try self.functions_young.append(self.allocator, f);
         self.allocs_since_gc +|= 1;
         if (!is_arrow) {
@@ -733,6 +759,7 @@ pub const Heap = struct {
         // before the prototype exists, handled by that pass.
         if (self.function_prototype) |fp| f.proto = fp;
         try self.installFunctionLengthAndName(f, param_count, name);
+        f.mark_color = self.live_color;
         try self.functions_young.append(self.allocator, f);
         self.allocs_since_gc +|= 1;
         return f;
@@ -780,6 +807,7 @@ pub const Heap = struct {
         try self.charge(src.len + @sizeOf(JSString));
         const s = try JSString.init(self.allocator, self.bytes_allocator, src);
         errdefer s.deinit(self.allocator, self.bytes_allocator);
+        s.mark_color = self.live_color;
         try self.strings_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
@@ -793,6 +821,7 @@ pub const Heap = struct {
         try self.charge(a.byte_len + b.byte_len + @sizeOf(JSString));
         const s = try JSString.concat(self.allocator, self.bytes_allocator, a, b);
         errdefer s.deinit(self.allocator, self.bytes_allocator);
+        s.mark_color = self.live_color;
         try self.strings_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
@@ -900,6 +929,7 @@ pub const Heap = struct {
                 .heap = self,
             } },
         };
+        s.mark_color = self.live_color;
         try self.strings_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
@@ -915,6 +945,7 @@ pub const Heap = struct {
         try self.charge(a.len + b.len + @sizeOf(JSString));
         const s = try JSString.concatBytes(self.allocator, self.bytes_allocator, a, b);
         errdefer s.deinit(self.allocator, self.bytes_allocator);
+        s.mark_color = self.live_color;
         try self.strings_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
@@ -932,8 +963,8 @@ pub const Heap = struct {
     /// unit test below. It is in place so a later stage that does
     /// create ropes has a correct mark walk from day one.
     pub fn markString(self: *Heap, s: *JSString) void {
-        if (s.marked) return;
-        s.marked = true;
+        if (s.mark_color == self.live_color) return;
+        s.mark_color = self.live_color;
         switch (s.payload) {
             .flat => {},
             .cons => |c| {
@@ -952,12 +983,12 @@ pub const Heap = struct {
             const s: *JSString = @ptrCast(@alignCast(v.asString()));
             self.markString(s);
         } else if (valueAsSymbol(v)) |sym| {
-            sym.marked = true;
+            sym.mark_color = self.live_color;
         } else if (valueAsBigInt(v)) |bi| {
-            bi.marked = true;
+            bi.mark_color = self.live_color;
         } else if (valueAsFunction(v)) |f| {
-            if (!f.marked) {
-                f.marked = true;
+            if (f.mark_color != self.live_color) {
+                f.mark_color = self.live_color;
                 if (f.captured_env) |env| self.markEnvironment(env);
                 var it = f.properties.iterator();
                 while (it.next()) |entry| self.markValue(entry.value_ptr.*);
@@ -985,7 +1016,7 @@ pub const Heap = struct {
                 // Heap-allocated JSStrings backing computed property
                 // keys (`fn[expr] = v`). The property map holds only
                 // the `bytes` slice — without this the key dangles.
-                for (f.key_anchors.items) |s| s.marked = true;
+                for (f.key_anchors.items) |s| s.mark_color = self.live_color;
                 if (f.prototype) |p| self.markValue(taggedObject(p));
                 // §10.2.3 [[HomeObject]] — a method's home object
                 // (and, for the typed-slot split Cynic uses, the
@@ -1017,8 +1048,8 @@ pub const Heap = struct {
                 // pinned items entirely.
             }
         } else if (valueAsPlainObject(v)) |o| {
-            if (!o.marked) {
-                o.marked = true;
+            if (o.mark_color != self.live_color) {
+                o.mark_color = self.live_color;
                 // Debug-only: every reachable shaped object's shadow
                 // shape must agree with its `properties` dictionary.
                 // Catches any direct property-bag mutation that
@@ -1179,7 +1210,7 @@ pub const Heap = struct {
                 // anchor the JSString gets swept and the key
                 // dangles. Computed `obj[expr] = v` writes go
                 // through `setComputedOwned` which pushes here.
-                for (o.key_anchors.items) |s| s.marked = true;
+                for (o.key_anchors.items) |s| s.mark_color = self.live_color;
                 // Pending Promise reactions / waiters — settlement
                 // microtasks read these lists. A reaction's
                 // `result_promise` is the chained sub-Promise that
@@ -1199,8 +1230,8 @@ pub const Heap = struct {
                 // §22.2.4 `[[OriginalSource]]` / `[[OriginalFlags]]`
                 // for RegExp instances. Strings that the regular
                 // property walk wouldn't reach.
-                if (o.regexp_source) |s| s.marked = true;
-                if (o.regexp_flags) |s| s.marked = true;
+                if (o.regexp_source) |s| s.mark_color = self.live_color;
+                if (o.regexp_flags) |s| s.mark_color = self.live_color;
                 if (o.instance_field_inits) |inits| {
                     for (inits) |fi| {
                         if (fi.init_fn) |fnp| self.markValue(taggedFunction(fnp));
@@ -1242,10 +1273,10 @@ pub const Heap = struct {
     /// it is trivially "live" (it isn't on the GC sweep list as a
     /// reclaimable weak target). Returns `true` for anything that
     /// is not a swept-away heap object/function/symbol.
-    fn isWeakReferentLive(v: Value) bool {
-        if (valueAsPlainObject(v)) |o| return o.marked;
-        if (valueAsFunction(v)) |f| return f.marked;
-        if (valueAsSymbol(v)) |s| return s.marked;
+    fn isWeakReferentLive(self: *const Heap, v: Value) bool {
+        if (valueAsPlainObject(v)) |o| return o.mark_color == self.live_color;
+        if (valueAsFunction(v)) |f| return f.mark_color == self.live_color;
+        if (valueAsSymbol(v)) |s| return s.mark_color == self.live_color;
         // Strings, BigInts, and primitives: not valid weak
         // referents per §6.2.10, treated as trivially live.
         return true;
@@ -1276,12 +1307,12 @@ pub const Heap = struct {
                 if (!md.is_weak) continue;
                 for (md.entries.items) |entry| {
                     if (entry.deleted) continue;
-                    if (!isWeakReferentLive(entry.key)) continue;
+                    if (!self.isWeakReferentLive(entry.key)) continue;
                     // Key is live — the value must be too. Mark it
                     // and note whether that introduced a new mark
                     // (a freshly-marked object flips a bit, which a
                     // later WeakMap key check can observe).
-                    if (!isWeakReferentLive(entry.value)) {
+                    if (!self.isWeakReferentLive(entry.value)) {
                         self.markValue(entry.value);
                         changed = true;
                     }
@@ -1315,7 +1346,7 @@ pub const Heap = struct {
         // §26.1 WeakRef.
         for (self.weak_refs_seen.items) |wr| {
             if (!wr.is_weak_ref) continue;
-            if (!isWeakReferentLive(wr.weak_ref_target)) {
+            if (!self.isWeakReferentLive(wr.weak_ref_target)) {
                 wr.weak_ref_target = Value.undefined_;
             }
         }
@@ -1325,7 +1356,7 @@ pub const Heap = struct {
                 if (md.is_weak) {
                     for (md.entries.items) |*entry| {
                         if (entry.deleted) continue;
-                        if (!isWeakReferentLive(entry.key)) {
+                        if (!self.isWeakReferentLive(entry.key)) {
                             entry.deleted = true;
                         }
                     }
@@ -1335,7 +1366,7 @@ pub const Heap = struct {
                 if (sd.is_weak) {
                     for (sd.entries.items) |*entry| {
                         if (entry.deleted) continue;
-                        if (!isWeakReferentLive(entry.value)) {
+                        if (!self.isWeakReferentLive(entry.value)) {
                             entry.deleted = true;
                         }
                     }
@@ -1348,7 +1379,7 @@ pub const Heap = struct {
             const fc = reg.finalization_cells orelse continue;
             for (fc.cells.items) |*cell| {
                 if (cell.deleted) continue;
-                if (!isWeakReferentLive(cell.target)) {
+                if (!self.isWeakReferentLive(cell.target)) {
                     if (self.finalization_enqueue_fn) |f| {
                         if (self.finalization_ctx) |c| {
                             f(c, fc.cleanup_callback, cell.held_value);
@@ -1428,8 +1459,8 @@ pub const Heap = struct {
     /// Mark `env` and recursively walk its parent chain + slots.
     /// Idempotent — a repeated mark short-circuits on the bit.
     pub fn markEnvironment(self: *Heap, env: *Environment) void {
-        if (env.marked) return;
-        env.marked = true;
+        if (env.mark_color == self.live_color) return;
+        env.mark_color = self.live_color;
         for (env.slots) |s| self.markValue(s);
         if (env.parent) |p| self.markEnvironment(p);
     }
@@ -1440,8 +1471,8 @@ pub const Heap = struct {
     /// pointer is borrowed from the function template; not owned
     /// by the heap, so not marked here.
     pub fn markGenerator(self: *Heap, gen: *JSGenerator) void {
-        if (gen.marked) return;
-        gen.marked = true;
+        if (gen.mark_color == self.live_color) return;
+        gen.mark_color = self.live_color;
         for (gen.registers) |s| self.markValue(s);
         self.markValue(gen.accumulator);
         self.markValue(gen.this_value);
@@ -1498,7 +1529,7 @@ pub const Heap = struct {
     /// just the struct allocator). `list` is `*ArrayListUnmanaged(*T)`;
     /// passed as `anytype` because Zig has no way to spell a list
     /// generic over the element type at a non-generic call site.
-    fn sweepList(list: anytype, deinit_args: anytype) void {
+    fn sweepList(list: anytype, live_color: u1, deinit_args: anytype) void {
         var i: usize = list.items.len;
         while (i > 0) {
             i -= 1;
@@ -1510,13 +1541,14 @@ pub const Heap = struct {
                 // pinned string never enters the remembered set
                 // (strings aren't barriered containers), so no bit
                 // to clear here.
-            } else if (entry.marked) {
-                entry.marked = false;
-                // A full trace already visited this survivor, so
-                // any remembered-set membership is now stale. Clear
-                // the bit (the set itself is emptied by the caller)
-                // so the next young cycle can re-record a genuine
-                // old→young store into it.
+            } else if (entry.mark_color == live_color) {
+                // Survivor — leave `mark_color` as-is; the next
+                // cycle's `live_color` flip will age it back to
+                // "unmarked". A full trace already visited this
+                // object, so any remembered-set membership is now
+                // stale. Clear the bit (the set itself is emptied
+                // by the caller) so the next young cycle can re-
+                // record a genuine old→young store into it.
                 if (@hasField(EntryT, "in_remembered_set")) {
                     entry.in_remembered_set = false;
                 }
@@ -1527,23 +1559,36 @@ pub const Heap = struct {
         }
     }
 
-    /// Arm weak-aware marking for a full GC cycle. Sets
-    /// `weak_aware_mark` so `markValue` treats the weak slots of a
-    /// `WeakRef` / `WeakMap` / `WeakSet` / `FinalizationRegistry` as
-    /// weak edges, and resets the per-cycle weak-holder worklists so
-    /// they only collect holders reached by THIS trace.
-    ///
-    /// MUST run before any `markValue` for the cycle. `collectFull`
-    /// calls it; `Realm.collectGarbage` also marks the realm roots
-    /// *before* it reaches `collectFull`, so the realm path calls
-    /// this first — `collectFull`'s own call is then idempotent.
-    /// `collectYoung` never calls it: a minor cycle keeps the old
-    /// strong-marking of weak slots.
-    pub fn beginWeakAwareCycle(self: *Heap) void {
+    /// Arm a major (full) GC cycle. Flips `live_color` so every
+    /// existing object's `mark_color` reads as "unmarked this
+    /// cycle", sets `cycle_started` so `collectFull` skips its
+    /// idempotent self-arm, sets `weak_aware_mark` + clears the
+    /// per-cycle weak-holder worklists so `markValue` treats
+    /// `WeakRef` / `WeakMap` / `WeakSet` / `FinalizationRegistry`
+    /// slots as weak edges. MUST run before any `markValue` for the
+    /// cycle. Two callers: `Realm.collectGarbage` (which calls it
+    /// BEFORE `markRoots` so the flip precedes any mark), and
+    /// `collectFull` itself for the unit-test path that doesn't go
+    /// through a realm.
+    pub fn beginMajorCycle(self: *Heap) void {
+        self.live_color = ~self.live_color;
+        self.cycle_started = true;
         self.weak_aware_mark = true;
         self.weak_refs_seen.clearRetainingCapacity();
         self.weak_collections_seen.clearRetainingCapacity();
         self.finalization_registries_seen.clearRetainingCapacity();
+    }
+
+    /// Arm a minor (young-only) GC cycle. Flips `live_color`; does
+    /// NOT arm weak-aware marking — a minor cycle strong-marks weak
+    /// slots (a young weak target tenures and is processed weakly at
+    /// the next major cycle; §26.1 GC timing is implementation-
+    /// defined, so this is conformant). Same caller protocol as
+    /// `beginMajorCycle` — realm calls before `markRoots`,
+    /// `collectYoung` covers the test path.
+    pub fn beginMinorCycle(self: *Heap) void {
+        self.live_color = ~self.live_color;
+        self.cycle_started = true;
     }
 
     /// Run a full mark-sweep cycle across BOTH generations. `roots`
@@ -1569,18 +1614,12 @@ pub const Heap = struct {
         // — the long-tail cycles are where investigation starts.
         const t_start = monotonicNs();
 
-        // §26.1 / §24.3 / §24.4 / §26.2 — a full cycle handles weak
-        // references properly. `beginWeakAwareCycle` sets
-        // `weak_aware_mark` and clears the per-cycle worklists; it
-        // MUST run before any `markValue` for this cycle.
-        // `Realm.collectGarbage` marks the realm roots *before* it
-        // reaches here, so it calls `beginWeakAwareCycle` itself —
-        // in which case `weak_aware_mark` is already `true` and this
-        // must NOT re-arm (re-arming would `clearRetainingCapacity`
-        // the worklists the realm-root mark already populated). A
-        // direct `collectFull` caller (the unit tests) leaves the
-        // flag `false`, so this arms the cycle for them.
-        if (!self.weak_aware_mark) self.beginWeakAwareCycle();
+        // Arm the cycle if the caller hasn't yet (the realm path
+        // calls `beginMajorCycle` BEFORE `markRoots` so the flip +
+        // weak-aware setup precedes its `markValue`s; a direct
+        // unit-test caller reaches here cold and `cycle_started`
+        // catches them).
+        if (!self.cycle_started) self.beginMajorCycle();
 
         // Mark phase.
         for (roots) |r| self.markValue(r);
@@ -1597,7 +1636,7 @@ pub const Heap = struct {
         // is a strong reference). Mark them before the sweep.
         {
             var rit = self.symbol_registry.iterator();
-            while (rit.next()) |e| e.value_ptr.*.marked = true;
+            while (rit.next()) |e| e.value_ptr.*.mark_color = self.live_color;
         }
 
         // §24.3 WeakMap ephemeron fixpoint — a WeakMap entry's value
@@ -1608,9 +1647,9 @@ pub const Heap = struct {
         // §26.1 / §24.3 / §24.4 / §26.2 — post-mark weak handling:
         // clear dead WeakRef targets, prune dead WeakMap/WeakSet
         // entries, queue FinalizationRegistry cleanup jobs. Must run
-        // BEFORE the sweep — `isWeakReferentLive` reads the `marked`
-        // bit the sweep is about to clear. Marking is now done, so
-        // turn weak-aware mode back off.
+        // BEFORE the sweep — `isWeakReferentLive` reads the
+        // `mark_color` the sweep is about to filter on. Marking is
+        // done now, so turn weak-aware mode back off.
         self.weak_aware_mark = false;
         self.processWeakReferences();
 
@@ -1631,20 +1670,21 @@ pub const Heap = struct {
         // trivially (there are no young objects to point at).
         const ba = .{ self.allocator, self.bytes_allocator };
         const sa = .{self.allocator};
-        sweepList(&self.strings_mature, ba);
-        sweepList(&self.functions_mature, sa);
-        sweepList(&self.objects_mature, sa);
-        sweepList(&self.environments_mature, sa);
-        sweepList(&self.generators_mature, sa);
-        sweepList(&self.symbols_mature, sa);
-        sweepList(&self.bigints_mature, sa);
-        promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, self.allocator, ba);
-        promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, self.allocator, sa);
-        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, self.allocator, sa);
-        promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, self.allocator, sa);
-        promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, self.allocator, sa);
-        promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, self.allocator, sa);
-        promoteYoungList(*JSBigInt, &self.bigints_young, &self.bigints_mature, self.allocator, sa);
+        const lc = self.live_color;
+        sweepList(&self.strings_mature, lc, ba);
+        sweepList(&self.functions_mature, lc, sa);
+        sweepList(&self.objects_mature, lc, sa);
+        sweepList(&self.environments_mature, lc, sa);
+        sweepList(&self.generators_mature, lc, sa);
+        sweepList(&self.symbols_mature, lc, sa);
+        sweepList(&self.bigints_mature, lc, sa);
+        promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, ba);
+        promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, sa);
+        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, sa);
+        promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, sa);
+        promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, lc, self.allocator, sa);
+        promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, lc, self.allocator, sa);
+        promoteYoungList(*JSBigInt, &self.bigints_young, &self.bigints_mature, lc, self.allocator, sa);
 
         // The remembered set is empty after a full cycle — a full
         // mark visited every mature object, and every survivor is
@@ -1661,6 +1701,8 @@ pub const Heap = struct {
         self.allocs_since_gc = 0;
         self.bytes_since_gc = 0;
         self.minor_cycles_since_full = 0;
+        // Cycle complete — disarm so the next collect knows to flip.
+        self.cycle_started = false;
 
         // Always-on cycle accounting (cheap; drives the harness
         // `--mem-summary` line).
@@ -1749,6 +1791,11 @@ pub const Heap = struct {
     pub fn collectYoung(self: *Heap, roots: []const Value) void {
         const t_start = monotonicNs();
 
+        // Arm the cycle if the caller hasn't yet — same protocol
+        // as `collectFull`. Realm path calls `beginMinorCycle`
+        // before `markRoots`; the unit-test path comes here cold.
+        if (!self.cycle_started) self.beginMinorCycle();
+
         // ── Mark phase ──────────────────────────────────────────
         for (roots) |r| self.markValue(r);
         for (self.handle_scopes.items) |scope| {
@@ -1765,7 +1812,7 @@ pub const Heap = struct {
             var rit = self.symbol_registry.iterator();
             while (rit.next()) |e| {
                 const sym = e.value_ptr.*;
-                if (sym.generation == .young) sym.marked = true;
+                if (sym.generation == .young) sym.mark_color = self.live_color;
             }
         }
 
@@ -1802,27 +1849,21 @@ pub const Heap = struct {
 
         // ── Sweep + promote phase ───────────────────────────────
         // Young survivors are relinked into the mature list; young
-        // garbage is freed. Mature lists are not touched.
-        promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, self.allocator, .{ self.allocator, self.bytes_allocator });
-        promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, self.allocator, .{self.allocator});
-        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, self.allocator, .{self.allocator});
-        promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, self.allocator, .{self.allocator});
-        promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, self.allocator, .{self.allocator});
-        promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, self.allocator, .{self.allocator});
-        promoteYoungList(*JSBigInt, &self.bigints_young, &self.bigints_mature, self.allocator, .{self.allocator});
-
-        // Clear the mark bit on every mature object. A minor sweep
-        // only resets bits on the young lists it walks; the mark
-        // phase above set bits on mature objects too (the trace
-        // recurses through old space). Leaving them set would make
-        // the next `collectFull` treat them as already-visited.
-        for (self.objects_mature.items) |o| o.marked = false;
-        for (self.functions_mature.items) |f| f.marked = false;
-        for (self.environments_mature.items) |e| e.marked = false;
-        for (self.generators_mature.items) |g| g.marked = false;
-        for (self.strings_mature.items) |s| s.marked = false;
-        for (self.symbols_mature.items) |s| s.marked = false;
-        for (self.bigints_mature.items) |b| b.marked = false;
+        // garbage is freed. Mature lists are not touched — the
+        // mark-colour flip at the top of the next cycle ages every
+        // mature `mark_color` back to "unmarked" without a linear
+        // walk over the mature set. (Before the colour trick, this
+        // loop body cleared `marked = false` on every mature object,
+        // defeating part of the generational promise: a "cheap"
+        // minor cycle still cost O(mature_set) per cycle.)
+        const lc = self.live_color;
+        promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, .{ self.allocator, self.bytes_allocator });
+        promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, .{self.allocator});
+        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, .{self.allocator});
+        promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, .{self.allocator});
+        promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, lc, self.allocator, .{self.allocator});
+        promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, lc, self.allocator, .{self.allocator});
+        promoteYoungList(*JSBigInt, &self.bigints_young, &self.bigints_mature, lc, self.allocator, .{self.allocator});
 
         // The remembered set is consumed by this cycle. Clear it and
         // every surviving container's `in_remembered_set` bit so the
@@ -1843,6 +1884,7 @@ pub const Heap = struct {
         self.allocs_since_gc = 0;
         self.bytes_since_gc = 0;
         self.minor_cycles_since_full +|= 1;
+        self.cycle_started = false;
 
         const elapsed_ns_total: i128 = monotonicNs() - t_start;
         self.gc_cycles_total +|= 1;
@@ -1882,6 +1924,7 @@ pub const Heap = struct {
         comptime PtrT: type,
         young_list: *std.ArrayListUnmanaged(PtrT),
         mature_list: *std.ArrayListUnmanaged(PtrT),
+        live_color: u1,
         allocator: std.mem.Allocator,
         deinit_args: anytype,
     ) void {
@@ -1891,9 +1934,11 @@ pub const Heap = struct {
         while (i > 0) {
             i -= 1;
             const entry = young_list.items[i];
-            const live = (has_pinned and entry.pinned) or entry.marked;
+            const live = (has_pinned and entry.pinned) or entry.mark_color == live_color;
             if (live) {
-                entry.marked = false;
+                // Survivor — leave `mark_color` as the current
+                // `live_color`; the next cycle's flip ages it to
+                // "unmarked". Promote into mature.
                 entry.generation = .mature;
                 if (@hasField(EntryT, "in_remembered_set")) {
                     entry.in_remembered_set = false;
@@ -2640,12 +2685,15 @@ test "Heap: collectYoung promotes a young survivor by relink" {
 
     heap.collectYoung(&.{taggedObject(survivor)});
 
-    // Relinked into mature — same address (non-moving), bit flipped.
+    // Relinked into mature — same address (non-moving), generation
+    // flipped. Survivor carries the current `live_color`; the next
+    // cycle's flip ages it back to "unmarked" automatically (the
+    // cross-cycle behavioural test above covers that aging).
     try testing.expectEqual(@as(usize, 0), heap.objects_young.items.len);
     try testing.expectEqual(@as(usize, 1), heap.objects_mature.items.len);
     try testing.expectEqual(Generation.mature, survivor.generation);
     try testing.expectEqual(addr_before, @intFromPtr(survivor));
-    try testing.expect(!survivor.marked);
+    try testing.expectEqual(heap.live_color, survivor.mark_color);
 }
 
 test "Heap: collectYoung keeps a young object reachable from the remembered set" {
@@ -2707,19 +2755,156 @@ test "Heap: collectYoung clears stale mark bits on mature objects" {
     defer heap.deinit();
 
     // A mature object reachable from a root: the minor cycle marks
-    // it transitively but must clear its mark bit afterward, or the
-    // next collectFull would treat it as already-visited and leak.
+    // it transitively. The cycle-end `live_color` flip ages every
+    // mature `mark_color` automatically — so a follow-up
+    // `collectFull` with empty roots can still free this object.
+    // That's the behavioural check that used to be done indirectly
+    // via `!mature.marked`.
     const mature = try heap.allocateObject();
     _ = heap.objects_young.pop();
     try heap.objects_mature.append(heap.allocator, mature);
     mature.generation = .mature;
 
     heap.collectYoung(&.{taggedObject(mature)});
-    try testing.expect(!mature.marked);
 
     // A subsequent collectFull with empty roots must still be able
-    // to free it — proof the mark bit was genuinely cleared.
+    // to free it — proof the mark colour is honored across cycles.
     heap.collectFull(&.{});
+    try testing.expectEqual(@as(usize, 0), heap.objects_mature.items.len);
+}
+
+// ── Mark-colour flip tests ─────────────────────────────────────────
+// The mark-bit scheme: every heap kind carries a `mark_color: u1`;
+// an object is "live this cycle" iff `obj.mark_color ==
+// heap.live_color`. Each cycle flips `live_color` once at the top,
+// so survivors of the previous cycle automatically look "unmarked"
+// without a per-object clear loop. The tests below characterise the
+// flip protocol — they belong to the colour-flip refactor itself
+// rather than to any single allocator helper.
+
+test "Heap: live_color flips on each major cycle" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const c0 = heap.live_color;
+    heap.collect(&.{});
+    const c1 = heap.live_color;
+    try testing.expect(c0 != c1);
+
+    heap.collect(&.{});
+    const c2 = heap.live_color;
+    try testing.expect(c1 != c2);
+    // u1 has period 2 — two flips return to the original colour.
+    try testing.expectEqual(c0, c2);
+}
+
+test "Heap: live_color flips on each minor cycle" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const c0 = heap.live_color;
+    heap.collectYoung(&.{});
+    try testing.expect(c0 != heap.live_color);
+}
+
+test "Heap: a freshly-allocated object's mark_color matches live_color" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const o = try heap.allocateObject();
+    try testing.expectEqual(heap.live_color, o.mark_color);
+
+    // Holds across cycles — after a cycle, a fresh allocation
+    // again carries the (newly flipped) live colour.
+    heap.collect(&.{});
+    const o2 = try heap.allocateObject();
+    try testing.expectEqual(heap.live_color, o2.mark_color);
+}
+
+test "Heap: a survivor's mark_color matches live_color after the cycle" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const o = try heap.allocateObject();
+    heap.collect(&.{taggedObject(o)});
+    try testing.expectEqual(heap.live_color, o.mark_color);
+}
+
+test "Heap: cycle_started is false outside a cycle and after one finishes" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    try testing.expect(!heap.cycle_started);
+    heap.collect(&.{});
+    try testing.expect(!heap.cycle_started);
+    heap.collectYoung(&.{});
+    try testing.expect(!heap.cycle_started);
+}
+
+test "Heap: beginMajorCycle arms the cycle and flips live_color exactly once" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const c0 = heap.live_color;
+    heap.beginMajorCycle();
+    try testing.expect(heap.cycle_started);
+    try testing.expectEqual(@as(u1, ~c0), heap.live_color);
+
+    // collectFull called after explicit arming must NOT re-flip.
+    const c_armed = heap.live_color;
+    heap.collectFull(&.{});
+    // After the cycle, live_color is the post-flip value; the
+    // cycle_started flag is back to false.
+    try testing.expectEqual(c_armed, heap.live_color);
+    try testing.expect(!heap.cycle_started);
+}
+
+test "Heap: beginMinorCycle arms the cycle and flips live_color exactly once" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const c0 = heap.live_color;
+    heap.beginMinorCycle();
+    try testing.expect(heap.cycle_started);
+    try testing.expectEqual(@as(u1, ~c0), heap.live_color);
+
+    // collectYoung called after explicit arming must NOT re-flip.
+    const c_armed = heap.live_color;
+    heap.collectYoung(&.{});
+    try testing.expectEqual(c_armed, heap.live_color);
+    try testing.expect(!heap.cycle_started);
+}
+
+test "Heap: markValue is idempotent within a cycle" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const o = try heap.allocateObject();
+    heap.beginMajorCycle();
+    heap.markValue(taggedObject(o));
+    const after_first = o.mark_color;
+    heap.markValue(taggedObject(o));
+    try testing.expectEqual(after_first, o.mark_color);
+    try testing.expectEqual(heap.live_color, o.mark_color);
+    // Clean up — finish the cycle so heap.deinit doesn't trip on
+    // a dangling cycle_started flag.
+    heap.collectFull(&.{taggedObject(o)});
+}
+
+test "Heap: a mature object unreachable after a cycle is swept by the next cycle" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // Tenure the object via a full cycle that holds it as a root.
+    const o = try heap.allocateObject();
+    heap.collect(&.{taggedObject(o)});
+    try testing.expectEqual(Generation.mature, o.generation);
+    try testing.expectEqual(@as(usize, 1), heap.objects_mature.items.len);
+
+    // Next cycle with empty roots: the colour flip ages
+    // `o.mark_color` to the "unmarked" value automatically, no
+    // per-object clear pass required.
+    heap.collect(&.{});
     try testing.expectEqual(@as(usize, 0), heap.objects_mature.items.len);
 }
 
@@ -2748,7 +2933,7 @@ test "Heap: collect keeps an object reachable through roots" {
     try testing.expectEqualStrings("kept", s.flatBytes());
 }
 
-test "Heap: collect resets mark bit between cycles" {
+test "Heap: collect honors the mark colour across cycles" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
 
@@ -2756,10 +2941,12 @@ test "Heap: collect resets mark bit between cycles" {
     const v = Value.fromString(s);
 
     heap.collect(&.{v});
-    try testing.expect(!s.marked); // cleared after sweep
+    // Cycle 1 survivor — `mark_color == live_color` right now.
+    try testing.expectEqual(heap.live_color, s.mark_color);
 
-    // A second cycle with no roots must free it (mark bit must
-    // really be cleared, not stuck on).
+    // A second cycle with no roots must free it. The cycle-start
+    // `live_color` flip ages `s.mark_color` to the "unmarked"
+    // value automatically — no per-mature clear pass needed.
     heap.collect(&.{});
     try testing.expectEqual(@as(usize, 0), heap.stringCount());
 }

@@ -1009,14 +1009,14 @@ pub const Realm = struct {
     /// `heap.allocs_since_gc` crosses `heap.gc_threshold`. The
     /// counter resets to zero at the end of `heap.collect`.
     pub fn collectGarbage(self: *Realm) void {
-        // §26.1 / §24.3 / §24.4 / §26.2 — arm weak-aware marking
+        // §26.1 / §24.3 / §24.4 / §26.2 — arm the major cycle
         // BEFORE `markRoots`. `markRoots` calls `markValue` on every
         // realm root (including any WeakRef / WeakMap / WeakSet /
-        // FinalizationRegistry held by a global), so the
-        // `weak_aware_mark` flag must already be set or those weak
-        // slots would be strong-marked. `collectFull` calls this
-        // again, idempotently.
-        self.heap.beginWeakAwareCycle();
+        // FinalizationRegistry held by a global), so both the
+        // `live_color` flip and the `weak_aware_mark` flag must
+        // already be in place. `collectFull` sees `cycle_started`
+        // and skips its own arm-cycle.
+        self.heap.beginMajorCycle();
         self.markRoots();
         // Hand off to `heap.collectFull` for the handle-scope walk
         // and the actual sweep. The empty roots slice is fine —
@@ -1035,6 +1035,10 @@ pub const Realm = struct {
         // asserts every routed-setter mature→young edge is in the
         // remembered set before the minor cycle consumes it.
         self.heap.verifyRememberedSet();
+        // Arm the minor cycle BEFORE `markRoots` so the `live_color`
+        // flip precedes any `markValue` call. `collectYoung` sees
+        // `cycle_started` and skips its own arm-cycle.
+        self.heap.beginMinorCycle();
         self.markRoots();
         self.heap.collectYoung(&.{});
     }

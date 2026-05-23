@@ -303,9 +303,9 @@ pub const JSFunction = struct {
     /// targeting this ctor, mirrors JSObject.extensible. Defaults
     /// to `true` — every function starts out extensible.
     extensible: bool = true,
-    /// Mark-sweep bit, written by the heap during a collection
-    /// cycle and reset to `false` after the sweep.
-    marked: bool = false,
+    /// Mark color. `f.mark_color == heap.live_color` means "live
+    /// this cycle". See `JSObject.mark_color` for the protocol.
+    mark_color: u1 = 0,
     /// Generational-GC age. Fresh allocations start `.young`; a
     /// young function surviving a `collectYoung` is promoted to
     /// `.mature` and relinked into the mature list.

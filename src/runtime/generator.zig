@@ -123,7 +123,9 @@ pub const JSGenerator = struct {
     home_function: ?*@import("function.zig").JSFunction = null,
     argc: u8 = 0,
     state: GeneratorState = .initial,
-    marked: bool = false,
+    /// Mark color. `gen.mark_color == heap.live_color` means "live
+    /// this cycle". See `JSObject.mark_color` for the protocol.
+    mark_color: u1 = 0,
     /// Generational-GC age. Fresh allocations start `.young`; a
     /// young generator surviving a `collectYoung` is promoted to
     /// `.mature` and relinked into the mature list.

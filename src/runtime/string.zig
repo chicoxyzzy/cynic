@@ -72,10 +72,11 @@ pub const StringError = error{ OutOfMemory, StringTooLong };
 pub const AllocError = error{OutOfMemory};
 
 pub const JSString = struct {
-    /// Mark-sweep bit, written by `Heap.markValue` and cleared by
-    /// `Heap.collect` after each sweep. `false` when freshly
-    /// allocated and after every full GC cycle.
-    marked: bool = false,
+    /// Mark color. `s.mark_color == heap.live_color` means "live
+    /// this cycle". See `JSObject.mark_color` for the protocol —
+    /// no explicit clear; the cycle-start `live_color` flip ages
+    /// every entry to "unmarked" automatically.
+    mark_color: u1 = 0,
     /// Permanently-live: never collected, never needs marking.
     /// Set on chunk-constant strings at chunk-finalize time, since
     /// chunks are realm-lifetime and their constant pool can't

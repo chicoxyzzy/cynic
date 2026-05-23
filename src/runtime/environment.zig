@@ -30,9 +30,9 @@ pub const Environment = struct {
     /// the slot count is part of the chunk's `MakeEnvironment`
     /// instruction.
     slots: []Value,
-    /// GC mark bit, written by `Heap.markValue` when a chain root
-    /// is traced and cleared after each sweep.
-    marked: bool = false,
+    /// Mark color. `env.mark_color == heap.live_color` means "live
+    /// this cycle". See `JSObject.mark_color` for the protocol.
+    mark_color: u1 = 0,
     /// Generational-GC age. Fresh allocations start `.young`; a
     /// young environment surviving a `collectYoung` is promoted to
     /// `.mature` and relinked into the mature list.

@@ -46,9 +46,9 @@ pub const JSSymbol = struct {
     /// `Symbol.keyFor(s)` consults this. Plain `Symbol(desc)`
     /// produces non-registered symbols.
     is_registered: bool = false,
-    /// Mark-sweep bit, written by `Heap.markValue` and cleared
-    /// after each sweep.
-    marked: bool = false,
+    /// Mark color. `sym.mark_color == heap.live_color` means "live
+    /// this cycle". See `JSObject.mark_color` for the protocol.
+    mark_color: u1 = 0,
     /// Generational-GC age. Fresh allocations start `.young`; a
     /// young symbol surviving a `collectYoung` is promoted to
     /// `.mature` and relinked into the mature list.
