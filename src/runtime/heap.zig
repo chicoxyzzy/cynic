@@ -986,14 +986,37 @@ pub const Heap = struct {
     /// unit test below. It is in place so a later stage that does
     /// create ropes has a correct mark walk from day one.
     pub fn markString(self: *Heap, s: *JSString) void {
-        if (s.mark_color == self.live_color) return;
-        s.mark_color = self.live_color;
-        switch (s.payload) {
-            .flat => {},
-            .cons => |c| {
-                self.markString(c.left);
-                self.markString(c.right);
-            },
+        // Iterative walk — the cons tree can be up to
+        // `string_mod.max_rope_depth` deep (1024 as of the
+        // `string_concat` speed-up), so a recursive `markString`
+        // would risk a stack overflow on a deep `s = s + tiny`
+        // loop. The worklist holds one right-child per descent
+        // level; depth is bounded by the rope depth cap. On OOM
+        // the marker falls back to direct recursion on the right
+        // child (left continues iteratively) — a missed mark would
+        // be worse than a deep stack frame.
+        var cursor: *JSString = s;
+        while (true) {
+            if (cursor.mark_color == self.live_color) break;
+            cursor.mark_color = self.live_color;
+            switch (cursor.payload) {
+                .flat => break,
+                .cons => |c| {
+                    // Defer the right child; descend left
+                    // iteratively to keep the worklist bounded
+                    // (left-deep is the common shape).
+                    self.mark_worklist.append(
+                        self.allocator,
+                        Value.fromString(@ptrCast(c.right)),
+                    ) catch {
+                        // Fall back to recursion only on this
+                        // right child — leaves the left iteration
+                        // intact so a deep left spine stays safe.
+                        self.markString(c.right);
+                    };
+                    cursor = c.left;
+                },
+            }
         }
     }
 

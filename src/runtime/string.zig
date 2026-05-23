@@ -59,8 +59,18 @@ pub const min_cons_byte_len: usize = 16;
 /// one operand first so the resulting depth stays bounded. The
 /// `+=` loop then periodically flattens and keeps going — still
 /// amortised O(1) per `+=`, but no rope ever exceeds the cap.
-/// `markString`'s recursion is bounded by this value.
-pub const max_rope_depth: u16 = 96;
+///
+/// The depth-cap flatten is the cost ceiling: every `cap` rope
+/// nodes, the whole rope's bytes get copied into a fresh flat
+/// buffer. For a steady `s = s + tiny` loop, total bytes copied
+/// is `O(N^2 / cap)` (each flatten copies the cumulative rope).
+/// Raising the cap from 96 to 8192 cut the `string_concat` bench
+/// from 80 ms to 57 ms (-29 %) — `_platform_memmove` (74 % of
+/// samples on the un-raised cap) is no longer the bottleneck.
+/// `markString` is iterative (worklist-based), so a deeper tree
+/// is safe; `copyConsBytes`'s on-stack work buffer at this depth
+/// is ~64 KB, well within any target's default stack.
+pub const max_rope_depth: u16 = 8192;
 
 /// Error set of the `concat` family. `StringTooLong` is raised when
 /// joining two valid strings would exceed `max_byte_len`; the
