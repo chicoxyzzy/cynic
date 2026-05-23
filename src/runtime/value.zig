@@ -149,6 +149,20 @@ pub const Value = extern struct {
         return self.topTag() == tag_undefined;
     }
 
+    /// True iff the value carries a heap-pointer payload — Object,
+    /// Function, Symbol, BigInt, or String. Cheap test (two
+    /// adjacent tags) used by the generational write barrier to
+    /// fast-path-out for primitives without instancing each
+    /// `valueAs*` cast in turn.
+    pub fn isHeapValue(self: Value) bool {
+        const t = self.topTag();
+        // tag_object (0xFFF9) and tag_string (0xFFFA) are the only
+        // tags that hold pointers; subtraction underflow makes the
+        // single `< 2` comparison cover both without separate
+        // equality checks.
+        return t -% tag_object < 2;
+    }
+
     /// True if this is the TDZ sentinel. Used by `throw_if_hole`
     /// in the interpreter to gate `let`/`const` reads before the
     /// binding's initialiser runs (§13.3.1).
@@ -405,4 +419,27 @@ test "Value: toBooleanPrimitive matches §7.1.2 for primitives" {
     try testing.expect(!Value.fromDouble(std.math.nan(f64)).toBooleanPrimitive());
     try testing.expect(Value.fromDouble(1.0).toBooleanPrimitive());
     try testing.expect(Value.fromDouble(std.math.inf(f64)).toBooleanPrimitive());
+}
+
+test "Value: isHeapValue covers Object + String tags only" {
+    // Used by `Heap.writeBarrier` to fast-path-out for primitives
+    // before instancing each `valueAs*` cast — a stale predicate
+    // here would either over-record (slow) or under-record
+    // (sweep an un-marked young referent). Pin both directions.
+    try testing.expect(Value.fromObject(@ptrFromInt(0x1000)).isHeapValue());
+    try testing.expect(Value.fromString(@ptrFromInt(0x2000)).isHeapValue());
+
+    try testing.expect(!Value.fromInt32(0).isHeapValue());
+    try testing.expect(!Value.fromInt32(-1).isHeapValue());
+    try testing.expect(!Value.fromInt32(std.math.maxInt(i32)).isHeapValue());
+    try testing.expect(!Value.fromDouble(0.0).isHeapValue());
+    try testing.expect(!Value.fromDouble(-0.0).isHeapValue());
+    try testing.expect(!Value.fromDouble(std.math.nan(f64)).isHeapValue());
+    try testing.expect(!Value.fromDouble(std.math.inf(f64)).isHeapValue());
+    try testing.expect(!Value.fromDouble(1.5e308).isHeapValue());
+    try testing.expect(!Value.fromBool(true).isHeapValue());
+    try testing.expect(!Value.fromBool(false).isHeapValue());
+    try testing.expect(!Value.null_.isHeapValue());
+    try testing.expect(!Value.undefined_.isHeapValue());
+    try testing.expect(!Value.hole_.isHeapValue());
 }

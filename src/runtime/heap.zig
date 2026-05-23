@@ -2662,9 +2662,18 @@ pub const Heap = struct {
     /// (amortised growth, tiny entries); a real OOM here means the
     /// process is already failing.
     pub fn writeBarrier(self: *Heap, container: Container, v: Value) void {
-        // Fast reject — young container can't create an old→young
-        // edge (a young→young store is reclaimed wholesale by the
-        // young sweep).
+        // Fast reject 1 — non-heap value can't create any
+        // generational edge. The fixture-heavy
+        // `o.x = i` (int32) case hits this in O(1) without
+        // instancing the five `valueAs*` casts inside
+        // `isYoungHeapValue`. Measured ~8 % of `prop_write`
+        // sample time on the un-fast-pathed barrier; the cheap
+        // tag-compare here collapses it to ~0 % for primitive
+        // stores. Doubles, ints, bools, null, undefined, hole.
+        if (!v.isHeapValue()) return;
+        // Fast reject 2 — young container can't create an
+        // old→young edge (a young→young store is reclaimed
+        // wholesale by the young sweep).
         if (container.generation() != .mature) return;
         // Only a young heap pointer needs remembering. Primitives
         // (number, bool, null, undefined) and already-mature
@@ -2857,6 +2866,39 @@ test "Heap: write barrier ignores a primitive store" {
     container.generation = .mature;
     heap.writeBarrier(.{ .object = container }, Value.fromInt32(42));
     heap.writeBarrier(.{ .object = container }, Value.undefined_);
+    try testing.expectEqual(@as(usize, 0), heap.remembered.items.len);
+}
+
+test "Heap: write barrier fast-path bails on primitives regardless of container generation" {
+    // The primitive check sits BEFORE the generation check in the
+    // barrier (see `writeBarrier` doc-comment). This test pins the
+    // ordering so a refactor that moves the heap-value reject back
+    // below the generation reject would still pass the
+    // "primitive store" test above but regress on the
+    // young-container hot path the profiler flagged.
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const young_container = try heap.allocateObject(); // .young by default
+    const mature_container = try heap.allocateObject();
+    mature_container.generation = .mature;
+
+    // Every primitive: int32, double, bool, null, undefined, hole.
+    const primitives = [_]Value{
+        Value.fromInt32(0),
+        Value.fromInt32(std.math.maxInt(i32)),
+        Value.fromDouble(1.5),
+        Value.fromDouble(std.math.nan(f64)),
+        Value.true_,
+        Value.false_,
+        Value.null_,
+        Value.undefined_,
+        Value.hole_,
+    };
+    for (primitives) |p| {
+        heap.writeBarrier(.{ .object = young_container }, p);
+        heap.writeBarrier(.{ .object = mature_container }, p);
+    }
     try testing.expectEqual(@as(usize, 0), heap.remembered.items.len);
 }
 
