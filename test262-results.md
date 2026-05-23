@@ -156,7 +156,7 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-23 — cynic `bc22bc5`, test262 `d0c1b455`
+### 2026-05-23 — cynic `8b321ec`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
