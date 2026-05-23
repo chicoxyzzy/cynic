@@ -1670,6 +1670,14 @@ pub const JSObject = struct {
         // [[HasProperty]] / [[GetOwnProperty]] so `'X' in ns` is
         // `false` and `Object.keys(ns)` omits the key.
         if (self.is_module_namespace and self.hasAmbiguousNamespaceKey(key)) return false;
+        // Shape-first own-property check — `slots[entry.slot]` is
+        // the authority for shape-stable objects (see the matching
+        // ordering in `get` above). Same rationale: future
+        // bag-mirror skip in `sta_property` must not leave hasOwn
+        // returning false on a freshly-written shaped slot.
+        if (self.shape) |sh| {
+            if (sh.lookup(key)) |_| return true;
+        }
         if (self.properties.contains(key) or self.hasAccessor(key)) return true;
         // §15.2.1.16.3 ResolveExport — re-export redirects make
         // the binding "own" on the Module Namespace exotic even
@@ -2201,6 +2209,25 @@ test "JSObject: get prefers the shape slot when present" {
     // relies on this ordering.
     o.slots.items[0] = Value.fromInt32(7);
     try testing.expectEqual(@as(i32, 7), o.get("x").asInt32());
+}
+
+test "JSObject: hasOwn prefers the shape when present" {
+    // Same contract as `get` above: the shape is authoritative
+    // for own-property liveness on a shape-stable object, so
+    // skipping the bag mirror in `sta_property` doesn't strand
+    // a `hasOwn`-shaped check.
+    const heap_mod = @import("heap.zig");
+    var heap = heap_mod.Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const o = try heap.allocateObject();
+    try o.set(testing.allocator, "x", Value.fromInt32(42));
+    try testing.expect(o.shape != null);
+
+    // Strip the bag entry behind the shape's back; hasOwn must
+    // still report own.
+    _ = o.properties.swapRemove("x");
+    try testing.expect(o.hasOwn("x"));
 }
 
 test "JSObject: missing property is undefined" {
