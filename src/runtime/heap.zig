@@ -1276,7 +1276,15 @@ pub const Heap = struct {
     fn isWeakReferentLive(self: *const Heap, v: Value) bool {
         if (valueAsPlainObject(v)) |o| return o.mark_color == self.live_color;
         if (valueAsFunction(v)) |f| return f.mark_color == self.live_color;
-        if (valueAsSymbol(v)) |s| return s.mark_color == self.live_color;
+        if (valueAsSymbol(v)) |s| {
+            // §6.2.10 CanBeHeldWeakly — a non-registered symbol is
+            // a valid weak referent and the regular colour check
+            // applies. A registered (pinned) symbol's `mark_color`
+            // is allowed to go stale across cycles — its registry
+            // entry keeps it permanently alive — so the pinned
+            // bit is the live-edge signal here.
+            return s.pinned or s.mark_color == self.live_color;
+        }
         // Strings, BigInts, and primitives: not valid weak
         // referents per §6.2.10, treated as trivially live.
         return true;
@@ -1422,6 +1430,47 @@ pub const Heap = struct {
             for (ct.instance_fields) |*fd| if (fd.init_chunk) |*ic| try self.pinChunk(ic);
             for (ct.static_fields) |*fd| if (fd.init_chunk) |*ic| try self.pinChunk(ic);
             for (ct.static_blocks) |*sb| try self.pinChunk(sb);
+        }
+    }
+
+    /// Weak-clear every reachable chunk's `call_method` inline-cache
+    /// cells whose cached callee isn't marked through other refs.
+    /// Called from `collectFull` and `collectYoung` after the mark
+    /// phase, before sweep. Without this, a swept-and-reused address
+    /// could match a stale `cell.callee` pointer and the fast path
+    /// would jump into the wrong (or freed) function.
+    ///
+    /// Walks every live function's chunk recursively (function
+    /// templates, class constructor / methods / field initializers /
+    /// static blocks). A chunk reached through multiple functions
+    /// gets visited multiple times — the operation is idempotent
+    /// (nulling an already-null cell is a no-op).
+    fn weakClearCallICs(self: *Heap) void {
+        const lc = self.live_color;
+        for (self.functions_young.items) |f| {
+            if (f.mark_color != lc) continue;
+            if (f.chunk) |c| weakClearChunkCallICs(c, lc);
+        }
+        for (self.functions_mature.items) |f| {
+            if (f.mark_color != lc) continue;
+            if (f.chunk) |c| weakClearChunkCallICs(c, lc);
+        }
+    }
+
+    fn weakClearChunkCallICs(chunk: *const Chunk, live_color: u1) void {
+        for (chunk.inline_call_caches) |*cell| {
+            if (cell.callee) |callee| {
+                if (callee.mark_color != live_color) cell.callee = null;
+            }
+        }
+        for (chunk.function_templates) |*ft| weakClearChunkCallICs(&ft.chunk, live_color);
+        for (chunk.class_templates) |*ct| {
+            weakClearChunkCallICs(&ct.constructor_chunk, live_color);
+            for (ct.instance_methods) |*m| weakClearChunkCallICs(&m.chunk, live_color);
+            for (ct.static_methods) |*m| weakClearChunkCallICs(&m.chunk, live_color);
+            for (ct.instance_fields) |*fd| if (fd.init_chunk) |*ic| weakClearChunkCallICs(ic, live_color);
+            for (ct.static_fields) |*fd| if (fd.init_chunk) |*ic| weakClearChunkCallICs(ic, live_color);
+            for (ct.static_blocks) |*sb| weakClearChunkCallICs(sb, live_color);
         }
     }
 
@@ -1632,12 +1681,12 @@ pub const Heap = struct {
         for (self.const_roots.items) |v| self.markValue(v);
         // Native-constructor instances currently in flight.
         for (self.native_ctor_roots.items) |v| self.markValue(v);
-        // Registered symbols stay alive forever (GlobalSymbolRegistry
-        // is a strong reference). Mark them before the sweep.
-        {
-            var rit = self.symbol_registry.iterator();
-            while (rit.next()) |e| e.value_ptr.*.mark_color = self.live_color;
-        }
+        // Registered symbols are pinned at `Symbol.for` time
+        // (§20.4.2.2 GlobalSymbolRegistry has no spec'd eviction);
+        // the sweep skips pinned entries and `isWeakReferentLive`
+        // short-circuits on `pinned`, so the per-cycle re-mark
+        // loop the heap used to do over `symbol_registry` is
+        // gone.
 
         // §24.3 WeakMap ephemeron fixpoint — a WeakMap entry's value
         // is reachable iff its key is. Run to a fixpoint: marking a
@@ -1652,6 +1701,14 @@ pub const Heap = struct {
         // done now, so turn weak-aware mode back off.
         self.weak_aware_mark = false;
         self.processWeakReferences();
+
+        // Weak-clear the `call_method` IC. Cells caching a callee
+        // whose mark-colour doesn't match `live_color` are stale —
+        // the callee is about to be swept (or, on the first cycle
+        // after a previous sweep, points at memory that may have
+        // been reused). Nulling them forces the slow path + refill
+        // on the next call site execution.
+        self.weakClearCallICs();
 
         // Snapshot pre-sweep counts for the diagnostic report.
         const pre_objs = self.objectCount();
@@ -1808,13 +1865,9 @@ pub const Heap = struct {
         for (self.const_roots.items) |v| self.markValue(v);
         // Native-constructor instances currently in flight.
         for (self.native_ctor_roots.items) |v| self.markValue(v);
-        {
-            var rit = self.symbol_registry.iterator();
-            while (rit.next()) |e| {
-                const sym = e.value_ptr.*;
-                if (sym.generation == .young) sym.mark_color = self.live_color;
-            }
-        }
+        // Registered symbols are pinned (§20.4.2.2); promoteYoungList
+        // honours `entry.pinned` and tenures them straight into the
+        // mature list without needing a per-cycle re-mark.
 
         // Root source 1 — remembered set. Each recorded mature
         // container is a root edge into young: mark it (and via
@@ -1837,6 +1890,12 @@ pub const Heap = struct {
             for (e.slots) |s| self.markValue(s);
         }
         for (self.generators_mature.items) |g| self.markGeneratorInternalSlots(g);
+
+        // Weak-clear the `call_method` IC — see `collectFull` for
+        // the rationale. Young collection nulls cells whose callee
+        // is young AND unmarked (about to be swept); mature callees
+        // pass through marked, so cells caching them survive.
+        self.weakClearCallICs();
 
         // Snapshot pre-sweep young counts for the diagnostic line.
         const pre_objs = self.objects_young.items.len;
@@ -2906,6 +2965,76 @@ test "Heap: a mature object unreachable after a cycle is swept by the next cycle
     // per-object clear pass required.
     heap.collect(&.{});
     try testing.expectEqual(@as(usize, 0), heap.objects_mature.items.len);
+}
+
+// ── Symbol-registry pin tests ───────────────────────────────────────
+// `Symbol.for("k")` interns into `Heap.symbol_registry`; the entries
+// are permanently alive (the spec gives no way to evict them). The
+// per-cycle re-mark loop the GC used to do is replaced by a `pinned`
+// bit on `JSSymbol` — the sweep skips pinned entries (same mechanism
+// chunk-constant strings use). The tests below pin the invariants:
+// the symbol survives across cycles, an un-pinned symbol does NOT,
+// and `WeakRef(symbol)` keeps observing the pinned referent (the
+// non-obvious corner — the `mark_color` of a pinned symbol can go
+// stale, so `isWeakReferentLive` needs the `pinned` short-circuit).
+
+test "Heap: a pinned registered symbol survives multiple cycles with no roots" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const sym = try heap.allocateSymbol("k");
+    sym.is_registered = true;
+    sym.pinned = true;
+    try heap.symbol_registry.put(heap.allocator, "k", sym);
+
+    heap.collect(&.{});
+    try testing.expectEqual(@as(usize, 1), heap.symbolCount());
+    heap.collect(&.{});
+    try testing.expectEqual(@as(usize, 1), heap.symbolCount());
+    heap.collectYoung(&.{});
+    try testing.expectEqual(@as(usize, 1), heap.symbolCount());
+}
+
+test "Heap: an unpinned non-registered symbol is freed without roots" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    _ = try heap.allocateSymbol("x");
+    heap.collect(&.{});
+    try testing.expectEqual(@as(usize, 0), heap.symbolCount());
+}
+
+test "Heap: WeakRef to a pinned symbol observes the live referent after GC" {
+    // The corner the `pinned` short-circuit on `isWeakReferentLive`
+    // exists for. Without it, a registered symbol with no other
+    // mark-phase reference would have a stale `mark_color`,
+    // `isWeakReferentLive` would read false, and processWeakReferences
+    // would clear the WeakRef's target slot — even though the symbol
+    // is permanently alive via the registry.
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // Symbol.for("k") analogue — registered + pinned.
+    const sym = try heap.allocateSymbol("k");
+    sym.is_registered = true;
+    sym.pinned = true;
+    try heap.symbol_registry.put(heap.allocator, "k", sym);
+    const sym_v = taggedSymbol(sym);
+
+    // Build a WeakRef object pointing at the symbol. Keep the
+    // WeakRef itself rooted; the cycle's weak-aware pass reaches it
+    // and decides whether to clear its target slot.
+    const wr = try heap.allocateObject();
+    wr.is_weak_ref = true;
+    wr.weak_ref_target = sym_v;
+
+    heap.collect(&.{taggedObject(wr)});
+
+    // Target slot must still point at the same symbol.
+    const after = valueAsSymbol(wr.weak_ref_target) orelse {
+        return error.TestExpectedNonNullTarget;
+    };
+    try testing.expectEqual(sym, after);
 }
 
 test "Heap: setGcThreshold derives a coherent minor/major pair" {

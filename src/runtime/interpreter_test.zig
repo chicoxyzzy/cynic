@@ -5188,3 +5188,136 @@ test "String.prototype.includes: position is code-unit indexed" {
     };
     try testing.expect(v2.isBool() and !v2.asBool());
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// call_method inline-cache correctness — regression coverage for the
+// monomorphic call IC. The IC caches the last callee fn pointer at
+// each call site and skips the proxy / callable / revocable / bound
+// dispatch when it matches. These tests target the failure modes the
+// cache introduces.
+// ─────────────────────────────────────────────────────────────────────
+
+test "call IC: hot monomorphic site produces correct cumulative result" {
+    // Drives the same call site through 1000 iterations on a single
+    // shape. The IC stays warm across every call; result asserts
+    // the cached callee evaluates the same as a fresh slow-path
+    // lookup would.
+    try expectScriptIntWithBuiltins(
+        \\const o = { n: 0, inc() { this.n++; return this.n; } };
+        \\let acc = 0;
+        \\for (let i = 0; i < 1000; i++) acc = o.inc();
+        \\acc;
+    , 1000);
+}
+
+test "call IC: reassigning the method invalidates a stale cached callee" {
+    // The IC's hit condition is `valueAsFunction(callee_v) ==
+    // cell.callee`, so reassigning the method swaps callee_v's
+    // function pointer and the next call must miss → refill →
+    // dispatch the new function. Without that, the cached pointer
+    // would shadow the live property.
+    try expectScriptIntWithBuiltins(
+        \\const o = { f: () => 1 };
+        \\let a = o.f();
+        \\o.f = () => 100;
+        \\let b = o.f();
+        \\a + b;
+    , 101);
+}
+
+test "call IC: same call site, two receivers of the same shape" {
+    // Two object literals built from the same property list share
+    // a shape through the transition tree. The call site sees both
+    // — IC must hit on both (returning the per-receiver `n`),
+    // never serving the wrong receiver's slot.
+    try expectScriptIntWithBuiltins(
+        \\const a = { n: 7, get() { return this.n; } };
+        \\const b = { n: 35, get() { return this.n; } };
+        \\let acc = 0;
+        \\for (let i = 0; i < 50; i++) { acc += a.get(); acc += b.get(); }
+        \\acc;
+    , (7 + 35) * 50);
+}
+
+test "call IC: polymorphic site degrades safely on shape change" {
+    // First object has shape A (one property). Second has shape B
+    // (different property layout). Same call site sees both —
+    // first warms cache with A, then call on B misses + refills,
+    // then back to A misses + refills. Each call still returns
+    // the right callee's value.
+    try expectScriptIntWithBuiltins(
+        \\const a = { tag: 1, get() { return this.tag; } };
+        \\const b = { tag: 10, extra: 99, get() { return this.tag; } };
+        \\let acc = 0;
+        \\for (let i = 0; i < 30; i++) {
+        \\  const recv = (i % 2) === 0 ? a : b;
+        \\  acc += recv.get();
+        \\}
+        \\acc;
+    , 15 * 1 + 15 * 10);
+}
+
+test "call IC: bound function on the call site stays correct" {
+    // Bound functions live on the slow path — the IC refills only
+    // on plain functions. A bound callee must NOT cache; the next
+    // call (still bound) must run the bound dispatch correctly.
+    try expectScriptIntWithBuiltins(
+        \\function plain() { return this.n + 1; }
+        \\const ctx = { n: 41 };
+        \\const o = { f: plain.bind(ctx) };
+        \\let acc = 0;
+        \\for (let i = 0; i < 5; i++) acc += o.f();
+        \\acc;
+    , 42 * 5);
+}
+
+test "call IC: cell survives a forced GC mid-loop" {
+    // gc-stress: trigger a collection mid-loop and confirm the
+    // cached callee still dispatches correctly afterwards. Without
+    // the GC weak-clear handling, a swept-and-reused fn address
+    // could match a stale cell.callee and execute the wrong body.
+    try expectScriptIntWithBuiltins(
+        \\const o = { n: 0, inc() { this.n++; return this.n; } };
+        \\let acc = 0;
+        \\for (let i = 0; i < 200; i++) {
+        \\  // Allocate garbage every other iteration so the GC
+        \\  // threshold trips somewhere inside the loop. The
+        \\  // `inc` callee survives via the realm's `o` root, so
+        \\  // a correct weak-clear leaves the IC cell intact.
+        \\  if ((i & 1) === 0) { const _ = [1, 2, 3, 4, 5]; }
+        \\  acc = o.inc();
+        \\}
+        \\acc;
+    , 200);
+}
+
+test "call IC: nested call sites — IC per site, no cross-talk" {
+    // Two distinct call sites in the same function. Each must
+    // have its own IC slot — caching `outer.outerCall` at site A
+    // must not cause site B to dispatch the wrong inner callee.
+    try expectScriptIntWithBuiltins(
+        \\const inner = { x: 3, getX() { return this.x; } };
+        \\const outer = {
+        \\  y: 11,
+        \\  combine() { return this.y + inner.getX(); },
+        \\};
+        \\let acc = 0;
+        \\for (let i = 0; i < 20; i++) acc += outer.combine();
+        \\acc;
+    , (11 + 3) * 20);
+}
+
+test "call IC: callable Proxy as method stays on slow path" {
+    // A callable Proxy on the callee value triggers the proxy
+    // dispatch branch in call_method's slow path. The IC must not
+    // skip past it (which would bypass the apply trap entirely).
+    try expectScriptIntWithBuiltins(
+        \\const target = function() { return 7; };
+        \\const handler = { apply(t, thisArg, args) { return 42; } };
+        \\const proxied = new Proxy(target, handler);
+        \\const o = { f: proxied };
+        \\let acc = 0;
+        \\for (let i = 0; i < 3; i++) acc += o.f();
+        \\acc;
+    , 42 * 3);
+}

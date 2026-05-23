@@ -170,13 +170,16 @@ pub const Op = enum(u8) {
     /// return value lands in the caller's accumulator after the
     /// callee's `Return`.
     call,
-    /// `[op] [r_recv:u8] [r_callee:u8] [argc:u8]` — method call.
-    /// Identical to `Call` except `this` is bound to the value in
-    /// `r_recv` (§13.3.6 — `obj.method()` produces a Reference
+    /// `[op] [r_recv:u8] [r_callee:u8] [argc:u8] [ic:u16]` — method
+    /// call. Identical to `Call` except `this` is bound to the value
+    /// in `r_recv` (§13.3.6 — `obj.method()` produces a Reference
     /// whose base is `obj`, so the call sees `this = obj`).
     /// Args are read from `r_callee + 1.. r_callee + argc`,
     /// matching `Call` so the compiler can share its argument-
-    /// emission helper.
+    /// emission helper. The `ic` operand indexes
+    /// `Chunk.inline_call_caches` — a hit on the cached callee
+    /// pointer skips the proxy / revocable / bound / `valueAsFunction`
+    /// dispatch chain and calls the function directly.
     call_method,
     /// `[op] [r_callee:u8] [argc:u8]` — `new f(args)` (§13.3.5).
     /// Allocates a fresh ordinary object whose `[[Prototype]]` is
@@ -971,7 +974,7 @@ pub const Op = enum(u8) {
             .sta_computed, .super_set_computed, .def_computed => 2, // r_obj:u8 + r_key:u8
             .del_named_property => 3, // k:u16 + r_obj:u8
             .del_computed_property => 2, // r_obj:u8 + r_key:u8
-            .call_method => 3, // r_recv:u8 + r_callee:u8 + argc:u8
+            .call_method => 5, // r_recv:u8 + r_callee:u8 + argc:u8 + ic:u16
             .for_of_next => 3, // r_iter:u8 + r_next:u8 + r_done:u8
             .make_environment => 1, // slot_count:u8
             .lda_smi => 4, // i32 immediate

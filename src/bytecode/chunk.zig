@@ -42,6 +42,26 @@ pub const ICCell = struct {
     slot: u32 = 0,
 };
 
+/// Inline-cache cell for `call_method`. Caches the last callee
+/// observed at the call site so subsequent calls can skip the
+/// callable check, the proxy / revocable-proxy / bound-target
+/// exotic dispatch, and the `valueAsFunction` decode — going
+/// straight to `callJSFunction(cached_fn, ...)`. Monomorphic.
+///
+/// `callee == null` is cold / un-cacheable (last callee was
+/// exotic, or hasn't run yet). The miss path only refills when
+/// the slow-path callee turned out to be a plain (non-bound,
+/// non-proxy, non-revoked) JSFunction.
+///
+/// The cached pointer is a GC-heap allocation, unlike the Shape
+/// pointers in `ICCell` (arena-stable). After the GC mark phase
+/// the heap walks every reachable chunk's `inline_call_caches`
+/// and nulls cells whose callee isn't marked, so a swept-and-
+/// reused address cannot reawaken a stale cell.
+pub const CallICCell = struct {
+    callee: ?*@import("../runtime/function.zig").JSFunction = null,
+};
+
 /// A single (code-offset → source-span) record. The list is sorted
 /// by `offset` ascending; the source span is the parser's range
 /// over the AST node that produced the instruction.
@@ -311,6 +331,11 @@ pub const Chunk = struct {
     /// Sized at `finish`; index range `[0, inline_cache_count)` is
     /// the operand space the compiler hands out.
     inline_caches: []ICCell = &.{},
+    /// Sister table for `call_method` callsite caching. Cell at
+    /// index `i` is the IC cell for the i-th call_method emit;
+    /// the heap mark walks every reachable chunk's cells and
+    /// weak-clears stale callee pointers post-mark.
+    inline_call_caches: []CallICCell = &.{},
 
     pub fn deinit(self: *Chunk, allocator: std.mem.Allocator) void {
         allocator.free(self.code);
@@ -322,6 +347,7 @@ pub const Chunk = struct {
         for (self.class_templates) |*t| t.deinit(allocator);
         allocator.free(self.class_templates);
         allocator.free(self.inline_caches);
+        allocator.free(self.inline_call_caches);
     }
 };
 
@@ -351,6 +377,9 @@ pub const Builder = struct {
     /// Running count of IC cells handed out via `allocIC`. The
     /// `finish` step uses this to size `Chunk.inline_caches`.
     inline_cache_count: u16 = 0,
+    /// Running count of call-IC cells handed out via `allocCallIC`.
+    /// Sizes `Chunk.inline_call_caches` at `finish`.
+    inline_call_cache_count: u16 = 0,
 
     pub fn init(allocator: std.mem.Allocator) Builder {
         return .{ .allocator = allocator };
@@ -488,6 +517,33 @@ pub const Builder = struct {
         try self.emitU16(try self.allocIC());
     }
 
+    /// Allocate a fresh call-IC slot for a `call_method` site.
+    pub fn allocCallIC(self: *Builder) !u16 {
+        if (self.inline_call_cache_count == std.math.maxInt(u16)) {
+            return error.TooManyInlineCaches;
+        }
+        const k = self.inline_call_cache_count;
+        self.inline_call_cache_count += 1;
+        return k;
+    }
+
+    /// Emit `call_method` plus its receiver / callee / argc operands
+    /// and a freshly allocated call-IC slot. Encoding:
+    /// `[op] [r_recv:u8] [r_callee:u8] [argc:u8] [ic:u16]`.
+    pub fn emitCallMethod(
+        self: *Builder,
+        span: Span,
+        r_recv: u8,
+        r_callee: u8,
+        argc: u8,
+    ) !void {
+        try self.emitOp(.call_method, span);
+        try self.emitU8(r_recv);
+        try self.emitU8(r_callee);
+        try self.emitU8(argc);
+        try self.emitU16(try self.allocCallIC());
+    }
+
     /// Append `v` to the constant pool, returning its index.
     /// Identical doubles, ints, etc. are not deduplicated — the
     /// optimizer (M5+) can do that. Keep simple here.
@@ -505,6 +561,8 @@ pub const Builder = struct {
     pub fn finish(self: *Builder) !Chunk {
         const ics = try self.allocator.alloc(ICCell, self.inline_cache_count);
         for (ics) |*c| c.* = .{};
+        const call_ics = try self.allocator.alloc(CallICCell, self.inline_call_cache_count);
+        for (call_ics) |*c| c.* = .{};
         return .{
             .code = try self.code.toOwnedSlice(self.allocator),
             .constants = try self.constants.toOwnedSlice(self.allocator),
@@ -516,6 +574,7 @@ pub const Builder = struct {
             .is_async_module = self.is_async_module,
             .global_lexical_base = self.global_lexical_base,
             .inline_caches = ics,
+            .inline_call_caches = call_ics,
         };
     }
 };

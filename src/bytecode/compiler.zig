@@ -948,10 +948,7 @@ pub const Compiler = struct {
             try self.builder.emitU8(r_received);
             try self.builder.emitOp(.star, y.span);
             try self.builder.emitU8(r_arg0);
-            try self.builder.emitOp(.call_method, y.span);
-            try self.builder.emitU8(r_recv);
-            try self.builder.emitU8(r_callee);
-            try self.builder.emitU8(1);
+            try self.builder.emitCallMethod(y.span, r_recv, r_callee, 1);
             try self.builder.emitOp(.await_, y.span);
             // §27.6.3.7 step 7.b.iv — after Awaiting the inner step
             // result, if its Type is not Object, throw a TypeError.
@@ -1014,10 +1011,7 @@ pub const Compiler = struct {
             try self.builder.emitU8(r_received);
             try self.builder.emitOp(.star, y.span);
             try self.builder.emitU8(r_arg0);
-            try self.builder.emitOp(.call_method, y.span);
-            try self.builder.emitU8(r_recv);
-            try self.builder.emitU8(r_callee);
-            try self.builder.emitU8(1);
+            try self.builder.emitCallMethod(y.span, r_recv, r_callee, 1);
             try self.builder.emitOp(.await_, y.span);
             try self.builder.emitOp(.jmp, y.span);
             const throw_to_body_patch = self.builder.here();
@@ -1057,10 +1051,7 @@ pub const Compiler = struct {
             try self.builder.emitU8(r_received);
             try self.builder.emitOp(.star, y.span);
             try self.builder.emitU8(r_arg0);
-            try self.builder.emitOp(.call_method, y.span);
-            try self.builder.emitU8(r_recv);
-            try self.builder.emitU8(r_callee);
-            try self.builder.emitU8(1);
+            try self.builder.emitCallMethod(y.span, r_recv, r_callee, 1);
             try self.builder.emitOp(.await_, y.span);
             // §27.6.3.7 step 7.c.viii — after Awaiting the inner
             // `.return()` result, if its Type is not Object, throw
@@ -1192,10 +1183,7 @@ pub const Compiler = struct {
         try self.builder.emitU8(r_received);
         try self.builder.emitOp(.star, y.span);
         try self.builder.emitU8(r_arg0);
-        try self.builder.emitOp(.call_method, y.span);
-        try self.builder.emitU8(r_recv);
-        try self.builder.emitU8(r_callee);
-        try self.builder.emitU8(1);
+        try self.builder.emitCallMethod(y.span, r_recv, r_callee, 1);
         // ── Shared body — acc holds inner result ──
         const body_after_call = self.builder.here();
         // §25.5.3.7 step 7.b.iii / 7.c.viii — `iter.next(received)` and
@@ -1258,10 +1246,7 @@ pub const Compiler = struct {
         try self.builder.emitU8(r_received);
         try self.builder.emitOp(.star, y.span);
         try self.builder.emitU8(r_arg0);
-        try self.builder.emitOp(.call_method, y.span);
-        try self.builder.emitU8(r_recv);
-        try self.builder.emitU8(r_callee);
-        try self.builder.emitU8(1);
+        try self.builder.emitCallMethod(y.span, r_recv, r_callee, 1);
         try self.builder.emitOp(.jmp, y.span);
         const throw_to_body_patch = self.builder.here();
         try self.builder.emitI16(0);
@@ -1303,10 +1288,7 @@ pub const Compiler = struct {
         try self.builder.emitU8(r_received);
         try self.builder.emitOp(.star, y.span);
         try self.builder.emitU8(r_arg0);
-        try self.builder.emitOp(.call_method, y.span);
-        try self.builder.emitU8(r_recv);
-        try self.builder.emitU8(r_callee);
-        try self.builder.emitU8(1);
+        try self.builder.emitCallMethod(y.span, r_recv, r_callee, 1);
         // §15.5.5 step 7.c.iii — inner result must be Object.
         // Save the raw call result first so we can check it.
         try self.builder.emitOp(.star, y.span);
@@ -1900,10 +1882,7 @@ pub const Compiler = struct {
                 try self.builder.emitU8(r_arg);
             }
 
-            try self.builder.emitOp(.call_method, tt.span);
-            try self.builder.emitU8(r_recv);
-            try self.builder.emitU8(r_callee);
-            try self.builder.emitU8(@intCast(1 + lit.expressions.len));
+            try self.builder.emitCallMethod(tt.span, r_recv, r_callee, @intCast(1 + lit.expressions.len));
 
             var k: u8 = 0;
             while (k < reserved) : (k += 1) self.releaseTemp();
@@ -3445,10 +3424,7 @@ pub const Compiler = struct {
 
         // 5. call_method: r_callee is the receiver (`f`), r_apply
         // is the function, two args.
-        try self.builder.emitOp(.call_method, c.span);
-        try self.builder.emitU8(r_callee);
-        try self.builder.emitU8(r_apply);
-        try self.builder.emitU8(2);
+        try self.builder.emitCallMethod(c.span, r_callee, r_apply, 2);
 
         self.releaseTemp(); // r_args_pos
         self.releaseTemp(); // r_this
@@ -3523,10 +3499,7 @@ pub const Compiler = struct {
             try self.builder.emitU8(r);
         }
 
-        try self.builder.emitOp(.call_method, c.span);
-        try self.builder.emitU8(r_recv);
-        try self.builder.emitU8(r_callee);
-        try self.builder.emitU8(@intCast(c.arguments.len));
+        try self.builder.emitCallMethod(c.span, r_recv, r_callee, @intCast(c.arguments.len));
 
         var j: u8 = 0;
         while (j < reserved) : (j += 1) self.releaseTemp();
@@ -3657,10 +3630,7 @@ pub const Compiler = struct {
         try self.builder.emitOp(.star, c.span);
         try self.builder.emitU8(r_args_pos);
 
-        try self.builder.emitOp(.call_method, c.span);
-        try self.builder.emitU8(r_callee);
-        try self.builder.emitU8(r_apply);
-        try self.builder.emitU8(2);
+        try self.builder.emitCallMethod(c.span, r_callee, r_apply, 2);
     }
 
     fn compileSuperMethodCall(
@@ -3716,10 +3686,7 @@ pub const Compiler = struct {
         try self.builder.emitOp(.star, c.span);
         try self.builder.emitU8(r_recv);
 
-        try self.builder.emitOp(.call_method, c.span);
-        try self.builder.emitU8(r_recv);
-        try self.builder.emitU8(r_callee);
-        try self.builder.emitU8(@intCast(c.arguments.len));
+        try self.builder.emitCallMethod(c.span, r_recv, r_callee, @intCast(c.arguments.len));
 
         self.releaseTemp(); // r_recv
         var j: u8 = 0;
@@ -3826,10 +3793,7 @@ pub const Compiler = struct {
         try self.builder.emitOp(.star, c.span);
         try self.builder.emitU8(r_args_pos);
 
-        try self.builder.emitOp(.call_method, c.span);
-        try self.builder.emitU8(r_callee);
-        try self.builder.emitU8(r_apply);
-        try self.builder.emitU8(2);
+        try self.builder.emitCallMethod(c.span, r_callee, r_apply, 2);
     }
 
     /// `new f(args)` (§13.3.5). Identical layout to `Call` — same
@@ -5424,10 +5388,7 @@ pub const Compiler = struct {
             // r_result = r_iter.next() — uses the cached `next`
             // from r_next_fn (read once above).
             // call_method r_recv=r_iter, r_callee=r_next_fn, argc=0
-            try self.builder.emitOp(.call_method, s.span);
-            try self.builder.emitU8(r_iter);
-            try self.builder.emitU8(r_next_fn);
-            try self.builder.emitU8(0);
+            try self.builder.emitCallMethod(s.span, r_iter, r_next_fn, 0);
             // §14.7.5 / §27.1.4.4 — for-await-of awaits each
             // next() result. Sync iters return `{done, value}`
             // directly; `await` on a non-Promise resolves to the

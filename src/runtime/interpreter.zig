@@ -5684,24 +5684,89 @@ fn runFrames(
                 const r_recv = code[ip];
                 const r_callee = code[ip + 1];
                 const argc = code[ip + 2];
-                ip += 3;
+                const ic_idx = readU16(code, ip + 3);
+                ip += 5;
 
                 const callee_v = registers[r_callee];
-                // §10.5.13 callable Proxy [[Call]] — route through
-                // `callValue` (handles apply trap + chained proxies).
-                if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-                    if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+                const recv = registers[r_recv];
+                const call_cell = &local_chunk.inline_call_caches[ic_idx];
+
+                // Inline cache: a hit means the same callee was here
+                // last time AND it was a plain (non-proxy, non-bound,
+                // non-revocable) JSFunction. Skip the entire exotic
+                // dispatch chain and fall through to the generator /
+                // native / async / regular call section directly.
+                //
+                // The IC is GC-aware: the heap's mark walk weak-clears
+                // any cell whose callee isn't reachable through other
+                // refs, so a swept-and-reused address cannot match.
+                const callee_fn = blk: {
+                    if (call_cell.callee) |cached| {
+                        if (heap_mod.valueAsFunction(callee_v)) |fn_obj| {
+                            if (fn_obj == cached) break :blk fn_obj;
+                        }
+                    }
+
+                    // Slow path — original exotic dispatch.
+
+                    // §10.5.13 callable Proxy [[Call]] — route through
+                    // `callValue` (handles apply trap + chained proxies).
+                    if (heap_mod.valueAsPlainObject(callee_v)) |po| {
+                        if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+                            const args_start = @as(usize, r_callee) + 1;
+                            const args_slice = registers[args_start .. args_start + argc];
+                            const cresult = try callValue(allocator, realm, callee_v, recv, args_slice);
+                            switch (cresult) {
+                                .value, .yielded => |v| {
+                                    acc = v;
+                                    // `callValue` ran the callee inline (its
+                                    // own runFrames re-entry) — active frame
+                                    // unchanged → decodeNext.
+                                    continue :dispatch try decodeNext(code, &ip, &committed);
+                                },
+                                .thrown => |ex| {
+                                    f.ip = ip;
+                                    f.accumulator = acc;
+                                    committed = true;
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                        return .{ .thrown = ex };
+                                    }
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                },
+                            }
+                        }
+                    }
+                    const fn_v = heap_mod.valueAsFunction(callee_v) orelse {
+                        const ex = try makeTypeError(realm, "value is not callable");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    };
+
+                    // §28.2.2.1.1 — revocation function. See `.call`.
+                    if (fn_v.revocable_proxy) |rp| {
+                        rp.proxy_target = null;
+                        rp.proxy_handler = null;
+                        rp.proxy_target_fn = null;
+                        rp.proxy_revoked = true;
+                        fn_v.revocable_proxy = null;
+                        acc = Value.undefined_;
+                        // No frame pushed, no inline call → decodeNext.
+                        continue :dispatch try decodeNext(code, &ip, &committed);
+                    }
+
+                    // §10.4.1 — bound functions unwrap. `this = recv`
+                    // is overridden by the bound `this` inside
+                    // `unwrapBoundCall`.
+                    if (fn_v.bound_target != null) {
                         const args_start = @as(usize, r_callee) + 1;
-                        const args_slice = registers[args_start .. args_start + argc];
-                        const cresult = try callValue(allocator, realm, callee_v, registers[r_recv], args_slice);
-                        switch (cresult) {
-                            .value, .yielded => |v| {
-                                acc = v;
-                                // `callValue` ran the callee inline (its
-                                // own runFrames re-entry) — active frame
-                                // unchanged → decodeNext.
-                                continue :dispatch try decodeNext(code, &ip, &committed);
-                            },
+                        const result = try callJSFunction(allocator, realm, fn_v, recv, registers[args_start .. args_start + argc]);
+                        switch (result) {
+                            .value, .yielded => |v| acc = v,
                             .thrown => |ex| {
                                 f.ip = ip;
                                 f.accumulator = acc;
@@ -5712,55 +5777,17 @@ fn runFrames(
                                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                         }
+                        // Bound target ran inline via `callJSFunction` —
+                        // active frame unchanged → decodeNext.
+                        continue :dispatch try decodeNext(code, &ip, &committed);
                     }
-                }
-                const callee_fn = heap_mod.valueAsFunction(callee_v) orelse {
-                    const ex = try makeTypeError(realm, "value is not callable");
-                    f.ip = ip;
-                    f.accumulator = acc;
-                    committed = true;
-                    if (!try unwindThrow(allocator, realm, frames, ex)) {
-                        return .{ .thrown = ex };
-                    }
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+
+                    // Survived every exotic check — the callee is a
+                    // plain function. Refill the IC so the next call
+                    // takes the fast path.
+                    call_cell.callee = fn_v;
+                    break :blk fn_v;
                 };
-
-                const recv = registers[r_recv];
-
-                // §28.2.2.1.1 — revocation function. See `.call`.
-                if (callee_fn.revocable_proxy) |rp| {
-                    rp.proxy_target = null;
-                    rp.proxy_handler = null;
-                    rp.proxy_target_fn = null;
-                    rp.proxy_revoked = true;
-                    callee_fn.revocable_proxy = null;
-                    acc = Value.undefined_;
-                    // No frame pushed, no inline call → decodeNext.
-                    continue :dispatch try decodeNext(code, &ip, &committed);
-                }
-
-                // §10.4.1 — bound functions unwrap. `this = recv`
-                // is overridden by the bound `this` inside
-                // `unwrapBoundCall`.
-                if (callee_fn.bound_target != null) {
-                    const args_start = @as(usize, r_callee) + 1;
-                    const result = try callJSFunction(allocator, realm, callee_fn, recv, registers[args_start .. args_start + argc]);
-                    switch (result) {
-                        .value, .yielded => |v| acc = v,
-                        .thrown => |ex| {
-                            f.ip = ip;
-                            f.accumulator = acc;
-                            committed = true;
-                            if (!try unwindThrow(allocator, realm, frames, ex)) {
-                                return .{ .thrown = ex };
-                            }
-                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                        },
-                    }
-                    // Bound target ran inline via `callJSFunction` —
-                    // active frame unchanged → decodeNext.
-                    continue :dispatch try decodeNext(code, &ip, &committed);
-                }
 
                 // §27.5 / §27.6 — calling a `function*` or
                 // `async function*` allocates a generator wrapper
