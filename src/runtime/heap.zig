@@ -1500,28 +1500,42 @@ pub const Heap = struct {
         const lc = self.live_color;
         for (self.functions_young.items) |f| {
             if (f.mark_color != lc) continue;
-            if (f.chunk) |c| weakClearChunkCallICs(c, lc);
+            if (f.chunk) |c| weakClearChunkICs(c, lc);
         }
         for (self.functions_mature.items) |f| {
             if (f.mark_color != lc) continue;
-            if (f.chunk) |c| weakClearChunkCallICs(c, lc);
+            if (f.chunk) |c| weakClearChunkICs(c, lc);
         }
     }
 
-    fn weakClearChunkCallICs(chunk: *const Chunk, live_color: u1) void {
+    /// Weak-clear stale heap pointers in both IC tables of a chunk:
+    /// `inline_caches` (proto pointer for prototype-load cells)
+    /// and `inline_call_caches` (callee pointer). Cells whose
+    /// pointer isn't otherwise reachable get nulled, so a swept-
+    /// and-reused address cannot reawaken a stale cell.
+    fn weakClearChunkICs(chunk: *const Chunk, live_color: u1) void {
+        for (chunk.inline_caches) |*cell| {
+            if (cell.proto) |proto| {
+                if (proto.mark_color != live_color) {
+                    cell.shape = null;
+                    cell.proto = null;
+                    cell.proto_shape = null;
+                }
+            }
+        }
         for (chunk.inline_call_caches) |*cell| {
             if (cell.callee) |callee| {
                 if (callee.mark_color != live_color) cell.callee = null;
             }
         }
-        for (chunk.function_templates) |*ft| weakClearChunkCallICs(&ft.chunk, live_color);
+        for (chunk.function_templates) |*ft| weakClearChunkICs(&ft.chunk, live_color);
         for (chunk.class_templates) |*ct| {
-            weakClearChunkCallICs(&ct.constructor_chunk, live_color);
-            for (ct.instance_methods) |*m| weakClearChunkCallICs(&m.chunk, live_color);
-            for (ct.static_methods) |*m| weakClearChunkCallICs(&m.chunk, live_color);
-            for (ct.instance_fields) |*fd| if (fd.init_chunk) |*ic| weakClearChunkCallICs(ic, live_color);
-            for (ct.static_fields) |*fd| if (fd.init_chunk) |*ic| weakClearChunkCallICs(ic, live_color);
-            for (ct.static_blocks) |*sb| weakClearChunkCallICs(sb, live_color);
+            weakClearChunkICs(&ct.constructor_chunk, live_color);
+            for (ct.instance_methods) |*m| weakClearChunkICs(&m.chunk, live_color);
+            for (ct.static_methods) |*m| weakClearChunkICs(&m.chunk, live_color);
+            for (ct.instance_fields) |*fd| if (fd.init_chunk) |*ic| weakClearChunkICs(ic, live_color);
+            for (ct.static_fields) |*fd| if (fd.init_chunk) |*ic| weakClearChunkICs(ic, live_color);
+            for (ct.static_blocks) |*sb| weakClearChunkICs(sb, live_color);
         }
     }
 

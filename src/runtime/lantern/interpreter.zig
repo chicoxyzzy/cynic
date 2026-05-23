@@ -5340,9 +5340,11 @@ pub fn runFrames(
                 const obj = heap_mod.valueAsPlainObject(registers[r_obj]) orelse return error.InvalidOpcode;
                 if (acc.isNull()) {
                     obj.prototype = null;
+                    realm.proto_revision_counter +%= 1;
                 } else if (heap_mod.valueAsPlainObject(acc)) |p| {
                     realm.heap.storeInternalSlot(.{ .object = obj }, acc);
                     obj.prototype = p;
+                    realm.proto_revision_counter +%= 1;
                 }
                 // else: no-op; do not throw.
                 continue :dispatch try decodeNext(code, &ip, &committed);
@@ -6495,32 +6497,108 @@ pub fn runFrames(
                 if (!key_v.isString()) return error.InvalidOpcode;
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
                 if (heap_mod.valueAsPlainObject(acc)) |obj_in| {
-                    // Monomorphic inline cache. The fast path is a
-                    // pointer compare against the last receiver's
-                    // shape: a hit serves the value straight out of
-                    // the slot vector. shadowSet demotes any exotic
-                    // (proxy, namespace, typed view, array, engine-
-                    // internal key) before stamping a shape, so a
-                    // shaped object is guaranteed to be a plain
-                    // ordinary object with own-data properties only.
+                    // Monomorphic inline cache. Two hit modes:
+                    //   • Own-data hit — `proto == null`. Pointer
+                    //     compare on the receiver's shape; serve
+                    //     from `recv.slots[slot]`.
+                    //   • Prototype-load hit — `proto != null`. The
+                    //     property was resolved through the chain at
+                    //     fill time. Re-validate by comparing the
+                    //     receiver's shape, the proto pointer's own
+                    //     shape (catches data→accessor / delete /
+                    //     shape mutation on the proto), AND the
+                    //     realm's `proto_revision_counter` (catches a
+                    //     `setPrototypeOf` / `__proto__` swap on
+                    //     ANY object since fill time).
+                    //
+                    // shadowSet demotes any exotic (proxy, namespace,
+                    // typed view, array, engine-internal key) before
+                    // stamping a shape, so a shaped receiver is a
+                    // plain ordinary object — the proxy / namespace
+                    // checks below are still required for shapeless
+                    // receivers and are reached on a cache miss.
                     const cell = &local_chunk.inline_caches[ic_idx];
                     if (cell.shape != null and cell.shape == obj_in.shape) {
-                        acc = obj_in.slots.items[cell.slot];
-                        continue :dispatch try decodeNext(code, &ip, &committed);
+                        if (cell.proto) |proto| {
+                            // Two receivers can share an own shape
+                            // (the same root, or the same chain of
+                            // transitions) while pointing at different
+                            // prototype objects — e.g. `new String(x)`
+                            // and `new Object(x)` both start at shape
+                            // root but inherit from String.prototype
+                            // vs Object.prototype. Verify identity of
+                            // the cached proto pointer alongside its
+                            // shape; otherwise the IC would serve the
+                            // wrong chain's slot.
+                            if (obj_in.prototype == proto and
+                                proto.shape == cell.proto_shape and
+                                cell.proto_rev == realm.proto_revision_counter)
+                            {
+                                acc = proto.slots.items[cell.slot];
+                                continue :dispatch try decodeNext(code, &ip, &committed);
+                            }
+                        } else {
+                            acc = obj_in.slots.items[cell.slot];
+                            continue :dispatch try decodeNext(code, &ip, &committed);
+                        }
                     }
-                    // Cold or shape-changed callsite: probe the
-                    // shape directly. If the obj is shaped and has
-                    // the key as own-data, refill the cell and
-                    // serve from slots. Anything else (no shape,
-                    // accessor, prototype-inherited) falls through
-                    // to the full lookup below.
+                    // Cold / shape-changed / proto-invalidated.
+                    // Probe own shape first.
                     if (obj_in.shape) |sh| {
                         if (sh.lookup(key_s.flatBytes())) |entry| {
                             if (entry.kind == .data) {
                                 cell.shape = sh;
                                 cell.slot = entry.slot;
+                                cell.proto = null;
+                                cell.proto_shape = null;
                                 acc = obj_in.slots.items[entry.slot];
                                 continue :dispatch try decodeNext(code, &ip, &committed);
+                            }
+                        }
+                        // Prototype-load chain walk. Cache the first
+                        // shape-claimed own-data hit; otherwise fall
+                        // through to the slow path.
+                        //
+                        // CRITICAL: if a proto has the key in its
+                        // `properties` bag but NOT in its shape (the
+                        // proto is in dictionary mode for that key —
+                        // some built-in prototypes like
+                        // `%String.prototype%` lose their shape via
+                        // exotic markers or other demoting paths),
+                        // BREAK out of the walk. The slow path's
+                        // properties-walk semantics still resolve the
+                        // value correctly at this proto level; we
+                        // must not skip past it and miscache a deeper
+                        // proto's same-named property as if it were
+                        // the resolution target.
+                        //
+                        // Also skip if the receiver has an own
+                        // accessor for this key — the slow path's
+                        // `lookupAccessor` dispatch fires the getter;
+                        // serving an inherited data slot would
+                        // silently bypass it.
+                        if (!chainHasProxy(obj_in) and !obj_in.accessors.contains(key_s.flatBytes())) {
+                            var cursor: ?*@import("../object.zig").JSObject = obj_in.prototype;
+                            while (cursor) |proto| : (cursor = proto.prototype) {
+                                if (proto.proxy_target != null or proto.proxy_revoked) break;
+                                if (proto.is_module_namespace) break;
+                                if (proto.accessors.contains(key_s.flatBytes())) break;
+                                if (proto.shape) |proto_sh| {
+                                    if (proto_sh.lookup(key_s.flatBytes())) |entry| {
+                                        if (entry.kind == .data) {
+                                            cell.shape = sh;
+                                            cell.slot = entry.slot;
+                                            cell.proto = proto;
+                                            cell.proto_shape = proto_sh;
+                                            cell.proto_rev = realm.proto_revision_counter;
+                                            acc = proto.slots.items[entry.slot];
+                                            continue :dispatch try decodeNext(code, &ip, &committed);
+                                        }
+                                    }
+                                }
+                                // Dictionary-mode proto holding the
+                                // key — let the slow path resolve it.
+                                if (proto.properties.contains(key_s.flatBytes())) break;
                             }
                         }
                     }

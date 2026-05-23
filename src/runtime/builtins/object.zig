@@ -3577,6 +3577,11 @@ pub fn objectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
             cursor = node.prototype;
         }
         obj.prototype = new_proto;
+        // §10.1.2.1 — every cached IC cell that resolved through
+        // the prototype chain may now point at a stale link. Bump
+        // the revision counter so all proto-load cells miss + refill
+        // on their next access.
+        realm.proto_revision_counter +%= 1;
     } else if (heap_mod.valueAsFunction(target_v)) |target_fn| {
         // §10.1.2.1 OrdinarySetPrototypeOf on a JSFunction target.
         // Cynic stores the function's [[Prototype]] edge on
@@ -3600,6 +3605,9 @@ pub fn objectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
         };
         target_fn.static_parent = new_static_parent;
         target_fn.proto = new_proto_obj;
+        // Function-target [[Prototype]] swap — bump the proto IC
+        // revision so dependent caches miss + refill.
+        realm.proto_revision_counter +%= 1;
     }
     return target_v;
 }

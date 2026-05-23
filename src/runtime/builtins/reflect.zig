@@ -1031,6 +1031,9 @@ fn reflectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) 
         cursor = node.prototype;
     }
     target.prototype = new_proto;
+    // Proto-link swap — bump the proto IC revision so dependent
+    // caches miss + refill.
+    realm.proto_revision_counter +%= 1;
     return Value.true_;
 }
 

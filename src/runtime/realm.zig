@@ -536,6 +536,19 @@ pub const Realm = struct {
     /// distinct brand identities so cross-instance private reads
     /// raise the spec-mandated TypeError.
     class_brand_counter: u32 = 0,
+    /// Monotonic invalidation counter for the prototype-load path
+    /// of the property IC. Bumped on every operation that swaps a
+    /// receiver's `[[Prototype]]` link — `Object.setPrototypeOf`,
+    /// `Reflect.setPrototypeOf`, and the `__proto__` object-literal
+    /// shorthand. The IC's prototype-load cells snapshot this value
+    /// at fill time and miss on any subsequent bump, forcing a
+    /// fresh chain walk. Mutations to a prototype's own properties
+    /// (data reassign, delete, data→accessor) don't bump — those
+    /// surface through the cached `proto_shape` field. Conservative:
+    /// bumps invalidate every proto-load cell in the realm, but the
+    /// counter is bumped only on the rare proto-link write path so
+    /// the broad invalidation is fine in practice.
+    proto_revision_counter: u64 = 1,
     /// One-shot exception slot for native callbacks. A native
     /// that wants to throw a specific JS value sets this and
     /// returns `error.NativeThrew`; the dispatcher reads it,

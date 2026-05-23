@@ -5655,3 +5655,86 @@ test "proto-load IC: polymorphic receivers sharing one prototype" {
         \\acc;
     , 5 * 100);
 }
+
+test "proto-load IC: receiver's own accessor shadows inherited data" {
+    // `child` has an own accessor for `length` installed via
+    // `Object.defineProperty`; `proto` carries a data property of
+    // the same name. A property read on `child.length` MUST dispatch
+    // the accessor — serving the inherited proto data would return
+    // 3 instead of 2.
+    //
+    // Regression: the early proto-load IC walk skipped the
+    // receiver's own accessor check and miscached the proto's data
+    // slot, breaking test262 fixtures like
+    // `built-ins/Array/prototype/reduce/15.4.4.21-2-8.js`.
+    try expectScriptIntWithBuiltins(
+        \\const proto = { length: 3 };
+        \\const child = Object.create(proto);
+        \\Object.defineProperty(child, "length", { get() { return 2; } });
+        \\let acc = 0;
+        \\// Hot loop — first iteration warms the cell. The
+        \\// remaining 99 must still fire the accessor.
+        \\for (let i = 0; i < 100; i++) acc = child.length;
+        \\acc;
+    , 2);
+}
+
+test "proto-load IC: dictionary-mode proto doesn't leak to the next chain link" {
+    // Built-in `%String.prototype%` is marked as a String exotic at
+    // realm init, which demotes its shape to dictionary mode while
+    // `properties` still carries `constructor`. A naive proto walk
+    // would skip the shapeless String.prototype and miscache
+    // `Object.prototype.constructor` (= Object) as the resolution.
+    // The walk must break at any proto whose `properties` claims
+    // the key — letting the slow path resolve correctly.
+    //
+    // Regression: pre-fix, `new String("a").constructor === String`
+    // returned false (the walk served Object). Drove ~50 test262
+    // fixtures under `built-ins/String` and `built-ins/Object`.
+    try expectScriptStringWithBuiltins(
+        \\const a = new String("a");
+        \\const b = new String("b");
+        \\const c = new Object("c"); // also boxes to a String wrapper
+        \\const ok = (a.constructor === String) &&
+        \\           (b.constructor === String) &&
+        \\           (c.constructor === String);
+        \\String(ok);
+    , "true");
+}
+
+test "proto-load IC: hot loop on dictionary-mode proto stays correct" {
+    // Same dictionary-mode-proto guard, exercised across many
+    // iterations of the same callsite to ensure no stale cache
+    // sneaks in mid-loop.
+    try expectScriptIntWithBuiltins(
+        \\const obj = new String("hot");
+        \\let hits = 0;
+        \\for (let i = 0; i < 200; i++) {
+        \\  if (obj.constructor === String) hits++;
+        \\}
+        \\hits;
+    , 200);
+}
+
+test "proto-load IC: two receivers with different protos at the same site" {
+    // Same call site, two receivers whose own shape happens to
+    // match (both at the shape-tree root) but whose prototypes
+    // differ. The IC must NOT serve the cached proto's slot when
+    // the receiver's actual prototype is different — covered by
+    // the `obj_in.prototype == cell.proto` identity check.
+    //
+    // Regression target: without the identity check, the cell
+    // filled by the first call would hit-and-mis-serve on the
+    // second.
+    try expectScriptStringWithBuiltins(
+        \\function read(o) { return o.constructor.name; }
+        \\const a = new String("x");
+        \\const b = new Number(7);
+        \\// Alternate receivers through the same compiled site.
+        \\let s = "";
+        \\for (let i = 0; i < 10; i++) {
+        \\  s += read((i & 1) === 0 ? a : b) + ",";
+        \\}
+        \\s;
+    , "String,Number,String,Number,String,Number,String,Number,String,Number,");
+}

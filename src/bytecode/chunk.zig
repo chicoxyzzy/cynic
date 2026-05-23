@@ -27,19 +27,40 @@ const Shape = @import("../runtime/shape.zig").Shape;
 
 /// Inline-cache cell — one per property-access callsite. The
 /// interpreter records the last receiver's `(shape, slot)` after a
-/// successful own-data lookup; on the next hit, a shape pointer
-/// compare and a `slots[slot]` load skip the full lookup.
+/// successful lookup; on the next hit, a shape pointer compare and a
+/// `slots[slot]` load skip the full lookup.
+///
+/// Two modes:
+///   • `proto == null` (own-data hit) — `slot` indexes
+///     `recv.slots`. Same behaviour as the original IC.
+///   • `proto != null` (prototype-load hit) — the property was
+///     resolved through the receiver's prototype chain; `slot`
+///     indexes `proto.slots`. `proto_shape` snapshots `proto.shape`
+///     at fill time so a mutation that demotes / re-shapes the
+///     prototype (adding / removing / converting a key) misses
+///     the cache. `proto_rev` snapshots the realm's
+///     `proto_revision_counter` — bumped on every
+///     `Object.setPrototypeOf` / `Reflect.setPrototypeOf` /
+///     `__proto__` literal write, so a chain-link swap also
+///     invalidates.
 ///
 /// Monomorphic: a miss overwrites the cell, no polymorphism / chain.
 /// Hermes-style: no JIT, the cache lives entirely in the lantern.
 ///
-/// `shape == null` is the cold / un-cacheable state (the last lookup
-/// hit a dictionary-mode object, an accessor, the prototype chain,
-/// or simply hasn't run yet). Initialised that way at chunk
+/// `shape == null` is the cold / un-cacheable state (the last
+/// lookup hit a dictionary-mode object, an accessor, the prototype
+/// chain, or simply hasn't run yet). Initialised that way at chunk
 /// finalisation.
+///
+/// The `proto` field is a GC-heap pointer; the heap's mark walk
+/// weak-clears any cell whose proto isn't otherwise reachable, so
+/// a swept-and-reused address cannot reawaken a stale cell.
 pub const ICCell = struct {
     shape: ?*Shape = null,
     slot: u32 = 0,
+    proto: ?*@import("../runtime/object.zig").JSObject = null,
+    proto_shape: ?*Shape = null,
+    proto_rev: u64 = 0,
 };
 
 /// Inline-cache cell for `call_method`. Caches the last callee
