@@ -460,7 +460,7 @@ pub fn buildClass(
         switch (m.kind) {
             .method => try proto.setWithFlags(realm.allocator, runtime_name, heap_mod.taggedFunction(fn_obj), method_flags),
             .getter => {
-                const entry = try proto.accessors.getOrPut(realm.allocator, runtime_name);
+                const entry = try proto.getOrPutAccessor(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 entry.value_ptr.*.getter = fn_obj;
                 try proto.property_flags.put(realm.allocator, runtime_name, .{
@@ -470,7 +470,7 @@ pub fn buildClass(
                 });
             },
             .setter => {
-                const entry = try proto.accessors.getOrPut(realm.allocator, runtime_name);
+                const entry = try proto.getOrPutAccessor(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 entry.value_ptr.*.setter = fn_obj;
                 try proto.property_flags.put(realm.allocator, runtime_name, .{

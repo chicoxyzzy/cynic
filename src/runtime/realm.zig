@@ -316,7 +316,7 @@ pub const GlobalBindings = struct {
     pub fn canDeclareGlobalFunction(self: *const GlobalBindings, key: []const u8) bool {
         const t = self.target orelse return true;
         const has_data = t.properties.contains(key);
-        const has_accessor = t.accessors.contains(key);
+        const has_accessor = t.hasAccessor(key);
         if (!has_data and !has_accessor) return t.extensible;
         if (has_accessor) {
             const flags = t.property_flags.get(key) orelse @import("object.zig").PropertyFlags.default;
@@ -416,7 +416,7 @@ pub const GlobalBindings = struct {
     ) !void {
         try self.var_names.put(allocator, key, {});
         if (self.target) |t| {
-            _ = t.accessors.swapRemove(key);
+            _ = t.removeAccessor(key);
             // Generational write barrier — raw `properties.put`
             // bypasses the routed `heap.storeProperty`.
             if (self.heap) |h| h.writeBarrier(.{ .object = t }, value);

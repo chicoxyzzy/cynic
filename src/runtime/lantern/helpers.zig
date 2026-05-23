@@ -47,7 +47,7 @@ pub fn consumePendingException(realm: *Realm) ?Value {
 pub fn lookupAccessor(obj: *JSObject, key: []const u8) ?Accessor {
     var cursor: ?*JSObject = obj;
     while (cursor) |c| : (cursor = c.prototype) {
-        if (c.accessors.get(key)) |a| return a;
+        if (c.getAccessor(key)) |a| return a;
         if (c.hasOwn(key)) return null;
         // §10.4.5.4 Integer-Indexed Exotic Object [[GetOwnProperty]]:
         // a typed array owns every canonical numeric index in
@@ -309,8 +309,8 @@ pub fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, targe
                 }
             }
         }
-        {
-            var it = obj.accessors.iterator();
+        if (obj.accessorIterator()) |it_outer| {
+            var it = it_outer;
             while (it.next()) |entry| {
                 const k = entry.key_ptr.*;
                 if (canonicalIntegerIndexInterp(k)) |idx| {
@@ -343,7 +343,7 @@ pub fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, targe
             // Demote: the shadow shape can't encode a removal.
             obj.demoteFromShape();
             _ = obj.properties.swapRemove(key);
-            _ = obj.accessors.swapRemove(key);
+            _ = obj.removeAccessor(key);
             _ = obj.property_flags.swapRemove(key);
         }
         const final_len = floor orelse target_len;

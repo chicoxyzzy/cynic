@@ -691,7 +691,7 @@ pub fn deletePropertyOrThrow(realm: *Realm, obj: *JSObject, key: []const u8) Nat
     // `deleteOwn` already honors configurable on array-exotic
     // indexed slots, but unconditionally strips named bag entries,
     // so reject non-configurable here before calling it.
-    if (cur.accessors.contains(key) or cur.properties.contains(key)) {
+    if (cur.hasAccessor(key) or cur.properties.contains(key)) {
         if (cur.property_flags.get(key)) |flags| {
             if (!flags.configurable) return throwTypeError(realm, "Cannot delete non-configurable property");
         }

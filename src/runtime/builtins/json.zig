@@ -83,7 +83,7 @@ fn jsonGetValue(realm: *Realm, value: Value, key: []const u8) NativeError!Value 
 fn getPropertyWithReceiver(realm: *Realm, obj: *JSObject, key: []const u8, receiver: Value) NativeError!Value {
     var cur: ?*JSObject = obj;
     while (cur) |o| {
-        if (o.accessors.get(key)) |acc| {
+        if (o.getAccessor(key)) |acc| {
             if (acc.getter) |getter| {
                 const outcome = lantern.callJSFunction(realm.allocator, realm, getter, receiver, &[_]Value{}) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -1057,7 +1057,7 @@ fn jsonDelete(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!bool {
     // property → return false (no remove). `deleteOwn` honors
     // this for array-exotic indexed slots but unconditionally
     // strips named bag entries, so reject non-configurable here.
-    if (cur.accessors.contains(key) or cur.properties.contains(key)) {
+    if (cur.hasAccessor(key) or cur.properties.contains(key)) {
         if (cur.property_flags.get(key)) |flags| {
             if (!flags.configurable) return false;
         }
@@ -1131,7 +1131,7 @@ fn jsonCreateDataProperty(realm: *Realm, obj: *JSObject, key: []const u8, value:
     // directly so a failed redefine returns false instead of
     // throwing (Object.defineProperty's strict-throw semantics
     // would diverge from §7.3.7 here).
-    const had_own = obj.hasOwn(key) or obj.accessors.contains(key);
+    const had_own = obj.hasOwn(key) or obj.hasAccessor(key);
     if (!had_own) {
         if (!obj.extensible) return false;
         // For arrays, route integer-index writes through the
@@ -1158,7 +1158,7 @@ fn jsonCreateDataProperty(realm: *Realm, obj: *JSObject, key: []const u8, value:
     obj.demoteFromShape();
     _ = obj.properties.swapRemove(key);
     _ = obj.property_flags.swapRemove(key);
-    _ = obj.accessors.swapRemove(key);
+    _ = obj.removeAccessor(key);
     if (obj.is_array_exotic) {
         if (@import("../object.zig").JSObject.canonicalIntegerIndex(key)) |idx| {
             obj.setIndexed(realm.allocator, idx, value) catch return error.OutOfMemory;

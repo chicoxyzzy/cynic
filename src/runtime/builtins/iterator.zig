@@ -157,7 +157,7 @@ fn installIteratorPrototypeConstructorAccessor(realm: *Realm, proto: *JSObject) 
     setter.proto = realm.intrinsics.function_prototype;
     // §17 — built-in accessor properties: { enumerable: false,
     // configurable: true }.
-    const entry = try proto.accessors.getOrPut(realm.allocator, "constructor");
+    const entry = try proto.getOrPutAccessor(realm.allocator, "constructor");
     entry.value_ptr.* = .{ .getter = getter, .setter = setter };
     try proto.property_flags.put(realm.allocator, "constructor", .{
         .writable = false,
@@ -181,7 +181,7 @@ fn installIteratorPrototypeToStringTagAccessor(realm: *Realm, proto: *JSObject) 
     getter.proto = realm.intrinsics.function_prototype;
     const setter = try realm.heap.allocateFunctionNative(iteratorPrototypeToStringTagSet, 1, "set [Symbol.toStringTag]");
     setter.proto = realm.intrinsics.function_prototype;
-    const entry = try proto.accessors.getOrPut(realm.allocator, "@@toStringTag");
+    const entry = try proto.getOrPutAccessor(realm.allocator, "@@toStringTag");
     entry.value_ptr.* = .{ .getter = getter, .setter = setter };
     try proto.property_flags.put(realm.allocator, "@@toStringTag", .{
         .writable = false,
@@ -1501,7 +1501,7 @@ fn getIteratorFlattenable(realm: *Realm, v: Value, reject_strings: bool) NativeE
         // the primitive in strict mode (typeof === 'string'), so
         // walk `String.prototype` directly rather than boxing first.
         const sp = realm.intrinsics.string_prototype orelse return throwTypeError(realm, "String.prototype not installed");
-        if (sp.accessors.get("@@iterator")) |acc| {
+        if (sp.getAccessor("@@iterator")) |acc| {
             if (acc.getter) |getter| {
                 const out = lantern.callJSFunction(realm.allocator, realm, getter, v, &.{}) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -2459,7 +2459,7 @@ fn iteratorZipKeyed(realm: *Realm, this_value: Value, args: []const Value) Nativ
         if (builtins_object.isSymbolKey(key)) {
             const flags = iterables_obj.flagsFor(key);
             const has_data = iterables_obj.properties.contains(key);
-            const has_acc = iterables_obj.accessors.contains(key);
+            const has_acc = iterables_obj.hasAccessor(key);
             if (!has_data and !has_acc) continue;
             if (!flags.enumerable) continue;
         } else {

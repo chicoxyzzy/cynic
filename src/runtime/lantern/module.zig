@@ -112,7 +112,7 @@ pub fn mergeStarKey(
     src_key: []const u8,
 ) !void {
     if (dst_ns.properties.contains(key)) return;
-    if (dst_ns.accessors.contains(key)) return;
+    if (dst_ns.hasAccessor(key)) return;
     if (dst_ns.ambiguous_namespace_keys.contains(key)) return;
 
     const new_resolved = module_mod.resolveRedirectChain(src_ns, src_key) catch return;

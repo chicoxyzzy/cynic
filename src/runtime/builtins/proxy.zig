@@ -225,7 +225,7 @@ pub fn nativeProxyGet(realm: *Realm, proxy: *JSObject, key: []const u8, receiver
             }
         }
     }
-    if (target.accessors.get(key)) |acc| {
+    if (target.getAccessor(key)) |acc| {
         const flags = target.flagsFor(key);
         if (!flags.configurable and acc.getter == null) {
             if (!v.isUndefined()) {
@@ -267,7 +267,7 @@ pub fn nativeProxySet(realm: *Realm, proxy: *JSObject, key: []const u8, value: V
             }
         }
     }
-    if (target.accessors.get(key)) |acc| {
+    if (target.getAccessor(key)) |acc| {
         const flags = target.flagsFor(key);
         if (!flags.configurable and acc.setter == null) {
             return throwTypeError(realm, "proxy 'set' trap reported success for non-configurable accessor with no setter");
@@ -293,7 +293,7 @@ pub fn nativeProxyHas(realm: *Realm, proxy: *JSObject, key: []const u8) NativeEr
     // property doesn't exist, nor an own property of a non-
     // extensible target.
     if (!b) {
-        const has_own = target.properties.contains(key) or target.accessors.contains(key);
+        const has_own = target.properties.contains(key) or target.hasAccessor(key);
         if (has_own) {
             const flags = target.flagsFor(key);
             if (!flags.configurable) {
@@ -385,7 +385,7 @@ pub fn nativeProxyDelete(realm: *Realm, proxy: *JSObject, key: []const u8) Nativ
         // configurable own property, nor for an own property of a
         // non-extensible target (§10.5.10 step 14 added by the
         // `proxy-missing-checks` proposal).
-        const has_own = target.properties.contains(key) or target.accessors.contains(key);
+        const has_own = target.properties.contains(key) or target.hasAccessor(key);
         if (has_own) {
             const flags = target.flagsFor(key);
             if (!flags.configurable) {

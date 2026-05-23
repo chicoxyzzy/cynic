@@ -307,7 +307,7 @@ pub fn ownPropertyKeysOrdered(
         // redundant, but a missed delete site would surface as
         // a phantom key here. Trust the maps as the source of
         // truth for liveness.
-        if (!obj.properties.contains(k) and !obj.accessors.contains(k)) continue;
+        if (!obj.properties.contains(k) and !obj.hasAccessor(k)) continue;
         string_keys.append(realm.allocator, k) catch return error.OutOfMemory;
     }
     // Fallback: pick up any `properties` keys not already in the
@@ -329,19 +329,21 @@ pub fn ownPropertyKeysOrdered(
         }
     }
     // Same fallback for `accessors`.
-    var ait = obj.accessors.iterator();
-    while (ait.next()) |entry| {
-        const k = entry.key_ptr.*;
-        if (std.mem.startsWith(u8, k, "__cynic_")) continue;
-        if (obj.properties.contains(k)) continue; // already counted
-        if (obj.typed_view != null) {
-            if (canonicalIntegerIndex(k)) |_| continue;
-        }
-        if (orderListContains(obj, k)) continue;
-        if (canonicalIntegerIndex(k)) |i| {
-            integer_keys.append(realm.allocator, .{ .idx = i, .key = k }) catch return error.OutOfMemory;
-        } else {
-            string_keys.append(realm.allocator, k) catch return error.OutOfMemory;
+    if (obj.accessorIterator()) |ait_outer| {
+        var ait = ait_outer;
+        while (ait.next()) |entry| {
+            const k = entry.key_ptr.*;
+            if (std.mem.startsWith(u8, k, "__cynic_")) continue;
+            if (obj.properties.contains(k)) continue; // already counted
+            if (obj.typed_view != null) {
+                if (canonicalIntegerIndex(k)) |_| continue;
+            }
+            if (orderListContains(obj, k)) continue;
+            if (canonicalIntegerIndex(k)) |i| {
+                integer_keys.append(realm.allocator, .{ .idx = i, .key = k }) catch return error.OutOfMemory;
+            } else {
+                string_keys.append(realm.allocator, k) catch return error.OutOfMemory;
+            }
         }
     }
     // §15.2.1.18 GetModuleNamespace step 3.c — re-export redirect
@@ -354,7 +356,7 @@ pub fn ownPropertyKeysOrdered(
         while (rit.next()) |entry| {
             const k = entry.key_ptr.*;
             if (obj.properties.contains(k)) continue;
-            if (obj.accessors.contains(k)) continue;
+            if (obj.hasAccessor(k)) continue;
             if (obj.ambiguous_namespace_keys.contains(k)) continue;
             if (canonicalIntegerIndex(k)) |i| {
                 integer_keys.append(realm.allocator, .{ .idx = i, .key = k }) catch return error.OutOfMemory;
@@ -1451,7 +1453,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
                         // `prototype` on a function is governed by
                         // §10.2.4 not the proxy invariant set).
                         if (proxy_target_obj) |proxy_target| {
-                            const target_had = proxy_target.hasOwn(key) or proxy_target.accessors.contains(key);
+                            const target_had = proxy_target.hasOwn(key) or proxy_target.hasAccessor(key);
                             const parsed_for_inv = parseDescriptor(realm, heap_mod.valueAsPlainObject(desc_v) orelse return target_v) catch return target_v;
                             if (!target_had) {
                                 if (!proxy_target.extensible) {
@@ -1462,7 +1464,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
                                 }
                             } else {
                                 const cur_flags = proxy_target.flagsFor(key);
-                                const cur_is_acc = proxy_target.accessors.contains(key);
+                                const cur_is_acc = proxy_target.hasAccessor(key);
                                 const cur_value: Value = blk: {
                                     if (cur_is_acc) break :blk Value.undefined_;
                                     if (proxy_target.properties.get(key)) |val| break :blk val;
@@ -1470,7 +1472,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
                                 };
                                 var cur_getter: ?*JSFunction = null;
                                 var cur_setter: ?*JSFunction = null;
-                                if (proxy_target.accessors.get(key)) |a| {
+                                if (proxy_target.getAccessor(key)) |a| {
                                     cur_getter = a.getter;
                                     cur_setter = a.setter;
                                 }
@@ -1656,9 +1658,9 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
         }
 
         // Snapshot the current descriptor (or `null` if absent).
-        const had_own = target.hasOwn(key) or target.accessors.contains(key);
+        const had_own = target.hasOwn(key) or target.hasAccessor(key);
         const cur_flags = target.flagsFor(key);
-        const cur_is_accessor = target.accessors.contains(key);
+        const cur_is_accessor = target.hasAccessor(key);
         // §10.1.6 — current value comes from `properties` first,
         // then from an Array exotic's `elements` for indexed keys
         // (so `defineProperty` sees the slot's actual value, not
@@ -1676,7 +1678,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
         };
         var cur_getter: ?*JSFunction = null;
         var cur_setter: ?*JSFunction = null;
-        if (target.accessors.get(key)) |a| {
+        if (target.getAccessor(key)) |a| {
             cur_getter = a.getter;
             cur_setter = a.setter;
         }
@@ -1744,7 +1746,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
                     }
                 }
             }
-            const entry = target.accessors.getOrPut(realm.allocator, key) catch return error.OutOfMemory;
+            const entry = target.getOrPutAccessor(realm.allocator, key) catch return error.OutOfMemory;
             // Preserve the half not specified in the new desc.
             const new_getter: ?*JSFunction = if (parsed.has_get) parsed.getter else if (cur_is_accessor) cur_getter else null;
             const new_setter: ?*JSFunction = if (parsed.has_set) parsed.setter else if (cur_is_accessor) cur_setter else null;
@@ -1770,7 +1772,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
         // shape).
         if (parsed.isData() or !cur_is_accessor) {
             // Drop any previous accessor.
-            _ = target.accessors.swapRemove(key);
+            _ = target.removeAccessor(key);
             const value: Value = if (parsed.has_value) parsed.value else cur_value;
             target.setWithFlags(realm.allocator, key, value, flags) catch return error.OutOfMemory;
             // Anchor the heap key string when it landed in the
@@ -2128,7 +2130,7 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
                 // target is a plain object (callable-target invariants
                 // are subsumed by JSFunction's own ordinary [[GetOwnProperty]]).
                 if (cursor.proxy_target) |proxy_target| {
-                    const target_had = proxy_target.hasOwn(key) or proxy_target.accessors.contains(key);
+                    const target_had = proxy_target.hasOwn(key) or proxy_target.hasAccessor(key);
                     if (result_v.isUndefined()) {
                         // Trap reports "absent". The target's own
                         // non-configurable property MUST also be
@@ -2198,7 +2200,7 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
             }
         }
         // Accessor descriptor first.
-        if (obj.accessors.get(key)) |acc| {
+        if (obj.getAccessor(key)) |acc| {
             const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
             desc.prototype = realm.intrinsics.object_prototype;
             const get_v: Value = if (acc.getter) |g| heap_mod.taggedFunction(g) else Value.undefined_;
@@ -2937,15 +2939,17 @@ fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             .configurable = false,
         }) catch return error.OutOfMemory;
     }
-    var ait = obj.accessors.iterator();
-    while (ait.next()) |entry| {
-        const key = entry.key_ptr.*;
-        const cur = obj.flagsFor(key);
-        obj.property_flags.put(realm.allocator, key, .{
-            .writable = false, // N/A on accessors; spec says omitted.
-            .enumerable = cur.enumerable,
-            .configurable = false,
-        }) catch return error.OutOfMemory;
+    if (obj.accessorIterator()) |ait_outer| {
+        var ait = ait_outer;
+        while (ait.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const cur = obj.flagsFor(key);
+            obj.property_flags.put(realm.allocator, key, .{
+                .writable = false, // N/A on accessors; spec says omitted.
+                .enumerable = cur.enumerable,
+                .configurable = false,
+            }) catch return error.OutOfMemory;
+        }
     }
     return arg;
 }
@@ -3048,10 +3052,12 @@ fn objectIsFrozen(realm: *Realm, this_value: Value, args: []const Value) NativeE
     }
     // Accessor descriptors only need `configurable: false` to be
     // frozen; `writable` is N/A on accessors.
-    var ait = obj.accessors.iterator();
-    while (ait.next()) |entry| {
-        const flags = obj.flagsFor(entry.key_ptr.*);
-        if (flags.configurable) return Value.false_;
+    if (obj.accessorIterator()) |ait_outer| {
+        var ait = ait_outer;
+        while (ait.next()) |entry| {
+            const flags = obj.flagsFor(entry.key_ptr.*);
+            if (flags.configurable) return Value.false_;
+        }
     }
     return Value.true_;
 }
@@ -3108,15 +3114,17 @@ fn objectSeal(realm: *Realm, this_value: Value, args: []const Value) NativeError
             .configurable = false,
         }) catch return error.OutOfMemory;
     }
-    var ait = obj.accessors.iterator();
-    while (ait.next()) |entry| {
-        const key = entry.key_ptr.*;
-        const cur = obj.flagsFor(key);
-        obj.property_flags.put(realm.allocator, key, .{
-            .writable = cur.writable,
-            .enumerable = cur.enumerable,
-            .configurable = false,
-        }) catch return error.OutOfMemory;
+    if (obj.accessorIterator()) |ait_outer| {
+        var ait = ait_outer;
+        while (ait.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const cur = obj.flagsFor(key);
+            obj.property_flags.put(realm.allocator, key, .{
+                .writable = cur.writable,
+                .enumerable = cur.enumerable,
+                .configurable = false,
+            }) catch return error.OutOfMemory;
+        }
     }
     return arg;
 }
@@ -3154,9 +3162,11 @@ fn objectIsSealed(realm: *Realm, this_value: Value, args: []const Value) NativeE
     while (it.next()) |entry| {
         if (obj.flagsFor(entry.key_ptr.*).configurable) return Value.false_;
     }
-    var ait = obj.accessors.iterator();
-    while (ait.next()) |entry| {
-        if (obj.flagsFor(entry.key_ptr.*).configurable) return Value.false_;
+    if (obj.accessorIterator()) |ait_outer| {
+        var ait = ait_outer;
+        while (ait.next()) |entry| {
+            if (obj.flagsFor(entry.key_ptr.*).configurable) return Value.false_;
+        }
     }
     return Value.true_;
 }
@@ -4071,7 +4081,7 @@ fn getVProperty(realm: *Realm, v: Value, key: []const u8) NativeError!Value {
 fn getPropertyWithReceiver(realm: *Realm, obj: *JSObject, key: []const u8, receiver: Value) NativeError!Value {
     var cur: ?*JSObject = obj;
     while (cur) |o| {
-        if (o.accessors.get(key)) |acc| {
+        if (o.getAccessor(key)) |acc| {
             if (acc.getter) |getter| {
                 const interp = @import("../lantern/interpreter.zig");
                 const outcome = interp.callJSFunction(realm.allocator, realm, getter, receiver, &[_]Value{}) catch |err| switch (err) {

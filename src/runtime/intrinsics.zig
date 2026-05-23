@@ -319,14 +319,14 @@ pub fn install(realm: *Realm) !void {
         // `built-ins/ThrowTypeError/unique-per-realm-function-proto`
         // verifies the same singleton lands in both descriptors.
         if (realm.intrinsics.function_prototype) |fn_proto| {
-            const a_entry = fn_proto.accessors.getOrPut(realm.allocator, "arguments") catch return error.OutOfMemory;
+            const a_entry = fn_proto.getOrPutAccessor(realm.allocator, "arguments") catch return error.OutOfMemory;
             a_entry.value_ptr.* = .{ .getter = t, .setter = t };
             try fn_proto.property_flags.put(realm.allocator, "arguments", .{
                 .writable = false,
                 .enumerable = false,
                 .configurable = true,
             });
-            const c_entry = fn_proto.accessors.getOrPut(realm.allocator, "caller") catch return error.OutOfMemory;
+            const c_entry = fn_proto.getOrPutAccessor(realm.allocator, "caller") catch return error.OutOfMemory;
             c_entry.value_ptr.* = .{ .getter = t, .setter = t };
             try fn_proto.property_flags.put(realm.allocator, "caller", .{
                 .writable = false,
@@ -729,7 +729,7 @@ pub fn installNativeGetter(realm: *Realm, proto: *JSObject, name: []const u8, ge
         std.fmt.allocPrint(realm.classAllocator(), "get {s}", .{name}) catch return error.OutOfMemory;
     const getter = try realm.heap.allocateFunctionNative(getter_fn, 0, getter_name);
     getter.proto = realm.intrinsics.function_prototype;
-    const entry = try proto.accessors.getOrPut(realm.allocator, name);
+    const entry = try proto.getOrPutAccessor(realm.allocator, name);
     entry.value_ptr.* = .{ .getter = getter };
     // §17 — built-in accessor properties are { enumerable: false,
     // configurable: true }. `writable` is N/A on accessor descriptors.
@@ -981,7 +981,7 @@ pub fn getPropertyChain(realm: *Realm, obj: *JSObject, key: []const u8) NativeEr
     }
     var cur: ?*JSObject = obj;
     while (cur) |o| {
-        if (o.accessors.get(key)) |acc| {
+        if (o.getAccessor(key)) |acc| {
             if (acc.getter) |getter| {
                 const lantern = @import("lantern/interpreter.zig");
                 const outcome = lantern.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedObject(obj), &[_]Value{}) catch |err| switch (err) {

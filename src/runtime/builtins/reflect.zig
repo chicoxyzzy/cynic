@@ -181,7 +181,7 @@ fn reflectHas(realm: *Realm, this_value: Value, args: []const Value) NativeError
         var cursor: ?*@import("../object.zig").JSObject = fn_obj.proto;
         while (cursor) |c| : (cursor = c.prototype) {
             if (c.properties.contains(key_slice)) return Value.true_;
-            if (c.accessors.contains(key_slice)) return Value.true_;
+            if (c.hasAccessor(key_slice)) return Value.true_;
         }
         return Value.false_;
     }
@@ -189,7 +189,7 @@ fn reflectHas(realm: *Realm, this_value: Value, args: []const Value) NativeError
     var cursor: ?*@import("../object.zig").JSObject = target;
     while (cursor) |c| : (cursor = c.prototype) {
         if (c.properties.contains(key_slice)) return Value.true_;
-        if (c.accessors.contains(key_slice)) return Value.true_;
+        if (c.hasAccessor(key_slice)) return Value.true_;
     }
     return Value.false_;
 }
@@ -215,7 +215,7 @@ fn hasPropertyProxyAware(realm: *Realm, root: *JSObject, key: []const u8) Native
     while (cur) |c| {
         // §10.1.7.1 OrdinaryHasProperty step 2 — own property check.
         if (c.properties.contains(key)) return true;
-        if (c.accessors.contains(key)) return true;
+        if (c.hasAccessor(key)) return true;
         if (c.is_module_namespace and c.ambiguous_namespace_keys.contains(key)) return false;
         if (c.is_module_namespace and c.namespace_redirects.contains(key)) return true;
         if (c.is_array_exotic) {
@@ -268,7 +268,7 @@ fn reflectGet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         // [[Prototype]].
         var cur: ?*JSObject = fn_obj.proto;
         while (cur) |o| : (cur = o.prototype) {
-            if (o.accessors.get(key_slice)) |acc| {
+            if (o.getAccessor(key_slice)) |acc| {
                 if (acc.getter) |getter| {
                     const interp2 = @import("../lantern/interpreter.zig");
                     const outcome = interp2.callJSFunction(realm.allocator, realm, getter, receiver, &[_]Value{}) catch |err| switch (err) {
@@ -307,7 +307,7 @@ fn reflectGet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // through; the function check above was the previous shortcut.
     var cursor: ?*JSObject = proxy_cur;
     while (cursor) |o| : (cursor = o.prototype) {
-        if (o.accessors.get(key_slice)) |acc| {
+        if (o.getAccessor(key_slice)) |acc| {
             if (acc.getter) |getter| {
                 const interp = @import("../lantern/interpreter.zig");
                 const outcome = interp.callJSFunction(realm.allocator, realm, getter, receiver, &[_]Value{}) catch |err| switch (err) {
@@ -628,7 +628,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         // as `this` per §10.1.9.2 step 4 (Reflect.set
         // call-prototype-property-set.js / set-value-on-accessor-
         // descriptor-with-receiver.js).
-        if (o.accessors.get(key_slice)) |acc| {
+        if (o.getAccessor(key_slice)) |acc| {
             if (acc.setter) |setter| {
                 const interp = @import("../lantern/interpreter.zig");
                 const setter_args = [_]Value{v};
@@ -715,7 +715,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         // runs against real slots.
         return try reflectSetOnReceiver(realm, heap_mod.taggedObject(proxy_cur), key_slice, v);
     }
-    if (receiver_obj.accessors.contains(key_slice)) {
+    if (receiver_obj.hasAccessor(key_slice)) {
         // IsAccessorDescriptor(existingDescriptor) → return false
         // (different-property-descriptors.js).
         return Value.false_;
@@ -788,7 +788,7 @@ fn reflectSetOnReceiver(realm: *Realm, receiver_v: Value, key_slice: []const u8,
         }
     }
     // §10.1.9.2 step 3.c-e — existing accessor on Receiver: reject.
-    if (receiver_obj.accessors.contains(key_slice)) return Value.false_;
+    if (receiver_obj.hasAccessor(key_slice)) return Value.false_;
     if (receiver_obj.properties.contains(key_slice)) {
         const flags = receiver_obj.flagsFor(key_slice);
         if (!flags.writable) return Value.false_;
@@ -881,17 +881,17 @@ fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) 
     // non-configurable `@@toStringTag` install also rejects.
     // Includes the `namespace_redirects` entries (re-exports
     // installed by `module_reexport_named` / `module_reexport_star`).
-    if (target.is_module_namespace and !std.mem.startsWith(u8, key_slice, "@@") and !std.mem.startsWith(u8, key_slice, "<sym:") and (target.properties.contains(key_slice) or target.accessors.contains(key_slice) or target.namespace_redirects.contains(key_slice))) {
+    if (target.is_module_namespace and !std.mem.startsWith(u8, key_slice, "@@") and !std.mem.startsWith(u8, key_slice, "<sym:") and (target.properties.contains(key_slice) or target.hasAccessor(key_slice) or target.namespace_redirects.contains(key_slice))) {
         return Value.false_;
     }
     // §10.1.10.1 — non-configurable own property → return false
     // (no mutation). Includes frozen / sealed objects.
-    if (target.flagsFor(key_slice).configurable == false and (target.properties.contains(key_slice) or target.accessors.contains(key_slice))) return Value.false_;
+    if (target.flagsFor(key_slice).configurable == false and (target.properties.contains(key_slice) or target.hasAccessor(key_slice))) return Value.false_;
     // Demote: the shadow shape can't encode a removal — leaving it
     // would trip `verifyShapeInvariant` under GC stress.
     target.demoteFromShape();
     _ = target.properties.swapRemove(key_slice);
-    _ = target.accessors.swapRemove(key_slice);
+    _ = target.removeAccessor(key_slice);
     _ = target.property_flags.swapRemove(key_slice);
     target.forgetKey(key_slice);
     return Value.true_;

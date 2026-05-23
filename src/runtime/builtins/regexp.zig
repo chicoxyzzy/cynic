@@ -1150,7 +1150,7 @@ fn setPropertyChainOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, value
     // setter. If found, invoke it with `this = obj`.
     var cur: ?*JSObject = obj;
     while (cur) |o| {
-        if (o.accessors.get(key)) |acc| {
+        if (o.getAccessor(key)) |acc| {
             if (acc.setter) |setter| {
                 const interp = @import("../lantern/interpreter.zig");
                 const args_one = [_]Value{value};

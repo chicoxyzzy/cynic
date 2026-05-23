@@ -414,14 +414,16 @@ pub const FinalizationCell = struct {
 /// `slots`, `properties`, `elements`, `prototype` out of this
 /// struct forever.
 pub const JSObjectExtension = struct {
-    /// Empty for now. Cold fields land here in follow-up commits
-    /// (accessors, private_*, namespace_*, map_data, set_data,
-    /// array_buffer, typed_view, promise_*, weak_ref_target,
-    /// finalization_cells, brand bools …).
+    /// §10.1.8 accessor descriptors — pairs of getter / setter
+    /// functions installed via `Object.defineProperty` with a
+    /// `{get, set}` descriptor. The vast majority of objects
+    /// have zero accessors, so this map sits behind the extension
+    /// pointer. The GC marker walks every accessor's getter /
+    /// setter (which are heap pointers).
+    accessors: std.StringArrayHashMapUnmanaged(Accessor) = .empty,
 
     pub fn deinit(self: *JSObjectExtension, allocator: std.mem.Allocator) void {
-        _ = self;
-        _ = allocator;
+        self.accessors.deinit(allocator);
     }
 };
 
@@ -476,10 +478,10 @@ pub const JSObject = struct {
     /// and writes through the setter when present. Read-only or
     /// write-only pairs leave the other half `null`.
     private_accessors: std.StringArrayHashMapUnmanaged(Accessor) = .empty,
-    /// Accessor descriptors — getter / setter pairs. Checked
-    /// before `properties` on read and write. Walks the prototype
-    /// chain like data properties.
-    accessors: std.StringArrayHashMapUnmanaged(Accessor) = .empty,
+    // (`accessors` field moved to `JSObjectExtension.accessors` —
+    // access via the `hasAccessor` / `getAccessor` /
+    // `getOrPutAccessor` / `removeAccessor` / `accessorIterator`
+    // helpers near the bottom of this struct.)
     /// Class instance-field initializers — only meaningful on a
     /// class prototype object. The constructor's
     /// `init_instance_fields` op walks this list, calling each
@@ -886,13 +888,64 @@ pub const JSObject = struct {
         return ext;
     }
 
+    // ── §10.1.8 accessor descriptors — extension-backed cold map ─
+    //
+    // Most objects have zero accessors; the map sits behind
+    // `extension.accessors`. The helpers below give every reader
+    // a cheap "is there an extension at all?" guard so plain
+    // `{a, b}` literals pay nothing for the migration.
+
+    pub fn hasAccessor(self: *const JSObject, key: []const u8) bool {
+        if (self.extension) |ext| return ext.accessors.contains(key);
+        return false;
+    }
+
+    pub fn getAccessor(self: *const JSObject, key: []const u8) ?Accessor {
+        if (self.extension) |ext| return ext.accessors.get(key);
+        return null;
+    }
+
+    /// `Map.GetOrPutResult` thin wrapper — lazy-allocates the
+    /// extension on the first put.
+    pub fn getOrPutAccessor(
+        self: *JSObject,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+    ) !std.StringArrayHashMapUnmanaged(Accessor).GetOrPutResult {
+        const ext = try self.getOrCreateExtension(allocator);
+        return ext.accessors.getOrPut(allocator, key);
+    }
+
+    /// Returns true if the key was present and removed.
+    pub fn removeAccessor(self: *JSObject, key: []const u8) bool {
+        if (self.extension) |ext| return ext.accessors.swapRemove(key);
+        return false;
+    }
+
+    /// Iterator over the accessor map, or `null` when the object
+    /// has no extension (and therefore no accessors). Caller
+    /// receives an owned iterator value — `while (it.next()) |e|`
+    /// works the same as the underlying `Map.iterator()`.
+    pub fn accessorIterator(self: *const JSObject) ?std.StringArrayHashMapUnmanaged(Accessor).Iterator {
+        if (self.extension) |ext| return ext.accessors.iterator();
+        return null;
+    }
+
+    /// Count of installed accessors. `0` when there is no extension.
+    /// Cheaper than walking `accessorIterator` for size checks.
+    pub fn accessorCount(self: *const JSObject) usize {
+        if (self.extension) |ext| return ext.accessors.count();
+        return 0;
+    }
+
     pub fn deinit(self: *JSObject, allocator: std.mem.Allocator) void {
         self.properties.deinit(allocator);
         self.property_flags.deinit(allocator);
         self.private_properties.deinit(allocator);
         self.private_methods.deinit(allocator);
         self.private_accessors.deinit(allocator);
-        self.accessors.deinit(allocator);
+        // `accessors` lives in `extension.accessors` — freed when
+        // the extension is freed below.
         self.namespace_redirects.deinit(allocator);
         self.ambiguous_namespace_keys.deinit(allocator);
         if (self.map_data) |m| m.deinit(allocator);
@@ -1316,7 +1369,7 @@ pub const JSObject = struct {
         // [[HasProperty]] / [[GetOwnProperty]] so `'X' in ns` is
         // `false` and `Object.keys(ns)` omits the key.
         if (self.is_module_namespace and self.ambiguous_namespace_keys.contains(key)) return false;
-        if (self.properties.contains(key) or self.accessors.contains(key)) return true;
+        if (self.properties.contains(key) or self.hasAccessor(key)) return true;
         // §15.2.1.16.3 ResolveExport — re-export redirects make
         // the binding "own" on the Module Namespace exotic even
         // though the value lives elsewhere. `'X' in ns` /
@@ -1355,7 +1408,7 @@ pub const JSObject = struct {
         // are omitted from the namespace.
         if (self.is_module_namespace and self.ambiguous_namespace_keys.contains(key)) return false;
         if (self.properties.contains(key)) return true;
-        if (self.accessors.contains(key)) return true;
+        if (self.hasAccessor(key)) return true;
         // §15.2.1.16.3 ResolveExport — re-export redirects appear
         // as own properties on a Module Namespace exotic.
         if (self.is_module_namespace and self.namespace_redirects.contains(key)) return true;
@@ -1702,8 +1755,8 @@ pub const JSObject = struct {
                 return true;
             }
         }
-        if (self.accessors.contains(key)) {
-            _ = self.accessors.swapRemove(key);
+        if (self.hasAccessor(key)) {
+            _ = self.removeAccessor(key);
             _ = self.property_flags.swapRemove(key);
             if (!self.properties.contains(key)) self.forgetKey(key);
             return true;
@@ -1711,7 +1764,7 @@ pub const JSObject = struct {
         if (!self.properties.contains(key)) return true;
         _ = self.properties.swapRemove(key);
         _ = self.property_flags.swapRemove(key);
-        if (!self.accessors.contains(key)) self.forgetKey(key);
+        if (!self.hasAccessor(key)) self.forgetKey(key);
         return true;
     }
 };

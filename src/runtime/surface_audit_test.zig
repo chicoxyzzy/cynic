@@ -44,9 +44,11 @@ fn collectOwnNames(allocator: std.mem.Allocator, obj: *JSObject) ![]const []cons
     while (p_it.next()) |entry| {
         try list.append(allocator, try allocator.dupe(u8, entry.key_ptr.*));
     }
-    var a_it = obj.accessors.iterator();
-    while (a_it.next()) |entry| {
-        try list.append(allocator, try allocator.dupe(u8, entry.key_ptr.*));
+    if (obj.accessorIterator()) |a_it_outer| {
+        var a_it = a_it_outer;
+        while (a_it.next()) |entry| {
+            try list.append(allocator, try allocator.dupe(u8, entry.key_ptr.*));
+        }
     }
 
     const out = try list.toOwnedSlice(allocator);

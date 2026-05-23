@@ -3022,7 +3022,7 @@ pub fn runFrames(
                     if (!found) {
                         var cursor: ?*JSObject = fn_in.proto;
                         while (cursor) |c| : (cursor = c.prototype) {
-                            if (c.properties.contains(key_slice) or c.accessors.contains(key_slice)) {
+                            if (c.properties.contains(key_slice) or c.hasAccessor(key_slice)) {
                                 found = true;
                                 break;
                             }
@@ -5161,7 +5161,7 @@ pub fn runFrames(
                 // here. The thrower function is a per-realm
                 // singleton (§10.2.4); reuse it from intrinsics.
                 if (realm.intrinsics.throw_type_error) |thrower| {
-                    const entry = obj.accessors.getOrPut(allocator, "callee") catch return error.OutOfMemory;
+                    const entry = obj.getOrPutAccessor(allocator, "callee") catch return error.OutOfMemory;
                     realm.heap.storeInternalSlot(.{ .object = obj }, heap_mod.taggedFunction(thrower));
                     entry.value_ptr.* = .{ .getter = thrower, .setter = thrower };
                     obj.property_flags.put(allocator, "callee", .{
@@ -5232,7 +5232,7 @@ pub fn runFrames(
                 // accessor install demotes to dictionary mode so the
                 // shape never claims the accessor key.
                 obj.demoteFromShape();
-                const entry = obj.accessors.getOrPut(allocator, key_s.flatBytes()) catch return error.OutOfMemory;
+                const entry = obj.getOrPutAccessor(allocator, key_s.flatBytes()) catch return error.OutOfMemory;
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 realm.heap.storeInternalSlot(.{ .object = obj }, acc);
                 if (is_setter) {
@@ -5272,7 +5272,7 @@ pub fn runFrames(
                 // properties, so demote before recording the accessor.
                 obj.demoteFromShape();
                 const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
-                const entry = obj.accessors.getOrPut(allocator, owned.flatBytes()) catch return error.OutOfMemory;
+                const entry = obj.getOrPutAccessor(allocator, owned.flatBytes()) catch return error.OutOfMemory;
                 if (!entry.found_existing) {
                     entry.value_ptr.* = .{};
                     // The accessors map borrows the `owned` slice as
@@ -6577,12 +6577,12 @@ pub fn runFrames(
                         // `lookupAccessor` dispatch fires the getter;
                         // serving an inherited data slot would
                         // silently bypass it.
-                        if (!chainHasProxy(obj_in) and !obj_in.accessors.contains(key_s.flatBytes())) {
+                        if (!chainHasProxy(obj_in) and !obj_in.hasAccessor(key_s.flatBytes())) {
                             var cursor: ?*@import("../object.zig").JSObject = obj_in.prototype;
                             while (cursor) |proto| : (cursor = proto.prototype) {
                                 if (proto.proxy_target != null or proto.proxy_revoked) break;
                                 if (proto.is_module_namespace) break;
-                                if (proto.accessors.contains(key_s.flatBytes())) break;
+                                if (proto.hasAccessor(key_s.flatBytes())) break;
                                 if (proto.shape) |proto_sh| {
                                     if (proto_sh.lookup(key_s.flatBytes())) |entry| {
                                         if (entry.kind == .data) {
@@ -7874,7 +7874,7 @@ fn lookupGlobalAccessor(
     const gt = realm.globals.target orelse return .none;
     var cur: ?*JSObject = gt;
     while (cur) |o| {
-        if (o.accessors.get(key)) |acc| {
+        if (o.getAccessor(key)) |acc| {
             if (acc.getter) |getter| {
                 const outcome = try callJSFunction(allocator, realm, getter, heap_mod.taggedObject(gt), &[_]Value{});
                 switch (outcome) {
@@ -8032,10 +8032,10 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
         // accessor name. If absent we treat as configurable=true
         // (default), since later only writes flag entries for
         // non-default descriptors.
-        if (obj.accessors.contains(key)) {
+        if (obj.hasAccessor(key)) {
             const flags = obj.flagsFor(key);
             if (!flags.configurable) return .{ .throw_typeerror = "Cannot delete non-configurable property" };
-            _ = obj.accessors.swapRemove(key);
+            _ = obj.removeAccessor(key);
             _ = obj.property_flags.swapRemove(key);
             // §10.1.11 — drop the slot from the unified order list
             // unless the data half also exists (it shouldn't —
@@ -8065,7 +8065,7 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
         obj.demoteFromShape();
         _ = obj.properties.swapRemove(key);
         _ = obj.property_flags.swapRemove(key);
-        if (!obj.accessors.contains(key)) obj.forgetKey(key);
+        if (!obj.hasAccessor(key)) obj.forgetKey(key);
         return .{ .ok = true };
     }
     if (heap_mod.valueAsFunction(recv)) |fn_obj| {
@@ -8315,7 +8315,7 @@ fn strictSetPropertyAnchored(
             // `key` / `value` / `recv` are kept rooted by
             // `px_root_scope` above for the whole proxy path.
             const has_own_data = obj.properties.contains(key);
-            const has_own_acc = obj.accessors.contains(key);
+            const has_own_acc = obj.hasAccessor(key);
             if (has_own_data and !has_own_acc) {
                 const flags = obj.flagsFor(key);
                 if (!flags.writable) {
@@ -8551,7 +8551,7 @@ fn strictSetPropertyAnchored(
             if (!had_indexed) {
                 var cursor: ?*JSObject = obj.prototype;
                 while (cursor) |p| : (cursor = p.prototype) {
-                    if (p.accessors.contains(key)) break; // accessor already handled above
+                    if (p.hasAccessor(key)) break; // accessor already handled above
                     if (p.properties.contains(key)) {
                         const p_flags = p.flagsFor(key);
                         if (!p_flags.writable) {
@@ -8844,7 +8844,7 @@ fn getThroughChain(
                 },
             }
         }
-        if (c.accessors.get(key)) |acc| {
+        if (c.getAccessor(key)) |acc| {
             if (acc.getter) |getter| {
                 const out = try callJSFunction(allocator, realm, getter, receiver, &.{});
                 switch (out) {
@@ -8917,7 +8917,7 @@ fn setThroughChain(
             }
         }
         // §10.1.9.2 — own accessor wins.
-        if (c.accessors.get(key)) |acc| {
+        if (c.getAccessor(key)) |acc| {
             if (acc.setter) |setter| {
                 const args = [_]Value{value};
                 const outcome = try callJSFunction(allocator, realm, setter, recv, &args);
@@ -9094,7 +9094,7 @@ fn proxyGetTrap(
         }
         // §10.5.5 step 11 — accessor with undefined getter requires
         // trap result to be undefined.
-        if (target.accessors.get(key)) |acc| {
+        if (target.getAccessor(key)) |acc| {
             const flags = target.flagsFor(key);
             if (!flags.configurable and acc.getter == null) {
                 if (!v.isUndefined()) {
@@ -9217,7 +9217,7 @@ fn proxyDeleteTrap(
             // and (proxy-missing-checks: §10.5.10 step 14) when
             // target is non-extensible and the property exists on
             // target.
-            const has_own = target.properties.contains(key) or target.accessors.contains(key);
+            const has_own = target.properties.contains(key) or target.hasAccessor(key);
             if (has_own) {
                 const flags = target.flagsFor(key);
                 if (!flags.configurable) {
@@ -9298,7 +9298,7 @@ fn proxyHasTrap(
         // property doesn't exist, nor pretend an own property of a
         // non-extensible target doesn't exist.
         if (!b) {
-            const has_own = target.properties.contains(key) or target.accessors.contains(key);
+            const has_own = target.properties.contains(key) or target.hasAccessor(key);
             if (has_own) {
                 const flags = target.flagsFor(key);
                 if (!flags.configurable) {
@@ -9395,7 +9395,7 @@ fn proxySetTrap(
                         }
                     }
                 }
-                if (target.accessors.get(key)) |acc| {
+                if (target.getAccessor(key)) |acc| {
                     const flags = target.flagsFor(key);
                     if (!flags.configurable and acc.setter == null) {
                         const ex = try makeTypeError(realm, "proxy 'set' trap reported success for non-configurable accessor with no setter");

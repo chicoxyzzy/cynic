@@ -1099,10 +1099,12 @@ pub const Heap = struct {
                     if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
                     if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
                 }
-                var ait = o.accessors.iterator();
-                while (ait.next()) |entry| {
-                    if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
-                    if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+                if (o.accessorIterator()) |ait_outer| {
+                    var ait = ait_outer;
+                    while (ait.next()) |entry| {
+                        if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
+                        if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+                    }
                 }
                 // §15.2.1.16.3 ResolveExport chain — re-export
                 // redirects pin their target namespace alive so a
@@ -2174,10 +2176,12 @@ pub const Heap = struct {
             if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
             if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
         }
-        var ait = o.accessors.iterator();
-        while (ait.next()) |entry| {
-            if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
-            if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+        if (o.accessorIterator()) |ait_outer| {
+            var ait = ait_outer;
+            while (ait.next()) |entry| {
+                if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
+                if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+            }
         }
         var nrit = o.namespace_redirects.iterator();
         while (nrit.next()) |entry| {

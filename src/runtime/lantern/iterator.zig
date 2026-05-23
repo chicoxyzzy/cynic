@@ -340,20 +340,22 @@ pub fn openForInIterator(
             // §14.7.5.6 also surfaces accessor properties; mark them
             // seen so a same-named ancestor data property doesn't
             // re-emit (shadowing rule).
-            var ait = cur.accessors.iterator();
-            while (ait.next()) |entry| {
-                const key = entry.key_ptr.*;
-                if (std.mem.startsWith(u8, key, "__cynic_")) continue;
-                if (std.mem.startsWith(u8, key, "@@") or std.mem.startsWith(u8, key, "<sym:")) continue;
-                const gop = seen.getOrPut(realm.allocator, key) catch return error.OutOfMemory;
-                if (gop.found_existing) continue;
-                if (!cur.flagsFor(key).enumerable) continue;
-                var ibuf: [16]u8 = undefined;
-                const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
-                const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-                const k_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                arr.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(k_owned)) catch return error.OutOfMemory;
-                len += 1;
+            if (cur.accessorIterator()) |ait_outer| {
+                var ait = ait_outer;
+                while (ait.next()) |entry| {
+                    const key = entry.key_ptr.*;
+                    if (std.mem.startsWith(u8, key, "__cynic_")) continue;
+                    if (std.mem.startsWith(u8, key, "@@") or std.mem.startsWith(u8, key, "<sym:")) continue;
+                    const gop = seen.getOrPut(realm.allocator, key) catch return error.OutOfMemory;
+                    if (gop.found_existing) continue;
+                    if (!cur.flagsFor(key).enumerable) continue;
+                    var ibuf: [16]u8 = undefined;
+                    const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
+                    const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+                    const k_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                    arr.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(k_owned)) catch return error.OutOfMemory;
+                    len += 1;
+                }
             }
             current_proto = cur.prototype;
         }
@@ -511,7 +513,7 @@ pub fn openForInIterator(
                 if (std.mem.startsWith(u8, key, "__cynic_")) continue;
                 // Liveness: skip if neither map carries the key
                 // anymore (a delete path could leave a phantom entry).
-                if (!cur.properties.contains(key) and !cur.accessors.contains(key)) continue;
+                if (!cur.properties.contains(key) and !cur.hasAccessor(key)) continue;
                 if (!cur.flagsFor(key).enumerable) {
                     shadow_only.append(realm.allocator, key) catch return error.OutOfMemory;
                     continue;
@@ -542,20 +544,22 @@ pub fn openForInIterator(
                     str_keys.append(realm.allocator, key) catch return error.OutOfMemory;
                 }
             }
-            var ait = cur.accessors.iterator();
-            while (ait.next()) |entry| {
-                const key = entry.key_ptr.*;
-                if (std.mem.startsWith(u8, key, "__cynic_")) continue;
-                if (emitted_str.contains(key)) continue;
-                if (cur.properties.contains(key)) continue;
-                if (!cur.flagsFor(key).enumerable) {
-                    shadow_only.append(realm.allocator, key) catch return error.OutOfMemory;
-                    continue;
-                }
-                if (canonicalIntegerIndexInterp(key)) |i| {
-                    int_keys.append(realm.allocator, .{ .idx = i, .key = key }) catch return error.OutOfMemory;
-                } else {
-                    str_keys.append(realm.allocator, key) catch return error.OutOfMemory;
+            if (cur.accessorIterator()) |ait_outer| {
+                var ait = ait_outer;
+                while (ait.next()) |entry| {
+                    const key = entry.key_ptr.*;
+                    if (std.mem.startsWith(u8, key, "__cynic_")) continue;
+                    if (emitted_str.contains(key)) continue;
+                    if (cur.properties.contains(key)) continue;
+                    if (!cur.flagsFor(key).enumerable) {
+                        shadow_only.append(realm.allocator, key) catch return error.OutOfMemory;
+                        continue;
+                    }
+                    if (canonicalIntegerIndexInterp(key)) |i| {
+                        int_keys.append(realm.allocator, .{ .idx = i, .key = key }) catch return error.OutOfMemory;
+                    } else {
+                        str_keys.append(realm.allocator, key) catch return error.OutOfMemory;
+                    }
                 }
             }
             std.mem.sort(KeyEntry, int_keys.items, {}, struct {
@@ -727,7 +731,7 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
                     if (!fn_has) {
                         var ancestor: ?*JSObject = src_fn.proto;
                         while (ancestor) |a| {
-                            if (a.properties.contains(key_str.flatBytes()) or a.accessors.contains(key_str.flatBytes())) {
+                            if (a.properties.contains(key_str.flatBytes()) or a.hasAccessor(key_str.flatBytes())) {
                                 fn_has = true;
                                 break;
                             }
