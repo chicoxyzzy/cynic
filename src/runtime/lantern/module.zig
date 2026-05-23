@@ -113,13 +113,13 @@ pub fn mergeStarKey(
 ) !void {
     if (dst_ns.properties.contains(key)) return;
     if (dst_ns.hasAccessor(key)) return;
-    if (dst_ns.ambiguous_namespace_keys.contains(key)) return;
+    if (dst_ns.hasAmbiguousNamespaceKey(key)) return;
 
     const new_resolved = module_mod.resolveRedirectChain(src_ns, src_key) catch return;
 
-    if (dst_ns.namespace_redirects.get(key)) |existing| {
+    if (dst_ns.getNamespaceRedirect(key)) |existing| {
         const old_resolved = module_mod.resolveRedirectChain(existing.target_ns, existing.target_key) catch {
-            try dst_ns.namespace_redirects.put(allocator, key, .{
+            try dst_ns.putNamespaceRedirect(allocator, key, .{
                 .target_ns = src_ns,
                 .target_key = src_key,
             });
@@ -151,11 +151,11 @@ pub fn mergeStarKey(
                 if (old_fn == new_fn) return;
             }
         }
-        _ = dst_ns.namespace_redirects.swapRemove(key);
-        try dst_ns.ambiguous_namespace_keys.put(allocator, key, {});
+        _ = dst_ns.removeNamespaceRedirect(key);
+        try dst_ns.putAmbiguousNamespaceKey(allocator, key);
         return;
     }
-    try dst_ns.namespace_redirects.put(allocator, key, .{
+    try dst_ns.putNamespaceRedirect(allocator, key, .{
         .target_ns = src_ns,
         .target_key = src_key,
     });

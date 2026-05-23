@@ -438,12 +438,24 @@ pub const JSObjectExtension = struct {
     /// pairs. Same shape as `accessors` above but keyed by the
     /// mangled private name and never visible via reflection.
     private_accessors: std.StringArrayHashMapUnmanaged(Accessor) = .empty,
+    /// §15.2.1.16.3 ResolveExport chain — `export { X as Y } from
+    /// "src"` re-exports. Populated only on a Module Namespace
+    /// exotic; entries point back at the source namespace + the
+    /// local key name. Plain objects never carry this.
+    namespace_redirects: std.StringArrayHashMapUnmanaged(NamespaceRedirect) = .empty,
+    /// §15.2.1.16.3 step 8 — keys whose `export *` chain resolves
+    /// to two distinct (module, binding) pairs. Treated as absent
+    /// by every reflection / lookup path. Module Namespace exotic
+    /// only.
+    ambiguous_namespace_keys: std.StringArrayHashMapUnmanaged(void) = .empty,
 
     pub fn deinit(self: *JSObjectExtension, allocator: std.mem.Allocator) void {
         self.accessors.deinit(allocator);
         self.private_properties.deinit(allocator);
         self.private_methods.deinit(allocator);
         self.private_accessors.deinit(allocator);
+        self.namespace_redirects.deinit(allocator);
+        self.ambiguous_namespace_keys.deinit(allocator);
     }
 };
 
@@ -794,34 +806,10 @@ pub const JSObject = struct {
     /// different `[[Set]]` semantics (writes are silently dropped
     /// vs. always-`false`).
     is_module_namespace: bool = false,
-    /// §15.2.1.16.3 ResolveExport chain — when this namespace is a
-    /// Module Namespace exotic (`is_module_namespace == true`) AND
-    /// the binding originated from a `export { X as Y } from "src"`
-    /// re-export, the indirect entry is recorded here as
-    /// `Y -> (src_ns, "X")`. Reads through §9.4.6.7 [[Get]]
-    /// (`namespaceGetThrowingOnHole`) consult `namespace_redirects`
-    /// first; the redirected entry is resolved by walking
-    /// `target_ns` for `target_key`, following further redirects
-    /// transitively with a visited-set so a cycle returns the
-    /// resolved binding (or stops without recursing infinitely
-    /// when a cycle has no terminating local definition).
-    ///
-    /// Distinct from `properties` because the namespace's value
-    /// for `Y` lives on the *source* module, not here — copying
-    /// at re-export-evaluation time would freeze the binding at
-    /// the partial-namespace state during a cycle and miss the
-    /// final value the source module published after the cycle
-    /// returned. The redirect resolves every read at access time.
-    namespace_redirects: std.StringArrayHashMapUnmanaged(NamespaceRedirect) = .empty,
-    /// §15.2.1.16.3 step 8 ambiguity result — keys whose
-    /// `export *` chain resolves to multiple distinct (module,
-    /// binding) pairs. §15.2.1.18 GetModuleNamespace step 3.c.ii
-    /// drops these from the namespace's exported names; the
-    /// `hasOwn` / `hasProperty` / [[Get]] paths likewise treat
-    /// them as absent. Populated by `module_reexport_star` when a
-    /// second star source would install the same key with a
-    /// different terminal target.
-    ambiguous_namespace_keys: std.StringArrayHashMapUnmanaged(void) = .empty,
+    // (`namespace_redirects`, `ambiguous_namespace_keys` moved to
+    // `JSObjectExtension` — only Module Namespace exotics populate
+    // them. Access via the `namespaceRedirect*` /
+    // `ambiguousNamespaceKey*` helpers below.)
     /// §20.5.1.1 [[ErrorData]] — set when this object is an Error
     /// (or NativeError) instance produced via `new <X>Error(...)`
     /// / `<X>Error(...)`. Object.prototype.toString uses this to
@@ -1031,14 +1019,67 @@ pub const JSObject = struct {
         return null;
     }
 
+    // ── §15.2.1.16.3 Module Namespace exotic state ──────────────
+    //
+    // Only objects with `is_module_namespace == true` ever populate
+    // these maps. Everything else returns "absent" cheaply via the
+    // null-extension fast path.
+
+    pub fn hasNamespaceRedirect(self: *const JSObject, key: []const u8) bool {
+        if (self.extension) |ext| return ext.namespace_redirects.contains(key);
+        return false;
+    }
+
+    pub fn getNamespaceRedirect(self: *const JSObject, key: []const u8) ?NamespaceRedirect {
+        if (self.extension) |ext| return ext.namespace_redirects.get(key);
+        return null;
+    }
+
+    pub fn putNamespaceRedirect(
+        self: *JSObject,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        r: NamespaceRedirect,
+    ) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        try ext.namespace_redirects.put(allocator, key, r);
+    }
+
+    pub fn removeNamespaceRedirect(self: *JSObject, key: []const u8) bool {
+        if (self.extension) |ext| return ext.namespace_redirects.swapRemove(key);
+        return false;
+    }
+
+    pub fn namespaceRedirectIterator(self: *const JSObject) ?std.StringArrayHashMapUnmanaged(NamespaceRedirect).Iterator {
+        if (self.extension) |ext| return ext.namespace_redirects.iterator();
+        return null;
+    }
+
+    pub fn hasAmbiguousNamespaceKey(self: *const JSObject, key: []const u8) bool {
+        if (self.extension) |ext| return ext.ambiguous_namespace_keys.contains(key);
+        return false;
+    }
+
+    pub fn putAmbiguousNamespaceKey(
+        self: *JSObject,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+    ) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        try ext.ambiguous_namespace_keys.put(allocator, key, {});
+    }
+
+    pub fn ambiguousNamespaceKeyIterator(self: *const JSObject) ?std.StringArrayHashMapUnmanaged(void).Iterator {
+        if (self.extension) |ext| return ext.ambiguous_namespace_keys.iterator();
+        return null;
+    }
+
     pub fn deinit(self: *JSObject, allocator: std.mem.Allocator) void {
         self.properties.deinit(allocator);
         self.property_flags.deinit(allocator);
-        // `private_properties`, `private_methods`, `private_accessors`
-        // and `accessors` all live in the extension — freed below
-        // when the extension itself is freed.
-        self.namespace_redirects.deinit(allocator);
-        self.ambiguous_namespace_keys.deinit(allocator);
+        // `private_properties`, `private_methods`, `private_accessors`,
+        // `accessors`, `namespace_redirects`, `ambiguous_namespace_keys`
+        // all live in the extension — freed when it is.
         if (self.map_data) |m| m.deinit(allocator);
         if (self.set_data) |s| s.deinit(allocator);
         if (self.array_like_iter) |s| s.deinit(allocator);
@@ -1148,7 +1189,7 @@ pub const JSObject = struct {
             !std.mem.startsWith(u8, key, "@@") and
             !std.mem.startsWith(u8, key, "<sym:"))
         {
-            if (self.properties.contains(key) or self.namespace_redirects.contains(key)) {
+            if (self.properties.contains(key) or self.hasNamespaceRedirect(key)) {
                 return .{
                     .writable = true,
                     .enumerable = true,
@@ -1459,14 +1500,14 @@ pub const JSObject = struct {
         // entries (§15.2.1.18 step 3.c.ii); reflect that in
         // [[HasProperty]] / [[GetOwnProperty]] so `'X' in ns` is
         // `false` and `Object.keys(ns)` omits the key.
-        if (self.is_module_namespace and self.ambiguous_namespace_keys.contains(key)) return false;
+        if (self.is_module_namespace and self.hasAmbiguousNamespaceKey(key)) return false;
         if (self.properties.contains(key) or self.hasAccessor(key)) return true;
         // §15.2.1.16.3 ResolveExport — re-export redirects make
         // the binding "own" on the Module Namespace exotic even
         // though the value lives elsewhere. `'X' in ns` /
         // `Object.keys(ns)` / `Reflect.has(ns, 'X')` must
         // include them.
-        if (self.is_module_namespace and self.namespace_redirects.contains(key)) return true;
+        if (self.is_module_namespace and self.hasNamespaceRedirect(key)) return true;
         if (self.is_array_exotic) {
             if (canonicalIntegerIndex(key)) |idx| {
                 return self.hasOwnIndexedSlot(idx);
@@ -1497,12 +1538,12 @@ pub const JSObject = struct {
     pub fn hasProperty(self: *const JSObject, key: []const u8) bool {
         // §15.2.1.16.3 / §15.2.1.18 — ambiguous star-export keys
         // are omitted from the namespace.
-        if (self.is_module_namespace and self.ambiguous_namespace_keys.contains(key)) return false;
+        if (self.is_module_namespace and self.hasAmbiguousNamespaceKey(key)) return false;
         if (self.properties.contains(key)) return true;
         if (self.hasAccessor(key)) return true;
         // §15.2.1.16.3 ResolveExport — re-export redirects appear
         // as own properties on a Module Namespace exotic.
-        if (self.is_module_namespace and self.namespace_redirects.contains(key)) return true;
+        if (self.is_module_namespace and self.hasNamespaceRedirect(key)) return true;
         if (self.is_array_exotic) {
             if (canonicalIntegerIndex(key)) |idx| {
                 if (self.hasOwnIndexedSlot(idx)) return true;

@@ -216,8 +216,8 @@ fn hasPropertyProxyAware(realm: *Realm, root: *JSObject, key: []const u8) Native
         // §10.1.7.1 OrdinaryHasProperty step 2 — own property check.
         if (c.properties.contains(key)) return true;
         if (c.hasAccessor(key)) return true;
-        if (c.is_module_namespace and c.ambiguous_namespace_keys.contains(key)) return false;
-        if (c.is_module_namespace and c.namespace_redirects.contains(key)) return true;
+        if (c.is_module_namespace and c.hasAmbiguousNamespaceKey(key)) return false;
+        if (c.is_module_namespace and c.hasNamespaceRedirect(key)) return true;
         if (c.is_array_exotic) {
             if (@import("../object.zig").JSObject.canonicalIntegerIndex(key)) |idx| {
                 if (c.hasOwnIndexedSlot(idx)) return true;
@@ -881,7 +881,7 @@ fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) 
     // non-configurable `@@toStringTag` install also rejects.
     // Includes the `namespace_redirects` entries (re-exports
     // installed by `module_reexport_named` / `module_reexport_star`).
-    if (target.is_module_namespace and !std.mem.startsWith(u8, key_slice, "@@") and !std.mem.startsWith(u8, key_slice, "<sym:") and (target.properties.contains(key_slice) or target.hasAccessor(key_slice) or target.namespace_redirects.contains(key_slice))) {
+    if (target.is_module_namespace and !std.mem.startsWith(u8, key_slice, "@@") and !std.mem.startsWith(u8, key_slice, "<sym:") and (target.properties.contains(key_slice) or target.hasAccessor(key_slice) or target.hasNamespaceRedirect(key_slice))) {
         return Value.false_;
     }
     // §10.1.10.1 — non-configurable own property → return false

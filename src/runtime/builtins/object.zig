@@ -352,16 +352,18 @@ pub fn ownPropertyKeysOrdered(
     // [[OwnPropertyKeys]]. Ambiguous keys are filtered out (per
     // step 3.c.ii — they're dropped from the exported names).
     if (obj.is_module_namespace) {
-        var rit = obj.namespace_redirects.iterator();
-        while (rit.next()) |entry| {
-            const k = entry.key_ptr.*;
-            if (obj.properties.contains(k)) continue;
-            if (obj.hasAccessor(k)) continue;
-            if (obj.ambiguous_namespace_keys.contains(k)) continue;
-            if (canonicalIntegerIndex(k)) |i| {
-                integer_keys.append(realm.allocator, .{ .idx = i, .key = k }) catch return error.OutOfMemory;
-            } else {
-                string_keys.append(realm.allocator, k) catch return error.OutOfMemory;
+        if (obj.namespaceRedirectIterator()) |rit_outer| {
+            var rit = rit_outer;
+            while (rit.next()) |entry| {
+                const k = entry.key_ptr.*;
+                if (obj.properties.contains(k)) continue;
+                if (obj.hasAccessor(k)) continue;
+                if (obj.hasAmbiguousNamespaceKey(k)) continue;
+                if (canonicalIntegerIndex(k)) |i| {
+                    integer_keys.append(realm.allocator, .{ .idx = i, .key = k }) catch return error.OutOfMemory;
+                } else {
+                    string_keys.append(realm.allocator, k) catch return error.OutOfMemory;
+                }
             }
         }
     }
@@ -1245,9 +1247,9 @@ fn moduleNamespaceDefineOwnProperty(
     // existing-property check below handles them. Redirect-only
     // entries (`namespace_redirects`) installed by re-exports
     // are also "own" per §15.2.1.16.3 ResolveExport.
-    const had_own = target.properties.contains(key) or target.namespace_redirects.contains(key);
+    const had_own = target.properties.contains(key) or target.hasNamespaceRedirect(key);
     if (!had_own) return false;
-    if (target.ambiguous_namespace_keys.contains(key)) return false;
+    if (target.hasAmbiguousNamespaceKey(key)) return false;
     // Accessor descriptor against a data slot → reject.
     if (parsed.isAccessor()) return false;
     const cur_flags = target.flagsFor(key);
@@ -1266,7 +1268,7 @@ fn moduleNamespaceDefineOwnProperty(
         // SameValue applies to the source's value, not a Hole/empty.
         const cur_value = blk: {
             if (target.properties.get(key)) |v| break :blk v;
-            if (target.namespace_redirects.get(key)) |r| {
+            if (target.getNamespaceRedirect(key)) |r| {
                 const resolved = @import("../module.zig").resolveRedirectChain(r.target_ns, r.target_key) catch return false;
                 break :blk resolved.ns.get(resolved.key);
             }

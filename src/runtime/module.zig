@@ -208,14 +208,16 @@ pub fn getModuleNamespace(realm: *Realm, mr: *ModuleRecord) !*JSObject {
             .configurable = false,
         });
     }
-    var rit = ns.namespace_redirects.iterator();
-    while (rit.next()) |entry| {
-        const key = entry.key_ptr.*;
-        try ns.property_flags.put(realm.allocator, key, .{
-            .writable = true,
-            .enumerable = true,
-            .configurable = false,
-        });
+    if (ns.namespaceRedirectIterator()) |rit_outer| {
+        var rit = rit_outer;
+        while (rit.next()) |entry| {
+            const key = entry.key_ptr.*;
+            try ns.property_flags.put(realm.allocator, key, .{
+                .writable = true,
+                .enumerable = true,
+                .configurable = false,
+            });
+        }
     }
 
     ns.extensible = false;
@@ -282,7 +284,7 @@ pub fn resolveRedirectChain(
         visited_key[len] = cur_key;
         len += 1;
 
-        if (cur_ns.namespace_redirects.get(cur_key)) |r| {
+        if (cur_ns.getNamespaceRedirect(cur_key)) |r| {
             cur_ns = r.target_ns;
             cur_key = r.target_key;
             continue;
@@ -316,28 +318,30 @@ pub fn resolveRedirectChain(
 /// the importer's module record (state → errored).
 pub fn validateIndirectExports(mr: *ModuleRecord) ResolveError!void {
     const ns = mr.exports;
-    var it = ns.namespace_redirects.iterator();
-    while (it.next()) |entry| {
-        if (!entry.value_ptr.from_indirect_export) continue;
-        const key = entry.key_ptr.*;
-        const resolved = try resolveRedirectChain(ns, key);
-        // §15.2.1.16.3 step 8 ambiguous case.
-        if (resolved.ns.ambiguous_namespace_keys.contains(resolved.key)) {
-            return error.AmbiguousOrCircularExport;
-        }
-        // §15.2.1.16.3 null resolution — terminal key has no
-        // backing binding on the terminal namespace. Module
-        // namespaces are the only target shape we install
-        // redirects against (re-export source must be a module),
-        // so the absence of both a property and a redirect at the
-        // terminal is the null-resolution shape. A Hole sentinel
-        // counts as a *bound* (but uninitialised) binding — it's
-        // a ReferenceError at access time per §8.1.1.1.6, not a
-        // SyntaxError at instantiation.
-        if (!resolved.ns.properties.contains(resolved.key) and
-            !resolved.ns.namespace_redirects.contains(resolved.key))
-        {
-            return error.AmbiguousOrCircularExport;
+    if (ns.namespaceRedirectIterator()) |it_outer| {
+        var it = it_outer;
+        while (it.next()) |entry| {
+            if (!entry.value_ptr.from_indirect_export) continue;
+            const key = entry.key_ptr.*;
+            const resolved = try resolveRedirectChain(ns, key);
+            // §15.2.1.16.3 step 8 ambiguous case.
+            if (resolved.ns.hasAmbiguousNamespaceKey(resolved.key)) {
+                return error.AmbiguousOrCircularExport;
+            }
+            // §15.2.1.16.3 null resolution — terminal key has no
+            // backing binding on the terminal namespace. Module
+            // namespaces are the only target shape we install
+            // redirects against (re-export source must be a module),
+            // so the absence of both a property and a redirect at the
+            // terminal is the null-resolution shape. A Hole sentinel
+            // counts as a *bound* (but uninitialised) binding — it's
+            // a ReferenceError at access time per §8.1.1.1.6, not a
+            // SyntaxError at instantiation.
+            if (!resolved.ns.properties.contains(resolved.key) and
+                !resolved.ns.hasNamespaceRedirect(resolved.key))
+            {
+                return error.AmbiguousOrCircularExport;
+            }
         }
     }
 }
@@ -382,7 +386,7 @@ pub fn namespaceGetThrowingOnHole(
     // observable as `'X' in ns` working but a read raising).
     var owner_ns: *JSObject = ns;
     var owner_key: []const u8 = key;
-    if (ns.namespace_redirects.contains(key)) {
+    if (ns.hasNamespaceRedirect(key)) {
         const resolved = resolveRedirectChain(ns, key) catch {
             const ex = @import("builtins/error.zig").newReferenceError(realm, key) catch return error.OutOfMemory;
             realm.pending_exception = ex;

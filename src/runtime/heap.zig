@@ -1117,9 +1117,11 @@ pub const Heap = struct {
                 // GC for as long as the importer's namespace does.
                 // `target_key` is a chunk-constant slice (pinned
                 // at chunk-finalise time) — no anchor needed.
-                var nrit = o.namespace_redirects.iterator();
-                while (nrit.next()) |entry| {
-                    self.markValue(taggedObject(entry.value_ptr.target_ns));
+                if (o.namespaceRedirectIterator()) |nrit_outer| {
+                    var nrit = nrit_outer;
+                    while (nrit.next()) |entry| {
+                        self.markValue(taggedObject(entry.value_ptr.target_ns));
+                    }
                 }
                 if (o.boxed_primitive) |bp| self.markValue(bp);
                 // §22.1.3 `[[StringData]]` — the JSString a `String`
@@ -2191,9 +2193,11 @@ pub const Heap = struct {
                 if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
             }
         }
-        var nrit = o.namespace_redirects.iterator();
-        while (nrit.next()) |entry| {
-            self.markValue(taggedObject(entry.value_ptr.target_ns));
+        if (o.namespaceRedirectIterator()) |nrit_outer| {
+            var nrit = nrit_outer;
+            while (nrit.next()) |entry| {
+                self.markValue(taggedObject(entry.value_ptr.target_ns));
+            }
         }
         if (o.boxed_primitive) |bp| self.markValue(bp);
         if (o.boxed_string) |bs| self.markString(bs);

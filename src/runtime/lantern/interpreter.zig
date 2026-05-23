@@ -4982,7 +4982,7 @@ pub fn runFrames(
                         // value alongside the redirect (the
                         // redirect-first lookup path skips the
                         // local map when a redirect is present).
-                        mr.exports.namespace_redirects.put(realm.allocator, exp_s.flatBytes(), .{
+                        mr.exports.putNamespaceRedirect(realm.allocator, exp_s.flatBytes(), .{
                             .target_ns = src_obj,
                             .target_key = local_s.flatBytes(),
                             // §15.2.1.16 IndirectExportEntries — flag
@@ -5053,11 +5053,13 @@ pub fn runFrames(
                         if (std.mem.eql(u8, key, "@@toStringTag")) continue;
                         try mergeStarKey(realm.allocator, mr.exports, key, src_obj, key);
                     }
-                    var rit = src_obj.namespace_redirects.iterator();
-                    while (rit.next()) |entry| {
-                        const key = entry.key_ptr.*;
-                        if (std.mem.eql(u8, key, "default")) continue;
-                        try mergeStarKey(realm.allocator, mr.exports, key, src_obj, key);
+                    if (src_obj.namespaceRedirectIterator()) |rit_outer| {
+                        var rit = rit_outer;
+                        while (rit.next()) |entry| {
+                            const key = entry.key_ptr.*;
+                            if (std.mem.eql(u8, key, "default")) continue;
+                            try mergeStarKey(realm.allocator, mr.exports, key, src_obj, key);
+                        }
                     }
                 }
                 continue :dispatch try decodeNext(code, &ip, &committed);
