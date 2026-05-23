@@ -191,10 +191,24 @@
   /* Bytecode-inspector disassembly: one element per line. A line
      carrying a [start..end] source span gets `.bc-hot` and lights
      up on hover, paired with a CodeMirror range decoration over
-     the matching source. */
+     the matching source. `.bc-active` is the reverse-direction
+     highlight (cursor in editor over the span -> light up the
+     instruction). */
   .bc-line { display: block; }
   .bc-hot { cursor: pointer; border-radius: 2px; }
-  .bc-hot:hover { background: var(--skin); }
+  .bc-hot:hover, .bc-active { background: var(--skin); }
+
+  /* Disasm token coloring — same families as the CodeMirror syntax
+     palette so the two panels feel like they speak the same
+     language. The exact regex sees src/bytecode/disasm.zig output. */
+  .bc-tok-offset { color: var(--ink-soft); }
+  .bc-tok-mnem   { color: #9b1d8f; font-weight: 700; }
+  .bc-tok-reg    { color: #1a64b8; }
+  .bc-tok-index  { color: #b5500f; }
+  .bc-tok-jump   { color: #0d7a8a; }
+  .bc-tok-span   { color: var(--ink-soft); }
+  .bc-tok-num    { color: #b5500f; }
+  .bc-tok-paren  { color: var(--ink-soft); }
 
   footer {
     margin-top: 26px;
@@ -224,7 +238,11 @@
   <div class="toolbar">
     <button id="run" type="button">Run</button>
     <button id="share" type="button">Copy link</button>
-    <label class="toggle"><input type="checkbox" id="inspector" /> bytecode inspector</label>
+    <select id="mode" title="What to do with the source">
+      <option value="eval">eval</option>
+      <option value="bytecode">bytecode</option>
+      <option value="ast">AST</option>
+    </select>
     <select id="snippets" title="Load a sample">
       <option value="">— sample snippets —</option>
     </select>

@@ -8,6 +8,7 @@
 //!   cynic_free(ptr, len)        -> void    release a guest buffer
 //!   cynic_eval(ptr, len)        -> ptr     run source, return a frame
 //!   cynic_parse(ptr, len)       -> ptr     disassemble, return a frame
+//!   cynic_parse_ast(ptr, len)   -> ptr     S-expression AST dump
 //!   cynic_result_ptr()          -> ptr     last result frame address
 //!   cynic_result_len()          -> u32     last result frame length
 //!   cynic_version_ptr/len()              the engine version string
@@ -28,9 +29,18 @@
 //!   [u8  value_len bytes]       completion value, string form
 //!   [u32 error_len]   big-endian
 //!   [u8  error_len bytes]       error text (empty unless status != 0)
+//!   [u32 error_span_start]      big-endian, byte offset into source
+//!   [u32 error_span_end]        big-endian, byte offset into source
 //!
-//! `cynic_parse` returns the same frame shape; its `value` section
-//! carries the bytecode disassembly text and `stdout` is empty.
+//! `error_span_start == error_span_end` means "no source range" —
+//! the playground falls back to a panel-level error message. Today
+//! the span is populated for parse-error diagnostics (the first
+//! error-severity diagnostic's span); compile-time and runtime
+//! errors carry an empty span.
+//!
+//! `cynic_parse` and `cynic_parse_ast` return the same frame shape;
+//! their `value` section carries the bytecode disassembly or the
+//! AST S-expression respectively, and `stdout` is empty.
 //!
 //! Strict-only by construction: the playground runs everything
 //! through `Realm.evaluateScript`, the same host path `cynic run`
@@ -167,9 +177,21 @@ const Status = enum(u8) {
 /// the layout) and install it as `result_frame`. On allocation
 /// failure `result_frame` is left empty and the JS side sees a
 /// zero-length result, which it treats as an internal error.
-fn buildFrame(status: Status, stdout: []const u8, value: []const u8, err: []const u8) [*]u8 {
+///
+/// `error_span` is a byte-offset range in the original source; pass
+/// `Span{ .start = 0, .end = 0 }` to mean "no source range" (the
+/// playground then renders the error without an underline). The two
+/// `u32`s ride at the very end of the frame so older JS clients that
+/// stop after `error_len` keep working.
+fn buildFrame(
+    status: Status,
+    stdout: []const u8,
+    value: []const u8,
+    err: []const u8,
+    error_span: cynic.source.Span,
+) [*]u8 {
     freeResultFrame();
-    const total = 1 + 4 + stdout.len + 4 + value.len + 4 + err.len;
+    const total = 1 + 4 + stdout.len + 4 + value.len + 4 + err.len + 8;
     const buf = gpa.alloc(u8, total) catch {
         return @ptrFromInt(8); // non-null sentinel; len() reports 0
     };
@@ -182,9 +204,18 @@ fn buildFrame(status: Status, stdout: []const u8, value: []const u8, err: []cons
         @memcpy(buf[w..][0..section.len], section);
         w += section.len;
     }
+    std.mem.writeInt(u32, buf[w..][0..4], error_span.start, .big);
+    w += 4;
+    std.mem.writeInt(u32, buf[w..][0..4], error_span.end, .big);
+    w += 4;
     result_frame = buf;
     return buf.ptr;
 }
+
+/// Empty source span — `error_span_start == error_span_end == 0` —
+/// means "no source range" on the wire. Used for compile-time and
+/// runtime errors that aren't yet plumbed through to a span.
+const empty_span: cynic.source.Span = .{ .start = 0, .end = 0 };
 
 // ---------------------------------------------------------------------------
 // cynic_eval — run source through the host evaluateScript path
@@ -211,24 +242,25 @@ export fn cynic_eval(src: [*]const u8, len: u32) [*]u8 {
         var diags: cynic.diagnostic.Diagnostics = .empty;
         const pre = cynic.parser.parseScript(arena.allocator(), source, &diags);
         if (pre) |_| {
-            if (firstError(&diags)) |_| {
+            if (firstError(&diags)) |d| {
                 var msg: std.ArrayListUnmanaged(u8) = .empty;
                 defer msg.deinit(gpa);
                 appendDiagnostics(&msg, &diags) catch {};
-                return buildFrame(.parse_error, "", "", msg.items);
+                return buildFrame(.parse_error, "", "", msg.items, d.span);
             }
         } else |_| {
             var msg: std.ArrayListUnmanaged(u8) = .empty;
             defer msg.deinit(gpa);
             appendDiagnostics(&msg, &diags) catch {};
-            return buildFrame(.parse_error, "", "", msg.items);
+            const span = if (firstError(&diags)) |d| d.span else empty_span;
+            return buildFrame(.parse_error, "", "", msg.items, span);
         }
     }
 
     var realm = Realm.init(gpa);
     defer realm.deinit();
     realm.installBuiltins() catch {
-        return buildFrame(.parse_error, "", "", "internal error: builtin install failed");
+        return buildFrame(.parse_error, "", "", "internal error: builtin install failed", empty_span);
     };
 
     const outcome = cynic.runtime.evaluateScript(gpa, &realm, source) catch |err| {
@@ -238,7 +270,7 @@ export fn cynic_eval(src: [*]const u8, len: u32) [*]u8 {
             error.OutOfMemory => "RangeError: out of memory",
             error.InvalidOpcode => "InternalError: invalid opcode",
         };
-        return buildFrame(.parse_error, realm.output.items, "", msg);
+        return buildFrame(.parse_error, realm.output.items, "", msg, empty_span);
     };
 
     // §9.4 — finish the current Job before returning to the host
@@ -253,11 +285,11 @@ export fn cynic_eval(src: [*]const u8, len: u32) [*]u8 {
     switch (outcome) {
         .value, .yielded => |v| {
             appendValueText(&value_buf, v) catch {};
-            return buildFrame(.ok, realm.output.items, value_buf.items, "");
+            return buildFrame(.ok, realm.output.items, value_buf.items, "", empty_span);
         },
         .thrown => |v| {
             appendThrownText(&error_buf, v) catch {};
-            return buildFrame(.threw, realm.output.items, "", error_buf.items);
+            return buildFrame(.threw, realm.output.items, "", error_buf.items, empty_span);
         },
     }
 }
@@ -282,34 +314,74 @@ export fn cynic_parse(src: [*]const u8, len: u32) [*]u8 {
         var msg: std.ArrayListUnmanaged(u8) = .empty;
         appendDiagnostics(&msg, &diags) catch {};
         defer msg.deinit(gpa);
-        return buildFrame(.parse_error, "", "", msg.items);
+        const span = if (firstError(&diags)) |d| d.span else empty_span;
+        return buildFrame(.parse_error, "", "", msg.items, span);
     };
     // A non-fatal parse can still have collected error diagnostics
     // — surface them rather than disassembling a malformed program.
-    if (firstError(&diags) != null) {
+    if (firstError(&diags)) |d| {
         var msg: std.ArrayListUnmanaged(u8) = .empty;
         appendDiagnostics(&msg, &diags) catch {};
         defer msg.deinit(gpa);
-        return buildFrame(.parse_error, "", "", msg.items);
+        return buildFrame(.parse_error, "", "", msg.items, d.span);
     }
 
     var realm = Realm.init(gpa);
     defer realm.deinit();
     realm.installBuiltins() catch {
-        return buildFrame(.parse_error, "", "", "internal error: builtin install failed");
+        return buildFrame(.parse_error, "", "", "internal error: builtin install failed", empty_span);
     };
 
     var chunk = cynic.bytecode.compiler.compileScriptAsChunk(gpa, &realm, &program, source, null) catch {
-        return buildFrame(.parse_error, "", "", "SyntaxError: failed to compile");
+        return buildFrame(.parse_error, "", "", "SyntaxError: failed to compile", empty_span);
     };
     defer chunk.deinit(gpa);
 
     const text = cynic.bytecode.disasm.dump(gpa, &chunk) catch {
-        return buildFrame(.parse_error, "", "", "internal error: disassembly failed");
+        return buildFrame(.parse_error, "", "", "internal error: disassembly failed", empty_span);
     };
     defer gpa.free(text);
 
-    return buildFrame(.ok, "", text, "");
+    return buildFrame(.ok, "", text, "", empty_span);
+}
+
+// ---------------------------------------------------------------------------
+// cynic_parse_ast — S-expression AST dump (the "AST" inspector toggle)
+// ---------------------------------------------------------------------------
+
+/// Parse `src[0..len]` as a Script and return the AST printer's
+/// S-expression dump in the frame's `value` section. Mirrors the
+/// CLI's `cynic parse <file>` output. Does NOT compile or execute.
+/// Parse failures surface as `.parse_error` with the first error
+/// diagnostic's span on the wire.
+export fn cynic_parse_ast(src: [*]const u8, len: u32) [*]u8 {
+    const source = src[0..len];
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    var diags: cynic.diagnostic.Diagnostics = .empty;
+    const program = cynic.parser.parseScript(aa, source, &diags) catch {
+        var msg: std.ArrayListUnmanaged(u8) = .empty;
+        appendDiagnostics(&msg, &diags) catch {};
+        defer msg.deinit(gpa);
+        const span = if (firstError(&diags)) |d| d.span else empty_span;
+        return buildFrame(.parse_error, "", "", msg.items, span);
+    };
+    if (firstError(&diags)) |d| {
+        var msg: std.ArrayListUnmanaged(u8) = .empty;
+        appendDiagnostics(&msg, &diags) catch {};
+        defer msg.deinit(gpa);
+        return buildFrame(.parse_error, "", "", msg.items, d.span);
+    }
+
+    // The AST printer allocates from the supplied arena; reuse the
+    // parse arena so both buffers free together.
+    const text = cynic.ast.printer.dump(aa, &program, source) catch {
+        return buildFrame(.parse_error, "", "", "internal error: AST dump failed", empty_span);
+    };
+    return buildFrame(.ok, "", text, "", empty_span);
 }
 
 // ---------------------------------------------------------------------------
