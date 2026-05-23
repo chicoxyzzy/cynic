@@ -156,11 +156,11 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-23 — cynic `39b5e31`, test262 `d0c1b455`
+### 2026-05-23 — cynic `bc22bc5`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 92.82 % | 99.98 % | 37211 / 40090 | 37211 / 37220 | ±0 | 40.6 s |
+| **runtime** | 92.82 % | 99.98 % | 37211 / 40090 | 37211 / 37220 | ±0 | 45.6 s |
 
 ### 2026-05-22 — cynic `99b6566`, test262 `d0c1b455`
 
