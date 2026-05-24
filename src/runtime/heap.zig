@@ -774,7 +774,7 @@ pub const Heap = struct {
         self.allocs_since_gc +|= 1;
         if (!is_arrow) {
             const proto = try self.allocateObject();
-            f.prototype = proto;
+            self.setFunctionPrototype(f, proto);
             // §20.2.4.1 — `prototype.constructor` is
             // non-enumerable. for-in over an instance must
             // not surface this as a key.

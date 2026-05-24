@@ -159,7 +159,7 @@ pub fn getModuleNamespace(realm: *Realm, mr: *ModuleRecord) !*JSObject {
     // namespace, but it's a namespace — `Symbol.toStringTag` and
     // proto:null are visible before finalisation).
     ns.is_module_namespace = true;
-    ns.prototype = null;
+    realm.heap.setObjectPrototype(ns, null);
 
     // §28.3.5 — `Symbol.toStringTag` on a Module Namespace exotic is
     // fixed at `"Module"` with all-false flags. The spec doesn't gate
