@@ -1445,7 +1445,7 @@ pub fn runFrames(
                 // creation. Non-arrow `make_function` ignores this
                 // slot — `this` comes from the call site.
                 if (tmpl.is_arrow) {
-                    fn_obj.captured_this = f.this_value;
+                    realm.heap.setCapturedThis(fn_obj, f.this_value);
                     // §13.3.12 NewTarget / §10.2.5 [[HomeObject]] /
                     // §13.3.7 super — arrows inherit all three from
                     // the enclosing function. The arrow has no
@@ -1455,9 +1455,9 @@ pub fn runFrames(
                     // function (which `f`'s slots already encode,
                     // because a nested arrow's frame also inherits
                     // its parent arrow's captures via this same op).
-                    fn_obj.captured_new_target = f.new_target;
-                    fn_obj.home_object = f.home_object;
-                    fn_obj.home_function = f.home_function;
+                    realm.heap.setCapturedNewTarget(fn_obj, f.new_target);
+                    realm.heap.setHomeObject(fn_obj, f.home_object);
+                    realm.heap.setHomeFunction(fn_obj, f.home_function);
                     // §10.2.1.4 / §13.3.7 — an arrow inside a
                     // derived-class constructor (or transitively
                     // inside a nested arrow) shares the outer
@@ -1513,10 +1513,10 @@ pub fn runFrames(
                         proto.demoteFromShape();
                         _ = proto.properties.swapRemove("constructor");
                         _ = proto.property_flags.swapRemove("constructor");
-                        proto.prototype = if (tmpl.is_async)
+                        realm.heap.setObjectPrototype(proto, if (tmpl.is_async)
                             ensureAsyncGeneratorPrototype(realm) catch realm.intrinsics.object_prototype
                         else
-                            ensureGeneratorPrototype(realm) catch realm.intrinsics.object_prototype;
+                            ensureGeneratorPrototype(realm) catch realm.intrinsics.object_prototype);
                     }
                 } else if (tmpl.is_async) {
                     // §27.7.4 — `async function f(){}` does NOT have
@@ -1526,14 +1526,14 @@ pub fn runFrames(
                     // non-arrow; drop it so reads return `undefined`
                     // and `Object.defineProperty(f, 'prototype', {…})`
                     // succeeds as a fresh data / accessor descriptor.
-                    fn_obj.prototype = null;
+                    realm.heap.setFunctionPrototype(fn_obj, null);
                 } else if (fn_obj.prototype) |proto| {
                     // §10.2.4 — a regular function's `.prototype`
                     // object inherits from `%Object.prototype%`.
                     // `allocateFunction` couldn't set this without
                     // the realm in scope, so wire it here.
                     if (proto.prototype == null) {
-                        proto.prototype = realm.intrinsics.object_prototype;
+                        realm.heap.setObjectPrototype(proto, realm.intrinsics.object_prototype);
                     }
                 }
                 // §20.2.3.5 — borrow the template's source slice
@@ -2206,7 +2206,7 @@ pub fn runFrames(
                         },
                     };
                     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
-                    inst.prototype = resolved_proto;
+                    realm.heap.setObjectPrototype(inst, resolved_proto);
                     const this_v = heap_mod.taggedObject(inst);
                     // §10.4.1.2 [[Construct]] step 5 — for a
                     // `new C()` where C is bound, the original
@@ -2307,7 +2307,7 @@ pub fn runFrames(
                     },
                 };
                 const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
-                instance.prototype = resolved_proto_main;
+                realm.heap.setObjectPrototype(instance, resolved_proto_main);
                 const this_value = heap_mod.taggedObject(instance);
 
                 // Native fast path — same calling shape as `Call`,
@@ -2477,7 +2477,7 @@ pub fn runFrames(
                         acc = heap_mod.taggedObject(im);
                     } else {
                         const im = realm.heap.allocateObject() catch return error.OutOfMemory;
-                        im.prototype = realm.intrinsics.object_prototype;
+                        realm.heap.setObjectPrototype(im, realm.intrinsics.object_prototype);
                         mr.import_meta = im;
                         acc = heap_mod.taggedObject(im);
                     }
@@ -2640,7 +2640,7 @@ pub fn runFrames(
                 const src_v = registers[r_src];
                 const excl_v = registers[r_excl];
                 const out_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-                out_obj.prototype = realm.intrinsics.object_prototype;
+                realm.heap.setObjectPrototype(out_obj, realm.intrinsics.object_prototype);
                 // §7.3.27 CopyDataProperties step 2 — `ToObject(source)`.
                 // Primitive sources (Strings, Numbers, Booleans, Symbols,
                 // BigInts) wrap into the matching boxed object — a String
@@ -2860,7 +2860,7 @@ pub fn runFrames(
                     }
                 }
                 const out_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-                out_obj.prototype = realm.intrinsics.array_prototype;
+                realm.heap.setObjectPrototype(out_obj, realm.intrinsics.array_prototype);
                 out_obj.markAsArrayExotic(allocator) catch return error.OutOfMemory;
                 var i: i64 = start;
                 var out_idx: i64 = 0;
@@ -3967,7 +3967,7 @@ pub fn runFrames(
                                 if (inst.proxy_target != null or inst.proxy_target_fn != null or inst.proxy_revoked) {
                                     // Build the descriptor object.
                                     const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
-                                    desc.prototype = realm.intrinsics.object_prototype;
+                                    realm.heap.setObjectPrototype(desc, realm.intrinsics.object_prototype);
                                     realm.heap.storeProperty(desc, allocator, "value", v) catch return error.OutOfMemory;
                                     realm.heap.storeProperty(desc, allocator, "writable", Value.fromBool(true)) catch return error.OutOfMemory;
                                     realm.heap.storeProperty(desc, allocator, "enumerable", Value.fromBool(true)) catch return error.OutOfMemory;
@@ -4188,10 +4188,11 @@ pub fn runFrames(
                 const gen = f.generator orelse return error.InvalidOpcode;
                 gen.ip = ip;
                 gen.accumulator = Value.undefined_;
-                gen.env = f.env;
+                realm.heap.setGeneratorEnv(gen, f.env);
+                realm.heap.storeInternalSlot(.{ .generator = gen }, f.this_value);
                 gen.this_value = f.this_value;
-                gen.home_object = f.home_object;
-                gen.home_function = f.home_function;
+                realm.heap.setGeneratorHomeObject(gen, f.home_object);
+                realm.heap.setGeneratorHomeFunction(gen, f.home_function);
                 gen.argc = f.argc;
                 gen.yielded_iter_result = false;
                 f.ip = ip;
@@ -4210,10 +4211,11 @@ pub fn runFrames(
                 const gen = f.generator orelse return error.InvalidOpcode;
                 gen.ip = ip;
                 gen.accumulator = Value.undefined_;
-                gen.env = f.env;
+                realm.heap.setGeneratorEnv(gen, f.env);
+                realm.heap.storeInternalSlot(.{ .generator = gen }, f.this_value);
                 gen.this_value = f.this_value;
-                gen.home_object = f.home_object;
-                gen.home_function = f.home_function;
+                realm.heap.setGeneratorHomeObject(gen, f.home_object);
+                realm.heap.setGeneratorHomeFunction(gen, f.home_function);
                 gen.argc = f.argc;
                 gen.yielded_iter_result = true;
                 f.ip = ip;
@@ -4235,10 +4237,11 @@ pub fn runFrames(
                 const gen = f.generator orelse return error.InvalidOpcode;
                 gen.ip = ip;
                 gen.accumulator = Value.undefined_;
-                gen.env = f.env;
+                realm.heap.setGeneratorEnv(gen, f.env);
+                realm.heap.storeInternalSlot(.{ .generator = gen }, f.this_value);
                 gen.this_value = f.this_value;
-                gen.home_object = f.home_object;
-                gen.home_function = f.home_function;
+                realm.heap.setGeneratorHomeObject(gen, f.home_object);
+                realm.heap.setGeneratorHomeFunction(gen, f.home_function);
                 gen.argc = f.argc;
                 f.ip = ip;
                 f.accumulator = acc;
@@ -4384,10 +4387,11 @@ pub fn runFrames(
                     // resumption microtask re-enters here.
                     gen.ip = ip;
                     gen.accumulator = Value.undefined_;
-                    gen.env = f.env;
+                    realm.heap.setGeneratorEnv(gen, f.env);
+                    realm.heap.storeInternalSlot(.{ .generator = gen }, f.this_value);
                     gen.this_value = f.this_value;
-                    gen.home_object = f.home_object;
-                    gen.home_function = f.home_function;
+                    realm.heap.setGeneratorHomeObject(gen, f.home_object);
+                    realm.heap.setGeneratorHomeFunction(gen, f.home_function);
                     gen.argc = f.argc;
                     f.ip = ip;
                     f.accumulator = Value.undefined_;
@@ -4759,7 +4763,7 @@ pub fn runFrames(
                 // `undefined` produce an empty iterator.
                 if (acc.isNull() or acc.isUndefined()) {
                     const empty = realm.heap.allocateObject() catch return error.OutOfMemory;
-                    empty.prototype = realm.intrinsics.array_prototype;
+                    realm.heap.setObjectPrototype(empty, realm.intrinsics.array_prototype);
                     empty.markAsArrayExotic(allocator) catch return error.OutOfMemory;
                     realm.heap.storeProperty(empty, allocator, "length", Value.fromInt32(0)) catch return error.OutOfMemory;
                     acc = openIterator(allocator, realm, heap_mod.taggedObject(empty)) catch return error.OutOfMemory;
@@ -5137,7 +5141,7 @@ pub fn runFrames(
                 // chain made `arguments[N] = v` trigger Array
                 // exotic auto-length-extend.
                 const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-                obj.prototype = realm.intrinsics.object_prototype;
+                realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
                 obj.is_arguments_exotic = true;
                 var i: u8 = 0;
                 while (i < f.argc) : (i += 1) {
@@ -5203,7 +5207,7 @@ pub fn runFrames(
                 const start = code[ip];
                 ip += 1;
                 const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-                obj.prototype = realm.intrinsics.array_prototype;
+                realm.heap.setObjectPrototype(obj, realm.intrinsics.array_prototype);
                 obj.markAsArrayExotic(allocator) catch return error.OutOfMemory;
                 var len: i32 = 0;
                 if (start < f.argc) {
@@ -5311,8 +5315,7 @@ pub fn runFrames(
                 ip += 1;
                 if (heap_mod.valueAsFunction(acc)) |fn_obj| {
                     if (heap_mod.valueAsPlainObject(registers[r_obj])) |home| {
-                        realm.heap.storeInternalSlot(.{ .function = fn_obj }, heap_mod.taggedObject(home));
-                        fn_obj.home_object = home;
+                        realm.heap.setHomeObject(fn_obj, home);
                     }
                     fn_obj.has_construct = false;
                     // §15.4.4 / §15.5.6 step 2 — MethodDefinitions
@@ -5327,7 +5330,7 @@ pub fn runFrames(
                     // by the dedicated paths above before this fires
                     // — that branch handles them.
                     if (!fn_obj.is_generator and !fn_obj.is_async) {
-                        fn_obj.prototype = null;
+                        realm.heap.setFunctionPrototype(fn_obj, null);
                     }
                 }
                 continue :dispatch try decodeNext(code, &ip, &committed);
@@ -5343,11 +5346,10 @@ pub fn runFrames(
                 ip += 1;
                 const obj = heap_mod.valueAsPlainObject(registers[r_obj]) orelse return error.InvalidOpcode;
                 if (acc.isNull()) {
-                    obj.prototype = null;
+                    realm.heap.setObjectPrototype(obj, null);
                     realm.proto_revision_counter +%= 1;
                 } else if (heap_mod.valueAsPlainObject(acc)) |p| {
-                    realm.heap.storeInternalSlot(.{ .object = obj }, acc);
-                    obj.prototype = p;
+                    realm.heap.setObjectPrototype(obj, p);
                     realm.proto_revision_counter +%= 1;
                 }
                 // else: no-op; do not throw.
@@ -6165,13 +6167,13 @@ pub fn runFrames(
             // ── Objects / properties ────────────────────────────────────
             .make_object => {
                 const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-                obj.prototype = realm.intrinsics.object_prototype;
+                realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
                 acc = heap_mod.taggedObject(obj);
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
             .make_array => {
                 const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-                obj.prototype = realm.intrinsics.array_prototype;
+                realm.heap.setObjectPrototype(obj, realm.intrinsics.array_prototype);
                 obj.markAsArrayExotic(allocator) catch return error.OutOfMemory;
                 // §23.1.4 — `Array.prototype.length` is
                 // non-enumerable. Pre-flag the slot so for-in
@@ -8023,7 +8025,6 @@ const DeleteResult = union(enum) {
 };
 
 fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
-    _ = realm;
     const obj_mod = @import("../object.zig");
     if (heap_mod.valueAsPlainObject(recv)) |obj| {
         // A property removal cannot be expressed as a shape
@@ -8129,7 +8130,7 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
             fn_obj.name = null;
             fn_obj.name_string = null;
         }
-        if (std.mem.eql(u8, key, "prototype")) fn_obj.prototype = null;
+        if (std.mem.eql(u8, key, "prototype")) realm.heap.setFunctionPrototype(fn_obj, null);
         _ = fn_obj.properties.swapRemove(key);
         _ = fn_obj.property_flags.swapRemove(key);
         if (!fn_obj.accessors.contains(key)) fn_obj.forgetKey(key);
@@ -8373,7 +8374,7 @@ fn strictSetPropertyAnchored(
                 };
                 // §10.1.9.2 step 3.d.iv — Receiver.[[DefineOwnProperty]](P, {Value: V}).
                 const desc_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-                desc_obj.prototype = realm.intrinsics.object_prototype;
+                realm.heap.setObjectPrototype(desc_obj, realm.intrinsics.object_prototype);
                 const key_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
                 realm.heap.storeProperty(desc_obj, allocator, "value", value) catch return error.OutOfMemory;
                 const dp_args = [_]Value{ recv, Value.fromString(key_owned), heap_mod.taggedObject(desc_obj) };
@@ -8404,7 +8405,7 @@ fn strictSetPropertyAnchored(
                     },
                 };
                 const desc_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-                desc_obj.prototype = realm.intrinsics.object_prototype;
+                realm.heap.setObjectPrototype(desc_obj, realm.intrinsics.object_prototype);
                 const key_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
                 realm.heap.storeProperty(desc_obj, allocator, "value", value) catch return error.OutOfMemory;
                 realm.heap.storeProperty(desc_obj, allocator, "writable", Value.true_) catch return error.OutOfMemory;
