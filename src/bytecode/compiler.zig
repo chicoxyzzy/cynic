@@ -767,7 +767,6 @@ pub const Compiler = struct {
     ///     way out, which is incompatible with frame reuse)
     fn shouldEmitTailCall(self: *Compiler) bool {
         if (!self.in_tail_position) return false;
-        if (!self.realm.feature_flags.contains(.ptc)) return false;
         if (self.current_is_async) return false;
         if (self.current_is_generator) return false;
         if (self.finally_chain != null) return false;

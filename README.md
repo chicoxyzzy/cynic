@@ -93,6 +93,11 @@ The shape, in broad strokes — the per-bucket numbers live in the
   pending-await suspension via `JSGenerator` capture, async
   generators with promise-reaction chaining, `Promise.try` and
   `Promise.withResolvers`.
+- **Proper Tail Calls** (ES2015 §15.10) — calls in tail position
+  reuse the caller's frame instead of pushing a fresh one;
+  `function f(n) { return f(n - 1); }` recurses without growing
+  the dispatch stack. Second engine shipping spec-mandated PTC
+  alongside JavaScriptCore.
 - **Tooling** — `cynic parse | eval | run` plus a parallel test262
   harness with `--threads=N`, `--only-failing` cache, and a
   per-area scoreboard.
@@ -117,12 +122,6 @@ timezone story behind `Date` (UTC-only today);
 `Set.prototype.{union, intersection, difference, …}` (ES2025). Each
 takes a swing at the runtime score as it lands; the scoreboard in
 [`test262-results.md`](test262-results.md) is the source of truth.
-
-Proper Tail Calls (PTC, ES2015 §15.10) ship behind the
-`tail-call-optimization` feature flag — opt in with
-`cynic --enable=tail-call-optimization run foo.js`. Off-by-default
-because `Error.stack` loses the eliminated frames per spec; on, Cynic
-is the second engine shipping spec-mandated PTC alongside JSC.
 
 ## Build
 

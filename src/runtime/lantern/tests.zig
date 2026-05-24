@@ -6042,44 +6042,13 @@ test "literal shape: duplicate keys fall back to non-template path" {
 
 // ── Proper Tail Calls (§15.10) ───────────────────────────────────────
 
-/// Like `installBuiltinsAllFeatures` but with `ptc` flipped off
-/// so we can prove the PTC path is the thing enabling the
-/// deep-recursion case (and not some other engine change).
-fn installBuiltinsWithoutPtc(realm: *Realm) !void {
-    realm.feature_flags = features.FeatureSet.initFull();
-    realm.feature_flags.remove(.ptc);
-    try realm.installBuiltins();
-}
-
-fn expectScriptIntWithoutPtc(source: []const u8, expected: i32) !void {
-    var realm = Realm.init(testing.allocator);
-    defer realm.deinit();
-    try installBuiltinsWithoutPtc(&realm);
-    const v = switch (try evaluateScriptResult(&realm, source)) {
-        .value, .yielded => |val| val,
-        .thrown => return error.UncaughtException,
-    };
-    if (v.isInt32()) try testing.expectEqual(expected, v.asInt32()) else if (v.isDouble()) try testing.expectEqual(@as(f64, @floatFromInt(expected)), v.asDouble()) else return error.NotANumber;
-}
-
-fn expectScriptThrowsWithoutPtc(source: []const u8) !void {
-    var realm = Realm.init(testing.allocator);
-    defer realm.deinit();
-    try installBuiltinsWithoutPtc(&realm);
-    switch (try evaluateScriptResult(&realm, source)) {
-        .value, .yielded => return error.ExpectedThrow,
-        .thrown => {},
-    }
-}
-
 test "PTC: deep self-recursion via return f() does not overflow" {
-    // §15.10 — `return f(n - 1)` is in tail position. With PTC,
-    // 3000 calls reuse one frame and the body finishes
-    // normally. The interpreter's `max_call_frames` is 1024, so
-    // without PTC the same recursion would throw RangeError
-    // (see the matching off-flag test below). 3000 is chosen as
-    // a comfortable margin over the cap while staying fast in
-    // Debug builds.
+    // §15.10 — `return f(n - 1)` is in tail position. The compiler
+    // emits `.tail_call`, the interpreter reuses the current
+    // frame, and 3000 calls fit in one dispatch frame. The
+    // 1024-frame `max_call_frames` cap is never hit. 3000 is
+    // chosen as a comfortable margin over the cap while staying
+    // fast in Debug builds.
     try expectScriptIntWithBuiltins(
         \\function f(n) {
         \\  if (n === 0) return 42;
@@ -6087,20 +6056,6 @@ test "PTC: deep self-recursion via return f() does not overflow" {
         \\}
         \\f(3000);
     , 42);
-}
-
-test "PTC: tail-eligible recursion with --enable=ptc off still overflows" {
-    // Negative control. With the feature flag off, the compiler
-    // emits `.call` (not `.tail_call`); the existing 1024-frame
-    // limit fires the way every other engine signals stack
-    // overflow.
-    try expectScriptThrowsWithoutPtc(
-        \\function f(n) {
-        \\  if (n === 0) return 42;
-        \\  return f(n - 1);
-        \\}
-        \\f(3000);
-    );
 }
 
 test "PTC: mutual recursion in tail position does not overflow" {

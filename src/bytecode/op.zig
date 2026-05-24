@@ -198,13 +198,13 @@ pub const Op = enum(u8) {
     /// async functions, and native callbacks — those cases either
     /// can't be flattened (the callee has its own frame allocation)
     /// or would require deeper reentrancy. Emitted by the compiler
-    /// only when (1) the call appears at a statically-detectable
+    /// whenever (1) the call appears at a statically-detectable
     /// tail position per §15.10.1 IsInTailPosition (return
     /// expression, arrow concise body, conditional / logical /
     /// comma rhs in tail position), (2) the enclosing function is
-    /// not a generator / async function, (3) the call is not
-    /// inside a try block with a finally, and (4) the `ptc`
-    /// feature flag is set on the realm.
+    /// not a generator / async function, and (3) the call is not
+    /// inside a try block whose catch or finally is in the same
+    /// chunk.
     tail_call,
     /// `[op] [r_recv:u8] [r_callee:u8] [argc:u8]` — §15.10 PTC,
     /// method-call variant. Identical to `tail_call` except

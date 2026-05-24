@@ -158,18 +158,15 @@ code construction (aligns with SES).
   current `CallFrame` in place — overwriting chunk / ip / env /
   this / registers — so `return f(n - 1)` recurses without
   growing the dispatch stack. The §15.10.1 disqualifiers Cynic
-  honors: enclosing try-with-finally, open for-of iterator
-  owing `IteratorClose`, async / generator body. Exotic callees
-  (proxy, bound, native, generator, async) fall back to
-  ordinary call semantics — the unconditionally-emitted
-  follow-up `return_` propagates the result. Gated behind a new
-  `tail-call-optimization` feature flag (off by default,
-  matching the policy for behaviors that aren't observable in
-  the existing engine surface — `Error.stack` loses the
-  eliminated frames per spec). Cynic is the second engine
-  shipping spec-mandated PTC alongside JavaScriptCore;
-  ~35 test262 fixtures under `language/*/tco-*` and the
-  `tail-call-optimization` feature tag now run.
+  honors: enclosing try-with-finally, try-with-catch in the
+  same chunk, open for-of iterator owing `IteratorClose`, async
+  / generator body. Exotic callees (proxy, bound, native,
+  generator, async) fall back to ordinary call semantics — the
+  unconditionally-emitted follow-up `return_` propagates the
+  result. **On by default** (no feature flag) — Cynic is the
+  second engine shipping spec-mandated PTC alongside
+  JavaScriptCore. ~30 test262 fixtures under `language/*/tco-*`
+  and the `tail-call-optimization` feature tag now pass.
 
 - **Monomorphic property cache — `lda_property` + `sta_property`
   + `call_method`.** Three opcodes grew a `u16` IC operand and a
@@ -954,19 +951,18 @@ stack frame instead of pushing a fresh one. Spec wording is
 mandatory; in practice only **JavaScriptCore** had been shipping
 it. Cynic is the second.
 
-Gated behind the `tail-call-optimization` feature flag (off by
-default — opt in with `--enable=tail-call-optimization` or
-`--enable-experimental`). The test262 harness flips it on for
-the dedicated per-feature phase, which scores the ~35 fixtures
-under `language/*/tco-*` plus the `tail-call-optimization`
-feature tag.
+**On by default.** No feature flag — the compiler always emits
+`tail_call` / `tail_call_method` at statically-detectable tail
+positions. The test262 fixtures under `language/*/tco-*` and the
+`tail-call-optimization` frontmatter tag run as part of the
+main ECMA-262 sweep.
 
 ### Cross-engine status (2026)
 
 | Engine | PTC | Notes |
 |---|---|---|
 | JavaScriptCore | ✅ | Shipped 2016, still in. Bun inherits. |
-| **Cynic** | ✅ | Shipped behind `tail-call-optimization` flag. |
+| **Cynic** | ✅ | Shipped on by default. |
 | V8 | ❌ | Implemented briefly behind a flag (2016), removed. Cited reasons: lost stack frames break dev-tools / `Error.stack`, hot-path cost on every call site, and the [STC counter-proposal](https://github.com/tc39/proposal-ptc-syntax) wanting explicit `return continue f()` syntax. |
 | SpiderMonkey | ❌ | [Tracking bug](https://bugzilla.mozilla.org/show_bug.cgi?id=1188320) open since 2015. |
 | Hermes / QuickJS / XS / Boa | ❌ | None. |
@@ -991,15 +987,15 @@ feature tag.
    `return_` immediately following the `tail_call` in the
    bytecode propagates the result.
 3. **Disqualifiers** consulted at the call-emission site in
-   `shouldEmitTailCall` (`src/bytecode/compiler.zig`): feature
-   flag off; enclosing function is async or generator;
-   `finally_chain` non-null (try-with-finally that would never
-   run); any enclosing loop owes an `IteratorClose` (for-of
-   with an open iterator).
+   `shouldEmitTailCall` (`src/bytecode/compiler.zig`):
+   enclosing function is async or generator; `finally_chain`
+   non-null (try-with-finally that would never run);
+   `try_with_handler_depth > 0` (try-with-catch whose handler
+   would be lost on frame reuse); any enclosing loop owes an
+   `IteratorClose` (for-of with an open iterator).
 4. **`Error.stack` impact**: a tail-called function disappears
    from the chain. Stack traces become harder to read. This is
-   the spec-prescribed cost; the off-by-default flag means
-   existing fixtures' stack-trace expectations stay intact.
+   the spec-prescribed cost.
 
 Cynic ships PTC tractably for reasons that don't apply to V8 /
 SpiderMonkey: no JIT (no TurboFan / Ion retrofit cost), no
