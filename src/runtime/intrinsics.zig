@@ -229,7 +229,7 @@ pub fn install(realm: *Realm) !void {
     // `gt.properties`, so `globalThis.X` and bare-identifier
     // lookups stay in lockstep without a snapshot rebuild.
     const gt = try realm.heap.allocateObject();
-    gt.prototype = obj_proto;
+    realm.heap.setObjectPrototype(gt, obj_proto);
     try realm.globals.bindToObject(realm.allocator, gt);
     // The `globalThis` binding itself is `{ w:true, e:false, c:true }`
     // per §19.3.3 (a standard built-in).
@@ -542,9 +542,9 @@ fn installStubConstructor(
     // Boolean, Function) has `length === 1`.
     const fn_obj = try realm.heap.allocateFunctionNative(stubConstructorNative, 1, name);
     const proto = try realm.heap.allocateObject();
-    proto.prototype = parent_proto;
+    realm.heap.setObjectPrototype(proto, parent_proto);
     try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
-    fn_obj.prototype = proto;
+    realm.heap.setFunctionPrototype(fn_obj, proto);
     // §17 — built-in constructors have a non-writable, non-
     // enumerable, non-configurable `prototype` data property.
     // The `flagsForOwn` synthesizer would otherwise hand back the
@@ -570,7 +570,7 @@ fn installCtorReusingProto(realm: *Realm, name: []const u8, proto: *JSObject) !v
     // §20.1.1 — `Object` constructor's `length` is 1.
     const fn_obj = try realm.heap.allocateFunctionNative(stubConstructorNative, 1, name);
     try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
-    fn_obj.prototype = proto;
+    realm.heap.setFunctionPrototype(fn_obj, proto);
     // §17 — same non-writable-prototype default as the stub path above.
     try fn_obj.property_flags.put(realm.allocator, "prototype", .{
         .writable = false,
@@ -681,13 +681,13 @@ pub fn installConstructor(realm: *Realm, spec: ConstructorSpec) !struct { ctor: 
     fn_obj.is_class_constructor = spec.is_class;
     fn_obj.proto = realm.intrinsics.function_prototype;
     const proto = try realm.heap.allocateObject();
-    proto.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(proto, realm.intrinsics.object_prototype);
     if (spec.install_constructor_property) {
         try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
     }
     if (spec.to_string_tag) |t| try installToStringTag(realm, proto, t);
-    fn_obj.prototype = proto;
-    if (spec.set_home_object) fn_obj.home_object = proto;
+    realm.heap.setFunctionPrototype(fn_obj, proto);
+    if (spec.set_home_object) realm.heap.setHomeObject(fn_obj, proto);
     // §17 — every built-in constructor's `prototype` slot is
     // { w:false, e:false, c:false } regardless of whether the
     // function itself is a class-style constructor (`new`-only,
@@ -786,7 +786,7 @@ pub fn argOr(args: []const Value, i: usize, default: Value) Value {
 /// `arr[3]` reads come from `properties` instead of `elements`.
 pub fn allocateArray(realm: *Realm) !*JSObject {
     const obj = try realm.heap.allocateObject();
-    obj.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(obj, realm.intrinsics.array_prototype);
     obj.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     obj.is_array_exotic = true;
     try obj.setWithFlags(realm.allocator, "length", Value.fromInt32(0), .{
@@ -824,7 +824,7 @@ pub fn toObjectThis(realm: *Realm, this_value: Value) NativeError!*JSObject {
     if (this_value.isString()) {
         const s: *JSString = @ptrCast(@alignCast(this_value.asString()));
         const w = realm.heap.allocateObject() catch return error.OutOfMemory;
-        w.prototype = realm.intrinsics.string_prototype;
+        realm.heap.setObjectPrototype(w, realm.intrinsics.string_prototype);
         w.boxed_string = s;
         // §22.1.4 String exotic — `length` and integer-indexed
         // entries are own *non-writable*, *non-configurable*
@@ -886,7 +886,7 @@ pub fn toObjectThis(realm: *Realm, this_value: Value) NativeError!*JSObject {
         // (Sputnik 15.4.4.x-1-9 family). The function's `proto`
         // slot points at `%Function.prototype%` (or a user-
         // subclassed proto), exactly what the wrapper needs.
-        w.prototype = fn_obj.proto;
+        realm.heap.setObjectPrototype(w, fn_obj.proto);
         var it = fn_obj.properties.iterator();
         while (it.next()) |entry| {
             const key = entry.key_ptr.*;
@@ -908,7 +908,7 @@ pub fn toObjectThis(realm: *Realm, this_value: Value) NativeError!*JSObject {
     // Array.prototype.* over a wrapped number reads length 0
     // and the loop exits — matching real engines.
     const w = realm.heap.allocateObject() catch return error.OutOfMemory;
-    w.prototype = lookupPrimitivePrototype(realm, this_value) orelse realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(w, lookupPrimitivePrototype(realm, this_value) orelse realm.intrinsics.object_prototype);
     // §6.1.6.1 Number wrapper / §6.1.5 BigInt / §6.1.3 Boolean —
     // stash the primitive in `boxed_primitive` so
     // `Number.prototype.toString` / `.valueOf` (and the matching
@@ -1223,7 +1223,7 @@ fn replaceGlobalNative(realm: *Realm, name: []const u8, native: NativeFn) !void 
     const old_v = realm.globals.get(name) orelse return;
     const old_fn = heap_mod.valueAsFunction(old_v) orelse return;
     const fresh = try realm.heap.allocateFunctionNative(native, 1, name);
-    fresh.prototype = old_fn.prototype;
+    realm.heap.setFunctionPrototype(fresh, old_fn.prototype);
     if (fresh.prototype) |p| {
         try p.set(realm.allocator, "constructor", heap_mod.taggedFunction(fresh));
     }
