@@ -456,9 +456,9 @@ fn functionBind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // `bound_target` and route through that.
     const bound = realm.heap.allocateFunctionNative(boundFunctionTrampoline, 0, "bound") catch return error.OutOfMemory;
     bound.proto = realm.intrinsics.function_prototype;
-    bound.bound_target = target;
-    bound.bound_this = bound_this;
-    bound.bound_args = owned_args;
+    realm.heap.setBoundTarget(bound, target);
+    realm.heap.setBoundThis(bound, bound_this);
+    realm.heap.setBoundArgs(bound, owned_args);
     // §10.4.1.2 BoundFunctionCreate — the bound has [[Construct]] iff
     // the target has [[Construct]]. Built-in static methods (Math.cos,
     // String.fromCharCode, …) are installed with `has_construct=false`,

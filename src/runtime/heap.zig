@@ -2967,7 +2967,7 @@ pub const Heap = struct {
     /// each element is a Value that may carry a young heap
     /// pointer, so when the function is mature we conservatively
     /// remember it (the next minor cycle will scan the slice).
-    pub fn setBoundArgs(self: *Heap, f: *JSFunction, args: ?[]Value) void {
+    pub fn setBoundArgs(self: *Heap, f: *JSFunction, args: ?[]const Value) void {
         if (args) |arr| {
             if (f.generation == .mature) {
                 for (arr) |v| {
