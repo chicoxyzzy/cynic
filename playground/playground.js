@@ -136,21 +136,21 @@ class Counter {
 const c = new Counter().inc().inc().inc();
 \`value = \${c.value}\`;`,
 
-  'WeakRef — genuinely weak': `// WeakRef holds a target without keeping it alive — once the
-// strong references drop and GC runs, deref() returns undefined.
-// JS GC is non-deterministic, so we nudge it with a 200k-object
-// allocation burst that trips Cynic's byte-pressure trigger.
+  'WeakRef — genuinely weak': `// WeakRef holds a target without keeping it alive. Spec quirk
+// (§9.10): the ctor pins the target until the next job boundary,
+// so drop + GC have to happen in a follow-up microtask.
+"use strict";
 let target = { tag: "doomed" };
 const ref = new WeakRef(target);
 console.log("before:", ref.deref()?.tag);
-
 target = null;
-// Allocate enough garbage to make GC run. Real code wouldn't
-// do this; it's only here to make a non-deterministic API
-// observable on a tiny script.
-for (let i = 0; i < 200000; i++) ({ k: i });
 
-ref.deref()?.tag ?? "collected";`,
+Promise.resolve().then(() => {
+  // 200k allocations force a GC cycle.
+  for (let i = 0; i < 200000; i++) ({ k: i });
+  console.log("after:", ref.deref()?.tag ?? "collected");
+});
+"queued";`,
 
   'Proper Tail Calls': `// ES2015 §15.10 — a call in tail position reuses the caller's
 // frame instead of pushing a fresh one. Recursing 100,000 deep
