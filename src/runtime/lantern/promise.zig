@@ -435,8 +435,8 @@ fn makeReturnThisHandler(realm: *Realm, value: Value) !Value {
     const bound = try realm.heap.allocateFunctionNative(returnThisValueNative, 1, "");
     bound.proto = realm.intrinsics.function_prototype;
     bound.has_construct = false;
-    bound.bound_target = impl;
-    bound.bound_this = value;
+    realm.heap.setBoundTarget(bound, impl);
+    realm.heap.setBoundThis(bound, value);
     return heap_mod.taggedFunction(bound);
 }
 
@@ -491,8 +491,8 @@ fn runThenableJob(
     const resolve_fn = realm.heap.allocateFunctionNative(promise_mod.boundResolveTrampolineExported, 1, "") catch return error.OutOfMemory;
     resolve_fn.proto = realm.intrinsics.function_prototype;
     resolve_fn.has_construct = false;
-    resolve_fn.bound_target = resolve_impl;
-    resolve_fn.bound_this = outer_promise;
+    realm.heap.setBoundTarget(resolve_fn, resolve_impl);
+    realm.heap.setBoundThis(resolve_fn, outer_promise);
 
     const reject_impl = realm.heap.allocateFunctionNative(promise_mod.promiseRejectImplExported, 1, "") catch return error.OutOfMemory;
     reject_impl.proto = realm.intrinsics.function_prototype;
@@ -500,8 +500,8 @@ fn runThenableJob(
     const reject_fn = realm.heap.allocateFunctionNative(promise_mod.boundResolveTrampolineExported, 1, "") catch return error.OutOfMemory;
     reject_fn.proto = realm.intrinsics.function_prototype;
     reject_fn.has_construct = false;
-    reject_fn.bound_target = reject_impl;
-    reject_fn.bound_this = outer_promise;
+    realm.heap.setBoundTarget(reject_fn, reject_impl);
+    realm.heap.setBoundThis(reject_fn, outer_promise);
 
     const args = [_]Value{ heap_mod.taggedFunction(resolve_fn), heap_mod.taggedFunction(reject_fn) };
     const outcome = callJSFunction(allocator, realm, then_fn, thenable, &args) catch |err| switch (err) {
