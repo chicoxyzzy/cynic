@@ -153,9 +153,10 @@ jobs:
     # `built-ins/RegExp/property-escapes` fixtures each exceed the
     # per-fixture watchdog (huge generated patterns × per-alloc GC),
     # so a whole-corpus gc1 run is timeout-bound. Instead it probes
-    # the GC-mutation-heavy buckets (Array / String / TypedArray) —
-    # the areas where the rooting contract is most often exercised.
-    # See docs/handbook/gc.md ("Finding these bugs").
+    # the GC-mutation-heavy buckets (Array / String / TypedArray /
+    # Iterator / generators) — the areas where the rooting
+    # contract and the iterative-marker contract are most often
+    # exercised. See docs/handbook/gc.md ("Finding these bugs").
     #
     # Advisory (`continue-on-error`): a verifier assert or a 0xaa
     # use-after-free crash should surface in PR review, not gate.
@@ -173,6 +174,10 @@ jobs:
       - name: GC stress sweep (ReleaseSafe, --gc-threshold=1)
         # The first invocation builds the ReleaseSafe harness; the
         # rest reuse it from `.zig-cache` (same `-Doptimize`).
+        # `Iterator` and `generators` were added after the shadow-
+        # shape removal class (9c4b70c) and the recursive-marker
+        # overflow (9ac49ff, f97155a) — both surfaced in those
+        # buckets and would slip past Array / String / TypedArray.
         timeout-minutes: 20
         continue-on-error: true
         run: |
@@ -182,3 +187,7 @@ jobs:
             --gc-threshold=1 --threads=4 --filter=built-ins/String
           zig build test262 -Doptimize=ReleaseSafe -- \
             --gc-threshold=1 --threads=4 --filter=built-ins/TypedArray
+          zig build test262 -Doptimize=ReleaseSafe -- \
+            --gc-threshold=1 --threads=4 --filter=built-ins/Iterator
+          zig build test262 -Doptimize=ReleaseSafe -- \
+            --gc-threshold=1 --threads=4 --filter=language/expressions/generators

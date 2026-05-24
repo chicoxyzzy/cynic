@@ -264,6 +264,67 @@ before step *n* can settle into step *n+1*'s sub-Promise.
 — the microtask was `orderedRemove`d from the queue before
 dispatch, so its values no longer have a queue-based root.
 
+## Iterative marker for chain-shaped graphs
+
+`markValue` and `markEnvironment` recurse through their target's
+fields by default. That's fine for objects with a fixed number
+of typed slots — the recursion depth is bounded by the
+field-count graph. But three edges in the object model can form
+N-deep linear chains where the recursion depth tracks the
+user-program's chain length, and 5-10k user-side chain entries
+overflow the Debug call stack:
+
+- **Promise reaction chain.** `p0.reactions[0].result_promise =
+  p1`, `p1.reactions[0].result_promise = p2`, … A 5k-deep
+  `.then` chain forms a 5k-deep `markValue → markValue` recursion
+  through that edge.
+- **Closure-env chain.** Each closure's `captured_env.slots[0]`
+  is the previous closure. Marking traverses
+  `markValue(f) → markEnvironment(f.captured_env) →
+  markValue(env.slots[0]=f_prev) → markEnvironment(…) → …`.
+- **Prototype chain.** A 10k-deep `Object.create(prev)` tower
+  recurses through `markValue → markObjectInternalSlots →
+  markValue(taggedObject(o.prototype)) → …`.
+
+`Heap` carries two worklists for these edges:
+
+- `mark_worklist: ArrayListUnmanaged(Value)` — for Value
+  pushes (`promise_reactions[i].result_promise`,
+  `o.prototype`).
+- `mark_env_worklist: ArrayListUnmanaged(*Environment)` — for
+  Environment pushes (`env.parent`, `f.captured_env`).
+
+At those four edges, code pushes to the relevant worklist
+instead of calling `markValue` / `markEnvironment` recursively:
+
+    self.mark_worklist.append(self.allocator, taggedObject(p)) catch {
+        self.markValue(taggedObject(p)); // OOM fallback
+    };
+
+`drainMarkWorklist` runs at cycle boundaries (before sweep in
+`collectFull`, before fixpoint and again post-fixpoint in
+`collectYoung`), alternating between the two worklists until
+both are empty. Either drain can refill the other — marking a
+function pushes its captured_env onto `mark_env_worklist`;
+marking an env pushes its slot values onto `mark_worklist`. The
+outer while re-checks both after each inner drain.
+
+The four edges above are the only ones that form unbounded
+chains today. Other recursive `markValue` calls inside the body
+— property bag values, Map / Set entries, FinalizationRegistry
+held_values, accessor pairs, key anchors — stay recursive
+because they don't form linear chains by construction.
+
+**When adding a new typed slot** (`runtime/object.zig` field,
+new `iter_helper` payload, etc.) that COULD form a chain — i.e.,
+the slot can hold an object that itself has a slot of the same
+kind — push to `mark_worklist` instead of recursing. If the
+slot is single-hop (e.g., one-shot capability state), recursion
+is fine. V8 (`MarkingState`) / JSC (Riptide concurrent marker)
+/ SpiderMonkey (`MarkingTracer`) all ship fully iterative
+markers globally; Cynic's worklist is a scoped subset covering
+the chains that actually overflow today.
+
 ## What's not yet done
 
 ### Array-spread integer-key gap (resolved)
