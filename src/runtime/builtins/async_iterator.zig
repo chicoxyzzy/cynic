@@ -32,7 +32,7 @@ const SYNC_ITER_SLOT = "__cynic_sync_iter__";
 pub fn ensureAsyncFromSyncIteratorPrototype(realm: *Realm) !*JSObject {
     if (realm.intrinsics.async_from_sync_iterator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
-    proto.prototype = try lantern.ensureAsyncIteratorPrototype(realm);
+    realm.heap.setObjectPrototype(proto, try lantern.ensureAsyncIteratorPrototype(realm));
 
     try installMethod(realm, proto, "next", afsiNext, 1);
     try installMethod(realm, proto, "return", afsiReturn, 1);
@@ -60,7 +60,7 @@ fn installMethod(realm: *Realm, proto: *JSObject, name: []const u8, native: anyt
 pub fn createAsyncFromSyncIterator(realm: *Realm, sync_iter: Value) !Value {
     const proto = try ensureAsyncFromSyncIteratorPrototype(realm);
     const obj = try realm.heap.allocateObject();
-    obj.prototype = proto;
+    realm.heap.setObjectPrototype(obj, proto);
     try obj.set(realm.allocator, SYNC_ITER_SLOT, sync_iter);
     return heap_mod.taggedObject(obj);
 }
@@ -393,7 +393,7 @@ fn closeIteratorOnReject(realm: *Realm, this_value: Value, args: []const Value) 
 
 fn genResult(realm: *Realm, value: Value, done: bool) NativeError!Value {
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-    obj.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
     obj.set(realm.allocator, "value", value) catch return error.OutOfMemory;
     obj.set(realm.allocator, "done", Value.fromBool(done)) catch return error.OutOfMemory;
     return heap_mod.taggedObject(obj);
