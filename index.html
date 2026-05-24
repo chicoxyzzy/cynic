@@ -765,10 +765,10 @@
         <div class="compare-row">
           <div>
             <div class="feature-name"><code>WeakRef</code> · <code>FinalizationRegistry</code></div>
-            <div class="compare-note">§26.1 / §26.2; strong-ref impl today, real weakness lands with generational GC</div>
+            <div class="compare-note">§26.1 / §26.2; real weak references — major sweep clears dead targets and queues registry callbacks</div>
           </div>
           <div class="check">Works.</div>
-          <div>The API surface ships. The weakness is on the same roadmap as the nursery.</div>
+          <div>Genuine weakness. The collector finally honours its end of the contract.</div>
         </div>
 
         <div class="compare-row">
@@ -827,8 +827,17 @@
 
         <div class="compare-row">
           <div>
-            <div class="feature-name">JIT tiers · inline caches</div>
-            <div class="compare-note">bytecode interpreter today; <code>/perf</code> &amp; <code>/profile</code> harness scaffolded</div>
+            <div class="feature-name">Inline property caches</div>
+            <div class="compare-note">monomorphic shape ICs on <code>lda_property</code> / <code>sta_property</code> / <code>call_method</code> + proto-load; <code>/perf</code> &amp; <code>/profile</code> harness scaffolded</div>
+          </div>
+          <div class="check">Works.</div>
+          <div>Reads land on the slot in one shape compare. No speculation involved.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">JIT tiers</div>
+            <div class="compare-note">bytecode interpreter today; baseline / optimising tiers on the long road</div>
           </div>
           <div class="cross">Future Cynic's problem.</div>
           <div>The plan is real. The plan is also not the code.</div>
