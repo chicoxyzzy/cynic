@@ -1173,7 +1173,7 @@ pub const Heap = struct {
                 if (o.boxed_primitive) |bp| self.markValue(bp);
                 // §22.1.3 `[[StringData]]` — the JSString a `String`
                 // wrapper boxes; a typed slot, not a property.
-                if (o.boxed_string) |bs| self.markString(bs);
+                if (o.getBoxedString()) |bs| self.markString(bs);
                 if (o.getMapData()) |md| {
                     if (md.is_weak and self.weak_aware_mark) {
                         // §24.3 WeakMap — the [[WeakMapData]] keys
@@ -2272,7 +2272,7 @@ pub const Heap = struct {
             }
         }
         if (o.boxed_primitive) |bp| self.markValue(bp);
-        if (o.boxed_string) |bs| self.markString(bs);
+        if (o.getBoxedString()) |bs| self.markString(bs);
         if (o.getMapData()) |md| {
             for (md.entries.items) |entry| {
                 if (entry.deleted) continue;
@@ -2910,9 +2910,9 @@ pub const Heap = struct {
 
     /// §22.1.4 String wrapper — the boxed code-unit source for
     /// `String.prototype.*` dispatched against the wrapper.
-    pub fn setBoxedString(self: *Heap, o: *JSObject, s: ?*JSString) void {
+    pub fn setBoxedString(self: *Heap, o: *JSObject, s: ?*JSString) !void {
         if (s) |str| self.writeBarrier(.{ .object = o }, Value.fromString(str));
-        o.boxed_string = s;
+        try o.setBoxedString(self.allocator, s);
     }
 
     /// `Promise.prototype.finally` reaction-context callback slot.

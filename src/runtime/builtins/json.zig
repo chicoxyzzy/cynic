@@ -269,7 +269,7 @@ fn resolvePropertyList(state: *StringifyState, replacer_v: Value) NativeError!vo
             // wrapper objects; coerce via ToString. Order
             // matters: String wrappers also pin `boxed_primitive`,
             // so look for the string slot first.
-            if (o.boxed_string != null) {
+            if (o.getBoxedString() != null) {
                 const s = try stringifyArg(realm, v);
                 item_bytes = s.flatBytes();
             } else if (o.boxed_primitive) |bp| {
@@ -309,7 +309,7 @@ fn resolveSpace(state: *StringifyState, space_v: Value) NativeError!void {
     // String wrappers also pin `boxed_primitive`, so check the
     // string slot first.
     if (heap_mod.valueAsPlainObject(space_v)) |obj| {
-        if (obj.boxed_string != null) {
+        if (obj.getBoxedString() != null) {
             const s = try stringifyArg(realm, space_v);
             space_resolved = Value.fromString(s);
         } else if (obj.boxed_primitive) |bp| {
@@ -490,7 +490,7 @@ fn serializeJSONProperty(
     // BigInt wrappers (step 4.d) unwrap to the primitive — step
     // 10 then throws TypeError unless toJSON ran above.
     if (heap_mod.valueAsPlainObject(value)) |o| {
-        if (o.boxed_string != null) {
+        if (o.getBoxedString() != null) {
             const s = try stringifyArg(realm, value);
             value = Value.fromString(s);
         } else if (o.boxed_primitive) |bp| {

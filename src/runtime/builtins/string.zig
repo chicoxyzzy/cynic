@@ -708,7 +708,7 @@ fn coerceThisToJSString(realm: *Realm, this_value: Value) NativeError!*JSString 
         // Synthetic slot recorded by `toObjectThis` for string
         // primitives. When present, return that JSString
         // directly without re-allocating.
-        if (obj.boxed_string) |s| return s;
+        if (obj.getBoxedString()) |s| return s;
     }
     // §7.1.17 ToString on an object: run ToPrimitive with hint
     // "string" first (which consults `Symbol.toPrimitive` /
@@ -1038,7 +1038,7 @@ fn stringToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // anything else (TypeError per §22.1.3.32 step 1).
     if (this_value.isString()) return this_value;
     if (heap_mod.valueAsPlainObject(this_value)) |obj| {
-        if (obj.boxed_string) |s| return Value.fromString(s);
+        if (obj.getBoxedString()) |s| return Value.fromString(s);
     }
     return throwTypeError(realm, "String.prototype.toString called on non-String");
 }

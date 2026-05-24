@@ -3939,7 +3939,7 @@ pub fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value
                 if (bp.isBool()) break :blk "Boolean";
                 if (bp.isInt32() or bp.isDouble()) break :blk "Number";
             }
-            if (obj.boxed_string != null) break :blk "String";
+            if (obj.getBoxedString() != null) break :blk "String";
             // §20.5.3 / §22.1.3.6 — objects with the [[ErrorData]]
             // internal slot tag as "Error". The `<X>Error.prototype`
             // objects intentionally don't have this slot (per

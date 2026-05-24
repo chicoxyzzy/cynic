@@ -490,6 +490,18 @@ pub const JSObjectExtension = struct {
     /// §25.3 DataView state — byte-offset / byte-length / endian
     /// hooks over the source ArrayBuffer.
     data_view: ?DataView = null,
+    /// `[[StringData]]` (§22.1.3) — the string primitive a
+    /// `String` wrapper boxes. Only `new String(v)` / `toObjectThis`
+    /// boxing populates this; every plain object skips the
+    /// extension alloc.
+    boxed_string: ?*@import("string.zig").JSString = null,
+    /// Opaque host-side pointer. Used by embedder code that
+    /// needs to associate a `*Realm` (or similar) with a JS
+    /// object — currently only the test262 harness, which
+    /// stashes the child Realm pointer on the wrapper returned
+    /// by `$262.createRealm()`. Not GC-traced; the harness keeps
+    /// the child Realm rooted in `parent.child_realms` separately.
+    host_data: ?*anyopaque = null,
 
     pub fn deinit(self: *JSObjectExtension, allocator: std.mem.Allocator) void {
         self.accessors.deinit(allocator);
@@ -684,21 +696,11 @@ pub const JSObject = struct {
     /// is the detached state. Plain objects keep the default `false`
     /// so the prototype-method brand checks `TypeError` correctly.
     has_array_buffer_data: bool = false,
-    /// `[[StringData]]` (§22.1.3) — the string primitive a
-    /// `String` wrapper boxes. Set by `toObjectThis` when
-    /// boxing a string primitive for a method call, and by
-    /// `new String("…")`. Lets `String.prototype.*` methods
-    /// unbox a wrapper receiver in O(1) instead of
-    /// reconstructing the bytes from indexed slots.
-    boxed_string: ?*@import("string.zig").JSString = null,
-    /// Opaque host-side pointer. Used by embedder code that
-    /// needs to associate a `*Realm` (or similar) with a JS
-    /// object — currently only the test262 harness, which
-    /// stashes the child Realm pointer on the wrapper returned
-    /// by `$262.createRealm()` so the trampoline `evalScript`
-    /// can dispatch to it. Not GC-traced; the harness keeps the
-    /// child Realm rooted in `parent.child_realms` separately.
-    host_data: ?*anyopaque = null,
+    // (`boxed_string` moved to `JSObjectExtension` — only
+    // `new String(v)` / String-wrapper boxing populates it.
+    // Access via `getBoxedString` / `setBoxedString` helpers.)
+    // (`host_data` moved to `JSObjectExtension` — only the test262
+    // harness uses it. Access via `getHostData` / `setHostData`.)
     // (`promise_waiters` + `promise_reactions` moved to
     // `JSObjectExtension` — only Promise instances populate them.
     // Access via the `promiseWaiters*` / `promiseReactions*`
@@ -1233,6 +1235,33 @@ pub const JSObject = struct {
     pub fn setDataView(self: *JSObject, allocator: std.mem.Allocator, dv: ?DataView) !void {
         const ext = try self.getOrCreateExtension(allocator);
         ext.data_view = dv;
+    }
+
+    // ── §22.1 String wrapper + embedder host pointer ──────────
+    //
+    // Both are cold on a plain JSObject and live behind the
+    // extension. The brand check `getBoxedString() != null` keeps
+    // the same semantics as the old direct-field read; non-String
+    // wrappers stay on the null-extension fast path.
+
+    pub fn getBoxedString(self: *const JSObject) ?*@import("string.zig").JSString {
+        if (self.extension) |ext| return ext.boxed_string;
+        return null;
+    }
+
+    pub fn setBoxedString(self: *JSObject, allocator: std.mem.Allocator, s: ?*@import("string.zig").JSString) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        ext.boxed_string = s;
+    }
+
+    pub fn getHostData(self: *const JSObject) ?*anyopaque {
+        if (self.extension) |ext| return ext.host_data;
+        return null;
+    }
+
+    pub fn setHostData(self: *JSObject, allocator: std.mem.Allocator, p: ?*anyopaque) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        ext.host_data = p;
     }
 
     /// Drop every sub-allocation owned by this object — does NOT
@@ -2512,4 +2541,40 @@ test "JSObjectExtension: deinit is a no-op when extension is null" {
     // objects that never reached for the extension.
     const o = try JSObject.init(testing.allocator);
     o.deinit(testing.allocator);
+}
+
+test "JSObjectExtension: boxed_string read/write through helpers" {
+    // §22.1.3 [[StringData]] — moved from a JSObject field to the
+    // extension. The brand check `getBoxedString() != null` keeps
+    // its old semantics on a plain object (returns null without
+    // materialising the extension).
+    const o = try JSObject.init(testing.allocator);
+    defer o.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(?*@import("string.zig").JSString, null), o.getBoxedString());
+    try testing.expect(o.extension == null);
+
+    // Setting to null still materialises the extension (matches
+    // the explicit `Heap.setBoxedString(o, null)` semantics).
+    try o.setBoxedString(testing.allocator, null);
+    try testing.expect(o.extension != null);
+    try testing.expectEqual(@as(?*@import("string.zig").JSString, null), o.getBoxedString());
+}
+
+test "JSObjectExtension: host_data read/write through helpers" {
+    // Test262 harness — `$262.createRealm()` wrapper carries the
+    // child `Realm` here. Plain objects must read back `null`
+    // without paying the extension allocation.
+    const o = try JSObject.init(testing.allocator);
+    defer o.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(?*anyopaque, null), o.getHostData());
+    try testing.expect(o.extension == null);
+
+    // Stash a dummy pointer and read it back.
+    var marker: u32 = 0xDEADBEEF;
+    try o.setHostData(testing.allocator, @ptrCast(&marker));
+    try testing.expect(o.extension != null);
+    const got = o.getHostData() orelse return error.TestUnexpectedNull;
+    try testing.expectEqual(@as(*anyopaque, @ptrCast(&marker)), got);
 }

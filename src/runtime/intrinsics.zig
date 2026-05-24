@@ -385,7 +385,7 @@ pub fn install(realm: *Realm) !void {
         // returning `"[object String]"`).
         const empty_str = realm.heap.allocateString("") catch return error.OutOfMemory;
         realm.heap.setBoxedPrimitive(sp, Value.fromString(empty_str));
-        realm.heap.setBoxedString(sp, empty_str);
+        try realm.heap.setBoxedString(sp, empty_str);
         // §22.1.4 — `String.prototype` has a `length` data property
         // whose initial value is 0 and whose attributes are
         // `{ [[Writable]]: false, [[Enumerable]]: false,
@@ -825,7 +825,7 @@ pub fn toObjectThis(realm: *Realm, this_value: Value) NativeError!*JSObject {
         const s: *JSString = @ptrCast(@alignCast(this_value.asString()));
         const w = realm.heap.allocateObject() catch return error.OutOfMemory;
         realm.heap.setObjectPrototype(w, realm.intrinsics.string_prototype);
-        realm.heap.setBoxedString(w, s);
+        realm.heap.setBoxedString(w, s) catch return error.OutOfMemory;
         // §22.1.4 String exotic — `length` and integer-indexed
         // entries are own *non-writable*, *non-configurable*
         // properties. Install them with that descriptor so the
@@ -1272,7 +1272,7 @@ fn stringConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
         // O(1) without an isString discriminator dance.
         if (primitive.isString()) {
             const ps: *JSString = @ptrCast(@alignCast(primitive.asString()));
-            realm.heap.setBoxedString(inst, ps);
+            realm.heap.setBoxedString(inst, ps) catch return error.OutOfMemory;
             // §22.1.4 String exotic — instances have own `length`
             // and indexed slots `[0]..[length-1]`, all
             // non-writable / non-configurable per §10.4.3.4. Without

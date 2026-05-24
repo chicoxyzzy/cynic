@@ -273,7 +273,7 @@ fn test262CreateRealm(
     // Stash the child realm pointer on the wrapper. The
     // `evalScript` trampoline reads it from `this_value` and
     // dispatches into the child.
-    wrapper.host_data = @ptrCast(child_ptr);
+    wrapper.setHostData(realm.allocator, @ptrCast(child_ptr)) catch return error.OutOfMemory;
 
     // `.evalScript(source)` — evaluates `source` IN THE CHILD
     // REALM. Receiver is the wrapper, which carries the child
@@ -300,7 +300,7 @@ fn test262ChildEvalScript(
 ) cynic.runtime.function.NativeError!cynic.runtime.Value {
     const this_obj = cynic.runtime.heap.valueAsPlainObject(this_value) orelse
         return throwTest262TypeError(realm, "$262.evalScript: bad receiver");
-    const child_raw = this_obj.host_data orelse
+    const child_raw = this_obj.getHostData() orelse
         return throwTest262TypeError(realm, "$262.evalScript: missing host realm");
     const child: *cynic.runtime.Realm = @ptrCast(@alignCast(child_raw));
     if (args.len == 0 or !args[0].isString()) {
