@@ -1075,6 +1075,16 @@ pub const skip_planned_path_contains = [_][]const u8{
     "Function/prototype/bind/get-fn-realm.",
     "Function/prototype/bind/get-fn-realm-recursive.",
 
+    // `built-ins/Proxy/revocable/tco-fn-realm.js` —
+    // `$262.createRealm()`-using fixture that revokes a Proxy in
+    // an "other" realm, then tail-calls it from the parent and
+    // asserts the TypeError comes from `other.global.TypeError`.
+    // Cynic's interpreter uses the *active* realm's TypeError
+    // (parent), not the proxy's realm of allocation (other) —
+    // same realm-per-frame gap as the families above. Lift when
+    // realm-per-call-frame tracking lands.
+    "Proxy/revocable/tco-fn-realm.",
+
     // Sputnik `language/types/string/S8.4_A7.*.js` (4 fixtures) —
     // every one wraps an `eval("var x = asdf<LineTerminator>ghjk")`
     // expecting ReferenceError because the line terminator
@@ -1364,6 +1374,21 @@ test "skip: /v unicodeSets generated — libregexp parse-time gaps" {
     ));
     try testing.expect(!pathIsCynicOutOfScope(
         "built-ins/RegExp/unicodeSets/generated/character-property-escape-union-character-property-escape.js",
+    ));
+}
+
+test "skip: Proxy revocable tco-fn-realm carve-out" {
+    // §10.5.12 [[Call]] on a revoked Proxy throws TypeError. The
+    // tco-fn-realm fixture asserts the TypeError comes from the
+    // proxy's realm (not the parent's). Cynic's interpreter uses
+    // the active realm's TypeError — same realm-per-frame gap as
+    // the other `*-realm-*` carve-outs.
+    try testing.expect(pathIsCynicOutOfScope(
+        "built-ins/Proxy/revocable/tco-fn-realm.js",
+    ));
+    // Same-bucket fixtures without `-realm` stay in scope.
+    try testing.expect(!pathIsCynicOutOfScope(
+        "built-ins/Proxy/revocable/revocation-function-extensible.js",
     ));
 }
 
