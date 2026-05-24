@@ -652,20 +652,30 @@ test "later: function declaration — self-recursion via self-binding" {
 
 test "later: deep recursion throws RangeError" {
     // The interpreter caps simultaneously-active call frames at
-    // `max_call_frames` and raises a RangeError on overflow. The
+    // `max_call_frames` and raises a RangeError on overflow.
+    // `rec(n + 1) + 1` is a non-tail call (the `+ 1` consumes
+    // the result), so PTC (§15.10, default-on since f3fdc8b)
+    // doesn't fire and the stack grows per recursion. The
     // throw unwinds all the way back to the host since nothing
     // catches it.
     try expectScriptThrows(
-        "function rec(n) { return rec(n + 1); } rec(0);",
+        "function rec(n) { return rec(n + 1) + 1; } rec(0);",
     );
 }
 
 test "later: deep recursion is catchable" {
     // RangeError unwinds frame-by-frame; an outer try/catch can
     // catch it the moment unwinding hits a handler.
+    //
+    // `rec(n + 1) + 1` is a *non-tail* call — the `+ 1` after
+    // the call means PTC (§15.10) doesn't fire and the stack
+    // grows per recursion as required to exercise the overflow.
+    // The original `return rec(n + 1)` pattern is now a tail
+    // call and runs in one frame forever (PTC ships on by
+    // default since f3fdc8b).
     try expectScriptString(
         \\let caught = '';
-        \\function rec(n) { return rec(n + 1); }
+        \\function rec(n) { return rec(n + 1) + 1; }
         \\try { rec(0); } catch (e) { caught = 'caught'; }
         \\caught;
     , "caught");
@@ -3647,9 +3657,17 @@ test "GC: WeakRef to an unreachable target clears after a major GC" {
     // a helper whose frame is popped before `__collectGarbage()`
     // runs, so the only edge to it is the WeakRef's weak slot —
     // which `Heap.collectFull` does not strong-mark.
+    //
+    // §26.1.1.1 step 4 — the `new WeakRef(target)` constructor
+    // also pins `target` in §9.10 [[KeptAlive]] for the current
+    // job. The synthetic `__clearKeptObjects()` drains the list
+    // so the GC sees the target as unreachable. (Real engines
+    // drain at the next microtask checkpoint; tests don't cross
+    // one.)
     try expectScriptIntWithBuiltins(
         \\function makeRef() { return new WeakRef({ tag: 1 }); }
         \\const wr = makeRef();
+        \\globalThis.__clearKeptObjects();
         \\globalThis.__collectGarbage();
         \\wr.deref() === undefined ? 1 : 0;
     , 1);
@@ -3682,6 +3700,7 @@ test "GC: WeakMap entry whose key is unreachable is gone after a major GC" {
         \\  return new WeakRef(k);
         \\}
         \\const probe = addEntry();
+        \\globalThis.__clearKeptObjects();
         \\globalThis.__collectGarbage();
         \\let r = 0;
         \\const k2 = probe.deref();
@@ -3740,6 +3759,7 @@ test "GC: WeakSet member that is unreachable is gone after a major GC" {
         \\  return new WeakRef(m);
         \\}
         \\const probe = addMember();
+        \\globalThis.__clearKeptObjects();
         \\globalThis.__collectGarbage();
         \\let r = 0;
         \\const m2 = probe.deref();
@@ -6292,25 +6312,19 @@ test "frame pool: alternating callees with different register counts" {
         \\  return a + b + c + d + e;
         \\}
         \\let r = 0;
-        \\for (let i = 0; i < 100; i++) {
+        \\for (let i = 0; i < 12; i++) {
         \\  r = small(r);
         \\  r = big(r);
         \\}
         \\r;
-    , (function() {
-        // small adds 1, big adds (i+1)+(i+2)+(i+3)+(i+4)+(i+5)
-        // = 5*x + 15. Iterating: r' = 5*(r+1) + 15 = 5r + 20.
-        // Closed form: after N iters of small+big,
-        // r_n = 5*r_{n-1} + 20.
-        // r_0 = 0; r_n = 20*(5^n - 1)/(5-1) = 5*(5^n - 1).
-        // For N=100 this overflows; use a small N and hand-compute.
-        // Instead just run mentally for low N and assert; for N=100
-        // overflow into double is fine — JS handles it.
-        var r: i64 = 0;
-        var i: u32 = 0;
-        while (i < 100) : (i += 1) r = 5 * r + 20;
-        return @intCast(r);
-    })());
+    // small adds 1; big computes 5*(x+1)+15 = 5x+20. Per loop
+    // iteration r' = 5*r + 20, closed-form r_n = 5*(5^n − 1).
+    // N=12 → r = 5*(5^12 − 1) = 5*244140624 = 1_220_703_120,
+    // still inside the i32 range expectScriptIntWithBuiltins
+    // takes. N=100 (the original intent) overflows i32 and
+    // produces a JS double — fold into the alternating-callees
+    // stress without needing string-assert plumbing.
+    , 1220703120);
 }
 
 test "frame pool: method call hot loop on class instance" {

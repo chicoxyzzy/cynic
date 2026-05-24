@@ -652,6 +652,19 @@ pub const Realm = struct {
     /// `await` opcode site. Each entry is a function to call
     /// with one argument.
     microtask_queue: std.ArrayListUnmanaged(Microtask) = .empty,
+    /// §9.10 [[KeptAlive]] — the per-agent "keep alive across the
+    /// current job" list. `WeakRef.prototype.deref` (§26.1.4.1
+    /// step 2a) and the `WeakRef` constructor (§26.1.1.1 step 4)
+    /// both call AddToKeptObjects (§9.10.4.1) which appends here.
+    /// `markRoots` strong-marks every entry so the GC can't
+    /// collect a target while it's still in this list.
+    /// `drainMicrotasks` calls `ClearKeptObjects` (§9.10.4.2) at
+    /// each job boundary, releasing the targets. Without this,
+    /// `ref.deref()` is observably broken — a second `deref()` in
+    /// the same synchronous block can see a swept target on a
+    /// spec-compliant engine, but every other shipping engine
+    /// pins the target until the job ends.
+    kept_alive: std.ArrayListUnmanaged(Value) = .empty,
     /// Host-installed module loader. `null` means imports throw
     /// at runtime. The CLI's `cynic run --module …` path and
     /// the test262 harness install one that reads from disk.
@@ -864,6 +877,7 @@ pub const Realm = struct {
         self.globals.deinit(self.allocator);
         self.output.deinit(self.allocator);
         self.microtask_queue.deinit(self.allocator);
+        self.kept_alive.deinit(self.allocator);
         self.pending_indirect_export_validation.deinit(self.allocator);
         // ModuleRecords are owned by the realm; the heap
         // doesn't sweep them.
@@ -918,6 +932,27 @@ pub const Realm = struct {
 
     pub fn enqueueMicrotask(self: *Realm, callback: Value, arg: Value) !void {
         try self.microtask_queue.append(self.allocator, .{ .kind = .callback, .callback = callback, .arg = arg });
+    }
+
+    /// §9.10.4.1 AddToKeptObjects — pin `value` alive for the
+    /// duration of the current job. Called from
+    /// `WeakRef.prototype.deref` (§26.1.4.1 step 2a) and the
+    /// `WeakRef` constructor (§26.1.1.1 step 4). The pinning is
+    /// released by `clearKeptObjects` at the next job boundary.
+    pub fn addToKeptObjects(self: *Realm, value: Value) !void {
+        try self.kept_alive.append(self.allocator, value);
+    }
+
+    /// §9.10.4.2 ClearKeptObjects — clear the per-agent
+    /// "keep alive across the current job" list. Per the spec
+    /// note, "ECMAScript implementations are expected to call
+    /// ClearKeptObjects when a synchronous sequence of ECMAScript
+    /// execution completes." `drainMicrotasks` calls this at the
+    /// start of each drain (after the top-level synchronous block
+    /// ended) and again after every drained microtask (each
+    /// microtask is its own job per §9.5.5).
+    pub fn clearKeptObjects(self: *Realm) void {
+        self.kept_alive.clearRetainingCapacity();
     }
 
     /// Schedule a suspended async-function generator to resume
@@ -1159,6 +1194,13 @@ pub const Realm = struct {
             self.heap.markValue(mt.reaction_result);
         }
 
+        // §9.10 [[KeptAlive]] — `WeakRef` constructor / `deref`
+        // pin targets here for the duration of the current job.
+        // Strong-mark every entry so the major collector treats
+        // them as live; `drainMicrotasks` releases them at the
+        // next job boundary via `clearKeptObjects`.
+        for (self.kept_alive.items) |v| self.heap.markValue(v);
+
         // Modules — each `ModuleRecord.exports` is a plain
         // `*JSObject` on the GC heap whose property bag holds
         // every named export. `error_value` carries the thrown
@@ -1229,6 +1271,17 @@ pub const Realm = struct {
         const gc_fn = try self.heap.allocateFunctionNative(collectGarbageNative, 0, "__collectGarbage");
         try self.globals.put(self.allocator, "__collectGarbage", heap_mod.taggedFunction(gc_fn));
 
+        // Companion test hook: synchronously runs §9.10.4.2
+        // ClearKeptObjects. Job boundaries (microtask drain /
+        // top-level entry boundaries) normally fire this; inline
+        // unit tests that don't go through a microtask need a
+        // synchronous way to drop the per-job kept-alive list so
+        // a follow-up `__collectGarbage()` can actually weak-clear
+        // a WeakRef target the constructor / `deref()` pinned.
+        // Not a spec built-in; lives on `globalThis.__clearKeptObjects`.
+        const ck_fn = try self.heap.allocateFunctionNative(clearKeptObjectsNative, 0, "__clearKeptObjects");
+        try self.globals.put(self.allocator, "__clearKeptObjects", heap_mod.taggedFunction(ck_fn));
+
         // Minimal `console` object with a `log` method bound to
         // the same printer. Lets test scripts that conventionally
         // call `console.log(x)` work without us having to teach
@@ -1261,6 +1314,20 @@ fn printNative(realm: *Realm, this_value: Value, args: []const Value) @import("f
 /// cycle so genuinely-weak WeakRef / WeakMap / WeakSet /
 /// FinalizationRegistry behaviour is observable from a unit test.
 /// Not a spec built-in.
+/// `globalThis.__clearKeptObjects()` — host hook backing the
+/// deterministic-job-boundary test trigger. Drops every entry
+/// from §9.10 [[KeptAlive]] so a follow-up `__collectGarbage()`
+/// can observe a WeakRef target as unreachable (the constructor /
+/// `deref()` pin the target across the current job; the spec
+/// clears the list at the next job boundary, but inline unit
+/// tests don't cross one). Not a spec built-in.
+fn clearKeptObjectsNative(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
+    _ = this_value;
+    _ = args;
+    realm.clearKeptObjects();
+    return Value.undefined_;
+}
+
 fn collectGarbageNative(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
     _ = this_value;
     _ = args;

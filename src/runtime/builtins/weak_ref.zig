@@ -14,10 +14,15 @@
 //!   §26.1.1.1 WeakRef ( target )
 //!   §26.1.3.2 WeakRef.prototype.deref ( )
 //!   §6.2.10   CanBeHeldWeakly
-//!   §9.10     KeptAlive / AddToKeptObjects (no-op here — Cynic does
-//!             not implement the per-job kept-alive set; a WeakRef
-//!             can clear immediately after the synchronous job that
-//!             created it, which §9.10 permits across job boundaries)
+//!   §9.10     KeptAlive / AddToKeptObjects — implemented. Both the
+//!             constructor (§26.1.1.1 step 4) and `deref`
+//!             (§26.1.4.1 step 2a) pin their target via
+//!             `Realm.addToKeptObjects` for the duration of the
+//!             current job; `drainMicrotasks` clears the list
+//!             between jobs (§9.10.4.2). Matches V8 / JSC /
+//!             SpiderMonkey behaviour: `ref.deref()` twice in the
+//!             same synchronous block sees the same target both
+//!             times even if all other strong references dropped.
 
 const std = @import("std");
 
@@ -67,8 +72,8 @@ fn canBeHeldWeakly(v: Value) bool {
 ///    — the interpreter's `new` dispatch allocates `this_value`
 ///    with the right `[[Prototype]]` (NewTarget's `prototype`
 ///    property, falling back to %WeakRefPrototype%).
-/// 4. Perform AddToKeptObjects(target). — no-op: Cynic does not
-///    model the §9.10 per-job kept-alive set.
+/// 4. Perform AddToKeptObjects(target). — pins the target alive
+///    for the current job (§9.10.4.1).
 /// 5. Set weakRef.[[WeakRefTarget]] to target.
 /// 6. Return weakRef.
 fn weakRefConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -79,6 +84,8 @@ fn weakRefConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
         return throwTypeError(realm, "WeakRef: target must be an object or non-registered symbol");
     inst.is_weak_ref = true;
     inst.setWeakRefTarget(realm.allocator, target) catch return error.OutOfMemory;
+    // §26.1.1.1 step 4 — pin the target across the current job.
+    realm.addToKeptObjects(target) catch return error.OutOfMemory;
     return this_value;
 }
 
@@ -90,7 +97,7 @@ fn weakRefConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
 /// §26.1.4.1 WeakRefDeref(weakRef):
 ///   1. Let target be weakRef.[[WeakRefTarget]].
 ///   2. If target is not empty:
-///      a. Perform AddToKeptObjects(target).  (no-op here)
+///      a. Perform AddToKeptObjects(target).
 ///      b. Return target.
 ///   3. Return undefined.
 fn weakRefDeref(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -102,5 +109,14 @@ fn weakRefDeref(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // §26.1.4.1 — `weak_ref_target` is `undefined` (the engine's
     // ~empty~ sentinel) once the major collector observed the
     // target become unreachable; otherwise it is the live target.
-    return inst.getWeakRefTarget();
+    const target = inst.getWeakRefTarget();
+    // §26.1.4.1 step 2a — pin the live target across the current
+    // job so a second `deref()` (or any other path that needs the
+    // target) sees the same value, even if all other strong refs
+    // have dropped. The pin is released at the next job boundary
+    // (`drainMicrotasks` → `clearKeptObjects`).
+    if (!target.isUndefined()) {
+        realm.addToKeptObjects(target) catch return error.OutOfMemory;
+    }
+    return target;
 }

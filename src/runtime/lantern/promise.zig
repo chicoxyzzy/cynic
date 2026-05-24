@@ -74,6 +74,16 @@ pub fn wrapInPromise(realm: *Realm, fulfilled: bool, value: Value) !Value {
 /// runner). Microtasks queued during draining run before this
 /// call returns (FIFO), matching §9.4.
 pub fn drainMicrotasks(allocator: std.mem.Allocator, realm: *Realm) RunError!void {
+    // §9.10.4.2 ClearKeptObjects — the synchronous block that
+    // queued whatever's about to drain just ended; release any
+    // §9.10 [[KeptAlive]] entries the `WeakRef` constructor /
+    // `deref` pinned during it, so the queued microtask (each its
+    // own job per §9.5.5) starts with an empty keep-alive list.
+    // Without this, a `WeakRef.prototype.deref` that pinned its
+    // target in a top-level script would keep the target alive
+    // through every microtask, observably different from V8 / JSC /
+    // SpiderMonkey.
+    realm.clearKeptObjects();
     while (realm.microtask_queue.items.len > 0) {
         // §16.2.1.10 EvaluateImportCall — a deferred dynamic-import
         // job (`.module_import`) must not run while a synchronous
@@ -95,6 +105,14 @@ pub fn drainMicrotasks(allocator: std.mem.Allocator, realm: *Realm) RunError!voi
             if (idx >= realm.microtask_queue.items.len) break;
         }
         const task = realm.microtask_queue.orderedRemove(idx);
+        // §9.10.4.2 ClearKeptObjects between microtasks — each
+        // microtask is its own job per §9.5.5, so any §9.10
+        // [[KeptAlive]] entries the previous task pinned via
+        // `WeakRef.prototype.deref` are released before the next
+        // task runs. `defer` fires whether this iteration falls
+        // through naturally or via one of the `continue`s in the
+        // switch arms below.
+        defer realm.clearKeptObjects();
         switch (task.kind) {
             .callback => {
                 const callback = heap_mod.valueAsFunction(task.callback) orelse continue;
