@@ -1519,6 +1519,149 @@ test "later: private field brand check throws on foreign object" {
     , "type");
 }
 
+test "later: private field postfix increment returns old value" {
+    // Regression: `this.#x++` used to fail with
+    // `error.UnsupportedExpression` from `compileUpdateMember` —
+    // the private-key branch was an explicit "not supported".
+    // The playground's "Class + private field" sample surfaced
+    // this as a generic "SyntaxError: failed to compile".
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  #n = 0;
+        \\  inc() { return this.#n++; }
+        \\  value() { return this.#n; }
+        \\}
+        \\const c = new C();
+        \\c.inc();
+        \\c.inc();
+        \\c.inc();
+        \\c.value();
+    , 3);
+}
+
+test "later: private field prefix increment returns new value" {
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  #n = 0;
+        \\  inc() { return ++this.#n; }
+        \\}
+        \\const c = new C();
+        \\c.inc();
+        \\c.inc();
+        \\c.inc();
+    , 3);
+}
+
+test "later: private field postfix decrement" {
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  #n = 5;
+        \\  dec() { this.#n--; }
+        \\  value() { return this.#n; }
+        \\}
+        \\const c = new C();
+        \\c.dec();
+        \\c.dec();
+        \\c.value();
+    , 3);
+}
+
+test "later: postfix-increment expression value equals the pre-update read" {
+    // Same shape as the previous test but asserts the
+    // postfix-result semantics (`x++` returns the OLD value, not
+    // the bumped one). Catches a bug where the .private branch
+    // emits the bumped value instead.
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  #n = 41;
+        \\  bump() { return this.#n++; }
+        \\}
+        \\new C().bump();
+    , 41);
+}
+
+test "later: private field prefix decrement returns new value" {
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  #n = 10;
+        \\  dec() { return --this.#n; }
+        \\}
+        \\new C().dec();
+    , 9);
+}
+
+test "later: multiple private fields, independent ++" {
+    // Distinct private slots mangle to distinct constants; check
+    // the bumps don't collide on the same mangled key.
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  #a = 0;
+        \\  #b = 100;
+        \\  bump() { this.#a++; this.#b++; }
+        \\  sum()  { return this.#a + this.#b; }
+        \\}
+        \\const c = new C();
+        \\c.bump();
+        \\c.bump();
+        \\c.bump();
+        \\c.sum();
+    , 106);
+}
+
+test "later: private BigInt field ++ uses BigInt::unit" {
+    // §13.4 bump dispatches on Type(oldValue). For a private
+    // BigInt slot, ++ must NOT mix in Number's 1 and TypeError —
+    // it should bump by 1n. The `inc` opcode handles the
+    // dispatch; this test catches any regression where the
+    // private path bypasses the type-aware bump.
+    try expectScriptStringWithBuiltins(
+        \\class C {
+        \\  #n = 0n;
+        \\  bump() { this.#n++; }
+        \\  value() { return this.#n.toString(); }
+        \\}
+        \\const c = new C();
+        \\c.bump();
+        \\c.bump();
+        \\c.bump();
+        \\c.value();
+    , "3");
+}
+
+test "later: private static field ++ via class lvalue" {
+    // `C.#n++` from a static method — `this` is the constructor
+    // itself, brand-checked against the static private slot.
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  static #n = 0;
+        \\  static bump() { return C.#n++; }
+        \\  static value() { return C.#n; }
+        \\}
+        \\C.bump();
+        \\C.bump();
+        \\C.bump();
+        \\C.value();
+    , 3);
+}
+
+test "later: private field compound `+=` still works" {
+    // Different code path (`compileAssignmentMember`, not
+    // `compileUpdateMember`) — sanity-check that the assignment
+    // path's private-field handling didn't regress alongside the
+    // update fix.
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  #n = 10;
+        \\  add(d) { this.#n += d; }
+        \\  value() { return this.#n; }
+        \\}
+        \\const c = new C();
+        \\c.add(5);
+        \\c.add(7);
+        \\c.value();
+    , 22);
+}
+
 test "later: private method callable via this" {
     try expectScriptIntWithBuiltins(
         \\class C {

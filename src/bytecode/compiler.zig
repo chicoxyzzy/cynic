@@ -1498,7 +1498,13 @@ pub const Compiler = struct {
         // Resolve the key shape; computed keys evaluate the key
         // expression once into r_key so the get/set pair share
         // the same value (avoiding double-eval side effects).
-        const Mode = enum { ident, computed };
+        // Private (`#name`) keys mangle into a class-prefixed
+        // constant pool entry and dispatch to `lda_private` /
+        // `sta_private`, same as `compileLda` / `compileSta` —
+        // before this branch landed the update path returned
+        // `UnsupportedExpression`, so `this.#n++` failed to
+        // compile.
+        const Mode = enum { ident, private, computed };
         var mode: Mode = .ident;
         var k_const: u16 = 0;
         var r_key: u8 = 0;
@@ -1506,11 +1512,22 @@ pub const Compiler = struct {
             .ident => |span| {
                 const key_slice = self.source[span.start..span.end];
                 if (key_slice.len > 0 and key_slice[0] == '#') {
-                    return error.UnsupportedExpression; // private field update
+                    // §15.7 — `obj.#name++` mangles the private
+                    // name with the lexically enclosing class's
+                    // prefix. Outside a class body this is a
+                    // SyntaxError, surfaced as
+                    // `UnsupportedExpression` (matches the read /
+                    // write paths above).
+                    if (self.class_stack.items.len == 0) return error.UnsupportedExpression;
+                    const decoded = try self.decodeIdentifierName(key_slice[1..]);
+                    const mangled = try self.manglePrivateRef(decoded);
+                    k_const = try self.internString(mangled);
+                    mode = .private;
+                } else {
+                    const decoded = try self.decodeIdentifierName(key_slice);
+                    k_const = try self.internString(decoded);
+                    mode = .ident;
                 }
-                const decoded = try self.decodeIdentifierName(key_slice);
-                k_const = try self.internString(decoded);
-                mode = .ident;
             },
             .computed => |key_expr| {
                 try self.compileExpression(key_expr);
@@ -1544,6 +1561,10 @@ pub const Compiler = struct {
             .ident => {
                 try self.builder.emitLdaProperty(u.span, k_const);
             },
+            .private => {
+                try self.builder.emitOp(.lda_private, u.span);
+                try self.builder.emitU16(k_const);
+            },
             .computed => {
                 try self.builder.emitOp(.ldar, u.span);
                 try self.builder.emitU8(r_key);
@@ -1567,6 +1588,11 @@ pub const Compiler = struct {
         switch (mode) {
             .ident => {
                 try self.builder.emitStaProperty(u.span, k_const, r_obj);
+            },
+            .private => {
+                try self.builder.emitOp(.sta_private, u.span);
+                try self.builder.emitU16(k_const);
+                try self.builder.emitU8(r_obj);
             },
             .computed => {
                 try self.builder.emitOp(.sta_computed, u.span);
