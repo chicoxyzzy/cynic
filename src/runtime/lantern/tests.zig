@@ -5916,3 +5916,126 @@ test "proto-load IC: two receivers with different protos at the same site" {
         \\s;
     , "String,Number,String,Number,String,Number,String,Number,String,Number,");
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Literal-shape template cache (b79e9e6) — `make_object_shape`
+// regression coverage. The compiler captures static-key object
+// literals in a chunk-side template; runtime stamps the cached
+// `Shape*` on the new object so downstream `def_property` opcodes
+// don't re-walk the shape transition tree per key. The same-attrs
+// path in `def_property` must let the redefine pass without
+// demoting.
+// ─────────────────────────────────────────────────────────────────────
+
+test "literal shape: basic data literal returns correct property values" {
+    try expectScriptIntWithBuiltins(
+        \\const o = {a: 1, b: 2, c: 3};
+        \\o.a + o.b + o.c;
+    , 6);
+}
+
+test "literal shape: Object.keys preserves insertion order" {
+    // §10.1.11 OrdinaryOwnPropertyKeys — `own_key_order` populated
+    // by `recordKey` (inside def_property's setWithFlags). Keys
+    // enumerate in source order regardless of the template path.
+    try expectScriptStringWithBuiltins(
+        \\const o = {alpha: 1, beta: 2, gamma: 3};
+        \\Object.keys(o).join(",");
+    , "alpha,beta,gamma");
+}
+
+test "literal shape: hot allocating loop produces correct cumulative values" {
+    // Main perf target — `{a: i, b: i+1}` in a tight loop. Shape
+    // cached after the first iteration; every subsequent stamp
+    // skips the per-key transition walk. Assert correctness
+    // across 1000 iterations.
+    try expectScriptIntWithBuiltins(
+        \\let r = 0;
+        \\for (let i = 0; i < 1000; i++) {
+        \\  const o = {a: i, b: i + 1};
+        \\  r += o.a + o.b;
+        \\}
+        \\r;
+    , 1000000); // sum(2*i+1, i=0..999) = 1000 + 2*sum(0..999) = 1000 + 999000
+}
+
+test "literal shape: two literals with identical key list share the cached shape" {
+    // `ShapeTree.transition` is find-or-create, so two distinct
+    // `make_object_shape` ops with the same key list build the
+    // same `Shape*` on first hit and reuse it. Reads at both
+    // sites must work.
+    try expectScriptIntWithBuiltins(
+        \\function make1(i) { return {x: i, y: i * 2}; }
+        \\function make2(i) { return {x: i * 10, y: i * 20}; }
+        \\const a = make1(3);
+        \\const b = make2(5);
+        \\a.x + a.y + b.x + b.y;
+    , 3 + 6 + 50 + 100);
+}
+
+test "literal shape: same-attrs reassignment via sta_property preserves shape" {
+    // After `make_object_shape` stamps the shape, `obj.x = …`
+    // goes through `sta_property` (IC-served write). The shape
+    // stays; the write IC verifies the value reads back
+    // correctly.
+    try expectScriptIntWithBuiltins(
+        \\const o = {x: 1, y: 2};
+        \\o.x = 100;
+        \\o.x + o.y;
+    , 102);
+}
+
+test "literal shape: defineProperty with non-default flags handles shape demote" {
+    // After the shape stamp, `Object.defineProperty` with attrs
+    // that diverge from the shape's default must demote and
+    // route through the audit-fixed dictionary path.
+    try expectScriptIntWithBuiltins(
+        \\const o = {x: 1, y: 2};
+        \\Object.defineProperty(o, "x", { value: 99, writable: true, enumerable: true, configurable: false });
+        \\o.x + o.y;
+    , 101);
+}
+
+test "literal shape: __proto__ literal key bails out of templatization" {
+    // `__proto__` is detected at compile time and bails — the
+    // template path's key list would skip it but the prototype
+    // mutation needs `set_proto_literal`. Compiler routes to the
+    // non-template path.
+    try expectScriptIntWithBuiltins(
+        \\const parent = { greet: 42 };
+        \\const o = { __proto__: parent, x: 1 };
+        \\o.x + o.greet;
+    , 43);
+}
+
+test "literal shape: computed key bails out of templatization" {
+    // `[expr]: value` keys are runtime-known. Template build
+    // detects `.computed` and bails; compiler falls back to
+    // `make_object` + `def_computed`.
+    try expectScriptIntWithBuiltins(
+        \\const k = "dynamic";
+        \\const o = {a: 1, [k]: 99};
+        \\o.a + o.dynamic;
+    , 100);
+}
+
+test "literal shape: method definition bails out of templatization" {
+    // Method syntax `{ fn() {} }` goes through `make_function`
+    // + def_property of a function value. Template build's
+    // `.method` branch bails.
+    try expectScriptIntWithBuiltins(
+        \\const o = { x: 1, get() { return this.x * 10; } };
+        \\o.x + o.get();
+    , 11);
+}
+
+test "literal shape: duplicate keys fall back to non-template path" {
+    // `{a: 1, a: 2}` — second `a` overrides. Template build
+    // detects the duplicate and bails (a transition fork or
+    // alias would corrupt the shape). The non-template path
+    // handles the override via def_property's had_own redefine.
+    try expectScriptIntWithBuiltins(
+        \\const o = {a: 1, b: 2, a: 3};
+        \\o.a + o.b;
+    , 5);
+}

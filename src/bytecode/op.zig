@@ -705,6 +705,17 @@ pub const Op = enum(u8) {
     /// compilation emits this followed by a series of
     /// `sta_property` ops to populate the bag.
     make_object,
+    /// `[op] [k:u16]` — allocate a fresh `JSObject` with
+    /// `[[Prototype]] = %Object.prototype%` AND stamp the literal
+    /// shape from `Chunk.literal_shape_templates[k]` onto the
+    /// receiver, pre-sizing `slots`. Used by object literals whose
+    /// keys are all static identifiers (no computed keys, no
+    /// methods, no spread, no `__proto__`, no shorthand
+    /// getter/setter). The downstream `def_property` opcodes then
+    /// take `shadowSet`'s same-attrs-update fast path on every
+    /// iteration of a literal-allocating hot loop instead of
+    /// re-walking the shape transition tree per key.
+    make_object_shape,
     /// Allocate a fresh empty `JSObject` whose `[[Prototype]]` is
     /// `%Array.prototype%`. Cynic doesn't have a true `JSArray`
     /// kind yet — array literals desugar to a plain object with
@@ -944,6 +955,7 @@ pub const Op = enum(u8) {
             .jmp_if_nullish,
             .make_function,
             .make_named_function_expr,
+            .make_object_shape,
             .super_get,
             .lda_private,
             .private_in,
@@ -1086,6 +1098,7 @@ pub const Op = enum(u8) {
             .lda_env => "LdaEnv",
             .sta_env => "StaEnv",
             .make_object => "MakeObject",
+            .make_object_shape => "MakeObjectShape",
             .make_array => "MakeArray",
             .array_spread => "ArraySpread",
             .object_spread => "ObjectSpread",

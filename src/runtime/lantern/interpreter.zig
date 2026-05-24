@@ -6169,6 +6169,51 @@ pub fn runFrames(
                 acc = heap_mod.taggedObject(obj);
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
+            .make_object_shape => {
+                // Literal-shape boilerplate. The compiler captured
+                // the literal's static key list in
+                // `Chunk.literal_shape_templates[k]`; first hit
+                // builds the shape by walking
+                // `ShapeTree.transition` from the root, caches it
+                // on the template, and pre-sizes `slots`. Hits on
+                // a populated cache stamp the shape directly.
+                const k = readU16(code, ip);
+                ip += 2;
+                if (k >= local_chunk.literal_shape_templates.len) return error.InvalidOpcode;
+                const tmpl = &local_chunk.literal_shape_templates[k];
+                const shape = blk: {
+                    if (tmpl.cached_shape) |s| break :blk s;
+                    // Cold cache — build the shape.
+                    var cur = realm.heap.shapes.root;
+                    for (tmpl.keys) |key_idx| {
+                        if (key_idx >= local_chunk.constants.len) return error.InvalidOpcode;
+                        const key_v = local_chunk.constants[key_idx];
+                        if (!key_v.isString()) return error.InvalidOpcode;
+                        const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+                        cur = realm.heap.shapes.transition(
+                            cur,
+                            key_s.flatBytes(),
+                            @import("../object.zig").PropertyFlags.default,
+                            .data,
+                        ) catch return error.OutOfMemory;
+                    }
+                    @constCast(tmpl).cached_shape = cur;
+                    break :blk cur;
+                };
+                const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+                realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
+                obj.shape = shape;
+                obj.slots.resize(allocator, shape.property_count) catch return error.OutOfMemory;
+                // `ArrayList.resize` doesn't zero-fill. Initialise
+                // every slot to `undefined` so a GC trigger between
+                // `make_object_shape` and the downstream
+                // `def_property` writes finds a valid Value (the
+                // slot won't have its real entry yet — that's the
+                // def_property's job).
+                for (obj.slots.items) |*s| s.* = Value.undefined_;
+                acc = heap_mod.taggedObject(obj);
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            },
             .make_array => {
                 const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
                 realm.heap.setObjectPrototype(obj, realm.intrinsics.array_prototype);
@@ -7016,12 +7061,30 @@ pub fn runFrames(
                         const ex = try makeTypeError(realm, "Cannot redefine non-configurable property");
                         return .{ .thrown = ex };
                     }
-                    // A redefine drops the existing slot and writes a
-                    // fresh entry — the shadow shape's append-only
-                    // transition chain can't express that, so demote
-                    // to dictionary mode before the swap. The
-                    // subsequent storePropertyWithFlags re-runs the
-                    // shadow build from an empty slot table.
+                    // Same-attrs redefine — let `setWithFlags`'s
+                    // shadowSet path overwrite the existing entry
+                    // in place (slot write + bag put-overwrite).
+                    // Crucial for `make_object_shape` literal
+                    // templates: the shape stamp marks every key
+                    // as already own, so `had_own` is true on the
+                    // first def_property — without this branch,
+                    // every templatized literal would
+                    // immediately demote.
+                    const new_default: object_mod.PropertyFlags = .{
+                        .writable = true,
+                        .enumerable = true,
+                        .configurable = true,
+                    };
+                    if (cur.writable == new_default.writable and
+                        cur.enumerable == new_default.enumerable and
+                        cur.configurable == new_default.configurable)
+                    {
+                        realm.heap.storePropertyWithFlags(obj, allocator, key_s.flatBytes(), acc, new_default) catch return error.OutOfMemory;
+                        continue :dispatch try decodeNext(code, &ip, &committed);
+                    }
+                    // Attrs would change — the append-only shape
+                    // can't encode that, so demote and rebuild
+                    // through `storePropertyWithFlags`.
                     obj.demoteFromShape();
                     _ = obj.properties.swapRemove(key_s.flatBytes());
                     _ = obj.property_flags.swapRemove(key_s.flatBytes());

@@ -2245,8 +2245,67 @@ pub const Compiler = struct {
     }
 
     fn compileObjectLiteral(self: *Compiler, lit: ast.expression.ObjectLit) CompileError!void {
-        // Allocate empty object.
-        try self.builder.emitOp(.make_object, lit.span);
+        // Literal-shape template fast path. When every property is
+        // a static-key data property — no computed keys, no
+        // methods / accessors, no spread, no `__proto__`, no
+        // shorthand getter/setter, no duplicates — capture the
+        // key list in a chunk-side template. `make_object_shape <k>`
+        // then stamps the cached `Shape*` on the new object so the
+        // downstream `def_property` opcodes take `shadowSet`'s
+        // same-attrs-update path on every iteration. Common for
+        // `{ a: i, b: i + 1 }`-shape loop bodies (record-style
+        // factories, React `createElement`, etc.).
+        const template_idx: ?u16 = blk: {
+            // Reject any feature the template can't represent. The
+            // walk also collects the key list when the literal is
+            // eligible.
+            var keys = std.ArrayListUnmanaged(u16).empty;
+            errdefer keys.deinit(self.allocator);
+            for (lit.properties) |prop| switch (prop) {
+                .property => |p| {
+                    if (p.key == .computed) break :blk null;
+                    if (p.key == .private) break :blk null;
+                    const key_slice = self.decodePropertyKeyName(p.key) catch break :blk null;
+                    // `__proto__` is the §B.3.1 prototype-mutation
+                    // syntax — handled separately, not a data slot.
+                    if (std.mem.eql(u8, key_slice, "__proto__")) break :blk null;
+                    // `__cynic_*` keys would demote on shadowSet —
+                    // don't templatize them.
+                    if (std.mem.startsWith(u8, key_slice, "__cynic_")) break :blk null;
+                    // Duplicates would either share a slot
+                    // (wrong-but-quiet) or trigger a transition
+                    // fork; bail and let the generic path handle.
+                    for (keys.items) |existing_k| {
+                        const existing_v = self.builder.constants.items[existing_k];
+                        const existing_str: *@import("../runtime/string.zig").JSString = @ptrCast(@alignCast(existing_v.asString()));
+                        if (std.mem.eql(u8, existing_str.flatBytes(), key_slice)) break :blk null;
+                    }
+                    const k = self.internString(key_slice) catch break :blk null;
+                    keys.append(self.allocator, k) catch break :blk null;
+                },
+                .method, .spread => break :blk null,
+            };
+            if (keys.items.len == 0) {
+                // Empty literal — no shape to template; emit the
+                // plain `make_object` path. (A pre-built root-shape
+                // stamp wouldn't help — fresh objects already start
+                // shape-empty.)
+                keys.deinit(self.allocator);
+                break :blk null;
+            }
+            const owned_keys = keys.toOwnedSlice(self.allocator) catch break :blk null;
+            const idx = self.builder.addLiteralShapeTemplate(owned_keys) catch {
+                self.allocator.free(owned_keys);
+                break :blk null;
+            };
+            break :blk idx;
+        };
+        if (template_idx) |idx| {
+            try self.builder.emitOp(.make_object_shape, lit.span);
+            try self.builder.emitU16(idx);
+        } else {
+            try self.builder.emitOp(.make_object, lit.span);
+        }
         const r_obj = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.star, lit.span);

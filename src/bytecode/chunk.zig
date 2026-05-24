@@ -100,6 +100,32 @@ pub const CallICCell = struct {
     callee: ?*@import("../runtime/function.zig").JSFunction = null,
 };
 
+/// Compile-time blueprint for an object-literal's shape — the V8 /
+/// JSC "literal boilerplate" pattern. When an object literal like
+/// `{a: e1, b: e2}` uses only static identifier keys, no spreads,
+/// no methods, and no `__proto__`, the compiler captures the key
+/// list in a template. At runtime, `make_object_shape <k>` stamps
+/// the cached `Shape*` on the freshly allocated `JSObject` directly,
+/// skipping the per-key `ShapeTree.transition` lookups that
+/// `def_property`'s `shadowSet` path used to perform on every
+/// iteration of a literal-allocating hot loop.
+///
+/// `cached_shape` is built lazily on first execution by walking
+/// `keys` through `ShapeTree.transition` from the root with
+/// `PropertyFlags.default` and `kind = .data`. Templates are
+/// chunk-lifetime; the cache is plain interior mutation on an
+/// otherwise-immutable chunk.
+pub const LiteralShapeTemplate = struct {
+    /// Constant pool indices for the literal's property keys, in
+    /// source order. Each indexed entry is a `Value.fromString`
+    /// holding the interned key.
+    keys: []const u16,
+    /// Resolved `Shape*` after the first execution of any
+    /// `make_object_shape` op pointing at this template. Set
+    /// once; arena-stable so later cycles trust the pointer.
+    cached_shape: ?*Shape = null,
+};
+
 /// A single (code-offset → source-span) record. The list is sorted
 /// by `offset` ascending; the source span is the parser's range
 /// over the AST node that produced the instruction.
@@ -374,6 +400,12 @@ pub const Chunk = struct {
     /// the heap mark walks every reachable chunk's cells and
     /// weak-clears stale callee pointers post-mark.
     inline_call_caches: []CallICCell = &.{},
+    /// Object-literal shape templates. `make_object_shape <k>`
+    /// indexes this table; the runtime stamps the cached
+    /// `Shape*` onto the freshly-allocated object so the
+    /// per-key `def_property`s downstream skip the per-key
+    /// `ShapeTree.transition` lookup.
+    literal_shape_templates: []LiteralShapeTemplate = &.{},
 
     pub fn deinit(self: *Chunk, allocator: std.mem.Allocator) void {
         allocator.free(self.code);
@@ -386,6 +418,8 @@ pub const Chunk = struct {
         allocator.free(self.class_templates);
         allocator.free(self.inline_caches);
         allocator.free(self.inline_call_caches);
+        for (self.literal_shape_templates) |*t| allocator.free(t.keys);
+        allocator.free(self.literal_shape_templates);
     }
 };
 
@@ -400,6 +434,7 @@ pub const Builder = struct {
     handlers: std.ArrayListUnmanaged(Handler) = .empty,
     function_templates: std.ArrayListUnmanaged(FunctionTemplate) = .empty,
     class_templates: std.ArrayListUnmanaged(ClassTemplate) = .empty,
+    literal_shape_templates: std.ArrayListUnmanaged(LiteralShapeTemplate) = .empty,
     register_count: u8 = 0,
     /// Surfaced on the finished `Chunk` as `.is_async_module`.
     /// Set by `compileModuleAsChunk` after walking the body's
@@ -436,6 +471,8 @@ pub const Builder = struct {
         self.function_templates.deinit(self.allocator);
         for (self.class_templates.items) |*t| t.deinit(self.allocator);
         self.class_templates.deinit(self.allocator);
+        for (self.literal_shape_templates.items) |*t| self.allocator.free(t.keys);
+        self.literal_shape_templates.deinit(self.allocator);
     }
 
     pub fn addHandler(self: *Builder, h: Handler) !void {
@@ -463,6 +500,19 @@ pub const Builder = struct {
         }
         const k: u16 = @intCast(self.class_templates.items.len);
         try self.class_templates.append(self.allocator, t);
+        return k;
+    }
+
+    /// Register a literal-shape template. `keys` is an owned slice
+    /// — the Builder takes ownership and the produced Chunk frees
+    /// it. `make_object_shape <k>` at runtime indexes the table at
+    /// `k` and stamps the cached `Shape*` on the new object.
+    pub fn addLiteralShapeTemplate(self: *Builder, keys: []u16) !u16 {
+        if (self.literal_shape_templates.items.len == std.math.maxInt(u16)) {
+            return error.TooManyLiteralShapes;
+        }
+        const k: u16 = @intCast(self.literal_shape_templates.items.len);
+        try self.literal_shape_templates.append(self.allocator, .{ .keys = keys });
         return k;
     }
 
@@ -608,6 +658,7 @@ pub const Builder = struct {
             .handlers = try self.handlers.toOwnedSlice(self.allocator),
             .function_templates = try self.function_templates.toOwnedSlice(self.allocator),
             .class_templates = try self.class_templates.toOwnedSlice(self.allocator),
+            .literal_shape_templates = try self.literal_shape_templates.toOwnedSlice(self.allocator),
             .register_count = self.register_count,
             .is_async_module = self.is_async_module,
             .global_lexical_base = self.global_lexical_base,
