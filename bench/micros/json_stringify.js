@@ -8,6 +8,7 @@
 // Iteration count picked so wall time is ~60 ms. Useful proxy
 // for any JS workload that touches `Object.keys(o).map(…)`,
 // the React render diff, or any serialization path.
+'use strict';
 const obj = {
     name: "cynic",
     version: 0,

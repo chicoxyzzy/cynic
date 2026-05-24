@@ -5,6 +5,7 @@
 // iters the fixture was 23 ms with a 16 % spread (GC-cycle jitter
 // dominates that small a window). 400k iters drops the relative
 // spread well under 10 % across peers.
+'use strict';
 let last = null;
 for (let i = 0; i < 400_000; i++) {
     last = { a: i, b: i + 1 };

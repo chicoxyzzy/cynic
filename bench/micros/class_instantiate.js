@@ -11,6 +11,7 @@
 // in formatting loops, `new URL()` parsers.
 //
 // Iteration count picked so wall time is ~60 ms.
+'use strict';
 class Point {
     constructor(x, y) {
         this.x = x;

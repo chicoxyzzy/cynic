@@ -4,10 +4,13 @@
 // PTC the same call site runs in one frame and the iteration
 // count dominates the timing.
 //
-// Requires the `tail-call-optimization` feature flag — the bench
-// driver enables every tracked feature. With the flag off the
-// compiler emits ordinary `call` and the script throws
-// RangeError instead of finishing.
+// `"use strict"` is mandatory: per spec PTC only fires in strict
+// code, and JSC (the only other PTC-shipping engine) follows the
+// letter. Without it this fixture errors on JSC in the cross-
+// engine harness; without it on most engines the script throws
+// RangeError at the 1024-frame stack ceiling. Cynic is always
+// strict, so the directive is a no-op here.
+'use strict';
 function sum(n, acc) {
   return n === 0 ? acc : sum(n - 1, acc + 1);
 }

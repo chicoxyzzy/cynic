@@ -7,6 +7,7 @@
 // cross-engine harness. Bumping further (15k flaky, 30k segfault)
 // surfaces a separate Cynic bug in the reaction drain — see the
 // upstream-gap log; the bench backs off until that's tracked down.
+'use strict';
 let p = Promise.resolve(0);
 for (let i = 0; i < 10000; i++) {
     p = p.then(v => v + 1);

@@ -1,5 +1,6 @@
 // for-of over a packed array — exercises iterator protocol +
 // indexed reads on a §10.4.2 Array exotic.
+'use strict';
 const a = [];
 for (let i = 0; i < 10_000; i++) a.push(i);
 let sum = 0;

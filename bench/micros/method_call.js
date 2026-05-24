@@ -8,6 +8,7 @@
 //
 // Iteration count picked so wall time is ~50 ms on a warm IC,
 // well above the spawn-overhead floor.
+'use strict';
 class Counter {
     constructor() { this.n = 0; }
     inc() { this.n += 1; return this.n; }

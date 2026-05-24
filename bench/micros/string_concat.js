@@ -5,6 +5,7 @@
 // jsc); ConsString ropes scale this sub-linearly (12× work was 4×
 // time), so the bump needs to be larger than naive arithmetic
 // suggests. 300k brings Cynic to ~70 ms.
+'use strict';
 let s = "";
 for (let i = 0; i < 300000; i++) {
     s = s + (i & 0xff).toString();

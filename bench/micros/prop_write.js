@@ -3,6 +3,7 @@
 // landed. Inline-cache work on `sta_property` collapses the hash
 // lookup and the exotic / accessor walk; this is the mirror of
 // `prop_access` for the write side.
+'use strict';
 const o = { x: 0, y: 1, z: 2, w: 3 };
 for (let i = 0; i < 500_000; i++) {
     o.x = i;

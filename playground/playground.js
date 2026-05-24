@@ -46,6 +46,9 @@ import {
 
 const SAMPLES = {
   'Hello, strict world': `// Cynic is strict-only — every script runs in strict mode.
+// The directive is a no-op here, but kept as a hint to anyone
+// copy-pasting this into another engine.
+"use strict";
 console.log("hello from cynic");
 const answer = 6 * 7;
 answer;`,
@@ -156,6 +159,12 @@ ref.deref()?.tag ?? "collected";`,
 // frame reuse, not a frame push. Second engine after
 // JavaScriptCore to ship this. Error.stack is shorter as a
 // result — that's the deal the spec wrote down.
+//
+// "use strict" is mandatory per spec — PTC only fires in strict
+// code. Cynic is always strict so the directive is redundant here,
+// but copying this to JSC (the only other shipping engine) needs
+// it to work.
+"use strict";
 function loop(n, acc) {
   return n === 0 ? acc : loop(n - 1, acc + 1);
 }
@@ -966,7 +975,13 @@ function decodeSource(b64) {
 function shareLink() {
   const hash = '#code=' + encodeURIComponent(encodeSource(getSource()));
   const url = location.origin + location.pathname + hash;
-  history.replaceState(null, '', hash);
+  // `history` (without `window.`) resolves to the CodeMirror
+  // `history` extension imported at the top of this module — a
+  // function with no `replaceState`. Without the explicit
+  // `window.`, every click on Copy link throws
+  // `TypeError: history.replaceState is not a function` and the
+  // clipboard write never fires.
+  window.history.replaceState(null, '', hash);
   navigator.clipboard?.writeText(url).then(
     () => setStatus('link copied to clipboard'),
     () => setStatus('link in address bar'),
