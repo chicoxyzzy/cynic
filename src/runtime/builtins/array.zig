@@ -112,7 +112,7 @@ pub fn install(realm: *Realm) !void {
         // `{w:F, e:F, c:T}` per the spec table; the inner data
         // properties are `{w:T, e:T, c:T}`.
         const u = realm.heap.allocateObject() catch return error.OutOfMemory;
-        u.prototype = null;
+        realm.heap.setObjectPrototype(u, null);
         const ObjMod = @import("../object.zig");
         const dflt = ObjMod.PropertyFlags.default;
         const names = [_][]const u8{
@@ -270,7 +270,7 @@ fn defaultArrayCreate(realm: *Realm, length: i64) NativeError!Value {
         return throwRangeError(realm, "Invalid array length");
     }
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     if (length > 0) setLength(realm, out, length) catch return error.OutOfMemory;
     return heap_mod.taggedObject(out);
@@ -319,7 +319,7 @@ fn arrayConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
         heap_mod.valueAsPlainObject(this_value).?
     else blk: {
         const fresh = realm.heap.allocateObject() catch return error.OutOfMemory;
-        fresh.prototype = realm.intrinsics.array_prototype;
+        realm.heap.setObjectPrototype(fresh, realm.intrinsics.array_prototype);
         break :blk fresh;
     };
     if (!out.is_array_exotic) out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
@@ -1242,7 +1242,7 @@ fn arrayOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
         out = heap_mod.valueAsPlainObject(ctor_v) orelse return throwTypeError(realm, "Array.of: constructor did not return an object");
     } else {
         out = realm.heap.allocateObject() catch return error.OutOfMemory;
-        out.prototype = realm.intrinsics.array_prototype;
+        realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
         out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     }
     // Pin the receiver across the data-property writes and the
@@ -1293,7 +1293,7 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     // constructor. String fast-path keeps the default receiver
     // (Array.from on a string doesn't observe the constructor).
     var out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
 
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     // §23.1.2.1 — every branch below re-enters JS (string fast
@@ -2757,7 +2757,7 @@ fn arrayToSorted(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const obj = try toObjectThis(realm, this_value);
     const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     if (len == 0) {
         setLength(realm, out, 0) catch return error.OutOfMemory;
@@ -2819,7 +2819,7 @@ fn arrayToReversed(realm: *Realm, this_value: Value, args: []const Value) Native
     const obj = try toObjectThis(realm, this_value);
     const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     // Pin `out` and the receiver across the re-entrant read loop.
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
@@ -2888,7 +2888,7 @@ fn arrayToSpliced(realm: *Realm, this_value: Value, args: []const Value) NativeE
     }
 
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     // Pin `out` and the receiver across the re-entrant copy loops.
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
@@ -2955,7 +2955,7 @@ fn arrayWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     }
     const value = argOr(args, 1, Value.undefined_);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     // Pin `out` and the receiver across the re-entrant read loop.
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
@@ -3564,11 +3564,11 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
 
     // Allocate the result array + driver state.
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
 
     const state = realm.heap.allocateObject() catch return error.OutOfMemory;
-    state.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(state, realm.intrinsics.object_prototype);
     // Root `state` for the rest of `arrayFromAsync` — the
     // `@@asyncIterator` / `@@iterator` lookups, the iterator-method
     // call, `LengthOfArrayLike`, and `Construct(C)` below all
