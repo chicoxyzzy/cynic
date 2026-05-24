@@ -116,7 +116,7 @@ fn jsonLengthOfArrayLike(realm: *Realm, obj_v: Value) NativeError!i64 {
 
 pub fn install(realm: *Realm) !void {
     const json_obj = try realm.heap.allocateObject();
-    json_obj.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(json_obj, realm.intrinsics.object_prototype);
     try installToStringTag(realm, json_obj, "JSON");
     // §17 — built-in methods are non-enumerable (writable +
     // configurable). The default `set` would mark them
@@ -209,7 +209,7 @@ fn jsonStringify(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     // §25.5.2 step 9-12 — wrap value in `{ "": value }` and
     // serialize via SerializeJSONProperty(state, "", wrapper).
     const wrapper = realm.heap.allocateObject() catch return error.OutOfMemory;
-    wrapper.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(wrapper, realm.intrinsics.object_prototype);
     wrapper.set(realm.allocator, "", value) catch return error.OutOfMemory;
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -859,7 +859,7 @@ fn jsonParse(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     const reviver_v = argOr(args, 1, Value.undefined_);
     const reviver_fn = heap_mod.valueAsFunction(reviver_v) orelse return result;
     const root = realm.heap.allocateObject() catch return error.OutOfMemory;
-    root.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(root, realm.intrinsics.object_prototype);
     root.set(realm.allocator, "", result) catch return error.OutOfMemory;
     // §25.5.1.1 InternalizeJSONProperty walks the whole parsed tree
     // calling the reviver at each node — every call re-enters JS and
@@ -1082,7 +1082,7 @@ fn jsonCreateDataProperty(realm: *Realm, obj: *JSObject, key: []const u8, value:
     // for CreateDataProperty discards the boolean here).
     if (obj.proxy_target != null or obj.proxy_revoked) {
         const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
-        desc.prototype = realm.intrinsics.object_prototype;
+        realm.heap.setObjectPrototype(desc, realm.intrinsics.object_prototype);
         desc.set(realm.allocator, "value", value) catch return error.OutOfMemory;
         desc.set(realm.allocator, "writable", Value.true_) catch return error.OutOfMemory;
         desc.set(realm.allocator, "enumerable", Value.true_) catch return error.OutOfMemory;
@@ -1222,7 +1222,7 @@ const JsonParser = struct {
     fn parseObject(self: *JsonParser) JsonError!Value {
         self.advance(); // {
         const obj = self.realm.heap.allocateObject() catch return error.OutOfMemory;
-        obj.prototype = self.realm.intrinsics.object_prototype;
+        self.realm.heap.setObjectPrototype(obj, self.realm.intrinsics.object_prototype);
         self.skipWs();
         if (self.peek() == @as(u8, '}')) {
             self.advance();
@@ -1255,7 +1255,7 @@ const JsonParser = struct {
     fn parseArray(self: *JsonParser) JsonError!Value {
         self.advance(); // [
         const arr = self.realm.heap.allocateObject() catch return error.OutOfMemory;
-        arr.prototype = self.realm.intrinsics.array_prototype;
+        self.realm.heap.setObjectPrototype(arr, self.realm.intrinsics.array_prototype);
         arr.markAsArrayExotic(self.realm.allocator) catch return error.OutOfMemory;
         self.skipWs();
         if (self.peek() == @as(u8, ']')) {
@@ -1423,7 +1423,7 @@ fn jsonRawJSON(realm: *Realm, this_value: Value, args: []const Value) NativeErro
 
     // Step 4-7 — build the frozen, null-proto, branded wrapper.
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-    obj.prototype = null;
+    realm.heap.setObjectPrototype(obj, null);
     obj.is_raw_json = true;
     // CreateDataPropertyOrThrow(obj, "rawJSON", jsonString). After
     // SetIntegrityLevel(frozen), this slot is `{w:false, e:true,
