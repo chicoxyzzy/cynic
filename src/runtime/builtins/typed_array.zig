@@ -340,7 +340,7 @@ pub fn install(realm: *Realm) !void {
         ctor.defers_proto_lookup = true;
         ctor.static_parent = ta_ctor; // §23.2.6 — Int8Array.[[Prototype]] = %TypedArray%
         const proto = try realm.heap.allocateObject();
-        proto.prototype = ta_proto; // §23.2.6 — concrete proto inherits from %TypedArray%.prototype.
+        realm.heap.setObjectPrototype(proto, ta_proto); // §23.2.6 — concrete proto inherits from %TypedArray%.prototype.
         try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(ctor));
         // §23.2.6.2 — `<TypedArray>.prototype.BYTES_PER_ELEMENT`
         // is `{w:false, e:false, c:false}`.
@@ -350,7 +350,7 @@ pub fn install(realm: *Realm) !void {
         // spec-faithful getter that reads [[TypedArrayName]]).
         // No own @@toStringTag here — `hasOwnProperty(Symbol.
         // toStringTag)` must be `false` on each concrete proto.
-        ctor.prototype = proto;
+        realm.heap.setFunctionPrototype(ctor, proto);
         // §23.2.5.2 — `<TypedArray>.prototype` is also frozen.
         try ctor.setWithFlags(realm.allocator, "prototype", heap_mod.taggedObject(proto), frozen);
         // §23.2.5.1 — `<TypedArray>.BYTES_PER_ELEMENT` is frozen
@@ -414,7 +414,7 @@ fn arrayBufferConstructor(realm: *Realm, this_value: Value, args: []const Value)
         },
     };
     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
-    inst.prototype = proto;
+    realm.heap.setObjectPrototype(inst, proto);
 
     // §25.1.3.1 step 7 — CreateByteDataBlock(len). Allocates
     // `len` bytes (or `max_len` for resizable buffers so growing
@@ -624,9 +624,9 @@ fn arrayBufferTransferImpl(realm: *Realm, this_value: Value, args: []const Value
 
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     if (heap_mod.valueAsFunction(realm.globals.get("ArrayBuffer") orelse Value.undefined_)) |ab_ctor| {
-        out.prototype = ab_ctor.prototype;
+        realm.heap.setObjectPrototype(out, ab_ctor.prototype);
     } else {
-        out.prototype = realm.intrinsics.object_prototype;
+        realm.heap.setObjectPrototype(out, realm.intrinsics.object_prototype);
     }
     out.setArrayBuffer(realm.allocator, new_bytes) catch return error.OutOfMemory;
     out.has_array_buffer_data = true;
@@ -796,7 +796,7 @@ fn allocateTypedArrayInstance(realm: *Realm, new_target: Value, default_proto: ?
         },
     };
     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
-    inst.prototype = proto;
+    realm.heap.setObjectPrototype(inst, proto);
     return inst;
 }
 
@@ -857,7 +857,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                 // has validated the length argument above.
                 const inst = try allocateTypedArrayInstance(realm, new_target, default_proto);
                 const buf_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-                buf_obj.prototype = realm.intrinsics.array_buffer_prototype;
+                realm.heap.setObjectPrototype(buf_obj, realm.intrinsics.array_buffer_prototype);
                 const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
                 @memset(buf_bytes, 0);
                 buf_obj.setArrayBuffer(realm.allocator, buf_bytes) catch return error.OutOfMemory;
@@ -1007,7 +1007,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                     const length: usize = collected.items.len;
                     const byte_len = length * elem_size;
                     const buf_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-                    buf_obj.prototype = realm.intrinsics.array_buffer_prototype;
+                    realm.heap.setObjectPrototype(buf_obj, realm.intrinsics.array_buffer_prototype);
                     const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
                     @memset(buf_bytes, 0);
                     buf_obj.setArrayBuffer(realm.allocator, buf_bytes) catch return error.OutOfMemory;
@@ -1067,7 +1067,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                 const length: usize = @intCast(length_u);
                 const byte_len = length * elem_size;
                 const buf_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-                buf_obj.prototype = realm.intrinsics.array_buffer_prototype;
+                realm.heap.setObjectPrototype(buf_obj, realm.intrinsics.array_buffer_prototype);
                 const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
                 @memset(buf_bytes, 0);
                 buf_obj.setArrayBuffer(realm.allocator, buf_bytes) catch return error.OutOfMemory;
@@ -1932,12 +1932,12 @@ fn taMakeNewNamed(realm: *Realm, kind: ObjMod.TypedKind, length: usize, name_hin
     const ctor_v = realm.globals.get(ctor_name) orelse return throwTypeError(realm, "TypedArray constructor not found");
     const ctor = heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "TypedArray constructor not callable");
     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
-    inst.prototype = ctor.prototype;
+    realm.heap.setObjectPrototype(inst, ctor.prototype);
     const elem_size = kind.elementSize();
     const byte_len = length * elem_size;
     const buf_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
     if (heap_mod.valueAsFunction(realm.globals.get("ArrayBuffer") orelse Value.undefined_)) |ab| {
-        buf_obj.prototype = ab.prototype;
+        realm.heap.setObjectPrototype(buf_obj, ab.prototype);
     }
     const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
     @memset(buf_bytes, 0);
@@ -2821,7 +2821,7 @@ fn taSpeciesCreateSubarray(
             nameForTypedKind(kind);
         const ctor = heap_mod.valueAsFunction(realm.globals.get(ctor_name) orelse Value.undefined_) orelse return throwTypeError(realm, "TypedArray constructor not found");
         const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
-        inst.prototype = ctor.prototype;
+        realm.heap.setObjectPrototype(inst, ctor.prototype);
         inst.setTypedView(realm.allocator, .{
             .kind = kind,
             .viewed = buffer,
@@ -3026,7 +3026,7 @@ fn dataViewConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
         if (byte_length > buf3.len - byte_offset) return throwRangeError(realm, "DataView: byteLength exceeds buffer");
     }
     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
-    inst.prototype = proto;
+    realm.heap.setObjectPrototype(inst, proto);
     inst.setDataView(realm.allocator, .{ .viewed = buf_obj, .byte_offset = byte_offset, .byte_length = byte_length, .length_tracking = length_tracking }) catch return error.OutOfMemory;
     return heap_mod.taggedObject(inst);
 }
