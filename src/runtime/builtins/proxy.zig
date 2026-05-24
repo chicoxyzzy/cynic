@@ -41,7 +41,7 @@ pub fn install(realm: *Realm) !void {
     // generic `installConstructor` set so
     // `'prototype' in Proxy` / `Object.getOwnPropertyDescriptor(Proxy,
     // 'prototype')` match V8 / JSC / SpiderMonkey.
-    installed.ctor.prototype = null;
+    realm.heap.setFunctionPrototype(installed.ctor, null);
     // §28.2.2.1 Proxy.revocable — static method, length 2.
     try installNativeMethod(realm, installed.ctor, "revocable", proxyRevocable, 2);
 
@@ -54,7 +54,7 @@ pub fn install(realm: *Realm) !void {
     // `class P extends Proxy {}` path (§15.7.14 step 7.g):
     // Get(Proxy, 'prototype') = undefined → not Object / null
     // → TypeError, matching V8 / SpiderMonkey.
-    installed.ctor.prototype = null;
+    realm.heap.setFunctionPrototype(installed.ctor, null);
 }
 
 fn proxyConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -68,13 +68,13 @@ fn proxyConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
     proxy.proxy_handler = handler;
     if (heap_mod.valueAsPlainObject(args[0])) |target| {
         proxy.proxy_target = target;
-        proxy.prototype = target.prototype;
+        realm.heap.setObjectPrototype(proxy, target.prototype);
         // §10.5 ProxyCreate — propagate callability from the
         // wrapped proxy. Wrapping a revoked-but-once-callable
         // proxy yields another callable proxy.
         if (target.proxy_callable) {
             proxy.proxy_callable = true;
-            proxy.prototype = realm.intrinsics.function_prototype;
+            realm.heap.setObjectPrototype(proxy, realm.intrinsics.function_prototype);
         }
     } else if (heap_mod.valueAsFunction(args[0])) |target_fn| {
         // Callable target — the proxy is itself callable via
@@ -85,7 +85,7 @@ fn proxyConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
         // `.bind` resolve.
         proxy.proxy_target_fn = target_fn;
         proxy.proxy_callable = true;
-        proxy.prototype = target_fn.proto orelse realm.intrinsics.function_prototype;
+        realm.heap.setObjectPrototype(proxy, target_fn.proto orelse realm.intrinsics.function_prototype);
     } else {
         return throwTypeError(realm, "Proxy target must be an object or function");
     }
@@ -113,7 +113,7 @@ fn proxyRevocable(realm: *Realm, this_value: Value, args: []const Value) NativeE
     revoke_fn.revocable_proxy = proxy_obj;
 
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
-    result.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(result, realm.intrinsics.object_prototype);
     result.set(realm.allocator, "proxy", proxy_v) catch return error.OutOfMemory;
     result.set(realm.allocator, "revoke", heap_mod.taggedFunction(revoke_fn)) catch return error.OutOfMemory;
     return heap_mod.taggedObject(result);
@@ -355,7 +355,7 @@ pub fn nativeProxyDefineProperty(realm: *Realm, proxy: *JSObject, key: []const u
     // §6.2.5.4 / §10.5.6 — for CreateDataPropertyOrThrow callers,
     // the descriptor is the §7.3.6 all-true data descriptor.
     const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
-    desc.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(desc, realm.intrinsics.object_prototype);
     desc.set(realm.allocator, "value", value) catch return error.OutOfMemory;
     desc.set(realm.allocator, "writable", Value.true_) catch return error.OutOfMemory;
     desc.set(realm.allocator, "enumerable", Value.true_) catch return error.OutOfMemory;
