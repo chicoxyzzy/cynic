@@ -100,7 +100,7 @@ pub fn install(realm: *Realm) !void {
     // (one method each, dispatched on `iter_helper.kind`).
     {
         const helper_proto = try realm.heap.allocateObject();
-        helper_proto.prototype = proto;
+        realm.heap.setObjectPrototype(helper_proto, proto);
         try installNativeMethodOnProto(realm, helper_proto, "next", iteratorHelperNext, 0);
         try installNativeMethodOnProto(realm, helper_proto, "return", iteratorHelperReturn, 0);
         try intrinsics.installToStringTag(realm, helper_proto, "Iterator Helper");
@@ -116,7 +116,7 @@ pub fn install(realm: *Realm) !void {
     // %IteratorPrototype%` (fixture `RegExpStringIteratorPrototype/
     // ancestry.js`).
     if (realm.intrinsics.regexp_string_iterator_prototype) |risp| {
-        risp.prototype = proto;
+        realm.heap.setObjectPrototype(risp, proto);
     }
     // The string-iterator prototype is built lazily by
     // `ensureStringIteratorPrototype` (`builtins/collections.zig`),
@@ -126,7 +126,7 @@ pub fn install(realm: *Realm) !void {
     // step) the lazy build would have cached `%Object.prototype%`.
     // Re-parent defensively for the same shape as above.
     if (realm.intrinsics.string_iterator_prototype) |sip| {
-        sip.prototype = proto;
+        realm.heap.setObjectPrototype(sip, proto);
     }
     // §24.1.5.2 %MapIteratorPrototype% / §24.2.5.2 %SetIteratorPrototype%
     // — both are eagerly allocated in `collections.installMap` /
@@ -136,10 +136,10 @@ pub fn install(realm: *Realm) !void {
     // through to `@@toStringTag === "Iterator"` one level up
     // (`built-ins/Object/prototype/toString/symbol-tag-{map,set}-builtin.js`).
     if (realm.intrinsics.map_iterator_prototype) |mip| {
-        mip.prototype = proto;
+        realm.heap.setObjectPrototype(mip, proto);
     }
     if (realm.intrinsics.set_iterator_prototype) |sip| {
-        sip.prototype = proto;
+        realm.heap.setObjectPrototype(sip, proto);
     }
 }
 
@@ -335,7 +335,7 @@ fn ensureWrapForValidIteratorPrototype(realm: *Realm) !*JSObject {
     const ctor_v = realm.globals.get("Iterator") orelse return error.OutOfMemory;
     const ctor = heap_mod.valueAsFunction(ctor_v) orelse return error.OutOfMemory;
     const proto = try realm.heap.allocateObject();
-    proto.prototype = ctor.prototype; // %Iterator.prototype%
+    realm.heap.setObjectPrototype(proto, ctor.prototype); // %Iterator.prototype%
 
     const next_fn = try realm.heap.allocateFunctionNative(wrappedNext, 0, "next");
     next_fn.has_construct = false;
@@ -374,7 +374,7 @@ fn wrapIterator(realm: *Realm, source: Value) NativeError!Value {
     const cached_next_v = try snapshotNextValue(realm, source);
     const proto = ensureWrapForValidIteratorPrototype(realm) catch return error.OutOfMemory;
     const wrap = realm.heap.allocateObject() catch return error.OutOfMemory;
-    wrap.prototype = proto;
+    realm.heap.setObjectPrototype(wrap, proto);
     const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
     state.* = .{ .source = source, .next_fn = cached_next_v };
     wrap.iter_helper = state;
@@ -396,7 +396,7 @@ fn wrappedReturn(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     if (ret_v.isUndefined() or ret_v.isNull()) {
         // Step 6 — return CreateIterResultObject(undefined, true).
         const res = realm.heap.allocateObject() catch return error.OutOfMemory;
-        res.prototype = realm.intrinsics.object_prototype;
+        realm.heap.setObjectPrototype(res, realm.intrinsics.object_prototype);
         res.set(realm.allocator, "value", Value.undefined_) catch return error.OutOfMemory;
         res.set(realm.allocator, "done", Value.true_) catch return error.OutOfMemory;
         return heap_mod.taggedObject(res);
@@ -704,7 +704,7 @@ fn iteratorFlatMap(realm: *Realm, this_value: Value, args: []const Value) Native
     const wrap = realm.heap.allocateObject() catch return error.OutOfMemory;
     // §27.1.4.1 — the flatMap result inherits
     // `%IteratorHelperPrototype%` (generic `next` / `return`).
-    wrap.prototype = realm.intrinsics.iterator_helper_prototype orelse ctor.prototype;
+    realm.heap.setObjectPrototype(wrap, realm.intrinsics.iterator_helper_prototype orelse ctor.prototype);
     const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
     state.* = .{
         .source = this_value,
@@ -925,7 +925,7 @@ fn buildLazy(realm: *Realm, source: Value, payload: Value, kind: IteratorHelperS
     // §27.1.4.1 — the lazy-helper result inherits
     // `%IteratorHelperPrototype%`, which carries the generic
     // `next` / `return`; the wrapper has no own iteration methods.
-    wrap.prototype = realm.intrinsics.iterator_helper_prototype orelse ctor.prototype;
+    realm.heap.setObjectPrototype(wrap, realm.intrinsics.iterator_helper_prototype orelse ctor.prototype);
     const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
     state.* = .{
         .source = source,
@@ -1222,7 +1222,7 @@ fn iteratorToArray(realm: *Realm, this_value: Value, args: []const Value) Native
     _ = this_obj;
     const next_fn = try snapshotNext(realm, this_value);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     // The loop body calls into user JS (`next`, accessor getters)
     // and allocates an index JSString per step. `out` is only
@@ -1450,7 +1450,7 @@ fn iteratorReduce(realm: *Realm, this_value: Value, args: []const Value) NativeE
 
 fn iterResult(realm: *Realm, value: Value, done: bool) NativeError!Value {
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-    obj.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
     obj.set(realm.allocator, "value", value) catch return error.OutOfMemory;
     obj.set(realm.allocator, "done", Value.fromBool(done)) catch return error.OutOfMemory;
     return heap_mod.taggedObject(obj);
@@ -1575,7 +1575,7 @@ fn iteratorConcat(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const ctor = heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "Iterator constructor missing");
     const wrap = realm.heap.allocateObject() catch return error.OutOfMemory;
     // §27.1.4.1 — the concat result inherits %IteratorHelperPrototype%.
-    wrap.prototype = realm.intrinsics.iterator_helper_prototype orelse ctor.prototype;
+    realm.heap.setObjectPrototype(wrap, realm.intrinsics.iterator_helper_prototype orelse ctor.prototype);
     const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
     state.* = .{ .count = @intCast(args.len), .kind = .concat };
     wrap.iter_helper = state;
@@ -1901,7 +1901,7 @@ fn buildZipWrapper(
     }
     const wrap = realm.heap.allocateObject() catch return error.OutOfMemory;
     // §27.1.4.1 — the zip / zipKeyed result inherits %IteratorHelperPrototype%.
-    wrap.prototype = realm.intrinsics.iterator_helper_prototype orelse ctor.prototype;
+    realm.heap.setObjectPrototype(wrap, realm.intrinsics.iterator_helper_prototype orelse ctor.prototype);
     const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
     state.* = .{
         .count = @intCast(iters.len),
@@ -2143,9 +2143,9 @@ fn zipNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
     // §27.5.5 step 16).
     const result_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
     if (keyed) {
-        result_obj.prototype = null;
+        realm.heap.setObjectPrototype(result_obj, null);
     } else {
-        result_obj.prototype = realm.intrinsics.array_prototype;
+        realm.heap.setObjectPrototype(result_obj, realm.intrinsics.array_prototype);
         result_obj.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     }
     // `result_obj` is filled across the step loop below, which

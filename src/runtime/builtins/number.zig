@@ -52,7 +52,7 @@ pub fn install(realm: *Realm) !void {
             // `Number.prototype.toString(2)` directly returns
             // `"0"`; without this, `primitiveNumberValue` would
             // see no `boxed_primitive` and throw.
-            np.boxed_primitive = Value.fromInt32(0);
+            realm.heap.setBoxedPrimitive(np, Value.fromInt32(0));
         }
     }
     // Top-level parseInt / parseFloat / isNaN / isFinite globals.

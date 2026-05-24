@@ -774,7 +774,7 @@ pub const Heap = struct {
         self.allocs_since_gc +|= 1;
         if (!is_arrow) {
             const proto = try self.allocateObject();
-            f.prototype = proto;
+            self.setFunctionPrototype(f, proto);
             // §20.2.4.1 — `prototype.constructor` is
             // non-enumerable. for-in over an instance must
             // not surface this as a key.
@@ -2704,9 +2704,312 @@ pub const Heap = struct {
     /// the other fields the interpreter writes directly rather
     /// than through a property-bag setter. The caller performs the
     /// actual field assignment; this helper only runs the barrier.
-    /// Stage 0: no-op (`writeBarrier` is a stub).
     pub fn storeInternalSlot(self: *Heap, container: Container, v: Value) void {
         self.writeBarrier(container, v);
+    }
+
+    // ─── Typed-slot setters ─────────────────────────────────────────
+    //
+    // Each combines the generational write barrier with the actual
+    // field assignment, so call sites stop needing to call
+    // `writeBarrier` + assign by hand (and stop forgetting the
+    // barrier — the unbarriered-write hazard the per-minor-cycle
+    // `markObjectInternalSlots` scan exists to paper over).
+    //
+    // Closing the ~500 raw typed-slot writes scattered across the
+    // runtime and builtins lets us drop the mature-internal-slot
+    // scan from `collectYoung` — a per-cycle O(mature_set) walk —
+    // and reach pure generational behaviour. Helpers land first;
+    // call sites migrate in follow-up commits. The scan stays
+    // in place until every write is routed.
+
+    /// `o.prototype = proto` with the generational write barrier.
+    /// Null-clearing skips the barrier — no edge to remember when
+    /// the slot is cleared.
+    pub fn setObjectPrototype(self: *Heap, o: *JSObject, proto: ?*JSObject) void {
+        if (proto) |p| self.writeBarrier(.{ .object = o }, taggedObject(p));
+        o.prototype = proto;
+    }
+
+    /// `fn_obj.prototype = proto` — same shape, JSFunction
+    /// container.
+    pub fn setFunctionPrototype(self: *Heap, fn_obj: *JSFunction, proto: ?*JSObject) void {
+        if (proto) |p| self.writeBarrier(.{ .function = fn_obj }, taggedObject(p));
+        fn_obj.prototype = proto;
+    }
+
+    /// §10.2.3 `[[HomeObject]]` setter on a function. Used by
+    /// `super` resolution.
+    pub fn setHomeObject(self: *Heap, fn_obj: *JSFunction, home: ?*JSObject) void {
+        if (home) |h| self.writeBarrier(.{ .function = fn_obj }, taggedObject(h));
+        fn_obj.home_object = home;
+    }
+
+    /// Sister of `setHomeObject` for generators — the body
+    /// re-borrows it for `super` lookups on resume.
+    pub fn setGeneratorHomeObject(self: *Heap, gen: *JSGenerator, home: ?*JSObject) void {
+        if (home) |h| self.writeBarrier(.{ .generator = gen }, taggedObject(h));
+        gen.home_object = home;
+    }
+
+    /// `fn_obj.home_function = hf` — the typed JSFunction the
+    /// home_object split keeps.
+    pub fn setHomeFunction(self: *Heap, fn_obj: *JSFunction, hf: ?*JSFunction) void {
+        if (hf) |f| self.writeBarrier(.{ .function = fn_obj }, taggedFunction(f));
+        fn_obj.home_function = hf;
+    }
+
+    /// Sister of `setHomeFunction` for generators.
+    pub fn setGeneratorHomeFunction(self: *Heap, gen: *JSGenerator, hf: ?*JSFunction) void {
+        if (hf) |f| self.writeBarrier(.{ .generator = gen }, taggedFunction(f));
+        gen.home_function = hf;
+    }
+
+    /// `fn_obj.captured_env = env` — the closure's inherited
+    /// environment chain. `*Environment` has no NaN-box tag, so
+    /// the barrier is open-coded against `env.generation`.
+    pub fn setCapturedEnv(self: *Heap, fn_obj: *JSFunction, env: ?*Environment) void {
+        if (env) |e| {
+            if (fn_obj.generation == .mature and e.generation == .young) {
+                if (!fn_obj.in_remembered_set) {
+                    fn_obj.in_remembered_set = true;
+                    self.remembered.append(self.allocator, .{ .function = fn_obj }) catch {
+                        fn_obj.in_remembered_set = false;
+                    };
+                }
+            }
+        }
+        fn_obj.captured_env = env;
+    }
+
+    /// `gen.env = env` — generator's saved environment. Same
+    /// open-coded barrier as `setCapturedEnv`.
+    pub fn setGeneratorEnv(self: *Heap, gen: *JSGenerator, env: ?*Environment) void {
+        if (env) |e| {
+            if (gen.generation == .mature and e.generation == .young) {
+                if (!gen.in_remembered_set) {
+                    gen.in_remembered_set = true;
+                    self.remembered.append(self.allocator, .{ .generator = gen }) catch {
+                        gen.in_remembered_set = false;
+                    };
+                }
+            }
+        }
+        gen.env = env;
+    }
+
+    /// `env.parent = parent` — env chain extension.
+    pub fn setEnvironmentParent(self: *Heap, env: *Environment, parent: ?*Environment) void {
+        if (parent) |p| {
+            if (env.generation == .mature and p.generation == .young) {
+                if (!env.in_remembered_set) {
+                    env.in_remembered_set = true;
+                    self.remembered.append(self.allocator, .{ .environment = env }) catch {
+                        env.in_remembered_set = false;
+                    };
+                }
+            }
+        }
+        env.parent = parent;
+    }
+
+    /// `fn_obj.captured_this = v` — arrow's lexical `this`.
+    pub fn setCapturedThis(self: *Heap, fn_obj: *JSFunction, v: Value) void {
+        self.writeBarrier(.{ .function = fn_obj }, v);
+        fn_obj.captured_this = v;
+    }
+
+    /// `fn_obj.captured_new_target = v` — arrow's lexical
+    /// new.target.
+    pub fn setCapturedNewTarget(self: *Heap, fn_obj: *JSFunction, v: Value) void {
+        self.writeBarrier(.{ .function = fn_obj }, v);
+        fn_obj.captured_new_target = v;
+    }
+
+    /// Update an accessor's getter half on `container`'s
+    /// `accessors` / `private_accessors` table. The accessor entry
+    /// itself lives inside an AutoHashMap value; the helper records
+    /// the cross-generational edge against `container` before
+    /// writing `entry_ptr.getter`. Used by `Object.defineProperty`,
+    /// `Reflect.defineProperty`, the `set_accessor` bytecode, and
+    /// the class definition lowering — same call surface as the
+    /// non-accessor typed-slot helpers above.
+    pub fn setAccessorGetter(
+        self: *Heap,
+        container: Container,
+        entry_ptr: *@import("object.zig").Accessor,
+        getter: ?*JSFunction,
+    ) void {
+        if (getter) |g| self.writeBarrier(container, taggedFunction(g));
+        entry_ptr.getter = getter;
+    }
+
+    /// Update an accessor's setter half — sister of
+    /// `setAccessorGetter`.
+    pub fn setAccessorSetter(
+        self: *Heap,
+        container: Container,
+        entry_ptr: *@import("object.zig").Accessor,
+        setter: ?*JSFunction,
+    ) void {
+        if (setter) |s| self.writeBarrier(container, taggedFunction(s));
+        entry_ptr.setter = setter;
+    }
+
+    /// §27.2.1.3 / §27.2.1.4 — settle a Promise object. Flips
+    /// `promise_state` and stores `value` into `promise_value`,
+    /// recording the cross-generational edge first when a mature
+    /// Promise settles with a young value (the long-lived top-
+    /// level Promise + late settle case).
+    pub fn settlePromise(
+        self: *Heap,
+        obj: *JSObject,
+        state: @import("object.zig").PromiseState,
+        value: Value,
+    ) void {
+        self.writeBarrier(.{ .object = obj }, value);
+        obj.settlePromise(state, value);
+    }
+
+    // ─── Tier 1 typed-slot setters ──────────────────────────────────
+    //
+    // Same shape as the prototype / home_* helpers above — combine
+    // the barrier with the field assignment so call sites don't
+    // need to remember the pair. Targets the remaining single-slot
+    // internal fields tracked by `markObjectInternalSlots` /
+    // `markFunctionInternalSlots`.
+
+    /// §28.1.1 Proxy target. Set at construction (typically young)
+    /// and on revocation (`null`).
+    pub fn setProxyTarget(self: *Heap, o: *JSObject, target: ?*JSObject) void {
+        if (target) |t| self.writeBarrier(.{ .object = o }, taggedObject(t));
+        o.proxy_target = target;
+    }
+
+    /// §28.1.1 Proxy handler. Set at construction and on revocation.
+    pub fn setProxyHandler(self: *Heap, o: *JSObject, handler: ?*JSObject) void {
+        if (handler) |h| self.writeBarrier(.{ .object = o }, taggedObject(h));
+        o.proxy_handler = handler;
+    }
+
+    /// §28.1.1 Proxy target for the callable-function variant
+    /// (proxy wraps a function). Set at construction; cleared on
+    /// revocation.
+    pub fn setProxyTargetFn(self: *Heap, o: *JSObject, target_fn: ?*JSFunction) void {
+        if (target_fn) |f| self.writeBarrier(.{ .object = o }, taggedFunction(f));
+        o.proxy_target_fn = target_fn;
+    }
+
+    /// §6.1.6.1 / §6.1.5 / §6.1.3 — boxed primitive (Number /
+    /// BigInt / Boolean) stashed on a wrapper for `.valueOf` /
+    /// `.toString` lookup.
+    pub fn setBoxedPrimitive(self: *Heap, o: *JSObject, v: Value) void {
+        self.writeBarrier(.{ .object = o }, v);
+        o.boxed_primitive = v;
+    }
+
+    /// §22.1.4 String wrapper — the boxed code-unit source for
+    /// `String.prototype.*` dispatched against the wrapper.
+    pub fn setBoxedString(self: *Heap, o: *JSObject, s: ?*JSString) void {
+        if (s) |str| self.writeBarrier(.{ .object = o }, Value.fromString(str));
+        o.boxed_string = s;
+    }
+
+    /// `Promise.prototype.finally` reaction-context callback slot.
+    pub fn setFinallyCallback(self: *Heap, o: *JSObject, f: ?*JSFunction) void {
+        if (f) |fn_obj| self.writeBarrier(.{ .object = o }, taggedFunction(fn_obj));
+        o.finally_callback = f;
+    }
+
+    /// `Promise.prototype.finally` thunk's carried value (the
+    /// settlement to re-throw or re-return through).
+    pub fn setFinallyValue(self: *Heap, o: *JSObject, v: Value) void {
+        self.writeBarrier(.{ .object = o }, v);
+        o.finally_value = v;
+    }
+
+    /// `Promise.prototype.finally` reaction-context constructor
+    /// (the species `C` used to build the next Promise in the
+    /// chain).
+    pub fn setFinallyConstructor(self: *Heap, o: *JSObject, f: ?*JSFunction) void {
+        if (f) |fn_obj| self.writeBarrier(.{ .object = o }, taggedFunction(fn_obj));
+        o.finally_constructor = f;
+    }
+
+    /// §22.2.4 — original source pattern JSString anchored on a
+    /// RegExp instance. Re-read by `.source`.
+    pub fn setRegexpSource(self: *Heap, o: *JSObject, s: ?*JSString) void {
+        if (s) |str| self.writeBarrier(.{ .object = o }, Value.fromString(str));
+        o.regexp_source = s;
+    }
+
+    /// §22.2.4 — original flags JSString anchored on a RegExp
+    /// instance.
+    pub fn setRegexpFlags(self: *Heap, o: *JSObject, s: ?*JSString) void {
+        if (s) |str| self.writeBarrier(.{ .object = o }, Value.fromString(str));
+        o.regexp_flags = s;
+    }
+
+    /// §10.4.2 Bound function — target (the inner callable).
+    pub fn setBoundTarget(self: *Heap, f: *JSFunction, target: ?*JSFunction) void {
+        if (target) |t| self.writeBarrier(.{ .function = f }, taggedFunction(t));
+        f.bound_target = target;
+    }
+
+    /// §10.4.2 Bound function — the captured `thisArg`.
+    pub fn setBoundThis(self: *Heap, f: *JSFunction, v: Value) void {
+        self.writeBarrier(.{ .function = f }, v);
+        f.bound_this = v;
+    }
+
+    /// §10.4.2 Bound function — captured pre-bound arguments
+    /// slice. The slice itself lives in the realm allocator;
+    /// each element is a Value that may carry a young heap
+    /// pointer, so when the function is mature we conservatively
+    /// remember it (the next minor cycle will scan the slice).
+    pub fn setBoundArgs(self: *Heap, f: *JSFunction, args: ?[]const Value) void {
+        if (args) |arr| {
+            if (f.generation == .mature) {
+                for (arr) |v| {
+                    if (isYoungHeapValue(v)) {
+                        if (!f.in_remembered_set) {
+                            f.in_remembered_set = true;
+                            self.remembered.append(self.allocator, .{ .function = f }) catch {
+                                f.in_remembered_set = false;
+                            };
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        f.bound_args = args;
+    }
+
+    /// JSFunction's name JSString anchor. Read by
+    /// `Function.prototype.name`. Updated on initial install and
+    /// on `Object.defineProperty(fn, 'name', …)`.
+    pub fn setFunctionNameString(self: *Heap, f: *JSFunction, s: ?*JSString) void {
+        if (s) |str| self.writeBarrier(.{ .function = f }, Value.fromString(str));
+        f.name_string = s;
+    }
+
+    /// §27.5 — link from a generator-wrapper JSObject back to its
+    /// `*JSGenerator` payload. `*JSGenerator` is not Value-boxable,
+    /// so the generation check is open-coded against `g.generation`
+    /// (same shape as `setCapturedEnv` / `setEnvironmentParent`).
+    pub fn setGeneratorRef(self: *Heap, o: *JSObject, g: ?*JSGenerator) void {
+        if (g) |gen| {
+            if (o.generation == .mature and gen.generation == .young) {
+                if (!o.in_remembered_set) {
+                    o.in_remembered_set = true;
+                    self.remembered.append(self.allocator, .{ .object = o }) catch {
+                        o.in_remembered_set = false;
+                    };
+                }
+            }
+        }
+        o.generator_ref = g;
     }
 
     /// Generational write barrier. Records an old→young store:

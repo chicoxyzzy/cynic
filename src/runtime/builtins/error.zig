@@ -111,14 +111,14 @@ pub fn installAll(realm: *Realm, obj_proto: *JSObject) !void {
 fn installAggregateError(realm: *Realm, parent_proto: *JSObject) !*JSFunction {
     const fn_obj = try realm.heap.allocateFunctionNative(aggregateErrorNative, 2, "AggregateError");
     const proto = try realm.heap.allocateObject();
-    proto.prototype = parent_proto;
+    realm.heap.setObjectPrototype(proto, parent_proto);
     try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
     const name_str = try realm.heap.allocateString("AggregateError");
     try setNonEnumerable(proto, realm.allocator, "name", Value.fromString(name_str));
     // §20.5.7.3.2 — the prototype's `message` defaults to "".
     const empty = try realm.heap.allocateString("");
     try setNonEnumerable(proto, realm.allocator, "message", Value.fromString(empty));
-    fn_obj.prototype = proto;
+    realm.heap.setFunctionPrototype(fn_obj, proto);
     // §20.5.7.2.1 — AggregateError.prototype is `{ writable:
     // false, enumerable: false, configurable: false }` (same
     // shape as other NativeError prototypes). Override the
@@ -140,7 +140,7 @@ fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) N
     // initialise it in-place; otherwise allocate fresh.
     const instance = if (heap_mod.valueAsPlainObject(this_value)) |o| o else blk: {
         const fresh = realm.heap.allocateObject() catch return error.OutOfMemory;
-        fresh.prototype = proto;
+        realm.heap.setObjectPrototype(fresh, proto);
         break :blk fresh;
     };
     instance.has_error_data = true;
@@ -204,7 +204,7 @@ fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) N
 fn aggregateErrorMaterialiseErrors(realm: *Realm, errors_v: Value) NativeError!Value {
     const lantern = @import("../lantern/interpreter.zig");
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
 
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     const src = heap_mod.valueAsPlainObject(errors_v) orelse {
@@ -292,11 +292,11 @@ pub fn installError(
     // allocateFunction; native fns don't get a prototype unless
     // we set one explicitly here.
     const proto = try realm.heap.allocateObject();
-    proto.prototype = parent_proto;
+    realm.heap.setObjectPrototype(proto, parent_proto);
     try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
     const name_str = try realm.heap.allocateString(name);
     try setNonEnumerable(proto, realm.allocator, "name", Value.fromString(name_str));
-    fn_obj.prototype = proto;
+    realm.heap.setFunctionPrototype(fn_obj, proto);
     // §20.5.5.1 / §20.5.6.2.1 — Error.prototype and
     // NativeError.prototype are `{ writable: false, enumerable:
     // false, configurable: false }`. `JSFunction.flagsForOwn`
@@ -424,7 +424,7 @@ fn constructErrorInstance(realm: *Realm, this_value: Value, proto: *JSObject, ar
     // back to allocating fresh with the default prototype.
     const instance = if (heap_mod.valueAsPlainObject(this_value)) |o| o else blk: {
         const fresh = realm.heap.allocateObject() catch return error.OutOfMemory;
-        fresh.prototype = proto;
+        realm.heap.setObjectPrototype(fresh, proto);
         break :blk fresh;
     };
     // §20.5.1.1 step 3 — install [[ErrorData]] slot so
@@ -528,7 +528,7 @@ pub fn newURIError(realm: *Realm, message: []const u8) !Value {
 
 fn makeError(realm: *Realm, proto: *JSObject, message: []const u8) !Value {
     const instance = try realm.heap.allocateObject();
-    instance.prototype = proto;
+    realm.heap.setObjectPrototype(instance, proto);
     instance.has_error_data = true;
     const msg_str = try realm.heap.allocateString(message);
     try instance.set(realm.allocator, "message", Value.fromString(msg_str));

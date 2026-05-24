@@ -71,8 +71,8 @@ pub fn wrapGenerator(
     ) catch return error.OutOfMemory;
     // §15.7.14 step 31 — propagate home_* so private-name access
     // inside the generator body translates the brand correctly.
-    gen.home_object = home_object;
-    gen.home_function = home_function;
+    realm.heap.setGeneratorHomeObject(gen, home_object);
+    realm.heap.setGeneratorHomeFunction(gen, home_function);
     // Pre-load argument values into the generator's register
     // file so the function prologue's Ldar / sta_env sequence
     // sees them at indices 0..argc-1.
@@ -88,8 +88,8 @@ pub fn wrapGenerator(
     // which may mutate `callee.prototype` (`function*(a = (g.prototype =
     // null)) {}`). The real wrapper.prototype is rebound after the
     // prologue per the §9.1.14 read below.
-    wrapper.prototype = ensureGeneratorPrototype(realm) catch return error.OutOfMemory;
-    wrapper.generator_ref = gen;
+    realm.heap.setObjectPrototype(wrapper, ensureGeneratorPrototype(realm) catch return error.OutOfMemory);
+    realm.heap.setGeneratorRef(wrapper, gen);
 
     // The wrapper is the only handle linking the freshly allocated
     // `gen` to anything caller-visible. `resumeGenerator` runs the
@@ -119,7 +119,7 @@ pub fn wrapGenerator(
     // = null` updates the bag but V8-style keeps the slot.
     const proto_val_g: Value = if (callee) |c| c.get("prototype") else Value.undefined_;
     if (heap_mod.valueAsPlainObject(proto_val_g)) |p| {
-        wrapper.prototype = p;
+        realm.heap.setObjectPrototype(wrapper, p);
     }
     switch (initial) {
         .yielded => return .{ .value = heap_mod.taggedObject(wrapper) },
@@ -159,8 +159,8 @@ pub fn wrapAsyncGenerator(
     gen.is_async_generator = true;
     // §15.7.14 step 31 — propagate home_* so private-name access
     // inside the async-generator body translates the brand correctly.
-    gen.home_object = home_object;
-    gen.home_function = home_function;
+    realm.heap.setGeneratorHomeObject(gen, home_object);
+    realm.heap.setGeneratorHomeFunction(gen, home_function);
     var i: usize = 0;
     while (i < args.len and i < gen.registers.len) : (i += 1) {
         gen.registers[i] = args[i];
@@ -172,8 +172,8 @@ pub fn wrapAsyncGenerator(
     // prologue — the §9.1.14 read below rebinds it after default-
     // param evaluation runs (see `wrapGenerator` for the spec
     // rationale).
-    wrapper.prototype = ensureAsyncGeneratorPrototype(realm) catch return error.OutOfMemory;
-    wrapper.generator_ref = gen;
+    realm.heap.setObjectPrototype(wrapper, ensureAsyncGeneratorPrototype(realm) catch return error.OutOfMemory);
+    realm.heap.setGeneratorRef(wrapper, gen);
 
     // Same wrapper-pin rationale as `wrapGenerator`: the eager
     // prologue can allocate and trip the GC before we return.
@@ -193,7 +193,7 @@ pub fn wrapAsyncGenerator(
     // slot) for the same V8-style-keep reason.
     const proto_val_ag: Value = if (callee) |c| c.get("prototype") else Value.undefined_;
     if (heap_mod.valueAsPlainObject(proto_val_ag)) |p| {
-        wrapper.prototype = p;
+        realm.heap.setObjectPrototype(wrapper, p);
     }
     switch (initial) {
         .yielded => return .{ .value = heap_mod.taggedObject(wrapper) },
@@ -235,7 +235,7 @@ pub fn iteratorPrototypeOrObjectPrototypePub(realm: *Realm) ?*JSObject {
 pub fn ensureGeneratorPrototype(realm: *Realm) !*JSObject {
     if (realm.intrinsics.generator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
-    proto.prototype = iteratorPrototypeOrObjectPrototype(realm);
+    realm.heap.setObjectPrototype(proto, iteratorPrototypeOrObjectPrototype(realm));
 
     // §27.5.1 — `next` / `return` / `throw` install with the
     // standard §17 built-in-prototype-method descriptor:
@@ -269,7 +269,7 @@ pub fn ensureGeneratorPrototype(realm: *Realm) !*JSObject {
 
 pub fn genResultObject(realm: *Realm, value: Value, done: bool) !Value {
     const obj = try realm.heap.allocateObject();
-    obj.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
     try obj.set(realm.allocator, "value", value);
     try obj.set(realm.allocator, "done", Value.fromBool(done));
     return heap_mod.taggedObject(obj);
@@ -288,7 +288,7 @@ pub fn genResultObject(realm: *Realm, value: Value, done: bool) !Value {
 pub fn ensureAsyncIteratorPrototype(realm: *Realm) !*JSObject {
     if (realm.intrinsics.async_iterator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
-    proto.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(proto, realm.intrinsics.object_prototype);
     const sym_iter_fn = try realm.heap.allocateFunctionNative(genSymbolIterator, 0, "[Symbol.asyncIterator]");
     sym_iter_fn.proto = realm.intrinsics.function_prototype;
     try proto.setWithFlags(realm.allocator, "@@asyncIterator", heap_mod.taggedFunction(sym_iter_fn), .{
@@ -307,7 +307,7 @@ pub fn ensureAsyncGeneratorPrototype(realm: *Realm) !*JSObject {
     // `%AsyncIteratorPrototype%`. That's where `@@asyncIterator`
     // lives — inheriting it here means `for await (... of asyncGen)`
     // resolves the method through the chain.
-    proto.prototype = try ensureAsyncIteratorPrototype(realm);
+    realm.heap.setObjectPrototype(proto, try ensureAsyncIteratorPrototype(realm));
 
     // §27.6.1 — `next` / `return` / `throw` install with the
     // standard §17 built-in-prototype-method descriptor:

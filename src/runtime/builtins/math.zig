@@ -28,7 +28,7 @@ const getPropertyChain = intrinsics.getPropertyChain;
 
 pub fn install(realm: *Realm) !void {
     const math_obj = try realm.heap.allocateObject();
-    math_obj.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(math_obj, realm.intrinsics.object_prototype);
     try installToStringTag(realm, math_obj, "Math");
     // §21.3.1 Math constants — `[[Writable]]: false`,
     // `[[Enumerable]]: false`, `[[Configurable]]: false`.

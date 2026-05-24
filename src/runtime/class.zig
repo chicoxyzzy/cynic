@@ -221,7 +221,7 @@ pub fn buildClass(
     //   • parent.prototype, if `extends X`
     //   • null, if `extends null`
     //   • %Object.prototype%, if no heritage clause
-    proto.prototype = if (parent_proto) |pp| pp else if (has_heritage) null else realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(proto, if (parent_proto) |pp| pp else if (has_heritage) null else realm.intrinsics.object_prototype);
 
     // Pin `proto` (and shortly `ctor`) across the rest of class
     // construction. Computed-key evaluation re-enters the
@@ -267,7 +267,7 @@ pub fn buildClass(
     // The constructor itself is a "method" of the class — its
     // home object is the prototype object, so `super(...)` /
     // `super.method()` inside the constructor body resolve.
-    ctor.home_object = proto;
+    realm.heap.setHomeObject(ctor, proto);
     // §13.3.7.2 GetSuperConstructor — `super(...)` from the ctor
     // body walks `activeFunction.[[Prototype]]`, where the active
     // function is the constructor itself. Wiring `home_function`
@@ -276,14 +276,14 @@ pub fn buildClass(
     // X)` retargets `super(...)` to `X` — matching V8 / SpiderMonkey
     // / JSC and unblocking test262
     // `language/expressions/super/call-proto-not-ctor.js`.
-    ctor.home_function = ctor;
+    realm.heap.setHomeFunction(ctor, ctor);
 
     // 4. ctor.prototype = proto, proto.constructor = ctor. The
     // auto-allocated `prototype` from `allocateFunction` would
     // have been a fresh object; replace it with our explicit
     // one so the prototype identity matches what we install
     // methods onto.
-    ctor.prototype = proto;
+    realm.heap.setFunctionPrototype(ctor, proto);
     // §15.7.14 — `Class.prototype.constructor` is non-enumerable.
     try proto.setWithFlags(realm.allocator, "constructor", heap_mod.taggedFunction(ctor), .{
         .writable = true,
@@ -378,7 +378,7 @@ pub fn buildClass(
         if (!m.is_generator and !m.is_async) {
             // Generators / async methods keep `prototype` — see
             // the wiring below.
-            fn_obj.prototype = null;
+            realm.heap.setFunctionPrototype(fn_obj, null);
         } else if (fn_obj.prototype) |gp| {
             // §27.5.1 / §27.6.1 — a class generator / async-generator
             // method's `.prototype` is an ordinary object whose
@@ -395,16 +395,16 @@ pub fn buildClass(
             _ = gp.properties.swapRemove("constructor");
             _ = gp.property_flags.swapRemove("constructor");
             const interp_mod = @import("lantern/interpreter.zig");
-            gp.prototype = if (m.is_async)
+            realm.heap.setObjectPrototype(gp, if (m.is_async)
                 interp_mod.ensureAsyncGeneratorPrototype(realm) catch realm.intrinsics.object_prototype
             else
-                interp_mod.ensureGeneratorPrototype(realm) catch realm.intrinsics.object_prototype;
+                interp_mod.ensureGeneratorPrototype(realm) catch realm.intrinsics.object_prototype);
         }
         fn_obj.has_construct = false;
         if (m.spec_length != m.param_count) {
             try fn_obj.properties.put(realm.allocator, "length", @import("value.zig").Value.fromInt32(m.spec_length));
         }
-        fn_obj.home_object = proto;
+        realm.heap.setHomeObject(fn_obj, proto);
         fn_obj.is_generator = m.is_generator;
         fn_obj.is_async = m.is_async;
         // §27.3 — `[[Prototype]]` of the method function points
@@ -462,7 +462,7 @@ pub fn buildClass(
             .getter => {
                 const entry = try proto.getOrPutAccessor(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
-                entry.value_ptr.*.getter = fn_obj;
+                realm.heap.setAccessorGetter(.{ .object = proto }, entry.value_ptr, fn_obj);
                 try proto.property_flags.put(realm.allocator, runtime_name, .{
                     .writable = false,
                     .enumerable = false,
@@ -472,7 +472,7 @@ pub fn buildClass(
             .setter => {
                 const entry = try proto.getOrPutAccessor(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
-                entry.value_ptr.*.setter = fn_obj;
+                realm.heap.setAccessorSetter(.{ .object = proto }, entry.value_ptr, fn_obj);
                 try proto.property_flags.put(realm.allocator, runtime_name, .{
                     .writable = false,
                     .enumerable = false,
@@ -497,7 +497,7 @@ pub fn buildClass(
             else
                 null;
             if (init_fn) |fp| {
-                fp.home_object = proto;
+                realm.heap.setHomeObject(fp, proto);
                 fp.proto = realm.intrinsics.function_prototype;
             }
             // §15.7.14 step 31 — for `#x` fields, swap the
@@ -562,7 +562,7 @@ pub fn buildClass(
         // `prototype` below via their `proto` wiring. Also turn
         // off [[Construct]] so `new C.staticMethod()` throws.
         if (!m.is_generator and !m.is_async) {
-            fn_obj.prototype = null;
+            realm.heap.setFunctionPrototype(fn_obj, null);
         } else if (fn_obj.prototype) |gp| {
             // §27.5.1 / §27.6.1 — static generator / async-generator
             // methods carry `.prototype` whose [[Prototype]] is
@@ -575,10 +575,10 @@ pub fn buildClass(
             _ = gp.properties.swapRemove("constructor");
             _ = gp.property_flags.swapRemove("constructor");
             const interp_mod = @import("lantern/interpreter.zig");
-            gp.prototype = if (m.is_async)
+            realm.heap.setObjectPrototype(gp, if (m.is_async)
                 interp_mod.ensureAsyncGeneratorPrototype(realm) catch realm.intrinsics.object_prototype
             else
-                interp_mod.ensureGeneratorPrototype(realm) catch realm.intrinsics.object_prototype;
+                interp_mod.ensureGeneratorPrototype(realm) catch realm.intrinsics.object_prototype);
         }
         fn_obj.has_construct = false;
         if (m.spec_length != m.param_count) {
@@ -599,7 +599,7 @@ pub fn buildClass(
         // class constructor itself (a function). Set
         // `home_function` so `super.x` from inside the static
         // method walks `ctor.proto` to reach the parent class.
-        fn_obj.home_function = ctor;
+        realm.heap.setHomeFunction(fn_obj, ctor);
         const is_priv_static = std.mem.startsWith(u8, runtime_name, template.private_prefix);
         // §15.7.14 step 31 — static private slots are also
         // brand-stamped per ClassTail evaluation. `slot_name` is
@@ -646,24 +646,24 @@ pub fn buildClass(
             .getter => if (is_priv_static) {
                 const entry = try ctor.private_accessors.getOrPut(realm.allocator, slot_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
-                entry.value_ptr.*.getter = fn_obj;
+                realm.heap.setAccessorGetter(.{ .function = ctor }, entry.value_ptr, fn_obj);
             } else {
                 // §17 static accessor on a class constructor —
                 // landed in the JSFunction's `accessors` map
                 // (added in the JSFunction-accessors commit).
                 const entry = try ctor.accessors.getOrPut(realm.allocator, slot_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
-                entry.value_ptr.*.getter = fn_obj;
+                realm.heap.setAccessorGetter(.{ .function = ctor }, entry.value_ptr, fn_obj);
                 try ctor.property_flags.put(realm.allocator, slot_name, static_accessor_flags);
             },
             .setter => if (is_priv_static) {
                 const entry = try ctor.private_accessors.getOrPut(realm.allocator, slot_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
-                entry.value_ptr.*.setter = fn_obj;
+                realm.heap.setAccessorSetter(.{ .function = ctor }, entry.value_ptr, fn_obj);
             } else {
                 const entry = try ctor.accessors.getOrPut(realm.allocator, slot_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
-                entry.value_ptr.*.setter = fn_obj;
+                realm.heap.setAccessorSetter(.{ .function = ctor }, entry.value_ptr, fn_obj);
                 try ctor.property_flags.put(realm.allocator, slot_name, static_accessor_flags);
             },
         }
@@ -720,7 +720,7 @@ pub fn buildClass(
             // surface. Setting `home_object = proto` here would
             // route through the prototype chain (the wrong
             // surface — instance methods, not statics).
-            blk_fn.home_function = ctor;
+            realm.heap.setHomeFunction(blk_fn, ctor);
             blk_fn.proto = realm.intrinsics.function_prototype;
             const outcome = lantern.callJSFunction(realm.allocator, realm, blk_fn, ctor_value, &.{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -753,7 +753,7 @@ pub fn buildClass(
             // `super.x` would route through the prototype chain
             // (instance surface) instead of the parent ctor's
             // own properties.
-            init_fn.home_function = ctor;
+            realm.heap.setHomeFunction(init_fn, ctor);
             init_fn.proto = realm.intrinsics.function_prototype;
             const outcome = lantern.callJSFunction(realm.allocator, realm, init_fn, ctor_value, &.{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,

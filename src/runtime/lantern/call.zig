@@ -129,7 +129,7 @@ pub fn callValue(
                 const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return .{ .thrown = try makeTypeError(realm, "proxy 'apply' trap is not callable") };
                 // Wrap args in a fresh array.
                 const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
-                arr.prototype = realm.intrinsics.array_prototype;
+                realm.heap.setObjectPrototype(arr, realm.intrinsics.array_prototype);
                 arr.markAsArrayExotic(allocator) catch return error.OutOfMemory;
                 var i: usize = 0;
                 while (i < args.len) : (i += 1) {
@@ -342,7 +342,7 @@ pub fn constructValue(
             if (!trap_v.isUndefined() and !trap_v.isNull()) {
                 const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return .{ .thrown = try makeTypeError(realm, "proxy 'construct' trap is not callable") };
                 const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
-                arr.prototype = realm.intrinsics.array_prototype;
+                realm.heap.setObjectPrototype(arr, realm.intrinsics.array_prototype);
                 arr.markAsArrayExotic(allocator) catch return error.OutOfMemory;
                 var i: usize = 0;
                 while (i < args.len) : (i += 1) {
@@ -437,7 +437,7 @@ pub fn constructValue(
         resolved_proto = target.prototype;
     }
     const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
-    instance.prototype = resolved_proto;
+    realm.heap.setObjectPrototype(instance, resolved_proto);
     const this_arg = heap_mod.taggedObject(instance);
     // §10.2.2 [[Construct]] — body runs with NewTarget bound to
     // `new_target`. The frame must carry it so `new.target`
@@ -716,11 +716,11 @@ pub fn startAsyncCall(
 ) RunError!RunResult {
     // Pre-allocate the Promise so the gen can settle it.
     const promise_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-    promise_obj.prototype = if (heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_)) |p|
+    realm.heap.setObjectPrototype(promise_obj, if (heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_)) |p|
         p.prototype
     else
-        realm.intrinsics.object_prototype;
-    promise_obj.settlePromise(.pending, Value.undefined_);
+        realm.intrinsics.object_prototype);
+    realm.heap.settlePromise(promise_obj, .pending, Value.undefined_);
     const result_promise = heap_mod.taggedObject(promise_obj);
 
     const wanted: usize = @max(@as(usize, chunk.register_count), args.len);
@@ -735,8 +735,8 @@ pub fn startAsyncCall(
     // async method falls through the brand translation and lookup
     // fails. Mirrors how wrapGenerator threads home_* for non-async
     // generators.
-    gen.home_object = home_object;
-    gen.home_function = home_function;
+    realm.heap.setGeneratorHomeObject(gen, home_object);
+    realm.heap.setGeneratorHomeFunction(gen, home_function);
     // §16.2.1.5.1 [[IsAsync]] — capture the module this async
     // body belongs to so deferred resumes can re-thread
     // `realm.current_module` for `module_export`. Two cases feed

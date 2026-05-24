@@ -267,7 +267,7 @@ fn loadModuleInner(
     // is applied immediately; the `extensible = false` flip waits
     // until the body returns so module_export can still publish.
     const ns = realm.heap.allocateObject() catch return error.OutOfMemory;
-    ns.prototype = null;
+    realm.heap.setObjectPrototype(ns, null);
     ns.is_module_namespace = true;
     const mr = ModuleRecord.init(realm.allocator, result.url, ns) catch return error.OutOfMemory;
     mr.state = .evaluating;

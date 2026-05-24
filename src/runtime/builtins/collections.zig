@@ -135,7 +135,7 @@ pub fn installMap(realm: *Realm) !void {
     // `next`, `@@iterator` (returns self), and the well-known
     // toStringTag.
     const it_proto = try realm.heap.allocateObject();
-    it_proto.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(it_proto, realm.intrinsics.object_prototype);
     try installNativeMethodOnProto(realm, it_proto, "next", mapIterNext, 0);
     try installNativeMethodOnProto(realm, it_proto, "@@iterator", iteratorReturnsSelf, 0);
     try intrinsics.installToStringTag(realm, it_proto, "Map Iterator");
@@ -153,7 +153,7 @@ pub fn installMap(realm: *Realm) !void {
 /// property; `next` brand-checks `map_set_iter.brand == .map`.
 fn makeMapIterator(realm: *Realm, src: Value, kind: ObjMod.MapSetIterState.Kind) !Value {
     const it = try realm.heap.allocateObject();
-    it.prototype = realm.intrinsics.map_iterator_prototype orelse realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(it, realm.intrinsics.map_iterator_prototype orelse realm.intrinsics.object_prototype);
     const st = try realm.allocator.create(ObjMod.MapSetIterState);
     st.* = .{ .brand = .map, .source = src, .kind = kind };
     it.map_set_iter = st;
@@ -192,7 +192,7 @@ fn iteratorReturnsSelf(realm: *Realm, this_value: Value, args: []const Value) Na
 fn ensureArrayIteratorPrototype(realm: *Realm) !?*JSObject {
     if (realm.intrinsics.array_iterator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
-    proto.prototype = @import("../lantern/interpreter.zig").iteratorPrototypeOrObjectPrototypePub(realm);
+    realm.heap.setObjectPrototype(proto, @import("../lantern/interpreter.zig").iteratorPrototypeOrObjectPrototypePub(realm));
     // §23.1.5.3.1 %ArrayIteratorPrototype%.next — installed on the
     // prototype (writable + configurable, non-enumerable) so the
     // descriptor matches §17's "built-in Function object" shape.
@@ -231,7 +231,7 @@ fn arrayIteratorProtoNext(realm: *Realm, this_value: Value, args: []const Value)
                 .keys => return iterResult(realm, Value.fromInt32(s.idx), false) catch return error.OutOfMemory,
                 .entries => {
                     const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
-                    arr.prototype = realm.intrinsics.array_prototype;
+                    realm.heap.setObjectPrototype(arr, realm.intrinsics.array_prototype);
                     arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
                     arr.set(realm.allocator, "0", Value.fromInt32(s.idx)) catch return error.OutOfMemory;
                     arr.set(realm.allocator, "1", s.value) catch return error.OutOfMemory;
@@ -284,7 +284,7 @@ pub fn arrayIterStepFast(realm: *Realm, this_value: Value) NativeError!?Value {
 fn ensureStringIteratorPrototype(realm: *Realm) !?*JSObject {
     if (realm.intrinsics.string_iterator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
-    proto.prototype = @import("../lantern/interpreter.zig").iteratorPrototypeOrObjectPrototypePub(realm);
+    realm.heap.setObjectPrototype(proto, @import("../lantern/interpreter.zig").iteratorPrototypeOrObjectPrototypePub(realm));
     try intrinsics.installNativeMethodOnProto(realm, proto, "next", stringIteratorProtoNext, 0);
     try intrinsics.installNativeMethodOnProto(realm, proto, "@@iterator", iteratorReturnsSelf, 0);
     const tag_str = try realm.heap.allocateString("String Iterator");
@@ -327,7 +327,7 @@ fn makeArrayLikeIterator(realm: *Realm, src: Value, kind: enum { entries, keys, 
     // %ArrayIteratorPrototype% which itself chains to
     // %IteratorPrototype% and now hosts the brand-checked
     // `next` method shared by every array iterator instance.
-    it.prototype = try ensureArrayIteratorPrototype(realm);
+    realm.heap.setObjectPrototype(it, try ensureArrayIteratorPrototype(realm));
     const ArrayLikeIterState = @import("../object.zig").ArrayLikeIterState;
     const state = try realm.allocator.create(ArrayLikeIterState);
     state.* = .{
@@ -462,7 +462,7 @@ pub fn stringIteratorMethod(realm: *Realm, this_value: Value, args: []const Valu
     // up on the prototype so `Object.create(it).next()` brand-checks
     // (§22.1.5.2.1 step 1, `next-missing-internal-slots.js`).
     if (heap_mod.valueAsPlainObject(v)) |obj| {
-        if (try ensureStringIteratorPrototype(realm)) |sip| obj.prototype = sip;
+        if (try ensureStringIteratorPrototype(realm)) |sip| realm.heap.setObjectPrototype(obj, sip);
         // Demote: the shadow shape can't encode a removal — leaving
         // the shape claiming these keys at their slots while
         // `properties` no longer has them trips
@@ -644,7 +644,7 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) StepOutcome {
 
 fn iterResult(realm: *Realm, value: Value, done: bool) !Value {
     const r = try realm.heap.allocateObject();
-    r.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(r, realm.intrinsics.object_prototype);
     try r.set(realm.allocator, "value", value);
     try r.set(realm.allocator, "done", Value.fromBool(done));
     return heap_mod.taggedObject(r);
@@ -690,7 +690,7 @@ fn mapIterNext(realm: *Realm, this_value: Value, args: []const Value) NativeErro
             .values => return iterResult(realm, kv.value, false) catch return error.OutOfMemory,
             .entries => {
                 const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
-                arr.prototype = realm.intrinsics.array_prototype;
+                realm.heap.setObjectPrototype(arr, realm.intrinsics.array_prototype);
                 arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
                 arr.set(realm.allocator, "0", kv.key) catch return error.OutOfMemory;
                 arr.set(realm.allocator, "1", kv.value) catch return error.OutOfMemory;
@@ -714,7 +714,7 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // Allocate a fresh Map by reusing the constructor.
     const map_proto = if (heap_mod.valueAsFunction(realm.globals.get("Map") orelse Value.undefined_)) |mp| mp.prototype else null;
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = map_proto;
+    realm.heap.setObjectPrototype(out, map_proto);
     const data = realm.allocator.create(ObjMod.MapData) catch return error.OutOfMemory;
     data.* = .{};
     out.setMapData(realm.allocator, data) catch return error.OutOfMemory;
@@ -778,7 +778,7 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
             bucket_obj.set(realm.allocator, "length", Value.fromInt32(len_i + 1)) catch return error.OutOfMemory;
         } else {
             const bucket = realm.heap.allocateObject() catch return error.OutOfMemory;
-            bucket.prototype = realm.intrinsics.array_prototype;
+            realm.heap.setObjectPrototype(bucket, realm.intrinsics.array_prototype);
             bucket.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
             const idx_owned = realm.heap.allocateString("0") catch return error.OutOfMemory;
             bucket.set(realm.allocator, idx_owned.flatBytes(), item) catch return error.OutOfMemory;
@@ -1507,7 +1507,7 @@ pub fn installSet(realm: *Realm) !void {
     // §24.2.5.2 %SetIteratorPrototype% — shared prototype for
     // Set-iterator instances. Same shape as %MapIteratorPrototype%.
     const it_proto = try realm.heap.allocateObject();
-    it_proto.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(it_proto, realm.intrinsics.object_prototype);
     try installNativeMethodOnProto(realm, it_proto, "next", setIterNext, 0);
     try installNativeMethodOnProto(realm, it_proto, "@@iterator", iteratorReturnsSelf, 0);
     try intrinsics.installToStringTag(realm, it_proto, "Set Iterator");
@@ -1520,7 +1520,7 @@ pub fn installSet(realm: *Realm) !void {
 /// property; `next` brand-checks `map_set_iter.brand == .set`.
 fn makeSetIterator(realm: *Realm, src: Value, kind: ObjMod.MapSetIterState.Kind) !Value {
     const it = try realm.heap.allocateObject();
-    it.prototype = realm.intrinsics.set_iterator_prototype orelse realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(it, realm.intrinsics.set_iterator_prototype orelse realm.intrinsics.object_prototype);
     const st = try realm.allocator.create(ObjMod.MapSetIterState);
     st.* = .{ .brand = .set, .source = src, .kind = kind };
     it.map_set_iter = st;
@@ -1569,7 +1569,7 @@ fn setIterNext(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     if (setIterAdvance(st)) |v| {
         if (st.kind == .entries) {
             const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
-            arr.prototype = realm.intrinsics.array_prototype;
+            realm.heap.setObjectPrototype(arr, realm.intrinsics.array_prototype);
             arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
             arr.set(realm.allocator, "0", v) catch return error.OutOfMemory;
             arr.set(realm.allocator, "1", v) catch return error.OutOfMemory;
@@ -1968,7 +1968,7 @@ fn closeSetLikeIterator(realm: *Realm, iter: Value) NativeError!void {
 
 fn allocateEmptySet(realm: *Realm) NativeError!*JSObject {
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-    if (realm.intrinsics.set_prototype) |sp| obj.prototype = sp;
+    if (realm.intrinsics.set_prototype) |sp| realm.heap.setObjectPrototype(obj, sp);
     const data = realm.allocator.create(ObjMod.SetData) catch return error.OutOfMemory;
     data.* = .{};
     obj.setSetData(realm.allocator, data) catch return error.OutOfMemory;

@@ -144,13 +144,13 @@ fn functionConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     // Wire up a normal `.prototype` object so users can
     // `Reflect.construct(C)` with our function as NewTarget.
     const proto = realm.heap.allocateObject() catch return error.OutOfMemory;
-    proto.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(proto, realm.intrinsics.object_prototype);
     proto.setWithFlags(realm.allocator, "constructor", heap_mod.taggedFunction(empty), .{
         .writable = true,
         .enumerable = false,
         .configurable = true,
     }) catch return error.OutOfMemory;
-    empty.prototype = proto;
+    realm.heap.setFunctionPrototype(empty, proto);
     // If called via `new`, the interpreter pre-allocated `this`;
     // ConstructResult prefers our return value (the empty fn) per
     // §13.3.5.1.1 when it's an Object. Plain-call returns it too.
@@ -456,9 +456,9 @@ fn functionBind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // `bound_target` and route through that.
     const bound = realm.heap.allocateFunctionNative(boundFunctionTrampoline, 0, "bound") catch return error.OutOfMemory;
     bound.proto = realm.intrinsics.function_prototype;
-    bound.bound_target = target;
-    bound.bound_this = bound_this;
-    bound.bound_args = owned_args;
+    realm.heap.setBoundTarget(bound, target);
+    realm.heap.setBoundThis(bound, bound_this);
+    realm.heap.setBoundArgs(bound, owned_args);
     // §10.4.1.2 BoundFunctionCreate — the bound has [[Construct]] iff
     // the target has [[Construct]]. Built-in static methods (Math.cos,
     // String.fromCharCode, …) are installed with `has_construct=false`,
@@ -589,7 +589,7 @@ fn installVariantCtor(realm: *Realm, name: []const u8) !*JSObject {
     const proto = try realm.heap.allocateObject();
     // §27.3 — these prototypes inherit from %Function.prototype%
     // (NOT %Object.prototype%) so e.g. `bind` / `call` resolve.
-    proto.prototype = realm.intrinsics.function_prototype;
+    realm.heap.setObjectPrototype(proto, realm.intrinsics.function_prototype);
     // §27.3.4.1 / §27.4.3.1 — `constructor` is
     // { w:false, e:false, c:true } on the variant prototypes.
     // `setNonEnumerable` defaults to writable=true; use
@@ -601,7 +601,7 @@ fn installVariantCtor(realm: *Realm, name: []const u8) !*JSObject {
     });
     // §27.3.3 — GeneratorFunction.prototype[@@toStringTag] etc.
     try installToStringTag(realm, proto, name);
-    fn_obj.prototype = proto;
+    realm.heap.setFunctionPrototype(fn_obj, proto);
     // §17 — built-in constructor `prototype` slot is
     // { w:false, e:false, c:false }. Same rationale as the
     // installConstructor branch in `intrinsics.zig`; pin

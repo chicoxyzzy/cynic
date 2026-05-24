@@ -96,7 +96,7 @@ pub fn objectConstructor(realm: *Realm, this_value: Value, args: []const Value) 
     // Plain `Object()` / `Object(undefined)` / `Object(null)` —
     // build a fresh empty object.
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-    obj.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
     return heap_mod.taggedObject(obj);
 }
 
@@ -688,7 +688,7 @@ fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // `Object.keys(class C { static x = 1 })` produces `["x"]`.
     if (heap_mod.valueAsFunction(arg)) |fn_obj| {
         const result = realm.heap.allocateObject() catch return error.OutOfMemory;
-        result.prototype = realm.intrinsics.array_prototype;
+        realm.heap.setObjectPrototype(result, realm.intrinsics.array_prototype);
         result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
         // Root the result array — it is built across a loop whose
         // `allocateString` calls can trigger a GC sweep.
@@ -720,7 +720,7 @@ fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const keys = if (try proxyOwnKeysOrNull(realm, obj, key_scope)) |k| k else try ownPropertyKeysOrdered(realm, obj, key_scope);
     defer realm.allocator.free(keys);
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
-    result.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(result, realm.intrinsics.array_prototype);
     result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     // Root the source and the result array — the loop below re-enters
     // JS through the proxy `getOwnPropertyDescriptor` trap, and each
@@ -896,7 +896,7 @@ fn functionEnumerableOwnValues(
     kind: FunctionEnumKind,
 ) NativeError!Value {
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
-    result.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(result, realm.intrinsics.array_prototype);
     result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     // Root the result array — it is built across `allocateString`
     // GC safepoints.
@@ -920,7 +920,7 @@ fn functionEnumerableOwnValues(
             },
             .entry => {
                 const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
-                pair.prototype = realm.intrinsics.array_prototype;
+                realm.heap.setObjectPrototype(pair, realm.intrinsics.array_prototype);
                 pair.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
                 scope.push(heap_mod.taggedObject(pair)) catch return error.OutOfMemory;
                 const key_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
@@ -960,7 +960,7 @@ fn objectValues(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     defer realm.allocator.free(pairs);
     // step 3 — `Return CreateArrayFromList(nameList)`.
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
-    result.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(result, realm.intrinsics.array_prototype);
     result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     scope.push(heap_mod.taggedObject(result)) catch return error.OutOfMemory;
     var idx: usize = 0;
@@ -999,13 +999,13 @@ fn objectEntries(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     defer realm.allocator.free(pairs);
     // step 3 — `Return CreateArrayFromList(nameList)`.
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
-    result.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(result, realm.intrinsics.array_prototype);
     result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     scope.push(heap_mod.taggedObject(result)) catch return error.OutOfMemory;
     var idx: usize = 0;
     for (pairs) |p| {
         const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
-        pair.prototype = realm.intrinsics.array_prototype;
+        realm.heap.setObjectPrototype(pair, realm.intrinsics.array_prototype);
         pair.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
         scope.push(heap_mod.taggedObject(pair)) catch return error.OutOfMemory;
         pair.set(realm.allocator, "0", Value.fromString(p.key_str)) catch return error.OutOfMemory;
@@ -1516,7 +1516,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
         if (heap_mod.valueAsPlainObject(desc_v)) |o| break :blk_desc o;
         if (heap_mod.valueAsFunction(desc_v)) |fn_obj| {
             const w = realm.heap.allocateObject() catch return error.OutOfMemory;
-            w.prototype = fn_obj.proto;
+            realm.heap.setObjectPrototype(w, fn_obj.proto);
             var fit = fn_obj.properties.iterator();
             while (fit.next()) |entry| {
                 w.set(realm.allocator, entry.key_ptr.*, entry.value_ptr.*) catch return error.OutOfMemory;
@@ -1749,10 +1749,12 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
                 }
             }
             const entry = target.getOrPutAccessor(realm.allocator, key) catch return error.OutOfMemory;
+            if (!entry.found_existing) entry.value_ptr.* = .{};
             // Preserve the half not specified in the new desc.
             const new_getter: ?*JSFunction = if (parsed.has_get) parsed.getter else if (cur_is_accessor) cur_getter else null;
             const new_setter: ?*JSFunction = if (parsed.has_set) parsed.setter else if (cur_is_accessor) cur_setter else null;
-            entry.value_ptr.* = .{ .getter = new_getter, .setter = new_setter };
+            realm.heap.setAccessorGetter(.{ .object = target }, entry.value_ptr, new_getter);
+            realm.heap.setAccessorSetter(.{ .object = target }, entry.value_ptr, new_setter);
             // Accessors don't honor `writable`; clear that bit.
             flags.writable = false;
             target.property_flags.put(realm.allocator, key, flags) catch return error.OutOfMemory;
@@ -1857,9 +1859,11 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             // Replace any existing data slot.
             _ = target_fn.properties.swapRemove(key);
             const entry = target_fn.accessors.getOrPut(realm.allocator, key) catch return error.OutOfMemory;
+            if (!entry.found_existing) entry.value_ptr.* = .{};
             const new_getter: ?*JSFunction = if (parsed.has_get) parsed.getter else if (cur_is_accessor) cur_getter else null;
             const new_setter: ?*JSFunction = if (parsed.has_set) parsed.setter else if (cur_is_accessor) cur_setter else null;
-            entry.value_ptr.* = .{ .getter = new_getter, .setter = new_setter };
+            realm.heap.setAccessorGetter(.{ .function = target_fn }, entry.value_ptr, new_getter);
+            realm.heap.setAccessorSetter(.{ .function = target_fn }, entry.value_ptr, new_setter);
             // Accessors don't carry a `writable` bit; clear it.
             flags.writable = false;
             const is_default = flags.writable and flags.enumerable and flags.configurable;
@@ -2191,7 +2195,7 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
             if (ta.canonicalNumericIndex(key)) |num| {
                 if (ta.typedArrayGetOwnPropertyValue(realm, obj, num)) |v| {
                     const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
-                    desc.prototype = realm.intrinsics.object_prototype;
+                    realm.heap.setObjectPrototype(desc, realm.intrinsics.object_prototype);
                     desc.set(realm.allocator, "value", v) catch return error.OutOfMemory;
                     desc.set(realm.allocator, "writable", Value.fromBool(true)) catch return error.OutOfMemory;
                     desc.set(realm.allocator, "enumerable", Value.fromBool(true)) catch return error.OutOfMemory;
@@ -2204,7 +2208,7 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
         // Accessor descriptor first.
         if (obj.getAccessor(key)) |acc| {
             const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
-            desc.prototype = realm.intrinsics.object_prototype;
+            realm.heap.setObjectPrototype(desc, realm.intrinsics.object_prototype);
             const get_v: Value = if (acc.getter) |g| heap_mod.taggedFunction(g) else Value.undefined_;
             const set_v: Value = if (acc.setter) |s| heap_mod.taggedFunction(s) else Value.undefined_;
             desc.set(realm.allocator, "get", get_v) catch return error.OutOfMemory;
@@ -2230,7 +2234,7 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
             obj.get(key);
         const flags = obj.flagsFor(key);
         const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
-        desc.prototype = realm.intrinsics.object_prototype;
+        realm.heap.setObjectPrototype(desc, realm.intrinsics.object_prototype);
         desc.set(realm.allocator, "value", value) catch return error.OutOfMemory;
         desc.set(realm.allocator, "writable", Value.fromBool(flags.writable)) catch return error.OutOfMemory;
         desc.set(realm.allocator, "enumerable", Value.fromBool(flags.enumerable)) catch return error.OutOfMemory;
@@ -2247,7 +2251,7 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
         // descriptors are mutually exclusive shapes.
         if (fn_obj.accessors.get(key)) |acc| {
             const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
-            desc.prototype = realm.intrinsics.object_prototype;
+            realm.heap.setObjectPrototype(desc, realm.intrinsics.object_prototype);
             const get_v: Value = if (acc.getter) |g| heap_mod.taggedFunction(g) else Value.undefined_;
             const set_v: Value = if (acc.setter) |s| heap_mod.taggedFunction(s) else Value.undefined_;
             desc.set(realm.allocator, "get", get_v) catch return error.OutOfMemory;
@@ -2261,7 +2265,7 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
         const value = fn_obj.get(key);
         const flags = fn_obj.flagsForOwn(key);
         const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
-        desc.prototype = realm.intrinsics.object_prototype;
+        realm.heap.setObjectPrototype(desc, realm.intrinsics.object_prototype);
         desc.set(realm.allocator, "value", value) catch return error.OutOfMemory;
         desc.set(realm.allocator, "writable", Value.fromBool(flags.writable)) catch return error.OutOfMemory;
         desc.set(realm.allocator, "enumerable", Value.fromBool(flags.enumerable)) catch return error.OutOfMemory;
@@ -2285,7 +2289,7 @@ fn objectGetOwnPropertyDescriptors(realm: *Realm, this_value: Value, args: []con
         raw;
     const obj = heap_mod.valueAsPlainObject(target) orelse return throwTypeError(realm, "Object.getOwnPropertyDescriptors target is not an object");
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.object_prototype);
     // Root the source and the result across the re-entrant loop
     // (proxy GOPD traps, plus `allocateString` GC safepoints).
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
@@ -2353,7 +2357,7 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
     // a TypeError instead of returning ["length", "name", …].
     if (heap_mod.valueAsFunction(target)) |fn_obj| {
         const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-        out.prototype = realm.intrinsics.array_prototype;
+        realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
         out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
         // Root the result array — built across `allocateString` GC
         // safepoints.
@@ -2448,7 +2452,7 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
     const keys = if (try proxyOwnKeysOrNull(realm, obj, key_scope)) |k| k else try ownPropertyKeysOrdered(realm, obj, key_scope);
     defer realm.allocator.free(keys);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
@@ -2496,7 +2500,7 @@ fn objectGetOwnPropertySymbols(realm: *Realm, this_value: Value, args: []const V
         raw;
     if (heap_mod.valueAsFunction(target)) |fn_obj| {
         const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-        out.prototype = realm.intrinsics.array_prototype;
+        realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
         out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
         const fscope = realm.heap.openScope() catch return error.OutOfMemory;
         defer fscope.close();
@@ -2527,7 +2531,7 @@ fn objectGetOwnPropertySymbols(realm: *Realm, this_value: Value, args: []const V
     const keys = if (try proxyOwnKeysOrNull(realm, obj, key_scope)) |k| k else try ownPropertyKeysOrdered(realm, obj, key_scope);
     defer realm.allocator.free(keys);
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
@@ -2557,11 +2561,11 @@ fn objectCreate(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const proto_v = argOr(args, 0, Value.undefined_);
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
     if (proto_v.isNull()) {
-        obj.prototype = null;
+        realm.heap.setObjectPrototype(obj, null);
     } else if (heap_mod.valueAsPlainObject(proto_v)) |p| {
-        obj.prototype = p;
+        realm.heap.setObjectPrototype(obj, p);
     } else if (heap_mod.valueAsFunction(proto_v)) |fn_obj| {
-        obj.prototype = fn_obj.prototype;
+        realm.heap.setObjectPrototype(obj, fn_obj.prototype);
     } else {
         return throwTypeError(realm, "Object.create prototype must be an Object or null");
     }
@@ -2796,7 +2800,7 @@ fn setIntegrityLevelViaProxy(realm: *Realm, target_v: Value, target: *JSObject, 
             is_accessor = cur_desc.hasOwn("get") or cur_desc.hasOwn("set");
         }
         const desc_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-        desc_obj.prototype = realm.intrinsics.object_prototype;
+        realm.heap.setObjectPrototype(desc_obj, realm.intrinsics.object_prototype);
         desc_obj.set(realm.allocator, "configurable", Value.false_) catch return error.OutOfMemory;
         if (frozen and !is_accessor) {
             desc_obj.set(realm.allocator, "writable", Value.false_) catch return error.OutOfMemory;
@@ -3332,7 +3336,7 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
     const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "iterator.next is not callable");
 
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.object_prototype);
     // Root the result and the iterator across the iteration loop —
     // every `next()` / accessor read re-enters JS and allocates.
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
@@ -3588,7 +3592,7 @@ pub fn objectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
             }
             cursor = node.prototype;
         }
-        obj.prototype = new_proto;
+        realm.heap.setObjectPrototype(obj, new_proto);
         // §10.1.2.1 — every cached IC cell that resolved through
         // the prototype chain may now point at a stale link. Bump
         // the revision counter so all proto-load cells miss + refill
@@ -3635,7 +3639,7 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const cb = heap_mod.valueAsFunction(cb_v) orelse return throwTypeError(realm, "Object.groupBy callback is not callable");
 
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = null; // null-prototype per spec
+    realm.heap.setObjectPrototype(out, null); // null-prototype per spec
 
     const iter = lantern.openIterator(realm.allocator, realm, items_v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -3701,7 +3705,7 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
             bucket = heap_mod.valueAsPlainObject(existing) orelse return error.NativeThrew;
         } else {
             bucket = realm.heap.allocateObject() catch return error.OutOfMemory;
-            bucket.prototype = realm.intrinsics.array_prototype;
+            realm.heap.setObjectPrototype(bucket, realm.intrinsics.array_prototype);
             bucket.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
             bucket.set(realm.allocator, "length", Value.fromInt32(0)) catch return error.OutOfMemory;
             out.set(realm.allocator, key_str, heap_mod.taggedObject(bucket)) catch return error.OutOfMemory;

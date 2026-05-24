@@ -236,7 +236,7 @@ fn regexpProtoMatch(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // step 6.c — `Let A be ! ArrayCreate(0)`. Allocate an array-
     // exotic JSObject so `Array.isArray(result)` is true.
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
 
     // step 6.d — `Let n be 0`.
@@ -895,7 +895,7 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // step 11 — `Let A be ! ArrayCreate(0)`. Allocate an array-
     // exotic JSObject so `Array.isArray(result)` is true.
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
 
     // step 12 — `Let lengthA be 0`.
@@ -1337,7 +1337,7 @@ fn regexpProtoMatchAll(realm: *Realm, this_value: Value, args: []const Value) Na
     // property. `string.zig:regexpStringIterNext` reads it.
     const iter = realm.heap.allocateObject() catch return error.OutOfMemory;
     scope.push(heap_mod.taggedObject(iter)) catch return error.OutOfMemory;
-    iter.prototype = realm.intrinsics.regexp_string_iterator_prototype orelse realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(iter, realm.intrinsics.regexp_string_iterator_prototype orelse realm.intrinsics.object_prototype);
     const ri_state = realm.allocator.create(RegExpStringIterState) catch return error.OutOfMemory;
     ri_state.* = .{
         .regexp = heap_mod.taggedObject(matcher),
@@ -1397,7 +1397,7 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     }
     const inst = if (called_with_new) this_obj.? else blk: {
         const fresh = realm.heap.allocateObject() catch return error.OutOfMemory;
-        fresh.prototype = realm.intrinsics.regexp_prototype;
+        realm.heap.setObjectPrototype(fresh, realm.intrinsics.regexp_prototype);
         break :blk fresh;
     };
     // The pattern / flags coercion below — `Get(pattern, "source")`,
@@ -1452,8 +1452,8 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     // §22.2.4 `[[OriginalSource]]` / `[[OriginalFlags]]` — typed
     // JSObject slots, not properties. Surfaced to JS only through
     // the accessors on `RegExp.prototype`.
-    inst.regexp_source = pat_s;
-    inst.regexp_flags = flag_s;
+    realm.heap.setRegexpSource(inst, pat_s);
+    realm.heap.setRegexpFlags(inst, flag_s);
     // §22.2.4 step 13 — `lastIndex` is `{ w:true, e:false, c:false }`.
     // Default `set` lands at all-true, so JSON.stringify({toJSON: /re/})
     // surfaced "lastIndex" as an enumerable own key.
@@ -1815,7 +1815,7 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // Build the result array per §22.2.7.2 — `[whole,...captures]`
     // with `index` and `input` properties on the result.
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     const whole_str = try allocMatchString(realm, input_s.flatBytes(), whole_start, whole_end);
     out.set(realm.allocator, "0", Value.fromString(whole_str)) catch return error.OutOfMemory;
@@ -1888,7 +1888,7 @@ fn buildIndicesArray(
     // step 6 — `Let A be ! ArrayCreate(n)`. Array-exotic so
     // `Array.isArray(indices)` is true (`indices-array.js`).
     const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
-    arr.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(arr, realm.intrinsics.array_prototype);
     arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
 
     var ibuf: [16]u8 = undefined;
@@ -1912,7 +1912,7 @@ fn buildIndicesArray(
         const u_start = (@intFromPtr(start_ptr.?) - cbuf_addr) / 2;
         const u_end = (@intFromPtr(end_ptr.?) - cbuf_addr) / 2;
         const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
-        pair.prototype = realm.intrinsics.array_prototype;
+        realm.heap.setObjectPrototype(pair, realm.intrinsics.array_prototype);
         pair.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
         pair.set(realm.allocator, "0", Value.fromInt32(@intCast(u_start))) catch return error.OutOfMemory;
         pair.set(realm.allocator, "1", Value.fromInt32(@intCast(u_end))) catch return error.OutOfMemory;
@@ -1960,7 +1960,7 @@ fn buildIndicesGroupsObject(
     // Null prototype mirrors `result.groups` (§22.2.7.2 step 33.a),
     // so `__proto__` lands as a plain own property
     // (`indices-groups-object.js`).
-    groups.prototype = null;
+    realm.heap.setObjectPrototype(groups, null);
 
     var p: usize = 0;
     var g: usize = 1;
@@ -1977,7 +1977,7 @@ fn buildIndicesGroupsObject(
             const u_start = (@intFromPtr(start_ptr.?) - cbuf_addr) / 2;
             const u_end = (@intFromPtr(end_ptr.?) - cbuf_addr) / 2;
             const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
-            pair.prototype = realm.intrinsics.array_prototype;
+            realm.heap.setObjectPrototype(pair, realm.intrinsics.array_prototype);
             pair.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
             pair.set(realm.allocator, "0", Value.fromInt32(@intCast(u_start))) catch return error.OutOfMemory;
             pair.set(realm.allocator, "1", Value.fromInt32(@intCast(u_end))) catch return error.OutOfMemory;
@@ -2022,7 +2022,7 @@ fn buildGroupsObject(
     // §22.2.7.2 step 33.a — `OrdinaryObjectCreate(null)`. Groups
     // object has a null prototype so `__proto__` keys land as
     // ordinary own properties, not as prototype-chain reads.
-    groups.prototype = null;
+    realm.heap.setObjectPrototype(groups, null);
 
     var p: usize = 0;
     var g: usize = 1;
