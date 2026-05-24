@@ -3826,8 +3826,8 @@ fn makeBoundCb(realm: *Realm, impl: *const fn (*Realm, Value, []const Value) Nat
     const bound = realm.heap.allocateFunctionNative(promise_mod.boundResolveTrampolineExported, 1, "") catch return error.OutOfMemory;
     bound.proto = realm.intrinsics.function_prototype;
     bound.has_construct = false;
-    bound.bound_target = impl_fn;
-    bound.bound_this = heap_mod.taggedObject(state);
+    realm.heap.setBoundTarget(bound, impl_fn);
+    realm.heap.setBoundThis(bound, heap_mod.taggedObject(state));
     return bound;
 }
 
