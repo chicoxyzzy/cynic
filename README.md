@@ -111,12 +111,18 @@ module graph beyond single-file evaluation (cyclic imports, namespace
 exotic, live mutable bindings — dynamic `import()` itself works);
 async-generator yield-star resume-arg forwarding + `AsyncIteratorClose`
 with `await`; `Array.fromAsync`; resizable-ArrayBuffer length-tracking
-view semantics across the TypedArray prototype; tail-call optimization
-(PTC); generational GC; the timezone story behind `Date` (UTC-only
-today); `String.prototype.normalize` (passthrough — needs UCD tables);
+view semantics across the TypedArray prototype; generational GC; the
+timezone story behind `Date` (UTC-only today);
+`String.prototype.normalize` (passthrough — needs UCD tables);
 `Set.prototype.{union, intersection, difference, …}` (ES2025). Each
 takes a swing at the runtime score as it lands; the scoreboard in
 [`test262-results.md`](test262-results.md) is the source of truth.
+
+Proper Tail Calls (PTC, ES2015 §15.10) ship behind the
+`tail-call-optimization` feature flag — opt in with
+`cynic --enable=tail-call-optimization run foo.js`. Off-by-default
+because `Error.stack` loses the eliminated frames per spec; on, Cynic
+is the second engine shipping spec-mandated PTC alongside JSC.
 
 ## Build
 

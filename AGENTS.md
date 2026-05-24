@@ -218,8 +218,9 @@ Common commands:
     zig build run -- run <file>                     # compile + run a script
 
 The `cynic` CLI defaults pre-Stage-4 / experimental TC39
-proposals (currently `joint-iteration`, `upsert`) to off so
-embedders see only stable ECMA-262. Opt in:
+proposals (currently `joint-iteration`, `upsert`,
+`tail-call-optimization`) to off so embedders see only stable
+ECMA-262. Opt in:
 
     cynic --enable=<name> run foo.js                # one feature
     cynic --enable-experimental run foo.js          # all tracked features
