@@ -167,7 +167,11 @@ fn installIteratorPrototypeConstructorAccessor(realm: *Realm, proto: *JSObject) 
     // installConstructor left a data slot under "constructor" —
     // strip it so the accessor wins on lookup. (Even though
     // `install_constructor_property = false` now skips it, we
-    // keep the cleanup for safety.)
+    // keep the cleanup for safety.) Demote the shadow shape
+    // first — without it, a shape-first read on this proto
+    // would return the stale slot value instead of routing
+    // through the accessor we just installed.
+    proto.demoteFromShape();
     _ = proto.properties.swapRemove("constructor");
     proto.forgetKey("constructor");
 }
@@ -188,6 +192,9 @@ fn installIteratorPrototypeToStringTagAccessor(realm: *Realm, proto: *JSObject) 
         .enumerable = false,
         .configurable = true,
     });
+    // Same shadow-shape hazard as the constructor cleanup above
+    // — demote before stripping the data slot.
+    proto.demoteFromShape();
     _ = proto.properties.swapRemove("@@toStringTag");
     proto.forgetKey("@@toStringTag");
 }
