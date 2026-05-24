@@ -798,6 +798,109 @@ matching the JIT engines at full speed is a separate track (see
    dispatch core — lowest priority, and the point where a
    baseline JIT becomes the better investment.
 
+**Planned — interpreter-tier optimizations beyond ICs.**
+
+The IC arc (item 1 above) covered the biggest single chunk —
+property access. Beyond ICs, several classical interpreter
+optimizations remain on the table. Stack-ranked by expected
+impact for an interpreter-only engine; numbers are estimates,
+not measurements.
+
+5. **Super-instructions (bytecode pair fusion).** Static
+   analysis over compiled chunks identifies the top-N
+   bytecode-pair sequences (e.g. `lda_const k; sta_property k2`,
+   `ldar r; add r2`, `lda_int N; lt r`). Each pair becomes one
+   opcode — one dispatch, one operand fetch. V8 Ignition ships
+   ~30 super-instructions; the single biggest non-JIT perf
+   lever after ICs. Compiler emits the fused form when the
+   AST pattern matches; interpreter handler is the body of the
+   two old opcodes inlined. Estimated ~10-20 % on synthetic
+   benches.
+
+6. **Counter-loop specialization.** Detect
+   `for (let i = 0; i < N; i++)` at compile time, emit a
+   specialized `loop_inc_lt` opcode that fuses
+   `add 1 + lt + jmp_if_true`. Closes most of the remaining
+   `arith_loop` gap to QuickJS-NG. Compile-time pattern match
+   over the `ForStmt` AST; runtime keeps the loop counter in a
+   register and reads the bound from another. Hermes / Ignition
+   both ship this.
+
+7. **Peephole pass at bytecode emit.** Pattern-match short
+   sequences in the emitted bytecode and rewrite:
+   - `lda_const 0; sub` → `negate`
+   - `ldar r; star r2; ldar r2` → `mov r r2`
+   - `lda_const c; jmp_if_false L` → fold (when c is statically
+     truthy/falsy)
+   - `jmp L1; L1: jmp L2` → `jmp L2` (jump threading)
+   - dead code after unconditional `return` / `throw` / `jmp`
+   Each rewrite is marginal; compounded across a real chunk
+   they shrink bytecode and remove dispatch overhead. Easy
+   first non-IC chunk to land.
+
+8. **Frame register pool.** Every call site does
+   `allocator.alloc(Value, register_count)` for the callee's
+   register file — a heap allocation per call. Pool / arena
+   would amortize. Real win on call-heavy code; complements
+   the call IC. Estimated ~5-10 % on tight call loops.
+
+9. **String interning for property keys + small literals.**
+   Identifier strings interned at compile time + at heap
+   allocation. Property-bag lookups become pointer compares
+   in the hash key path instead of byte compares. Compounds
+   with the IC: even on a cache miss, the hash lookup is
+   faster. Also a precondition for the
+   computed-property IC (`obj[k]` with hot constant `k`).
+
+10. **SMI fast paths in arithmetic / comparison opcodes.**
+    Cynic uses NaN-boxing so an int32 value is identifiable
+    by tag. The `add` / `sub` / `mul` / `lt` / `eq` opcodes
+    can check `(lhs.isInt32() and rhs.isInt32())` early and
+    take a non-overflow integer path before falling back to
+    the full numeric-tower coercion. Some opcodes already
+    have this; auditing for completeness is the work.
+
+11. **Direct-threaded dispatch.** Pre-decode each chunk's
+    bytecode into a list of `(handler_fn_ptr, operand_bytes)`
+    pairs at chunk-finalize time; the dispatch loop indexes
+    that list directly, skipping the opcode-byte → switch-arm
+    indirection. JSC's LLInt uses this pattern. Significant
+    rewrite — a chunk grows a parallel "decoded" representation,
+    every opcode handler becomes addressable via `&handler`,
+    and `Chunk` ownership/layout shifts. Worth it only after
+    everything else is exhausted. The interpreter perf
+    ceiling without a JIT.
+
+12. **Inline small function bodies at bytecode-emit time.**
+    For non-recursive, non-escaping, small (<N bytecode bytes)
+    functions, inline the body at the call site. Bytecode-
+    level inlining (no JIT speculation required). Niche but
+    real for hot helper functions.
+
+13. **Environment hoisting (more sites).** `for-of` and C-style
+    `for` already hoist the per-iteration env when the body has
+    no closure capture (shipped). `while` / `do-while` / classic
+    `for` blocks with no closures are candidate sites for the
+    same analysis. Each hoist avoids one `allocateEnvironment`
+    per iteration.
+
+14. **Loop unrolling / loop-invariant code motion.** Bytecode-
+    level unrolling pays icache cost on bigger bodies; rarely
+    a win in practice for an interpreter. LICM needs escape
+    analysis (JIT-territory). Both skipped unless a profile
+    shows a specific workload that warrants the cost.
+
+15. **Tail call optimization** (§15.10 / PTC). See the
+    separate *Proper Tail Calls* section below. JSC was the
+    only engine that shipped this; spec made it optional. Not
+    a perf priority.
+
+The cross-engine bench dictates the order. If `prop_access` /
+`prop_write` / call-heavy workloads sit at parity with
+QuickJS-NG post-IC, the next bottleneck is `arith_loop` (pure
+dispatch + arithmetic throughput) — items 5, 6, 7, 10. If
+allocation-heavy workloads dominate, items 8, 9.
+
 **Planned — GC latency.**
 
 - **Incremental / concurrent marking.** The generational
