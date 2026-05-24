@@ -1622,9 +1622,9 @@ pub fn runFrames(
                 // First call returns undefined and clears the slot;
                 // subsequent calls no-op (slot is null).
                 if (callee_fn.revocable_proxy) |rp| {
-                    rp.proxy_target = null;
-                    rp.proxy_handler = null;
-                    rp.proxy_target_fn = null;
+                    realm.heap.setProxyTarget(rp, null);
+                    realm.heap.setProxyHandler(rp, null);
+                    realm.heap.setProxyTargetFn(rp, null);
                     rp.proxy_revoked = true;
                     callee_fn.revocable_proxy = null;
                     acc = Value.undefined_;
@@ -1903,9 +1903,9 @@ pub fn runFrames(
 
                     // §28.2.2.1.1 — revocation function. See `.call`.
                     if (fn_v.revocable_proxy) |rp| {
-                        rp.proxy_target = null;
-                        rp.proxy_handler = null;
-                        rp.proxy_target_fn = null;
+                        realm.heap.setProxyTarget(rp, null);
+                        realm.heap.setProxyHandler(rp, null);
+                        realm.heap.setProxyTargetFn(rp, null);
                         rp.proxy_revoked = true;
                         fn_v.revocable_proxy = null;
                         acc = Value.undefined_;
@@ -4945,7 +4945,7 @@ pub fn runFrames(
                         if (looks_anonymous) {
                             const owned = realm.heap.allocateString("default") catch return error.OutOfMemory;
                             realm.heap.storeFunctionProperty(fn_obj, realm.allocator, "name", Value.fromString(owned)) catch return error.OutOfMemory;
-                            fn_obj.name_string = owned;
+                            realm.heap.setFunctionNameString(fn_obj, owned);
                             fn_obj.name = owned.flatBytes();
                         }
                     }
@@ -8126,7 +8126,7 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
         // `prototype` clears the dedicated slot.
         if (std.mem.eql(u8, key, "name")) {
             fn_obj.name = null;
-            fn_obj.name_string = null;
+            realm.heap.setFunctionNameString(fn_obj, null);
         }
         if (std.mem.eql(u8, key, "prototype")) realm.heap.setFunctionPrototype(fn_obj, null);
         _ = fn_obj.properties.swapRemove(key);
