@@ -148,6 +148,18 @@ target = null;
 for (let i = 0; i < 200000; i++) ({ k: i });
 
 ref.deref()?.tag ?? "collected";`,
+
+  'Proper Tail Calls': `// ES2015 §15.10 — a call in tail position reuses the caller's
+// frame instead of pushing a fresh one. Recursing 100,000 deep
+// without PTC would overflow the 1024-frame dispatch stack;
+// here it lands cleanly because each \`return f(...)\` is a
+// frame reuse, not a frame push. Second engine after
+// JavaScriptCore to ship this. Error.stack is shorter as a
+// result — that's the deal the spec wrote down.
+function loop(n, acc) {
+  return n === 0 ? acc : loop(n - 1, acc + 1);
+}
+loop(100000, 0);`,
 };
 
 const DEFAULT_SNIPPET = SAMPLES['Hello, strict world'];
