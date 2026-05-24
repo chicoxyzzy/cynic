@@ -229,32 +229,34 @@ const empty_span: cynic.source.Span = .{ .start = 0, .end = 0 };
 export fn cynic_eval(src: [*]const u8, len: u32) [*]u8 {
     const source = src[0..len];
 
-    // Pre-parse with a diagnostics buffer so syntax errors surface
-    // as readable text instead of a silent `undefined`. Cynic's
-    // parser is diagnostic-collecting — it only returns
-    // `error.ParseError` for fatal cases and otherwise yields a
-    // (possibly partial) program with error-severity diagnostics
-    // attached. The playground reports the first such diagnostic
-    // and does NOT execute a program that failed to parse cleanly.
-    {
-        var arena = std.heap.ArenaAllocator.init(gpa);
-        defer arena.deinit();
-        var diags: cynic.diagnostic.Diagnostics = .empty;
-        const pre = cynic.parser.parseScript(arena.allocator(), source, &diags);
-        if (pre) |_| {
-            if (firstError(&diags)) |d| {
-                var msg: std.ArrayListUnmanaged(u8) = .empty;
-                defer msg.deinit(gpa);
-                appendDiagnostics(&msg, &diags) catch {};
-                return buildFrame(.parse_error, "", "", msg.items, d.span);
-            }
-        } else |_| {
-            var msg: std.ArrayListUnmanaged(u8) = .empty;
-            defer msg.deinit(gpa);
-            appendDiagnostics(&msg, &diags) catch {};
-            const span = if (firstError(&diags)) |d| d.span else empty_span;
-            return buildFrame(.parse_error, "", "", msg.items, span);
-        }
+    // The whole pipeline shares one Diagnostics buffer so both
+    // parse and compile errors surface with the same span / format
+    // machinery (`firstError` + `appendDiagnostics`). The previous
+    // implementation hand-wrote a pre-parse for syntax errors but
+    // then called `evaluateScript`, which discards the compile-stage
+    // diagnostics and folds every failure into the generic
+    // "SyntaxError: failed to compile" — that was the bug the
+    // `class + #private` sample surfaced. Run the steps directly so
+    // we keep ownership of the buffer.
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var diags: cynic.diagnostic.Diagnostics = .empty;
+
+    // 1. Parse. Cynic's parser is diagnostic-collecting — it only
+    // returns `error.ParseError` for fatal cases and otherwise yields
+    // a (possibly partial) program with error-severity diagnostics
+    // attached. Surface the first error either way.
+    const program = cynic.parser.parseScript(arena.allocator(), source, &diags) catch {
+        var msg: std.ArrayListUnmanaged(u8) = .empty;
+        defer msg.deinit(gpa);
+        const span = formatDiagnostics(&msg, &diags, "SyntaxError: failed to parse");
+        return buildFrame(.parse_error, "", "", msg.items, span);
+    };
+    if (firstError(&diags)) |d| {
+        var msg: std.ArrayListUnmanaged(u8) = .empty;
+        defer msg.deinit(gpa);
+        appendDiagnostics(&msg, &diags) catch {};
+        return buildFrame(.parse_error, "", "", msg.items, d.span);
     }
 
     var realm = Realm.init(gpa);
@@ -263,10 +265,46 @@ export fn cynic_eval(src: [*]const u8, len: u32) [*]u8 {
         return buildFrame(.parse_error, "", "", "internal error: builtin install failed", empty_span);
     };
 
-    const outcome = cynic.runtime.evaluateScript(gpa, &realm, source) catch |err| {
+    // 2. Compile. Inlines `evaluateScript`'s parse+compile+pin step
+    // (see `runtime/lantern/interpreter.zig`) so we can thread the
+    // diagnostics buffer through `compileScriptAsChunk`. The chunk
+    // is heap-allocated on `realm.allocator` and pinned in
+    // `realm.script_chunks` for the same reason `evaluateScript`
+    // does: any `JSFunction` declared by this script keeps a pointer
+    // into the chunk's `function_templates`, which must outlive the
+    // emit step.
+    const chunk_ptr = realm.allocator.create(cynic.bytecode.Chunk) catch {
+        return buildFrame(.parse_error, "", "", "internal error: chunk alloc failed", empty_span);
+    };
+    chunk_ptr.* = cynic.bytecode.compiler.compileScriptAsChunk(
+        realm.allocator,
+        &realm,
+        &program,
+        source,
+        &diags,
+    ) catch {
+        realm.allocator.destroy(chunk_ptr);
+        var msg: std.ArrayListUnmanaged(u8) = .empty;
+        defer msg.deinit(gpa);
+        // When the compiler throws without a recorded diagnostic
+        // (current behaviour for some emit paths — see
+        // `docs/ecma262-upstream-gaps.md` / engine TODO), the
+        // fallback string says so explicitly rather than misleading
+        // the user with a parse-error label.
+        const span = formatDiagnostics(
+            &msg,
+            &diags,
+            "SyntaxError: failed to compile (engine did not record a diagnostic)",
+        );
+        return buildFrame(.parse_error, realm.output.items, "", msg.items, span);
+    };
+    realm.script_chunks.append(realm.allocator, chunk_ptr) catch {
+        return buildFrame(.parse_error, "", "", "internal error: chunk pin failed", empty_span);
+    };
+
+    // 3. Run.
+    const outcome = cynic.runtime.lantern.run(gpa, &realm, chunk_ptr) catch |err| {
         const msg = switch (err) {
-            error.ParseError => "SyntaxError: failed to parse",
-            error.CompileError => "SyntaxError: failed to compile",
             error.OutOfMemory => "RangeError: out of memory",
             error.InvalidOpcode => "InternalError: invalid opcode",
         };
@@ -312,17 +350,16 @@ export fn cynic_parse(src: [*]const u8, len: u32) [*]u8 {
     var diags: cynic.diagnostic.Diagnostics = .empty;
     const program = cynic.parser.parseScript(aa, source, &diags) catch {
         var msg: std.ArrayListUnmanaged(u8) = .empty;
-        appendDiagnostics(&msg, &diags) catch {};
         defer msg.deinit(gpa);
-        const span = if (firstError(&diags)) |d| d.span else empty_span;
+        const span = formatDiagnostics(&msg, &diags, "SyntaxError: failed to parse");
         return buildFrame(.parse_error, "", "", msg.items, span);
     };
     // A non-fatal parse can still have collected error diagnostics
     // — surface them rather than disassembling a malformed program.
     if (firstError(&diags)) |d| {
         var msg: std.ArrayListUnmanaged(u8) = .empty;
-        appendDiagnostics(&msg, &diags) catch {};
         defer msg.deinit(gpa);
+        appendDiagnostics(&msg, &diags) catch {};
         return buildFrame(.parse_error, "", "", msg.items, d.span);
     }
 
@@ -332,8 +369,24 @@ export fn cynic_parse(src: [*]const u8, len: u32) [*]u8 {
         return buildFrame(.parse_error, "", "", "internal error: builtin install failed", empty_span);
     };
 
-    var chunk = cynic.bytecode.compiler.compileScriptAsChunk(gpa, &realm, &program, source, null) catch {
-        return buildFrame(.parse_error, "", "", "SyntaxError: failed to compile", empty_span);
+    // Thread the same diagnostics buffer through the compile step so
+    // bytecode-emit errors surface with their span — same UX as
+    // `cynic_eval`.
+    var chunk = cynic.bytecode.compiler.compileScriptAsChunk(
+        gpa,
+        &realm,
+        &program,
+        source,
+        &diags,
+    ) catch {
+        var msg: std.ArrayListUnmanaged(u8) = .empty;
+        defer msg.deinit(gpa);
+        const span = formatDiagnostics(
+            &msg,
+            &diags,
+            "SyntaxError: failed to compile (engine did not record a diagnostic)",
+        );
+        return buildFrame(.parse_error, "", "", msg.items, span);
     };
     defer chunk.deinit(gpa);
 
@@ -364,15 +417,14 @@ export fn cynic_parse_ast(src: [*]const u8, len: u32) [*]u8 {
     var diags: cynic.diagnostic.Diagnostics = .empty;
     const program = cynic.parser.parseScript(aa, source, &diags) catch {
         var msg: std.ArrayListUnmanaged(u8) = .empty;
-        appendDiagnostics(&msg, &diags) catch {};
         defer msg.deinit(gpa);
-        const span = if (firstError(&diags)) |d| d.span else empty_span;
+        const span = formatDiagnostics(&msg, &diags, "SyntaxError: failed to parse");
         return buildFrame(.parse_error, "", "", msg.items, span);
     };
     if (firstError(&diags)) |d| {
         var msg: std.ArrayListUnmanaged(u8) = .empty;
-        appendDiagnostics(&msg, &diags) catch {};
         defer msg.deinit(gpa);
+        appendDiagnostics(&msg, &diags) catch {};
         return buildFrame(.parse_error, "", "", msg.items, d.span);
     }
 
@@ -458,40 +510,24 @@ fn lookupString(obj: *cynic.runtime.JSObject, key: []const u8) ?[]const u8 {
     return null;
 }
 
-/// Return the first error-severity diagnostic, or null if the
-/// buffer holds only warnings / notes.
+/// Thin shims over `cynic.wasm_diag.*` — the actual formatters live
+/// in a host-portable module so `zig build test` can exercise them
+/// (wasm.zig is wasm32-only). Production calls pass the WASM
+/// allocator (`gpa`); the test path passes `testing.allocator`.
 fn firstError(diags: *const cynic.diagnostic.Diagnostics) ?cynic.diagnostic.Diagnostic {
-    for (diags.items) |d| {
-        if (d.severity == .err) return d;
-    }
-    return null;
+    return cynic.wasm_diag.firstError(diags);
 }
 
-/// Render the error-severity diagnostics as the playground's error
-/// text — one `Class: code [start..end]` line each. Warnings and
-/// notes are dropped (the playground reports failures, not lint).
 fn appendDiagnostics(buf: *std.ArrayListUnmanaged(u8), diags: *const cynic.diagnostic.Diagnostics) !void {
-    var wrote = false;
-    for (diags.items) |d| {
-        if (d.severity != .err) continue;
-        if (wrote) try buf.append(gpa, '\n');
-        wrote = true;
-        var scratch: [256]u8 = undefined;
-        const line = try std.fmt.bufPrint(&scratch, "{s}: {s} [{d}..{d}]", .{
-            d.code.errorClass().name(),
-            @tagName(d.code),
-            d.span.start,
-            d.span.end,
-        });
-        try buf.appendSlice(gpa, line);
-        if (d.message.len != 0) {
-            try buf.appendSlice(gpa, " — ");
-            try buf.appendSlice(gpa, d.message);
-        }
-    }
-    if (!wrote) {
-        try buf.appendSlice(gpa, "SyntaxError: failed to parse");
-    }
+    return cynic.wasm_diag.appendDiagnostics(gpa, buf, diags);
+}
+
+fn formatDiagnostics(
+    buf: *std.ArrayListUnmanaged(u8),
+    diags: *const cynic.diagnostic.Diagnostics,
+    fallback: []const u8,
+) cynic.source.Span {
+    return cynic.wasm_diag.formatDiagnostics(gpa, buf, diags, fallback);
 }
 
 // ---------------------------------------------------------------------------

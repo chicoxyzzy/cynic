@@ -37,6 +37,11 @@ pub const bytecode = @import("bytecode.zig");
 /// reach the same code.
 pub const wasm_format = @import("wasm_format.zig");
 
+/// Diagnostics → playground-frame error text. Same rationale as
+/// `wasm_format`: extracted from `src/wasm.zig` so `zig build test`
+/// can exercise the helpers (wasm.zig is wasm32-only).
+pub const wasm_diag = @import("wasm_diag.zig");
+
 test {
     // Force the compiler to walk every reachable module so that every file's
     // `test` blocks are picked up by `zig build test`.
@@ -95,4 +100,5 @@ test {
     _ = @import("bytecode/literals.zig");
     _ = @import("bytecode/arguments_scan.zig");
     _ = @import("wasm_format.zig");
+    _ = @import("wasm_diag.zig");
 }
