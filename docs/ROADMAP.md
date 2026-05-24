@@ -147,6 +147,16 @@ code construction (aligns with SES).
 
 **Recently landed (was in progress; now done).**
 
+- **`harden()` global** — Phase 2 of the SES-by-default
+  shopping list. Native recursive deep-freeze on `globalThis`,
+  cycle-safe via a heap-pointer visited set. SES code can run
+  on Cynic without `@endo/ses` polyfill for the harden idiom;
+  Phase 1 (freeze primordials by default) and Phase 3
+  (override-mistake fix) still planned. See
+  [docs/ses-alignment.md](ses-alignment.md) for the
+  acknowledged corner-case gaps (module namespaces, Proxy
+  trap routing, recursion depth).
+
 - **§9.10 KeepDuringJob for WeakRef** (`d791920`). Both the
   `WeakRef` constructor (§26.1.1.1 step 4) and
   `WeakRef.prototype.deref` (§26.1.4.1 step 2a) call

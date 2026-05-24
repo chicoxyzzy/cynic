@@ -521,6 +521,13 @@ pub fn install(realm: *Realm) !void {
         }
     }
 
+    // `harden(value)` — SES recursive deep-freeze. Installed last
+    // so it can walk the intrinsic graph as-is (Phase 1 of
+    // [docs/ses-alignment.md] will pre-freeze the primordials so
+    // `harden(globalThis)` becomes mostly a no-op walk; until
+    // then `harden` still works on user-allocated graphs).
+    try @import("builtins/harden.zig").install(realm);
+
     // No catch-up pass needed — `realm.globals` is a live view
     // over the globalThis object's `properties`. Every binding
     // installed above (Map/Set/Date/Promise/__drainMicrotasks/…)

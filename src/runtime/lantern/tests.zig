@@ -980,6 +980,47 @@ test "later: TypedArray.prototype.buffer throws on prototype object" {
     );
 }
 
+test "later: harden recursively freezes own data + nested + prototype" {
+    // Phase 2 of docs/ses-alignment.md — `harden(v)` deep-freezes
+    // the reachable graph from `v`. Strict mode + frozen property
+    // ⇒ assignment throws TypeError. Three layers exercise:
+    //  · top-level data property assignment (root frozen)
+    //  · nested data property assignment (recursive walk caught it)
+    //  · new property addition (non-extensible)
+    try expectScriptIntWithBuiltins(
+        \\const o = { tag: 1, nested: { count: 2 } };
+        \\harden(o);
+        \\let r = 0;
+        \\try { o.tag = 9; } catch { r += 1; }
+        \\try { o.nested.count = 9; } catch { r += 10; }
+        \\try { o.added = 9; } catch { r += 100; }
+        \\r;
+    , 111);
+}
+
+test "later: harden is cycle-safe + returns its argument" {
+    // The reference algorithm uses a visited WeakSet for cycle
+    // termination — Cynic's native equivalent uses an internal
+    // AutoHashMap keyed by heap pointer. Spec demands the call
+    // returns `value` unchanged (identity-equal).
+    try expectScriptIntWithBuiltins(
+        \\const cyc = { name: "cyc" };
+        \\cyc.self = cyc;
+        \\const ret = harden(cyc);
+        \\(ret === cyc && cyc.self === cyc) ? 1 : 0;
+    , 1);
+}
+
+test "later: harden of a primitive is a no-op" {
+    // §primitive — number / string / bool / null / undefined have
+    // no heap identity; `harden` returns them unchanged.
+    try expectScriptIntWithBuiltins(
+        \\(harden(42) === 42 && harden("x") === "x" &&
+        \\ harden(true) === true && harden(null) === null &&
+        \\ harden(undefined) === undefined) ? 1 : 0;
+    , 1);
+}
+
 test "later: AsyncGeneratorFunction constructor is reachable via instance proto" {
     try expectScriptStringWithBuiltins(
         \\const f = async function* () {};

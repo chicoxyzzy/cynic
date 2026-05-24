@@ -206,15 +206,31 @@ fail; need to measure. Probably <100 fixtures.
 test "you can patch the prototype" — those become honest failures
 in default mode, expected passes under `--allow=primordial-mutation`.
 
-### Phase 2 — `harden()` global
+### Phase 2 — `harden()` global — **shipped**
 
-Native Zig implementation, installed as a non-writable global. The
-freeze pass from Phase 1 freezes `harden` itself (it's an
-intrinsic). Memoization shared with the Phase 1 cycle handler.
+Lives in `src/runtime/builtins/harden.zig`, installed at the end
+of `intrinsics.install` (so the walk can reach the intrinsic graph
+once it's wired). Native Zig — primitives pass through; objects /
+functions get `extensible = false` + every own descriptor stamped
+`{writable: false, configurable: false}`. Recursion walks own
+property values, accessor getters / setters, and the
+prototype chain. Visited set keyed by heap pointer makes the walk
+cycle-safe. Three unit tests pin the contract (`harden recursively
+freezes own data + nested + prototype`, `harden is cycle-safe +
+returns its argument`, `harden of a primitive is a no-op`).
 
-**Risk:** low. No spec interaction; it's a new global.
-**Test262 risk:** none — no fixture expects `harden` to exist or
-not exist.
+Known acknowledged gaps (acceptable for the MVP):
+  - Module Namespace objects can't be made non-extensible per
+    §9.4.6.6; skipped rather than throw.
+  - Proxy receivers freeze via direct slot mutation here, not
+    through the `preventExtensions` trap.
+  - Recursion uses the Zig stack; pathological depth would
+    overflow. Real-world capability graphs are shallow.
+
+When Phase 1 ships, the primordial freeze runs first, so
+`harden(globalThis)` becomes mostly a no-op walk over already-
+frozen intrinsics — the path stays correct (the visited set
+short-circuits the redundant freezes).
 
 ### Phase 3 — override-mistake fix
 
