@@ -147,6 +147,19 @@ code construction (aligns with SES).
 
 **Recently landed (was in progress; now done).**
 
+- **§9.10 KeepDuringJob for WeakRef** (`d791920`). Both the
+  `WeakRef` constructor (§26.1.1.1 step 4) and
+  `WeakRef.prototype.deref` (§26.1.4.1 step 2a) call
+  AddToKeptObjects(target), pinning the target in a per-agent
+  [[KeptAlive]] list. `Realm.kept_alive` holds the list; the
+  GC marker walks it as a strong root.
+  `lantern.drainMicrotasks` calls ClearKeptObjects at start +
+  after each drained microtask (§9.5.5 — each microtask is its
+  own job). Closes a documented spec gap: previously
+  `ref.deref()` twice in the same synchronous block could see
+  a swept target on Cynic, observably different from
+  V8 / JSC / SpiderMonkey.
+
 - **Proper Tail Calls (PTC) — §15.10.** Two new opcodes
   (`tail_call`, `tail_call_method`) plus a static
   IsInTailPosition pass in the bytecode compiler: an inherited
@@ -773,21 +786,24 @@ matching the JIT engines at full speed is a separate track (see
    → ~159 ns/alloc — **-32 % per allocation** vs the original
    baseline.
 
-   Remaining structural wins on `object_alloc` (Cynic 63 ms vs
-   QuickJS-NG 53 ms, +19 % gap):
+   **Literal-shape template cache — shipped** (`22d2028`).
+   `make_object` for an object-literal sequence carries a
+   chunk-side template index; first execution walks the keys
+   via `ShapeTree.transition` and caches the result; subsequent
+   executions stamp `obj.shape = cached_shape` directly and the
+   follow-up `def_property` opcodes skip the per-key transition
+   lookup. V8 / JSC's "literal boilerplate" pattern.
 
-   - **Literal-shape template cache** — `make_object` for an
-     object-literal sequence (always the same key list, in the
-     same order) could carry a chunk-side template index pointing
-     at a pre-built shape. First execution walks the keys via
-     `ShapeTree.transition` and caches the result; subsequent
-     executions stamp `obj.shape = cached_shape` directly and the
-     follow-up `def_property` opcodes skip the per-key transition
-     lookup. V8 / JSC ship the equivalent as "literal boilerplate".
-     Estimated `object_alloc` -10 %; the headline interpreter-tier
-     win still on the table. Touches the compiler (emit a template
-     index), `Chunk` (new template table), and the runtime
-     (`make_object` + `def_property` fast paths).
+   **Bag-mirror skip on shape-stable writes — shipped**
+   (`8b98ba0`). `sta_property`'s IC hot path skips the bag write
+   on a shape-stable object. `JSObject.get` / `.hasOwn` were
+   already shape-first (`4133c7f`, `4b06eb4`). The more
+   aggressive variant — dropping the bag *allocation* entirely
+   for shape-mode objects — is still designed in
+   [docs/lazy-property-bag.md](lazy-property-bag.md) and would
+   close more `object_alloc` headroom.
+
+   Remaining structural wins on `object_alloc`:
 
    - **Brand-bool bit-packing.** ~10 single-byte bools on
      `JSObject` (`has_error_data`, `is_raw_json`,
@@ -798,22 +814,11 @@ matching the JIT engines at full speed is a separate track (see
      after alignment — marginal; defer until measurement shows
      it matters.
 
-   - **Bag-mirror skip on shape-stable writes.** `sta_property`'s
-     IC hot path already caches the bag's array-index (`4dc8f0f`,
-     -33 % on `prop_write`); skipping the bag write entirely on a
-     shape-stable object would shave another ~30 % on `prop_write`
-     and adjacent fixtures. `JSObject.get` / `.hasOwn` are
-     shape-first (`4133c7f`, `4b06eb4`), so the bag-stale value
-     wouldn't bite through those paths — but ~27 direct
-     `obj.properties.get(key)` call sites across builtins
-     (Reflect, JSON, Proxy traps, Object.defineProperty) need
-     auditing and either migrating to the shape-first
-     `JSObject.get` or accepting the divergence. Real work but
-     well-scoped — one focused session. See the design + phase
-     plan in [docs/lazy-property-bag.md](lazy-property-bag.md)
-     (more aggressive variant: drop the bag *allocation* too,
-     not just the write — fixes `object_alloc` as well as
-     `prop_write`).
+   - **Lazy property bag** — drop the bag allocation entirely
+     for shape-mode objects (the more aggressive complement to
+     the shape-stable-write skip). Full design + phase plan in
+     [docs/lazy-property-bag.md](lazy-property-bag.md). Closes
+     remaining `object_alloc` distance to QuickJS-NG.
 
 3. **Packed `JSArray` element-kinds.** V8 / JSC distinguish
    `PackedSmiElements` (i32-flat), `PackedDoubleElements`
@@ -872,11 +877,15 @@ not measurements.
    they shrink bytecode and remove dispatch overhead. Easy
    first non-IC chunk to land.
 
-8. **Frame register pool.** Every call site does
-   `allocator.alloc(Value, register_count)` for the callee's
-   register file — a heap allocation per call. Pool / arena
-   would amortize. Real win on call-heavy code; complements
-   the call IC. Estimated ~5-10 % on tight call loops.
+8. **Frame register pool — shipped** (`b38f125`). Every
+   JS-function call site (`call`, `call_method`, `new_call`,
+   `tail_call`, `tail_call_method`) used to `allocator.alloc(
+   Value, max(register_count, argc))` for the callee's register
+   file and free it on frame pop — a libc malloc + free per
+   call. Pool keyed by register_count amortises both. Surfaced
+   by the cross-engine bench (`method_call` /
+   `class_instantiate` running 2.2× behind QuickJS-NG); the
+   pool closes most of that gap.
 
 9. **String interning for property keys + small literals.**
    Identifier strings interned at compile time + at heap
