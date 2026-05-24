@@ -26,6 +26,7 @@ pub fn run(
     paths: []const []const u8,
     feature_flags: FeatureSet,
     gc_threshold: ?u32,
+    dump_bytecode: bool,
 ) !void {
     std.debug.assert(paths.len > 0);
 
@@ -48,6 +49,38 @@ pub fn run(
     // alloc collects — exposes a missing root in builtin init).
     if (gc_threshold) |n| realm.heap.setGcThreshold(n);
     try realm.installBuiltins();
+
+    // `--dump-bytecode` — parse + compile each file and print the
+    // disassembly; don't execute. Matches V8's `d8 --print-bytecode`
+    // shape for "what did the compiler emit?" inspection. Side
+    // effects: realm builtins installed (chunks reference them),
+    // but no script body runs.
+    if (dump_bytecode) {
+        for (paths) |path| {
+            const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, sa, .limited(64 * 1024 * 1024));
+            const program = cynic.parser.parseScript(sa, bytes, null) catch |err| {
+                var line_buf: [256]u8 = undefined;
+                const msg = try std.fmt.bufPrint(&line_buf, "{s}: parse error: {t}\n", .{ path, err });
+                try std.Io.File.stderr().writeStreamingAll(io, msg);
+                std.process.exit(1);
+            };
+            var chunk = cynic.bytecode.compiler.compileScriptAsChunk(allocator, &realm, &program, bytes, null) catch |err| {
+                var line_buf: [256]u8 = undefined;
+                const msg = try std.fmt.bufPrint(&line_buf, "{s}: compile error: {t}\n", .{ path, err });
+                try std.Io.File.stderr().writeStreamingAll(io, msg);
+                std.process.exit(1);
+            };
+            defer chunk.deinit(allocator);
+            const dis = try cynic.bytecode.disasm.dump(allocator, &chunk);
+            defer allocator.free(dis);
+            var header: [256]u8 = undefined;
+            const h = try std.fmt.bufPrint(&header, "; {s}\n", .{path});
+            try std.Io.File.stdout().writeStreamingAll(io, h);
+            try std.Io.File.stdout().writeStreamingAll(io, dis);
+            try std.Io.File.stdout().writeStreamingAll(io, "\n\n");
+        }
+        return;
+    }
 
     var last_outcome: cynic.runtime.lantern.RunResult = .{ .value = Value.undefined_ };
 

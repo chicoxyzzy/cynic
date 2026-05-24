@@ -101,11 +101,25 @@ pub fn main(init: std.process.Init) !void {
         // `cynic run a.js b.js c.js` evaluates each file in order
         // against one realm — the same shape every other engine's
         // CLI uses (`d8 a.js b.js`, `jsc a.js b.js`).
-        if (args.len == 0) {
+        // `--dump-bytecode` (before the paths) skips execution and
+        // emits the compiled chunk's disassembly — same intent as
+        // V8's `d8 --print-bytecode`.
+        var dump_bytecode = false;
+        var run_args = args;
+        while (run_args.len > 0 and std.mem.startsWith(u8, run_args[0], "--")) {
+            if (std.mem.eql(u8, run_args[0], "--dump-bytecode")) {
+                dump_bytecode = true;
+                run_args = run_args[1..];
+            } else {
+                try printUsage(io);
+                return error.UnknownArgument;
+            }
+        }
+        if (run_args.len == 0) {
             try printUsage(io);
             return error.MissingArgument;
         }
-        try run_cmd.run(allocator, io, args, feature_flags, gc_threshold);
+        try run_cmd.run(allocator, io, run_args, feature_flags, gc_threshold, dump_bytecode);
     } else if (std.mem.eql(u8, sub, "help") or std.mem.eql(u8, sub, "--help") or std.mem.eql(u8, sub, "-h")) {
         try printUsage(io);
     } else {
@@ -130,9 +144,11 @@ fn printUsage(io: std.Io) !void {
         \\                                   script mode against a `.mjs` path.
         \\  eval <expr>                      Compile and execute a single
         \\                                   expression; print the result.
-        \\  run <file>...                    Compile and execute each <file> as a
+        \\  run [--dump-bytecode] <file>...  Compile and execute each <file> as a
         \\                                   script against one realm; print the
         \\                                   final completion value.
+        \\                                   `--dump-bytecode` prints the compiled
+        \\                                   chunk and exits without executing.
         \\  help                             Show this help.
         \\
         \\Top-level options (consumed before the subcommand):
