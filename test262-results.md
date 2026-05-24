@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 92.82 % | 99.98 % | 37211 / 40090 | 37211 / 37220 |
+| **runtime** | 92.89 % | 99.97 % | 37241 / 40090 | 37241 / 37251 |
 
 
 ## Where the runtime stands, by area
@@ -24,6 +24,7 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_1–9 fails_** | | | | | |
+| `built-ins/Proxy` | 293 | 1 | 12 | 96 % | 100 % |
 | `built-ins/RegExp` | 1593 | 9 | 161 | 90 % | 99 % |
 | **_0 fails (passing or wholly OOS)_** | | | | | |
 | ~~`built-ins/AbstractModuleSource`~~ | ~~0~~ | ~~0~~ | ~~8~~ | ~~0 %~~ | ~~0 %~~ |
@@ -58,7 +59,6 @@ browser-era built-ins …).
 | `built-ins/Number` | 339 | 0 | 0 | 100 % | 100 % |
 | `built-ins/Object` | 3319 | 0 | 80 | 98 % | 100 % |
 | `built-ins/Promise` | 627 | 0 | 38 | 94 % | 100 % |
-| `built-ins/Proxy` | 293 | 0 | 13 | 96 % | 100 % |
 | `built-ins/Reflect` | 152 | 0 | 0 | 100 % | 100 % |
 | `built-ins/RegExpStringIteratorPrototype` | 17 | 0 | 0 | 100 % | 100 % |
 | `built-ins/Set` | 381 | 0 | 1 | 100 % | 100 % |
@@ -91,7 +91,7 @@ browser-era built-ins …).
 | `language/destructuring` | 18 | 0 | 1 | 95 % | 100 % |
 | ~~`language/directive-prologue`~~ | ~~0~~ | ~~0~~ | ~~62~~ | ~~0 %~~ | ~~0 %~~ |
 | `language/export` | 3 | 0 | 0 | 100 % | 100 % |
-| `language/expressions` | 9768 | 0 | 972 | 91 % | 100 % |
+| `language/expressions` | 9780 | 0 | 960 | 91 % | 100 % |
 | `language/function-code` | 94 | 0 | 109 | 46 % | 100 % |
 | `language/future-reserved-words` | 48 | 0 | 7 | 87 % | 100 % |
 | `language/global-code` | 36 | 0 | 5 | 88 % | 100 % |
@@ -107,7 +107,7 @@ browser-era built-ins …).
 | `language/rest-parameters` | 11 | 0 | 0 | 100 % | 100 % |
 | `language/source-text` | 1 | 0 | 0 | 100 % | 100 % |
 | `language/statementList` | 40 | 0 | 0 | 100 % | 100 % |
-| `language/statements` | 8409 | 0 | 672 | 93 % | 100 % |
+| `language/statements` | 8427 | 0 | 654 | 93 % | 100 % |
 | `language/types` | 97 | 0 | 9 | 92 % | 100 % |
 | `language/white-space` | 51 | 0 | 0 | 100 % | 100 % |
 
@@ -156,11 +156,16 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-24 — cynic `a8caaf8`, test262 `d0c1b455`
+### 2026-05-24 — cynic `711bd56`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 92.82 % | 99.98 % | 37211 / 40090 | 37211 / 37220 | +17 | 40.6 s |
+| **runtime** | 92.89 % | 99.97 % | 37241 / 40090 | 37241 / 37251 | +47 | 40.6 s |
+
+Biggest movers (runtime):
+
+- `language/statements` +18
+- `language/expressions` +12
 
 ### 2026-05-23 — cynic `a8caaf8`, test262 `d0c1b455`
 
