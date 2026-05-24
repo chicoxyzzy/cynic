@@ -284,6 +284,25 @@ test "interpreter: || returns rhs when lhs falsey" {
     try expectInt("0 || 2;", 2);
 }
 
+test "interpreter: toBoolean covers every spec ToBoolean case" {
+    // §7.1.2 ToBoolean — pins the full type-switch so the
+    // arith_loop fast-path on Bool doesn't regress any case.
+    // String empty-vs-nonempty, BigInt 0n-vs-nonzero, object
+    // always truthy (incl. `new Boolean(false)`), numeric 0/NaN
+    // falsy and anything else truthy, undefined/null falsy. Each
+    // pair is read through a ternary so the result feeds the
+    // jmp_if_* opcode that calls toBoolean.
+    try expectScriptStringWithBuiltins(
+        \\(true ? "T" : "F") + "," + (false ? "T" : "F") + "," +
+        \\(undefined ? "T" : "F") + "," + (null ? "T" : "F") + "," +
+        \\(0 ? "T" : "F") + "," + (-0 ? "T" : "F") + "," +
+        \\(NaN ? "T" : "F") + "," + (42 ? "T" : "F") + "," +
+        \\("" ? "T" : "F") + "," + ("x" ? "T" : "F") + "," +
+        \\(0n ? "T" : "F") + "," + (1n ? "T" : "F") + "," +
+        \\({} ? "T" : "F") + "," + (new Boolean(false) ? "T" : "F");
+    , "T,F,F,F,F,F,F,T,F,T,F,T,T,T");
+}
+
 test "interpreter: string + string = concatenation" {
     try expectString("'a' + 'b';", "ab");
     try expectString("'foo' + 'bar';", "foobar");
