@@ -1452,8 +1452,8 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     // §22.2.4 `[[OriginalSource]]` / `[[OriginalFlags]]` — typed
     // JSObject slots, not properties. Surfaced to JS only through
     // the accessors on `RegExp.prototype`.
-    inst.regexp_source = pat_s;
-    inst.regexp_flags = flag_s;
+    realm.heap.setRegexpSource(inst, pat_s);
+    realm.heap.setRegexpFlags(inst, flag_s);
     // §22.2.4 step 13 — `lastIndex` is `{ w:true, e:false, c:false }`.
     // Default `set` lands at all-true, so JSON.stringify({toJSON: /re/})
     // surfaced "lastIndex" as an enumerable own key.
