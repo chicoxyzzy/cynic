@@ -89,7 +89,7 @@ pub fn wrapGenerator(
     // null)) {}`). The real wrapper.prototype is rebound after the
     // prologue per the §9.1.14 read below.
     realm.heap.setObjectPrototype(wrapper, ensureGeneratorPrototype(realm) catch return error.OutOfMemory);
-    wrapper.generator_ref = gen;
+    realm.heap.setGeneratorRef(wrapper, gen);
 
     // The wrapper is the only handle linking the freshly allocated
     // `gen` to anything caller-visible. `resumeGenerator` runs the
@@ -173,7 +173,7 @@ pub fn wrapAsyncGenerator(
     // param evaluation runs (see `wrapGenerator` for the spec
     // rationale).
     realm.heap.setObjectPrototype(wrapper, ensureAsyncGeneratorPrototype(realm) catch return error.OutOfMemory);
-    wrapper.generator_ref = gen;
+    realm.heap.setGeneratorRef(wrapper, gen);
 
     // Same wrapper-pin rationale as `wrapGenerator`: the eager
     // prologue can allocate and trip the GC before we return.
