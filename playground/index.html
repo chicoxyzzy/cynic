@@ -46,11 +46,6 @@
   .wrap { max-width: 1160px; margin: 0 auto; }
 
   header {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 12px;
     margin-bottom: 22px;
   }
 
@@ -58,26 +53,22 @@
     font-family: var(--display);
     font-size: 30px;
     letter-spacing: 0.02em;
+    line-height: 1.1;
   }
   .brand a { color: var(--ink); text-decoration: none; }
 
-  .tag {
-    color: var(--ink-soft);
-    background: rgba(255, 255, 255, 0.55);
-    padding: 2px 6px;
+  /* Tagline now sits under the title as a calmer subtitle. Used to
+     float top-right; demoted because the tabs + Run are the real
+     drama on this page. */
+  .subtitle {
+    font-family: var(--mono);
     font-size: 13px;
+    color: var(--ink-soft);
+    margin-top: 4px;
+    letter-spacing: 0;
   }
 
-  /* Toolbar spans the full width above the two-column row. */
-  .toolbar {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 10px;
-    margin-bottom: 22px;
-  }
-
-  button, select {
+  button {
     font-family: var(--display);
     font-size: 14px;
     color: var(--ink);
@@ -90,28 +81,44 @@
   button:active { transform: translate(2px, 2px); box-shadow: 2px 2px 0 var(--ink); }
   button:disabled { opacity: 0.5; cursor: progress; }
 
-  button#run { background: var(--grass); }
-  button#share { background: var(--marge); color: #fff; }
+  /* Panel-head buttons are tighter than the page's stand-alone
+     buttons so the head row stays compact. Same palette, slimmer
+     border + shadow. */
+  .panel-head .btn-primary,
+  .panel-head .btn-secondary {
+    font-size: 13px;
+    border-width: 2px;
+    padding: 5px 12px;
+    box-shadow: 2px 2px 0 var(--ink);
+  }
+  .panel-head .btn-primary:active,
+  .panel-head .btn-secondary:active {
+    transform: translate(1px, 1px);
+    box-shadow: 1px 1px 0 var(--ink);
+  }
+  .btn-primary { background: var(--grass); }
+  .btn-secondary { background: var(--marge); color: #fff; }
 
-  select { font-family: var(--mono); font-size: 13px; box-shadow: none; padding: 7px 10px; }
-
-  label.toggle {
+  /* Snippet picker is a quiet, contextual control — no shadow, just
+     a 2px ink border so it sits inside the panel head without
+     competing with the action buttons. */
+  .snippets-select {
     font-family: var(--mono);
     font-size: 13px;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    background: rgba(255, 255, 255, 0.6);
-    padding: 6px 8px;
+    color: var(--ink);
+    background: rgba(255, 255, 255, 0.7);
     border: 2px solid var(--ink);
+    box-shadow: none;
+    padding: 4px 8px;
+    max-width: 220px;
     cursor: pointer;
   }
 
   .status {
     font-family: var(--mono);
-    font-size: 13px;
+    font-size: 12px;
     color: var(--ink-soft);
-    margin-left: auto;
+    letter-spacing: 0;
   }
 
   /* The two-column working area: editor left, output right. */
@@ -137,12 +144,21 @@
     letter-spacing: 0.04em;
     background: var(--skin);
     border-bottom: var(--bd);
-    padding: 8px 12px;
+    padding: 6px 10px;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 10px;
     flex: 0 0 auto;
+  }
+
+  /* Right-side action cluster inside a panel head — Run / Copy link
+     stay grouped while the snippet picker (or tabs) anchor the left. */
+  .panel-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
   }
 
   /* The CodeMirror editor host fills the left panel body. */
@@ -188,15 +204,14 @@
   }
   .out-empty { color: var(--ink-soft); font-style: italic; }
 
-  /* Bytecode-inspector disassembly: one element per line. A line
-     carrying a [start..end] source span gets `.bc-hot` and lights
-     up on hover, paired with a CodeMirror range decoration over
-     the matching source. `.bc-active` is the reverse-direction
-     highlight (cursor in editor over the span -> light up the
-     instruction). */
+  /* Output-panel span-line decoration. Each disasm instruction or AST
+     node line that carries a source `[start..end]` span gets `.span-line`
+     and lights up on hover, paired with a CodeMirror range decoration
+     over the matching source. `.span-active` is the reverse-direction
+     highlight (cursor in editor over the span -> light up the line). */
   .bc-line { display: block; }
-  .bc-hot { cursor: pointer; border-radius: 2px; }
-  .bc-hot:hover, .bc-active { background: var(--skin); }
+  .span-line { cursor: pointer; border-radius: 2px; }
+  .span-line:hover, .span-active { background: var(--skin); }
 
   /* Disasm token coloring — same families as the CodeMirror syntax
      palette so the two panels feel like they speak the same
@@ -206,9 +221,43 @@
   .bc-tok-reg    { color: #1a64b8; }
   .bc-tok-index  { color: #b5500f; }
   .bc-tok-jump   { color: #0d7a8a; }
-  .bc-tok-span   { color: var(--ink-soft); }
   .bc-tok-num    { color: #b5500f; }
   .bc-tok-paren  { color: var(--ink-soft); }
+
+  /* AST-printer S-expression token coloring — mirrors the bytecode
+     palette so the two inspector modes look related. See
+     src/ast/printer.zig for the exact output shape. */
+  .ast-tok-paren  { color: var(--ink-soft); }
+  .ast-tok-head   { color: #9b1d8f; font-weight: 700; }
+  .ast-tok-attr   { color: #1a64b8; }
+  .ast-tok-string { color: #1f7a2e; }
+  .ast-tok-num    { color: #b5500f; }
+  .ast-tok-ident  { color: #0d7a8a; }
+
+  /* Right-panel tab row. Replaces the toolbar mode <select>; clicking
+     a tab switches the inspector view and re-runs the source. */
+  .panel-head-tabs { padding: 6px 10px; }
+  .mode-tabs {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .mode-tab {
+    font-family: var(--display);
+    font-size: 13px;
+    letter-spacing: 0.04em;
+    color: var(--ink);
+    background: rgba(255, 255, 255, 0.55);
+    border: 2px solid var(--ink);
+    box-shadow: none;
+    padding: 4px 12px;
+    cursor: pointer;
+  }
+  .mode-tab[aria-selected="true"] {
+    background: #fff;
+    box-shadow: 2px 2px 0 var(--ink);
+  }
+  .mode-tab:active { transform: translate(1px, 1px); box-shadow: 1px 1px 0 var(--ink); }
 
   footer {
     margin-top: 26px;
@@ -231,32 +280,35 @@
 <div class="wrap">
 
   <header>
-    <div class="brand"><a href="../">Cynic</a> · Playground</div>
-    <div class="tag">strict-only ECMAScript, compiled to WebAssembly. No eval. That's the point.</div>
+    <div class="brand">
+      <a href="../">Cynic</a> · Playground
+      <div class="subtitle">strict-only ECMAScript, compiled to WebAssembly. No eval. That's the point.</div>
+    </div>
   </header>
-
-  <div class="toolbar">
-    <button id="run" type="button">Run</button>
-    <button id="share" type="button">Copy link</button>
-    <select id="mode" title="What to do with the source">
-      <option value="eval">eval</option>
-      <option value="bytecode">bytecode</option>
-      <option value="ast">AST</option>
-    </select>
-    <select id="snippets" title="Load a sample">
-      <option value="">— sample snippets —</option>
-    </select>
-    <span class="status" id="status">loading engine…</span>
-  </div>
 
   <div class="columns">
     <div class="panel">
-      <div class="panel-head"><span>source</span></div>
+      <div class="panel-head">
+        <select id="snippets" class="snippets-select" title="Load a sample">
+          <option value="">— sample snippets —</option>
+        </select>
+        <div class="panel-actions">
+          <button id="share" type="button" class="btn-secondary">Copy link</button>
+          <button id="run" type="button" class="btn-primary">Run</button>
+        </div>
+      </div>
       <div id="editor-host"></div>
     </div>
 
     <div class="panel">
-      <div class="panel-head"><span id="output-label">output</span></div>
+      <div class="panel-head panel-head-tabs">
+        <div class="mode-tabs" role="tablist" aria-label="output mode">
+          <button class="mode-tab" data-mode="eval" type="button" role="tab" aria-selected="true">eval</button>
+          <button class="mode-tab" data-mode="bytecode" type="button" role="tab" aria-selected="false">bytecode</button>
+          <button class="mode-tab" data-mode="ast" type="button" role="tab" aria-selected="false">AST</button>
+        </div>
+        <span class="status" id="status">loading engine…</span>
+      </div>
       <pre class="output" id="output"><span class="out-empty">Run something. Cynic will judge it.</span></pre>
     </div>
   </div>

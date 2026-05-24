@@ -150,16 +150,16 @@ const els = {
   editorHost: document.getElementById('editor-host'),
   run: document.getElementById('run'),
   share: document.getElementById('share'),
-  mode: document.getElementById('mode'),
   status: document.getElementById('status'),
   output: document.getElementById('output'),
-  outputLabel: document.getElementById('output-label'),
   snippets: document.getElementById('snippets'),
   version: document.getElementById('version'),
+  modeTabs: Array.from(document.querySelectorAll('.mode-tab')),
 };
 
-let wasm = null; // { instance, exports, memory }
-let view = null; // the CodeMirror EditorView
+let wasm = null;   // { instance, exports, memory }
+let view = null;   // the CodeMirror EditorView
+let currentMode = 'eval'; // 'eval' | 'bytecode' | 'ast' — driven by the right-panel tabs
 
 // --------------------------------------------------------------------------
 // CodeMirror editor
@@ -527,7 +527,7 @@ function renderError(text) {
 
 function renderEvalResult(frame) {
   clearOutput();
-  els.outputLabel.textContent = 'output';
+  lastSpanLines = [];
 
   let printedAnything = false;
 
@@ -588,17 +588,35 @@ function buildByteToCodeUnitMap(source) {
   return map;
 }
 
-// Match a trailing ` [start..end]` source span on a disasm line.
-const SPAN_RE = /\[(\d+)\.\.(\d+)\]\s*$/;
+// Match the first ` [start..end]` source span on an inspector line.
+// Bytecode disasm always trails the span; the AST printer embeds it
+// mid-line (a closing `)` may follow) — so we match the *first* span
+// per line rather than anchoring to end-of-line.
+const SPAN_RE = /\s?\[(\d+)\.\.(\d+)\]/;
+
+// Pull the first `[start..end]` span off an inspector line, returning
+// the span's byte offsets plus the line text with that span removed
+// (including any single space that preceded it, so the cleaned text
+// doesn't have a stray gap). Returns `{ line, span: null }` if the
+// line carries no span — header / closing-paren lines included.
+function extractSpan(rawLine) {
+  const m = rawLine.match(SPAN_RE);
+  if (!m) return { line: rawLine, span: null };
+  const startByte = Number(m[1]);
+  const endByte = Number(m[2]);
+  const cleaned = rawLine.slice(0, m.index) + rawLine.slice(m.index + m[0].length);
+  return { line: cleaned, span: { startByte, endByte } };
+}
 
 // Disasm-line token classification. Patterns match the format
 // produced by `src/bytecode/disasm.zig` — keep both sides in sync
-// when adding a new operand shape.
+// when adding a new operand shape. The line text reaching the
+// tokenizer has already had its trailing `[start..end]` span
+// stripped (see `extractSpan`); no span group needed here.
 //   • 4-hex-digit offset at line start (`0005`)
 //   • Mnemonic — UpperCamelCase identifier
 //   • Register / index sigils: `r0`, `k1`, `t2`, `c0`, `s5`, `^1`
 //   • Jump form: `+12 -> 0024` / `-5 -> 0010`
-//   • Square-bracketed source span at line end
 const DISASM_TOKEN_RE = new RegExp(
   [
     '(?<offset>^[0-9a-f]{4})',            // 0005
@@ -607,7 +625,6 @@ const DISASM_TOKEN_RE = new RegExp(
     '(?<index>\\b[kctsi][0-9]+\\b)',      // k1, t0, c2, s5
     '(?<envdepth>\\^[0-9]+)',             // ^1 (lda_env / sta_env)
     '(?<jump>[+-]\\d+\\s*->\\s*[0-9a-f]{4})', // +12 -> 0024
-    '(?<span>\\[\\d+\\.\\.\\d+\\])',      // [0..6]
     '(?<num>[+-]?\\b\\d+\\b)',            // 42
     '(?<paren>\\([^)]*\\))',              // (2 args), (chunk …)
   ].join('|'),
@@ -629,7 +646,6 @@ function appendDisasmTokens(parent, line) {
       m.groups.index     ? 'bc-tok-index' :
       m.groups.envdepth  ? 'bc-tok-index' :
       m.groups.jump      ? 'bc-tok-jump' :
-      m.groups.span      ? 'bc-tok-span' :
       m.groups.num       ? 'bc-tok-num' :
       m.groups.paren     ? 'bc-tok-paren' :
       '';
@@ -644,17 +660,97 @@ function appendDisasmTokens(parent, line) {
   parent.appendChild(document.createTextNode('\n'));
 }
 
-// All disasm `.bc-hot` lines from the most recent inspector render,
-// in source order. Used by the reverse hover-link (mouse-in-editor ->
-// highlight the matching disasm line) so we don't rescan the DOM on
-// every mousemove. Reset on every render and on mode switch.
-let lastDisasmHotLines = [];
+// AST printer token classification — output shape lives in
+// `src/ast/printer.zig`. Cleaned line (span already stripped by
+// `extractSpan`) has these atoms:
+//   • `(head` — opening paren glued to a node name (e.g. `(program`,
+//     `(expr-stmt`). We split this into a paren + head pair so the
+//     head can take the keyword colour without breaking the paren run.
+//   • One or more closing parens `)))`.
+//   • `key=value` attribute pair (`op=+`, `kind=let_`).
+//   • Quoted source slice — `"x"`, `"100"`.
+//   • Bare integer (rare — kept for future printer additions).
+//   • Bare lowercase identifier — e.g. `script` after `(program`.
+const AST_TOKEN_RE = new RegExp(
+  [
+    '(?<openhead>\\([a-z][a-zA-Z0-9-]*)',           // (program, (expr-stmt
+    '(?<closeparen>\\)+)',                          // ), )))
+    '(?<attr>\\b[a-z_][\\w-]*=\\S+)',               // op=+, kind=let_, source_kind=script
+    '(?<string>"(?:[^"\\\\]|\\\\.)*")',         // "x"
+    '(?<num>[+-]?\\b\\d+\\b)',                      // 1, -2
+    '(?<ident>[a-z][a-zA-Z0-9_-]*)',                // script, identifier
+  ].join('|'),
+  'g',
+);
+
+function appendAstTokens(parent, line) {
+  let last = 0;
+  for (const m of line.matchAll(AST_TOKEN_RE)) {
+    if (m.index > last) {
+      parent.appendChild(document.createTextNode(line.slice(last, m.index)));
+    }
+    const token = m[0];
+    if (m.groups.openhead) {
+      // Split `(program` into a paren span and a head span so the
+      // colours pick up the role rather than the glued shape.
+      const paren = document.createElement('span');
+      paren.className = 'ast-tok-paren';
+      paren.textContent = '(';
+      parent.appendChild(paren);
+      const head = document.createElement('span');
+      head.className = 'ast-tok-head';
+      head.textContent = token.slice(1);
+      parent.appendChild(head);
+    } else {
+      const span = document.createElement('span');
+      const cls =
+        m.groups.closeparen ? 'ast-tok-paren' :
+        m.groups.attr       ? 'ast-tok-attr' :
+        m.groups.string     ? 'ast-tok-string' :
+        m.groups.num        ? 'ast-tok-num' :
+        m.groups.ident      ? 'ast-tok-ident' :
+        '';
+      if (cls) span.className = cls;
+      span.textContent = token;
+      parent.appendChild(span);
+    }
+    last = m.index + token.length;
+  }
+  if (last < line.length) {
+    parent.appendChild(document.createTextNode(line.slice(last)));
+  }
+  parent.appendChild(document.createTextNode('\n'));
+}
+
+// Every span-bearing line element from the most recent inspector
+// render, in source order — shared between bytecode and AST modes.
+// Used by the reverse hover-link (mouse-in-editor -> highlight the
+// matching output line) so we don't rescan the DOM on every
+// mousemove. Reset on every render and on mode switch.
+let lastSpanLines = [];
+
+// Pin a span-bearing line element to its source range. Computes the
+// CodeMirror code-unit range from the engine's UTF-8 byte span, tags
+// the element with the shared `.span-line` class, and records it in
+// `lastSpanLines` for the reverse hover-link. The element keeps its
+// own mode-specific class (`.bc-line` / `.ast-line`) for layout.
+function attachSpanToLine(el, span, byteToCodeUnit, docLength) {
+  if (!span) return;
+  let from = byteToCodeUnit[Math.min(span.startByte, byteToCodeUnit.length - 1)];
+  let to = byteToCodeUnit[Math.min(span.endByte, byteToCodeUnit.length - 1)];
+  from = Math.max(0, Math.min(from, docLength));
+  to = Math.max(from, Math.min(to, docLength));
+  if (to <= from) return;
+  el.classList.add('span-line');
+  el.dataset.from = String(from);
+  el.dataset.to = String(to);
+  lastSpanLines.push(el);
+}
 
 function renderInspectorResult(frame) {
   clearOutput();
-  els.outputLabel.textContent = 'bytecode disassembly';
   setEditorHotRange(null);
-  lastDisasmHotLines = [];
+  lastSpanLines = [];
 
   if (frame.status !== 0 || frame.value.length === 0) {
     setEditorErrorRange(frameSpanToEditorRange(frame.errorSpan));
@@ -669,39 +765,23 @@ function renderInspectorResult(frame) {
   const docLength = view.state.doc.length;
 
   const lines = frame.value.split('\n');
-  for (const line of lines) {
+  for (const rawLine of lines) {
+    const { line, span } = extractSpan(rawLine);
     const el = document.createElement('span');
     el.className = 'bc-line out-stdout';
     appendDisasmTokens(el, line);
-
-    const m = line.match(SPAN_RE);
-    if (m) {
-      // The `(chunk …` header and the closing `)` carry no span —
-      // only real instruction lines reach here.
-      const startByte = Number(m[1]);
-      const endByte = Number(m[2]);
-      let from = byteToCodeUnit[Math.min(startByte, byteToCodeUnit.length - 1)];
-      let to = byteToCodeUnit[Math.min(endByte, byteToCodeUnit.length - 1)];
-      // Clamp into the live document, just in case.
-      from = Math.max(0, Math.min(from, docLength));
-      to = Math.max(from, Math.min(to, docLength));
-
-      el.classList.add('bc-hot');
-      el.dataset.from = String(from);
-      el.dataset.to = String(to);
-      lastDisasmHotLines.push(el);
-    }
-
+    attachSpanToLine(el, span, byteToCodeUnit, docLength);
     els.output.appendChild(el);
   }
 }
 
-// Hovering a `.bc-hot` instruction line marks the matching source
-// range in CodeMirror. The mark is a StateField decoration — it
-// does not touch the user's real selection and needs no .focus().
+// Hovering a `.span-line` (bytecode instruction or AST node) marks
+// the matching source range in CodeMirror. The mark is a StateField
+// decoration — it does not touch the user's real selection and needs
+// no .focus().
 function wireInspectorHover() {
   els.output.addEventListener('mouseover', (e) => {
-    const hot = e.target.closest('.bc-hot');
+    const hot = e.target.closest('.span-line');
     if (!hot || !els.output.contains(hot)) return;
     const from = Number(hot.dataset.from);
     const to = Number(hot.dataset.to);
@@ -716,52 +796,60 @@ function wireInspectorHover() {
 }
 
 // Reverse direction of the hover-link: while the pointer is over the
-// editor in bytecode mode, light up the disasm lines whose source
-// range contains the doc position under the cursor. Uses
+// editor in bytecode or AST mode, light up the output lines whose
+// source range contains the doc position under the cursor. Uses
 // `view.posAtCoords` (CodeMirror's hit-test) and walks the cached
-// `lastDisasmHotLines` set; the disasm DOM is at most a few hundred
-// elements so a linear scan per mousemove is fine.
-function wireSourceToDisasmHover() {
+// `lastSpanLines` set; output DOM is at most a few hundred elements
+// so a linear scan per mousemove is fine.
+function wireSourceToSpanHover() {
   els.editorHost.addEventListener('mousemove', (e) => {
-    if (lastDisasmHotLines.length === 0) return;
+    if (lastSpanLines.length === 0) return;
     if (!view) return;
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     if (pos == null) {
-      clearDisasmActive();
+      clearSpanActive();
       return;
     }
     let firstActive = null;
-    for (const el of lastDisasmHotLines) {
+    let tightest = null;
+    let tightestWidth = Infinity;
+    for (const el of lastSpanLines) {
       const from = Number(el.dataset.from);
       const to = Number(el.dataset.to);
       const inside = pos >= from && pos < to;
-      el.classList.toggle('bc-active', inside);
+      el.classList.toggle('span-active', inside);
       if (inside && firstActive === null) firstActive = el;
+      // For nested AST nodes the tightest match is the innermost one;
+      // prefer scrolling that into view rather than the outermost.
+      if (inside && to - from < tightestWidth) {
+        tightest = el;
+        tightestWidth = to - from;
+      }
     }
-    // Scroll the first match into view so a long disasm doesn't hide
-    // the activated line below the fold. `block: nearest` keeps the
-    // scroll quiet — no jump if the line is already visible.
-    if (firstActive) {
-      firstActive.scrollIntoView({ block: 'nearest', behavior: 'auto' });
-    }
+    // Keep the activated line visible. `block: nearest` is a no-op
+    // when the line is already on-screen.
+    const target = tightest || firstActive;
+    if (target) target.scrollIntoView({ block: 'nearest', behavior: 'auto' });
   });
-  els.editorHost.addEventListener('mouseleave', clearDisasmActive);
+  els.editorHost.addEventListener('mouseleave', clearSpanActive);
 }
 
-function clearDisasmActive() {
-  for (const el of lastDisasmHotLines) el.classList.remove('bc-active');
+function clearSpanActive() {
+  for (const el of lastSpanLines) el.classList.remove('span-active');
 }
 
 // --------------------------------------------------------------------------
-// AST inspector — S-expression dump of the parser's AST. Same panel
-// surface as the bytecode inspector, but no hover-link (the AST printer
-// already labels each node with its source span in the text, which is
-// the natural form here).
+// AST inspector — S-expression dump of the parser's AST. Each line is
+// emitted as a `.span-line` with the AST printer's `[start..end]` span
+// extracted into data-from / data-to, so the same hover-link machinery
+// powers source↔AST cross-highlighting (the inner-most match wins on
+// the reverse scan, since AST spans nest).
 // --------------------------------------------------------------------------
 
 function renderAstResult(frame) {
   clearOutput();
-  els.outputLabel.textContent = 'AST';
+  setEditorHotRange(null);
+  lastSpanLines = [];
 
   if (frame.status !== 0 || frame.value.length === 0) {
     setEditorErrorRange(frameSpanToEditorRange(frame.errorSpan));
@@ -769,7 +857,19 @@ function renderAstResult(frame) {
     return;
   }
   setEditorErrorRange(null);
-  appendLine(frame.value, 'out-stdout');
+
+  const byteToCodeUnit = buildByteToCodeUnitMap(getSource());
+  const docLength = view.state.doc.length;
+
+  const lines = frame.value.split('\n');
+  for (const rawLine of lines) {
+    const { line, span } = extractSpan(rawLine);
+    const el = document.createElement('span');
+    el.className = 'bc-line out-stdout';
+    appendAstTokens(el, line);
+    attachSpanToLine(el, span, byteToCodeUnit, docLength);
+    els.output.appendChild(el);
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -785,7 +885,7 @@ function run() {
     // pointer otherwise (the disasm that produced it is gone in
     // eval / AST mode).
     setEditorHotRange(null);
-    switch (els.mode.value) {
+    switch (currentMode) {
       case 'bytecode':
         renderInspectorResult(callEngine('cynic_parse', source));
         break;
@@ -802,6 +902,27 @@ function run() {
     renderError('Engine call failed: ' + err);
     setStatus('error');
     console.error(err);
+  }
+}
+
+// Switch the active output mode and re-run. Called by the tab-row
+// click handler; also responsible for visually flipping the
+// aria-selected state across the tab buttons.
+function setMode(mode) {
+  if (mode === currentMode) return;
+  currentMode = mode;
+  for (const tab of els.modeTabs) {
+    tab.setAttribute('aria-selected', tab.dataset.mode === mode ? 'true' : 'false');
+  }
+  // Switching modes invalidates any cached span-line state — the
+  // output DOM is about to be replaced.
+  lastSpanLines = [];
+  if (wasm) run();
+}
+
+function wireModeTabs() {
+  for (const tab of els.modeTabs) {
+    tab.addEventListener('click', () => setMode(tab.dataset.mode));
   }
 }
 
@@ -862,6 +983,14 @@ function wireSnippets() {
     if (name && SAMPLES[name]) {
       setSource(SAMPLES[name]);
       els.snippets.value = '';
+      // The previous run's output is about to be stale — wipe it so
+      // the user knows the next Run will reflect the new snippet. Same
+      // resets we'd do on a fresh page load.
+      clearOutput();
+      setEditorHotRange(null);
+      setEditorErrorRange(null);
+      lastSpanLines = [];
+      appendLine('Run something. Cynic will judge it.', 'out-empty');
       view.focus();
     }
   });
@@ -875,16 +1004,11 @@ function init() {
   els.run.disabled = true;
   createEditor(seedFromHash() || DEFAULT_SNIPPET);
   wireSnippets();
+  wireModeTabs();
   wireInspectorHover();
-  wireSourceToDisasmHover();
+  wireSourceToSpanHover();
   els.run.addEventListener('click', run);
   els.share.addEventListener('click', shareLink);
-  els.mode.addEventListener('change', () => {
-    // Switching modes invalidates the bytecode hover-link state — the
-    // disasm DOM is about to be replaced or removed entirely.
-    lastDisasmHotLines = [];
-    if (wasm) run();
-  });
   loadWasm();
 }
 
