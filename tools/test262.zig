@@ -220,9 +220,9 @@ fn test262DetachArrayBuffer(
     const obj = cynic.runtime.heap.valueAsPlainObject(args[0]) orelse {
         return throwTest262TypeError(realm, "$262.detachArrayBuffer: argument must be an ArrayBuffer");
     };
-    if (obj.array_buffer) |ab| {
+    if (obj.getArrayBuffer()) |ab| {
         realm.allocator.free(ab);
-        obj.array_buffer = null;
+        obj.setArrayBuffer(realm.allocator, null) catch {};
     }
     return cynic.runtime.Value.undefined_;
 }

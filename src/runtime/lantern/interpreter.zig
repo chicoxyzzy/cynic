@@ -6937,6 +6937,16 @@ pub fn runFrames(
                         // `prop_write` samples to a single Value store.
                         // The cache is filled lazily on first miss (see
                         // the slow-path refill below).
+                        // Cached index is safe because every
+                        // `properties.swapRemove` path that could
+                        // reshuffle the bag (delete operator,
+                        // Array.prototype.{pop, splice, shift,
+                        // reverse, copyWithin, unshift} via
+                        // `deleteOwn`, `def_property` redefine,
+                        // array-length truncation) demotes the
+                        // shape first — the outer `cell.shape ==
+                        // obj.shape` guard above then catches every
+                        // such case and falls into the slow refill.
                         if (cell.bag_index != chunk_mod.bag_index_uncached and
                             cell.bag_index < obj_in.properties.count())
                         {

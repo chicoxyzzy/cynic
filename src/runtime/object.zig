@@ -2068,6 +2068,16 @@ pub const JSObject = struct {
                 if (self.properties.contains(key)) {
                     const flags = self.property_flags.get(key) orelse PropertyFlags.default;
                     if (!flags.configurable) return false;
+                    // Shape can't encode a removal — demote before
+                    // any `properties.swapRemove` so subsequent
+                    // shape-first reads / hasOwn checks don't
+                    // see a stale slot for the just-deleted key.
+                    // Same discipline as the `del_named_property`
+                    // opcode in the interpreter. Native callers
+                    // (Array.prototype.pop / splice / shift /
+                    // reverse / copyWithin / unshift) come through
+                    // here for array-like generic-object receivers.
+                    self.demoteFromShape();
                     _ = self.properties.swapRemove(key);
                     _ = self.property_flags.swapRemove(key);
                 }
@@ -2075,12 +2085,14 @@ pub const JSObject = struct {
             }
         }
         if (self.hasAccessor(key)) {
+            self.demoteFromShape();
             _ = self.removeAccessor(key);
             _ = self.property_flags.swapRemove(key);
             if (!self.properties.contains(key)) self.forgetKey(key);
             return true;
         }
         if (!self.properties.contains(key)) return true;
+        self.demoteFromShape();
         _ = self.properties.swapRemove(key);
         _ = self.property_flags.swapRemove(key);
         if (!self.hasAccessor(key)) self.forgetKey(key);
