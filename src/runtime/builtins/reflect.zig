@@ -356,7 +356,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         // for function targets isn't surfaced by any failing
         // fixture in our scope today.
         const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
-        const ok = fn_obj.setIfWritable(realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
+        const ok = realm.heap.storeFunctionPropertyIfWritable(fn_obj, realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
         return Value.fromBool(ok);
     }
     var target = heap_mod.valueAsPlainObject(arg).?;
