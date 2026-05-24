@@ -104,7 +104,7 @@ pub fn install(realm: *Realm) !void {
     // `[[Done]]` state on the typed `regexp_string_iter` slot,
     // brand-checked by `next`.
     const re_iter_proto = try realm.heap.allocateObject();
-    re_iter_proto.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(re_iter_proto, realm.intrinsics.object_prototype);
     try installNativeMethodOnProto(realm, re_iter_proto, "next", regexpStringIterNext, 0);
     try installNativeMethodOnProto(realm, re_iter_proto, "@@iterator", regexpStringIterReturnsSelf, 0);
     try intrinsics.installToStringTag(realm, re_iter_proto, "RegExp String Iterator");
@@ -436,7 +436,7 @@ fn stringMatchAllDispatched(realm: *Realm, this_value: Value, args: []const Valu
 
 fn iterResult(realm: *Realm, value: Value, done: bool) NativeError!Value {
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-    obj.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
     obj.set(realm.allocator, "value", value) catch return error.OutOfMemory;
     obj.set(realm.allocator, "done", Value.fromBool(done)) catch return error.OutOfMemory;
     return heap_mod.taggedObject(obj);
@@ -505,7 +505,7 @@ pub fn stringMatch(realm: *Realm, this_value: Value, args: []const Value) Native
     // Global: walk all matches.
     re_obj.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
-    result.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(result, realm.intrinsics.array_prototype);
     result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     // The match loop calls `exec` (JS re-entry → GC) on every step;
     // root the result array, the source string and the regex so a
@@ -645,7 +645,7 @@ fn regExpCreate(realm: *Realm, pattern: Value, flags: ?[]const u8) NativeError!V
     const ctor = heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "RegExp constructor is missing");
     const interp = @import("../lantern/interpreter.zig");
     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
-    inst.prototype = ctor.prototype;
+    realm.heap.setObjectPrototype(inst, ctor.prototype);
     var argbuf: [2]Value = .{ pattern, Value.undefined_ };
     var argn: usize = 1;
     if (flags) |fs| {
@@ -1356,7 +1356,7 @@ pub fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) Native
     // operationally infinite for the bounded source.
     const limit: i64 = @min(@as(i64, limit_raw), @as(i64, std.math.maxInt(i32)));
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     // `out` is the result array. The separator `ToString` below and
     // the `regexSplit` path both re-enter JS and can trigger a GC
