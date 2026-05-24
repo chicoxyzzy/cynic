@@ -2826,6 +2826,36 @@ pub const Heap = struct {
         fn_obj.captured_new_target = v;
     }
 
+    /// Update an accessor's getter half on `container`'s
+    /// `accessors` / `private_accessors` table. The accessor entry
+    /// itself lives inside an AutoHashMap value; the helper records
+    /// the cross-generational edge against `container` before
+    /// writing `entry_ptr.getter`. Used by `Object.defineProperty`,
+    /// `Reflect.defineProperty`, the `set_accessor` bytecode, and
+    /// the class definition lowering — same call surface as the
+    /// non-accessor typed-slot helpers above.
+    pub fn setAccessorGetter(
+        self: *Heap,
+        container: Container,
+        entry_ptr: *@import("object.zig").Accessor,
+        getter: ?*JSFunction,
+    ) void {
+        if (getter) |g| self.writeBarrier(container, taggedFunction(g));
+        entry_ptr.getter = getter;
+    }
+
+    /// Update an accessor's setter half — sister of
+    /// `setAccessorGetter`.
+    pub fn setAccessorSetter(
+        self: *Heap,
+        container: Container,
+        entry_ptr: *@import("object.zig").Accessor,
+        setter: ?*JSFunction,
+    ) void {
+        if (setter) |s| self.writeBarrier(container, taggedFunction(s));
+        entry_ptr.setter = setter;
+    }
+
     /// Generational write barrier. Records an old→young store:
     /// when `container` is a mature object and `v` carries a young
     /// heap pointer, the container joins the remembered set so a

@@ -462,7 +462,7 @@ pub fn buildClass(
             .getter => {
                 const entry = try proto.getOrPutAccessor(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
-                entry.value_ptr.*.getter = fn_obj;
+                realm.heap.setAccessorGetter(.{ .object = proto }, entry.value_ptr, fn_obj);
                 try proto.property_flags.put(realm.allocator, runtime_name, .{
                     .writable = false,
                     .enumerable = false,
@@ -472,7 +472,7 @@ pub fn buildClass(
             .setter => {
                 const entry = try proto.getOrPutAccessor(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
-                entry.value_ptr.*.setter = fn_obj;
+                realm.heap.setAccessorSetter(.{ .object = proto }, entry.value_ptr, fn_obj);
                 try proto.property_flags.put(realm.allocator, runtime_name, .{
                     .writable = false,
                     .enumerable = false,
@@ -646,24 +646,24 @@ pub fn buildClass(
             .getter => if (is_priv_static) {
                 const entry = try ctor.private_accessors.getOrPut(realm.allocator, slot_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
-                entry.value_ptr.*.getter = fn_obj;
+                realm.heap.setAccessorGetter(.{ .function = ctor }, entry.value_ptr, fn_obj);
             } else {
                 // §17 static accessor on a class constructor —
                 // landed in the JSFunction's `accessors` map
                 // (added in the JSFunction-accessors commit).
                 const entry = try ctor.accessors.getOrPut(realm.allocator, slot_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
-                entry.value_ptr.*.getter = fn_obj;
+                realm.heap.setAccessorGetter(.{ .function = ctor }, entry.value_ptr, fn_obj);
                 try ctor.property_flags.put(realm.allocator, slot_name, static_accessor_flags);
             },
             .setter => if (is_priv_static) {
                 const entry = try ctor.private_accessors.getOrPut(realm.allocator, slot_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
-                entry.value_ptr.*.setter = fn_obj;
+                realm.heap.setAccessorSetter(.{ .function = ctor }, entry.value_ptr, fn_obj);
             } else {
                 const entry = try ctor.accessors.getOrPut(realm.allocator, slot_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
-                entry.value_ptr.*.setter = fn_obj;
+                realm.heap.setAccessorSetter(.{ .function = ctor }, entry.value_ptr, fn_obj);
                 try ctor.property_flags.put(realm.allocator, slot_name, static_accessor_flags);
             },
         }

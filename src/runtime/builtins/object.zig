@@ -1749,10 +1749,12 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
                 }
             }
             const entry = target.getOrPutAccessor(realm.allocator, key) catch return error.OutOfMemory;
+            if (!entry.found_existing) entry.value_ptr.* = .{};
             // Preserve the half not specified in the new desc.
             const new_getter: ?*JSFunction = if (parsed.has_get) parsed.getter else if (cur_is_accessor) cur_getter else null;
             const new_setter: ?*JSFunction = if (parsed.has_set) parsed.setter else if (cur_is_accessor) cur_setter else null;
-            entry.value_ptr.* = .{ .getter = new_getter, .setter = new_setter };
+            realm.heap.setAccessorGetter(.{ .object = target }, entry.value_ptr, new_getter);
+            realm.heap.setAccessorSetter(.{ .object = target }, entry.value_ptr, new_setter);
             // Accessors don't honor `writable`; clear that bit.
             flags.writable = false;
             target.property_flags.put(realm.allocator, key, flags) catch return error.OutOfMemory;
@@ -1857,9 +1859,11 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             // Replace any existing data slot.
             _ = target_fn.properties.swapRemove(key);
             const entry = target_fn.accessors.getOrPut(realm.allocator, key) catch return error.OutOfMemory;
+            if (!entry.found_existing) entry.value_ptr.* = .{};
             const new_getter: ?*JSFunction = if (parsed.has_get) parsed.getter else if (cur_is_accessor) cur_getter else null;
             const new_setter: ?*JSFunction = if (parsed.has_set) parsed.setter else if (cur_is_accessor) cur_setter else null;
-            entry.value_ptr.* = .{ .getter = new_getter, .setter = new_setter };
+            realm.heap.setAccessorGetter(.{ .function = target_fn }, entry.value_ptr, new_getter);
+            realm.heap.setAccessorSetter(.{ .function = target_fn }, entry.value_ptr, new_setter);
             // Accessors don't carry a `writable` bit; clear it.
             flags.writable = false;
             const is_default = flags.writable and flags.enumerable and flags.configurable;

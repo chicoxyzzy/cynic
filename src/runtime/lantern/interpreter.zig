@@ -3868,12 +3868,12 @@ pub fn runFrames(
                                     .getter => {
                                         const ent = inst.getOrPutPrivateAccessor(allocator, entry.name) catch return error.OutOfMemory;
                                         if (!ent.found_existing) ent.value_ptr.* = .{};
-                                        ent.value_ptr.*.getter = fn_obj;
+                                        realm.heap.setAccessorGetter(.{ .object = inst }, ent.value_ptr, fn_obj);
                                     },
                                     .setter => {
                                         const ent = inst.getOrPutPrivateAccessor(allocator, entry.name) catch return error.OutOfMemory;
                                         if (!ent.found_existing) ent.value_ptr.* = .{};
-                                        ent.value_ptr.*.setter = fn_obj;
+                                        realm.heap.setAccessorSetter(.{ .object = inst }, ent.value_ptr, fn_obj);
                                     },
                                 }
                             }
@@ -5242,11 +5242,10 @@ pub fn runFrames(
                 obj.demoteFromShape();
                 const entry = obj.getOrPutAccessor(allocator, key_s.flatBytes()) catch return error.OutOfMemory;
                 if (!entry.found_existing) entry.value_ptr.* = .{};
-                realm.heap.storeInternalSlot(.{ .object = obj }, acc);
                 if (is_setter) {
-                    entry.value_ptr.*.setter = fn_obj;
+                    realm.heap.setAccessorSetter(.{ .object = obj }, entry.value_ptr, fn_obj);
                 } else {
-                    entry.value_ptr.*.getter = fn_obj;
+                    realm.heap.setAccessorGetter(.{ .object = obj }, entry.value_ptr, fn_obj);
                 }
                 // §10.1.11 OrdinaryOwnPropertyKeys — accessor counts as
                 // an own key for enumeration order.
@@ -5288,11 +5287,10 @@ pub fn runFrames(
                     // can't dangle a computed accessor key.
                     obj.key_anchors.append(allocator, owned) catch return error.OutOfMemory;
                 }
-                realm.heap.storeInternalSlot(.{ .object = obj }, acc);
                 if (is_setter) {
-                    entry.value_ptr.*.setter = fn_obj;
+                    realm.heap.setAccessorSetter(.{ .object = obj }, entry.value_ptr, fn_obj);
                 } else {
-                    entry.value_ptr.*.getter = fn_obj;
+                    realm.heap.setAccessorGetter(.{ .object = obj }, entry.value_ptr, fn_obj);
                 }
                 obj.recordKey(allocator, owned.flatBytes()) catch return error.OutOfMemory;
                 continue :dispatch try decodeNext(code, &ip, &committed);
