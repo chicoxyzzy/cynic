@@ -257,7 +257,7 @@ pub fn openIteratorOpts(
     if (!has_length) return error.NotIterable;
 
     const iter = realm.heap.allocateObject() catch return error.OutOfMemory;
-    iter.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(iter, realm.intrinsics.object_prototype);
     const state = realm.allocator.create(object_mod.ArrayLikeIterState) catch return error.OutOfMemory;
     state.* = .{ .target = iterable };
     iter.array_like_iter = state;
@@ -285,7 +285,7 @@ pub fn openForInIterator(
     obj_v: Value,
 ) RunError!Value {
     const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
-    arr.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(arr, realm.intrinsics.array_prototype);
     arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     var seen: std.StringArrayHashMapUnmanaged(void) = .empty;
     defer seen.deinit(realm.allocator);
@@ -606,7 +606,7 @@ pub fn openForInIterator(
     // ("If a property that has not yet been visited during
     // enumeration is deleted, then it will not be visited.")
     const iter = realm.heap.allocateObject() catch return error.OutOfMemory;
-    iter.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(iter, realm.intrinsics.object_prototype);
     const state = realm.allocator.create(@import("../object.zig").ArrayLikeIterState) catch return error.OutOfMemory;
     state.* = .{ .target = heap_mod.taggedObject(arr), .idx = 0, .done = false, .for_in_source = obj_v };
     iter.array_like_iter = state;
@@ -637,7 +637,7 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
     const idx: u32 = state.idx;
 
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
-    result.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(result, realm.intrinsics.object_prototype);
 
     if (target.isString()) {
         const s: *@import("../string.zig").JSString = @ptrCast(@alignCast(target.asString()));
