@@ -63,7 +63,7 @@ const genResultObject = generator.genResultObject;
 /// property — so the Promise can't be forged from JS.
 pub fn wrapInPromise(realm: *Realm, fulfilled: bool, value: Value) !Value {
     const obj = try realm.heap.allocateObject();
-    obj.prototype = realm.intrinsics.promise_prototype;
+    realm.heap.setObjectPrototype(obj, realm.intrinsics.promise_prototype);
     obj.settlePromise(if (fulfilled) .fulfilled else .rejected, value);
     return heap_mod.taggedObject(obj);
 }
