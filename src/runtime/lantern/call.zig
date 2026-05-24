@@ -490,10 +490,10 @@ pub fn constructValue(
     const callee_chunk = target.chunk.?;
     var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
     defer {
-        for (frames.items) |*f| if (f.owns_registers) allocator.free(f.registers);
+        for (frames.items) |*f| if (f.owns_registers) realm.frame_pool.release(allocator, f.registers);
         frames.deinit(allocator);
     }
-    const regs = try allocator.alloc(Value, @max(@as(usize, callee_chunk.register_count), args.len));
+    const regs = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk.register_count), args.len));
     @memset(regs, Value.undefined_);
     var i: usize = 0;
     while (i < args.len and i < regs.len) : (i += 1) regs[i] = args[i];
@@ -576,11 +576,11 @@ pub fn callJSFunction(
 
     var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
     defer {
-        for (frames.items) |*f| if (f.owns_registers) allocator.free(f.registers);
+        for (frames.items) |*f| if (f.owns_registers) realm.frame_pool.release(allocator, f.registers);
         frames.deinit(allocator);
     }
 
-    const regs = try allocator.alloc(Value, @max(@as(usize, callee_chunk.register_count), args.len));
+    const regs = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk.register_count), args.len));
     @memset(regs, Value.undefined_);
     var i: usize = 0;
     while (i < args.len and i < regs.len) : (i += 1) {
@@ -665,11 +665,11 @@ pub fn callJSFunctionAsSuper(
 
     var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
     defer {
-        for (frames.items) |*f| if (f.owns_registers) allocator.free(f.registers);
+        for (frames.items) |*f| if (f.owns_registers) realm.frame_pool.release(allocator, f.registers);
         frames.deinit(allocator);
     }
 
-    const regs = try allocator.alloc(Value, @max(@as(usize, callee_chunk.register_count), args.len));
+    const regs = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk.register_count), args.len));
     @memset(regs, Value.undefined_);
     var i: usize = 0;
     while (i < args.len and i < regs.len) : (i += 1) regs[i] = args[i];

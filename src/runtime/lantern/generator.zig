@@ -637,7 +637,7 @@ pub fn resumeAsyncGenBody(
 
             var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
             defer {
-                for (frames.items) |*f| if (f.owns_registers) allocator.free(f.registers);
+                for (frames.items) |*f| if (f.owns_registers) realm.frame_pool.release(allocator, f.registers);
                 frames.deinit(allocator);
             }
 

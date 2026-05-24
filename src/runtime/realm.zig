@@ -41,6 +41,53 @@ pub const FeatureSet = features.FeatureSet;
 /// resolves `reaction_result`. A null handler propagates
 /// the settlement unchanged. A Promise-returning handler
 /// chains.
+/// Per-size register-file pool. Each JS-function call allocates a
+/// `[]Value` sized `max(register_count, argc)` for the callee's
+/// register file; without pooling, that's a libc malloc + free per
+/// call. The pool keeps freed buffers in a per-size bin so a hot
+/// method loop pops the same buffer back out every iteration.
+///
+/// Size key is `register_count` (u32 to cover both u8 and the
+/// `argc` path). Bin entries are owned `[]Value` slices freed
+/// individually at `realm.deinit`.
+pub const FramePool = struct {
+    bins: std.AutoHashMapUnmanaged(u32, std.ArrayListUnmanaged([]Value)) = .empty,
+
+    /// Pop a register file of exactly `n` from the pool, or
+    /// allocate a fresh one on miss. Caller is responsible for
+    /// memset'ing to `undefined` before use — buffer contents
+    /// are stale from the previous frame.
+    pub fn acquire(self: *FramePool, allocator: std.mem.Allocator, n: usize) ![]Value {
+        if (self.bins.getPtr(@intCast(n))) |list| {
+            if (list.items.len > 0) return list.pop().?;
+        }
+        return try allocator.alloc(Value, n);
+    }
+
+    /// Return a register file to its size's bin. On allocation
+    /// failure (the bins map can't grow), fall back to freeing
+    /// the slice directly — pool growth is best-effort.
+    pub fn release(self: *FramePool, allocator: std.mem.Allocator, regs: []Value) void {
+        const gop = self.bins.getOrPut(allocator, @intCast(regs.len)) catch {
+            allocator.free(regs);
+            return;
+        };
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        gop.value_ptr.append(allocator, regs) catch {
+            allocator.free(regs);
+        };
+    }
+
+    pub fn deinit(self: *FramePool, allocator: std.mem.Allocator) void {
+        var it = self.bins.iterator();
+        while (it.next()) |e| {
+            for (e.value_ptr.items) |buf| allocator.free(buf);
+            e.value_ptr.deinit(allocator);
+        }
+        self.bins.deinit(allocator);
+    }
+};
+
 pub const Microtask = struct {
     kind: enum {
         callback,
@@ -549,6 +596,20 @@ pub const Realm = struct {
     /// counter is bumped only on the rare proto-link write path so
     /// the broad invalidation is fine in practice.
     proto_revision_counter: u64 = 1,
+    /// Per-size register-file pool for call frames. Every
+    /// JS-function call allocates a `[]Value` sized
+    /// `max(chunk.register_count, argc)` for the callee's register
+    /// file; freeing it on frame pop returns malloc/free pressure
+    /// on every call. Method-call and constructor-instantiation
+    /// hot loops (the `method_call` / `class_instantiate` cross-
+    /// engine benches surfaced this) repeatedly allocate the same
+    /// size, so a per-size free list captures the pattern: pop on
+    /// `acquire`, push on `release`. Bin entries are owned slices
+    /// drained at `realm.deinit`. Distinct sizes (different
+    /// chunks, or `argc` ≥ `register_count` paths) get their own
+    /// bin; the map grows bounded by the number of unique
+    /// register_counts the realm has seen.
+    frame_pool: FramePool = .{},
     /// One-shot exception slot for native callbacks. A native
     /// that wants to throw a specific JS value sets this and
     /// returns `error.NativeThrew`; the dispatcher reads it,
@@ -799,6 +860,7 @@ pub const Realm = struct {
     }
 
     pub fn deinit(self: *Realm) void {
+        self.frame_pool.deinit(self.allocator);
         self.globals.deinit(self.allocator);
         self.output.deinit(self.allocator);
         self.microtask_queue.deinit(self.allocator);

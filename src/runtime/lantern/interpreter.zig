@@ -491,7 +491,7 @@ pub fn run(allocator: std.mem.Allocator, realm: *Realm, chunk: *const Chunk) Run
 
     var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
     defer {
-        for (frames.items) |*f| if (f.owns_registers) allocator.free(f.registers);
+        for (frames.items) |*f| if (f.owns_registers) realm.frame_pool.release(allocator, f.registers);
         frames.deinit(allocator);
     }
 
@@ -513,7 +513,7 @@ pub fn run(allocator: std.mem.Allocator, realm: *Realm, chunk: *const Chunk) Run
         break :blk Value.undefined_;
     };
     {
-        const main_regs = try allocator.alloc(Value, chunk.register_count);
+        const main_regs = try realm.frame_pool.acquire(allocator, chunk.register_count);
         @memset(main_regs, Value.undefined_);
         try frames.append(allocator, .{
             .chunk = chunk,
@@ -1780,7 +1780,7 @@ pub fn runFrames(
                 }
 
                 const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
-                const callee_regs = try allocator.alloc(Value, @max(@as(usize, callee_chunk.register_count), @as(usize, argc)));
+                const callee_regs = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk.register_count), @as(usize, argc)));
                 @memset(callee_regs, Value.undefined_);
                 var i: u8 = 0;
                 while (i < argc and @as(usize, i) < callee_regs.len) : (i += 1) {
@@ -1824,7 +1824,7 @@ pub fn runFrames(
                     .wrap_return_in_promise = false,
                     .owning_module = callee_fn.owning_module,
                 }) catch {
-                    allocator.free(callee_regs);
+                    realm.frame_pool.release(allocator, callee_regs);
                     return error.OutOfMemory;
                 };
                 // JS callee — a new frame was pushed; the active
@@ -2038,7 +2038,7 @@ pub fn runFrames(
                 }
 
                 const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
-                const callee_regs = try allocator.alloc(Value, @max(@as(usize, callee_chunk.register_count), @as(usize, argc)));
+                const callee_regs = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk.register_count), @as(usize, argc)));
                 @memset(callee_regs, Value.undefined_);
                 var ai: u8 = 0;
                 while (ai < argc and @as(usize, ai) < callee_regs.len) : (ai += 1) {
@@ -2078,7 +2078,7 @@ pub fn runFrames(
                     .wrap_return_in_promise = false,
                     .owning_module = callee_fn.owning_module,
                 }) catch {
-                    allocator.free(callee_regs);
+                    realm.frame_pool.release(allocator, callee_regs);
                     return error.OutOfMemory;
                 };
                 // JS callee — a new frame was pushed; the active
@@ -2298,8 +2298,8 @@ pub fn runFrames(
 
                 // Free the current frame's register file. The new
                 // one is sized for the callee chunk.
-                if (f.owns_registers) allocator.free(f.registers);
-                const callee_regs_t = try allocator.alloc(Value, @max(@as(usize, callee_chunk_t.register_count), @as(usize, argc)));
+                if (f.owns_registers) realm.frame_pool.release(allocator, f.registers);
+                const callee_regs_t = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk_t.register_count), @as(usize, argc)));
                 @memset(callee_regs_t, Value.undefined_);
                 {
                     var i: u8 = 0;
@@ -2493,8 +2493,8 @@ pub fn runFrames(
                     var i: u8 = 0;
                     while (i < argc) : (i += 1) args_buf[i] = registers[r_callee + 1 + i];
                 }
-                if (f.owns_registers) allocator.free(f.registers);
-                const callee_regs_t = try allocator.alloc(Value, @max(@as(usize, callee_chunk_t.register_count), @as(usize, argc)));
+                if (f.owns_registers) realm.frame_pool.release(allocator, f.registers);
+                const callee_regs_t = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk_t.register_count), @as(usize, argc)));
                 @memset(callee_regs_t, Value.undefined_);
                 {
                     var i: u8 = 0;
@@ -2806,7 +2806,7 @@ pub fn runFrames(
                 }
 
                 const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
-                const callee_regs = try allocator.alloc(Value, @max(@as(usize, callee_chunk.register_count), @as(usize, argc)));
+                const callee_regs = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk.register_count), @as(usize, argc)));
                 @memset(callee_regs, Value.undefined_);
                 var ai: u8 = 0;
                 while (ai < argc and @as(usize, ai) < callee_regs.len) : (ai += 1) {
@@ -2832,7 +2832,7 @@ pub fn runFrames(
                     .owning_module = callee_fn.owning_module,
                     .argc = argc,
                 }) catch {
-                    allocator.free(callee_regs);
+                    realm.frame_pool.release(allocator, callee_regs);
                     return error.OutOfMemory;
                 };
                 // JS callee — a new frame was pushed; the active
@@ -8318,7 +8318,7 @@ pub fn runFrames(
                         ret = wrapInPromise(realm, true, ret) catch return error.OutOfMemory;
                     }
                 }
-                if (f.owns_registers) allocator.free(registers);
+                if (f.owns_registers) realm.frame_pool.release(allocator, registers);
                 _ = frames.pop();
                 committed = true;
                 // §10.2.2 [[Construct]] steps 7c / 11 — raise the
