@@ -448,6 +448,20 @@ fn numberToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
     }
     var buf: [128]u8 = undefined;
     if (radix == 10) {
+        // Integer fast-path. `(i & 0xff).toString()` and friends
+        // produce a Number whose underlying f64 is integral and
+        // fits an i64. Routing through `{d}` on f64 goes through
+        // `Io.Writer.printFloat`, which profile flagged at ~12 %
+        // of `string_concat` samples; `{d}` on i64 is a
+        // straight-line digit-by-digit divmod and skips that
+        // entirely. -0 stays integer here ("0" matches §6.1.6.1.20
+        // step 2 for zero NumericValue regardless of sign-bit).
+        if (x == @trunc(x) and x >= -1.0e18 and x <= 1.0e18) {
+            const i: i64 = @intFromFloat(x);
+            const slice = std.fmt.bufPrint(&buf, "{d}", .{i}) catch return error.OutOfMemory;
+            const s = realm.heap.allocateString(slice) catch return error.OutOfMemory;
+            return Value.fromString(s);
+        }
         const slice = std.fmt.bufPrint(&buf, "{d}", .{x}) catch return error.OutOfMemory;
         const s = realm.heap.allocateString(slice) catch return error.OutOfMemory;
         return Value.fromString(s);

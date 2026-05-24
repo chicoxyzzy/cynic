@@ -913,6 +913,22 @@ test "later: Number.prototype.toString(radix)" {
     , "ff:1010");
 }
 
+test "later: Number.prototype.toString integer fast-path matches spec" {
+    // §6.1.6.1.20 Number::toString. The radix-10 path takes an
+    // integer shortcut (i64-format) when the value is integral
+    // and in the safe range; the rest must keep falling through
+    // to the f64 formatter. -0 must serialize as "0" (step 2:
+    // NumericValue of -0𝔽 is 0). Non-integral doubles stay on
+    // the float path. Infinity / NaN keep their dedicated names.
+    try expectScriptStringWithBuiltins(
+        \\(0).toString() + "," + (-0).toString() + "," +
+        \\(42).toString() + "," + (-42).toString() + "," +
+        \\(1.5).toString() + "," + (-1.5).toString() + "," +
+        \\(NaN).toString() + "," + (Infinity).toString() + "," +
+        \\(-Infinity).toString();
+    , "0,0,42,-42,1.5,-1.5,NaN,Infinity,-Infinity");
+}
+
 test "later: BigInt.prototype.toString(radix)" {
     try expectScriptStringWithBuiltins(
         \\(255n).toString(16) + ":" + (-100n).toString(16);
