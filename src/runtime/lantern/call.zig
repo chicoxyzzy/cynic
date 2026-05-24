@@ -720,7 +720,7 @@ pub fn startAsyncCall(
         p.prototype
     else
         realm.intrinsics.object_prototype);
-    promise_obj.settlePromise(.pending, Value.undefined_);
+    realm.heap.settlePromise(promise_obj, .pending, Value.undefined_);
     const result_promise = heap_mod.taggedObject(promise_obj);
 
     const wanted: usize = @max(@as(usize, chunk.register_count), args.len);

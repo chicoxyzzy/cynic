@@ -290,7 +290,7 @@ pub fn allocatePromiseFor(
     // `[[PromiseResult]]` as internal slots, NOT properties.
     // We store them as typed JSObject fields so they don't
     // surface in `Object.keys` / `in` / property reads.
-    obj.settlePromise(state, value);
+    realm.heap.settlePromise(obj, state, value);
     return heap_mod.taggedObject(obj);
 }
 
@@ -334,7 +334,7 @@ fn promiseConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
     const executor = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Promise executor must be a function");
 
     // Initial state: pending.
-    inst.settlePromise(.pending, Value.undefined_);
+    realm.heap.settlePromise(inst, .pending, Value.undefined_);
 
     // Resolve / reject capture the target Promise via a
     // bound-function trick: the actual native (impl) takes its
@@ -389,9 +389,8 @@ fn promiseConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
 }
 
 fn settlePromise(realm: *Realm, inst: *@import("../object.zig").JSObject, state: enum { fulfilled, rejected }, value: Value) !void {
-    _ = realm;
     if (inst.promise_state != .pending) return; // already settled
-    inst.settlePromise(switch (state) {
+    realm.heap.settlePromise(inst, switch (state) {
         .fulfilled => .fulfilled,
         .rejected => .rejected,
     }, value);

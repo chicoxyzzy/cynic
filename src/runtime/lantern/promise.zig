@@ -64,7 +64,7 @@ const genResultObject = generator.genResultObject;
 pub fn wrapInPromise(realm: *Realm, fulfilled: bool, value: Value) !Value {
     const obj = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(obj, realm.intrinsics.promise_prototype);
-    obj.settlePromise(if (fulfilled) .fulfilled else .rejected, value);
+    realm.heap.settlePromise(obj, if (fulfilled) .fulfilled else .rejected, value);
     return heap_mod.taggedObject(obj);
 }
 
@@ -974,7 +974,7 @@ pub fn settlePromiseInternal(
     value: Value,
 ) !void {
     if (inst.promise_state != .pending) return; // already settled
-    inst.settlePromise(switch (state) {
+    realm.heap.settlePromise(inst, switch (state) {
         .fulfilled => .fulfilled,
         .rejected => .rejected,
     }, value);

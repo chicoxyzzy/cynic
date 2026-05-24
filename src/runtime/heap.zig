@@ -2856,6 +2856,21 @@ pub const Heap = struct {
         entry_ptr.setter = setter;
     }
 
+    /// §27.2.1.3 / §27.2.1.4 — settle a Promise object. Flips
+    /// `promise_state` and stores `value` into `promise_value`,
+    /// recording the cross-generational edge first when a mature
+    /// Promise settles with a young value (the long-lived top-
+    /// level Promise + late settle case).
+    pub fn settlePromise(
+        self: *Heap,
+        obj: *JSObject,
+        state: @import("object.zig").PromiseState,
+        value: Value,
+    ) void {
+        self.writeBarrier(.{ .object = obj }, value);
+        obj.settlePromise(state, value);
+    }
+
     /// Generational write barrier. Records an old→young store:
     /// when `container` is a mature object and `v` carries a young
     /// heap pointer, the container joins the remembered set so a
