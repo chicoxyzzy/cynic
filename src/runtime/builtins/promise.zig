@@ -195,7 +195,7 @@ pub fn newPromiseCapability(realm: *Realm, ctor: *JSFunction) NativeError!Promis
     // a bound function lets the impl pick up the state via
     // `this_value` without needing closures.
     const state = realm.heap.allocateObject() catch return error.OutOfMemory;
-    state.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(state, realm.intrinsics.object_prototype);
     const rec = realm.allocator.create(@import("../object.zig").PromiseCapabilityRecord) catch return error.OutOfMemory;
     rec.* = .{};
     state.capability_record = rec;
@@ -275,7 +275,7 @@ pub fn allocatePromiseFor(
 ) !Value {
     const obj = try realm.heap.allocateObject();
     if (ctor) |c| {
-        if (c.prototype) |p| obj.prototype = p;
+        if (c.prototype) |p| realm.heap.setObjectPrototype(obj, p);
     }
     if (obj.prototype == null) {
         // §27 — when no caller-supplied constructor is in play we use
@@ -284,7 +284,7 @@ pub fn allocatePromiseFor(
         // (see test262 language/expressions/dynamic-import/
         // returns-promise.js where `globalThis.Promise` is overridden);
         // engine-internal Promises must keep the intrinsic shape.
-        obj.prototype = realm.intrinsics.promise_prototype orelse realm.intrinsics.object_prototype;
+        realm.heap.setObjectPrototype(obj, realm.intrinsics.promise_prototype orelse realm.intrinsics.object_prototype);
     }
     // §27.2.3.1 — the spec models `[[PromiseState]]` /
     // `[[PromiseResult]]` as internal slots, NOT properties.
@@ -678,19 +678,19 @@ fn promiseFinally(realm: *Realm, this_value: Value, args: []const Value) NativeE
     var catch_arg: Value = on_finally;
     if (on_finally_fn != null) {
         const ctx = realm.heap.allocateObject() catch return error.OutOfMemory;
-        ctx.prototype = realm.intrinsics.object_prototype;
+        realm.heap.setObjectPrototype(ctx, realm.intrinsics.object_prototype);
         ctx.finally_callback = on_finally_fn;
         ctx.finally_constructor = C;
 
         const then_fn = realm.heap.allocateFunctionNative(finallyThenReaction, 1, "") catch return error.OutOfMemory;
         then_fn.proto = realm.intrinsics.function_prototype;
         then_fn.is_arrow = true;
-        then_fn.captured_this = heap_mod.taggedObject(ctx);
+        realm.heap.setCapturedThis(then_fn, heap_mod.taggedObject(ctx));
 
         const catch_fn = realm.heap.allocateFunctionNative(finallyCatchReaction, 1, "") catch return error.OutOfMemory;
         catch_fn.proto = realm.intrinsics.function_prototype;
         catch_fn.is_arrow = true;
-        catch_fn.captured_this = heap_mod.taggedObject(ctx);
+        realm.heap.setCapturedThis(catch_fn, heap_mod.taggedObject(ctx));
 
         then_arg = heap_mod.taggedFunction(then_fn);
         catch_arg = heap_mod.taggedFunction(catch_fn);
@@ -863,7 +863,7 @@ fn chainFinallyResult(realm: *Realm, result: Value, carry: Value, is_throw: bool
 
     // Build the value-thunk context (captures `carry` + the throw flag).
     const thunk_ctx = realm.heap.allocateObject() catch return error.OutOfMemory;
-    thunk_ctx.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(thunk_ctx, realm.intrinsics.object_prototype);
     thunk_ctx.finally_value = carry;
     const thunk_fn = realm.heap.allocateFunctionNative(
         if (is_throw) finallyThrowThunk else finallyReturnThunk,
@@ -872,7 +872,7 @@ fn chainFinallyResult(realm: *Realm, result: Value, carry: Value, is_throw: bool
     ) catch return error.OutOfMemory;
     thunk_fn.proto = realm.intrinsics.function_prototype;
     thunk_fn.is_arrow = true;
-    thunk_fn.captured_this = heap_mod.taggedObject(thunk_ctx);
+    realm.heap.setCapturedThis(thunk_fn, heap_mod.taggedObject(thunk_ctx));
 
     // Invoke(wrapped, "then", « thunk »).
     const wrapped_obj = heap_mod.valueAsPlainObject(wrapped) orelse return error.OutOfMemory;
@@ -1336,7 +1336,7 @@ const k_elem_called = "__cynic_elem_called__";
 
 fn allocAggState(realm: *Realm, kind: AggKind, cap: PromiseCapability, values: *JSObject) NativeError!*JSObject {
     const st = realm.heap.allocateObject() catch return error.OutOfMemory;
-    st.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(st, realm.intrinsics.object_prototype);
     st.set(realm.allocator, k_kind, Value.fromInt32(@intFromEnum(kind))) catch return error.OutOfMemory;
     // Spec starts `remainingElementsCount` at 1 to handle the
     // synchronous-iteration case (decremented once after the
@@ -1360,7 +1360,7 @@ fn allocAggState(realm: *Realm, kind: AggKind, cap: PromiseCapability, values: *
 /// can read the wrapper out of `this_value`.
 fn allocElementClosures(realm: *Realm, state: *JSObject, idx: u32) NativeError!struct { resolve: *JSFunction, reject: *JSFunction } {
     const wrapper = realm.heap.allocateObject() catch return error.OutOfMemory;
-    wrapper.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(wrapper, realm.intrinsics.object_prototype);
     wrapper.set(realm.allocator, k_elem_state, heap_mod.taggedObject(state)) catch return error.OutOfMemory;
     wrapper.set(realm.allocator, k_elem_index, Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
     wrapper.set(realm.allocator, k_elem_called, Value.false_) catch return error.OutOfMemory;
@@ -1457,7 +1457,7 @@ fn aggRejectElement(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
 fn buildAllSettledEntry(realm: *Realm, state: *JSObject, settle_kind: enum { fulfilled, rejected }, payload: Value) NativeError!*JSObject {
     const entry = realm.heap.allocateObject() catch return error.OutOfMemory;
-    entry.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(entry, realm.intrinsics.object_prototype);
     const status = state.get(if (settle_kind == .fulfilled) k_fulfilled_str else k_rejected_str);
     const slot = if (settle_kind == .fulfilled) "value" else "reason";
     entry.set(realm.allocator, "status", status) catch return error.OutOfMemory;
@@ -1482,7 +1482,7 @@ fn decrementRemaining(realm: *Realm, state: *JSObject) NativeError!Value {
             const reasons = heap_mod.valueAsPlainObject(values_v) orelse return Value.undefined_;
             const agg_proto = realm.intrinsics.aggregate_error_prototype orelse realm.intrinsics.error_prototype.?;
             const agg = realm.heap.allocateObject() catch return error.OutOfMemory;
-            agg.prototype = agg_proto;
+            realm.heap.setObjectPrototype(agg, agg_proto);
             agg.setWithFlags(realm.allocator, "errors", heap_mod.taggedObject(reasons), .{
                 .writable = true,
                 .enumerable = false,
@@ -1630,7 +1630,7 @@ fn promiseAll(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const ctor = try thisAsPromiseCtor(realm, this_value, "all");
     const cap = try newPromiseCapability(realm, ctor);
     const values = realm.heap.allocateObject() catch return error.OutOfMemory;
-    values.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(values, realm.intrinsics.array_prototype);
     values.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     const state = try allocAggState(realm, .all, cap, values);
     // `iterateAggregator` drives `resolveInputAsPromise` / `.then`
@@ -1710,7 +1710,7 @@ fn allSettledProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, idx:
     _ = idx;
     const ctx: *AllSettledCtx = @ptrCast(@alignCast(ctx_ptr));
     const entry = realm.heap.allocateObject() catch return error.OutOfMemory;
-    entry.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(entry, realm.intrinsics.object_prototype);
     switch (promiseStateOf(resolved)) {
         .rejected => {
             entry.set(realm.allocator, "status", Value.fromString(ctx.rejected_str)) catch return error.OutOfMemory;
@@ -1737,7 +1737,7 @@ fn promiseAllSettled(realm: *Realm, this_value: Value, args: []const Value) Nati
     const ctor = try thisAsPromiseCtor(realm, this_value, "allSettled");
     const cap = try newPromiseCapability(realm, ctor);
     const values = realm.heap.allocateObject() catch return error.OutOfMemory;
-    values.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(values, realm.intrinsics.array_prototype);
     values.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     const state = try allocAggState(realm, .all_settled, cap, values);
     // `iterateAggregator` drives `resolveInputAsPromise` / `.then`
@@ -1832,7 +1832,7 @@ fn promiseAny(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const ctor = try thisAsPromiseCtor(realm, this_value, "any");
     const cap = try newPromiseCapability(realm, ctor);
     const errors = realm.heap.allocateObject() catch return error.OutOfMemory;
-    errors.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(errors, realm.intrinsics.array_prototype);
     errors.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     const state = try allocAggState(realm, .any, cap, errors);
     // `iterateAggregator` drives `resolveInputAsPromise` / `.then`
@@ -1943,7 +1943,7 @@ fn promiseWithResolvers(realm: *Realm, this_value: Value, args: []const Value) N
     reject_fn.bound_this = promise_v;
 
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-    obj.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
     obj.set(realm.allocator, "promise", promise_v) catch return error.OutOfMemory;
     obj.set(realm.allocator, "resolve", heap_mod.taggedFunction(resolve_fn)) catch return error.OutOfMemory;
     obj.set(realm.allocator, "reject", heap_mod.taggedFunction(reject_fn)) catch return error.OutOfMemory;
