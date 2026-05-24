@@ -14,6 +14,61 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-05-24 — cynic `28ef99c` (post numberToString fast-path + write-barrier closure merge), host `Darwin 25.5.0 arm64`
+
+Two perf-shaped wins since `9871171`:
+
+- `822b189` `Number.prototype.toString` radix-10 integer fast-path —
+  `(i & 0xff).toString()` and friends now format via `{d}` on i64
+  (straight-line divmod) instead of `{d}` on f64 (Grisu /
+  Dragon-shortest, ~12 % of `string_concat` samples).
+- `29a4462` merge of `gc-write-barrier-closure` — 37 commits
+  (stages 1 → 3k) routing every typed-slot setter in the engine
+  through a barrier-aware helper (`Heap.storeBoundTarget`,
+  `Heap.settlePromise`, etc.). Closes the historical
+  "mature → young typed-slot write bypasses `writeBarrier`"
+  hazard documented in `docs/handbook/gc.md`, and turns out to
+  measurably help dispatch too (typed setter inline expansion vs
+  generic `writeBarrier` indirection).
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 80.10 | 79.29 | 81.18 | 3456 |
+| prop_access | 14.39 | 14.24 | 14.49 | 3504 |
+| prop_write | 19.03 | 18.87 | 19.22 | 3616 |
+| array_iter | 19.99 | 19.92 | 20.32 | 4752 |
+| string_concat | 44.56 | 43.93 | 46.44 | 13024 |
+| promise_chain | 13.11 | 12.56 | 13.84 | 26928 |
+| object_alloc | 64.13 | 61.18 | 64.97 | 12416 |
+
+Δ vs the `9871171` row below:
+- **`string_concat` −21 %** (56.74 → 44.56) — primary driver is
+  `822b189`'s integer fast-path; the GC-closure typed setters
+  contributed the rest. The remaining ~26 % of samples in
+  `_platform_memmove` (inside `allocateConsString`'s depth-cap
+  flatten) is the bytes-bandwidth ceiling; raising the cap
+  measured neutral (tested + reverted this session).
+- **`array_iter` −12 %** (22.61 → 19.99) — GC-closure win.
+- **`prop_access` −10 %** (16.03 → 14.39) — GC-closure win.
+- **`promise_chain` −7 %** (14.10 → 13.11) — GC-closure win.
+- **`arith_loop` −4.5 %** (83.85 → 80.10) — GC-closure win.
+- **`prop_write` −4 %** (19.86 → 19.03) — GC-closure win.
+- `object_alloc` flat (63.67 → 64.13). The structural ~15 ms
+  gap to QuickJS-NG remains — design + phase plan in
+  [docs/lazy-property-bag.md](docs/lazy-property-bag.md).
+
+Cross-engine context (interpreter tier, `tools/bench-cross.sh`
+snapshot recorded in `bench-cross-results.md`): cynic now
+**matched or ahead of QuickJS-NG on 4 of 7 fixtures**
+(`array_iter`, `prop_access`, `string_concat`, ≈`promise_chain`).
+Remaining gaps (`arith_loop` 5 ms, `prop_write` 3 ms,
+`object_alloc` 15 ms noisy) all map to ROADMAP-tracked
+structural items.
+
+Verified: `zig build test` green (1124+ tests pass), runtime
+sweep 37211 / 9 (RegExp cluster only — unchanged), `--top-rss`
+healthy band on `language/expressions`.
+
 ### 2026-05-23 — cynic `9871171` (post six-commit perf arc), host `Darwin 25.5.0 arm64`
 
 Cumulative measurement after six perf commits landed on top of
