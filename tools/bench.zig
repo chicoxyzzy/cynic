@@ -18,7 +18,12 @@
 
 const std = @import("std");
 
-const RUNS_PER_FIXTURE = 5;
+// 9 timed runs + 1 discarded warmup. Odd count gives a true
+// median sample (no average-of-middle-two distortion) and trims
+// the worst-case spike when a parallel agent's bench / GC pulse
+// lands during one iteration. 5-run medians were too sensitive
+// to one-off OS scheduling jitter on a shared machine.
+const RUNS_PER_FIXTURE = 9;
 const WARMUP_RUNS = 1;
 
 const Bench = struct {
@@ -34,6 +39,9 @@ const BENCHES = [_]Bench{
     .{ .name = "string_concat", .path = "bench/micros/string_concat.js" },
     .{ .name = "promise_chain", .path = "bench/micros/promise_chain.js" },
     .{ .name = "object_alloc", .path = "bench/micros/object_alloc.js" },
+    .{ .name = "method_call", .path = "bench/micros/method_call.js" },
+    .{ .name = "class_instantiate", .path = "bench/micros/class_instantiate.js" },
+    .{ .name = "json_stringify", .path = "bench/micros/json_stringify.js" },
 };
 
 const Sample = struct {
