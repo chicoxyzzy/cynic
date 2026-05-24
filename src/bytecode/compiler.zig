@@ -2260,7 +2260,12 @@ pub const Compiler = struct {
             // walk also collects the key list when the literal is
             // eligible.
             var keys = std.ArrayListUnmanaged(u16).empty;
-            errdefer keys.deinit(self.allocator);
+            // `defer` (not `errdefer`) because the early `break :blk null`
+            // exits aren't errors — `errdefer` wouldn't fire and the keys
+            // ArrayList would leak. After `toOwnedSlice` moves ownership
+            // on the success path, this deinit is a no-op on the empty
+            // residual list.
+            defer keys.deinit(self.allocator);
             for (lit.properties) |prop| switch (prop) {
                 .property => |p| {
                     if (p.key == .computed) break :blk null;
@@ -2289,8 +2294,8 @@ pub const Compiler = struct {
                 // Empty literal — no shape to template; emit the
                 // plain `make_object` path. (A pre-built root-shape
                 // stamp wouldn't help — fresh objects already start
-                // shape-empty.)
-                keys.deinit(self.allocator);
+                // shape-empty.) The deferred `keys.deinit` at the
+                // top of the block handles the free.
                 break :blk null;
             }
             const owned_keys = keys.toOwnedSlice(self.allocator) catch break :blk null;
