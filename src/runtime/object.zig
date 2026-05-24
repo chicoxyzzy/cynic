@@ -2252,6 +2252,56 @@ test "JSObject: hasOwn prefers the shape when present" {
     try testing.expect(o.hasOwn("x"));
 }
 
+test "JSObject: deleteOwn demotes the shape for shape-stable receivers" {
+    // Regression for the 17-fixture `built-ins/Array` cluster
+    // (`Array.prototype.{pop, splice, shift, reverse, copyWithin,
+    // unshift}` on array-like plain-object receivers go through
+    // `deleteOwn` to drop entries). Without demote, the shape
+    // keeps claiming the slot is live; shape-first `get`
+    // (4133c7f) then returns the stale value instead of
+    // falling through to the prototype.
+    const heap_mod = @import("heap.zig");
+    var heap = heap_mod.Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const o = try heap.allocateObject();
+    try o.set(testing.allocator, "x", Value.fromInt32(42));
+    try testing.expect(o.shape != null);
+
+    try testing.expect(o.deleteOwn("x"));
+    // Shape demoted — the IC + JSObject.get's shape-first
+    // branch must see no shape, fall through to the (now
+    // empty) bag, return undefined.
+    try testing.expect(o.shape == null);
+    try testing.expect(!o.hasOwn("x"));
+    try testing.expect(o.get("x").isUndefined());
+}
+
+test "JSObject: accessor install via deleteOwn-then-install demotes the shape" {
+    // Regression for the iterator-proto install pattern
+    // (`installIteratorPrototypeConstructorAccessor` /
+    // `…ToStringTagAccessor`). The bug: install accessor pair
+    // → swap-remove the leftover data slot left by an earlier
+    // `installConstructor`. If the proto carried a shape with
+    // "constructor" at some slot, the swap-remove without
+    // demote left shape-first reads returning the stale data
+    // value instead of routing through the accessor.
+    const heap_mod = @import("heap.zig");
+    var heap = heap_mod.Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const proto = try heap.allocateObject();
+    try proto.set(testing.allocator, "constructor", Value.fromInt32(123));
+    try testing.expect(proto.shape != null);
+
+    // Simulate the cleanup path: install accessor (demote +
+    // getOrPutAccessor in the actual code), then strip the
+    // leftover data slot via deleteOwn.
+    try testing.expect(proto.deleteOwn("constructor"));
+    try testing.expect(proto.shape == null);
+    try testing.expect(!proto.hasOwn("constructor"));
+}
+
 test "JSObject: missing property is undefined" {
     const o = try JSObject.init(testing.allocator);
     defer o.deinit(testing.allocator);
