@@ -1000,7 +1000,9 @@ function wireSnippets() {
     const name = els.snippets.value;
     if (name && SAMPLES[name]) {
       setSource(SAMPLES[name]);
-      els.snippets.value = '';
+      // Keep the selected option visible — used to reset to the
+      // "— sample snippets —" placeholder, which made it impossible
+      // to tell which snippet was loaded after picking.
       // The previous run's output is about to be stale — wipe it so
       // the user knows the next Run will reflect the new snippet. Same
       // resets we'd do on a fresh page load.
