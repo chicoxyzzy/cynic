@@ -2704,9 +2704,126 @@ pub const Heap = struct {
     /// the other fields the interpreter writes directly rather
     /// than through a property-bag setter. The caller performs the
     /// actual field assignment; this helper only runs the barrier.
-    /// Stage 0: no-op (`writeBarrier` is a stub).
     pub fn storeInternalSlot(self: *Heap, container: Container, v: Value) void {
         self.writeBarrier(container, v);
+    }
+
+    // ─── Typed-slot setters ─────────────────────────────────────────
+    //
+    // Each combines the generational write barrier with the actual
+    // field assignment, so call sites stop needing to call
+    // `writeBarrier` + assign by hand (and stop forgetting the
+    // barrier — the unbarriered-write hazard the per-minor-cycle
+    // `markObjectInternalSlots` scan exists to paper over).
+    //
+    // Closing the ~500 raw typed-slot writes scattered across the
+    // runtime and builtins lets us drop the mature-internal-slot
+    // scan from `collectYoung` — a per-cycle O(mature_set) walk —
+    // and reach pure generational behaviour. Helpers land first;
+    // call sites migrate in follow-up commits. The scan stays
+    // in place until every write is routed.
+
+    /// `o.prototype = proto` with the generational write barrier.
+    /// Null-clearing skips the barrier — no edge to remember when
+    /// the slot is cleared.
+    pub fn setObjectPrototype(self: *Heap, o: *JSObject, proto: ?*JSObject) void {
+        if (proto) |p| self.writeBarrier(.{ .object = o }, taggedObject(p));
+        o.prototype = proto;
+    }
+
+    /// `fn_obj.prototype = proto` — same shape, JSFunction
+    /// container.
+    pub fn setFunctionPrototype(self: *Heap, fn_obj: *JSFunction, proto: ?*JSObject) void {
+        if (proto) |p| self.writeBarrier(.{ .function = fn_obj }, taggedObject(p));
+        fn_obj.prototype = proto;
+    }
+
+    /// §10.2.3 `[[HomeObject]]` setter on a function. Used by
+    /// `super` resolution.
+    pub fn setHomeObject(self: *Heap, fn_obj: *JSFunction, home: ?*JSObject) void {
+        if (home) |h| self.writeBarrier(.{ .function = fn_obj }, taggedObject(h));
+        fn_obj.home_object = home;
+    }
+
+    /// Sister of `setHomeObject` for generators — the body
+    /// re-borrows it for `super` lookups on resume.
+    pub fn setGeneratorHomeObject(self: *Heap, gen: *JSGenerator, home: ?*JSObject) void {
+        if (home) |h| self.writeBarrier(.{ .generator = gen }, taggedObject(h));
+        gen.home_object = home;
+    }
+
+    /// `fn_obj.home_function = hf` — the typed JSFunction the
+    /// home_object split keeps.
+    pub fn setHomeFunction(self: *Heap, fn_obj: *JSFunction, hf: ?*JSFunction) void {
+        if (hf) |f| self.writeBarrier(.{ .function = fn_obj }, taggedFunction(f));
+        fn_obj.home_function = hf;
+    }
+
+    /// Sister of `setHomeFunction` for generators.
+    pub fn setGeneratorHomeFunction(self: *Heap, gen: *JSGenerator, hf: ?*JSFunction) void {
+        if (hf) |f| self.writeBarrier(.{ .generator = gen }, taggedFunction(f));
+        gen.home_function = hf;
+    }
+
+    /// `fn_obj.captured_env = env` — the closure's inherited
+    /// environment chain. `*Environment` has no NaN-box tag, so
+    /// the barrier is open-coded against `env.generation`.
+    pub fn setCapturedEnv(self: *Heap, fn_obj: *JSFunction, env: ?*Environment) void {
+        if (env) |e| {
+            if (fn_obj.generation == .mature and e.generation == .young) {
+                if (!fn_obj.in_remembered_set) {
+                    fn_obj.in_remembered_set = true;
+                    self.remembered.append(self.allocator, .{ .function = fn_obj }) catch {
+                        fn_obj.in_remembered_set = false;
+                    };
+                }
+            }
+        }
+        fn_obj.captured_env = env;
+    }
+
+    /// `gen.env = env` — generator's saved environment. Same
+    /// open-coded barrier as `setCapturedEnv`.
+    pub fn setGeneratorEnv(self: *Heap, gen: *JSGenerator, env: ?*Environment) void {
+        if (env) |e| {
+            if (gen.generation == .mature and e.generation == .young) {
+                if (!gen.in_remembered_set) {
+                    gen.in_remembered_set = true;
+                    self.remembered.append(self.allocator, .{ .generator = gen }) catch {
+                        gen.in_remembered_set = false;
+                    };
+                }
+            }
+        }
+        gen.env = env;
+    }
+
+    /// `env.parent = parent` — env chain extension.
+    pub fn setEnvironmentParent(self: *Heap, env: *Environment, parent: ?*Environment) void {
+        if (parent) |p| {
+            if (env.generation == .mature and p.generation == .young) {
+                if (!env.in_remembered_set) {
+                    env.in_remembered_set = true;
+                    self.remembered.append(self.allocator, .{ .environment = env }) catch {
+                        env.in_remembered_set = false;
+                    };
+                }
+            }
+        }
+        env.parent = parent;
+    }
+
+    /// `fn_obj.captured_this = v` — arrow's lexical `this`.
+    pub fn setCapturedThis(self: *Heap, fn_obj: *JSFunction, v: Value) void {
+        self.writeBarrier(.{ .function = fn_obj }, v);
+        fn_obj.captured_this = v;
+    }
+
+    /// `fn_obj.captured_new_target = v` — arrow's lexical
+    /// new.target.
+    pub fn setCapturedNewTarget(self: *Heap, fn_obj: *JSFunction, v: Value) void {
+        self.writeBarrier(.{ .function = fn_obj }, v);
+        fn_obj.captured_new_target = v;
     }
 
     /// Generational write barrier. Records an old→young store:
