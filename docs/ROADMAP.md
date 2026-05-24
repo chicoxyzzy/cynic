@@ -139,8 +139,6 @@ code construction (aligns with SES).
   [docs/ses-alignment.md](ses-alignment.md). Brand bet: the
   differentiator over "Workers / Deno / Node + @endo/ses" is that
   Cynic ships the SES baseline natively.
-- **Tail-call optimization (PTC).** See the dedicated section
-  below.
 - **Incremental / concurrent GC marking.** The generational
   collector — young/mature split, write barrier, remembered set,
   `collectYoung` with promotion-by-relink — has shipped (see the
@@ -148,6 +146,30 @@ code construction (aligns with SES).
   the remaining GC step.
 
 **Recently landed (was in progress; now done).**
+
+- **Proper Tail Calls (PTC) — §15.10.** Two new opcodes
+  (`tail_call`, `tail_call_method`) plus a static
+  IsInTailPosition pass in the bytecode compiler: an inherited
+  `in_tail_position` flag propagates through `ReturnStatement`,
+  `ArrowFunction` concise body, parenthesized, conditional
+  consequent / alternate, logical `&&` / `||` / `??` rhs, and
+  comma's last operand; every other expression type clears it
+  for its sub-expressions. The runtime handler reuses the
+  current `CallFrame` in place — overwriting chunk / ip / env /
+  this / registers — so `return f(n - 1)` recurses without
+  growing the dispatch stack. The §15.10.1 disqualifiers Cynic
+  honors: enclosing try-with-finally, open for-of iterator
+  owing `IteratorClose`, async / generator body. Exotic callees
+  (proxy, bound, native, generator, async) fall back to
+  ordinary call semantics — the unconditionally-emitted
+  follow-up `return_` propagates the result. Gated behind a new
+  `tail-call-optimization` feature flag (off by default,
+  matching the policy for behaviors that aren't observable in
+  the existing engine surface — `Error.stack` loses the
+  eliminated frames per spec). Cynic is the second engine
+  shipping spec-mandated PTC alongside JavaScriptCore;
+  ~35 test262 fixtures under `language/*/tco-*` and the
+  `tail-call-optimization` feature tag now run.
 
 - **Monomorphic property cache — `lda_property` + `sta_property`
   + `call_method`.** Three opcodes grew a `u16` IC operand and a
@@ -905,10 +927,9 @@ not measurements.
     analysis (JIT-territory). Both skipped unless a profile
     shows a specific workload that warrants the cost.
 
-15. **Tail call optimization** (§15.10 / PTC). See the
-    separate *Proper Tail Calls* section below. JSC was the
-    only engine that shipped this; spec made it optional. Not
-    a perf priority.
+15. **Tail call optimization** (§15.10 / PTC) — *shipped*.
+    See the *Proper Tail Calls* section below for the
+    implementation note and the feature-flag gate.
 
 The cross-engine bench dictates the order. If `prop_access` /
 `prop_write` / call-heavy workloads sit at parity with
@@ -924,66 +945,68 @@ allocation-heavy workloads dominate, items 8, 9.
   the long-pause tail. The next GC step after the generational
   split.
 
-## Proper Tail Calls (PTC) — research
+## Proper Tail Calls (PTC) — shipped
 
-ES2015 §10.2.4 + §15.6.1 + §15.10.1 — function calls *in tail
-position* (`return f(x)`, the last expression of an arrow body,
-`return cond ? f() : g()`, etc.) MUST reuse the caller's stack
-frame, not push a fresh one. Spec wording is mandatory; in practice
-only **JavaScriptCore** ships it. Reflected in the test262 corpus
-by ~35 fixtures gated on the `tail-call-optimization` feature flag,
-all currently skipped in `tools/test262/skip.zig`.
+ES2015 §15.10 (with §14.6 PrepareForTailCall) — function calls
+*in tail position* (`return f(x)`, the last expression of an
+arrow body, `return cond ? f() : g()`, etc.) reuse the caller's
+stack frame instead of pushing a fresh one. Spec wording is
+mandatory; in practice only **JavaScriptCore** had been shipping
+it. Cynic is the second.
+
+Gated behind the `tail-call-optimization` feature flag (off by
+default — opt in with `--enable=tail-call-optimization` or
+`--enable-experimental`). The test262 harness flips it on for
+the dedicated per-feature phase, which scores the ~35 fixtures
+under `language/*/tco-*` plus the `tail-call-optimization`
+feature tag.
 
 ### Cross-engine status (2026)
 
 | Engine | PTC | Notes |
 |---|---|---|
 | JavaScriptCore | ✅ | Shipped 2016, still in. Bun inherits. |
+| **Cynic** | ✅ | Shipped behind `tail-call-optimization` flag. |
 | V8 | ❌ | Implemented briefly behind a flag (2016), removed. Cited reasons: lost stack frames break dev-tools / `Error.stack`, hot-path cost on every call site, and the [STC counter-proposal](https://github.com/tc39/proposal-ptc-syntax) wanting explicit `return continue f()` syntax. |
 | SpiderMonkey | ❌ | [Tracking bug](https://bugzilla.mozilla.org/show_bug.cgi?id=1188320) open since 2015. |
 | Hermes / QuickJS / XS / Boa | ❌ | None. |
 
-### What it takes to ship in Cynic
+### Implementation
 
-1. **Static tail-position detection** during bytecode compilation.
-   Per §15.10.1, a `CallExpression` is in tail position iff:
-   - It's the `Expression` of a `ReturnStatement`, or
-   - The last expression of an `ArrowFunction` ConciseBody, or
-   - The consequent / alternate of a tail-position conditional, or
-   - Inside a tail-position `,` / `&&` / `||` / `??` right-hand side,
-   *and* not inside a `try` block whose `finally` runs after the
-   call, *not* inside a `with` (Cynic doesn't ship `with` — easier),
-   *not* inside a `for-of` / `for-in` that owes the iterator a
-   `return()` call on early exit (§7.4.6 IteratorClose).
-2. **A `tail_call` bytecode op.** Instead of pushing a new
-   `CallFrame`, the handler overwrites the *current* frame's
-   registers, locals, and chunk pointer in-place with the callee's,
-   then re-enters the dispatch loop. The discipline matches the
-   JSC pattern (`emit_op_tail_call`); the implementation lifts
-   cleanly into Cynic's existing frame-stack-as-`ArrayList` model.
-3. **Cleanup of pending `iter_close` ops at tail-call sites** —
-   PTC must run them *before* the frame is reused, otherwise the
-   open iterators stay open across the call (and the spec says
-   the loop is supposed to close on early exit).
+1. **Static tail-position detection** runs in the bytecode
+   compiler — an inherited `in_tail_position` flag set by
+   `compileReturn` and the `ArrowFunction` concise-body path,
+   propagated through the §15.10.1-transparent expression types
+   (parenthesized, conditional consequent / alternate, logical
+   `&&` / `||` / `??` rhs, comma's last operand). Every other
+   expression type clears the flag for its sub-expressions.
+2. **`tail_call` / `tail_call_method` opcodes** (`src/bytecode/op.zig`).
+   Operand layouts mirror `call` and `call_method`. The
+   interpreter handler frees the current frame's register file,
+   allocates the callee's, copies args, and overwrites the
+   frame's chunk / ip / env / this / new.target / home /
+   owning_module in place — no new push, no matching pop.
+   Exotic callees (proxy, bound, native, generator, async) fall
+   back to ordinary call semantics; the unconditionally-emitted
+   `return_` immediately following the `tail_call` in the
+   bytecode propagates the result.
+3. **Disqualifiers** consulted at the call-emission site in
+   `shouldEmitTailCall` (`src/bytecode/compiler.zig`): feature
+   flag off; enclosing function is async or generator;
+   `finally_chain` non-null (try-with-finally that would never
+   run); any enclosing loop owes an `IteratorClose` (for-of
+   with an open iterator).
 4. **`Error.stack` impact**: a tail-called function disappears
-   from the chain Cynic threads through `unwindThrow`. Stack
-   traces become harder to read. The decision to ship PTC is
-   partly a decision to give that up; mirroring JSC's tradeoff
-   is the most defensible position.
+   from the chain. Stack traces become harder to read. This is
+   the spec-prescribed cost; the off-by-default flag means
+   existing fixtures' stack-trace expectations stay intact.
 
-### Why deferred
-
-- ~35 fixtures of test262 score, small relative to other clusters.
-- The static-analysis machinery (tail-position detection, escape
-  analysis through `try`/`finally`) is *the same machinery* a
-  baseline JIT will want. Building it twice is wasteful.
-- No production demand: edge-runtime workloads don't write
-  deeply-recursive JS by accident, and the SES / Hardened-
-  JavaScript layer above Cynic doesn't require PTC.
-
-Revisit alongside the baseline-JIT scaffolding (Future work
-section), at which point the analysis cost amortises across
-PTC + inline-cache shape guards + dead-store elimination.
+Cynic ships PTC tractably for reasons that don't apply to V8 /
+SpiderMonkey: no JIT (no TurboFan / Ion retrofit cost), no
+sloppy mode (no §15.10.1 carve-outs), no `eval` (no §15.10.1
+direct-eval interaction), no `with` (drops out of the spec
+walk), no DevTools surface today (no installed expectation
+that `Error.stack` shows eliminated frames).
 
 ## Future work (post-strict-only-runtime)
 

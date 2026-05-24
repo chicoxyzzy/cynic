@@ -172,6 +172,37 @@ pub const Compiler = struct {
     /// uses this to decide whether to emit an `await` on each
     /// inner-iterator step (async-generator yield* per §27.6.3.7).
     current_is_async: bool = false,
+    /// True when the enclosing function is `function*` /
+    /// `async function*` / generator method. §15.10.1 — calls
+    /// inside a generator body are NOT in tail position (the
+    /// resume frame would dangle), so the PTC guard reads this
+    /// to suppress `tail_call` emission.
+    current_is_generator: bool = false,
+    /// §15.10.1 IsInTailPosition. True at the moment a call-
+    /// emission site is about to compile a syntactic tail-position
+    /// CallExpression: the expression of a ReturnStatement, the
+    /// concise body of an ArrowFunction, the consequent/alternate
+    /// of a tail-position conditional, the rhs of a tail-position
+    /// `&&` / `||` / `??`, or the last operand of a tail-position
+    /// comma expression. `compileExpression` clears this on entry
+    /// and only the propagating arms (parenthesized, conditional,
+    /// logical, sequence, call) thread it through. `compileCall`
+    /// reads it to decide between `.call` and `.tail_call`.
+    /// Reset to false at every function template boundary so a
+    /// closure body never inherits the outer call's tail flag.
+    in_tail_position: bool = false,
+    /// §15.10.1 — depth of enclosing `try Block` whose catch
+    /// handler is installed in this same chunk. A tail call from
+    /// inside such a block would reuse the frame (losing the
+    /// exception handler PC range), so the throw would bypass
+    /// the catch. `finally_chain` already handles the try-with-
+    /// finally case; this counter handles try-with-catch where
+    /// there's no finally. Incremented around the try BLOCK
+    /// compile only (the catch body and the finally body each
+    /// inherit a freshly-reset counter; that matches the spec —
+    /// `HasCallInTailPosition` of `Catch ` and `Finally` is the
+    /// inner statement's, untainted by the surrounding try).
+    try_with_handler_depth: u32 = 0,
     /// True when compiling a module body. Toggles
     /// whether `import` declarations emit `module_load` ops and
     /// whether `export` declarations emit `module_export` ops.
@@ -663,7 +694,19 @@ pub const Compiler = struct {
     }
 
     /// Compile `expr`, leaving its result in the accumulator.
+    ///
+    /// §15.10 PTC plumbing: `in_tail_position` is an inherited
+    /// boolean — a tail-position root (return expression, arrow
+    /// concise body) sets it true, then propagates through a
+    /// small set of "transparent" expression types
+    /// (parenthesized, conditional consequent/alternate,
+    /// short-circuit rhs, comma-last). Every other expression
+    /// type clears it for its sub-expressions because the call
+    /// site's value is consumed locally and so is not in tail
+    /// position. We do that clearing once here at the top.
     pub fn compileExpression(self: *Compiler, expr: *const Expression) CompileError!void {
+        const tail = self.in_tail_position;
+        self.in_tail_position = false;
         switch (expr.*) {
             .null_literal => |n| try self.builder.emitOp(.lda_null, n.span),
             .boolean_literal => |b| try self.builder.emitOp(if (b.value) Op.lda_true else Op.lda_false, b.span),
@@ -671,22 +714,29 @@ pub const Compiler = struct {
             .bigint_literal => |n| try self.compileBigInt(n.span),
             .string_literal => |s| try self.compileString(s.span),
             .identifier_reference => |id| try self.compileIdentRef(id.span),
-            .parenthesized => |p| try self.compileExpression(p.expression),
+            // §13.2 — ParenthesizedExpression is transparent;
+            // §15.10.1 explicitly propagates IsInTailPosition through.
+            .parenthesized => |p| {
+                self.in_tail_position = tail;
+                try self.compileExpression(p.expression);
+            },
             .unary => |u| try self.compileUnary(u),
             .binary => |b| try self.compileBinary(b),
-            .logical => |l| try self.compileLogical(l),
-            .conditional => |c| try self.compileConditional(c),
-            .sequence => |s| try self.compileSequence(s),
+            .logical => |l| try self.compileLogical(l, tail),
+            .conditional => |c| try self.compileConditional(c, tail),
+            .sequence => |s| try self.compileSequence(s, tail),
             .assignment => |a| try self.compileAssignment(a),
             .function_expr => |fe| try self.compileFunctionExpr(fe),
             .arrow_function => |af| try self.compileArrowFunction(af),
-            .call => |c| try self.compileCall(c),
+            .call => |c| try self.compileCall(c, tail),
             .new_expr => |n| try self.compileNewExpr(n),
             .object_literal => |o| try self.compileObjectLiteral(o),
             .array_literal => |a| try self.compileArrayLiteral(a),
             .member => |m| try self.compileMember(m),
             .template_literal => |t| try self.compileTemplateLiteral(t),
-            .tagged_template => |tt| try self.compileTaggedTemplate(tt),
+            // §13.3.4 TaggedTemplate is a function call — same
+            // §15.10.1 tail-position rules apply.
+            .tagged_template => |tt| try self.compileTaggedTemplate(tt, tail),
             .update => |u| try self.compileUpdate(u),
             .class_expr => |c| try self.compileClassExpr(c),
             .yield => |y| try self.compileYield(y),
@@ -699,6 +749,38 @@ pub const Compiler = struct {
             .import_call => |ic| try self.compileImportCall(ic),
             else => return error.UnsupportedExpression,
         }
+    }
+
+    /// §15.10 PTC — true when the compiler should emit a
+    /// `tail_call` / `tail_call_method` instead of an ordinary
+    /// call. Reads the inherited `in_tail_position` flag and
+    /// applies the §15.10.1 disqualifiers Cynic actually
+    /// implements:
+    ///   • feature flag must be on (off-by-default policy)
+    ///   • enclosing function is not async (resume frame would
+    ///     dangle — §27.7 + §15.10.1)
+    ///   • enclosing function is not a generator (same)
+    ///   • not inside a try block whose finally would owe execution
+    ///     (the finally would never run — §15.10.1 explicitly)
+    ///   • no enclosing for-of iterator owes a `return()` call
+    ///     (§7.4.6 IteratorClose; the close has to happen on the
+    ///     way out, which is incompatible with frame reuse)
+    fn shouldEmitTailCall(self: *Compiler) bool {
+        if (!self.in_tail_position) return false;
+        if (!self.realm.feature_flags.contains(.ptc)) return false;
+        if (self.current_is_async) return false;
+        if (self.current_is_generator) return false;
+        if (self.finally_chain != null) return false;
+        // §15.10.1 — a call inside a try block whose catch is in
+        // the SAME chunk would lose its catch handler on frame
+        // reuse (the handler PC range belongs to the caller's
+        // chunk). Suppress.
+        if (self.try_with_handler_depth > 0) return false;
+        var c = self.current_loop;
+        while (c) |ctx| : (c = ctx.parent) {
+            if (ctx.iter_register != null) return false;
+        }
+        return true;
     }
 
     /// `import.meta` — §16.2.1.7 ImportMeta. Emit the
@@ -1849,10 +1931,17 @@ pub const Compiler = struct {
     /// `strs` object as a chunk constant. The runtime emits
     /// `lda_constant` to load it — same Value every call,
     /// satisfying the identity contract.
-    fn compileTaggedTemplate(self: *Compiler, tt: ast.expression.TaggedTemplateExpr) CompileError!void {
+    fn compileTaggedTemplate(self: *Compiler, tt: ast.expression.TaggedTemplateExpr, tail: bool) CompileError!void {
         if (tt.quasi.* != .template_literal) return error.UnsupportedExpression;
         const lit = tt.quasi.template_literal;
         const k_strs = try self.buildTemplateObject(lit);
+
+        // §15.10 PTC — same gate as `compileCall`. Tagged
+        // templates desugar to a function call (§13.3.4), so
+        // tail-position eligibility carries through.
+        self.in_tail_position = tail;
+        const emit_tail = self.shouldEmitTailCall();
+        self.in_tail_position = false;
 
         // §13.3.11.4 — when the tag is a member expression
         // (`obj.fn\`…\``), the call must bind `this = obj` per
@@ -1908,7 +1997,14 @@ pub const Compiler = struct {
                 try self.builder.emitU8(r_arg);
             }
 
-            try self.builder.emitCallMethod(tt.span, r_recv, r_callee, @intCast(1 + lit.expressions.len));
+            if (emit_tail) {
+                try self.builder.emitOp(.tail_call_method, tt.span);
+                try self.builder.emitU8(r_recv);
+                try self.builder.emitU8(r_callee);
+                try self.builder.emitU8(@intCast(1 + lit.expressions.len));
+            } else {
+                try self.builder.emitCallMethod(tt.span, r_recv, r_callee, @intCast(1 + lit.expressions.len));
+            }
 
             var k: u8 = 0;
             while (k < reserved) : (k += 1) self.releaseTemp();
@@ -1940,7 +2036,7 @@ pub const Compiler = struct {
             try self.builder.emitU8(r_arg);
         }
 
-        try self.builder.emitOp(.call, tt.span);
+        try self.builder.emitOp(if (emit_tail) .tail_call else .call, tt.span);
         try self.builder.emitU8(r_callee);
         try self.builder.emitU8(@intCast(1 + lit.expressions.len));
 
@@ -3202,7 +3298,18 @@ pub const Compiler = struct {
         try self.builder.emitU16(k);
     }
 
-    fn compileCall(self: *Compiler, c: ast.expression.CallExpr) CompileError!void {
+    fn compileCall(self: *Compiler, c: ast.expression.CallExpr, tail: bool) CompileError!void {
+        // §15.10 PTC consumer site. Restore the inherited
+        // tail-position flag so `shouldEmitTailCall()` sees it;
+        // every sub-expression (callee, args, spread machinery,
+        // method receiver) is compiled WITHOUT the flag because
+        // those values are produced and consumed locally and so
+        // are not in tail position themselves.
+        self.in_tail_position = tail;
+        const emit_tail = self.shouldEmitTailCall();
+        // The flag has done its job — clear it so callee/args
+        // compilation can't accidentally re-emit a tail call.
+        self.in_tail_position = false;
         // `super(...)` in a constructor — invoke the parent
         // constructor with `this` from the current frame. The
         // arguments compile into consecutive temps; emit
@@ -3360,7 +3467,7 @@ pub const Compiler = struct {
             // emits the short-circuit when the member is
             // optional.
             if (!has_spread_arg) {
-                try self.compileMethodCall(c, m);
+                try self.compileMethodCall(c, m, emit_tail);
                 if (chained_member) {
                     // Close the local chain context: jmp past the
                     // undefined-loader to the join, patch each
@@ -3422,7 +3529,11 @@ pub const Compiler = struct {
             try self.builder.emitU8(r);
         }
 
-        try self.builder.emitOp(.call, c.span);
+        // §15.10 PTC — when the call is statically known to be in
+        // tail position, emit `tail_call` so the interpreter reuses
+        // the current frame instead of pushing one. Spread calls
+        // and super calls don't take this path (handled above).
+        try self.builder.emitOp(if (emit_tail) .tail_call else .call, c.span);
         try self.builder.emitU8(r_callee);
         try self.builder.emitU8(@intCast(c.arguments.len));
 
@@ -3530,6 +3641,7 @@ pub const Compiler = struct {
         self: *Compiler,
         c: ast.expression.CallExpr,
         m: ast.expression.MemberExpr,
+        emit_tail: bool,
     ) CompileError!void {
         // Receiver into r_recv. `m.optional` flag (`a?.b`)
         // short-circuits to undefined when `a` is null/undefined.
@@ -3589,7 +3701,19 @@ pub const Compiler = struct {
             try self.builder.emitU8(r);
         }
 
-        try self.builder.emitCallMethod(c.span, r_recv, r_callee, @intCast(c.arguments.len));
+        if (emit_tail) {
+            // §15.10 PTC — method tail call. Encoding matches
+            // `tail_call_method` in op.zig: `[op] [r_recv:u8]
+            // [r_callee:u8] [argc:u8]`. No IC slot — the
+            // tail-call dispatch can't share the
+            // `call_method` cache safely.
+            try self.builder.emitOp(.tail_call_method, c.span);
+            try self.builder.emitU8(r_recv);
+            try self.builder.emitU8(r_callee);
+            try self.builder.emitU8(@intCast(c.arguments.len));
+        } else {
+            try self.builder.emitCallMethod(c.span, r_recv, r_callee, @intCast(c.arguments.len));
+        }
 
         var j: u8 = 0;
         while (j < reserved) : (j += 1) self.releaseTemp();
@@ -4500,7 +4624,7 @@ pub const Compiler = struct {
         try self.builder.emitU8(r);
     }
 
-    fn compileLogical(self: *Compiler, l: ast.expression.LogicalExpr) CompileError!void {
+    fn compileLogical(self: *Compiler, l: ast.expression.LogicalExpr, tail: bool) CompileError!void {
         // §13.13 short-circuit semantics:
         // a && b: if !ToBoolean(a) → result = a; else result = b.
         // a || b: if ToBoolean(a) → result = a; else result = b.
@@ -4509,6 +4633,11 @@ pub const Compiler = struct {
         // later has no `JmpIfNullish` opcode yet — until later lands
         // it, `??` is unsupported. `&&` and `||` lower to a single
         // conditional jump each.
+        //
+        // §15.10.1 — only the rhs of a logical operator is in tail
+        // position when the operator itself is; the lhs's value is
+        // observed by the short-circuit test, so a call there is
+        // not in tail position.
         try self.compileExpression(l.lhs);
         switch (l.op) {
             .and_and => {
@@ -4516,6 +4645,7 @@ pub const Compiler = struct {
                 try self.builder.emitOp(.jmp_if_false, l.span);
                 const patch = self.builder.here();
                 try self.builder.emitI16(0);
+                self.in_tail_position = tail;
                 try self.compileExpression(l.rhs);
                 const target = self.builder.here();
                 try self.builder.patchI16(patch, target);
@@ -4524,6 +4654,7 @@ pub const Compiler = struct {
                 try self.builder.emitOp(.jmp_if_true, l.span);
                 const patch = self.builder.here();
                 try self.builder.emitI16(0);
+                self.in_tail_position = tail;
                 try self.compileExpression(l.rhs);
                 const target = self.builder.here();
                 try self.builder.patchI16(patch, target);
@@ -4541,6 +4672,7 @@ pub const Compiler = struct {
                 try self.builder.emitI16(0);
                 const rhs_target = self.builder.here();
                 try self.builder.patchI16(to_rhs, rhs_target);
+                self.in_tail_position = tail;
                 try self.compileExpression(l.rhs);
                 const end_target = self.builder.here();
                 try self.builder.patchI16(skip_rhs, end_target);
@@ -4548,13 +4680,17 @@ pub const Compiler = struct {
         }
     }
 
-    fn compileConditional(self: *Compiler, c: ast.expression.CondExpr) CompileError!void {
+    fn compileConditional(self: *Compiler, c: ast.expression.CondExpr, tail: bool) CompileError!void {
         // test: if false-ish, jump to else; else fall through.
         try self.compileExpression(c.test_);
         try self.builder.emitOp(.jmp_if_false, c.span);
         const else_patch = self.builder.here();
         try self.builder.emitI16(0);
 
+        // §15.10.1 — consequent and alternate inherit the
+        // tail-position flag from the conditional itself; the
+        // test does not.
+        self.in_tail_position = tail;
         try self.compileExpression(c.consequent);
         try self.builder.emitOp(.jmp, c.span);
         const end_patch = self.builder.here();
@@ -4562,15 +4698,23 @@ pub const Compiler = struct {
 
         const else_target = self.builder.here();
         try self.builder.patchI16(else_patch, else_target);
+        self.in_tail_position = tail;
         try self.compileExpression(c.alternate);
 
         const end_target = self.builder.here();
         try self.builder.patchI16(end_patch, end_target);
     }
 
-    fn compileSequence(self: *Compiler, s: ast.expression.SequenceExpr) CompileError!void {
+    fn compileSequence(self: *Compiler, s: ast.expression.SequenceExpr, tail: bool) CompileError!void {
         std.debug.assert(s.expressions.len > 0);
-        for (s.expressions) |*e| try self.compileExpression(e);
+        // §15.10.1 — only the final operand of a comma expression
+        // is in tail position; the earlier operands are evaluated
+        // for side effects and discarded.
+        const last = s.expressions.len - 1;
+        var i: usize = 0;
+        while (i < last) : (i += 1) try self.compileExpression(&s.expressions[i]);
+        self.in_tail_position = tail;
+        try self.compileExpression(&s.expressions[last]);
         // Result of the comma operator is the last operand. Falls
         // out naturally because the last compileExpression leaves
         // its result in acc.
@@ -5956,7 +6100,16 @@ pub const Compiler = struct {
         //     explicit.js` asserts the tick gap.)
         const has_expr = s.argument != null;
         if (s.argument) |*arg| {
+            // §15.10.1 — the expression of a ReturnStatement is in
+            // tail position. `shouldEmitTailCall` (consulted at
+            // the call-emission site) applies the disqualifiers
+            // (async / generator / try-finally / for-of close /
+            // feature flag off).
+            self.in_tail_position = true;
             try self.compileExpression(arg);
+            // compileExpression clears the flag, but defensive-clear
+            // in case a future arm forgets to.
+            self.in_tail_position = false;
         } else {
             try self.builder.emitOp(.lda_undefined, s.span);
         }
@@ -10435,7 +10588,15 @@ pub const Compiler = struct {
         }
 
         const start_pc = self.builder.here();
+        // §15.10.1 — calls inside the try BLOCK are NOT in tail
+        // position when a catch (in this same chunk) would
+        // otherwise observe their throws. Bump the depth around
+        // the block compile only; catch / finally compile below
+        // each see the unbumped value.
+        const bumped_try_depth = s.handler != null;
+        if (bumped_try_depth) self.try_with_handler_depth += 1;
         try self.compileBlock(s.block.body, s.block.span);
+        if (bumped_try_depth) self.try_with_handler_depth -= 1;
         const end_pc = self.builder.here();
 
         // Jump past the catch landing on the normal-completion path.
@@ -10741,6 +10902,20 @@ fn compileFunctionTemplateExtNamed(
     const saved_env_depth = self.env_depth;
     const saved_current_loop = self.current_loop;
     const saved_is_async = self.current_is_async;
+    const saved_is_generator = self.current_is_generator;
+    // §15.10 PTC — `in_tail_position` must reset across a
+    // function boundary so a closure body doesn't inherit the
+    // outer call site's tail flag, which would let a call inside
+    // the closure silently emit `tail_call` and reuse the
+    // closure's frame (not the outer's).
+    const saved_in_tail_position = self.in_tail_position;
+    self.in_tail_position = false;
+    // §15.10 PTC — try-with-catch depth resets at function
+    // boundary too. A closure compiled inside an outer try
+    // block has its OWN exception table; the outer try's
+    // handler can't catch throws from the closure's body.
+    const saved_try_with_handler_depth = self.try_with_handler_depth;
+    self.try_with_handler_depth = 0;
     // §14.13 — label scopes don't cross function boundaries.
     // Stash the outer `pending_labels` (and the function body
     // starts with an empty list), restore on exit. Without
@@ -10783,6 +10958,7 @@ fn compileFunctionTemplateExtNamed(
     self.env_depth = saved_env_depth + 1 + (if (has_fn_name_env) @as(u8, 1) else @as(u8, 0));
     self.current_loop = null;
     self.current_is_async = is_async;
+    self.current_is_generator = is_generator;
 
     var inner_finished = false;
     defer {
@@ -10798,6 +10974,9 @@ fn compileFunctionTemplateExtNamed(
             self.env_depth = saved_env_depth;
             self.current_loop = saved_current_loop;
             self.current_is_async = saved_is_async;
+            self.current_is_generator = saved_is_generator;
+            self.in_tail_position = saved_in_tail_position;
+            self.try_with_handler_depth = saved_try_with_handler_depth;
             self.pending_labels = saved_pending_labels;
         }
     }
@@ -10884,7 +11063,12 @@ fn compileFunctionTemplateExtNamed(
             try self.builder.emitOp(.return_, span);
         },
         .expression => |e| {
+            // §15.10.1 — ArrowFunction ConciseBody is in tail
+            // position (the body expression IS the implicit
+            // return value).
+            self.in_tail_position = true;
             try self.compileExpression(e);
+            self.in_tail_position = false;
             try self.builder.emitOp(.return_, span);
         },
     }
@@ -10909,6 +11093,9 @@ fn compileFunctionTemplateExtNamed(
     self.env_depth = saved_env_depth;
     self.current_loop = saved_current_loop;
     self.current_is_async = saved_is_async;
+    self.current_is_generator = saved_is_generator;
+    self.in_tail_position = saved_in_tail_position;
+    self.try_with_handler_depth = saved_try_with_handler_depth;
     self.pending_labels = saved_pending_labels;
 
     const sp_len = computeSpecLength(params);

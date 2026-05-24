@@ -2088,6 +2088,441 @@ pub fn runFrames(
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             },
 
+            // §15.10 PTC — tail call. The compiler emitted this
+            // only after the §15.10.1 IsInTailPosition checks
+            // passed (statically a tail expression; not in async
+            // / generator / try-finally / open for-of). The
+            // runtime job: REUSE the current frame for the callee
+            // instead of pushing a new one. For plain JSFunction
+            // callees that means freeing the current frame's
+            // register file, allocating the callee's, overwriting
+            // the frame's chunk/ip/env/this/etc., and re-entering
+            // dispatch.  Exotic callees (proxy, bound, native,
+            // generator, async) fall back to ordinary call
+            // semantics — they each manage their own frame stack
+            // via callValue / callJSFunction / startAsyncCall and
+            // can't be flattened. After the fallback, the value
+            // sits in `acc` and the unconditionally-emitted
+            // `return_` immediately after the `tail_call` in the
+            // bytecode propagates the result. So a tail call is a
+            // 0-cost optimization where it applies and falls back
+            // to ordinary call+return where it doesn't.
+            .tail_call => {
+                const r_callee = code[ip];
+                const argc = code[ip + 1];
+                ip += 2;
+
+                const callee_v = registers[r_callee];
+
+                // §10.5.13 callable Proxy [[Call]] — fall back.
+                if (heap_mod.valueAsPlainObject(callee_v)) |po| {
+                    if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+                        const args_start = @as(usize, r_callee) + 1;
+                        const args_slice = registers[args_start .. args_start + argc];
+                        const cresult = try callValue(allocator, realm, callee_v, Value.undefined_, args_slice);
+                        switch (cresult) {
+                            .value, .yielded => |v| {
+                                acc = v;
+                                continue :dispatch try decodeNext(code, &ip, &committed);
+                            },
+                            .thrown => |ex| {
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            },
+                        }
+                    }
+                }
+                const callee_fn = heap_mod.valueAsFunction(callee_v) orelse {
+                    const ex = try makeTypeError(realm, "value is not callable");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                };
+
+                // §15.7.14 step 1 — class constructors are not
+                // callable without `new`.
+                if (callee_fn.is_class_constructor) {
+                    const ex = try makeTypeError(realm, "Class constructor cannot be invoked without 'new'");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                }
+
+                // §28.2.2.1.1 — revocation function (one-shot).
+                if (callee_fn.revocable_proxy) |rp| {
+                    realm.heap.setProxyTarget(rp, null);
+                    realm.heap.setProxyHandler(rp, null);
+                    realm.heap.setProxyTargetFn(rp, null);
+                    rp.proxy_revoked = true;
+                    callee_fn.revocable_proxy = null;
+                    acc = Value.undefined_;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+
+                // §10.4.1 — bound function: fall back through
+                // `callJSFunction` (handles the concatenated args
+                // and `this` rebinding). Doesn't preserve PTC
+                // semantics but matches every shipping engine —
+                // JSC included.
+                if (callee_fn.bound_target != null) {
+                    var inner_target = callee_fn;
+                    while (inner_target.bound_target) |i_t| inner_target = i_t;
+                    if (inner_target.is_class_constructor) {
+                        const ex = try makeTypeError(realm, "Class constructor cannot be invoked without 'new'");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    }
+                    const args_start = @as(usize, r_callee) + 1;
+                    const result = try callJSFunction(allocator, realm, callee_fn, Value.undefined_, registers[args_start .. args_start + argc]);
+                    switch (result) {
+                        .value, .yielded => |v| acc = v,
+                        .thrown => |ex| {
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                    }
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+
+                // §27.5 / §27.6 — generator constructor allocates a
+                // wrapper. Fall back: wrap and return the
+                // generator object in acc.
+                if (callee_fn.is_generator) {
+                    const callee_chunk_g = callee_fn.chunk orelse return error.InvalidOpcode;
+                    const args_start = @as(usize, r_callee) + 1;
+                    const wrap_result = if (callee_fn.is_async)
+                        try wrapAsyncGenerator(allocator, realm, callee_chunk_g, callee_fn.captured_env, Value.undefined_, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function, callee_fn)
+                    else
+                        try wrapGenerator(allocator, realm, callee_chunk_g, callee_fn.captured_env, Value.undefined_, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function, callee_fn);
+                    switch (wrap_result) {
+                        .value, .yielded => |v| acc = v,
+                        .thrown => |ex| {
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                    }
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+
+                // Native fallback — runs inline.
+                if (callee_fn.native_callback) |native| {
+                    const args_start = @as(usize, r_callee) + 1;
+                    const args = registers[args_start .. args_start + argc];
+                    const native_this: Value = if (callee_fn.is_arrow)
+                        callee_fn.captured_this
+                    else
+                        Value.undefined_;
+                    const result = native(realm, native_this, args) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.NativeThrew => {
+                            const ex = consumePendingException(realm) orelse try makeTypeError(realm, "native error");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                    };
+                    acc = result;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+
+                // §27.7 — async function fallback (compiler should
+                // have suppressed PTC here, but defend in depth).
+                if (callee_fn.is_async) {
+                    const callee_chunk_a = callee_fn.chunk orelse return error.InvalidOpcode;
+                    const args_start = @as(usize, r_callee) + 1;
+                    const callee_this_a: Value = if (callee_fn.is_arrow) callee_fn.captured_this else Value.undefined_;
+                    const outcome = try startAsyncCall(allocator, realm, callee_chunk_a, callee_fn.captured_env, callee_this_a, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function, callee_fn.owning_module);
+                    switch (outcome) {
+                        .value, .yielded => |v| acc = v,
+                        .thrown => |ex| {
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                    }
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+
+                // Plain JSFunction with a chunk — REUSE the current
+                // frame. §14.6 PrepareForTailCall: the caller's
+                // execution context is "popped" (we free its
+                // registers and overwrite the slot) and the
+                // callee runs in place. No frames.append, no
+                // matching pop on Return — the callee's Return
+                // returns to the CALLER's caller.
+                const callee_chunk_t = callee_fn.chunk orelse return error.InvalidOpcode;
+
+                // Buffer the args before we free the current
+                // register file. argc is u8 so 256 is enough.
+                var args_buf: [256]Value = undefined;
+                {
+                    var i: u8 = 0;
+                    while (i < argc) : (i += 1) args_buf[i] = registers[r_callee + 1 + i];
+                }
+
+                // Free the current frame's register file. The new
+                // one is sized for the callee chunk.
+                if (f.owns_registers) allocator.free(f.registers);
+                const callee_regs_t = try allocator.alloc(Value, @max(@as(usize, callee_chunk_t.register_count), @as(usize, argc)));
+                @memset(callee_regs_t, Value.undefined_);
+                {
+                    var i: u8 = 0;
+                    while (i < argc) : (i += 1) callee_regs_t[i] = args_buf[i];
+                }
+
+                // Reframe in place. §13.3.6 / §15.3.4 — `this` /
+                // `new.target` for an arrow inherit from creation
+                // site; plain calls reset to undefined.
+                f.chunk = callee_chunk_t;
+                f.ip = 0;
+                f.accumulator = Value.undefined_;
+                f.registers = callee_regs_t;
+                f.env = callee_fn.captured_env;
+                f.this_value = if (callee_fn.is_arrow) callee_fn.captured_this else Value.undefined_;
+                f.is_construct = false;
+                f.new_target = if (callee_fn.is_arrow) callee_fn.captured_new_target else Value.undefined_;
+                f.is_derived_ctor = false;
+                f.super_called = false;
+                f.super_called_cell = callee_fn.super_called_cell;
+                f.home_object = callee_fn.home_object;
+                f.home_function = callee_fn.home_function;
+                f.argc = argc;
+                f.generator = null;
+                f.owns_registers = true;
+                f.wrap_return_in_promise = false;
+                f.owning_module = callee_fn.owning_module;
+                committed = true;
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+            },
+
+            // §15.10 PTC — method tail call. Same as `tail_call`
+            // but `this` comes from `r_recv` (§13.3.6 — method
+            // call binds receiver). Encoding:
+            // `[op] [r_recv:u8] [r_callee:u8] [argc:u8]`. No IC
+            // slot (unlike `call_method`) — tail-recursive method
+            // dispatch is rare and the cache layout doesn't
+            // compose with frame reuse.
+            .tail_call_method => {
+                const r_recv = code[ip];
+                const r_callee = code[ip + 1];
+                const argc = code[ip + 2];
+                ip += 3;
+
+                const callee_v = registers[r_callee];
+                const recv = registers[r_recv];
+
+                // §10.5.13 callable Proxy [[Call]] — fall back.
+                if (heap_mod.valueAsPlainObject(callee_v)) |po| {
+                    if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+                        const args_start = @as(usize, r_callee) + 1;
+                        const args_slice = registers[args_start .. args_start + argc];
+                        const cresult = try callValue(allocator, realm, callee_v, recv, args_slice);
+                        switch (cresult) {
+                            .value, .yielded => |v| {
+                                acc = v;
+                                continue :dispatch try decodeNext(code, &ip, &committed);
+                            },
+                            .thrown => |ex| {
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            },
+                        }
+                    }
+                }
+                const callee_fn = heap_mod.valueAsFunction(callee_v) orelse {
+                    const ex = try makeTypeError(realm, "value is not callable");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                };
+
+                if (callee_fn.is_class_constructor) {
+                    const ex = try makeTypeError(realm, "Class constructor cannot be invoked without 'new'");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                }
+
+                if (callee_fn.revocable_proxy) |rp| {
+                    realm.heap.setProxyTarget(rp, null);
+                    realm.heap.setProxyHandler(rp, null);
+                    realm.heap.setProxyTargetFn(rp, null);
+                    rp.proxy_revoked = true;
+                    callee_fn.revocable_proxy = null;
+                    acc = Value.undefined_;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+
+                if (callee_fn.bound_target != null) {
+                    const args_start = @as(usize, r_callee) + 1;
+                    const result = try callJSFunction(allocator, realm, callee_fn, recv, registers[args_start .. args_start + argc]);
+                    switch (result) {
+                        .value, .yielded => |v| acc = v,
+                        .thrown => |ex| {
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                    }
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+
+                if (callee_fn.is_generator) {
+                    const callee_chunk_g = callee_fn.chunk orelse return error.InvalidOpcode;
+                    const args_start = @as(usize, r_callee) + 1;
+                    const wrap_result = if (callee_fn.is_async)
+                        try wrapAsyncGenerator(allocator, realm, callee_chunk_g, callee_fn.captured_env, recv, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function, callee_fn)
+                    else
+                        try wrapGenerator(allocator, realm, callee_chunk_g, callee_fn.captured_env, recv, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function, callee_fn);
+                    switch (wrap_result) {
+                        .value, .yielded => |v| acc = v,
+                        .thrown => |ex| {
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                    }
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+
+                if (callee_fn.native_callback) |native| {
+                    const args_start = @as(usize, r_callee) + 1;
+                    const args = registers[args_start .. args_start + argc];
+                    const native_this: Value = if (callee_fn.is_arrow)
+                        callee_fn.captured_this
+                    else
+                        recv;
+                    const result = native(realm, native_this, args) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.NativeThrew => {
+                            const ex = consumePendingException(realm) orelse try makeTypeError(realm, "native error");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                    };
+                    acc = result;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+
+                if (callee_fn.is_async) {
+                    const callee_chunk_a = callee_fn.chunk orelse return error.InvalidOpcode;
+                    const args_start = @as(usize, r_callee) + 1;
+                    const callee_this_a: Value = if (callee_fn.is_arrow) callee_fn.captured_this else recv;
+                    const outcome = try startAsyncCall(allocator, realm, callee_chunk_a, callee_fn.captured_env, callee_this_a, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function, callee_fn.owning_module);
+                    switch (outcome) {
+                        .value, .yielded => |v| acc = v,
+                        .thrown => |ex| {
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                    }
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+
+                // Plain JSFunction — reframe in place.
+                const callee_chunk_t = callee_fn.chunk orelse return error.InvalidOpcode;
+                var args_buf: [256]Value = undefined;
+                {
+                    var i: u8 = 0;
+                    while (i < argc) : (i += 1) args_buf[i] = registers[r_callee + 1 + i];
+                }
+                if (f.owns_registers) allocator.free(f.registers);
+                const callee_regs_t = try allocator.alloc(Value, @max(@as(usize, callee_chunk_t.register_count), @as(usize, argc)));
+                @memset(callee_regs_t, Value.undefined_);
+                {
+                    var i: u8 = 0;
+                    while (i < argc) : (i += 1) callee_regs_t[i] = args_buf[i];
+                }
+
+                f.chunk = callee_chunk_t;
+                f.ip = 0;
+                f.accumulator = Value.undefined_;
+                f.registers = callee_regs_t;
+                f.env = callee_fn.captured_env;
+                f.this_value = if (callee_fn.is_arrow) callee_fn.captured_this else recv;
+                f.is_construct = false;
+                f.new_target = if (callee_fn.is_arrow) callee_fn.captured_new_target else Value.undefined_;
+                f.is_derived_ctor = false;
+                f.super_called = false;
+                f.super_called_cell = callee_fn.super_called_cell;
+                f.home_object = callee_fn.home_object;
+                f.home_function = callee_fn.home_function;
+                f.argc = argc;
+                f.generator = null;
+                f.owns_registers = true;
+                f.wrap_return_in_promise = false;
+                f.owning_module = callee_fn.owning_module;
+                committed = true;
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+            },
+
             .new_call => {
                 const r_callee = code[ip];
                 const argc = code[ip + 1];

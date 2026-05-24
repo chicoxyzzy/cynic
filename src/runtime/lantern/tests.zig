@@ -6039,3 +6039,269 @@ test "literal shape: duplicate keys fall back to non-template path" {
         \\o.a + o.b;
     , 5);
 }
+
+// ── Proper Tail Calls (§15.10) ───────────────────────────────────────
+
+/// Like `installBuiltinsAllFeatures` but with `ptc` flipped off
+/// so we can prove the PTC path is the thing enabling the
+/// deep-recursion case (and not some other engine change).
+fn installBuiltinsWithoutPtc(realm: *Realm) !void {
+    realm.feature_flags = features.FeatureSet.initFull();
+    realm.feature_flags.remove(.ptc);
+    try realm.installBuiltins();
+}
+
+fn expectScriptIntWithoutPtc(source: []const u8, expected: i32) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsWithoutPtc(&realm);
+    const v = switch (try evaluateScriptResult(&realm, source)) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    if (v.isInt32()) try testing.expectEqual(expected, v.asInt32()) else if (v.isDouble()) try testing.expectEqual(@as(f64, @floatFromInt(expected)), v.asDouble()) else return error.NotANumber;
+}
+
+fn expectScriptThrowsWithoutPtc(source: []const u8) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsWithoutPtc(&realm);
+    switch (try evaluateScriptResult(&realm, source)) {
+        .value, .yielded => return error.ExpectedThrow,
+        .thrown => {},
+    }
+}
+
+test "PTC: deep self-recursion via return f() does not overflow" {
+    // §15.10 — `return f(n - 1)` is in tail position. With PTC,
+    // 3000 calls reuse one frame and the body finishes
+    // normally. The interpreter's `max_call_frames` is 1024, so
+    // without PTC the same recursion would throw RangeError
+    // (see the matching off-flag test below). 3000 is chosen as
+    // a comfortable margin over the cap while staying fast in
+    // Debug builds.
+    try expectScriptIntWithBuiltins(
+        \\function f(n) {
+        \\  if (n === 0) return 42;
+        \\  return f(n - 1);
+        \\}
+        \\f(3000);
+    , 42);
+}
+
+test "PTC: tail-eligible recursion with --enable=ptc off still overflows" {
+    // Negative control. With the feature flag off, the compiler
+    // emits `.call` (not `.tail_call`); the existing 1024-frame
+    // limit fires the way every other engine signals stack
+    // overflow.
+    try expectScriptThrowsWithoutPtc(
+        \\function f(n) {
+        \\  if (n === 0) return 42;
+        \\  return f(n - 1);
+        \\}
+        \\f(3000);
+    );
+}
+
+test "PTC: mutual recursion in tail position does not overflow" {
+    // §15.10 PTC covers mutual recursion too — every call from
+    // even→odd / odd→even is the last operation of its frame.
+    try expectScriptIntWithBuiltins(
+        \\function even(n) { return n === 0 ? 1 : odd(n - 1); }
+        \\function odd(n)  { return n === 0 ? 0 : even(n - 1); }
+        \\even(3000);
+    , 1);
+}
+
+test "PTC: arrow concise body is in tail position (§15.10.1)" {
+    // The body expression of an arrow with concise body IS the
+    // return value, so the call inside it is in tail position.
+    try expectScriptIntWithBuiltins(
+        \\const f = (n) => n === 0 ? 7 : f(n - 1);
+        \\f(3000);
+    , 7);
+}
+
+test "PTC: conditional consequent / alternate propagate tail position" {
+    // §15.10.1 — the consequent and alternate of a ternary
+    // inherit the surrounding tail-position; the test does not.
+    try expectScriptIntWithBuiltins(
+        \\function loop(n, acc) {
+        \\  return n === 0 ? acc : loop(n - 1, acc + 1);
+        \\}
+        \\loop(3000, 0);
+    , 3000);
+}
+
+test "PTC: logical && / || rhs propagates tail position" {
+    // §13.13 — the rhs of `&&` / `||` is evaluated only when
+    // short-circuit doesn't fire; §15.10.1 says it's in tail
+    // position when the operator is. lhs is NOT.
+    try expectScriptIntWithBuiltins(
+        \\function f(n) {
+        \\  return n === 0 || f(n - 1);
+        \\}
+        \\f(50000) === true ? 1 : 0;
+    , 1);
+}
+
+test "PTC: comma's last operand inherits tail position" {
+    try expectScriptIntWithBuiltins(
+        \\function f(n) {
+        \\  return (0, n === 0 ? 99 : f(n - 1));
+        \\}
+        \\f(3000);
+    , 99);
+}
+
+test "PTC: parenthesized expressions are transparent for tail position" {
+    try expectScriptIntWithBuiltins(
+        \\function f(n) {
+        \\  return ((n === 0 ? 5 : f(n - 1)));
+        \\}
+        \\f(3000);
+    , 5);
+}
+
+test "PTC: try-with-catch suppresses PTC in the try block (§15.10.1)" {
+    // §15.10.1 — TryStatement : try Block Catch asks `Catch`,
+    // not `Block`, for tail-position eligibility. So a call in
+    // the try block is NOT in tail position when a catch is
+    // installed in the same chunk: reusing the frame would lose
+    // the handler PC range and the catch would never see the
+    // throw.
+    //
+    // Design of the test: each recursive frame's catch catches
+    // any thrown RangeError and returns `-1`. With PTC ON and
+    // SUPPRESSION WORKING, the recursion pushes real frames,
+    // overflows at the 1024-frame cap, the deepest frame's
+    // catch fires, returns -1 — propagates up through the
+    // returns and the top-level call yields -1.
+    //
+    // If the compiler INCORRECTLY emitted `.tail_call` for the
+    // call inside the try, frames would be reused, n would
+    // count down to 0 cleanly, and the call would yield 99 with
+    // no throw observed. So an answer of -1 confirms the
+    // suppression. Run with PTC ON to actually exercise the
+    // gate.
+    try expectScriptIntWithBuiltins(
+        \\function f(n) {
+        \\  try {
+        \\    return n === 0 ? 99 : f(n - 1);
+        \\  } catch (e) { return -1; }
+        \\}
+        \\f(3000);
+    , -1);
+}
+
+test "PTC: catch body IS in tail position (§15.10.1 — Catch is the inner)" {
+    // The companion to the test above — `return f(n-1)` INSIDE
+    // the catch body IS in tail position per §15.10.1's
+    // `HasCallInTailPosition of Catch with argument call` rule.
+    // Confirms `try_with_handler_depth` resets when leaving the
+    // try block (not when leaving the whole try statement).
+    try expectScriptIntWithBuiltins(
+        \\function f(n) {
+        \\  if (n === 0) return 7;
+        \\  try { throw null; } catch (e) { return f(n - 1); }
+        \\}
+        \\f(3000);
+    , 7);
+}
+
+test "PTC: finally body IS in tail position (§15.10.1)" {
+    // `try { } finally { return f(n-1) }` — the finally body is
+    // the tail of the try statement; spec says it IS in tail
+    // position. Cynic's compileTry pops the finally context
+    // BEFORE compiling the finally body, so `finally_chain`
+    // sees null and the PTC gate allows the tail call.
+    try expectScriptIntWithBuiltins(
+        \\function f(n) {
+        \\  if (n === 0) return 3;
+        \\  try { } finally { return f(n - 1); }
+        \\}
+        \\f(3000);
+    , 3);
+}
+
+test "PTC: try/finally suppresses PTC (§15.10.1 — finally would never run)" {
+    // The recursive call is syntactically in tail position, but
+    // a `finally` block still has to run after the return.
+    // §15.10.1 says the try block is NOT a tail-position site
+    // when a finally is owed.
+    //
+    // Tested with PTC ON — if the compiler incorrectly emitted
+    // `.tail_call` here, the 3000-iter recursion would complete.
+    // The `finally_chain != null` gate in `shouldEmitTailCall`
+    // keeps it as `.call` and the recursion overflows.
+    try expectScriptThrowsWithBuiltins(
+        \\function f(n) {
+        \\  try {
+        \\    return n === 0 ? 42 : f(n - 1);
+        \\  } finally {}
+        \\}
+        \\f(3000);
+    );
+}
+
+test "PTC: for-of body suppresses PTC (iterator close discipline)" {
+    // §7.4.6 IteratorClose says the iterator's return() runs
+    // when control leaves the loop. PTC frame-reuse would
+    // perform the recursive call before iter_close (or skip it
+    // entirely), so the compiler suppresses PTC when any
+    // enclosing loop owns an open iterator. Tested with PTC ON
+    // so the suppression is what's actually exercising the
+    // overflow.
+    try expectScriptThrowsWithBuiltins(
+        \\function f(n) {
+        \\  for (const _ of [1]) {
+        \\    return n === 0 ? 0 : f(n - 1);
+        \\  }
+        \\}
+        \\f(3000);
+    );
+}
+
+test "PTC: non-tail position recursive call still overflows" {
+    // `1 + f(n - 1)` is NOT in tail position (the `+` consumes
+    // the result), so the compiler must emit `.call`, not
+    // `.tail_call`. Confirms the in_tail_position flag is
+    // CLEARED by non-propagating expression types. Tested with
+    // PTC ON: the binary `+` arm of `compileExpression` clears
+    // the flag for its sub-expressions; without that clear, the
+    // call inside would tail-call and the recursion would
+    // succeed.
+    try expectScriptThrowsWithBuiltins(
+        \\function f(n) {
+        \\  if (n === 0) return 0;
+        \\  return 1 + f(n - 1);
+        \\}
+        \\f(3000);
+    );
+}
+
+test "PTC: method call in tail position uses tail_call_method" {
+    try expectScriptIntWithBuiltins(
+        \\const o = {
+        \\  step(n, acc) { return n === 0 ? acc : o.step(n - 1, acc + 2); }
+        \\};
+        \\o.step(3000, 0);
+    , 6000);
+}
+
+test "PTC: arrow's captured this/new.target preserved across tail call" {
+    // Arrows tail-called from a method body inherit the captured
+    // this — the reframe step copies captured_this rather than
+    // the call-site receiver.
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  constructor() { this.v = 11; }
+        \\  go(n) {
+        \\    const self = this;
+        \\    const step = (k) => k === 0 ? self.v : step(k - 1);
+        \\    return step(n);
+        \\  }
+        \\}
+        \\new C().go(3000);
+    , 11);
+}

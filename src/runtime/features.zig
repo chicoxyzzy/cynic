@@ -31,6 +31,17 @@ pub const FeatureFlag = enum {
     /// corresponding pair on `WeakMap.prototype`. Stage 3 as of
     /// 2026-05. Installer site: `src/runtime/builtins/collections.zig`.
     upsert,
+    /// ES2015 §15.10 Proper Tail Calls. Calls in tail position
+    /// (return f(x), arrow concise body, conditional / logical
+    /// rhs in tail position) reuse the caller's frame instead of
+    /// pushing a fresh one. Only JavaScriptCore ships this in the
+    /// production engines; V8 implemented and removed it.
+    /// Gated because Error.stack loses the eliminated frames —
+    /// off-by-default keeps existing fixtures' stack-trace
+    /// expectations intact. Compiler-site gate: `compileCall`
+    /// emits `.tail_call` / `.tail_call_method` instead of
+    /// `.call` / `.call_method` when set.
+    ptc,
 
     /// CLI flag / test262 `features:` frontmatter name (kebab-case,
     /// matching the upstream tc39/test262 convention).
@@ -38,6 +49,7 @@ pub const FeatureFlag = enum {
         return switch (self) {
             .joint_iteration => "joint-iteration",
             .upsert => "upsert",
+            .ptc => "tail-call-optimization",
         };
     }
 
@@ -46,6 +58,7 @@ pub const FeatureFlag = enum {
         return switch (self) {
             .joint_iteration => "Iterator.zip / Iterator.zipKeyed (Stage 3)",
             .upsert => "Map / WeakMap.prototype.getOrInsert{,Computed} (Stage 3)",
+            .ptc => "Proper Tail Calls (ES2015 §15.10)",
         };
     }
 

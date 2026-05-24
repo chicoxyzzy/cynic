@@ -42,6 +42,9 @@ const BENCHES = [_]Bench{
     .{ .name = "method_call", .path = "bench/micros/method_call.js" },
     .{ .name = "class_instantiate", .path = "bench/micros/class_instantiate.js" },
     .{ .name = "json_stringify", .path = "bench/micros/json_stringify.js" },
+    // §15.10 PTC — recurses past the 1024-frame stack ceiling;
+    // proves the tail_call opcodes keep the spine at depth 1.
+    .{ .name = "tail_recursion", .path = "bench/micros/tail_recursion.js" },
 };
 
 const Sample = struct {
@@ -68,7 +71,13 @@ fn runOnce(
 ) !Sample {
     const t0 = std.Io.Clock.now(.awake, io);
     var child = try std.process.spawn(io, .{
-        .argv = &.{ cynic_bin, "run", fixture },
+        // `--enable-experimental` flips every tracked pre-Stage-4
+        // proposal on (joint-iteration, upsert,
+        // tail-call-optimization) so fixtures gated on those flags
+        // execute the gated path. No effect on the older arith /
+        // alloc / promise fixtures, which don't touch any gated
+        // surface.
+        .argv = &.{ cynic_bin, "--enable-experimental", "run", fixture },
         // Suppress the fixture's print() output — the bench harness
         // doesn't care, and dumping it would scramble the report.
         .stdout = .ignore,

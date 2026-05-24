@@ -187,6 +187,34 @@ pub const Op = enum(u8) {
     /// object, and yields either the constructor's return value
     /// (if it's an object) or the new object (otherwise).
     new_call,
+    /// `[op] [r_callee:u8] [argc:u8]` — §15.10 PTC. Tail-call the
+    /// function in register `r_callee` with `argc` arguments at
+    /// `r_callee+1.. r_callee+argc`. Spec §14.6 PrepareForTailCall:
+    /// the caller's frame is REUSED for the callee — no new
+    /// dispatch frame is pushed, the caller's `Return` is skipped,
+    /// and `function f(n) { return f(n - 1) }` recurses without
+    /// stack growth. Falls back to ordinary `call` semantics
+    /// (push + return) for proxies, bound functions, generators,
+    /// async functions, and native callbacks — those cases either
+    /// can't be flattened (the callee has its own frame allocation)
+    /// or would require deeper reentrancy. Emitted by the compiler
+    /// only when (1) the call appears at a statically-detectable
+    /// tail position per §15.10.1 IsInTailPosition (return
+    /// expression, arrow concise body, conditional / logical /
+    /// comma rhs in tail position), (2) the enclosing function is
+    /// not a generator / async function, (3) the call is not
+    /// inside a try block with a finally, and (4) the `ptc`
+    /// feature flag is set on the realm.
+    tail_call,
+    /// `[op] [r_recv:u8] [r_callee:u8] [argc:u8]` — §15.10 PTC,
+    /// method-call variant. Identical to `tail_call` except
+    /// `this` is bound to the value in `r_recv` (§13.3.6).
+    /// No inline-cache slot — the saved tail-call frame would
+    /// invalidate the cache layout that `call_method` relies on,
+    /// and tail-recursive method calls are rare enough that the
+    /// extra IC isn't load-bearing. Falls back to ordinary
+    /// `call_method` for exotic callees, same as `tail_call`.
+    tail_call_method,
     /// Load `this` from the current call frame into acc. Top-level
     /// `this` is `undefined` in strict mode (§10.2.1.2). Arrow
     /// functions inherit `this` from their captured frame; the
@@ -975,9 +1003,11 @@ pub const Op = enum(u8) {
             .call,
             .new_call,
             .super_call,
+            .tail_call,
             .lda_env,
             .sta_env,
             => 2, // u8 + u8
+            .tail_call_method => 3, // r_recv:u8 + r_callee:u8 + argc:u8
             .sta_private, .super_set, .def_property => 3, // k:u16 + r_obj:u8
             .sta_property => 5, // k:u16 + r_obj:u8 + ic:u16 (inline-cache slot)
             .def_accessor => 4, // k:u16 + r_obj:u8 + is_setter:u8
@@ -1050,6 +1080,8 @@ pub const Op = enum(u8) {
             .call => "Call",
             .call_method => "CallMethod",
             .new_call => "NewCall",
+            .tail_call => "TailCall",
+            .tail_call_method => "TailCallMethod",
             .lda_this => "LdaThis",
             .lda_new_target => "LdaNewTarget",
             .instanceof_ => "InstanceOf",
