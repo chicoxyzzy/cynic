@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 92.89 % | 99.97 % | 37241 / 40090 | 37241 / 37251 |
+| **runtime** | 92.90 % | 99.98 % | 37241 / 40089 | 37241 / 37250 |
 
 
 ## Where the runtime stands, by area
@@ -24,7 +24,6 @@ browser-era built-ins …).
 | area | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | **_1–9 fails_** | | | | | |
-| `built-ins/Proxy` | 293 | 1 | 12 | 96 % | 100 % |
 | `built-ins/RegExp` | 1593 | 9 | 161 | 90 % | 99 % |
 | **_0 fails (passing or wholly OOS)_** | | | | | |
 | ~~`built-ins/AbstractModuleSource`~~ | ~~0~~ | ~~0~~ | ~~8~~ | ~~0 %~~ | ~~0 %~~ |
@@ -59,6 +58,7 @@ browser-era built-ins …).
 | `built-ins/Number` | 339 | 0 | 0 | 100 % | 100 % |
 | `built-ins/Object` | 3319 | 0 | 80 | 98 % | 100 % |
 | `built-ins/Promise` | 627 | 0 | 38 | 94 % | 100 % |
+| `built-ins/Proxy` | 293 | 0 | 12 | 96 % | 100 % |
 | `built-ins/Reflect` | 152 | 0 | 0 | 100 % | 100 % |
 | `built-ins/RegExpStringIteratorPrototype` | 17 | 0 | 0 | 100 % | 100 % |
 | `built-ins/Set` | 381 | 0 | 1 | 100 % | 100 % |
@@ -156,16 +156,11 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-24 — cynic `711bd56`, test262 `d0c1b455`
+### 2026-05-24 — cynic `b49572e`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 92.89 % | 99.97 % | 37241 / 40090 | 37241 / 37251 | +47 | 40.6 s |
-
-Biggest movers (runtime):
-
-- `language/statements` +18
-- `language/expressions` +12
+| **runtime** | 92.90 % | 99.98 % | 37241 / 40089 | 37241 / 37250 | +47 | 45.7 s |
 
 ### 2026-05-23 — cynic `a8caaf8`, test262 `d0c1b455`
 
