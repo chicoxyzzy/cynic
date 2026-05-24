@@ -6925,35 +6925,18 @@ pub fn runFrames(
                 if (recv_obj_opt) |obj_in| {
                     const cell = &local_chunk.inline_caches[ic_idx];
                     if (cell.shape != null and cell.shape == obj_in.shape) {
+                        // Shape-authoritative write: slot vector is
+                        // the source of truth for shape-mode objects.
+                        // `JSObject.get` / `.hasOwn` are shape-first
+                        // (4133c7f / 4b06eb4), so spec-surface reads
+                        // resolve against `slots`. Skip the bag mirror
+                        // entirely on the IC hot path. Any remaining
+                        // direct `obj.properties.get` reader that
+                        // sees a stale value is a migration target —
+                        // route it through `JSObject.get` or accept
+                        // the bag staleness as an audit-flagged
+                        // divergence.
                         obj_in.slots.items[cell.slot] = acc;
-                        // Bag mirror: keeps direct `obj.properties.get`
-                        // readers (a handful of slow-path builtins),
-                        // `verifyShapeInvariant`, and any caller that
-                        // hasn't migrated to `JSObject.get` (shape-first
-                        // since 4133c7f) honest. Hot path uses the
-                        // cached array index — `values()[bag_index] = acc`
-                        // — collapsing the wyhash + bucket walk + key
-                        // compare that profile flagged at ~41 % of
-                        // `prop_write` samples to a single Value store.
-                        // The cache is filled lazily on first miss (see
-                        // the slow-path refill below).
-                        // Cached index is safe because every
-                        // `properties.swapRemove` path that could
-                        // reshuffle the bag (delete operator,
-                        // Array.prototype.{pop, splice, shift,
-                        // reverse, copyWithin, unshift} via
-                        // `deleteOwn`, `def_property` redefine,
-                        // array-length truncation) demotes the
-                        // shape first — the outer `cell.shape ==
-                        // obj.shape` guard above then catches every
-                        // such case and falls into the slow refill.
-                        if (cell.bag_index != chunk_mod.bag_index_uncached and
-                            cell.bag_index < obj_in.properties.count())
-                        {
-                            obj_in.properties.values()[cell.bag_index] = acc;
-                        } else {
-                            obj_in.properties.put(allocator, key_s.flatBytes(), acc) catch return error.OutOfMemory;
-                        }
                         realm.heap.storeInternalSlot(.{ .object = obj_in }, acc);
                         continue :dispatch try decodeNext(code, &ip, &committed);
                     }

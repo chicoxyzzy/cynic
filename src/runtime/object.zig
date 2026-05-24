@@ -1670,6 +1670,30 @@ pub const JSObject = struct {
         return Value.undefined_;
     }
 
+    /// Own-data lookup, NOT walking the prototype chain. Shape-first:
+    /// when the receiver carries a shape that claims `key` as an
+    /// own-data entry, returns `slots[entry.slot]` — the bag is a
+    /// best-effort mirror and may be stale for shape-mode objects
+    /// whose IC-served writes skipped the mirror. Bag fallback is
+    /// used for dictionary-mode objects (no shape) and for
+    /// shape-claimed accessor entries (data lookup misses, bag
+    /// stays the source of truth for descriptor metadata).
+    ///
+    /// Returns `null` when the key is absent from both shape and
+    /// bag. Callers that need accessor dispatch must consult
+    /// `getAccessor` separately — this helper is for the data
+    /// lookup that closes out an `OrdinaryGet` chain walk.
+    pub fn ownDataLookup(self: *const JSObject, key: []const u8) ?Value {
+        if (self.shape) |sh| {
+            if (sh.lookup(key)) |entry| {
+                if (entry.kind == .data and entry.slot < self.slots.items.len) {
+                    return self.slots.items[entry.slot];
+                }
+            }
+        }
+        return self.properties.get(key);
+    }
+
     /// Own-property check — does NOT walk the prototype chain.
     /// Returns true for both data and accessor own properties
     /// (§7.3.13 HasOwnProperty: any descriptor counts).

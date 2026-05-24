@@ -1035,7 +1035,7 @@ pub fn getPropertyChain(realm: *Realm, obj: *JSObject, key: []const u8) NativeEr
                 return Value.undefined_;
             } else |_| {}
         }
-        if (o.properties.get(key)) |v| return v;
+        if (o.ownDataLookup(key)) |v| return v;
         cur = o.prototype;
     }
     return Value.undefined_;
