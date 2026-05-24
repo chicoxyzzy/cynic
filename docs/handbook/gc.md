@@ -1,9 +1,24 @@
 # Garbage collection
 
-Stop-the-world mark-sweep, triggered on allocation pressure. Lives in
-[`src/runtime/heap.zig`](../../src/runtime/heap.zig); the trigger and
-root walker live in [`src/runtime/realm.zig`](../../src/runtime/realm.zig)
-and [`src/runtime/interpreter.zig`](../../src/runtime/interpreter.zig).
+Stop-the-world generational mark-sweep (the *Metla* GC), triggered on
+allocation pressure. Each per-kind heap list is split into a `_young`
+and a `_mature` half; allocations land in `_young`, and survivors of
+a minor cycle are spliced into `_mature` by `promoteYoungList`. Lives
+in [`src/runtime/heap.zig`](../../src/runtime/heap.zig); the trigger
+and root walker live in
+[`src/runtime/realm.zig`](../../src/runtime/realm.zig) and
+[`src/runtime/lantern/interpreter.zig`](../../src/runtime/lantern/interpreter.zig).
+
+A **minor cycle** (`Heap.collectYoung`) marks reachable young
+objects, promotes them, and frees the rest. A **major cycle**
+(`Heap.collectFull`) marks across both halves, sweeps everything
+unreachable, and flips the mark colour at the top of the next cycle
+so the previously-marked bit ages back to "unmarked" without a linear
+walk over the mature set. The remembered set
+(`Heap.remembered: ArrayListUnmanaged(Container)`) tracks mature→young
+edges recorded by the generational write barrier
+(`Heap.writeBarrier`); it's seeded as a root source on every minor
+cycle and cleared at the end of one.
 
 ## What it does
 
@@ -87,10 +102,15 @@ function metadata, Map / Set entries, generator references, and class
 field initialisers — `Heap.markValue` and `Heap.markChunk` do the
 work; `Realm.collectGarbage` only seeds the roots.
 
-The sweep walks each per-kind list (`heap.strings`, `heap.functions`,
-`heap.objects`, `heap.environments`, `heap.generators`, `heap.symbols`,
-`heap.bigints`), `swapRemove`s any unmarked entry, and `deinit`s it.
-Marked entries get their bit cleared, ready for the next cycle.
+Each per-kind heap is split `_young` / `_mature`. `promoteYoungList`
+runs at the end of the mark phase: it walks the young half,
+`swapRemove`s any unmarked entry (freed via the kind's `deinit`),
+and *appends* the marked survivors onto the mature half. A minor
+cycle never touches the mature lists; a major cycle sweeps both
+halves and (still) routes survivors through the same per-kind list.
+Marked entries don't get their bit cleared on a per-entry basis —
+the mark-colour flip at the top of the next major cycle ages the
+whole mature set back to "unmarked" in `O(1)`.
 
 ## Natives and `HandleScope`
 
@@ -132,12 +152,13 @@ can trigger a collection. Three recurring shapes:
     constant needs the same treatment.
 
 Two failure modes live next door but are NOT `HandleScope` bugs:
-a missing **generational write barrier** on a raw `setIndexed` /
-`properties.put` (route through `heap.storeProperty` /
-`storeIndexed`, or call `heap.writeBarrier` before the raw store);
-and a **missing mark edge** — a typed slot `markValue` /
-`markObjectInternalSlots` forgot to trace (e.g. a function's
-`home_object`, a symbol's description).
+a missing **generational write barrier** on a raw write into a
+property bag / indexed slot / typed internal slot (route through
+the Heap helpers — see "Typed-setter helpers" below — or fall back
+to `heap.writeBarrier` before the raw store); and a **missing
+mark edge** — a typed slot `markValue` / `markObjectInternalSlots`
+forgot to trace (e.g. a function's `home_object`, a symbol's
+description).
 
 ### Finding these bugs
 
@@ -325,6 +346,80 @@ is fine. V8 (`MarkingState`) / JSC (Riptide concurrent marker)
 markers globally; Cynic's worklist is a scoped subset covering
 the chains that actually overflow today.
 
+## Typed-setter helpers
+
+Property-bag writes / indexed-element writes / environment-slot
+writes route through `Heap.storeProperty` / `storeElement` /
+`storeEnvSlot`, each of which calls `writeBarrier` before doing
+the raw assignment. **Typed internal slots** (`prototype`,
+`home_object`, `captured_env`, `bound_target`, `proxy_handler`,
+`promise_value`, accessor `getter`/`setter` halves, …) get the
+same treatment via a family of single-purpose setter helpers
+on `Heap`:
+
+| Container | Helpers |
+|---|---|
+| `*JSObject` | `setObjectPrototype`, `setProxyTarget` / `setProxyHandler` / `setProxyTargetFn`, `setBoxedPrimitive` / `setBoxedString`, `setFinallyCallback` / `setFinallyValue` / `setFinallyConstructor`, `setRegexpSource` / `setRegexpFlags`, `setGeneratorRef`, `setAccessorGetter` / `setAccessorSetter`, `settlePromise` |
+| `*JSFunction` | `setFunctionPrototype`, `setHomeObject`, `setHomeFunction`, `setCapturedEnv`, `setCapturedThis`, `setCapturedNewTarget`, `setBoundTarget` / `setBoundThis` / `setBoundArgs`, `setFunctionNameString`, `setAccessorGetter` / `setAccessorSetter` |
+| `*JSGenerator` | `setGeneratorHomeObject`, `setGeneratorHomeFunction`, `setGeneratorEnv` |
+| `*Environment` | `setEnvironmentParent` |
+
+Each helper checks for a null target and skips the barrier in
+that case (no edge to remember when the slot is cleared). For
+the typed-pointer fields where the target type isn't NaN-box-
+tagged (`*Environment`, `*JSGenerator`), the barrier is
+open-coded against the target's `.generation` instead of
+routing through `writeBarrier`'s Value path.
+
+**When adding a new typed slot**, add a matching `setXxx`
+helper next to its siblings in `heap.zig` and route every write
+site through it. The bare `obj.<slot> = …` form bypasses the
+barrier and silently leans on the per-cycle mature scan (see
+below) to keep mature→young edges alive — which closes the loop
+for now, but blocks the scan-drop work.
+
+### Per-cycle scan and the closure work
+
+`collectYoung` currently runs a per-minor-cycle root walk over
+every mature container's typed internal slots
+(`markObjectInternalSlots`, `markFunctionInternalSlots`,
+`markGeneratorInternalSlots`, plus a slot-by-slot pass over
+declarative environments). This catches any old→young edge that
+bypassed the write barrier — it's the safety net that lets a
+new internal slot ship before its writes are fully routed.
+
+The closure work in progress migrates every raw typed-slot
+write to use the typed setters above (so the barrier always
+fires), with the goal of dropping the corresponding portions
+of the scan. Three buckets remain:
+
+1. **`iter_helper.*` mutable state** (`source`, `next_fn`,
+   `payload`, `active`, `concat_inputs[]`, `zip_inputs[]`) — set
+   at iterator creation and mutated as iteration advances. Needs
+   barrier coverage on the containing JSObject when the
+   `*IteratorHelperState` field is updated.
+2. **Collection mutations** — `map_data.entries`,
+   `set_data.entries`, `promise_reactions[]`,
+   `promise_waiters[]`, `finalization_cells.cells[]`,
+   `key_anchors[]`, `private_properties` / `private_accessors`.
+   Two design choices: per-mutation barriers at each `Map.set` /
+   `.then` / etc., or an "always-remembered subset" list of
+   mature containers carrying collections that the minor cycle
+   re-scans wholesale.
+3. **Generator hot-path mutations** (`gen.registers[]`,
+   `gen.queue[]`) — written on every opcode / async-gen request.
+   The scan stays for these; per-write barriers would dominate
+   interpreter dispatch cost.
+
+Once buckets 1 and 2 close, `collectYoung`'s mature scan can be
+split: drop the `objects_mature` / `functions_mature` /
+`environments_mature` passes entirely, keep a scan over
+`generators_mature` (Tier 3) and any "always-remembered" subset
+(if that design wins). The remembered set then becomes the only
+mature→young root source for the non-generator object world,
+which is what V8's Scavenger / JSC's Eden / SpiderMonkey's
+Nursery converged on independently.
+
 ## What's not yet done
 
 ### Array-spread integer-key gap (resolved)
@@ -349,11 +444,13 @@ vector regardless of how many iterations the source produced.
 
 ### Future work
 
-The README has these as future work and they remain so:
-
-- **Generational GC.** A nursery + tenuring lets the cheap case (most
-  allocations die young) be much cheaper still. V8's Scavenger,
-  SpiderMonkey's Nursery, Hermes's YoungGen all live here.
+- **Write-barrier closure + scan drop.** In progress — see
+  "Typed-setter helpers" above. Once the iter_helper and
+  collection-mutation buckets close, `collectYoung`'s per-cycle
+  walk over `objects_mature` / `functions_mature` /
+  `environments_mature` can be dropped in favour of the
+  remembered set as the sole mature→young root source. The
+  generator-register / async-queue scan stays.
 - **Incremental marking.** Today's mark phase is a single
   uninterruptible walk; long lists or deep object graphs introduce
   GC-pause latency. V8's incremental marker, JSC's Riptide concurrent
@@ -361,11 +458,21 @@ The README has these as future work and they remain so:
 - **Concurrent / parallel sweep.** Useful once the heap is big enough
   that a single-threaded sweep eats real wall-time. Not a current
   bottleneck — test262's typical resident set is well under 50 MB.
+- **Compaction.** Mark-compact would reduce fragmentation in
+  long-running embedder scenarios (Workers, Deno). Not a
+  bottleneck against test262's allocation profile.
 - **A `--top-rss` CLI flag for `cynic run`.** The test262
   harness exposes the per-fixture RSS-delta report; the runtime
   CLI doesn't yet thread it through. (`--gc-threshold=<n>` is
   now wired — `cynic --gc-threshold=1 run foo.js` collects on
   every allocation for stress testing.)
+- **Known latent rooting bugs (gc-stress only).** Two pre-existing
+  failure clusters surface only under `--gc-threshold=1`
+  ReleaseSafe: `built-ins/Array/fromAsync/*` (~67 fixtures —
+  async-pumped driver state isn't rooted across the suspended
+  await), and `language/expressions/generators/dstr/
+  {,dflt-}obj-ptrn-rest-getter.js` (rest-pattern destructure with
+  an accessor side effect). Both pass at the default GC threshold.
 
 ## Prior art
 
