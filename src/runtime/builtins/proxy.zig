@@ -65,9 +65,9 @@ fn proxyConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // either target or handler at creation time; the resulting
     // proxy will eagerly throw on first internal-method dispatch.
     const proxy = realm.heap.allocateObject() catch return error.OutOfMemory;
-    proxy.proxy_handler = handler;
+    realm.heap.setProxyHandler(proxy, handler);
     if (heap_mod.valueAsPlainObject(args[0])) |target| {
-        proxy.proxy_target = target;
+        realm.heap.setProxyTarget(proxy, target);
         realm.heap.setObjectPrototype(proxy, target.prototype);
         // §10.5 ProxyCreate — propagate callability from the
         // wrapped proxy. Wrapping a revoked-but-once-callable
@@ -83,7 +83,7 @@ fn proxyConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
         // function that's `%Function.prototype%` (held in
         // JSFunction.proto), so `proxy.call` / `.apply` /
         // `.bind` resolve.
-        proxy.proxy_target_fn = target_fn;
+        realm.heap.setProxyTargetFn(proxy, target_fn);
         proxy.proxy_callable = true;
         realm.heap.setObjectPrototype(proxy, target_fn.proto orelse realm.intrinsics.function_prototype);
     } else {
