@@ -133,14 +133,20 @@ class Counter {
 const c = new Counter().inc().inc().inc();
 \`value = \${c.value}\`;`,
 
-  'WeakRef — genuinely weak': `// WeakRef holds a target without keeping it alive. After
-// the strong reference goes out of scope and GC runs, the
-// ref dereferences to undefined.
+  'WeakRef — genuinely weak': `// WeakRef holds a target without keeping it alive — once the
+// strong references drop and GC runs, deref() returns undefined.
+// JS GC is non-deterministic, so we nudge it with a 200k-object
+// allocation burst that trips Cynic's byte-pressure trigger.
 let target = { tag: "doomed" };
 const ref = new WeakRef(target);
 console.log("before:", ref.deref()?.tag);
+
 target = null;
-// (in-browser GC is opaque — this is best-effort)
+// Allocate enough garbage to make GC run. Real code wouldn't
+// do this; it's only here to make a non-deterministic API
+// observable on a tiny script.
+for (let i = 0; i < 200000; i++) ({ k: i });
+
 ref.deref()?.tag ?? "collected";`,
 };
 
