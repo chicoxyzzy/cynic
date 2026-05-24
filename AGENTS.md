@@ -147,6 +147,7 @@ These are project rules — they apply to everyone.
 | Add a lexer / parser / runtime feature | [docs/handbook/tdd.md](docs/handbook/tdd.md), then [docs/handbook/compiler-engineering.md](docs/handbook/compiler-engineering.md) |
 | Touch heap-allocating native code | [docs/handbook/gc.md](docs/handbook/gc.md) (`HandleScope` contract for natives that re-enter JS) |
 | Touch binding / scope / top-level resolution | [docs/handbook/environments.md](docs/handbook/environments.md) (GlobalEnvironmentRecord split, named-fn-expr wrapper, module env-record, top-level write opcodes) |
+| Touch the property-storage layout (bag / shape / slots) | [docs/inline-caches.md](docs/inline-caches.md) (shape substrate + read/write IC); [docs/lazy-property-bag.md](docs/lazy-property-bag.md) (plan to drop the bag for shape-mode objects) |
 | Verify a shared-machinery change without missing regressions | [docs/handbook/agent-checks.md](docs/handbook/agent-checks.md) (the `--only-failing` trap, per-touch bucket filters, harness threading invariant) |
 | Look up a Zig idiom Cynic uses | [docs/handbook/zig.md](docs/handbook/zig.md) |
 | Score current conformance | `zig build test262 -- --quiet`; history in [test262-results.md](test262-results.md) |

@@ -775,7 +775,11 @@ matching the JIT engines at full speed is a separate track (see
      (Reflect, JSON, Proxy traps, Object.defineProperty) need
      auditing and either migrating to the shape-first
      `JSObject.get` or accepting the divergence. Real work but
-     well-scoped — one focused session.
+     well-scoped — one focused session. See the design + phase
+     plan in [docs/lazy-property-bag.md](lazy-property-bag.md)
+     (more aggressive variant: drop the bag *allocation* too,
+     not just the write — fixes `object_alloc` as well as
+     `prop_write`).
 
 3. **Packed `JSArray` element-kinds.** V8 / JSC distinguish
    `PackedSmiElements` (i32-flat), `PackedDoubleElements`
