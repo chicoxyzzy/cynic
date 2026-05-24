@@ -827,6 +827,15 @@
 
         <div class="compare-row">
           <div>
+            <div class="feature-name">Proper Tail Calls (PTC)</div>
+            <div class="compare-note">ECMA-262 §15.10; <code>return f(x)</code> reuses the caller's frame instead of pushing a fresh one</div>
+          </div>
+          <div class="check">Works.</div>
+          <div>Second JS engine ever to ship this. JavaScriptCore was first in 2016. V8 tried and walked it back. SpiderMonkey's tracking bug is open since 2015.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
             <div class="feature-name">Inline property caches</div>
             <div class="compare-note">monomorphic shape ICs on <code>lda_property</code> / <code>sta_property</code> / <code>call_method</code> + proto-load; <code>/perf</code> &amp; <code>/profile</code> harness scaffolded</div>
           </div>
