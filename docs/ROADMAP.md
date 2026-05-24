@@ -124,6 +124,21 @@ code construction (aligns with SES).
 
 **In progress / planned.**
 
+- **SES-by-default — frozen primordials + `harden()` + override-
+  mistake fix.** Position commitment: Cynic ships hardened by
+  default, no `lockdown()` step required. Primordials get
+  `[[Extensible]] = false` and non-writable / non-configurable
+  descriptors at realm init; `harden()` is a native global; the
+  override-mistake fix replaces frozen-prototype data slots with
+  accessor pairs that allow instance shadowing. Per-constraint
+  opt-out via `--allow=primordial-mutation` /
+  `--allow=extensible-globalThis` /
+  `--allow=no-override-mistake-fix`; umbrella `--permissive`
+  enables all of them. Compartments deferred (need multi-realm,
+  which Cynic still punts). Full design + phase plan in
+  [docs/ses-alignment.md](ses-alignment.md). Brand bet: the
+  differentiator over "Workers / Deno / Node + @endo/ses" is that
+  Cynic ships the SES baseline natively.
 - **Tail-call optimization (PTC).** See the dedicated section
   below.
 - **Incremental / concurrent GC marking.** The generational

@@ -81,8 +81,8 @@ These are project rules — they apply to everyone.
     adding a Cynic-side pattern pre-validator; we deemed the
     leak narrower than the policy and live with it. See
     [docs/ROADMAP.md](docs/ROADMAP.md) under "Regex".
-  - **`eval` and runtime code construction** — out
-    permanently. `eval()` itself, `new Function(string)` /
+  - **`eval` and runtime code construction** — out by
+    default. `eval()` itself, `new Function(string)` /
     `new GeneratorFunction(string)` / `new AsyncFunction(string)`,
     and dynamic-code-from-string generally aren't shipped.
     Aligns with [SES / Hardened JavaScript](https://github.com/endojs/endo/tree/main/packages/ses)
@@ -90,6 +90,39 @@ These are project rules — they apply to everyone.
     `Realm.evaluateScript` (powering multi-file `cynic run`,
     the test262 harness loader, and a future REPL) is a
     different mechanism — it's not exposed to user JS.
+    Opt back in with `--allow=eval` (the implementation lands
+    in a separate effort — see
+    [docs/ses-alignment.md](docs/ses-alignment.md)).
+- **SES-aligned by default, permissive under flags.** Cynic
+  isn't just "SES-friendly" (every modern edge runtime is that);
+  Cynic ships **hardened by default**:
+  - **Primordials frozen at realm init** — every intrinsic
+    object + prototype + method gets `[[Extensible]] = false`
+    and non-writable / non-configurable descriptors. No
+    `lockdown()` call needed; no `@endo/ses` import. Code
+    that monkey-patches `Array.prototype.X = …` throws on
+    contact with the frozen prototype.
+  - **`harden()` global** — recursive deep freeze, native.
+    Matches `@endo/ses`'s `harden`. Used by hardened-JS code
+    to seal capability-bearing objects.
+  - **Override-mistake fix** — assignment to a frozen
+    prototype's data slot (`obj.x = 2` where `proto.x === 1`
+    is frozen-non-writable) succeeds as instance shadowing
+    instead of throwing TypeError. Spec-conforming via
+    synthetic accessor pairs on each frozen prototype slot.
+  - **Compartments deferred** — the full SES sandboxing API
+    needs multi-realm support, which Cynic still punts.
+  - **Opt-out via `--allow=<name>` flags.** Per-constraint
+    relaxation: `--allow=primordial-mutation`,
+    `--allow=extensible-globalThis`,
+    `--allow=no-override-mistake-fix`, `--allow=eval` (when
+    eval ships). Umbrella: `--permissive` enables all of them.
+  Two distinct CLI verbs to keep separate: **`--enable=<name>`**
+  turns on a not-yet-stable spec feature (`joint-iteration`,
+  `upsert`); **`--allow=<name>`** relaxes a default-on
+  Cynic-imposed hardening restriction. Forward-vs-backward.
+  See [docs/ses-alignment.md](docs/ses-alignment.md) for the
+  design + phase plan.
 - **Unicode tracks `latest`.** §3 normatively references
   [`unicode.org/versions/latest`](https://unicode.org/versions/latest)
   (undated) and §12.7 says identifier-category code points "in
@@ -148,6 +181,7 @@ These are project rules — they apply to everyone.
 | Touch heap-allocating native code | [docs/handbook/gc.md](docs/handbook/gc.md) (`HandleScope` contract for natives that re-enter JS) |
 | Touch binding / scope / top-level resolution | [docs/handbook/environments.md](docs/handbook/environments.md) (GlobalEnvironmentRecord split, named-fn-expr wrapper, module env-record, top-level write opcodes) |
 | Touch the property-storage layout (bag / shape / slots) | [docs/inline-caches.md](docs/inline-caches.md) (shape substrate + read/write IC); [docs/lazy-property-bag.md](docs/lazy-property-bag.md) (plan to drop the bag for shape-mode objects) |
+| Touch realm setup / intrinsic install / hardening | [docs/ses-alignment.md](docs/ses-alignment.md) (SES-by-default position, frozen primordials, `harden()`, override-mistake fix, the `--allow=<name>` opt-out system) |
 | Verify a shared-machinery change without missing regressions | [docs/handbook/agent-checks.md](docs/handbook/agent-checks.md) (the `--only-failing` trap, per-touch bucket filters, harness threading invariant) |
 | Look up a Zig idiom Cynic uses | [docs/handbook/zig.md](docs/handbook/zig.md) |
 | Score current conformance | `zig build test262 -- --quiet`; history in [test262-results.md](test262-results.md) |
