@@ -35,7 +35,7 @@ const proxy_mod = @import("proxy.zig");
 
 pub fn install(realm: *Realm) !void {
     const obj = try realm.heap.allocateObject();
-    obj.prototype = realm.intrinsics.object_prototype;
+    realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
     try installToStringTag(realm, obj, "Reflect");
     // §28.1.* — spec `.length` values reflect REQUIRED args,
     // not declared. Reflect.get(target, key, receiver?) is
@@ -902,7 +902,7 @@ fn reflectOwnKeys(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const arg = argOr(args, 0, Value.undefined_);
 
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    out.prototype = realm.intrinsics.array_prototype;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
 
     // §17 — built-in function objects are ordinary objects too, so
@@ -1030,7 +1030,7 @@ fn reflectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) 
         if (node == target) return Value.false_;
         cursor = node.prototype;
     }
-    target.prototype = new_proto;
+    realm.heap.setObjectPrototype(target, new_proto);
     // Proto-link swap — bump the proto IC revision so dependent
     // caches miss + refill.
     realm.proto_revision_counter +%= 1;
@@ -1249,7 +1249,7 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
         },
     };
     const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
-    instance.prototype = resolved_proto;
+    realm.heap.setObjectPrototype(instance, resolved_proto);
     const this_arg = heap_mod.taggedObject(instance);
 
     // §10.5.14 [[Construct]] — invoke the target with the supplied
