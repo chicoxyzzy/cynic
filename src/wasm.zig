@@ -406,44 +406,12 @@ export fn cynic_version_len() u32 {
 // Value formatting
 // ---------------------------------------------------------------------------
 
-/// Render `v` as the playground's display string. Primitives get
-/// their natural form; objects / functions get a coarse tag — the
-/// playground shows the completion value as a hint, not a full
-/// inspector (that is what `console.log` inside the script is for).
+/// Render `v` as the playground's display string. Delegates to the
+/// host-portable formatter in `src/wasm_format.zig` (extracted so
+/// `zig build test` can exercise it — the wasm32-freestanding target
+/// here can't host unit tests).
 fn appendValueText(buf: *std.ArrayListUnmanaged(u8), v: Value) !void {
-    var scratch: [64]u8 = undefined;
-    if (v.isInt32()) {
-        try buf.appendSlice(gpa, try std.fmt.bufPrint(&scratch, "{d}", .{v.asInt32()}));
-    } else if (v.isDouble()) {
-        const d = v.asDouble();
-        if (std.math.isNan(d)) {
-            try buf.appendSlice(gpa, "NaN");
-        } else if (std.math.isInf(d)) {
-            try buf.appendSlice(gpa, if (d > 0) "Infinity" else "-Infinity");
-        } else {
-            try buf.appendSlice(gpa, try std.fmt.bufPrint(&scratch, "{d}", .{d}));
-        }
-    } else if (v.isBool()) {
-        try buf.appendSlice(gpa, if (v.asBool()) "true" else "false");
-    } else if (v.isNull()) {
-        try buf.appendSlice(gpa, "null");
-    } else if (v.isUndefined()) {
-        try buf.appendSlice(gpa, "undefined");
-    } else if (v.isString()) {
-        const s: *JSString = @ptrCast(@alignCast(v.asString()));
-        try buf.appendSlice(gpa, s.flatBytes());
-    } else if (cynic.runtime.heap.valueAsBigInt(v)) |bi| {
-        const digits = try cynic.runtime.bigint.toStringAlloc(gpa, bi, 10);
-        defer gpa.free(digits);
-        try buf.appendSlice(gpa, digits);
-        try buf.append(gpa, 'n');
-    } else if (cynic.runtime.heap.isFunction(v)) {
-        try buf.appendSlice(gpa, "[Function]");
-    } else if (cynic.runtime.heap.isPlainObject(v)) {
-        try buf.appendSlice(gpa, "[object Object]");
-    } else {
-        try buf.appendSlice(gpa, "[unknown]");
-    }
+    return cynic.wasm_format.appendValue(gpa, buf, v);
 }
 
 /// Render an uncaught exception value. Error objects get the

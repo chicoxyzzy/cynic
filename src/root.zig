@@ -30,6 +30,13 @@ pub const parser = struct {
 pub const runtime = @import("runtime.zig");
 pub const bytecode = @import("bytecode.zig");
 
+/// Value → display-string formatter used by the playground panel.
+/// Lives at the library boundary (not under `runtime/`) because it
+/// is a display concern — the engine itself does not need it, but
+/// surfacing it here lets both `src/wasm.zig` and host unit tests
+/// reach the same code.
+pub const wasm_format = @import("wasm_format.zig");
+
 test {
     // Force the compiler to walk every reachable module so that every file's
     // `test` blocks are picked up by `zig build test`.
@@ -87,4 +94,5 @@ test {
     _ = @import("bytecode/compiler.zig");
     _ = @import("bytecode/literals.zig");
     _ = @import("bytecode/arguments_scan.zig");
+    _ = @import("wasm_format.zig");
 }
