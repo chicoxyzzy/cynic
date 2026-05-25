@@ -53,6 +53,8 @@ pub fn main(init: std.process.Init) !void {
     const sub = args[0];
     args = args[1..];
 
+    const unhardened = parsed.unhardened;
+
     if (std.mem.eql(u8, sub, "lex")) {
         if (args.len != 1) {
             try printUsage(io);
@@ -96,7 +98,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.MissingArgument;
         }
-        try eval_cmd.run(allocator, io, args[0], feature_flags, gc_threshold);
+        try eval_cmd.run(allocator, io, args[0], feature_flags, gc_threshold, unhardened);
     } else if (std.mem.eql(u8, sub, "run")) {
         // `cynic run a.js b.js c.js` evaluates each file in order
         // against one realm — the same shape every other engine's
@@ -123,11 +125,13 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.MissingArgument;
         }
-        try run_cmd.run(allocator, io, run_args, feature_flags, gc_threshold, dump_bytecode, debug_globals);
+        try run_cmd.run(allocator, io, run_args, feature_flags, gc_threshold, dump_bytecode, debug_globals, unhardened);
     } else if (std.mem.eql(u8, sub, "repl")) {
         // `cynic repl [--debug-globals]` — interactive read-eval-print
         // loop with a persistent realm. Same `--debug-globals` opt-in
-        // as `cynic run`; default realm stays production-shaped.
+        // as `cynic run`; SES posture inherited from the top-level
+        // `--unhardened` (default hardened — primordials frozen,
+        // override-mistake fix active).
         var repl_debug_globals = false;
         var repl_args = args;
         while (repl_args.len > 0 and std.mem.startsWith(u8, repl_args[0], "--")) {
@@ -143,7 +147,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.UnexpectedArgument;
         }
-        try repl_cmd.run(allocator, io, feature_flags, gc_threshold, repl_debug_globals);
+        try repl_cmd.run(allocator, io, feature_flags, gc_threshold, repl_debug_globals, unhardened);
     } else if (std.mem.eql(u8, sub, "help") or std.mem.eql(u8, sub, "--help") or std.mem.eql(u8, sub, "-h")) {
         try printUsage(io);
     } else {
@@ -198,6 +202,12 @@ fn printUsage(io: std.Io) !void {
         \\  --gc-threshold=<n>               Allocation-pressure GC threshold.
         \\                                   Default 16384; `=1` collects on every
         \\                                   allocation (stress mode).
+        \\  --unhardened                     Disable the SES posture (frozen
+        \\                                   primordials, frozen globalThis).
+        \\                                   Default is hardened — `Array.prototype.X = …`
+        \\                                   and direct globalThis assignment throw.
+        \\                                   Use this for code that monkey-patches
+        \\                                   intrinsics or polyfills primordials.
         \\
     );
 }
@@ -330,6 +340,13 @@ pub const ParsedFlags = struct {
     /// here lets the runtime CLI run a `--gc-threshold=1` stress
     /// pass without going through the harness binary.
     gc_threshold: ?u32,
+    /// `--unhardened` — drop the SES posture atomically. When set,
+    /// `realm.hardened` is flipped to `false` before
+    /// `installBuiltins`, so the Phase 1 freeze pass at the tail
+    /// of intrinsic install is skipped and primordials stay
+    /// mutable (legacy ECMAScript behaviour). See
+    /// [docs/ses-alignment.md](../docs/ses-alignment.md).
+    unhardened: bool = false,
     /// The unconsumed tail of the argv slice (subcommand + its
     /// arguments). Empty when no subcommand was supplied — the
     /// caller prints usage in that case.
@@ -384,6 +401,9 @@ pub fn parseTopLevelFlags(args: []const []const u8) ParsedFlags {
                 return out;
             };
             out.feature_flags.remove(flag);
+            rest = rest[1..];
+        } else if (std.mem.eql(u8, a, "--unhardened")) {
+            out.unhardened = true;
             rest = rest[1..];
         } else if (std.mem.startsWith(u8, a, "--gc-threshold=")) {
             const raw = a["--gc-threshold=".len..];
@@ -488,4 +508,18 @@ test "parseTopLevelFlags: --list-features short-circuits and signals via list_fe
     const args = [_][]const u8{ "--list-features", "run", "foo.js" };
     const parsed = parseTopLevelFlags(&args);
     try testing.expect(parsed.list_features);
+}
+
+test "parseTopLevelFlags: --unhardened flips the SES posture flag" {
+    const args = [_][]const u8{ "--unhardened", "run", "foo.js" };
+    const parsed = parseTopLevelFlags(&args);
+    try testing.expectEqual(@as(?FlagError, null), parsed.err);
+    try testing.expect(parsed.unhardened);
+    try testing.expectEqualStrings("run", parsed.remaining[0]);
+}
+
+test "parseTopLevelFlags: --unhardened defaults to false when absent" {
+    const args = [_][]const u8{ "run", "foo.js" };
+    const parsed = parseTopLevelFlags(&args);
+    try testing.expect(!parsed.unhardened);
 }

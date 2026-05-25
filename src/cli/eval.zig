@@ -16,6 +16,7 @@ pub fn run(
     source: []const u8,
     feature_flags: FeatureSet,
     gc_threshold: ?u32,
+    unhardened: bool,
 ) !void {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
@@ -40,6 +41,9 @@ pub fn run(
     var realm = Realm.init(allocator);
     defer realm.deinit();
     realm.feature_flags = feature_flags;
+    // `--unhardened` — drop the SES posture before
+    // `installBuiltins` so the Phase 1 freeze pass is skipped.
+    if (unhardened) realm.hardened = false;
     if (gc_threshold) |n| realm.heap.setGcThreshold(n);
     try realm.installBuiltins();
 

@@ -31,10 +31,17 @@ pub fn run(
     feature_flags: FeatureSet,
     gc_threshold: ?u32,
     debug_globals: bool,
+    unhardened: bool,
 ) !void {
     var realm = Realm.init(allocator);
     defer realm.deinit();
     realm.feature_flags = feature_flags;
+    // `--unhardened` — drop the SES posture (frozen primordials,
+    // override-mistake fix) atomically. Must be set BEFORE
+    // `installBuiltins` so the Phase 1 freeze pass at the tail
+    // of intrinsic install sees the relaxed flag. Mirrors
+    // `cli/run.zig` and `cli/eval.zig`.
+    if (unhardened) realm.hardened = false;
     if (gc_threshold) |n| realm.heap.setGcThreshold(n);
     try realm.installBuiltins();
     // REPL is a debug / exploration context — install the debug

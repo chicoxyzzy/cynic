@@ -28,6 +28,7 @@ pub fn run(
     gc_threshold: ?u32,
     dump_bytecode: bool,
     debug_globals: bool,
+    unhardened: bool,
 ) !void {
     std.debug.assert(paths.len > 0);
 
@@ -44,6 +45,11 @@ pub fn run(
     var realm = Realm.init(allocator);
     defer realm.deinit();
     realm.feature_flags = feature_flags;
+    // `--unhardened` — drop the SES posture (frozen primordials,
+    // frozen globalThis) atomically. Must be set BEFORE
+    // `installBuiltins` so the Phase 1 freeze pass at the tail
+    // of intrinsic install sees the relaxed flag.
+    if (unhardened) realm.hardened = false;
     // Apply the `--gc-threshold` knob before `installBuiltins`
     // so the builtin-install allocations themselves run at the
     // requested cadence (matters at `--gc-threshold=1` where every
