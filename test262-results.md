@@ -5,8 +5,8 @@
 |         | spec% | attempted% | pass / total | pass / attempted |
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
-| **runtime** | 92.90 % | 99.98 % | 37241 / 40089 | 37241 / 37250 |
-| **runtime_hardened** | 84.77 % | 91.23 % | 33983 / 40089 | 33983 / 37250 |
+| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 |
+| **runtime_hardened** | 84.77 % | 91.22 % | 34044 / 40161 | 34044 / 37321 |
 
 
 ## Where the runtime stands, by area
@@ -51,7 +51,7 @@ browser-era built-ins …).
 | `built-ins/Infinity` | 4 | 0 | 2 | 67 % | 100 % |
 | `built-ins/Iterator` | 425 | 0 | 6 | 99 % | 100 % |
 | `built-ins/JSON` | 143 | 0 | 21 | 87 % | 100 % |
-| `built-ins/Map` | 169 | 0 | 1 | 99 % | 100 % |
+| `built-ins/Map` | 202 | 0 | 1 | 100 % | 100 % |
 | `built-ins/MapIteratorPrototype` | 11 | 0 | 0 | 100 % | 100 % |
 | `built-ins/Math` | 322 | 0 | 5 | 98 % | 100 % |
 | `built-ins/NaN` | 4 | 0 | 2 | 67 % | 100 % |
@@ -71,7 +71,7 @@ browser-era built-ins …).
 | `built-ins/ThrowTypeError` | 13 | 0 | 0 | 100 % | 100 % |
 | `built-ins/TypedArray` | 1423 | 0 | 8 | 99 % | 100 % |
 | `built-ins/TypedArrayConstructors` | 655 | 0 | 16 | 98 % | 100 % |
-| `built-ins/WeakMap` | 101 | 0 | 0 | 100 % | 100 % |
+| `built-ins/WeakMap` | 140 | 0 | 0 | 100 % | 100 % |
 | `built-ins/WeakRef` | 28 | 0 | 0 | 100 % | 100 % |
 | `built-ins/WeakSet` | 84 | 0 | 0 | 100 % | 100 % |
 | `built-ins/decodeURI` | 55 | 0 | 0 | 100 % | 100 % |
@@ -157,12 +157,17 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-25 — cynic `d4d7c94`, test262 `d0c1b4555b`
+### 2026-05-25 — cynic `f48b7b0`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 92.90 % | 99.98 % | 37241 / 40089 | 37241 / 37250 | ±0 | 35.6 s |
-| **runtime_hardened** | 84.77 % | 91.23 % | 33983 / 40089 | 33983 / 37250 | n/a |  |
+| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | +72 | 55.8 s |
+| **runtime_hardened** | 84.77 % | 91.22 % | 34044 / 40161 | 34044 / 37321 | n/a |  |
+
+Biggest movers (runtime):
+
+- `built-ins/WeakMap` +39
+- `built-ins/Map` +33
 
 ### 2026-05-24 — cynic `b49572e`, test262 `d0c1b455`
 
