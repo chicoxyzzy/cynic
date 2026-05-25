@@ -1394,6 +1394,79 @@ pub fn runFrames(
                 }
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
+            .loop_inc_lt => {
+                const r_counter = code[ip];
+                const r_bound = code[ip + 1];
+                const off = readI16(code, ip + 2);
+                ip += 4;
+                // Hot path: both operands int32, counter+1 doesn't
+                // overflow. The branch back to the body is the
+                // overwhelmingly common case (5M iterations of an
+                // arith loop hit this every step), so it stays
+                // straight-line.
+                const c = registers[r_counter];
+                const b = registers[r_bound];
+                if (c.isInt32() and b.isInt32()) {
+                    const ov = @addWithOverflow(c.asInt32(), @as(i32, 1));
+                    if (ov[1] == 0) {
+                        registers[r_counter] = Value.fromInt32(ov[0]);
+                        if (ov[0] < b.asInt32()) {
+                            ip = applyOffset(ip, off);
+                            if (off < 0) {
+                                if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
+                            }
+                        }
+                        continue :dispatch try decodeNext(code, &ip, &committed);
+                    }
+                }
+                // Slow path — replicate the unfused `inc` + `lt` +
+                // `jmp_if_true` semantics so a non-int32 counter
+                // (e.g. crossed into double via overflow) or a
+                // non-int32 bound (string, BigInt, …) stays
+                // observably identical to the unfused sequence the
+                // compiler would have emitted otherwise.
+                const bumped = (try arith.incOrDec(realm, c, 1)) orelse {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "Update failed");
+                    realm.pending_exception = null;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                };
+                registers[r_counter] = bumped;
+                const lhs = try coerceForCompare(allocator, realm, frames, f, ip, bumped, .number);
+                if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
+                if (lhs == .handled) {
+                    committed = true;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                }
+                const rhs = try coerceForCompare(allocator, realm, frames, f, ip, b, .number);
+                if (rhs == .uncaught) return .{ .thrown = rhs.uncaught };
+                if (rhs == .handled) {
+                    committed = true;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                }
+                const cmp = relational(.lt, realm, lhs.ok, rhs.ok) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NativeThrew => {
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "comparison threw");
+                        realm.pending_exception = null;
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                        committed = true;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                };
+                if (toBoolean(cmp)) {
+                    ip = applyOffset(ip, off);
+                    if (off < 0) {
+                        if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
+                    }
+                }
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            },
 
             // ── Functions / calls ───────────────────────────────────────
             .make_function, .make_named_function_expr => |op_tag| {

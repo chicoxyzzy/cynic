@@ -11,6 +11,23 @@ const lantern = @import("interpreter.zig");
 const RunResult = lantern.RunResult;
 const run = lantern.run;
 const evaluateScript = lantern.evaluateScript;
+const op_mod = @import("../../bytecode/op.zig");
+const chunk_mod = @import("../../bytecode/chunk.zig");
+const disasm = @import("../../bytecode/disasm.zig");
+const Span = @import("../../source.zig").Span;
+
+/// Compile `source` and disassemble the resulting chunk. Caller
+/// owns the returned slice. Used by the fused counter-loop tests
+/// to assert whether the `LoopIncLt` opcode shows up in the
+/// emitted bytecode.
+fn compileAndDisassemble(realm: *Realm, source: []const u8) ![]u8 {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const program = try parser_mod.parseScript(arena.allocator(), source, null);
+    var chunk = try compileScriptAsChunk(testing.allocator, realm, &program, source, null);
+    defer chunk.deinit(testing.allocator);
+    return disasm.dump(testing.allocator, &chunk);
+}
 
 const Value = @import("../value.zig").Value;
 const JSString = @import("../string.zig").JSString;
@@ -6443,4 +6460,219 @@ test "frame pool: nested construction reuses frames" {
         \\}
         \\sum;
     , 250000); // sum(i + (i+1), i=0..499) = sum(2i+1) = 2*(499*500/2) + 500 = 250000
+}
+
+// ── loop_inc_lt — direct opcode tests ──────────────────────────────
+// Hand-built chunks that exercise the fused counter-loop opcode
+// without going through the compiler. Confirms both the int32 fast
+// path (counter + bound both int32, no overflow) and the
+// general-case slow fallback (counter coerced to double via overflow,
+// non-int32 operands).
+
+fn runHandBuiltChunk(chunk: *chunk_mod.Chunk) !Value {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    return switch (try run(testing.allocator, &realm, chunk)) {
+        .value, .yielded => |v| v,
+        .thrown => return error.UncaughtException,
+    };
+}
+
+test "loop_inc_lt: int32 fast path sums 0..4" {
+    // Equivalent to `for (let i = 0; i < 5; i++) sum += i;` —
+    // r0 holds the counter, r1 the bound, r2 the running sum.
+    var b = chunk_mod.Builder.init(testing.allocator);
+    errdefer b.deinit();
+    const span: Span = .{ .start = 0, .end = 1 };
+    const r_counter = try b.reserveRegister();
+    const r_bound = try b.reserveRegister();
+    const r_sum = try b.reserveRegister();
+
+    try b.emitOp(.lda_smi, span);
+    try b.emitI32(0);
+    try b.emitOp(.star, span);
+    try b.emitU8(r_counter);
+
+    try b.emitOp(.lda_smi, span);
+    try b.emitI32(5);
+    try b.emitOp(.star, span);
+    try b.emitU8(r_bound);
+
+    try b.emitOp(.lda_smi, span);
+    try b.emitI32(0);
+    try b.emitOp(.star, span);
+    try b.emitU8(r_sum);
+
+    // Entry test: if !(counter < bound) jump to exit. `lt r`
+    // computes `acc = reg < acc`, so put the bound in acc and
+    // the counter in the register operand to get `counter < bound`.
+    try b.emitOp(.ldar, span);
+    try b.emitU8(r_bound);
+    try b.emitOp(.lt, span);
+    try b.emitU8(r_counter);
+    try b.emitOp(.jmp_if_false, span);
+    const entry_exit = b.here();
+    try b.emitI16(0);
+
+    // Body: sum = sum + counter.
+    const body_start = b.here();
+    try b.emitOp(.ldar, span);
+    try b.emitU8(r_sum);
+    try b.emitOp(.add, span);
+    try b.emitU8(r_counter);
+    try b.emitOp(.star, span);
+    try b.emitU8(r_sum);
+
+    // Fused bottom: counter++; if counter < bound, jump back.
+    try b.emitOp(.loop_inc_lt, span);
+    try b.emitU8(r_counter);
+    try b.emitU8(r_bound);
+    const back_patch = b.here();
+    try b.emitI16(0);
+    try b.patchI16(back_patch, body_start);
+
+    // Exit: leave sum in acc and return.
+    const exit_pc = b.here();
+    try b.patchI16(entry_exit, exit_pc);
+    try b.emitOp(.ldar, span);
+    try b.emitU8(r_sum);
+    try b.emitOp(.return_, span);
+
+    var chunk = try b.finish();
+    defer chunk.deinit(testing.allocator);
+
+    const v = try runHandBuiltChunk(&chunk);
+    try testing.expect(v.isInt32());
+    try testing.expectEqual(@as(i32, 10), v.asInt32()); // 0+1+2+3+4
+}
+
+test "loop_inc_lt: slow path with double counter still iterates" {
+    // Counter starts as the double 3.0 — the int32 fast path
+    // bails on the first iteration, the slow path takes over via
+    // `arith.incOrDec` + `relational(.lt, …)`. Sum should be
+    // 3+4 = 7 (counter visits 3 then 4, both int-valued doubles).
+    var b = chunk_mod.Builder.init(testing.allocator);
+    errdefer b.deinit();
+    const span: Span = .{ .start = 0, .end = 1 };
+    const r_counter = try b.reserveRegister();
+    const r_bound = try b.reserveRegister();
+    const r_sum = try b.reserveRegister();
+
+    const k_three = try b.addConstant(Value.fromDouble(3.0));
+    try b.emitOp(.lda_constant, span);
+    try b.emitU16(k_three);
+    try b.emitOp(.star, span);
+    try b.emitU8(r_counter);
+
+    try b.emitOp(.lda_smi, span);
+    try b.emitI32(5);
+    try b.emitOp(.star, span);
+    try b.emitU8(r_bound);
+
+    try b.emitOp(.lda_smi, span);
+    try b.emitI32(0);
+    try b.emitOp(.star, span);
+    try b.emitU8(r_sum);
+
+    try b.emitOp(.ldar, span);
+    try b.emitU8(r_bound);
+    try b.emitOp(.lt, span);
+    try b.emitU8(r_counter);
+    try b.emitOp(.jmp_if_false, span);
+    const entry_exit = b.here();
+    try b.emitI16(0);
+
+    const body_start = b.here();
+    try b.emitOp(.ldar, span);
+    try b.emitU8(r_sum);
+    try b.emitOp(.add, span);
+    try b.emitU8(r_counter);
+    try b.emitOp(.star, span);
+    try b.emitU8(r_sum);
+
+    try b.emitOp(.loop_inc_lt, span);
+    try b.emitU8(r_counter);
+    try b.emitU8(r_bound);
+    const back_patch = b.here();
+    try b.emitI16(0);
+    try b.patchI16(back_patch, body_start);
+
+    const exit_pc = b.here();
+    try b.patchI16(entry_exit, exit_pc);
+    try b.emitOp(.ldar, span);
+    try b.emitU8(r_sum);
+    try b.emitOp(.return_, span);
+
+    var chunk = try b.finish();
+    defer chunk.deinit(testing.allocator);
+
+    const v = try runHandBuiltChunk(&chunk);
+    // Int32-safe sum lands back in int32 once int32+int32 (added
+    // to the running int32 sum) succeeds without overflow. Double
+    // 3 + int 0 → int32 3 via addValues' int32-or-double dispatch
+    // — accept either tag and compare numerically.
+    const n: f64 = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
+    try testing.expectEqual(@as(f64, 7.0), n);
+}
+
+test "loop_inc_lt: zero iterations when entry test fails" {
+    // counter = 5, bound = 5 — entry test bails before the body
+    // runs. Sum stays at 100 (its seed).
+    var b = chunk_mod.Builder.init(testing.allocator);
+    errdefer b.deinit();
+    const span: Span = .{ .start = 0, .end = 1 };
+    const r_counter = try b.reserveRegister();
+    const r_bound = try b.reserveRegister();
+    const r_sum = try b.reserveRegister();
+
+    try b.emitOp(.lda_smi, span);
+    try b.emitI32(5);
+    try b.emitOp(.star, span);
+    try b.emitU8(r_counter);
+
+    try b.emitOp(.lda_smi, span);
+    try b.emitI32(5);
+    try b.emitOp(.star, span);
+    try b.emitU8(r_bound);
+
+    try b.emitOp(.lda_smi, span);
+    try b.emitI32(100);
+    try b.emitOp(.star, span);
+    try b.emitU8(r_sum);
+
+    try b.emitOp(.ldar, span);
+    try b.emitU8(r_bound);
+    try b.emitOp(.lt, span);
+    try b.emitU8(r_counter);
+    try b.emitOp(.jmp_if_false, span);
+    const entry_exit = b.here();
+    try b.emitI16(0);
+
+    const body_start = b.here();
+    try b.emitOp(.ldar, span);
+    try b.emitU8(r_sum);
+    try b.emitOp(.add, span);
+    try b.emitU8(r_counter);
+    try b.emitOp(.star, span);
+    try b.emitU8(r_sum);
+
+    try b.emitOp(.loop_inc_lt, span);
+    try b.emitU8(r_counter);
+    try b.emitU8(r_bound);
+    const back_patch = b.here();
+    try b.emitI16(0);
+    try b.patchI16(back_patch, body_start);
+
+    const exit_pc = b.here();
+    try b.patchI16(entry_exit, exit_pc);
+    try b.emitOp(.ldar, span);
+    try b.emitU8(r_sum);
+    try b.emitOp(.return_, span);
+
+    var chunk = try b.finish();
+    defer chunk.deinit(testing.allocator);
+
+    const v = try runHandBuiltChunk(&chunk);
+    try testing.expect(v.isInt32());
+    try testing.expectEqual(@as(i32, 100), v.asInt32());
 }

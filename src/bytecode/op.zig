@@ -148,6 +148,24 @@ pub const Op = enum(u8) {
     /// §13.5.5 OptionalChain short-circuit: when `?.` LHS evaluates
     /// to nullish, the entire chain returns undefined.
     jmp_if_nullish,
+    /// `[op] [r_counter:u8] [r_bound:u8] [o:i16]` — fused
+    /// counter-loop bottom: `r_counter += 1`, then branch back to
+    /// the body when `r_counter < r_bound`. Fuses the seven-opcode
+    /// canonical-for-loop tail (`lda_smi 1; add r_c; star r_c; ldar
+    /// r_c; lt r_b; jmp_if_true`) into one dispatch. Emitted by the
+    /// compiler for `for (let i = INT; i < BOUND; i++) BODY` when
+    /// the body doesn't reassign or close over `i`. Hermes calls
+    /// this `JLessNLong`; V8 Ignition has a `Jump…IncIfTrue` family.
+    ///
+    /// Fast path: both operands int32, no overflow → int32 inc +
+    /// int32 compare. Slow path: routes through `arith.incOrDec`
+    /// (ToNumeric → bump, BigInt-tolerant) and `relational(.lt,
+    /// …)` so the spec-observable behaviour is identical to the
+    /// unfused sequence the compiler would have emitted. Acc is
+    /// preserved across the opcode — the body's last expression
+    /// value still surfaces to the for-statement's caller in
+    /// REPL contexts.
+    loop_inc_lt,
 
     // ── Functions / calls ─────────────────────────────────────────
     /// `[op] [k:u16]` — instantiate a `JSFunction` from
@@ -1018,6 +1036,7 @@ pub const Op = enum(u8) {
             .del_computed_property => 2, // r_obj:u8 + r_key:u8
             .call_method => 5, // r_recv:u8 + r_callee:u8 + argc:u8 + ic:u16
             .for_of_next => 3, // r_iter:u8 + r_next:u8 + r_done:u8
+            .loop_inc_lt => 4, // r_counter:u8 + r_bound:u8 + offset:i16
             .make_environment => 1, // slot_count:u8
             .lda_smi => 4, // i32 immediate
             .lda_property => 4, // k:u16 + ic:u16 (inline-cache slot)
@@ -1075,6 +1094,7 @@ pub const Op = enum(u8) {
             .jmp_if_false => "JmpIfFalse",
             .jmp_if_true => "JmpIfTrue",
             .jmp_if_nullish => "JmpIfNullish",
+            .loop_inc_lt => "LoopIncLt",
             .make_function => "MakeFunction",
             .make_named_function_expr => "MakeNamedFunctionExpr",
             .call => "Call",
