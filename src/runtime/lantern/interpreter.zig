@@ -9101,7 +9101,7 @@ fn strictSetPropertyAnchored(
                 if (idx <= 0xFFFFFFFE and !obj.properties.contains(key)) {
                     if (obj.property_flags.get("length")) |flags| {
                         if (!flags.writable) {
-                            const cur_len_v = obj.properties.get("length") orelse Value.fromInt32(0);
+                            const cur_len_v = obj.lookupOwn("length") orelse Value.fromInt32(0);
                             const cur_len: u32 = if (cur_len_v.isInt32()) @intCast(@max(0, cur_len_v.asInt32())) else 0;
                             if (idx >= cur_len) {
                                 const ex = try makeTypeError(realm, "Cannot extend non-writable array length");
@@ -9473,7 +9473,7 @@ fn getThroughChain(
                 if (c.tryGetIndexedOwn(idx)) |v| return .{ .value = v };
             }
         }
-        if (c.properties.get(key)) |v| return .{ .value = v };
+        if (c.lookupOwn(key)) |v| return .{ .value = v };
         cursor = c.prototype;
     }
     return .{ .value = Value.undefined_ };
@@ -9691,7 +9691,7 @@ fn proxyGetTrap(
         // §10.5.5 step 10 — non-configurable non-writable data
         // property must match.
         if (target.property_flags.get(key)) |flags| {
-            if (target.properties.get(key)) |target_v| {
+            if (target.lookupOwn(key)) |target_v| {
                 if (!flags.configurable and !flags.writable) {
                     if (!intrinsics_mod.sameValue(target_v, v)) {
                         const ex = try makeTypeError(realm, "proxy 'get' trap returned mismatched value for non-writable non-configurable data property");
@@ -9994,7 +9994,7 @@ fn proxySetTrap(
                 // unless the new value matches, nor on a non-configurable
                 // accessor whose [[Set]] is undefined.
                 if (target.property_flags.get(key)) |flags| {
-                    if (target.properties.get(key)) |target_v| {
+                    if (target.lookupOwn(key)) |target_v| {
                         if (!flags.configurable and !flags.writable) {
                             if (!intrinsics_mod.sameValue(target_v, value)) {
                                 const ex = try makeTypeError(realm, "proxy 'set' trap reported success for non-writable non-configurable data property");

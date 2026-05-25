@@ -599,7 +599,7 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
             if (!o.properties.contains(key)) {
                 if (o.property_flags.get("length")) |flags| {
                     if (!flags.writable) {
-                        const cur_len_v = o.properties.get("length") orelse Value.fromInt32(0);
+                        const cur_len_v = o.lookupOwn("length") orelse Value.fromInt32(0);
                         const cur_len: u32 = if (cur_len_v.isInt32()) @intCast(@max(0, cur_len_v.asInt32())) else 0;
                         if (idx >= cur_len) {
                             return throwTypeError(realm, "Cannot extend non-writable array length");

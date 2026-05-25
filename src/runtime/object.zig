@@ -908,6 +908,26 @@ pub const JSObject = struct {
         return self.properties.iterator();
     }
 
+    /// §10.1.1 OrdinaryGetOwnProperty (data half) — return the
+    /// own data property's value, or `null` if absent. Phase 2
+    /// of [docs/lazy-property-bag.md] — the single chokepoint
+    /// for own-data reads, so Phase 3 can route shape-mode
+    /// objects through `slots[shape.lookup(key).slot]` here in
+    /// one place. Accessors / proxy traps / proto chain are
+    /// NOT consulted — callers that need the full §10.1.7
+    /// [[Get]] semantics route through `lda_property`'s helper
+    /// stack (or `lookupAccessor` for the accessor half).
+    ///
+    /// Phase 3 will widen the return to a `LookupResult`
+    /// (`{ value, flags }`) so callers that also want
+    /// `flagsFor(key)` can pick up the slot lookup once
+    /// instead of paying for two hashmap hits. Today every
+    /// caller takes just the value; widening is a backward-
+    /// compatible expansion when needed.
+    pub fn lookupOwn(self: *const JSObject, key: []const u8) ?Value {
+        return self.properties.get(key);
+    }
+
     /// Return the extension if already allocated, otherwise allocate
     /// a zero-init extension and stash it on this object. The
     /// caller mutates the returned pointer in place; subsequent

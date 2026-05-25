@@ -70,7 +70,7 @@ pub fn createAsyncFromSyncIterator(realm: *Realm, sync_iter: Value) !Value {
 /// (per the brand check in §27.6.1.{2,3,4} step 1).
 fn syncIterOf(this_value: Value) ?Value {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    const v = obj.properties.get(SYNC_ITER_SLOT) orelse return null;
+    const v = obj.lookupOwn(SYNC_ITER_SLOT) orelse return null;
     return v;
 }
 

@@ -285,7 +285,7 @@ fn reflectGet(realm: *Realm, this_value: Value, args: []const Value) NativeError
                 }
                 return Value.undefined_;
             }
-            if (o.properties.get(key_slice)) |v| return v;
+            if (o.lookupOwn(key_slice)) |v| return v;
         }
         return Value.undefined_;
     }
@@ -329,7 +329,7 @@ fn reflectGet(realm: *Realm, this_value: Value, args: []const Value) NativeError
                 if (o.tryGetIndexedOwn(idx)) |v| return v;
             }
         }
-        if (o.properties.get(key_slice)) |v| return v;
+        if (o.lookupOwn(key_slice)) |v| return v;
     }
     return Value.undefined_;
 }

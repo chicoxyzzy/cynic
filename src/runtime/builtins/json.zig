@@ -99,7 +99,7 @@ fn getPropertyWithReceiver(realm: *Realm, obj: *JSObject, key: []const u8, recei
             }
             return Value.undefined_;
         }
-        if (o.properties.get(key)) |v| return v;
+        if (o.lookupOwn(key)) |v| return v;
         cur = o.prototype;
     }
     return Value.undefined_;

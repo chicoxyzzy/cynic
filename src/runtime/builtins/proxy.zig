@@ -217,7 +217,7 @@ pub fn nativeProxyGet(realm: *Realm, proxy: *JSObject, key: []const u8, receiver
     // must match; non-configurable accessor with undefined get
     // requires trap to return undefined.
     if (target.property_flags.get(key)) |flags| {
-        if (target.properties.get(key)) |target_v| {
+        if (target.lookupOwn(key)) |target_v| {
             if (!flags.configurable and !flags.writable) {
                 if (!intrinsics.sameValue(target_v, v)) {
                     return throwTypeError(realm, "proxy 'get' trap returned mismatched value for non-writable non-configurable data property");
@@ -259,7 +259,7 @@ pub fn nativeProxySet(realm: *Realm, proxy: *JSObject, key: []const u8, value: V
     if (!arith.toBoolean(v)) return .{ .boolean = false };
     // §10.5.6 invariants.
     if (target.property_flags.get(key)) |flags| {
-        if (target.properties.get(key)) |target_v| {
+        if (target.lookupOwn(key)) |target_v| {
             if (!flags.configurable and !flags.writable) {
                 if (!intrinsics.sameValue(target_v, value)) {
                     return throwTypeError(realm, "proxy 'set' trap reported success for non-writable non-configurable data property");

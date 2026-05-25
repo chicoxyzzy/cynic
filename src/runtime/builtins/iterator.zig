@@ -1532,7 +1532,7 @@ fn getIteratorFlattenable(realm: *Realm, v: Value, reject_strings: bool) NativeE
         // No accessor on String.prototype — fall through to data
         // slot lookup. If a normal data property is installed
         // there, invoke it with `this = v`.
-        if (sp.properties.get("@@iterator")) |m_v| {
+        if (sp.lookupOwn("@@iterator")) |m_v| {
             if (heap_mod.valueAsFunction(m_v)) |m_fn| {
                 return callIteratorMethod(realm, m_fn, v);
             }

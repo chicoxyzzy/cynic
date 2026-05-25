@@ -1267,7 +1267,7 @@ fn moduleNamespaceDefineOwnProperty(
         // For redirect entries we resolve through the chain so the
         // SameValue applies to the source's value, not a Hole/empty.
         const cur_value = blk: {
-            if (target.properties.get(key)) |v| break :blk v;
+            if (target.lookupOwn(key)) |v| break :blk v;
             if (target.getNamespaceRedirect(key)) |r| {
                 const resolved = @import("../module.zig").resolveRedirectChain(r.target_ns, r.target_key) catch return false;
                 break :blk resolved.ns.get(resolved.key);
@@ -1469,7 +1469,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
                                 const cur_is_acc = proxy_target.hasAccessor(key);
                                 const cur_value: Value = blk: {
                                     if (cur_is_acc) break :blk Value.undefined_;
-                                    if (proxy_target.properties.get(key)) |val| break :blk val;
+                                    if (proxy_target.lookupOwn(key)) |val| break :blk val;
                                     break :blk Value.undefined_;
                                 };
                                 var cur_getter: ?*JSFunction = null;
@@ -1670,7 +1670,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
         // guard on an already-set index).
         const cur_value: Value = blk_cv: {
             if (cur_is_accessor) break :blk_cv Value.undefined_;
-            if (target.properties.get(key)) |v| break :blk_cv v;
+            if (target.lookupOwn(key)) |v| break :blk_cv v;
             if (target.is_array_exotic) {
                 if (ObjMod.JSObject.canonicalIntegerIndex(key)) |idx| {
                     if (target.tryGetIndexedOwn(idx)) |ev| break :blk_cv ev;
@@ -3701,7 +3701,7 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         const key_str = key_js.flatBytes();
         // Look up or create the bucket array.
         var bucket: *JSObject = undefined;
-        if (out.properties.get(key_str)) |existing| {
+        if (out.lookupOwn(key_str)) |existing| {
             bucket = heap_mod.valueAsPlainObject(existing) orelse return error.NativeThrew;
         } else {
             bucket = realm.heap.allocateObject() catch return error.OutOfMemory;
@@ -4104,7 +4104,7 @@ fn getPropertyWithReceiver(realm: *Realm, obj: *JSObject, key: []const u8, recei
             }
             return Value.undefined_;
         }
-        if (o.properties.get(key)) |val| return val;
+        if (o.lookupOwn(key)) |val| return val;
         cur = o.prototype;
     }
     return Value.undefined_;

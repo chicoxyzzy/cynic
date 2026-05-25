@@ -119,7 +119,7 @@ pub fn installMap(realm: *Realm) !void {
     // property"). Install both keys against one allocation
     // instead of two — `prototype/Symbol.iterator.js` reads
     // `Map.prototype[Symbol.iterator] === Map.prototype.entries`.
-    const entries_fn_v = proto.properties.get("entries") orelse Value.undefined_;
+    const entries_fn_v = proto.lookupOwn("entries") orelse Value.undefined_;
     try proto.setWithFlags(realm.allocator, "@@iterator", entries_fn_v, .{
         .writable = true,
         .enumerable = false,
