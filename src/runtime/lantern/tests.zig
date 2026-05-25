@@ -7156,3 +7156,38 @@ test "counter-loop: zero-iteration when init equals bound" {
         \\s;
     , 100);
 }
+
+test "SES Phase 3: iter spread on built-in iterators works under hardened" {
+    // Regression pin for the iterator-dispatch bug surfaced by
+    // `docs/handbook/ses-test262-policy.md` Phase 1 audit
+    // (commit a104662 reported 65 `iterator.next is not callable`
+    // failures, all on Set / Iterator methods that pass under
+    // unhardened but failed when SES Phase 3 demoted the
+    // built-in iterator-prototype `next` slot to a synthetic
+    // accessor pair). `JSObject.get` walked the prototype chain
+    // via data-slot lookup only — synthetic accessors silently
+    // returned `undefined`, so the spread's `iter_obj.get("next")`
+    // call site at `interpreter.zig:6790` saw a non-function and
+    // threw. Fix routes `JSObject.get` through `synth_accessor.value`
+    // for accessor entries it encounters during the chain walk.
+    //
+    // Three reproducers, all of which threw `TypeError: iterator.next
+    // is not callable` pre-fix:
+    try expectScriptStringWithBuiltins(
+        \\let s = new Set([1, 2, 3]);
+        \\[...s].join(",");
+    , "1,2,3");
+    try expectScriptStringWithBuiltins(
+        \\let a = new Set([1, 2, 3]);
+        \\let b = new Set([2, 3, 4]);
+        \\[...a.intersection(b)].join(",");
+    , "2,3");
+    try expectScriptStringWithBuiltins(
+        \\class Iterable {
+        \\  get [Symbol.iterator]() {
+        \\    return function () { return [10, 20, 30][Symbol.iterator](); };
+        \\  }
+        \\}
+        \\[...Iterator.concat(new Iterable())].join(",");
+    , "10,20,30");
+}

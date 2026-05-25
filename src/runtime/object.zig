@@ -1709,6 +1709,35 @@ pub const JSObject = struct {
 
     /// `[[Get]]` (§10.1.8) — own-property lookup that walks the
     /// prototype chain. Returns `undefined` when absent.
+    ///
+    /// Spec-incomplete on purpose: a *general* §10.1.8 [[Get]]
+    /// can call accessor getters, which re-enters the engine
+    /// and requires a `*Realm`. Most callers (the interpreter
+    /// hot path's IC-served `lda_property`, the spread / iter
+    /// machinery in `lantern/interpreter.zig`, the builtin
+    /// methods in `runtime/builtins/*`) want a data-shaped
+    /// shortcut and route accessor lookups through their own
+    /// realm-aware paths. So this method handles data slots
+    /// and **synthetic accessors only**.
+    ///
+    /// Synthetic accessors are the Phase 3 SES demotion
+    /// (`intrinsics.installSyntheticAccessorPair`) — every
+    /// frozen prototype's data slot becomes an accessor pair
+    /// whose getter just returns a captured Value, no JS
+    /// re-entry. Treating them as data slots here is
+    /// observably equivalent and lets the engine's many
+    /// `obj.get("next")` / `obj.get("constructor")` shortcuts
+    /// keep working after SES hardening — without this, every
+    /// shortcut path that touches a frozen-prototype method
+    /// silently returns `undefined`, which is how the
+    /// `iterator.next is not callable` cluster surfaced at
+    /// `docs/handbook/ses-test262-policy.md` Phase 1.
+    ///
+    /// User-installed getters (e.g. `Object.defineProperty(o,
+    /// "x", {get: …})`) are still NOT fired here. Callers
+    /// that need full §10.1.8 semantics must use
+    /// `intrinsics.getPropertyChain` (realm-aware) or
+    /// `lda_property` (interpreter-hot).
     pub fn get(self: *const JSObject, key: []const u8) Value {
         // §10.4.2 Array exotic — integer-indexed reads come from
         // the indexed storage (packed `elements` or `sparse_elements`).
@@ -1735,6 +1764,20 @@ pub const JSObject = struct {
             }
         }
         if (self.properties.get(key)) |v| return v;
+        // Synthetic-accessor fast path — see the method-level
+        // doc above for why this lives in the data-shaped
+        // shortcut rather than as a realm-aware general
+        // accessor walk.
+        if (self.getAccessor(key)) |acc| {
+            if (acc.getter) |getter| {
+                if (getter.synth_accessor) |sa| return sa.value;
+            }
+            // Non-synthetic accessor or write-only — caller must
+            // route through a realm-aware path; surface `undefined`
+            // (matches the legacy pre-SES behaviour for any
+            // unreachable accessor).
+            return Value.undefined_;
+        }
         if (self.prototype) |proto| return proto.get(key);
         return Value.undefined_;
     }
