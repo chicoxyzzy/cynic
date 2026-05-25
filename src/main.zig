@@ -1,10 +1,10 @@
-//! Cynic CLI — `lex`, `parse`, `eval`, and `run` subcommands.
-//! `repl` follows when later's function machinery is in place.
+//! Cynic CLI — `lex`, `parse`, `eval`, `run`, and `repl` subcommands.
 
 const std = @import("std");
 const cynic = @import("cynic");
 const eval_cmd = @import("cli/eval.zig");
 const run_cmd = @import("cli/run.zig");
+const repl_cmd = @import("cli/repl.zig");
 
 const FeatureFlag = cynic.runtime.FeatureFlag;
 const FeatureSet = cynic.runtime.FeatureSet;
@@ -124,6 +124,26 @@ pub fn main(init: std.process.Init) !void {
             return error.MissingArgument;
         }
         try run_cmd.run(allocator, io, run_args, feature_flags, gc_threshold, dump_bytecode, debug_globals);
+    } else if (std.mem.eql(u8, sub, "repl")) {
+        // `cynic repl [--debug-globals]` — interactive read-eval-print
+        // loop with a persistent realm. Same `--debug-globals` opt-in
+        // as `cynic run`; default realm stays production-shaped.
+        var repl_debug_globals = false;
+        var repl_args = args;
+        while (repl_args.len > 0 and std.mem.startsWith(u8, repl_args[0], "--")) {
+            if (std.mem.eql(u8, repl_args[0], "--debug-globals")) {
+                repl_debug_globals = true;
+                repl_args = repl_args[1..];
+            } else {
+                try printUsage(io);
+                return error.UnknownArgument;
+            }
+        }
+        if (repl_args.len != 0) {
+            try printUsage(io);
+            return error.UnexpectedArgument;
+        }
+        try repl_cmd.run(allocator, io, feature_flags, gc_threshold, repl_debug_globals);
     } else if (std.mem.eql(u8, sub, "help") or std.mem.eql(u8, sub, "--help") or std.mem.eql(u8, sub, "-h")) {
         try printUsage(io);
     } else {
@@ -159,6 +179,9 @@ fn printUsage(io: std.Io) !void {
         \\                                   `__drainMicrotasks` for debugging. Off
         \\                                   by default — these are attack surfaces
         \\                                   on production embeddings.
+        \\  repl [--debug-globals]           Interactive read-eval-print loop with
+        \\                                   a persistent realm. Type .exit or
+        \\                                   press Ctrl-D to leave.
         \\  help                             Show this help.
         \\
         \\Top-level options (consumed before the subcommand):

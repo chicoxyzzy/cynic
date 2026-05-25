@@ -11647,6 +11647,26 @@ pub fn compileScriptAsChunk(
         .start = if (program.body.len > 0) program.body[program.body.len - 1].span().end else 0,
         .end = if (program.body.len > 0) program.body[program.body.len - 1].span().end else 0,
     };
+    // §16.1.6 ScriptEvaluation step 11 + §13.2 UpdateEmpty —
+    // declarations have **empty** completion. Today the
+    // accumulator carries whatever residue the last statement
+    // left (a `let x = 42;` initializer would leak `42`); reset
+    // to `undefined` when the trailing statement is unambiguously
+    // empty-completion so the REPL, `cynic run`, and embedder
+    // `evaluateScript` see the spec-aligned value. The full
+    // walk-and-stash needed for `42; let x = 99;` → 42 is
+    // deferred; declarations-trailing is the surface that
+    // actually mattered in REPL smoke-testing. d8 / Node REPL
+    // arrive at the same observable behaviour through their own
+    // shortcuts (V8's bytecode emits a literal `LdaUndefined`
+    // before `Return` for `let x = 42;`).
+    if (program.body.len > 0) {
+        const trailing_empty_completion = switch (program.body[program.body.len - 1]) {
+            .lexical, .function_decl, .class_decl, .import_decl, .export_decl, .empty, .debugger_ => true,
+            else => false,
+        };
+        if (trailing_empty_completion) try c.builder.emitOp(.lda_undefined, end_span);
+    }
     try c.builder.emitOp(.return_, end_span);
 
     c.builder.code.items[slot_count_patch] = c.env_slot_count;

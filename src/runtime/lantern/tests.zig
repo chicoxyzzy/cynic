@@ -2853,6 +2853,52 @@ test "later: top-level let visible in a later script on the same realm" {
     try testing.expectEqual(@as(i32, 42), v.asInt32());
 }
 
+test "script completion: declaration-trailing is undefined, not the initializer" {
+    // §16.1.6 ScriptEvaluation step 11 + §13.2 UpdateEmpty —
+    // declarations have empty completion, which scripts convert to
+    // undefined. Pre-fix the script `let x = 42;` would return 42
+    // because the initializer left the value in the accumulator
+    // and the trailing `return_` picked it up. Pin the spec
+    // behaviour for every empty-completion trailing-statement
+    // form so a REPL or embedder `evaluateScript` sees `undefined`.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+
+    inline for (.{
+        "let x = 42;",
+        "const y = 7;",
+        "var z = 99;",
+        "function f() { return 1; }",
+        "class C {}",
+        ";",
+    }) |src| {
+        const r = try evaluateScript(testing.allocator, &realm, src);
+        const v = switch (r) {
+            .value, .yielded => |val| val,
+            .thrown => return error.UnexpectedThrow,
+        };
+        try testing.expect(v.isUndefined());
+    }
+}
+
+test "script completion: expression-trailing carries its value through" {
+    // Counterpart to the empty-completion pin above — expression
+    // statements DO leave their value in the accumulator. Without
+    // this the d8-style `cynic eval`-of-a-script flow and the REPL
+    // value-line would both go silent.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+
+    const r = try evaluateScript(testing.allocator, &realm, "let x = 42; x + 1;");
+    const v = switch (r) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UnexpectedThrow,
+    };
+    try testing.expectEqual(@as(i32, 43), v.asInt32());
+}
+
 test "later: top-level function declaration visible across scripts" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
