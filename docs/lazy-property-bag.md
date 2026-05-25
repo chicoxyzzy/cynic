@@ -2,10 +2,29 @@
 
 Goal: skip the per-property `properties.put` hashmap insert on
 shape-mode objects, so `{ a: i, b: i + 1 }` allocates faster. The
-`object_alloc` micro-bench (~70 ms, ~30 % behind QuickJS-NG) is the
-target; the same hot path runs in every literal-heavy program (DOM-
-shaped record construction, JSON-like factory functions, the React
-`createElement` pattern, etc.).
+`object_alloc` micro-bench (~59 ms, ~5 % behind QuickJS-NG today,
+was ~30 % at design time) and **`class_instantiate` (~131 ms,
+~2× behind QuickJS-NG)** are the targets; the same hot path runs
+in every literal-heavy program (DOM-shaped record construction,
+JSON-like factory functions, the React `createElement` pattern,
+class-based allocations under load, etc.).
+
+A fresh samply on `class_instantiate` (6M `new Point(i, i+1)`
+iterations) attributes inclusive cost roughly as:
+
+| bucket | % | what |
+|---|---:|---|
+| `strictSetPropertyAnchored` family | ~41 % | the `this.x = x; this.y = y;` writes in the constructor body |
+| `JSObject.set` (split across paths) | ~16 % | downstream of strictSetPropertyAnchored — the bag insert + shape transition + flags update |
+| `Heap.collectYoung` | ~10 % | GC sweep walking the per-iteration JSObject churn |
+| `JSObject.hasOwn` | ~8 % | bag lookup inside `set` (existence check for the redefine-vs-add fork) |
+| `lookupAccessor` | ~7 % | accessor-check before falling back to the data slot |
+| `array_hash_map.getIndexAdapted` | ~6 % | the bag's `wyhash` + bucket walk |
+
+The lazy-bag refactor below targets the **`hasOwn` + `getIndexAdapted`
++ half of `JSObject.set`** cluster — every line that touches
+`obj.properties` for a shape-mode object becomes a no-op when
+the bag isn't there.
 
 This doc is the durable plan — a fresh session should be able to
 pick up the next sub-step from here without re-deriving the design.
