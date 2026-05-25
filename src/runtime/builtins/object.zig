@@ -313,7 +313,7 @@ pub fn ownPropertyKeysOrdered(
     // Fallback: pick up any `properties` keys not already in the
     // order list (built-in installation paths that don't call
     // `recordKey`). The map's own insertion order applies here.
-    var it = obj.properties.iterator();
+    var it = obj.iterOwnNamedKeys();
     while (it.next()) |entry| {
         const k = entry.key_ptr.*;
         if (std.mem.startsWith(u8, k, "__cynic_")) continue;
@@ -2935,7 +2935,7 @@ fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // §10.1.4.1 SetIntegrityLevel(O, frozen) — mark every own
     // data property `{ writable: false, configurable: false }`
     // and every accessor `{ configurable: false }`.
-    var it = obj.properties.iterator();
+    var it = obj.iterOwnNamedKeys();
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
         const cur = obj.flagsFor(key);
@@ -3051,7 +3051,7 @@ fn objectIsFrozen(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // the property bag is still writable+configurable, so the
     // array can't be frozen.
     if (hasUnlockedIndexedElements(obj)) return Value.false_;
-    var it = obj.properties.iterator();
+    var it = obj.iterOwnNamedKeys();
     while (it.next()) |entry| {
         const flags = obj.flagsFor(entry.key_ptr.*);
         if (flags.writable or flags.configurable) return Value.false_;
@@ -3110,7 +3110,7 @@ fn objectSeal(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // §10.1.4.1 SetIntegrityLevel(O, sealed) — every own property
     // (data + accessor) loses configurability; writable bits
     // stay.
-    var it = obj.properties.iterator();
+    var it = obj.iterOwnNamedKeys();
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
         const cur = obj.flagsFor(key);
@@ -3164,7 +3164,7 @@ fn objectIsSealed(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // §10.4.2 — Array exotic indexed slots default to all-true;
     // an array with raw indexed elements isn't sealed.
     if (hasUnlockedIndexedElements(obj)) return Value.false_;
-    var it = obj.properties.iterator();
+    var it = obj.iterOwnNamedKeys();
     while (it.next()) |entry| {
         if (obj.flagsFor(entry.key_ptr.*).configurable) return Value.false_;
     }

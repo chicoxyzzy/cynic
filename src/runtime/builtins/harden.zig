@@ -94,7 +94,7 @@ pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void
         // already non-configurable by construction.
         if (obj.is_module_namespace) return;
         obj.extensible = false;
-        var it = obj.properties.iterator();
+        var it = obj.iterOwnNamedKeys();
         while (it.next()) |e| {
             const k = e.key_ptr.*;
             const cur = obj.flagsFor(k);
@@ -105,7 +105,7 @@ pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void
             }) catch return error.OutOfMemory;
         }
         // Recurse into own data values.
-        var rit = obj.properties.iterator();
+        var rit = obj.iterOwnNamedKeys();
         while (rit.next()) |e| try hardenWalk(realm, e.value_ptr.*, visited);
         // Recurse into accessor getters / setters.
         if (obj.accessorIterator()) |ait_outer| {

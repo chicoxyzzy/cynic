@@ -322,7 +322,7 @@ pub fn openForInIterator(
         // a bound function, else `%Function.prototype%`.
         var current_proto: ?*JSObject = fn_obj.proto;
         while (current_proto) |cur| {
-            var pit = cur.properties.iterator();
+            var pit = cur.iterOwnNamedKeys();
             while (pit.next()) |entry| {
                 const key = entry.key_ptr.*;
                 if (std.mem.startsWith(u8, key, "__cynic_")) continue;
@@ -529,7 +529,7 @@ pub fn openForInIterator(
             // not recorded in `own_key_order` (e.g. built-in
             // installers that bypass `recordKey`). Map iteration is
             // insertion-ordered for determinism.
-            var it = cur.properties.iterator();
+            var it = cur.iterOwnNamedKeys();
             while (it.next()) |entry| {
                 const key = entry.key_ptr.*;
                 if (std.mem.startsWith(u8, key, "__cynic_")) continue;

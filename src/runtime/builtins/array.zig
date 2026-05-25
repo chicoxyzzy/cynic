@@ -1682,7 +1682,7 @@ fn arrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nativ
 fn plainObjectReverseSearch(realm: *Realm, obj: *JSObject, start: i64, target: Value) NativeError!?i64 {
     var keys: std.ArrayListUnmanaged(i64) = .empty;
     defer keys.deinit(realm.allocator);
-    var it = obj.properties.iterator();
+    var it = obj.iterOwnNamedKeys();
     while (it.next()) |entry| {
         const k = entry.key_ptr.*;
         const idx = std.fmt.parseInt(i64, k, 10) catch continue;
@@ -1975,7 +1975,7 @@ fn reduceRightOwnIndicesDescending(
 ) NativeError!Value {
     var keys: std.ArrayListUnmanaged(i64) = .empty;
     defer keys.deinit(realm.allocator);
-    var it = obj.properties.iterator();
+    var it = obj.iterOwnNamedKeys();
     while (it.next()) |entry| {
         const k = entry.key_ptr.*;
         const idx = std.fmt.parseInt(i64, k, 10) catch continue;

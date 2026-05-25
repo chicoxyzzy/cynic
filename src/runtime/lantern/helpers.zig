@@ -299,7 +299,7 @@ pub fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, targe
         var promoted: std.ArrayListUnmanaged(u32) = .empty;
         defer promoted.deinit(allocator);
         {
-            var it = obj.properties.iterator();
+            var it = obj.iterOwnNamedKeys();
             while (it.next()) |entry| {
                 const k = entry.key_ptr.*;
                 if (canonicalIntegerIndexInterp(k)) |idx| {
@@ -355,7 +355,7 @@ pub fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, targe
     // routed through ArraySetLength via prototype chaining.
     var indices: std.ArrayListUnmanaged(u32) = .empty;
     defer indices.deinit(allocator);
-    var it = obj.properties.iterator();
+    var it = obj.iterOwnNamedKeys();
     while (it.next()) |entry| {
         const k = entry.key_ptr.*;
         if (canonicalIntegerIndexInterp(k)) |idx| {

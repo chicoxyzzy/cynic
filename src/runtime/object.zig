@@ -888,6 +888,26 @@ pub const JSObject = struct {
         return o;
     }
 
+    /// §10.1.11 OrdinaryOwnPropertyKeys — iterator over the
+    /// object's own named-data properties in insertion order.
+    /// Today wraps `properties.iterator()` directly. Phase 3 of
+    /// [docs/lazy-property-bag.md] flips this to a shape-chain
+    /// walk for shape-mode objects (bag is null then); the
+    /// single chokepoint here means every spec enumeration
+    /// surface (`Object.{keys, values, entries}`,
+    /// `Reflect.ownKeys`, `for-in`, `JSON.stringify`,
+    /// descriptor walks, `Object.assign`) picks up the new
+    /// path with no edit.
+    ///
+    /// Doesn't include accessor entries — those live in
+    /// `extension.accessors` and have their own iterator
+    /// (`accessorIterator`). `Object.getOwnPropertyNames` /
+    /// `Object.keys` consumers merge the two iterators with the
+    /// integer-index slot ordering ahead per §10.1.11.
+    pub fn iterOwnNamedKeys(self: *const JSObject) std.StringArrayHashMapUnmanaged(Value).Iterator {
+        return self.properties.iterator();
+    }
+
     /// Return the extension if already allocated, otherwise allocate
     /// a zero-init extension and stash it on this object. The
     /// caller mutates the returned pointer in place; subsequent

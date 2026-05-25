@@ -1140,7 +1140,7 @@ pub const Heap = struct {
                 // introduced the divergence. Compiled out in
                 // ReleaseFast.
                 o.verifyShapeInvariant();
-                var it = o.properties.iterator();
+                var it = o.iterOwnNamedKeys();
                 while (it.next()) |entry| self.markValue(entry.value_ptr.*);
                 if (o.privatePropertyIterator()) |pit_outer| {
                     var pit = pit_outer;
@@ -2450,7 +2450,7 @@ pub const Heap = struct {
 
         for (self.objects_mature.items) |o| {
             // Property bag.
-            var it = o.properties.iterator();
+            var it = o.iterOwnNamedKeys();
             while (it.next()) |entry| {
                 if (isYoungHeapValue(entry.value_ptr.*) and !o.in_remembered_set) {
                     std.debug.print(

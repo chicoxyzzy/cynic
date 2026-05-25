@@ -5287,7 +5287,7 @@ pub fn runFrames(
                     // before the loop body runs.
                     if (heap_mod.valueAsPlainObject(acc)) |ns_obj| {
                         if (ns_obj.is_module_namespace) {
-                            var ns_it = ns_obj.properties.iterator();
+                            var ns_it = ns_obj.iterOwnNamedKeys();
                             const probe_outcome = blk_probe: while (ns_it.next()) |entry| {
                                 const k = entry.key_ptr.*;
                                 if (std.mem.startsWith(u8, k, "__cynic_")) continue;
@@ -5561,7 +5561,7 @@ pub fn runFrames(
                     // Zig's switch arms — inline the merge for
                     // each iter so the ambiguity check stays close
                     // to the install site.
-                    var it = src_obj.properties.iterator();
+                    var it = src_obj.iterOwnNamedKeys();
                     while (it.next()) |entry| {
                         const key = entry.key_ptr.*;
                         if (std.mem.eql(u8, key, "default")) continue;

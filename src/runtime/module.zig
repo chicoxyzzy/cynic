@@ -196,7 +196,7 @@ pub fn getModuleNamespace(realm: *Realm, mr: *ModuleRecord) !*JSObject {
     // bindings per §15.2.1.16.3 — give them the same flags so
     // `Object.getOwnPropertyDescriptor(ns, "redirected")` reports
     // the spec descriptor.
-    var it = ns.properties.iterator();
+    var it = ns.iterOwnNamedKeys();
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
         // Skip the @@toStringTag installed above — it has different

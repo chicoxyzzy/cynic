@@ -653,7 +653,7 @@ fn installOverrideMistakeFix(realm: *Realm, proto: *JSObject) !void {
     };
     var snapshot: std.ArrayListUnmanaged(Entry) = .empty;
     defer snapshot.deinit(realm.allocator);
-    var pit = proto.properties.iterator();
+    var pit = proto.iterOwnNamedKeys();
     while (pit.next()) |e| {
         const flags = proto.flagsFor(e.key_ptr.*);
         try snapshot.append(realm.allocator, .{
