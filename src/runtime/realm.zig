@@ -1261,27 +1261,6 @@ pub const Realm = struct {
         const print_fn = try self.heap.allocateFunctionNative(printNative, 1, "print");
         try self.globals.put(self.allocator, "print", heap_mod.taggedFunction(print_fn));
 
-        // Cynic-only host hook: forces a full (major) mark-sweep
-        // cycle. Not in the spec — `$262.gc()` is the test262
-        // equivalent, and a real host never exposes this — but
-        // inline unit tests covering genuinely-weak WeakRef /
-        // WeakMap / WeakSet / FinalizationRegistry need a
-        // deterministic trigger (GC timing is otherwise
-        // unspecified). Lives on `globalThis.__collectGarbage`.
-        const gc_fn = try self.heap.allocateFunctionNative(collectGarbageNative, 0, "__collectGarbage");
-        try self.globals.put(self.allocator, "__collectGarbage", heap_mod.taggedFunction(gc_fn));
-
-        // Companion test hook: synchronously runs §9.10.4.2
-        // ClearKeptObjects. Job boundaries (microtask drain /
-        // top-level entry boundaries) normally fire this; inline
-        // unit tests that don't go through a microtask need a
-        // synchronous way to drop the per-job kept-alive list so
-        // a follow-up `__collectGarbage()` can actually weak-clear
-        // a WeakRef target the constructor / `deref()` pinned.
-        // Not a spec built-in; lives on `globalThis.__clearKeptObjects`.
-        const ck_fn = try self.heap.allocateFunctionNative(clearKeptObjectsNative, 0, "__clearKeptObjects");
-        try self.globals.put(self.allocator, "__clearKeptObjects", heap_mod.taggedFunction(ck_fn));
-
         // Minimal `console` object with a `log` method bound to
         // the same printer. Lets test scripts that conventionally
         // call `console.log(x)` work without us having to teach
@@ -1292,6 +1271,53 @@ pub const Realm = struct {
 
         // typed Error constructors + prototype chain.
         try intrinsics_mod.install(self);
+    }
+
+    /// Install the engine's **debug / test-only host hooks** on
+    /// `globalThis`. Each of these is documented as "real host
+    /// never exposes this"; they exist for inline unit tests, the
+    /// test262 harness, and `cynic run --debug-globals`-style
+    /// invocations that want a deterministic trigger for behaviour
+    /// the spec leaves unspecified.
+    ///
+    /// **Do not call this from a production embedding.** Each hook
+    /// is a real attack surface for an untrusted script:
+    ///   - `__collectGarbage` → DoS via forced GC, timing leverage
+    ///   - `__clearKeptObjects` → §9.10 [[KeptAlive]] confusion,
+    ///     WeakRef target observation
+    ///   - `__drainMicrotasks` → forced job boundaries, TOCTOU on
+    ///     async ordering
+    ///
+    /// `installBuiltins` deliberately does NOT install these — a
+    /// fresh Cynic realm is debug-clean by default. The test262
+    /// harness, the inline test helpers, and the playground all
+    /// opt in explicitly.
+    pub fn installTestGlobals(self: *Realm) !void {
+        // Forces a full (major) mark-sweep cycle. Not in the spec;
+        // `$262.gc()` is the test262 equivalent and the canonical
+        // way to ask for a deterministic GC trigger from
+        // `built-ins/WeakRef` / `built-ins/FinalizationRegistry`
+        // fixtures and inline tests with the same shape.
+        const gc_fn = try self.heap.allocateFunctionNative(collectGarbageNative, 0, "__collectGarbage");
+        try self.globals.put(self.allocator, "__collectGarbage", heap_mod.taggedFunction(gc_fn));
+
+        // Companion to `__collectGarbage`: synchronously runs
+        // §9.10.4.2 ClearKeptObjects. Job boundaries (microtask
+        // drain / top-level entry boundaries) normally fire this;
+        // inline tests that don't cross one need a synchronous
+        // drop of the per-job kept-alive list so a follow-up
+        // `__collectGarbage()` can actually weak-clear a WeakRef
+        // target the constructor / `deref()` pinned.
+        const ck_fn = try self.heap.allocateFunctionNative(clearKeptObjectsNative, 0, "__clearKeptObjects");
+        try self.globals.put(self.allocator, "__clearKeptObjects", heap_mod.taggedFunction(ck_fn));
+
+        // Forces a microtask-queue drain. Real ECMAScript hosts
+        // drain automatically at "completion of a job" — Cynic's
+        // CLI does the same around `cynic eval` / `cynic run`,
+        // but inline tests asserting microtask ordering need
+        // direct access. Lives on `globalThis.__drainMicrotasks`.
+        const drain_fn = try self.heap.allocateFunctionNative(@import("builtins/promise.zig").microtaskDrainNative, 0, "__drainMicrotasks");
+        try self.globals.put(self.allocator, "__drainMicrotasks", heap_mod.taggedFunction(drain_fn));
     }
 };
 

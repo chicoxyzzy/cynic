@@ -100,14 +100,11 @@ pub fn install(realm: *Realm) !void {
         .configurable = true,
     });
 
-    // Cynic-only host hook: lets tests + the CLI explicitly
-    // drain the microtask queue. Real ECMAScript hosts drain
-    // automatically at "completion of a job" — Cynic's CLI does
-    // that around `cynic eval`/`cynic run`, but inline tests
-    // and microtask-ordering assertions need direct access.
-    // Lives on `globalThis.__drainMicrotasks`; not in the spec.
-    const drain_fn = try realm.heap.allocateFunctionNative(microtaskDrainNative, 0, "__drainMicrotasks");
-    try realm.globals.put(realm.allocator, "__drainMicrotasks", heap_mod.taggedFunction(drain_fn));
+    // `__drainMicrotasks` moved to `Realm.installTestGlobals`
+    // (debug-only; not installed on production realms). Inline
+    // tests / the test262 harness / the playground all call
+    // `installTestGlobals` explicitly after `installBuiltins`.
+    // See `Realm.installTestGlobals` in src/runtime/realm.zig.
 }
 
 /// §27.2.4.6 `get Promise [ @@species ]`. The spec says "Return
@@ -120,7 +117,7 @@ fn promiseSpeciesGetter(realm: *Realm, this_value: Value, args: []const Value) N
     return this_value;
 }
 
-fn microtaskDrainNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+pub fn microtaskDrainNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     _ = args;
     const lantern = @import("../lantern/interpreter.zig");

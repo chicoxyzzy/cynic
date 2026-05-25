@@ -252,6 +252,10 @@ fn test262CreateRealm(
     // The child shares the parent's heap so the allocations made
     // here outlive only the child's globals map.
     child_ptr.installBuiltins() catch return error.OutOfMemory;
+    // Child realms inherit the parent's debug-hook policy — every
+    // test262 sweep runs with these installed; a fixture creating
+    // a child via $262.createRealm expects the same surface.
+    child_ptr.installTestGlobals() catch return error.OutOfMemory;
     // §6.1.5.1 — well-known symbols are agent-wide. Replace the
     // child's freshly-allocated `Symbol.iterator` / etc. with
     // the parent's pointers so identity holds across realms.
@@ -1821,6 +1825,11 @@ fn classifyAndRun(
     // proposal honestly in isolation.
     realm.feature_flags = phase.realmFeatures();
     realm.installBuiltins() catch return .{ .kind = .fail_false_reject };
+    // test262 fixtures use `__collectGarbage` / `__clearKeptObjects`
+    // / `__drainMicrotasks` for deterministic triggering — debug
+    // host hooks `installBuiltins` deliberately doesn't install on
+    // production realms.
+    realm.installTestGlobals() catch return .{ .kind = .fail_false_reject };
     // Cap each test at a generous opcode budget so an
     // infinite-loop fixture (`while(true){}`, recursive yield,
     // a `for(;;)` waiting on an awaitable that never settles)

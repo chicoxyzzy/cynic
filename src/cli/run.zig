@@ -27,6 +27,7 @@ pub fn run(
     feature_flags: FeatureSet,
     gc_threshold: ?u32,
     dump_bytecode: bool,
+    debug_globals: bool,
 ) !void {
     std.debug.assert(paths.len > 0);
 
@@ -49,6 +50,12 @@ pub fn run(
     // alloc collects — exposes a missing root in builtin init).
     if (gc_threshold) |n| realm.heap.setGcThreshold(n);
     try realm.installBuiltins();
+    // `--debug-globals` — install the test-only host hooks
+    // (`__collectGarbage` / `__clearKeptObjects` / `__drainMicrotasks`).
+    // Off by default to keep production-style `cynic run`
+    // invocations debug-clean (each hook is a real attack surface
+    // for an untrusted script — see Realm.installTestGlobals).
+    if (debug_globals) try realm.installTestGlobals();
 
     // `--dump-bytecode` — parse + compile each file and print the
     // disassembly; don't execute. Matches V8's `d8 --print-bytecode`

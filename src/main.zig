@@ -105,10 +105,14 @@ pub fn main(init: std.process.Init) !void {
         // emits the compiled chunk's disassembly — same intent as
         // V8's `d8 --print-bytecode`.
         var dump_bytecode = false;
+        var debug_globals = false;
         var run_args = args;
         while (run_args.len > 0 and std.mem.startsWith(u8, run_args[0], "--")) {
             if (std.mem.eql(u8, run_args[0], "--dump-bytecode")) {
                 dump_bytecode = true;
+                run_args = run_args[1..];
+            } else if (std.mem.eql(u8, run_args[0], "--debug-globals")) {
+                debug_globals = true;
                 run_args = run_args[1..];
             } else {
                 try printUsage(io);
@@ -119,7 +123,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.MissingArgument;
         }
-        try run_cmd.run(allocator, io, run_args, feature_flags, gc_threshold, dump_bytecode);
+        try run_cmd.run(allocator, io, run_args, feature_flags, gc_threshold, dump_bytecode, debug_globals);
     } else if (std.mem.eql(u8, sub, "help") or std.mem.eql(u8, sub, "--help") or std.mem.eql(u8, sub, "-h")) {
         try printUsage(io);
     } else {
@@ -144,11 +148,17 @@ fn printUsage(io: std.Io) !void {
         \\                                   script mode against a `.mjs` path.
         \\  eval <expr>                      Compile and execute a single
         \\                                   expression; print the result.
-        \\  run [--dump-bytecode] <file>...  Compile and execute each <file> as a
+        \\  run [--dump-bytecode] [--debug-globals] <file>...
+        \\                                   Compile and execute each <file> as a
         \\                                   script against one realm; print the
         \\                                   final completion value.
         \\                                   `--dump-bytecode` prints the compiled
         \\                                   chunk and exits without executing.
+        \\                                   `--debug-globals` installs
+        \\                                   `__collectGarbage` / `__clearKeptObjects` /
+        \\                                   `__drainMicrotasks` for debugging. Off
+        \\                                   by default — these are attack surfaces
+        \\                                   on production embeddings.
         \\  help                             Show this help.
         \\
         \\Top-level options (consumed before the subcommand):

@@ -264,6 +264,12 @@ export fn cynic_eval(src: [*]const u8, len: u32) [*]u8 {
     realm.installBuiltins() catch {
         return buildFrame(.parse_error, "", "", "internal error: builtin install failed", empty_span);
     };
+    // Playground is unambiguously a demo / debug context — install
+    // the test-only debug hooks (`__collectGarbage` etc.) so
+    // snippets can demonstrate GC-observable behaviour.
+    realm.installTestGlobals() catch {
+        return buildFrame(.parse_error, "", "", "internal error: test globals install failed", empty_span);
+    };
 
     // 2. Compile. Inlines `evaluateScript`'s parse+compile+pin step
     // (see `runtime/lantern/interpreter.zig`) so we can thread the
@@ -367,6 +373,12 @@ export fn cynic_parse(src: [*]const u8, len: u32) [*]u8 {
     defer realm.deinit();
     realm.installBuiltins() catch {
         return buildFrame(.parse_error, "", "", "internal error: builtin install failed", empty_span);
+    };
+    // Playground is unambiguously a demo / debug context — install
+    // the test-only debug hooks (`__collectGarbage` etc.) so
+    // snippets can demonstrate GC-observable behaviour.
+    realm.installTestGlobals() catch {
+        return buildFrame(.parse_error, "", "", "internal error: test globals install failed", empty_span);
     };
 
     // Thread the same diagnostics buffer through the compile step so

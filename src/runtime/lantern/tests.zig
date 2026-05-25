@@ -31,6 +31,12 @@ const cynic_diag = @import("../../diagnostic.zig");
 fn installBuiltinsAllFeatures(realm: *Realm) !void {
     realm.feature_flags = features.FeatureSet.initFull();
     try realm.installBuiltins();
+    // Inline unit tests deliberately use `__collectGarbage` /
+    // `__clearKeptObjects` / `__drainMicrotasks` for deterministic
+    // GC + microtask triggering. These are debug-only host hooks
+    // that production realms (`cynic eval`, `cynic run` without
+    // `--debug-globals`) deliberately don't install.
+    try realm.installTestGlobals();
 }
 
 fn evaluate(realm: *Realm, source: []const u8) !Value {
