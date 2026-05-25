@@ -219,6 +219,15 @@ fn printValueToStream(io: std.Io, out: std.Io.File, v: Value) !void {
 /// Takes `anytype` because `JSObject` isn't re-exported from the
 /// cynic root module — the parameter is always a `*JSObject` at
 /// the only call site, and Zig infers the field/method names.
+///
+/// Under the SES posture (default) `<Sub>Error.prototype.name` is
+/// not a data property — Phase 3's override-mistake fix demoted
+/// it to a synthetic accessor pair on the prototype. The getter
+/// is a `JSFunction` whose `synth_accessor.value` holds the
+/// captured "TypeError" / "RangeError" / etc. string. We check
+/// the captured value directly instead of invoking the getter
+/// (no re-entry into the engine to display an already-thrown
+/// value).
 fn lookupChain(start: anytype, key: []const u8) []const u8 {
     var cur = @as(?@TypeOf(start), start);
     while (cur) |o| : (cur = o.prototype) {
@@ -226,6 +235,16 @@ fn lookupChain(start: anytype, key: []const u8) []const u8 {
             if (v.isString()) {
                 const s: *JSString = @ptrCast(@alignCast(v.asString()));
                 return s.flatBytes();
+            }
+        }
+        if (o.getAccessor(key)) |acc| {
+            if (acc.getter) |g| {
+                if (g.synth_accessor) |cell| {
+                    if (cell.value.isString()) {
+                        const s: *JSString = @ptrCast(@alignCast(cell.value.asString()));
+                        return s.flatBytes();
+                    }
+                }
             }
         }
     }
