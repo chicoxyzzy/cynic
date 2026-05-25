@@ -3697,6 +3697,30 @@ test "GC: destructuring iterator record survives gc_threshold=1" {
     , 6);
 }
 
+test "debug globals: installBuiltins is debug-clean — production realms ship without test hooks" {
+    // A `Realm.init + installBuiltins` (the production-style
+    // embedding shape) MUST NOT install `__collectGarbage` /
+    // `__clearKeptObjects` / `__drainMicrotasks`. These are
+    // documented attack surfaces (forced GC → DoS; KeptAlive
+    // confusion; microtask reorder TOCTOU). They live behind
+    // `Realm.installTestGlobals` instead — opt-in for the test
+    // harness, inline tests, the playground, and
+    // `cynic run --debug-globals`. The CLI `cynic run` / `cynic eval`
+    // default and any host embedding without the opt-in get a
+    // clean realm.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    try testing.expect(realm.globals.get("__collectGarbage") == null);
+    try testing.expect(realm.globals.get("__clearKeptObjects") == null);
+    try testing.expect(realm.globals.get("__drainMicrotasks") == null);
+    // After explicit opt-in, all three appear.
+    try realm.installTestGlobals();
+    try testing.expect(realm.globals.get("__collectGarbage") != null);
+    try testing.expect(realm.globals.get("__clearKeptObjects") != null);
+    try testing.expect(realm.globals.get("__drainMicrotasks") != null);
+}
+
 test "GC: WeakRef to an unreachable target clears after a major GC" {
     // §26.1 — a WeakRef whose target is no longer strongly
     // reachable must `deref()` to `undefined` after a major

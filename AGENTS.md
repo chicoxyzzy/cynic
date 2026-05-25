@@ -133,6 +133,21 @@ These are project rules — they apply to everyone.
   `--allow=eval` lives here today). See
   [docs/ses-alignment.md](docs/ses-alignment.md) for the
   design + phase plan.
+- **Production realms are debug-clean.** `Realm.installBuiltins`
+  does NOT install `__collectGarbage` / `__clearKeptObjects` /
+  `__drainMicrotasks`. Each is an attack surface for untrusted
+  code (forced GC → CPU DoS + timing leverage; KeptAlive
+  confusion → WeakRef capability leak; forced microtask drain →
+  async-ordering TOCTOU). They live behind
+  `Realm.installTestGlobals`, which the test262 harness, the
+  inline test helpers, the playground, and
+  `cynic run --debug-globals` opt into explicitly. `cynic eval`
+  and default `cynic run` stay clean; an embedder using
+  `Realm.init + installBuiltins` from a host program gets a
+  production-shaped surface by default. If you add a new
+  Cynic-only debug global (e.g. `__forceCompact`, a future
+  `__profileFn`), wire it through `installTestGlobals` too — not
+  `installBuiltins`.
 - **Unicode tracks `latest`.** §3 normatively references
   [`unicode.org/versions/latest`](https://unicode.org/versions/latest)
   (undated) and §12.7 says identifier-category code points "in
