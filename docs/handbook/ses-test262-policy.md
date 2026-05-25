@@ -609,6 +609,127 @@ comment) before landing the bump.
 
 ## Audit results
 
-_Phase 1 hasn't run yet. The hypothesis above lists candidate
-categories; the audit produces the concrete table this section
-will hold._
+### Phase 0a — skip-list reclassification (2026-05-26)
+
+Cross-referenced [TC39 finished-proposals.md](https://github.com/tc39/proposals/blob/main/finished-proposals.md)
+against `tools/test262/skip.zig`. One mis-classification surfaced;
+the rest were already correct.
+
+**Mis-classified — needs downgrade from Stage maturity to Planned:**
+
+| Feature | Current bucket | TC39 status | Lead |
+|---|---|---|---|
+| `explicit-resource-management` | `skip_stage_maturity_features` | **Stage 4** (per finished-proposals.md, expected publication 2027) | Needs `using` / `await using` grammar in the parser, plus the four built-ins: `DisposableStack`, `AsyncDisposableStack`, `SuppressedError`, and Symbol.dispose / Symbol.asyncDispose. ~478 fixtures. |
+
+**Already correctly classified as Planned (Stage 4, Cynic doesn't ship yet):**
+
+| Feature / Path | Fixture count |
+|---|---:|
+| `Temporal` (path `built-ins/Temporal/`) | 4588 |
+| `explicit-resource-management` (after downgrade above) | 478 |
+| `import-attributes` (feature tag) | 100 |
+| `Uint8Array.{fromBase64, toBase64, fromHex, toHex}` (`built-ins/Uint8Array/`) | 68 |
+| `Float16Array` (feature tag) | 62 |
+| `json-parse-with-source` (feature tag) | 22 |
+| `json-modules` (feature tag) | 13 |
+| `regexp-duplicate-named-groups`, `regexp-modifiers`, unicodeSets `\q{}` / property-of-strings / set-difference / etc. (libregexp gaps) | varies |
+
+Total currently-Planned fixture exposure: **≈ 5350 fixtures** dominated
+by Temporal. These all get a row in the new `## Planned features`
+block per Phase 0c below.
+
+**Correctly classified as Stage maturity (still pre-Stage-4):**
+
+| Feature | TC39 stage |
+|---|---|
+| `decorators` | Stage 3 |
+| `import-defer` | Stage 3 |
+| `source-phase-imports` | Stage 3 |
+| `import-bytes` | Stage 3 |
+| `immutable-arraybuffer` | Stage 2.7 |
+| `await-dictionary` | Stage 2 |
+| `ShadowRealm` (path) | Stage 2.7 (67 fixtures) |
+
+**Already shipped natively** (no skip needed, scoring as expected):
+
+`Array.fromAsync`, `Error.isError`, `Promise.try`, `RegExp.escape`,
+`Math.sumPrecise`, `Iterator.concat` (iterator-sequencing). One
+follow-up note: `upsert` reached Stage 4 in January 2026 — the
+in-code comment `Stage 3 as of 2026-05` in
+`src/runtime/builtins/iterator.zig:67` and `src/runtime/builtins/
+collections.zig` is stale. Currently the feature ships behind
+`--enable=upsert`; decide separately whether to flip it on by
+default and graduate the row out of `## Pre-Stage-4 proposals
+shipped`. Same call for `joint-iteration` (still Stage 3 per
+2026-05).
+
+### Phase 0b — Annex B negative-coverage scan (2026-05-26)
+
+Walked `vendor/test262/test/annexB/` and classified fixtures
+with `negative:` frontmatter against their `flags:` field.
+
+| Fixture | flags | type | Treatment |
+|---|---|---|---|
+| `annexB/language/statements/for-in/strict-initializer.js` | `[onlyStrict]` | parse SyntaxError | **Unskip** — strict-mode rejection test |
+| `annexB/language/expressions/template-literal/legacy-octal-escape-sequence-strict.js` | `[onlyStrict]` | parse SyntaxError | **Unskip** — strict-mode rejection test |
+
+**Net Annex B unskip: 2 fixtures.** Both are pure strict-mode-
+rejection tests — exactly the positive coverage we want. The
+remaining ~1084 fixtures under `annexB/` test the *positive*
+Annex B surface (which Cynic doesn't ship); keeping them skipped
+is correct.
+
+Cross-check outside `annexB/`: **268 strict-only fixtures** under
+`vendor/test262/test/language/` already get attempted and pass.
+None are over-skipped by the `skip_annex_b_features` rule
+(verified: zero overlap between strict-only fixtures and
+fixtures tagged `__getter__` / `__setter__` / `__proto__` /
+`legacy-regexp` / `IsHTMLDDA`).
+
+**Cynic-authored negative coverage gap:** test262 doesn't include
+fixtures of the form `typeof String.prototype.substr ===
+'undefined'` (the spec doesn't mandate absence of Annex B in
+non-browser hosts — Annex B is normative *for* browsers,
+optional elsewhere). For positive proof that Cynic doesn't ship
+these features by accident, Phase 4 of this plan adds
+hand-written tests under `tests/ses/annex-b-rejection/` with
+the same scoring shape as the SES witnesses. Estimated ~40
+hand-written assertions (one per Annex B method we deliberately
+don't ship: `substr`, HTML wrappers, `escape`/`unescape`,
+`getYear` / `setYear` / `toGMTString`, `__proto__` accessor,
+`__define{Getter,Setter}__` / `__lookup{Getter,Setter}__`,
+`RegExp.$1` legacy globals, for-in initializer in sloppy, etc.).
+
+### Phase 0c — Planned features block sketch (2026-05-26)
+
+Proposed `## Planned features` section for `test262-results.md`,
+sorted by fixture count descending (biggest gap surface first):
+
+```markdown
+## Planned features
+
+Stage 4 ECMAScript features Cynic doesn't yet ship. Each entry's
+fixtures are excluded from the headline `total` (same mechanism
+as the `## Pre-Stage-4 proposals shipped` block — feature-tagged
+or path-skipped). Once a feature lands, its row migrates from
+here into the per-area scoreboard above. Counts come from the
+current `vendor/test262/` corpus.
+
+| feature | fixtures | implementation lead |
+|---|---:|---|
+| **Temporal** | 4588 | The Temporal global — Calendar / TimeZone / Instant / PlainDate / PlainTime / ZonedDateTime + the full §22 API. Large; an entire bucket of engineering. |
+| **explicit-resource-management** | 478 | `using` / `await using` grammar + `DisposableStack`, `AsyncDisposableStack`, `SuppressedError`, `Symbol.dispose` / `Symbol.asyncDispose`. |
+| **import-attributes** | 100 | `import x from "./y.json" with { type: "json" }` syntax + the JSON-module resolver back-end. Pair with json-modules below. |
+| **Uint8Array.{from,to}{Base64,Hex}** | 68 | `Uint8Array.fromBase64` / `.fromHex` / `.prototype.{set,to}{Base64,Hex}`. Pure data-conversion methods on the TypedArray surface. |
+| **Float16Array** | 62 | IEEE 754 binary16 conversion + the TypedArray ctor + `Math.f16round` + `DataView` half-float accessors. |
+| **json-parse-with-source** | 22 | `JSON.parse` reviver's second arg carries `{ source }` for the original JSON span. Needs per-value source spans through the parse tree. |
+| **json-modules** | 13 | `import data from "./x.json"` returning the parsed JSON value. Pair with import-attributes above. |
+| **libregexp Annex B / `/v` gaps** | varies | Vendored libregexp doesn't implement ES2024 `/v` set-difference / `\q{…}` / property-of-strings, `regexp-modifiers`, or `regexp-duplicate-named-groups`. Either patch the matcher or switch regex engines. |
+```
+
+Open question for implementation: do we add an `attempt-on-bump`
+flag to a Planned entry, so that when we ship the underlying
+feature we can flip the skip off in one step? Lean: yes — a
+boolean `ready_to_attempt` per entry, defaulting false, lets
+the audit row read "shipped — pending unskip" before flipping
+the feature flag.
