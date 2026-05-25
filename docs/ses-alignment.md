@@ -44,14 +44,14 @@ guarantee against Cynic's status:
 | 1 | Ban `eval` / `new Function(string)` family | ✅ permanent | — |
 | 2 | Strict mode only, no sloppy code paths | ✅ permanent | — |
 | 3 | No Annex B (HTML comments, legacy octal, `with`, etc.) | ✅ permanent | — |
-| 4 | **Freeze all primordials at realm init** | ❌ | Phase 1 |
-| 5 | **`harden()` global** — recursive deep freeze | ❌ | Phase 2 |
-| 6 | **Override-mistake fix** — data props on frozen prototypes become accessor pairs that allow instance shadowing | ❌ | Phase 3 |
+| 4 | **Freeze all primordials at realm init** | ✅ shipped | Phase 1 |
+| 5 | **`harden()` global** — recursive deep freeze | ✅ shipped | Phase 2 |
+| 6 | **Override-mistake fix** — data props on frozen prototypes become accessor pairs that allow instance shadowing | ✅ shipped | Phase 3 |
 | 7 | **`Compartment` class** — isolated realm-like sandboxes | ❌ — Cynic is single-realm | Deferred |
 | 8 | Tame ambient state (`Math.random`, `Date.now`, …) | ❌ | Deferred (needs Compartments) |
 | 9 | Tame error stacks | partial — minimal surface today | Phase 4 (small) |
 | 10 | Tame RegExp legacy globals | ✅ explicitly out | — |
-| 11 | **Frozen `globalThis`** | ❌ | Phase 1 (folded in) |
+| 11 | **Frozen `globalThis`** | ✅ shipped | Phase 1 (folded in) |
 | 12 | Whitelisted intrinsic shapes | mostly — Cynic ships only spec-defined surface | — |
 
 Phases 1-3 + 11 land "SES baseline by default" — the meaningful
@@ -211,23 +211,51 @@ Each phase builds green and is gated on `zig build test` + a
 filtered `--only-failing` sweep, with a full sweep at the end of
 each phase.
 
-### Phase 1 — freeze primordials at realm init (+ globalThis)
+### Phase 1 — freeze primordials at realm init (+ globalThis) — **shipped**
 
-The freezing pass. Recursive walk + memoization + descriptor
-update. Wired as the last step of `intrinsics.install(realm)`.
+`intrinsics.freezePrimordials` runs as the last step of
+`intrinsics.install(realm)` when `realm.hardened` is true (the
+default). Walks `globalThis` and every field of
+`realm.intrinsics` through `hardenWalk` — the same recursive
+deep-freeze `harden(value)` uses, keeping the Phase 1 freeze
+shape in lockstep with the user-facing harden idiom. Cycle-safe
+via the visited pointer set already in `harden.zig`.
 
-The pass is gated on `realm.hardened` (the default-true flag the
-single `--unhardened` switch flips). When `--unhardened` is set,
-the pass is skipped — every intrinsic stays extensible and
-writable, matching legacy JS expectations. Test262 sweep runs
-the default (frozen) path; a per-feature `--phase=feature:
-unhardened` sweep verifies the relaxation path stays functional.
+After the pass:
+- Every reachable intrinsic object / function has
+  `[[Extensible]] = false`.
+- Every own data descriptor is
+  `{writable: false, configurable: false}`.
+- Every accessor descriptor is `{configurable: false}`.
+- `globalThis` itself is non-extensible — new bare-identifier
+  assignments (`globalThis.x = 1`) throw.
 
-**Risk:** medium. test262 fixtures that monkey-patch intrinsics
-fail; need to measure. Probably <100 fixtures.
-**Test262 risk:** measurable but bounded. Some fixtures explicitly
-test "you can patch the prototype" — those become honest failures
-in default mode, expected passes under `--unhardened`.
+`canDeclareGlobalVar` / `canDeclareGlobalFunction` carry a
+`hardened` parameter (threaded through from
+`realm.hardened`) and skip the extensibility check when set.
+Top-level `var x = 1` keeps working under the SES posture — the
+host's program-level binding install is distinct from user JS
+poisoning globalThis by assignment.
+
+`--unhardened` flips `realm.hardened` to `false` before
+`installBuiltins`; the freeze pass is then a no-op and the
+intrinsic graph stays mutable. Test262 verification:
+`zig build test262 -- --phase=unhardened` runs the main-phase
+fixture set with the freeze skipped.
+
+Acknowledged gaps (inherited from `hardenWalk`):
+- Array-exotic indexed slots aren't lowered into the property
+  bag — none of the intrinsic objects today are array exotics
+  (Array.prototype, etc. are plain objects in Cynic), so the
+  gap is dormant on the intrinsic graph.
+- Module Namespace objects can't be made non-extensible per
+  §9.4.6.6; no intrinsic is a module namespace.
+- Proxy receivers — no intrinsic is a Proxy.
+
+**Test262 risk:** observed — handful of fixtures (those that
+monkey-patch intrinsics) regress in the default hardened sweep;
+the `--phase=unhardened` sweep confirms each comes back when
+the freeze is skipped.
 
 ### Phase 2 — `harden()` global — **shipped**
 
@@ -255,28 +283,46 @@ When Phase 1 ships, the primordial freeze runs first, so
 frozen intrinsics — the path stays correct (the visited set
 short-circuits the redundant freezes).
 
-### Phase 3 — override-mistake fix
+### Phase 3 — override-mistake fix — **shipped**
 
-Extend the Phase 1 freezing pass: when freezing a prototype's data
-property, install accessor pairs instead. The setter creates an
-own data property on `this`.
+`installOverrideMistakeFix` runs as Pass 2 of
+`freezePrimordials`. For every prototype object reachable
+through `realm.intrinsics` (every `*_prototype` field + every
+constructor's `.prototype` slot), each own data descriptor is
+demoted to a synthetic accessor pair: the getter returns the
+captured value verbatim; the setter performs
+DefineOwnProperty on the *receiver* with `{value, writable:
+true, enumerable: true, configurable: true}`. Constructors,
+namespace objects (`Math`, `JSON`, `Reflect`), and `globalThis`
+keep their data descriptors so direct intrinsic mutation
+(`Math.PI = 4`) still throws.
 
-**Risk:** medium-high. Subtle — the accessor pair has to behave
-correctly when called from `Reflect.set` / `Reflect.defineProperty`
-/ `Object.assign` / the spread operator / destructuring assignment.
-Each path through OrdinarySet has to land on the synthetic setter
-correctly.
+The `constructor` back-edge is left as a frozen data slot to
+avoid routing every `instance.constructor` read through a
+getter — that property is on every prototype and would
+multiply IC misses.
 
-**Perf risk:** prototype property reads go through getters. The IC
-needs to optimize the synthetic getter case (the getter is pure;
-its return value is the slot value, cacheable). If the IC can't
-cache it, every prototype-inherited property read is 2-3× slower.
+The synthetic setter throws if asked to redefine on the frozen
+holder (`Array.prototype.flat = badImpl`), since the accessor
+slot is non-configurable. Receivers further down the prototype
+chain succeed by creating the own data property — the
+override-mistake fix proper.
 
-**Test262 risk:** moderate — fixtures that test "OrdinarySet
-rejects non-writable proto slot" need to factor in the override
-fix. The same `realm.hardened` flag gates this — `--unhardened`
-skips the synthetic accessor swap and Cynic reverts to spec-
-literal `OrdinarySetWithOwnDescriptor`.
+**IC interaction.** `callJSFunction` short-circuits on
+`JSFunction.synth_accessor` before allocating a call frame —
+the getter is a pointer load, the setter is a property-define
+op. The `lda_property` slow-path also fast-paths synthetic
+getters on its hot arms (plain-object receiver,
+function-receiver). Future work: extend the inline cache to
+remember the captured value at the call site so the hot
+`obj.toString()` read avoids the `lookupAccessor` walk entirely.
+
+**Test262 risk:** observed — fixtures that pin built-in
+function `.name` / `.length` descriptors as `configurable: true`
+per §17 regress because the freeze locks them
+non-configurable. These are the dominant cluster of regressions
+under the `runtime-hardened` score row; the `runtime` row
+recovers them in full.
 
 ### Phase 4 — `--unhardened` flag wiring
 

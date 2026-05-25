@@ -6,6 +6,7 @@
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
 | **runtime** | 92.90 % | 99.98 % | 37241 / 40089 | 37241 / 37250 |
+| **runtime_hardened** | 84.77 % | 91.23 % | 33983 / 40089 | 33983 / 37250 |
 
 
 ## Where the runtime stands, by area
@@ -132,8 +133,8 @@ features ship in mainline ECMA-262.
 
 | feature | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
-| `joint-iteration` | 76 | 2 | 0 | 97 % | 97 % |
-| `upsert` | 72 | 0 | 0 | 100 % | 100 % |
+| `joint-iteration` | 70 | 8 | 0 | 90 % | 90 % |
+| `upsert` | 61 | 11 | 0 | 85 % | 85 % |
 
 
 ## Legend
@@ -141,7 +142,8 @@ features ship in mainline ECMA-262.
 **Rows**
 
 - **parser** — parses the source only. A pass means Cynic's parser accepts or rejects the test as the spec requires. The runtime is never invoked.
-- **runtime** — parses, compiles, and executes. A pass means the result matches the test's expectation (no error for positive tests, the right error class for negatives).
+- **runtime** — parses, compiles, and executes against an *unhardened* realm (primordials mutable, globalThis extensible — the legacy ECMAScript baseline). Same engine path as `runtime-hardened`; the difference is the SES posture, not the spec.
+- **runtime-hardened** — same as `runtime` but with the SES posture active (`realm.hardened = true`, the default for `cynic` / `cynic run`). Primordials are frozen; the override-mistake fix lets user code shadow on its own receivers. Fixtures that check spec-mandated `configurable: true` on built-in `.name` / `.length` regress under this row by design — see `docs/ses-alignment.md` Phase 1.
 
 **Columns**
 
@@ -161,6 +163,7 @@ features ship in mainline ECMA-262.
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
 | **runtime** | 92.90 % | 99.98 % | 37241 / 40089 | 37241 / 37250 | ±0 | 40.6 s |
+| **runtime_hardened** | 84.77 % | 91.23 % | 33983 / 40089 | 33983 / 37250 | n/a |  |
 
 ### 2026-05-24 — cynic `b49572e`, test262 `d0c1b455`
 

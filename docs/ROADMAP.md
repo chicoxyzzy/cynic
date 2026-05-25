@@ -124,21 +124,6 @@ code construction (aligns with SES).
 
 **In progress / planned.**
 
-- **SES-by-default — frozen primordials + override-mistake fix.**
-  Position commitment: Cynic ships hardened by default, no
-  `lockdown()` step required. Primordials get
-  `[[Extensible]] = false` and non-writable / non-configurable
-  descriptors at realm init; the override-mistake fix replaces
-  frozen-prototype data slots with accessor pairs that allow
-  instance shadowing. `harden()` global already shipped
-  (`aed6a66`). The whole SES posture toggles atomically with
-  `--unhardened` for code that needs mutable primordials;
-  `--allow=eval` stays separate because it carries compile-time
-  optimization-fence cost. Compartments deferred (need multi-realm,
-  which Cynic still punts). Full design + phase plan in
-  [docs/ses-alignment.md](ses-alignment.md). Brand bet: the
-  differentiator over "Workers / Deno / Node + @endo/ses" is that
-  Cynic ships the SES baseline natively.
 - **Incremental / concurrent GC marking.** The generational
   collector — young/mature split, write barrier, remembered set,
   `collectYoung` with promotion-by-relink — has shipped (see the
@@ -147,14 +132,36 @@ code construction (aligns with SES).
 
 **Recently landed (was in progress; now done).**
 
+- **SES baseline by default — frozen primordials + override-
+  mistake fix.** `intrinsics.freezePrimordials` runs as the last
+  step of `installBuiltins` when `realm.hardened` is true (the
+  default). Two passes: a `hardenWalk` over `globalThis` + every
+  reachable intrinsic stamps `[[Extensible]] = false` and locks
+  every descriptor `{writable: false, configurable: false}`
+  (accessors: `{configurable: false}`); then a Phase 3 pass
+  demotes each prototype's own data slot to a synthetic accessor
+  pair so `Foo.prototype.toString = fn` succeeds as instance
+  shadowing on `Foo.prototype` instead of throwing per §10.1.9.2's
+  override-mistake reject. Constructors, namespace objects
+  (`Math`, `JSON`, `Reflect`), and `globalThis` itself stay as
+  frozen data slots — direct intrinsic mutation
+  (`Array = …`, `Math.PI = 4`) still throws. The whole SES
+  posture toggles atomically with `--unhardened`; `--allow=eval`
+  stays separate because it carries compile-time optimization-
+  fence cost. Compartments deferred (need multi-realm, which
+  Cynic still punts). The test262 sweep scores both modes — the
+  `runtime` row tracks the legacy ECMAScript baseline (unhardened),
+  the `runtime-hardened` row tracks the SES posture. Brand bet
+  delivered: Cynic ships the SES baseline natively, no
+  `@endo/ses` import or `lockdown()` call required. Design +
+  phase notes in [docs/ses-alignment.md](ses-alignment.md).
+
 - **`harden()` global** — Phase 2 of the SES-by-default
-  shopping list. Native recursive deep-freeze on `globalThis`,
-  cycle-safe via a heap-pointer visited set. SES code can run
-  on Cynic without `@endo/ses` polyfill for the harden idiom;
-  Phase 1 (freeze primordials by default) and Phase 3
-  (override-mistake fix) still planned. See
-  [docs/ses-alignment.md](ses-alignment.md) for the
-  acknowledged corner-case gaps (module namespaces, Proxy
+  shopping list (`aed6a66`). Native recursive deep-freeze on
+  `globalThis`, cycle-safe via a heap-pointer visited set.
+  Reused by the Phase 1 freeze pass (`hardenWalk` is the same
+  walker). See [docs/ses-alignment.md](ses-alignment.md) for
+  the acknowledged corner-case gaps (module namespaces, Proxy
   trap routing, recursion depth).
 
 - **§9.10 KeepDuringJob for WeakRef** (`d791920`). Both the
