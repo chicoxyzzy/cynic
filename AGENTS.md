@@ -241,6 +241,7 @@ Common commands:
     zig build run -- parse <file>.mjs               # `.mjs` auto-detected as module
     zig build run -- eval '<expr>'                  # compile + run a single expression
     zig build run -- run <file>                     # compile + run a script
+    zig build run -- repl                           # interactive REPL (persistent realm)
 
 The `cynic` CLI defaults pre-Stage-4 / experimental TC39
 proposals (currently `joint-iteration`, `upsert`) to off so

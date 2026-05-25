@@ -683,7 +683,13 @@ RegExp/` test corpus is already path-skipped.
 
 **Done.**
 
-- `cynic parse <file>` / `cynic eval '<expr>'` / `cynic run <file>`.
+- `cynic parse <file>` / `cynic eval '<expr>'` / `cynic run <file>` /
+  `cynic repl` (persistent realm, microtask drain between lines,
+  `.exit` / `.quit` / Ctrl-D, `Name: message` error rendering).
+- `cynic run --dump-bytecode` disassembles compiled chunks
+  (script + every nested function template) and exits without
+  executing — useful for tracing codegen shape and verifying
+  peephole / IC work.
 - `zig build test262 -- ...` parser and runtime modes; harness
   loads `harness/sta.js` + `assert.js` automatically; per-file
   outcome on `--verbose`; failure list on `--list-failures=N`;
@@ -706,8 +712,6 @@ RegExp/` test corpus is already path-skipped.
 
 **Planned.**
 
-- REPL.
-- Disassembler integration on `cynic run --dump-bytecode`.
 - Source-map–style position info in stack traces.
 
 ## Performance
