@@ -349,9 +349,17 @@ pub const GlobalBindings = struct {
     /// added as a top-level `var` binding.
     ///   • Property already exists on the global object → OK.
     ///   • Otherwise → the global object must be extensible.
-    pub fn canDeclareGlobalVar(self: *const GlobalBindings, key: []const u8) bool {
+    ///
+    /// `hardened` opts out of the extensibility check. A hardened
+    /// realm freezes globalThis (`extensible = false`) at init,
+    /// but the host still needs to install top-level `var` /
+    /// `function` decls — the SES freeze is meant to block user
+    /// JS from poisoning globalThis via assignment, not to break
+    /// host program-level bindings.
+    pub fn canDeclareGlobalVar(self: *const GlobalBindings, key: []const u8, hardened: bool) bool {
         if (self.mapConst().contains(key)) return true;
         const t = self.target orelse return true;
+        if (hardened) return true;
         return t.extensible;
     }
 
@@ -360,11 +368,20 @@ pub const GlobalBindings = struct {
     /// global object must be extensible. If one exists, it must
     /// be configurable, or it must be a writable + enumerable
     /// data property (accessor descriptors fail outright).
-    pub fn canDeclareGlobalFunction(self: *const GlobalBindings, key: []const u8) bool {
+    ///
+    /// `hardened` — see `canDeclareGlobalVar`. Bypasses the
+    /// extensibility check on the "no existing property" branch
+    /// only; the existing-binding check stays in force so
+    /// `function Array() {}` at top level still rejects (Array is
+    /// frozen by the SES pass: non-writable + non-configurable).
+    pub fn canDeclareGlobalFunction(self: *const GlobalBindings, key: []const u8, hardened: bool) bool {
         const t = self.target orelse return true;
         const has_data = t.properties.contains(key);
         const has_accessor = t.hasAccessor(key);
-        if (!has_data and !has_accessor) return t.extensible;
+        if (!has_data and !has_accessor) {
+            if (hardened) return true;
+            return t.extensible;
+        }
         if (has_accessor) {
             const flags = t.property_flags.get(key) orelse @import("object.zig").PropertyFlags.default;
             return flags.configurable;
@@ -776,6 +793,37 @@ pub const Realm = struct {
     /// volume, simpler than threading lifetime through every
     /// `super_call` site. Each entry is a single `*bool`.
     derived_ctor_cells: std.ArrayListUnmanaged(*bool) = .empty,
+    /// SES posture toggle. When `true` (the default) the freeze
+    /// pass at the end of `installBuiltins` walks the intrinsic
+    /// graph + globalThis and stamps every reachable object /
+    /// function `[[Extensible]] = false`, every own data
+    /// descriptor `{writable: false, configurable: false}`, and
+    /// every accessor descriptor `{configurable: false}`. User-
+    /// installed `Array.prototype.X = …` etc. then throws.
+    /// `--unhardened` flips this to `false` — the freeze is a
+    /// no-op and Cynic behaves like legacy ECMAScript (mutable
+    /// primordials).
+    ///
+    /// Also consulted by `GlobalBindings.canDeclareGlobalVar` /
+    /// `canDeclareGlobalFunction`: a hardened realm freezes
+    /// globalThis (`extensible = false`), which would normally
+    /// reject every new top-level `var` / `function` declaration
+    /// via §9.1.1.4.15. The host bypasses the extensibility check
+    /// when `hardened` is true so user scripts can still declare
+    /// top-level bindings — the freeze is intended to lock the
+    /// intrinsics, not break the host's ability to install
+    /// program-level globals.
+    ///
+    /// See [docs/ses-alignment.md](../../docs/ses-alignment.md).
+    hardened: bool = true,
+    /// Phase 3 SES override-mistake fix — `freezePrimordials`
+    /// installs a `SyntheticAccessor` pair (getter + setter
+    /// JSFunctions sharing one capture cell) for every data
+    /// property on every reachable prototype. The capture cells
+    /// live as long as the realm; this list tracks them for the
+    /// teardown free. The realm owns the cells; the
+    /// `JSFunction.synth_accessor` slot is a borrow.
+    synth_accessor_cells: std.ArrayListUnmanaged(*@import("function.zig").SyntheticAccessor) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Realm {
         const heap_ptr = allocator.create(Heap) catch unreachable;
@@ -835,6 +883,11 @@ pub const Realm = struct {
             .heap = parent.heap,
             .owns_heap = false,
             .host_interrupt = parent.host_interrupt,
+            // Children inherit the SES posture of their parent —
+            // a hardened parent must not accidentally hand a
+            // mutable-primordials surface to `$262.createRealm()`
+            // and vice versa.
+            .hardened = parent.hardened,
         };
         r.globals.heap = parent.heap;
         return r;
@@ -897,6 +950,15 @@ pub const Realm = struct {
             self.allocator.destroy(cell);
         }
         self.derived_ctor_cells.deinit(self.allocator);
+        // Phase 3 — free the SES override-mistake-fix capture cells.
+        // The getter/setter JSFunctions referencing them are torn
+        // down with the heap below; freeing the cells here is
+        // safe-ordered (the heap sweep doesn't dereference
+        // `synth_accessor` after this point).
+        for (self.synth_accessor_cells.items) |cell| {
+            self.allocator.destroy(cell);
+        }
+        self.synth_accessor_cells.deinit(self.allocator);
         // Tear down child realms (created via $262.createRealm)
         // BEFORE the heap, so their globals/intrinsics maps free
         // through allocator paths that don't depend on heap state.

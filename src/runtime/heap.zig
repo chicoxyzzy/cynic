@@ -1120,6 +1120,9 @@ pub const Heap = struct {
                 if (f.bound_args) |ba| {
                     for (ba) |a| self.markValue(a);
                 }
+                // Phase 3 synthetic accessor — see
+                // `markFunctionInternalSlots` for the rationale.
+                if (f.synth_accessor) |sa| self.markValue(sa.value);
                 // The function's chunk holds heap-allocated string
                 // constants. Those JSStrings were pinned at
                 // chunk-finalize time (see `pinChunk`), so we
@@ -2401,6 +2404,12 @@ pub const Heap = struct {
             for (ba) |a| self.markValue(a);
         }
         if (f.name_string) |s| self.markString(s);
+        // Phase 3 synthetic accessor — getter holds a captured
+        // Value that must stay rooted across cycles. The cell
+        // itself rides along with the JSFunction (allocated by
+        // `freezePrimordials`, freed at realm teardown); the
+        // Value-typed `value` field is the GC-relevant edge.
+        if (f.synth_accessor) |sa| self.markValue(sa.value);
     }
 
     /// Mark the typed internal-slot pointers of a `JSGenerator`.

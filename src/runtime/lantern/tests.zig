@@ -1076,6 +1076,238 @@ test "later: harden on Array reaches nested values but not indexed slots (known 
     , 110);
 }
 
+/// Inline-test variant of `installBuiltinsAllFeatures` that
+/// drops the SES posture before installing builtins — the
+/// Phase 1 freeze pass is skipped, so primordials stay mutable.
+/// Used by the `--unhardened` parity tests below.
+fn installBuiltinsUnhardened(realm: *Realm) !void {
+    realm.feature_flags = features.FeatureSet.initFull();
+    realm.hardened = false;
+    try realm.installBuiltins();
+    try realm.installTestGlobals();
+}
+
+test "ses phase 1: hardened-default — Array.prototype assignment throws" {
+    // Phase 1 of docs/ses-alignment.md — at the tail of
+    // `installBuiltins` the engine walks the intrinsic graph and
+    // stamps every reachable object / function frozen. Writing
+    // to `Array.prototype.X` in strict mode then throws
+    // TypeError per §10.1.9 (own property is non-writable on a
+    // frozen prototype).
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    const res = try evaluateScriptResult(&realm,
+        \\let threw = 0;
+        \\try { Array.prototype.flat = () => null; } catch { threw += 1; }
+        \\try { Object.prototype.foo = 'bar'; } catch { threw += 10; }
+        \\try { Date.now = () => 0; } catch { threw += 100; }
+        \\try { String.prototype.includes = null; } catch { threw += 1000; }
+        \\threw;
+    );
+    const v = switch (res) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 1111), v.asInt32());
+}
+
+test "ses phase 1: hardened-default — globalThis is non-extensible" {
+    // Adding a brand-new property to globalThis throws because
+    // the freeze pass set `globalThis.extensible = false`. This
+    // is the property that locks the host surface against an
+    // untrusted script smuggling capabilities through bare-
+    // identifier assignment.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    const res = try evaluateScriptResult(&realm,
+        \\let threw = 0;
+        \\try { globalThis.brandNewBinding = 1; } catch { threw += 1; }
+        \\try { Array = null; } catch { threw += 10; }
+        \\threw;
+    );
+    const v = switch (res) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 11), v.asInt32());
+}
+
+test "ses phase 1: hardened-default — Object.isFrozen(Array.prototype) is true" {
+    // The whole hardened graph reports as frozen through the
+    // §20.1.2.12 spec path. A user using SES-conventional checks
+    // (`Object.isFrozen(intrinsic)`) gets the right answer
+    // without having to call `harden()` themselves.
+    try expectScriptIntWithBuiltins(
+        \\(Object.isFrozen(Array.prototype) &&
+        \\ Object.isFrozen(Object.prototype) &&
+        \\ Object.isFrozen(Array) &&
+        \\ Object.isFrozen(globalThis)) ? 1 : 0;
+    , 1);
+}
+
+test "ses phase 1: hardened-default — user-allocated objects stay mutable" {
+    // The freeze targets ONLY the intrinsic graph — every `{}`,
+    // `class`, `new`, array literal etc. allocated by user JS
+    // stays writable. Otherwise basic JS programs can't run.
+    try expectScriptIntWithBuiltins(
+        \\const obj = { a: 1 };
+        \\obj.a = 2;
+        \\obj.b = 3;
+        \\class Foo { constructor() { this.x = 0; } }
+        \\Foo.prototype.method = () => 7;
+        \\const f = new Foo();
+        \\f.x = 42;
+        \\const arr = [1, 2, 3];
+        \\arr.push(4);
+        \\(obj.a === 2 && obj.b === 3 && f.x === 42 &&
+        \\ f.method() === 7 && arr.length === 4) ? 1 : 0;
+    , 1);
+}
+
+test "ses phase 1: --unhardened — Array.prototype assignment succeeds" {
+    // Setting `realm.hardened = false` before installBuiltins
+    // skips the freeze pass. Primordials stay mutable and the
+    // same script that threw four times above succeeds silently.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsUnhardened(&realm);
+    const res = try evaluateScriptResult(&realm,
+        \\Array.prototype.flat = () => 'patched';
+        \\Object.prototype.foo = 'bar';
+        \\Date.now = () => 0;
+        \\globalThis.brandNewBinding = 99;
+        \\([1].flat === Array.prototype.flat &&
+        \\ ({}).foo === 'bar' &&
+        \\ Date.now() === 0 &&
+        \\ globalThis.brandNewBinding === 99) ? 1 : 0;
+    );
+    const v = switch (res) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 1), v.asInt32());
+}
+
+test "ses phase 1: --unhardened — Object.isFrozen(Array.prototype) is false" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsUnhardened(&realm);
+    const res = try evaluateScriptResult(&realm,
+        \\Object.isFrozen(Array.prototype) ? 1 : 0;
+    );
+    const v = switch (res) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 0), v.asInt32());
+}
+
+test "ses phase 1: --unhardened — user-allocated objects still mutable" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsUnhardened(&realm);
+    const res = try evaluateScriptResult(&realm,
+        \\const obj = { a: 1 };
+        \\obj.a = 2;
+        \\obj.b = 3;
+        \\(obj.a === 2 && obj.b === 3) ? 1 : 0;
+    );
+    const v = switch (res) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 1), v.asInt32());
+}
+
+test "ses phase 3: override-mistake fix — user class can shadow Object.prototype methods" {
+    // The canonical override mistake: `Foo.prototype.toString = fn`.
+    // Under spec-literal §10.1.9.2 step 3.b this throws because
+    // Object.prototype.toString is non-writable on the chain.
+    // Phase 3's synthetic accessor pair routes the assignment
+    // through a setter that creates an own data property on the
+    // receiver, so the shadow lands on Foo.prototype.
+    try expectScriptStringWithBuiltins(
+        \\class Foo { constructor() { this.x = 1; } }
+        \\Foo.prototype.toString = function() { return "foo"; };
+        \\(new Foo()).toString();
+    , "foo");
+}
+
+test "ses phase 3: override-mistake fix — sta.js Test262Error pattern" {
+    // The actual shape from `vendor/test262/harness/sta.js`. If
+    // this assignment throws, the entire test262 harness preamble
+    // fails to load → every fixture using assert.* false-rejects.
+    try expectScriptStringWithBuiltins(
+        \\function Test262Error(message) { this.message = message || ""; }
+        \\Test262Error.prototype.toString = function() {
+        \\  return "Test262Error: " + this.message;
+        \\};
+        \\(new Test262Error("oops")).toString();
+    , "Test262Error: oops");
+}
+
+test "ses phase 3: override-mistake fix — instance shadowing of inherited toString" {
+    // The shadow lands on the receiver, not on Object.prototype
+    // itself. Other objects keep seeing the original inherited
+    // toString.
+    try expectScriptIntWithBuiltins(
+        \\const a = {};
+        \\const b = {};
+        \\a.toString = function() { return "from-a"; };
+        \\(a.toString() === "from-a" &&
+        \\ b.toString() === "[object Object]") ? 1 : 0;
+    , 1);
+}
+
+test "ses phase 3: direct intrinsic-prototype mutation still throws" {
+    // Phase 3 only allows shadowing on downstream receivers. A
+    // user attempting to overwrite the intrinsic prototype slot
+    // itself (`Array.prototype.flat = badImpl` where the receiver
+    // IS Array.prototype) still trips the non-configurable
+    // accessor redefine and throws.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    const res = try evaluateScriptResult(&realm,
+        \\let threw = 0;
+        \\try { Array.prototype.push = () => "evil"; } catch { threw += 1; }
+        \\try { Object.prototype.toString = () => "evil"; } catch { threw += 10; }
+        \\try { String.prototype.includes = () => true; } catch { threw += 100; }
+        \\threw;
+    );
+    const v = switch (res) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 111), v.asInt32());
+}
+
+test "ses phase 3: shadowing via Reflect.set works on user receiver" {
+    // The override-mistake fix has to fire on every code path that
+    // routes through OrdinarySet — not just bare assignment. The
+    // Phase 3 dispatch lives in `callJSFunction`, so any caller of
+    // the synthetic setter sees the shadow happen.
+    try expectScriptIntWithBuiltins(
+        \\const obj = {};
+        \\const ok = Reflect.set(obj, "toString", function() { return "yes"; });
+        \\(ok && obj.toString() === "yes") ? 1 : 0;
+    , 1);
+}
+
+test "ses phase 1: harden global is itself frozen under hardened-default" {
+    // If `harden` weren't reached by the freeze pass, untrusted
+    // code could shadow `globalThis.harden = (x) => x` to defeat
+    // user-level deep-freezes. The Phase 1 walk starts from
+    // globalThis and reaches `harden` transitively.
+    try expectScriptIntWithBuiltins(
+        \\let threw = 0;
+        \\try { globalThis.harden = (x) => x; } catch { threw += 1; }
+        \\threw;
+    , 1);
+}
+
 test "later: harden of a function freezes its .prototype and own props" {
     // Functions carry an own `.prototype` object that downstream
     // `new`-construction wires up the receiver's [[Prototype]]

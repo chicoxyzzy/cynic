@@ -7227,6 +7227,19 @@ pub fn runFrames(
                         // data property. Walk the prototype chain
                         // looking for an accessor first.
                         if (acc_pair.getter) |getter| {
+                            // Phase 3 SES fast path — a synthetic
+                            // getter just returns its captured value
+                            // (no observable side effects). Skip the
+                            // call-frame setup and dispatch loop
+                            // entry; we'd just pay malloc + a 5-stage
+                            // return for what amounts to a pointer
+                            // load.
+                            if (getter.synth_accessor) |sa| {
+                                if (!sa.is_setter) {
+                                    acc = sa.value;
+                                    continue :dispatch try decodeNext(code, &ip, &committed);
+                                }
+                            }
                             const recv = acc;
                             const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
                             switch (outcome) {
@@ -7257,6 +7270,14 @@ pub fn runFrames(
                     // code reads `fn.caller` / `fn.arguments`.
                     if (lookupFunctionAccessor(fn_obj, key_s.flatBytes())) |acc_pair| {
                         if (acc_pair.getter) |getter| {
+                            // Phase 3 SES fast path — see the same
+                            // optimization in the plain-object arm.
+                            if (getter.synth_accessor) |sa| {
+                                if (!sa.is_setter) {
+                                    acc = sa.value;
+                                    continue :dispatch try decodeNext(code, &ip, &committed);
+                                }
+                            }
                             const recv = acc;
                             const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
                             switch (outcome) {

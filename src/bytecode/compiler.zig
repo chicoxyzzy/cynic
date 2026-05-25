@@ -7548,7 +7548,7 @@ pub const Compiler = struct {
         // failing-name carried into the error message matches V8's
         // when functions go first.
         for (fn_names.items) |fn_n| {
-            if (!self.realm.globals.canDeclareGlobalFunction(fn_n.name)) {
+            if (!self.realm.globals.canDeclareGlobalFunction(fn_n.name, self.realm.hardened)) {
                 self.pending_global_decl_error = fn_n.name;
                 return;
             }
@@ -7565,7 +7565,7 @@ pub const Compiler = struct {
                 break;
             };
             if (is_func) continue;
-            if (!self.realm.globals.canDeclareGlobalVar(vn.name)) {
+            if (!self.realm.globals.canDeclareGlobalVar(vn.name, self.realm.hardened)) {
                 self.pending_global_decl_error = vn.name;
                 return;
             }

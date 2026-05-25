@@ -52,6 +52,76 @@ const wrapAsyncGenerator = generator.wrapAsyncGenerator;
 const promise_mod = @import("promise.zig");
 const resumeAsyncFunction = promise_mod.resumeAsyncFunction;
 
+/// Phase 3 SES override-mistake fix — perform the synthetic
+/// setter's DefineOwnProperty step on `receiver`.
+///
+/// The semantics are §7.3.6 CreateDataPropertyOrThrow with the
+/// fresh descriptor `{value, writable: true, enumerable: true,
+/// configurable: true}`. Two failure modes surface as strict-mode
+/// TypeError (per §6.2.5.5 PutValue step 6):
+///   • The receiver already has the key as a non-configurable
+///     accessor — this is the "user wrote `Array.prototype.foo
+///     = …`" case, where dispatch reached us through the
+///     prototype's own synthetic accessor and the receiver IS
+///     that prototype. Refuse the redefine.
+///   • The receiver is non-extensible and doesn't already have
+///     an own data slot for the key.
+///
+/// Otherwise drop the value through with default flags. This is
+/// what creates the shadowing own property on a downstream user
+/// receiver (`Test262Error.prototype.toString = fn` with
+/// receiver `Test262Error.prototype`, not `Object.prototype`).
+fn syntheticSetterDispatch(
+    realm: *Realm,
+    sa: *@import("../function.zig").SyntheticAccessor,
+    receiver: Value,
+    value: Value,
+) RunError!RunResult {
+    const flags: object_mod.PropertyFlags = .{
+        .writable = true,
+        .enumerable = true,
+        .configurable = true,
+    };
+    if (heap_mod.valueAsPlainObject(receiver)) |obj| {
+        if (obj.hasAccessor(sa.key)) {
+            const cur = obj.flagsFor(sa.key);
+            if (!cur.configurable) {
+                const ex = try makeTypeError(realm, "Cannot redefine non-configurable property on frozen prototype");
+                return .{ .thrown = ex };
+            }
+        }
+        if (!obj.extensible and !obj.properties.contains(sa.key)) {
+            const ex = try makeTypeError(realm, "Cannot add property; object is not extensible");
+            return .{ .thrown = ex };
+        }
+        obj.setWithFlags(realm.allocator, sa.key, value, flags) catch return error.OutOfMemory;
+        return .{ .value = Value.undefined_ };
+    }
+    if (heap_mod.valueAsFunction(receiver)) |fn_obj| {
+        if (fn_obj.accessors.contains(sa.key)) {
+            const cur = fn_obj.flagsForOwn(sa.key);
+            if (!cur.configurable) {
+                const ex = try makeTypeError(realm, "Cannot redefine non-configurable property on frozen prototype");
+                return .{ .thrown = ex };
+            }
+        }
+        if (!fn_obj.extensible and !fn_obj.properties.contains(sa.key)) {
+            const ex = try makeTypeError(realm, "Cannot add property; function is not extensible");
+            return .{ .thrown = ex };
+        }
+        fn_obj.setWithFlags(realm.allocator, sa.key, value, flags) catch return error.OutOfMemory;
+        return .{ .value = Value.undefined_ };
+    }
+    // Primitive receiver — §10.1.9.1 OrdinarySet step 4 says
+    // assignment through a primitive wrapper succeeds-silently
+    // when the property would shadow on the wrapper. Cynic
+    // doesn't yet box every primitive into its wrapper class on
+    // assignment; for now silently no-op, matching the spec's
+    // observable end-state (the next read still sees the
+    // inherited value because no shadow was created).
+    return .{ .value = Value.undefined_ };
+}
+
 /// Unwrap a (possibly chained) bound function. Returns the
 /// real target plus the effective `this` and args. The caller
 /// owns the freshly-allocated `args` slice and must free it.
@@ -536,6 +606,21 @@ pub fn callJSFunction(
         const unwrapped = try unwrapBoundCall(allocator, callee, this_value, args, false);
         defer if (unwrapped.owns_args) allocator.free(unwrapped.args);
         return callJSFunction(allocator, realm, unwrapped.target, unwrapped.this_value, unwrapped.args);
+    }
+
+    // Phase 3 SES override-mistake fix — synthetic accessors
+    // installed by `freezePrimordials` short-circuit the native-
+    // callback path. The getter returns the captured value
+    // verbatim; the setter performs an OrdinaryDefineOwnProperty
+    // on the receiver with `{value, writable: true,
+    // enumerable: true, configurable: true}` — creating an own
+    // data property that shadows the frozen prototype slot.
+    if (callee.synth_accessor) |sa| {
+        if (sa.is_setter) {
+            const incoming = if (args.len > 0) args[0] else Value.undefined_;
+            return try syntheticSetterDispatch(realm, sa, this_value, incoming);
+        }
+        return .{ .value = sa.value };
     }
 
     if (callee.native_callback) |native| {

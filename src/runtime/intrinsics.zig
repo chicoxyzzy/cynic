@@ -521,18 +521,231 @@ pub fn install(realm: *Realm) !void {
         }
     }
 
-    // `harden(value)` — SES recursive deep-freeze. Installed last
-    // so it can walk the intrinsic graph as-is (Phase 1 of
-    // [docs/ses-alignment.md] will pre-freeze the primordials so
-    // `harden(globalThis)` becomes mostly a no-op walk; until
-    // then `harden` still works on user-allocated graphs).
-    try @import("builtins/harden.zig").install(realm);
+    // `harden(value)` — SES recursive deep-freeze. Part of the
+    // SES posture: install only when `realm.hardened` is true,
+    // matching the atomic-toggle contract documented in
+    // [AGENTS.md](../../AGENTS.md) ("`--unhardened` ⇒ primordials
+    // stay mutable, harden() isn't installed, override-mistake
+    // fix skipped"). Installed BEFORE `freezePrimordials` so the
+    // pass reaches `harden` and stamps it frozen too (otherwise
+    // untrusted user code could shadow `globalThis.harden =
+    // identity` to defeat the hardening posture).
+    if (realm.hardened) try @import("builtins/harden.zig").install(realm);
+
+    // Phase 1 of [docs/ses-alignment.md] — freeze every reachable
+    // intrinsic + `globalThis`. Gated on `realm.hardened`
+    // (default true; `--unhardened` flips it). Reuses the same
+    // walker `harden(value)` does so the freeze shape stays in
+    // lockstep with user-invoked hardening.
+    if (realm.hardened) try freezePrimordials(realm);
 
     // No catch-up pass needed — `realm.globals` is a live view
     // over the globalThis object's `properties`. Every binding
     // installed above (Map/Set/Date/Promise/__drainMicrotasks/…)
     // already lives on `gt.properties`, so `globalThis.X` reads
     // hit them directly.
+}
+
+/// Phase 1 + Phase 3 SES freeze. Two passes:
+///
+///  1. **Freeze walk** (`hardenWalk`) — stamps `[[Extensible]] =
+///     false` on every reachable object / function and locks
+///     every own descriptor `{writable: false, configurable:
+///     false}` (accessors get `{configurable: false}`). Same
+///     shape as user-invoked `harden(value)`.
+///
+///  2. **Override-mistake fix** (Phase 3) — every *prototype*
+///     object's own data descriptors are demoted to a synthetic
+///     accessor pair. The getter returns the captured value;
+///     the setter calls DefineOwnProperty on the receiver, which
+///     creates an own data property on the user receiver
+///     (shadowing the frozen prototype) instead of throwing.
+///     Only prototypes get this treatment — constructors,
+///     `globalThis`, namespace objects (`Math`, `JSON`,
+///     `Reflect`) stay as plain frozen data slots so that
+///     `Array = somethingElse` and `Math.PI = 4` continue to
+///     throw.
+///
+/// Called as the last step of `install(realm)` when
+/// `realm.hardened` is true. Skipped wholesale under
+/// `--unhardened`, where Cynic behaves like legacy ECMAScript
+/// (mutable primordials, extensible globalThis).
+///
+/// Acknowledged gaps (inherited from `hardenWalk`): module
+/// namespaces, proxy receivers, array-exotic indexed slots —
+/// none of which appear on the intrinsic graph today. See the
+/// `harden.zig` file header for the full list.
+fn freezePrimordials(realm: *Realm) !void {
+    // ── Pass 1 — deep freeze ─────────────────────────────────
+    var visited: std.AutoHashMap(usize, void) = .init(realm.allocator);
+    defer visited.deinit();
+    const hardenWalk = @import("builtins/harden.zig").hardenWalk;
+    // Walk `globalThis` first — its property bag transitively
+    // reaches every host-installed binding (`Array`, `Object`,
+    // `Math`, `harden`, …) and through each one's `.prototype`
+    // chain the full prototype graph. The visited set
+    // short-circuits the explicit per-intrinsic walk below so
+    // intrinsics reachable through globalThis aren't re-walked.
+    if (realm.globals.target) |gt| {
+        try hardenWalk(realm, heap_mod.taggedObject(gt), &visited);
+    }
+    // Belt-and-braces: a handful of intrinsics aren't reachable
+    // through globalThis (the unpinned `%ThrowTypeError%`,
+    // `%Object.prototype%` if Object's constructor was patched
+    // mid-init, …). Iterate the struct via comptime reflection
+    // so a future intrinsic addition is covered automatically.
+    inline for (@typeInfo(Intrinsics).@"struct".fields) |field| {
+        const v = @field(realm.intrinsics, field.name);
+        const T = @TypeOf(v);
+        if (T == ?*@import("object.zig").JSObject) {
+            if (v) |o| try hardenWalk(realm, heap_mod.taggedObject(o), &visited);
+        } else if (T == ?*JSFunction) {
+            if (v) |fp| try hardenWalk(realm, heap_mod.taggedFunction(fp), &visited);
+        }
+    }
+
+    // ── Pass 2 — override-mistake fix on prototype objects ───
+    //
+    // Collect every prototype the user JS can reach as
+    // `[[Prototype]]`: every `*_prototype` field on Intrinsics +
+    // every constructor's `.prototype`. Skip non-prototype
+    // intrinsics (`Math`, `JSON`, `Reflect`, the global object) so
+    // direct intrinsic mutation like `Math.PI = 4` keeps
+    // throwing per the Phase 1 freeze.
+    var proto_set: std.AutoHashMap(*JSObject, void) = .init(realm.allocator);
+    defer proto_set.deinit();
+    inline for (@typeInfo(Intrinsics).@"struct".fields) |field| {
+        const v = @field(realm.intrinsics, field.name);
+        const T = @TypeOf(v);
+        if (T == ?*JSObject) {
+            // Naming convention: every prototype intrinsic field
+            // ends in `_prototype` (`object_prototype`,
+            // `array_iterator_prototype`, …). Non-prototype
+            // JSObject fields (`throw_type_error` is a JSFunction,
+            // so it doesn't hit this arm; nothing else lives
+            // here today) are skipped.
+            if (comptime std.mem.endsWith(u8, field.name, "_prototype")) {
+                if (v) |o| try proto_set.put(o, {});
+            }
+        } else if (T == ?*JSFunction) {
+            if (v) |fn_obj| {
+                if (fn_obj.prototype) |p| try proto_set.put(p, {});
+            }
+        }
+    }
+    var it = proto_set.iterator();
+    while (it.next()) |entry| {
+        try installOverrideMistakeFix(realm, entry.key_ptr.*);
+    }
+}
+
+/// Demote each of `proto`'s own data properties to a Phase 3
+/// synthetic accessor pair so user writes through the prototype
+/// chain shadow on the receiver instead of failing the §10.1.9.2
+/// "non-writable inherited slot" rejection.
+fn installOverrideMistakeFix(realm: *Realm, proto: *JSObject) !void {
+    // Snapshot the data entries before we mutate the bag —
+    // iterating while removing would invalidate the iterator.
+    const Entry = struct {
+        key: []const u8,
+        value: Value,
+        enumerable: bool,
+    };
+    var snapshot: std.ArrayListUnmanaged(Entry) = .empty;
+    defer snapshot.deinit(realm.allocator);
+    var pit = proto.properties.iterator();
+    while (pit.next()) |e| {
+        const flags = proto.flagsFor(e.key_ptr.*);
+        try snapshot.append(realm.allocator, .{
+            .key = e.key_ptr.*,
+            .value = e.value_ptr.*,
+            .enumerable = flags.enumerable,
+        });
+    }
+    for (snapshot.items) |s| {
+        // §15.7.14 / §17 — `constructor` is the back-edge that
+        // makes `instance.constructor === MyClass` work. Demoting
+        // it to a synth accessor would route every
+        // `someInst.constructor` read through the getter. Cheap
+        // to read in cycle terms but it shows up in IC misses;
+        // leave it as a frozen data slot (and accept the
+        // override mistake for the rare `Foo.prototype.constructor
+        // = …` reassignment — that's not a hot path).
+        if (std.mem.eql(u8, s.key, "constructor")) continue;
+        try installSyntheticAccessorPair(realm, proto, s.key, s.value, s.enumerable);
+    }
+}
+
+/// Replace `proto`'s own data property `key = value` with an
+/// accessor pair `(synthGet, synthSet)`. The pair's descriptor
+/// is `{enumerable, configurable: false}` — the configurability
+/// bit stays locked so `Object.defineProperty(proto, key,
+/// {value: …})` can't put the data slot back.
+fn installSyntheticAccessorPair(
+    realm: *Realm,
+    proto: *JSObject,
+    key: []const u8,
+    value: Value,
+    enumerable: bool,
+) !void {
+    const SyntheticAccessor = @import("function.zig").SyntheticAccessor;
+    // Two cells — one per role. They share the key + value
+    // contents but each carries its own `is_setter` flag because
+    // call dispatch reads that to pick the branch.
+    const get_cell = try realm.allocator.create(SyntheticAccessor);
+    get_cell.* = .{ .value = value, .key = key, .is_setter = false };
+    try realm.synth_accessor_cells.append(realm.allocator, get_cell);
+    const set_cell = try realm.allocator.create(SyntheticAccessor);
+    set_cell.* = .{ .value = value, .key = key, .is_setter = true };
+    try realm.synth_accessor_cells.append(realm.allocator, set_cell);
+
+    // Allocate the getter / setter JSFunctions. The native body
+    // is a placeholder — call dispatch short-circuits on
+    // `synth_accessor != null` before invoking it.
+    const get_fn = try realm.heap.allocateFunctionNative(synthAccessorPlaceholder, 0, "");
+    get_fn.synth_accessor = get_cell;
+    get_fn.has_construct = false;
+    get_fn.extensible = false;
+    const set_fn = try realm.heap.allocateFunctionNative(synthAccessorPlaceholder, 1, "");
+    set_fn.synth_accessor = set_cell;
+    set_fn.has_construct = false;
+    set_fn.extensible = false;
+
+    // The shape system only models data properties; an accessor
+    // install MUST demote first or the IC's shape lookup would
+    // still serve the removed slot's stale value.
+    proto.demoteFromShape();
+    _ = proto.properties.swapRemove(key);
+    const entry = try proto.getOrPutAccessor(realm.allocator, key);
+    entry.value_ptr.* = .{ .getter = get_fn, .setter = set_fn };
+    // Accessor descriptor — `writable` is ignored, `configurable`
+    // stays false (the Phase 1 freeze applied to the underlying
+    // slot; preserving non-configurable matches the spec's
+    // observable shape and prevents the SES posture from being
+    // unwound by `Object.defineProperty`).
+    try proto.property_flags.put(realm.allocator, key, .{
+        .writable = false,
+        .enumerable = enumerable,
+        .configurable = false,
+    });
+}
+
+/// Placeholder native body for synthetic accessor closures. Call
+/// dispatch (`callJSFunction`) short-circuits on
+/// `JSFunction.synth_accessor` BEFORE reaching the native
+/// callback, so this body is never invoked in normal operation.
+/// Returning `undefined` is the safe fallback if dispatch ever
+/// misses the short-circuit (e.g. a future call path forgets
+/// the check).
+fn synthAccessorPlaceholder(
+    realm: *Realm,
+    this_value: Value,
+    args: []const Value,
+) NativeError!Value {
+    _ = realm;
+    _ = this_value;
+    _ = args;
+    return Value.undefined_;
 }
 
 /// Allocate a no-op constructor whose `.prototype` chains to

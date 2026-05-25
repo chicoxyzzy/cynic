@@ -62,6 +62,36 @@ pub const NativeFn = *const fn (
     args: []const @import("value.zig").Value,
 ) NativeError!@import("value.zig").Value;
 
+/// Per-pair state for a Phase 3 synthetic accessor (SES
+/// override-mistake fix). Two `JSFunction`s share one
+/// `*SyntheticAccessor`: the getter and the setter installed at
+/// the same `(prototype, key)` site. The getter reads `value`;
+/// the setter reads `key` and DefineOwnProperty's the receiver.
+///
+/// `key` is borrowed from the heap's interned property names —
+/// `freezePrimordials` walks `prototype.properties.keys()` which
+/// already point into heap-anchored strings, so no copy is
+/// needed and lifetime is the realm's.
+///
+/// Allocated on the realm's allocator; freed when the realm is
+/// torn down. Lifetime tied to the JSFunction GC arena — the
+/// accessor closures themselves are visible from realm.intrinsics
+/// (transitively) so a sweep can never reclaim them, and the
+/// `SyntheticAccessor` cell rides along.
+pub const SyntheticAccessor = struct {
+    /// Getter's captured return value. Marked as a root via the
+    /// `JSFunction` mark routine — see `Heap.markFunctionInternalSlots`.
+    value: Value,
+    /// Setter's DefineOwnProperty key. Slice borrows from a
+    /// heap-anchored string (typically the prototype's own
+    /// property-name slice the freeze pass replaced).
+    key: []const u8,
+    /// `true` ⇒ this JSFunction is the synthetic SETTER (call
+    /// dispatch performs the receiver-side DefineOwnProperty).
+    /// `false` ⇒ getter (call dispatch returns `value`).
+    is_setter: bool,
+};
+
 pub const JSFunction = struct {
     /// Discriminator — must remain the first field. Read by
     /// runtime checks like `valueAsFunction` to distinguish
@@ -238,6 +268,21 @@ pub const JSFunction = struct {
     /// no-op (spec step 1 — return undefined when [[RevocableProxy]]
     /// is null).
     revocable_proxy: ?*JSObject = null,
+    /// Phase 3 override-mistake fix (SES). Non-null marks this
+    /// function as a synthetic accessor installed by
+    /// `freezePrimordials` on a frozen prototype's data slot.
+    /// Call dispatch short-circuits the `native_callback` path:
+    ///   • getter ⇒ returns `captured.value` (a captured Value).
+    ///   • setter ⇒ performs DefineOwnProperty on the receiver
+    ///     with `{value: arg, writable: true, enumerable: true,
+    ///     configurable: true}` — creates an own data property
+    ///     on the receiver, shadowing the frozen prototype slot.
+    ///     If the receiver is itself the frozen holder (e.g.
+    ///     `Array.prototype.flat = badImpl`), the redefine
+    ///     attempt fails the configurability check and throws.
+    /// See [docs/ses-alignment.md](../../docs/ses-alignment.md)
+    /// Phase 3.
+    synth_accessor: ?*SyntheticAccessor = null,
     /// Function-as-object: properties set via `fn.foo = bar`.
     /// Spec: §10.2 Function objects are ordinary objects too —
     /// they support arbitrary property assignment. Without this

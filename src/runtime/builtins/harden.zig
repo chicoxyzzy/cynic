@@ -8,11 +8,13 @@
 //! A visited set keyed by heap pointer makes the walk cycle-safe.
 //!
 //! Phase 2 of [docs/ses-alignment.md](../../../docs/ses-alignment.md).
-//! Phase 1 (freeze primordials by default) hasn't shipped yet, so
-//! `harden(globalThis)` would currently traverse user-added globals
-//! too — once Phase 1 lands, the primordial walk is mostly a
-//! no-op (already frozen) and `harden(x)` becomes a useful
-//! capability-sealing primitive for hardened-JS code.
+//! Phase 1 (freeze primordials at realm init) is also shipped —
+//! `intrinsics.freezePrimordials` reuses `hardenWalk` directly,
+//! so the deep-freeze shape stays in lockstep between user-
+//! invoked `harden(value)` and the engine's startup freeze pass.
+//! `harden(globalThis)` after init is mostly a no-op walk
+//! because every reachable intrinsic is already frozen; the
+//! visited set short-circuits the redundant freezes.
 //!
 //! Known gaps (acceptable for the MVP):
 //!   - Module Namespace objects can't be made non-extensible per
@@ -63,7 +65,12 @@ fn hardenNative(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     return root;
 }
 
-fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void)) NativeError!void {
+/// Recursive deep-freeze. Public so the Phase 1 SES freeze pass
+/// (`intrinsics.freezePrimordials`) can reuse the same walker
+/// on the intrinsic graph + globalThis at realm init — the
+/// freeze shape is identical to user-invoked `harden(value)`,
+/// and a second walker would just drift over time.
+pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void)) NativeError!void {
     // Pointer identity for the visited set. Primitives have no
     // heap identity — bail before doing any work.
     const key: usize = if (heap_mod.valueAsPlainObject(v)) |o|
