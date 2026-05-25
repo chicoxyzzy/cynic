@@ -836,6 +836,7 @@ pub fn runFrames(
             },
             .lda_hole => { acc = Value.hole_; continue :dispatch try decodeNext(code, &ip, &committed); },
 
+            // ── Peephole padding ────────────────────────────────────────
             // ── Arithmetic — `acc = reg <op> acc` ───────────────────────
             // Per §13.15.4 ApplyStringOrNumericBinaryOperator the
             // helpers handle ToPrimitive / ToNumeric themselves —

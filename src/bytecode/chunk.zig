@@ -644,9 +644,98 @@ pub const Builder = struct {
         return k;
     }
 
+    fn readI16(code: []const u8, at: usize) i16 {
+        const u: u16 = @as(u16, code[at]) | (@as(u16, code[at + 1]) << 8);
+        return @bitCast(u);
+    }
+
+    /// Length-preserving peephole pass. Scans `self.code` once and
+    /// rewrites in place:
+    ///
+    /// **Jump threading** — every jump (`jmp`, `jmp_if_false`,
+    /// `jmp_if_true`, `jmp_if_nullish`) whose target is itself an
+    /// unconditional `jmp` has its operand retargeted to the
+    /// eventual landing site. Walks through chains, capped at
+    /// `max_thread_hops` to defuse pathological self-loops.
+    ///
+    /// Neither rewrite changes the byte layout — every existing jump
+    /// offset, source-position offset, and exception-handler PC stays
+    /// valid. The pass runs unconditionally from `finish`; cost is one
+    /// linear walk over the code plus one jump-chain follow per jump
+    /// instruction. The peephole is the cheapest tier of bytecode
+    /// optimisation — length-changing rewrites (`+= 1` → `inc`, dead
+    /// code after `return`, etc.) need basic-block / handler-table /
+    /// source-position update machinery the chunk doesn't have yet
+    /// and are out of scope here.
+    pub fn peephole(self: *Builder) void {
+        const max_thread_hops: u8 = 16;
+        var i: usize = 0;
+        while (i < self.code.items.len) {
+            const op: Op = @enumFromInt(self.code.items[i]);
+            const op_size = Op.operandSize(op);
+
+            switch (op) {
+                // Self-mov elimination (`mov rN rN` → nop_3) was tried
+                // but reverted: introducing same-length nop_* opcodes
+                // grew the dispatch jump table enough to regress every
+                // hot-loop bench by ~5-20% from cache layout shifts.
+                // The mov itself is already a load+store nop at runtime
+                // — the would-be savings (one dispatch round-trip per
+                // self-mov) didn't recover the cost. A length-changing
+                // rewrite (drop the bytes entirely) needs basic-block /
+                // jump-target reverse-index machinery the chunk doesn't
+                // have yet; revisit when that lands.
+                .jmp, .jmp_if_false, .jmp_if_true, .jmp_if_nullish => {
+                    // `[op] [off:i16]`. The offset is relative to the
+                    // byte AFTER the operand (matches `patchI16`).
+                    // Follow the chain: if the target is an
+                    // unconditional `jmp`, replace this op's target
+                    // with that jmp's target. Repeat until the target
+                    // is some other opcode or the hop budget runs out.
+                    const after_operand = i + 3;
+                    const cur_off = readI16(self.code.items, i + 1);
+                    const target: i64 = @as(i64, @intCast(after_operand)) + cur_off;
+                    var hops: u8 = 0;
+                    var new_target = target;
+                    while (hops < max_thread_hops) : (hops += 1) {
+                        if (new_target < 0 or
+                            new_target >= self.code.items.len) break;
+                        const t: usize = @intCast(new_target);
+                        const next_op: Op = @enumFromInt(self.code.items[t]);
+                        if (next_op != .jmp) break;
+                        // Don't thread through ourselves — the
+                        // chain's leading jump rewriting onto its own
+                        // landing would still terminate via the hop
+                        // cap, but a guard makes the intent explicit.
+                        if (t == i) break;
+                        const inner_after = t + 3;
+                        const inner_off = readI16(self.code.items, t + 1);
+                        const next_target: i64 = @as(i64, @intCast(inner_after)) + inner_off;
+                        if (next_target == new_target) break; // self-jmp
+                        new_target = next_target;
+                    }
+                    if (new_target != target) {
+                        const new_off: i64 = new_target - @as(i64, @intCast(after_operand));
+                        if (new_off >= std.math.minInt(i16) and
+                            new_off <= std.math.maxInt(i16))
+                        {
+                            const o: i16 = @intCast(new_off);
+                            const bytes = std.mem.toBytes(o);
+                            self.code.items[i + 1] = bytes[0];
+                            self.code.items[i + 2] = bytes[1];
+                        }
+                    }
+                },
+                else => {},
+            }
+            i += 1 + op_size;
+        }
+    }
+
     /// Transfer ownership of the accumulated buffers into a Chunk.
     /// The builder is empty after this call; `deinit` is a no-op.
     pub fn finish(self: *Builder) !Chunk {
+        self.peephole();
         const ics = try self.allocator.alloc(ICCell, self.inline_cache_count);
         for (ics) |*c| c.* = .{};
         const call_ics = try self.allocator.alloc(CallICCell, self.inline_call_cache_count);
@@ -711,6 +800,130 @@ test "Builder: reserveRegister grows the count" {
     try testing.expectEqual(@as(u8, 0), r0);
     try testing.expectEqual(@as(u8, 1), r1);
     try testing.expectEqual(@as(u8, 2), b.register_count);
+}
+
+test "Builder.peephole: jump threading rewrites first jump's target" {
+    var b = Builder.init(testing.allocator);
+    errdefer b.deinit();
+    const span: Span = .{ .start = 0, .end = 1 };
+
+    // jmp L1; L1: jmp L2; L2: return
+    try b.emitOp(.jmp, span);
+    const patch_a = b.here();
+    try b.emitI16(0);
+
+    const l1 = b.here();
+    try b.emitOp(.jmp, span);
+    const patch_b = b.here();
+    try b.emitI16(0);
+
+    const l2 = b.here();
+    try b.emitOp(.return_, span);
+
+    try b.patchI16(patch_a, l1);
+    try b.patchI16(patch_b, l2);
+
+    var chunk = try b.finish();
+    defer chunk.deinit(testing.allocator);
+
+    // Byte layout: jmp(0..3), jmp(3..6), return(6).
+    // After threading, the first jmp should jump straight to L2
+    // (the return). Offset is from after-operand = 3, so 6-3 = +3.
+    const got_a: i16 = @bitCast(@as(u16, chunk.code[1]) | (@as(u16, chunk.code[2]) << 8));
+    try testing.expectEqual(@as(i16, 3), got_a);
+
+    // The second jmp's operand is unchanged.
+    const got_b: i16 = @bitCast(@as(u16, chunk.code[4]) | (@as(u16, chunk.code[5]) << 8));
+    try testing.expectEqual(@as(i16, 0), got_b);
+}
+
+test "Builder.peephole: conditional jump threads through unconditional jmp" {
+    var b = Builder.init(testing.allocator);
+    errdefer b.deinit();
+    const span: Span = .{ .start = 0, .end = 1 };
+
+    // jmp_if_false L1; lda_undefined; L1: jmp L2; L2: return
+    try b.emitOp(.jmp_if_false, span);
+    const patch_a = b.here();
+    try b.emitI16(0);
+
+    try b.emitOp(.lda_undefined, span); // never targeted
+
+    const l1 = b.here();
+    try b.emitOp(.jmp, span);
+    const patch_b = b.here();
+    try b.emitI16(0);
+
+    const l2 = b.here();
+    try b.emitOp(.return_, span);
+
+    try b.patchI16(patch_a, l1);
+    try b.patchI16(patch_b, l2);
+
+    var chunk = try b.finish();
+    defer chunk.deinit(testing.allocator);
+
+    // jmp_if_false at 0, operand 1..3, lda_undefined at 3,
+    // jmp at 4, operand 5..7, return at 7.
+    // After threading, jmp_if_false's target = L2 = 7,
+    // after-operand = 3, so offset = +4.
+    const got_a: i16 = @bitCast(@as(u16, chunk.code[1]) | (@as(u16, chunk.code[2]) << 8));
+    try testing.expectEqual(@as(i16, 4), got_a);
+}
+
+test "Builder.peephole: jump threading caps self-loop and doesn't infinite-loop" {
+    var b = Builder.init(testing.allocator);
+    errdefer b.deinit();
+    const span: Span = .{ .start = 0, .end = 1 };
+
+    // L: jmp L (offset = -3 from after-operand)
+    const l = b.here();
+    try b.emitOp(.jmp, span);
+    const patch = b.here();
+    try b.emitI16(0);
+    try b.emitOp(.return_, span);
+    try b.patchI16(patch, l);
+
+    var chunk = try b.finish();
+    defer chunk.deinit(testing.allocator);
+
+    // Self-loop detected — the offset stays as it was.
+    const got: i16 = @bitCast(@as(u16, chunk.code[1]) | (@as(u16, chunk.code[2]) << 8));
+    try testing.expectEqual(@as(i16, -3), got);
+}
+
+test "Builder.peephole: conditional jump targeting a conditional jump is NOT threaded" {
+    var b = Builder.init(testing.allocator);
+    errdefer b.deinit();
+    const span: Span = .{ .start = 0, .end = 1 };
+
+    // jmp L1; L1: jmp_if_false L2; L2: return
+    // The first jump is unconditional and could thread, but the
+    // target is a CONDITIONAL jmp — threading would observe `acc`
+    // semantics that the unconditional first jump doesn't share.
+    // Leave it alone.
+    try b.emitOp(.jmp, span);
+    const patch_a = b.here();
+    try b.emitI16(0);
+
+    const l1 = b.here();
+    try b.emitOp(.jmp_if_false, span);
+    const patch_b = b.here();
+    try b.emitI16(0);
+
+    const l2 = b.here();
+    try b.emitOp(.return_, span);
+
+    try b.patchI16(patch_a, l1);
+    try b.patchI16(patch_b, l2);
+
+    var chunk = try b.finish();
+    defer chunk.deinit(testing.allocator);
+
+    // First jmp's offset is still pointing at L1 (offset 0 from
+    // after-operand at 3).
+    const got_a: i16 = @bitCast(@as(u16, chunk.code[1]) | (@as(u16, chunk.code[2]) << 8));
+    try testing.expectEqual(@as(i16, 0), got_a);
 }
 
 test "Builder: patchI16 sets a forward jump correctly" {

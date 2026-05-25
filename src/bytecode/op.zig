@@ -272,18 +272,24 @@ pub const Op = enum(u8) {
     /// strings in the array at `r_excl_arr` into a fresh object,
     /// leaving the result in `acc`. Used for `const {x, y,...rest} = src`.
     object_rest_from,
-    /// `[op] [k:u16] [r_keys_base:u8]` — instantiate a class from
-    /// `Chunk.class_templates[k]`. The heritage value (for
-    /// `class … extends X`) is read from the accumulator on entry
-    /// (the compiler emits the heritage expression immediately
-    /// before this op); when the template's `has_heritage` is
-    /// false, the accumulator is ignored. `r_keys_base` is the
-    /// first register of a contiguous block holding the
-    /// `to_property_key`-coerced computed-key values, one per
-    /// member with `computed_key_index >= 0`, in source order;
-    /// `make_class` reads them out of the enclosing frame's
+    /// `[op] [k:u16] [r_keys_base:u8] [inner_class_slot:u8]` —
+    /// instantiate a class from `Chunk.class_templates[k]`. The
+    /// heritage value (for `class … extends X`) is read from the
+    /// accumulator on entry (the compiler emits the heritage
+    /// expression immediately before this op); when the template's
+    /// `has_heritage` is false, the accumulator is ignored.
+    /// `r_keys_base` is the first register of a contiguous block
+    /// holding the `to_property_key`-coerced computed-key values,
+    /// one per member with `computed_key_index >= 0`, in source
+    /// order; `make_class` reads them out of the enclosing frame's
     /// register file. Templates without computed keys leave
-    /// `r_keys_base` as a don't-care (typically `0`). The
+    /// `r_keys_base` as a don't-care (typically `0`).
+    /// `inner_class_slot` (§15.7.14 step 27.b) is the
+    /// classScopeEnvRec slot index where the runtime publishes the
+    /// freshly constructed constructor BEFORE static fields /
+    /// static blocks run, so a static initializer referencing the
+    /// class name sees the binding live instead of in TDZ.
+    /// Sentinel `0xFF` for anonymous classes (no inner env). The
     /// resulting class constructor lands in `acc`. §15.7.14
     /// OrdinaryClassDefinition mirrors in `runtime/class.zig`.
     make_class,
@@ -1016,8 +1022,8 @@ pub const Op = enum(u8) {
             .module_reexport_named => 4, // local_k:u16 + exported_k:u16
             .capture_unresolved_global,
             .sta_global_strict,
-            .make_class,
             => 3, // k:u16 + r:u8
+            .make_class => 4, // k:u16 + r_keys_base:u8 + inner_class_slot:u8
             .call,
             .new_call,
             .super_call,

@@ -108,7 +108,12 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
             .make_class => {
                 const k = readU16(chunk.code, i + 1);
                 const r_keys_base = chunk.code[i + 3];
-                try buf.print(allocator, " c{d} keys=r{d}", .{ k, r_keys_base });
+                const inner_slot = chunk.code[i + 4];
+                if (inner_slot == 0xff) {
+                    try buf.print(allocator, " c{d} keys=r{d}", .{ k, r_keys_base });
+                } else {
+                    try buf.print(allocator, " c{d} keys=r{d} inner=s{d}", .{ k, r_keys_base, inner_slot });
+                }
             },
             .super_get => {
                 const k = readU16(chunk.code, i + 1);
