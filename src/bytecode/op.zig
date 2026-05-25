@@ -1226,4 +1226,16 @@ test "Op: operandSize agrees with the documented encoding" {
     // of operand. Same disassembler-PC-walk hazard as `lda_property`
     // if this gets out of sync with the encoding.
     try testing.expectEqual(@as(u8, 5), Op.operandSize(.sta_property));
+    // `make_class` is `[op] [k:u16] [r_keys_base:u8] [inner_class_slot:u8]`
+    // — 4 bytes of operand (§15.7.14 step 27.b). Was 3 in an
+    // earlier revision; disasm walked off any MakeClass boundary
+    // (interpreter advances explicitly, so the bug was only
+    // user-visible through `cynic run --dump-bytecode` / playground
+    // hover). Pinned to catch any future operand-shape drift.
+    try testing.expectEqual(@as(u8, 4), Op.operandSize(.make_class));
+    // `loop_inc_lt` is `[op] [r_counter:u8] [r_bound:u8] [back_offset:i16]`
+    // — 4 bytes of operand. Counter-loop specialization (ROADMAP
+    // item #6); fused increment + compare + back-jump for the
+    // canonical `for (let i = INT; i < INT; i++)` shape.
+    try testing.expectEqual(@as(u8, 4), Op.operandSize(.loop_inc_lt));
 }

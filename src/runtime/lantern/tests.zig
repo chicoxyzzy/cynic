@@ -1044,6 +1044,56 @@ test "later: harden of a primitive is a no-op" {
     , 1);
 }
 
+test "later: harden on Array reaches nested values but not indexed slots (known gap)" {
+    // Pins current MVP harden behaviour on §10.4.2 Array exotics:
+    //
+    //   `a[0].x = 9`    throws (the walk recurses through the
+    //                   element's value and freezes the nested
+    //                   object). ✓
+    //   `a.push(3)`     throws (root is non-extensible). ✓
+    //   `a[0] = 9`      **does NOT throw** — the indexed slot
+    //                   itself lives in `obj.elements`, not
+    //                   `obj.properties`, so harden's bag-only
+    //                   walk doesn't reach it. Object.freeze
+    //                   handles this via `lowerArrayIndexedFlags`
+    //                   which demotes each indexed slot into the
+    //                   bag with `{w:false, c:false}`. Wiring
+    //                   that into harden is a follow-up — see
+    //                   src/runtime/builtins/harden.zig for the
+    //                   acknowledged-gaps list.
+    //
+    // Expected = 10 (nested freeze) + 100 (non-extensible) = 110.
+    // When the array gap closes, the indexed-write also throws
+    // and this test flips to 111.
+    try expectScriptIntWithBuiltins(
+        \\const a = [{x: 1}, {x: 2}];
+        \\harden(a);
+        \\let r = 0;
+        \\try { a[0] = 9; } catch { r += 1; }
+        \\try { a[0].x = 9; } catch { r += 10; }
+        \\try { a.push(3); } catch { r += 100; }
+        \\r;
+    , 110);
+}
+
+test "later: harden of a function freezes its .prototype and own props" {
+    // Functions carry an own `.prototype` object that downstream
+    // `new`-construction wires up the receiver's [[Prototype]]
+    // to. Hardening the function must also reach .prototype +
+    // every accessor pair so that `MyClass.prototype.bar = …`
+    // doesn't slip through.
+    try expectScriptIntWithBuiltins(
+        \\function MakePoint(x, y) { this.x = x; this.y = y; }
+        \\MakePoint.prototype.greet = function() { return "hi"; };
+        \\harden(MakePoint);
+        \\let r = 0;
+        \\try { MakePoint.tag = 1; } catch { r += 1; }
+        \\try { MakePoint.prototype.greet = null; } catch { r += 10; }
+        \\try { MakePoint.prototype.added = 1; } catch { r += 100; }
+        \\r;
+    , 111);
+}
+
 test "later: AsyncGeneratorFunction constructor is reachable via instance proto" {
     try expectScriptStringWithBuiltins(
         \\const f = async function* () {};

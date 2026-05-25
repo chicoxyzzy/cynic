@@ -22,6 +22,19 @@
 //!     Proxy.harden would route through the trap; defer.
 //!   - Recursion uses the Zig stack; pathological depth would
 //!     overflow. Real-world capability graphs are shallow.
+//!   - Array-exotic indexed slots (§10.4.2) live in
+//!     `obj.elements`, not `obj.properties`, so the bag-only
+//!     walk below misses them. The root array becomes non-
+//!     extensible and the *values* at each slot freeze
+//!     transitively (good), but `a[0] = …` doesn't throw on
+//!     a hardened array because the slot's flags weren't
+//!     stamped. `Object.freeze` handles this via
+//!     `lowerArrayIndexedFlags` (in builtins/object.zig) which
+//!     demotes each indexed slot into the bag with
+//!     `{writable: false, configurable: false}`. Wire that into
+//!     the array branch when extending. Test
+//!     `harden on Array reaches nested values but not indexed
+//!     slots (known gap)` pins the current behaviour.
 
 const std = @import("std");
 
