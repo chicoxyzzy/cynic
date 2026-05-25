@@ -30,6 +30,10 @@
 //!                           (pre-Stage-4 fixtures excluded). `--phase=feature:<name>`
 //!                           runs only that proposal's dedicated sweep (only its
 //!                           realm flag on, only its tagged fixtures included).
+//!                           `--phase=unhardened` runs the main fixture set against
+//!                           a realm with `realm.hardened = false` — confirms the
+//!                           `--unhardened` opt-out keeps fixtures alive that
+//!                           regress under the hardened-default freeze pass.
 //!                           Default: just main, unless `--write-results` is set —
 //!                           then main + every tracked feature in sequence.
 //!
@@ -246,6 +250,9 @@ fn test262CreateRealm(
     _ = this_value;
     _ = args;
     const child_ptr = realm.allocator.create(cynic.runtime.Realm) catch return error.OutOfMemory;
+    // `initChild` propagates the parent's SES posture
+    // (`realm.hardened`) so a hardened parent doesn't accidentally
+    // hand the child a mutable-primordials surface.
     child_ptr.* = cynic.runtime.Realm.initChild(realm);
     // installBuiltins wires every intrinsic constructor onto the
     // child's globals and stashes them in `child.intrinsics`.
@@ -411,7 +418,42 @@ const SkipReason = enum {
     out_of_phase,
 };
 
-const Mode = enum { parser, runtime };
+/// Mode identifies whether the sweep parses (and stops) or
+/// executes each fixture. Composes with `Posture` (SES posture)
+/// to form the score-row identity.
+const Mode = enum {
+    parser,
+    runtime,
+    /// "runtime under the SES posture" — same engine path as
+    /// `.runtime`, but the realm runs with `realm.hardened = true`
+    /// (the default install). Distinct from `.runtime` so the
+    /// existing `runtime` row in `test262-results.md` keeps its
+    /// historical meaning (legacy ECMAScript primordials,
+    /// extensible globalThis) while the SES-posture sweep gets
+    /// its own row.
+    runtime_hardened,
+
+    /// Render the mode as it appears in `test262-results.md`
+    /// score rows and headers. Matches the historical labels
+    /// where they exist.
+    fn label(self: Mode) []const u8 {
+        return switch (self) {
+            .parser => "parser",
+            .runtime => "runtime",
+            .runtime_hardened => "runtime-hardened",
+        };
+    }
+
+    /// Mode that drives the actual engine path. Both runtime
+    /// modes execute the fixture; parser is parser-only. The
+    /// SES posture lives on the Phase, not the engine path.
+    fn enginePath(self: Mode) Mode {
+        return switch (self) {
+            .parser => .parser,
+            .runtime, .runtime_hardened => .runtime,
+        };
+    }
+};
 
 const Options = struct {
     corpus: []const u8 = "vendor/test262/test",
@@ -725,13 +767,20 @@ const PreStage4Stats = struct {
 const Phase = union(enum) {
     main,
     feature: cynic.runtime.FeatureFlag,
+    /// SES Phase 1 relaxation sweep. Runs the main-phase fixture
+    /// set against a realm with `realm.hardened = false` so the
+    /// Phase 1 freeze pass is skipped — confirms fixtures that
+    /// monkey-patch primordials (and therefore regress under the
+    /// hardened default) come back to life with the single
+    /// `--unhardened` opt-out. Selected via `--phase=unhardened`.
+    unhardened,
 
-    /// FeatureSet to install on the per-fixture realm. Main
-    /// returns empty (no proposals); a feature phase returns a
-    /// singleton set with only its flag.
+    /// FeatureSet to install on the per-fixture realm. Main +
+    /// unhardened return empty (no proposals); a feature phase
+    /// returns a singleton set with only its flag.
     fn realmFeatures(self: Phase) cynic.runtime.FeatureSet {
         return switch (self) {
-            .main => cynic.runtime.FeatureSet.initEmpty(),
+            .main, .unhardened => cynic.runtime.FeatureSet.initEmpty(),
             .feature => |f| blk: {
                 var s = cynic.runtime.FeatureSet.initEmpty();
                 s.insert(f);
@@ -740,13 +789,25 @@ const Phase = union(enum) {
         };
     }
 
+    /// Whether per-fixture realms run with the SES posture
+    /// disabled. Only the `.unhardened` phase flips this; main
+    /// and feature phases score the engine as embedders see it
+    /// by default (hardened).
+    fn realmHardened(self: Phase) bool {
+        return switch (self) {
+            .unhardened => false,
+            .main, .feature => true,
+        };
+    }
+
     /// Phase membership predicate for a fixture, given its
-    /// pre-Stage-4 frontmatter bitmask. Main admits only fixtures
-    /// that reference no tracked proposal (mask == 0); a feature
-    /// phase admits only fixtures whose mask has the matching bit.
+    /// pre-Stage-4 frontmatter bitmask. Main + unhardened admit
+    /// only fixtures that reference no tracked proposal
+    /// (mask == 0); a feature phase admits only fixtures whose
+    /// mask has the matching bit.
     fn includesFixture(self: Phase, pre_stage4_mask: PreStage4Mask) bool {
         return switch (self) {
-            .main => pre_stage4_mask == 0,
+            .main, .unhardened => pre_stage4_mask == 0,
             .feature => |f| has: {
                 const idx: usize = @intFromEnum(f);
                 const bit = @as(PreStage4Mask, 1) << @intCast(idx);
@@ -758,11 +819,13 @@ const Phase = union(enum) {
     /// Short label for progress prefixes and the per-phase tally
     /// banner. `"main"` for the headline sweep; the feature's
     /// `name()` (kebab-case, same string as the test262
-    /// frontmatter `features:` tag) for proposal sweeps.
+    /// frontmatter `features:` tag) for proposal sweeps;
+    /// `"unhardened"` for the SES-relaxation sweep.
     fn label(self: Phase) []const u8 {
         return switch (self) {
             .main => "main",
             .feature => |f| f.name(),
+            .unhardened => "unhardened",
         };
     }
 };
@@ -865,7 +928,7 @@ pub fn main(init: std.process.Init) !void {
     // every test source in runtime mode unless `--no-harness`.
     var harness_sources: ?harness_mod.HarnessSources = null;
     defer if (harness_sources) |*h| h.deinit(gpa);
-    if (opts.mode == .runtime and opts.preload_harness) {
+    if (opts.mode.enginePath() == .runtime and opts.preload_harness) {
         var harness_dir = cwd.openDir(io, opts.harness_dir, .{ .iterate = true }) catch |err| {
             var line: [512]u8 = undefined;
             const msg = try std.fmt.bufPrint(&line, "error: cannot open harness '{s}': {t}\n", .{ opts.harness_dir, err });
@@ -881,30 +944,44 @@ pub fn main(init: std.process.Init) !void {
         };
     }
 
-    // Phase plan. Default: just main. With `--write-results` (and
-    // no explicit `--phase`), populate every row of the per-feature
-    // scoreboard by running main + every tracked feature in its
-    // own sweep. An explicit `--phase` pins us to that one.
+    // Phase plan. Default: main (hardened) + unhardened — both
+    // SES postures get scored on every sweep so
+    // `test262-results.md` shows the engine's compliance with
+    // both the SES-by-default position and the unhardened
+    // baseline. With `--write-results` (and no explicit
+    // `--phase`), additionally populate every row of the per-
+    // feature scoreboard by running each tracked proposal in
+    // its own sweep. An explicit `--phase` pins us to that one.
+    //
+    // Per-feature phases run under the unhardened path so the
+    // proposal scoreboard isn't dragged down by SES descriptor-
+    // shape regressions — each proposal is scored against bare
+    // ECMA-262 with only its one flag enabled, mirroring how an
+    // embedder would evaluate the feature in isolation.
     const tracked_count = @typeInfo(cynic.runtime.FeatureFlag).@"enum".fields.len;
-    var phases_buf: [tracked_count + 1]Phase = undefined;
+    var phases_buf: [tracked_count + 2]Phase = undefined;
     var phases_len: usize = 0;
     if (opts.phase) |p| {
         phases_buf[0] = p;
         phases_len = 1;
     } else if (opts.write_results) {
         phases_buf[0] = .main;
-        phases_len = 1;
+        phases_buf[1] = .unhardened;
+        phases_len = 2;
         inline for (@typeInfo(cynic.runtime.FeatureFlag).@"enum".fields) |f| {
             phases_buf[phases_len] = .{ .feature = @enumFromInt(f.value) };
             phases_len += 1;
         }
     } else {
         phases_buf[0] = .main;
-        phases_len = 1;
+        phases_buf[1] = .unhardened;
+        phases_len = 2;
     }
 
     var main_result: ?PhaseResult = null;
     defer if (main_result) |*r| r.deinit(gpa);
+    var unhardened_result: ?PhaseResult = null;
+    defer if (unhardened_result) |*r| r.deinit(gpa);
     var feature_results: [tracked_count]?PhaseResult = @splat(null);
     defer for (&feature_results) |*slot| if (slot.*) |*pr| pr.deinit(gpa);
 
@@ -920,13 +997,21 @@ pub fn main(init: std.process.Init) !void {
                 if (feature_results[idx]) |*old| old.deinit(gpa);
                 feature_results[idx] = res;
             },
+            .unhardened => {
+                if (unhardened_result) |*old| old.deinit(gpa);
+                unhardened_result = res;
+            },
         }
     }
 
-    // Score-row write: only off the main phase. Pre-Stage-4 per-feature
-    // rows come from the dedicated phase sweeps we just ran (each in a
-    // realm with only its one flag enabled), folded into a
-    // `PreStage4Stats` for `writeResults`.
+    // Score-row write: both runtime modes (SES posture and the
+    // unhardened legacy baseline) get their own rows on every
+    // write. Pre-Stage-4 per-feature rows come from the dedicated
+    // phase sweeps we just ran (each in a realm with only its one
+    // flag enabled), folded into a `PreStage4Stats` for
+    // `writeResults`. The per-feature scoreboard belongs with the
+    // unhardened row since the feature phases run on the
+    // unhardened path.
     if (opts.write_results) {
         var pre_stage4: PreStage4Stats = .{};
         for (feature_results, 0..) |maybe_r, i| {
@@ -940,11 +1025,27 @@ pub fn main(init: std.process.Init) !void {
                 };
             }
         }
+        const is_full = opts.filter == null and !opts.only_failing;
+        const now_ts = std.Io.Clock.now(.real, io);
+        // SES-posture row (hardened by default). Always derived
+        // from the `.main` phase result regardless of `opts.mode`
+        // because that phase runs with `realm.hardened = true`.
+        // For parser-mode sweeps, fall back to the user's mode
+        // label (SES posture is irrelevant when we don't execute).
         if (main_result) |*mr| {
-            const is_full = opts.filter == null and !opts.only_failing;
             const elapsed_for_row: ?u64 = if (is_full and mr.elapsed_ms > 0) @intCast(mr.elapsed_ms) else null;
-            const now_ts = std.Io.Clock.now(.real, io);
-            try writeResults(gpa, io, &mr.stats, &mr.buckets, &pre_stage4, now_ts.toSeconds(), opts.mode, elapsed_for_row);
+            const row_mode: Mode = if (opts.mode == .parser) .parser else .runtime_hardened;
+            // Pre-stage-4 scoreboard is unhardened-only (see
+            // above); a hardened row gets an empty
+            // `PreStage4Stats` slot so the writer doesn't restamp
+            // the per-feature table with the SES-posture numbers.
+            const empty_pre_stage4: PreStage4Stats = .{};
+            try writeResults(gpa, io, &mr.stats, &mr.buckets, &empty_pre_stage4, now_ts.toSeconds(), row_mode, elapsed_for_row);
+        }
+        // Unhardened (legacy) row + the per-feature scoreboard.
+        if (unhardened_result) |*ur| {
+            const elapsed_for_row: ?u64 = if (is_full and ur.elapsed_ms > 0) @intCast(ur.elapsed_ms) else null;
+            try writeResults(gpa, io, &ur.stats, &ur.buckets, &pre_stage4, now_ts.toSeconds(), .runtime, elapsed_for_row);
         }
     }
 
@@ -1117,7 +1218,7 @@ fn runSweep(
             const fx_rss_pre: u64 = if (opts.top_rss > 0) (currentRssMb() orelse 0) else 0;
             const need_mem = opts.mem_summary or opts.top_alloc > 0 or opts.top_gc_time > 0;
             var fx_mem: FixtureMem = .{};
-            const outcome = try classifyAndRun(arena, bytes_allocator, io, corpus, rel, opts.mode, harness_pair, opts.gc_threshold, opts.gc_stats, if (need_mem) &fx_mem else null, phase);
+            const outcome = try classifyAndRun(arena, bytes_allocator, io, corpus, rel, opts.mode.enginePath(), harness_pair, opts.gc_threshold, opts.gc_stats, if (need_mem) &fx_mem else null, phase);
             if (need_mem) {
                 mem_agg.add(fx_mem);
                 if (opts.top_alloc > 0) {
@@ -1619,7 +1720,7 @@ fn workerLoop(
         const fx_rss_pre: u64 = if (ctx.opts.top_rss > 0) (currentRssMb() orelse 0) else 0;
         // Workers don't participate in `--mem-summary` / `--top-alloc`
         // (single-thread only — those flags pin `--threads=1` upstream).
-        const outcome = classifyAndRun(arena, ctx.gpa, ctx.io, ctx.corpus, rel, ctx.opts.mode, ctx.harness_sources, ctx.opts.gc_threshold, ctx.opts.gc_stats, null, ctx.phase) catch |err| {
+        const outcome = classifyAndRun(arena, ctx.gpa, ctx.io, ctx.corpus, rel, ctx.opts.mode.enginePath(), ctx.harness_sources, ctx.opts.gc_threshold, ctx.opts.gc_stats, null, ctx.phase) catch |err| {
             if (err == error.OutOfMemory) return err;
             try recordOutcome(ctx.gpa, stats, buckets, failures, pass_paths, rel, .{ .kind = .fail_false_reject }, ctx.is_full_run);
             continue;
@@ -1824,6 +1925,12 @@ fn classifyAndRun(
     // that one flag, so the per-feature scoreboard reflects each
     // proposal honestly in isolation.
     realm.feature_flags = phase.realmFeatures();
+    // The `unhardened` phase flips the SES posture before
+    // intrinsic install so the Phase 1 freeze pass is skipped —
+    // fixtures that monkey-patch primordials should pass here
+    // even when they regress under the hardened-default main
+    // sweep.
+    realm.hardened = phase.realmHardened();
     realm.installBuiltins() catch return .{ .kind = .fail_false_reject };
     // test262 fixtures use `__collectGarbage` / `__clearKeptObjects`
     // / `__drainMicrotasks` for deterministic triggering — debug
@@ -2894,7 +3001,7 @@ fn writeFileBody(
         \\|---|---|---|---|---|
         \\
     );
-    inline for (.{ Mode.parser, Mode.runtime }) |m| {
+    inline for (.{ Mode.parser, Mode.runtime, Mode.runtime_hardened }) |m| {
         if (latestRow(rows, m)) |r| try writeMiniRow(gpa, out, r);
     }
     try out.append(gpa, '\n');
@@ -2927,7 +3034,8 @@ fn writeFileBody(
         \\**Rows**
         \\
         \\- **parser** — parses the source only. A pass means Cynic's parser accepts or rejects the test as the spec requires. The runtime is never invoked.
-        \\- **runtime** — parses, compiles, and executes. A pass means the result matches the test's expectation (no error for positive tests, the right error class for negatives).
+        \\- **runtime** — parses, compiles, and executes against an *unhardened* realm (primordials mutable, globalThis extensible — the legacy ECMAScript baseline). Same engine path as `runtime-hardened`; the difference is the SES posture, not the spec.
+        \\- **runtime-hardened** — same as `runtime` but with the SES posture active (`realm.hardened = true`, the default for `cynic` / `cynic run`). Primordials are frozen; the override-mistake fix lets user code shadow on its own receivers. Fixtures that check spec-mandated `configurable: true` on built-in `.name` / `.length` regress under this row by design — see `docs/ses-alignment.md` Phase 1.
         \\
         \\**Columns**
         \\
@@ -3421,6 +3529,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             const spec = arg["--phase=".len..];
             if (std.mem.eql(u8, spec, "main")) {
                 opts.phase = .main;
+            } else if (std.mem.eql(u8, spec, "unhardened")) {
+                opts.phase = .unhardened;
             } else if (std.mem.startsWith(u8, spec, "feature:")) {
                 const fname = spec["feature:".len..];
                 const flag = cynic.runtime.FeatureFlag.fromName(fname) orelse {
@@ -3429,7 +3539,7 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
                 };
                 opts.phase = .{ .feature = flag };
             } else {
-                std.debug.print("error: --phase expects 'main' or 'feature:<name>', got '{s}'\n", .{spec});
+                std.debug.print("error: --phase expects 'main', 'unhardened', or 'feature:<name>', got '{s}'\n", .{spec});
                 std.process.exit(1);
             }
         }
