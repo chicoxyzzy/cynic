@@ -127,8 +127,10 @@ These are project rules — they apply to everyone.
     `--unhardened` would impose that cost on users who just want
     mutable primordials.
   Three distinct CLI verbs to keep separate: **`--enable=<name>`**
-  turns on a not-yet-stable spec feature (`joint-iteration`,
-  `upsert`); **`--unhardened`** is the SES-posture toggle;
+  turns on a not-yet-stable spec feature (`joint-iteration` is
+  the only one shipping today; `upsert` graduated to default-on
+  in 2026-05 when it advanced to Stage 4); **`--unhardened`** is
+  the SES-posture toggle;
   **`--allow=<name>`** relaxes a default-on restriction (only
   `--allow=eval` lives here today). See
   [docs/ses-alignment.md](docs/ses-alignment.md) for the
@@ -244,8 +246,9 @@ Common commands:
     zig build run -- repl                           # interactive REPL (persistent realm)
 
 The `cynic` CLI defaults pre-Stage-4 / experimental TC39
-proposals (currently `joint-iteration`, `upsert`) to off so
-embedders see only stable ECMA-262. Opt in:
+proposals (currently `joint-iteration`; `upsert` graduated
+to default-on when it advanced to Stage 4 in 2026-05) to off
+so embedders see only stable ECMA-262. Opt in:
 
     cynic --enable=<name> run foo.js                # one feature
     cynic --enable-experimental run foo.js          # all tracked features

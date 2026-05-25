@@ -524,12 +524,6 @@ place to revisit. The current set:
   (SES alignment), so the helper can obtain no intrinsic at all.
   Off by default in the CLI and excluded from headline
   conformance.
-- **`upsert`** (Stage 3) — `Map.prototype.{getOrInsert,
-  getOrInsertComputed}` and the corresponding pair on
-  `WeakMap.prototype`. Installer in
-  `src/runtime/builtins/collections.zig`. Atomic "get value at
-  key, or insert default if absent."
-
 Revisit this list each TC39 meeting cycle. If a proposal stalls,
 demotes, or its semantics flip, follow the comment trail in the
 installer and either back the change out or update.

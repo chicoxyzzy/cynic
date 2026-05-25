@@ -914,7 +914,6 @@ pub const skip_ses_features = [_][]const u8{
 
 pub const skip_stage_maturity_features = [_][]const u8{
     "decorators", // Stage 3 — class decorator grammar.
-    "explicit-resource-management", // Stage 3 — `using` / `await using`.
     "import-defer", // Stage 3 — `import defer * as ns from "…"`.
     "source-phase-imports", // Stage 3 — `import source x from "…"`.
     // Stage 3 `import-bytes` — `import data from "./x.png" with {
@@ -981,6 +980,15 @@ pub const skip_planned_features = [_][]const u8{
     // `built-ins/JSON/parse/reviver-context-*` +
     // `reviver-{forward,call-args}-*`.
     "json-parse-with-source",
+    // Stage 4 (expected publication 2027) — `using` / `await using`
+    // grammar + `DisposableStack`, `AsyncDisposableStack`,
+    // `SuppressedError`, `Symbol.dispose` / `Symbol.asyncDispose`.
+    // Cynic ships none of it yet — large surface, separate effort.
+    // ~478 fixtures. Downgraded from `skip_stage_maturity_features`
+    // on 2026-05-26 per `docs/handbook/ses-test262-policy.md`
+    // Phase 0a audit; the proposal advanced to Stage 4 in early
+    // 2025 but Cynic's classification hadn't caught up.
+    "explicit-resource-management",
 };
 
 pub const skip_planned_paths = [_][]const u8{

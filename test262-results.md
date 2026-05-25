@@ -134,7 +134,6 @@ features ship in mainline ECMA-262.
 | feature | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | `joint-iteration` | 70 | 8 | 0 | 90 % | 90 % |
-| `upsert` | 61 | 11 | 0 | 85 % | 85 % |
 
 
 ## Legend

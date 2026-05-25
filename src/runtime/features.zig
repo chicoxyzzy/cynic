@@ -27,17 +27,12 @@ pub const FeatureFlag = enum {
     /// `Iterator.zipKeyed(iterables, options?)`. Stage 3 as of
     /// 2026-05. Installer site: `src/runtime/builtins/iterator.zig`.
     joint_iteration,
-    /// `Map.prototype.{getOrInsert, getOrInsertComputed}` and the
-    /// corresponding pair on `WeakMap.prototype`. Stage 3 as of
-    /// 2026-05. Installer site: `src/runtime/builtins/collections.zig`.
-    upsert,
 
     /// CLI flag / test262 `features:` frontmatter name (kebab-case,
     /// matching the upstream tc39/test262 convention).
     pub fn name(self: FeatureFlag) []const u8 {
         return switch (self) {
             .joint_iteration => "joint-iteration",
-            .upsert => "upsert",
         };
     }
 
@@ -45,7 +40,6 @@ pub const FeatureFlag = enum {
     pub fn description(self: FeatureFlag) []const u8 {
         return switch (self) {
             .joint_iteration => "Iterator.zip / Iterator.zipKeyed (Stage 3)",
-            .upsert => "Map / WeakMap.prototype.getOrInsert{,Computed} (Stage 3)",
         };
     }
 
