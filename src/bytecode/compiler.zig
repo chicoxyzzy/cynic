@@ -505,6 +505,15 @@ pub const Compiler = struct {
     /// Script bindings). Both append a `throw_if_hole` for `let`
     /// / `const` to enforce §13.3.1 TDZ.
     fn emitLoadBinding(self: *Compiler, binding: Binding, span: Span) !void {
+        if (binding.is_register) {
+            // Register-promoted binding — used by the fused
+            // counter-loop path. No TDZ probe: the loop's init
+            // writes the slot before any read, and the body is
+            // statically verified to neither shadow nor write `i`.
+            try self.builder.emitOp(.ldar, span);
+            try self.builder.emitU8(binding.register);
+            return;
+        }
         if (binding.is_import) {
             // §8.1.1.5.5 CreateImportBinding — indirect alias.
             // Resolve at every read so the importer sees the live
@@ -571,6 +580,17 @@ pub const Compiler = struct {
     }
 
     fn emitStoreBindingMode(self: *Compiler, binding: Binding, span: Span, is_init: bool) !void {
+        if (binding.is_register) {
+            // Register-promoted binding (fused counter-loop). All
+            // writes go straight to the register file; const /
+            // TDZ checks don't apply because the path that creates
+            // this binding statically guarantees a single init
+            // followed by interpreter-managed updates inside
+            // `loop_inc_lt`. `is_init` distinction is irrelevant.
+            try self.builder.emitOp(.star, span);
+            try self.builder.emitU8(binding.register);
+            return;
+        }
         if (binding.is_fn_expr_name) {
             // §15.6.5 — the named-function-expression self-binding
             // is immutable. §8.1.1.1.4 SetMutableBinding step 9.b on
@@ -10017,7 +10037,437 @@ pub const Compiler = struct {
         }
     }
 
+    /// Pattern-match `for (let i = INT; i < INT; i++) BODY` and
+    /// emit a fused `loop_inc_lt` tail in place of the seven-opcode
+    /// `add 1; star; ldar; lt; jmp_if_true` sequence. Returns
+    /// `true` when the fused form was emitted; `false` when any
+    /// pattern check failed and the caller should fall back to the
+    /// legacy ForStatement path. Hermes ships the same shape as
+    /// `JLessNLong`; V8 Ignition has a `Jump…IncIfTrue` family.
+    /// See [docs/ROADMAP.md](../../docs/ROADMAP.md) item 6 under
+    /// interpreter-tier optimizations.
+    ///
+    /// Pattern requirements:
+    ///   1. Head: `let <id> = <int literal>` (single declarator,
+    ///      identifier target, integer-valued initialiser).
+    ///   2. Test: `<id> < <int literal>` — only the strict-less-
+    ///      than form qualifies; `<=` falls back to the legacy path
+    ///      (the fused opcode encodes a `<` comparison).
+    ///   3. Update: `<id>++` or `++<id>` (prefix / postfix — the
+    ///      for-update slot discards the expression value, so both
+    ///      forms have identical observable effect).
+    ///   4. Body: no assignment / update / compound-op targeting
+    ///      `<id>`, and no function / arrow / class expression
+    ///      whose body or params mention `<id>` (a closure would
+    ///      attempt to capture the register-promoted binding, which
+    ///      isn't in any env chain).
+    fn tryCompileFusedCounterLoop(self: *Compiler, s: ast.statement.ForStmt) CompileError!bool {
+        // 1. Init shape.
+        const head = s.init orelse return false;
+        const lex = switch (head) {
+            .lexical => |ld| ld,
+            .expression => return false,
+        };
+        if (lex.kind != .let_) return false;
+        if (lex.declarators.len != 1) return false;
+        const decl = lex.declarators[0];
+        const counter_ident = switch (decl.name) {
+            .identifier => |id| id,
+            else => return false,
+        };
+        const init_expr = blk: {
+            if (decl.init) |*e| break :blk e;
+            return false;
+        };
+        const init_val = self.intLiteralValue(init_expr) orelse return false;
+        const counter_name = try self.bindingName(counter_ident.span);
+
+        // 2. Test shape.
+        const test_expr = s.test_ orelse return false;
+        const bin = switch (test_expr) {
+            .binary => |b| b,
+            else => return false,
+        };
+        if (bin.op != .lt) return false;
+        if (bin.lhs.* != .identifier_reference) return false;
+        const lhs_name = try self.bindingName(bin.lhs.identifier_reference.span);
+        if (!std.mem.eql(u8, lhs_name, counter_name)) return false;
+        const bound_val = self.intLiteralValue(bin.rhs) orelse return false;
+
+        // 3. Update shape.
+        const upd_expr = s.update orelse return false;
+        const upd = switch (upd_expr) {
+            .update => |u| u,
+            else => return false,
+        };
+        if (upd.op != .increment) return false;
+        if (upd.operand.* != .identifier_reference) return false;
+        const upd_name = try self.bindingName(upd.operand.identifier_reference.span);
+        if (!std.mem.eql(u8, upd_name, counter_name)) return false;
+
+        // 4. Body safety.
+        if (try self.bodyCounterHazard(s.body, counter_name)) return false;
+
+        // 5. Emit. Drain pending labels so a `LABEL: for (…)`
+        // wrapper still routes `break LABEL ;` / `continue LABEL ;`
+        // through this loop's LoopContext.
+        const labels = try self.drainPendingLabels();
+        var labels_owned = labels;
+        errdefer if (labels_owned.len > 0) self.allocator.free(labels_owned);
+
+        const r_counter = try self.reserveTemp();
+        errdefer self.releaseTemp();
+        const r_bound = try self.reserveTemp();
+        errdefer self.releaseTemp();
+
+        const init_span = init_expr.numeric_literal.span;
+        try self.builder.emitOp(.lda_smi, init_span);
+        try self.builder.emitI32(init_val);
+        try self.builder.emitOp(.star, init_span);
+        try self.builder.emitU8(r_counter);
+
+        const bound_span = bin.rhs.numeric_literal.span;
+        try self.builder.emitOp(.lda_smi, bound_span);
+        try self.builder.emitI32(bound_val);
+        try self.builder.emitOp(.star, bound_span);
+        try self.builder.emitU8(r_bound);
+
+        // Open the loop's lexical scope and register `i` as a
+        // register-promoted binding so `compileIdentRef` reads
+        // route to `ldar r_counter`.
+        var for_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = false };
+        defer for_scope.deinit(self.allocator);
+        try for_scope.bindings.append(self.allocator, .{
+            .name = counter_name,
+            .env_slot = 0,
+            .env_depth = self.env_depth,
+            .kind = .let_,
+            .span = counter_ident.span,
+            .is_register = true,
+            .register = r_counter,
+        });
+        const saved_scope = self.scope;
+        self.scope = &for_scope;
+        defer self.scope = saved_scope;
+
+        // Entry test (`counter < bound`): `lt r` computes `acc =
+        // reg < acc`, so we load `bound` into acc and pass
+        // `r_counter` as the operand to get the spec-direction
+        // comparison.
+        try self.builder.emitOp(.ldar, s.span);
+        try self.builder.emitU8(r_bound);
+        try self.builder.emitOp(.lt, s.span);
+        try self.builder.emitU8(r_counter);
+        try self.builder.emitOp(.jmp_if_false, s.span);
+        const exit_patch = self.builder.here();
+        try self.builder.emitI16(0);
+
+        const body_start = self.builder.here();
+
+        var ctx: LoopContext = .{
+            .continue_target = 0,
+            .parent = self.current_loop,
+            .entry_finally_chain = self.finally_chain,
+            .labels = labels_owned,
+        };
+        defer ctx.deinit(self.allocator);
+        // ctx owns labels now — clear our errdefer hold.
+        labels_owned = &.{};
+        const saved_loop = self.current_loop;
+        self.current_loop = &ctx;
+        defer self.current_loop = saved_loop;
+
+        try self.compileStatement(s.body);
+
+        const update_pc = self.builder.here();
+        ctx.continue_target = update_pc;
+
+        // Fused tail: `counter++; if (counter < bound) jump body`.
+        try self.builder.emitOp(.loop_inc_lt, s.span);
+        try self.builder.emitU8(r_counter);
+        try self.builder.emitU8(r_bound);
+        const back_patch = self.builder.here();
+        try self.builder.emitI16(0);
+        try self.builder.patchI16(back_patch, body_start);
+
+        const exit_pc = self.builder.here();
+        try self.builder.patchI16(exit_patch, exit_pc);
+        for (ctx.break_patches.items) |p| try self.builder.patchI16(p, exit_pc);
+        for (ctx.continue_patches.items) |p| try self.builder.patchI16(p, update_pc);
+
+        // r_bound, then r_counter — LIFO.
+        self.releaseTemp();
+        self.releaseTemp();
+        return true;
+    }
+
+    /// Decode a numeric-literal expression to its i32 value when
+    /// the source text parses cleanly and fits exactly in i32.
+    /// Returns `null` for any other expression shape, non-integer
+    /// doubles, NaN/Infinity, or out-of-range integers. Numeric
+    /// literals in JS are syntactically non-negative (the leading
+    /// `-` is a unary expression), so this never matches negative
+    /// values — that's fine for the counter loop, which only
+    /// fuses ascending int-init / int-bound pairs.
+    fn intLiteralValue(self: *Compiler, e: *const ast.expression.Expression) ?i32 {
+        if (e.* != .numeric_literal) return null;
+        const span = e.numeric_literal.span;
+        const text = self.source[span.start..span.end];
+        const d = parseNumericLiteral(text) catch return null;
+        return asExactSmi(d);
+    }
+
+    /// Conservative body-safety scan for the fused counter-loop
+    /// path. Returns true (unsafe — bail to legacy path) when:
+    ///   • any direct assignment / update / compound op targets
+    ///     `name`;
+    ///   • the body contains ANY closure (function / arrow / class
+    ///     expression or declaration). The fused path elides the
+    ///     for-loop's per-iteration declarative environment —
+    ///     §14.7.4.4 CreatePerIterationEnvironment — which the
+    ///     legacy path uses to give every iteration its own copy
+    ///     of body `let` / `const` bindings. Without a per-iter
+    ///     env, a closure that captures any body lexical would
+    ///     see the single function-scope slot across iterations
+    ///     (the regression `for: closure over a body lexical keeps
+    ///     per-iteration values` guards against this).
+    ///
+    /// The closure bail is broader than what the spec strictly
+    /// requires (a closure that captures NOTHING from the body
+    /// could in principle stay), but the wider rule is cheap to
+    /// state and skips a vanishingly rare pattern.
+    fn bodyCounterHazard(self: *Compiler, stmt: *const ast.statement.Statement, name: []const u8) CompileError!bool {
+        if (self.bodyHasClosure(stmt)) return true;
+        return self.stmtCounterHazard(stmt, name);
+    }
+
+    fn stmtCounterHazard(self: *Compiler, stmt: *const ast.statement.Statement, name: []const u8) CompileError!bool {
+        return switch (stmt.*) {
+            .empty, .debugger_, .break_, .continue_, .import_decl, .export_decl => false,
+            // A nested function / class declaration is a closure —
+            // descend into its body looking for `name`.
+            .function_decl => |fd| {
+                const names = [_][]const u8{name};
+                return self.fnBodyMentionsNames(fd.params, fd.body.body, names[0..]);
+            },
+            .class_decl => |cd| {
+                const names = [_][]const u8{name};
+                return self.classBodyMentionsNames(cd.superclass, cd.body, names[0..]);
+            },
+            .expression => |es| self.exprCounterHazard(&es.expression, name),
+            .block => |bs| {
+                for (bs.body) |*sub| if (try self.stmtCounterHazard(sub, name)) return true;
+                return false;
+            },
+            .lexical => |ld| {
+                for (ld.declarators) |d| {
+                    if (d.init) |*e| if (try self.exprCounterHazard(e, name)) return true;
+                }
+                return false;
+            },
+            .if_ => |ifs| {
+                if (try self.exprCounterHazard(&ifs.test_, name)) return true;
+                if (try self.stmtCounterHazard(ifs.consequent, name)) return true;
+                if (ifs.alternate) |alt| if (try self.stmtCounterHazard(alt, name)) return true;
+                return false;
+            },
+            .while_ => |ws| {
+                if (try self.exprCounterHazard(&ws.test_, name)) return true;
+                return self.stmtCounterHazard(ws.body, name);
+            },
+            .do_while => |dw| {
+                if (try self.stmtCounterHazard(dw.body, name)) return true;
+                return self.exprCounterHazard(&dw.test_, name);
+            },
+            .return_ => |rs| {
+                if (rs.argument) |*e| return self.exprCounterHazard(e, name);
+                return false;
+            },
+            .throw_ => |ts| self.exprCounterHazard(&ts.argument, name),
+            .for_ => |fs| {
+                if (fs.init) |sub_head| switch (sub_head) {
+                    .lexical => |ld| for (ld.declarators) |d| {
+                        if (d.init) |*e| if (try self.exprCounterHazard(e, name)) return true;
+                    },
+                    .expression => |e| if (try self.exprCounterHazard(&e, name)) return true,
+                };
+                if (fs.test_) |*t| if (try self.exprCounterHazard(t, name)) return true;
+                if (fs.update) |*u| if (try self.exprCounterHazard(u, name)) return true;
+                return self.stmtCounterHazard(fs.body, name);
+            },
+            .for_in_of => |fio| {
+                if (fio.left == .expression) {
+                    if (try self.exprCounterHazard(&fio.left.expression, name)) return true;
+                } else for (fio.left.lexical.declarators) |d| {
+                    if (d.init) |*e| if (try self.exprCounterHazard(e, name)) return true;
+                }
+                if (try self.exprCounterHazard(&fio.right, name)) return true;
+                return self.stmtCounterHazard(fio.body, name);
+            },
+            .try_ => |ts| {
+                for (ts.block.body) |*sub| if (try self.stmtCounterHazard(sub, name)) return true;
+                if (ts.handler) |h| {
+                    for (h.body.body) |*sub| if (try self.stmtCounterHazard(sub, name)) return true;
+                }
+                if (ts.finalizer) |f| {
+                    for (f.body) |*sub| if (try self.stmtCounterHazard(sub, name)) return true;
+                }
+                return false;
+            },
+            .switch_ => |sw| {
+                if (try self.exprCounterHazard(&sw.discriminant, name)) return true;
+                for (sw.cases) |c| {
+                    if (c.test_) |*t| if (try self.exprCounterHazard(t, name)) return true;
+                    for (c.body) |*sub| if (try self.stmtCounterHazard(sub, name)) return true;
+                }
+                return false;
+            },
+            .labeled => |ls| self.stmtCounterHazard(ls.body, name),
+        };
+    }
+
+    fn exprCounterHazard(self: *Compiler, expr: *const ast.expression.Expression, name: []const u8) CompileError!bool {
+        switch (expr.*) {
+            .null_literal,
+            .boolean_literal,
+            .numeric_literal,
+            .bigint_literal,
+            .string_literal,
+            .regex_literal,
+            .this_expr,
+            .super_,
+            .import_meta,
+            .new_target,
+            .private_identifier,
+            .identifier_reference,
+            => return false,
+            .template_literal => |tl| {
+                for (tl.expressions) |*sub| if (try self.exprCounterHazard(sub, name)) return true;
+                return false;
+            },
+            .parenthesized => |p| return self.exprCounterHazard(p.expression, name),
+            .unary => |u| return self.exprCounterHazard(u.operand, name),
+            .binary => |b| {
+                if (try self.exprCounterHazard(b.lhs, name)) return true;
+                return self.exprCounterHazard(b.rhs, name);
+            },
+            .logical => |l| {
+                if (try self.exprCounterHazard(l.lhs, name)) return true;
+                return self.exprCounterHazard(l.rhs, name);
+            },
+            .conditional => |c| {
+                if (try self.exprCounterHazard(c.test_, name)) return true;
+                if (try self.exprCounterHazard(c.consequent, name)) return true;
+                return self.exprCounterHazard(c.alternate, name);
+            },
+            .assignment => |a| {
+                // Direct mutation of the counter — covers
+                // `i = expr`, `i += expr`, `i *= expr`, … —
+                // any AssignmentOp targeting the bare identifier.
+                var t = a.target;
+                while (t.* == .parenthesized) t = t.parenthesized.expression;
+                if (t.* == .identifier_reference) {
+                    const tname = try self.bindingName(t.identifier_reference.span);
+                    if (std.mem.eql(u8, tname, name)) return true;
+                }
+                if (try self.exprCounterHazard(a.target, name)) return true;
+                return self.exprCounterHazard(a.value, name);
+            },
+            .sequence => |sq| {
+                for (sq.expressions) |*sub| if (try self.exprCounterHazard(sub, name)) return true;
+                return false;
+            },
+            .member => |m| {
+                if (try self.exprCounterHazard(m.object, name)) return true;
+                if (m.property == .computed) {
+                    return self.exprCounterHazard(m.property.computed, name);
+                }
+                return false;
+            },
+            .call => |c| {
+                if (try self.exprCounterHazard(c.callee, name)) return true;
+                for (c.arguments) |*arg| if (try self.exprCounterHazard(arg, name)) return true;
+                return false;
+            },
+            .new_expr => |n| {
+                if (try self.exprCounterHazard(n.callee, name)) return true;
+                for (n.arguments) |*arg| if (try self.exprCounterHazard(arg, name)) return true;
+                return false;
+            },
+            .chain => |ch| return self.exprCounterHazard(ch.expression, name),
+            .tagged_template => |tt| {
+                if (try self.exprCounterHazard(tt.tag, name)) return true;
+                return self.exprCounterHazard(tt.quasi, name);
+            },
+            .spread => |sp| return self.exprCounterHazard(sp.argument, name),
+            .update => |up| {
+                // Direct mutation of the counter via `i++` / `++i`
+                // / `i--` / `--i`. The for-update slot of THIS
+                // loop has already been pattern-matched away, so
+                // any update in the body is a foreign write.
+                var t = up.operand;
+                while (t.* == .parenthesized) t = t.parenthesized.expression;
+                if (t.* == .identifier_reference) {
+                    const tname = try self.bindingName(t.identifier_reference.span);
+                    if (std.mem.eql(u8, tname, name)) return true;
+                }
+                return self.exprCounterHazard(up.operand, name);
+            },
+            .function_expr => |fe| {
+                const names = [_][]const u8{name};
+                return self.fnBodyMentionsNames(fe.params, fe.body.body, names[0..]);
+            },
+            .arrow_function => |af| {
+                const names = [_][]const u8{name};
+                if (try self.paramsMentionNames(af.params, names[0..])) return true;
+                switch (af.body) {
+                    .expression => |e| return self.scanInitForIdentRefs(e, names[0..]),
+                    .block => |bs| return self.scanForIdentRefs(bs.body, names[0..]),
+                }
+            },
+            .class_expr => |ce| {
+                const names = [_][]const u8{name};
+                const sc: ?ast.expression.Expression = if (ce.superclass) |sp| sp.* else null;
+                return self.classBodyMentionsNames(sc, ce.body, names[0..]);
+            },
+            .array_literal => |al| {
+                for (al.elements) |maybe| {
+                    if (maybe) |sub| if (try self.exprCounterHazard(&sub, name)) return true;
+                }
+                return false;
+            },
+            .object_literal => |ol| {
+                for (ol.properties) |m| switch (m) {
+                    .property => |p| {
+                        if (p.key == .computed) {
+                            if (try self.exprCounterHazard(p.key.computed, name)) return true;
+                        }
+                        if (try self.exprCounterHazard(&p.value, name)) return true;
+                    },
+                    .spread => |sp| if (try self.exprCounterHazard(sp.argument, name)) return true,
+                    .method => |md| {
+                        const names = [_][]const u8{name};
+                        if (md.key == .computed) {
+                            if (try self.exprMentionsNamesInNestedFn(md.key.computed, names[0..])) return true;
+                        }
+                        if (try self.fnBodyMentionsNames(md.params, md.body.body, names[0..])) return true;
+                    },
+                };
+                return false;
+            },
+            .yield => |y| {
+                if (y.argument) |arg| return self.exprCounterHazard(arg, name);
+                return false;
+            },
+            .await_ => |aw| return self.exprCounterHazard(aw.argument, name),
+            .import_call => |ic| return self.exprCounterHazard(ic.source, name),
+        }
+    }
+
     fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
+        // Fast path — fused counter loop. Falls through to the
+        // general path on any pattern mismatch.
+        if (try self.tryCompileFusedCounterLoop(s)) return;
         // §14.7.4 ForStatement (C-style — for-in / for-of compile
         // separately). For `let`/`const` head bindings,
         // §14.7.4.1 ForBodyEvaluation step 2 + CreatePerIterationEnvironment

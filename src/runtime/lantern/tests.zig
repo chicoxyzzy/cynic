@@ -6676,3 +6676,155 @@ test "loop_inc_lt: zero iterations when entry test fails" {
     try testing.expect(v.isInt32());
     try testing.expectEqual(@as(i32, 100), v.asInt32());
 }
+
+// ── Counter-loop specialization — end-to-end tests ─────────────────
+// Source-level coverage of the compiler pattern matcher: confirm
+// the fused form runs correctly and stays observably identical to
+// the legacy path on edge cases (break, continue, body-mutation,
+// non-integer init, `<=` bound).
+
+test "counter-loop: tight numeric sum 0..99" {
+    try expectScriptIntWithBuiltins(
+        \\let sum = 0;
+        \\for (let i = 0; i < 100; i++) sum = (sum + i) | 0;
+        \\sum;
+    , 4950);
+}
+
+test "counter-loop: break exits at right iteration" {
+    try expectScriptIntWithBuiltins(
+        \\let s = 0;
+        \\for (let i = 0; i < 100; i++) {
+        \\  if (i === 4) break;
+        \\  s = s + i;
+        \\}
+        \\s;
+    , 6); // 0+1+2+3
+}
+
+test "counter-loop: continue skips to increment" {
+    try expectScriptIntWithBuiltins(
+        \\let s = 0;
+        \\for (let i = 0; i < 10; i++) {
+        \\  if ((i & 1) === 0) continue;  // skip even
+        \\  s = s + i;
+        \\}
+        \\s;
+    , 25); // 1+3+5+7+9
+}
+
+test "counter-loop: emits loop_inc_lt for canonical pattern" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    const out = try compileAndDisassemble(&realm,
+        \\let s = 0; for (let i = 0; i < 10; i++) s = s + i; s;
+    );
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "LoopIncLt") != null);
+    // Sanity: the standalone `Inc` opcode is NOT emitted for this
+    // loop — the fused form replaces the inc + lt + jmp triple.
+    try testing.expect(std.mem.indexOf(u8, out, " Inc ") == null);
+}
+
+test "counter-loop: body reassigning i falls back to legacy path" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    const out = try compileAndDisassemble(&realm,
+        \\let s = 0;
+        \\for (let i = 0; i < 10; i++) {
+        \\  i = i + 1;  // body reassigns the counter — bail to legacy.
+        \\  s = s + i;
+        \\}
+        \\s;
+    );
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "LoopIncLt") == null);
+}
+
+test "counter-loop: non-integer init falls back to legacy path" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    const out = try compileAndDisassemble(&realm,
+        \\let s = 0;
+        \\for (let i = 0.5; i < 5; i++) s = s + 1;
+        \\s;
+    );
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "LoopIncLt") == null);
+}
+
+test "counter-loop: `<=` bound falls back to legacy path" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    const out = try compileAndDisassemble(&realm,
+        \\let s = 0;
+        \\for (let i = 0; i <= 5; i++) s = s + i;
+        \\s;
+    );
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "LoopIncLt") == null);
+}
+
+test "counter-loop: closure capturing i falls back" {
+    // A nested function mentions `i` — would attempt to capture
+    // the register-promoted binding, which isn't in any env. The
+    // safety walker bails to the legacy per-iter-env path.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    const out = try compileAndDisassemble(&realm,
+        \\const fns = [];
+        \\for (let i = 0; i < 3; i++) fns.push(function() { return i; });
+        \\fns[0]() + fns[1]() + fns[2]();
+    );
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "LoopIncLt") == null);
+}
+
+test "counter-loop: prefix ++i matches the canonical pattern" {
+    // `++i` and `i++` have identical for-update semantics (the
+    // expression value is discarded), so both qualify.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    const out = try compileAndDisassemble(&realm,
+        \\let s = 0; for (let i = 0; i < 5; ++i) s = s + i; s;
+    );
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "LoopIncLt") != null);
+}
+
+test "counter-loop: nested fused loops compile correctly" {
+    try expectScriptIntWithBuiltins(
+        \\let s = 0;
+        \\for (let i = 0; i < 5; i++) {
+        \\  for (let j = 0; j < 5; j++) s = s + 1;
+        \\}
+        \\s;
+    , 25);
+}
+
+test "counter-loop: break in nested fused loop exits inner only" {
+    try expectScriptIntWithBuiltins(
+        \\let s = 0;
+        \\for (let i = 0; i < 3; i++) {
+        \\  for (let j = 0; j < 100; j++) {
+        \\    if (j >= 4) break;
+        \\    s = s + 1;
+        \\  }
+        \\}
+        \\s;
+    , 12); // 3 outer * 4 inner = 12
+}
+
+test "counter-loop: zero-iteration when init equals bound" {
+    try expectScriptIntWithBuiltins(
+        \\let s = 100;
+        \\for (let i = 5; i < 5; i++) s = 0;
+        \\s;
+    , 100);
+}

@@ -134,6 +134,21 @@ pub const Binding = struct {
     /// builtins, and module bindings leave this false and keep
     /// the string-keyed `lda_global` / `sta_global` path.
     has_global_lex_slot: bool = false,
+    /// True when this binding's value lives in a plain register
+    /// (`registers[register]`) rather than an environment slot.
+    /// Set by the fused counter-loop path in `compileFor`: when
+    /// `for (let i = INT; i < BOUND; i++) BODY` is detected and
+    /// the body provably neither reassigns nor closes over `i`,
+    /// `i` is promoted to a register so `loop_inc_lt`'s
+    /// register-indexed inc/compare can fire. Reads emit `ldar
+    /// register`; writes emit `star register`. TDZ checks are
+    /// skipped — the only writer is the loop's own init and the
+    /// fused opcode (both initialise/refresh the slot before any
+    /// read).
+    is_register: bool = false,
+    /// Register index when `is_register` is true. Otherwise
+    /// `env_slot` is the live field.
+    register: u8 = 0,
 };
 
 pub const ScopeKind = enum {
