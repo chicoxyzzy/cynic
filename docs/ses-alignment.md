@@ -3,8 +3,9 @@
 Goal: Cynic ships **hardened by default** — frozen primordials, a
 `harden()` global, and the SES override-mistake fix at every realm
 init. No `lockdown()` step required, no `@endo/ses` import. Code
-that needs to opt out of one of the hardening pieces uses a targeted
-`--allow=<name>` flag.
+that needs the legacy "mutable primordials" world opts out with a
+single `--unhardened` switch (the whole SES package toggles
+atomically — see Phase 4).
 
 Sister doc to [inline-caches.md](inline-caches.md) and
 [lazy-property-bag.md](lazy-property-bag.md). This doc is the durable
@@ -30,7 +31,8 @@ ceremony, without the configuration. That's the differentiator.
 The trade-off: **monkey-patching primordials stops working out of
 the box**. Code that polyfills `Array.prototype.flat`, stubs
 `Date.now`, or proxies a built-in's prototype gets rejected by
-default. Users who actually need that opt in via `--allow=…`.
+default. Users who actually need that flip `--unhardened` to
+disable the whole SES posture.
 
 ## What SES `lockdown()` does (the full checklist)
 
@@ -158,27 +160,47 @@ not optimised. The IC can still cache the getter's result if the
 getter is pure (which it is for these synthetic accessors). The
 fix needs care to not slow every prototype read by 2-3×.
 
-## The `--allow=<name>` opt-out system (Phase 4)
+## The `--unhardened` opt-out + `--allow=eval` (Phase 4)
 
 SES-by-default means general-purpose JS that monkey-patches
-primordials stops working in default mode. Users who need that
-opt out per-constraint via the flag system, mirroring the existing
-`--enable=<name>` / `--enable-experimental` pattern:
+primordials stops working in default mode. The opt-out surface
+is intentionally minimal:
 
 | Flag | Effect |
 |---|---|
-| `--allow=eval` | Re-enables `eval`, `new Function(string)`, and the `GeneratorFunction` / `AsyncFunction` / `AsyncGeneratorFunction` constructors. Requires the full eval implementation (deferred — see notes below). |
-| `--allow=primordial-mutation` | Skip the Phase 1 freezing pass. Primordials stay mutable. Recovers compatibility with code that monkey-patches `Array.prototype.X`, polyfills missing methods, etc. |
-| `--allow=extensible-globalThis` | `globalThis` stays extensible — new global bindings via assignment work. Phase 1's globalThis freeze becomes opt-in. |
-| `--allow=no-override-mistake-fix` | Phase 3 is skipped — prototype data properties stay data properties; assignment-to-frozen-proto-slot reverts to TypeError. |
-| `--permissive` | Umbrella: enables every `--allow=*` flag at once. The single switch a user flips if they want spec-literal behaviour and full compatibility with general-purpose JS. |
+| `--unhardened` | Disables the **entire SES posture** atomically: primordials stay mutable (Phase 1 skipped), `globalThis` stays extensible, the `harden()` global is not installed (Phase 2), the override-mistake fix is skipped (Phase 3). Spec-literal `OrdinarySetWithOwnDescriptor` semantics. The single switch a user flips for full compatibility with general-purpose JS that monkey-patches `Array.prototype.X`, polyfills missing methods, or relies on the spec's "assign-to-frozen-proto throws" behaviour. |
+| `--allow=eval` | Independent opt-in for `eval`, `new Function(string)`, and the `GeneratorFunction` / `AsyncFunction` / `AsyncGeneratorFunction` constructors. **Not bundled** with `--unhardened` because eval is a compile-time optimization fence — every function eval-reachable gets per-function escape analysis + a conservative bytecode variant. Users who want mutable primordials WITHOUT paying the eval-taint compile cost stay on `--unhardened` alone. Requires the full eval implementation (deferred — see notes below). |
 
-Two distinct verbs in the CLI surface:
+Why one umbrella switch instead of per-constraint flags:
+
+- **SES is a coherent package** — frozen primordials + `harden()` +
+  override-mistake fix are designed to work together. A user
+  doesn't typically want "frozen primordials but no `harden()`"
+  or "harden but no override fix"; they want either the hardened
+  world or the legacy one. Atomic toggle matches the actual user
+  decision.
+- **One flag is easier to reason about** in CI, in embedder
+  configuration, in deployment docs. Per-constraint flags
+  (`--allow=primordial-mutation` / `--allow=extensible-globalThis`
+  / `--allow=no-override-mistake-fix` / `--permissive` — an
+  earlier iteration of this design) presented a menu where users
+  would have to learn what each piece does just to know which
+  ones to flip.
+- **`harden()` is a capability addition**, not a restriction. It
+  doesn't need a separate `--allow=*` flag because users who
+  want their own `harden` just assign over `globalThis.harden`.
+  Bundling it into the umbrella switch means a user who's
+  rejecting the SES package also drops the Cynic-specific global
+  cleanly (no leftover capability they'd have to manually undo).
+
+Two distinct CLI verbs to keep separate:
 - `--enable=<feature>` — turns on a not-yet-stable spec feature
   (`joint-iteration`, `upsert`, etc.). Forward-looking.
-- `--allow=<relaxation>` — relaxes a default-on Cynic-imposed
-  restriction (primordial freeze, eval ban, etc.).
-  Backward-compatible-with-legacy-JS.
+- `--unhardened` — the SES-posture toggle. Backward-compatible-
+  with-legacy-JS.
+- `--allow=<relaxation>` — kept as a verb for restrictions that
+  have meaningfully different opt-in cost than the SES package.
+  Currently only `--allow=eval` lives here.
 
 The flag values get a `realm.allow.<name>: bool` field accessed at
 the relevant gate in the engine. Default false; per-flag opt-in.
@@ -194,17 +216,18 @@ each phase.
 The freezing pass. Recursive walk + memoization + descriptor
 update. Wired as the last step of `intrinsics.install(realm)`.
 
-**Add `--allow=primordial-mutation`** at the same time — when set,
-the freezing pass is skipped. Test262 sweep runs the default
-(frozen) path. Per-feature sweep for the flag runs `--phase=
-feature:primordial-mutation` to verify the relaxation path stays
-functional.
+The pass is gated on `realm.hardened` (the default-true flag the
+single `--unhardened` switch flips). When `--unhardened` is set,
+the pass is skipped — every intrinsic stays extensible and
+writable, matching legacy JS expectations. Test262 sweep runs
+the default (frozen) path; a per-feature `--phase=feature:
+unhardened` sweep verifies the relaxation path stays functional.
 
 **Risk:** medium. test262 fixtures that monkey-patch intrinsics
 fail; need to measure. Probably <100 fixtures.
 **Test262 risk:** measurable but bounded. Some fixtures explicitly
 test "you can patch the prototype" — those become honest failures
-in default mode, expected passes under `--allow=primordial-mutation`.
+in default mode, expected passes under `--unhardened`.
 
 ### Phase 2 — `harden()` global — **shipped**
 
@@ -251,20 +274,25 @@ cache it, every prototype-inherited property read is 2-3× slower.
 
 **Test262 risk:** moderate — fixtures that test "OrdinarySet
 rejects non-writable proto slot" need to factor in the override
-fix.
+fix. The same `realm.hardened` flag gates this — `--unhardened`
+skips the synthetic accessor swap and Cynic reverts to spec-
+literal `OrdinarySetWithOwnDescriptor`.
 
-**Add `--allow=no-override-mistake-fix`** as the escape hatch.
+### Phase 4 — `--unhardened` flag wiring
 
-### Phase 4 — `--permissive` umbrella
-
-Trivial — collect every `--allow=*` flag and flip them all when
-`--permissive` is set. Single CLI parser change + docs.
+Trivial — collect the gates (Phase 1 freeze, Phase 2 harden
+install, Phase 3 override fix) and skip them all when
+`realm.hardened == false`. Single CLI parser change + docs +
+one struct field on Realm. `--allow=eval` is independent and
+landed separately when eval ships.
 
 ### Phase 5 — measurement, doc updates, gh-pages
 
 - Run the full bench suite — confirm no regression
   (the override-mistake accessor pair is the perf risk)
-- Run test262 with each `--allow=*` flag isolated, confirm scores
+- Run test262 with `--unhardened` isolated as a phase, confirm
+  the relaxation path keeps test fixtures that depend on
+  prototype-mutation alive
 - Update website (`gh-pages/index.html`) — the "Cynic says" column
   for the SES-adjacent rows gains "hardened by default"
 - Update `bench-cross-results.md` if the perf moved
@@ -352,15 +380,16 @@ Revisit Compartments when:
 - `zig build test262 -- --quiet` runtime sweep after each phase —
   measure the regression (expected: tens of fixtures in default
   mode that monkey-patch intrinsics)
-- `zig build test262 -- --quiet --phase=feature:primordial-mutation`
-  — confirms the opt-out path restores those fixtures
+- `zig build test262 -- --quiet --phase=feature:unhardened` —
+  confirms the opt-out path restores fixtures that monkey-patch
+  primordials
 - `zig build bench` after Phase 3 — perf check on the override-
   mistake accessor pair (the headline risk)
 - New unit tests pinning:
   - `Object.freeze` semantics on intrinsics (Phase 1)
-  - `harden()` on cyclic and deep structures (Phase 2)
+  - `harden()` on cyclic and deep structures (Phase 2 — shipped)
   - Override shadowing via assignment + Reflect.set + spread (Phase 3)
-  - Each `--allow=*` flag's effect (Phase 4)
+  - `--unhardened` actually disables every gated piece (Phase 4)
 - Manual smoke test: import an SES-using package (`@endo/marshal`,
   the canonical one) and confirm it runs without `lockdown()`
 

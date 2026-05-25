@@ -93,7 +93,7 @@ These are project rules — they apply to everyone.
     Opt back in with `--allow=eval` (the implementation lands
     in a separate effort — see
     [docs/ses-alignment.md](docs/ses-alignment.md)).
-- **SES-aligned by default, permissive under flags.** Cynic
+- **SES-aligned by default; `--unhardened` opts out.** Cynic
   isn't just "SES-friendly" (every modern edge runtime is that);
   Cynic ships **hardened by default**:
   - **Primordials frozen at realm init** — every intrinsic
@@ -102,9 +102,10 @@ These are project rules — they apply to everyone.
     `lockdown()` call needed; no `@endo/ses` import. Code
     that monkey-patches `Array.prototype.X = …` throws on
     contact with the frozen prototype.
-  - **`harden()` global** — recursive deep freeze, native.
-    Matches `@endo/ses`'s `harden`. Used by hardened-JS code
-    to seal capability-bearing objects.
+  - **`harden()` global** — recursive deep freeze, native
+    (shipped, `aed6a66`). Matches `@endo/ses`'s `harden`.
+    Used by hardened-JS code to seal capability-bearing
+    objects.
   - **Override-mistake fix** — assignment to a frozen
     prototype's data slot (`obj.x = 2` where `proto.x === 1`
     is frozen-non-writable) succeeds as instance shadowing
@@ -112,16 +113,25 @@ These are project rules — they apply to everyone.
     synthetic accessor pairs on each frozen prototype slot.
   - **Compartments deferred** — the full SES sandboxing API
     needs multi-realm support, which Cynic still punts.
-  - **Opt-out via `--allow=<name>` flags.** Per-constraint
-    relaxation: `--allow=primordial-mutation`,
-    `--allow=extensible-globalThis`,
-    `--allow=no-override-mistake-fix`, `--allow=eval` (when
-    eval ships). Umbrella: `--permissive` enables all of them.
-  Two distinct CLI verbs to keep separate: **`--enable=<name>`**
+  - **`--unhardened`** — single flag that disables the whole
+    SES posture atomically. Primordials stay mutable, `harden()`
+    isn't installed, override-mistake fix skipped. For code
+    that genuinely needs to monkey-patch primordials / polyfill
+    missing methods / rely on spec-literal `OrdinarySet` semantics.
+    SES is a coherent package — atomic toggle matches how users
+    decide, vs the granular per-piece flags an earlier design
+    iteration sketched.
+  - **`--allow=eval`** stays separate (when eval ships) because
+    it's a compile-time optimization fence (per-function escape
+    analysis + conservative bytecode); bundling with
+    `--unhardened` would impose that cost on users who just want
+    mutable primordials.
+  Three distinct CLI verbs to keep separate: **`--enable=<name>`**
   turns on a not-yet-stable spec feature (`joint-iteration`,
-  `upsert`); **`--allow=<name>`** relaxes a default-on
-  Cynic-imposed hardening restriction. Forward-vs-backward.
-  See [docs/ses-alignment.md](docs/ses-alignment.md) for the
+  `upsert`); **`--unhardened`** is the SES-posture toggle;
+  **`--allow=<name>`** relaxes a default-on restriction (only
+  `--allow=eval` lives here today). See
+  [docs/ses-alignment.md](docs/ses-alignment.md) for the
   design + phase plan.
 - **Unicode tracks `latest`.** §3 normatively references
   [`unicode.org/versions/latest`](https://unicode.org/versions/latest)
@@ -181,7 +191,7 @@ These are project rules — they apply to everyone.
 | Touch heap-allocating native code | [docs/handbook/gc.md](docs/handbook/gc.md) (`HandleScope` contract for natives that re-enter JS) |
 | Touch binding / scope / top-level resolution | [docs/handbook/environments.md](docs/handbook/environments.md) (GlobalEnvironmentRecord split, named-fn-expr wrapper, module env-record, top-level write opcodes) |
 | Touch the property-storage layout (bag / shape / slots) | [docs/inline-caches.md](docs/inline-caches.md) (shape substrate + read/write IC); [docs/lazy-property-bag.md](docs/lazy-property-bag.md) (plan to drop the bag for shape-mode objects) |
-| Touch realm setup / intrinsic install / hardening | [docs/ses-alignment.md](docs/ses-alignment.md) (SES-by-default position, frozen primordials, `harden()`, override-mistake fix, the `--allow=<name>` opt-out system) |
+| Touch realm setup / intrinsic install / hardening | [docs/ses-alignment.md](docs/ses-alignment.md) (SES-by-default position, frozen primordials, `harden()`, override-mistake fix, the `--unhardened` opt-out + the separate `--allow=eval`) |
 | Verify a shared-machinery change without missing regressions | [docs/handbook/agent-checks.md](docs/handbook/agent-checks.md) (the `--only-failing` trap, per-touch bucket filters, harness threading invariant) |
 | Look up a Zig idiom Cynic uses | [docs/handbook/zig.md](docs/handbook/zig.md) |
 | Score current conformance | `zig build test262 -- --quiet`; history in [test262-results.md](test262-results.md) |

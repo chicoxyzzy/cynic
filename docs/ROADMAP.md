@@ -124,17 +124,17 @@ code construction (aligns with SES).
 
 **In progress / planned.**
 
-- **SES-by-default — frozen primordials + `harden()` + override-
-  mistake fix.** Position commitment: Cynic ships hardened by
-  default, no `lockdown()` step required. Primordials get
+- **SES-by-default — frozen primordials + override-mistake fix.**
+  Position commitment: Cynic ships hardened by default, no
+  `lockdown()` step required. Primordials get
   `[[Extensible]] = false` and non-writable / non-configurable
-  descriptors at realm init; `harden()` is a native global; the
-  override-mistake fix replaces frozen-prototype data slots with
-  accessor pairs that allow instance shadowing. Per-constraint
-  opt-out via `--allow=primordial-mutation` /
-  `--allow=extensible-globalThis` /
-  `--allow=no-override-mistake-fix`; umbrella `--permissive`
-  enables all of them. Compartments deferred (need multi-realm,
+  descriptors at realm init; the override-mistake fix replaces
+  frozen-prototype data slots with accessor pairs that allow
+  instance shadowing. `harden()` global already shipped
+  (`aed6a66`). The whole SES posture toggles atomically with
+  `--unhardened` for code that needs mutable primordials;
+  `--allow=eval` stays separate because it carries compile-time
+  optimization-fence cost. Compartments deferred (need multi-realm,
   which Cynic still punts). Full design + phase plan in
   [docs/ses-alignment.md](ses-alignment.md). Brand bet: the
   differentiator over "Workers / Deno / Node + @endo/ses" is that
