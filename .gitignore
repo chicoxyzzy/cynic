@@ -20,14 +20,17 @@ node_modules/
 # Throwaway worktree used by the gh-pages deploy flow.
 .gh-pages-deploy/
 
-# Throwaway worktrees spawned by Claude Code agents.
-.claude/worktrees/
-
-# Per-user Claude Code allow/deny rules — agent-local, per-machine.
-.claude/settings.local.json
-
-# Scheduler lock file written by Claude Code's /loop machinery.
-.claude/scheduled_tasks.lock
+# `.claude/` is mostly per-user / per-machine scratch — agent-local
+# permissions (`settings.local.json`), runtime lock files
+# (`scheduled_tasks.lock`), spawned worktrees (`worktrees/`),
+# debugger launch configs (`launch.json`), and whatever new
+# scaffolding Claude Code lands next. Ignore the whole directory
+# by default; allowlist exactly the things the team actually
+# shares so anything new defaults to "agent-local" without an
+# edit here. Add `!.claude/<name>` when promoting a file to
+# shared.
+.claude/*
+!.claude/commands/
 
 # `--only-failing` cache for the test262 harness — written by
 # every full run, consumed by `--only-failing`.
