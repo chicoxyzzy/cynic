@@ -733,3 +733,148 @@ feature we can flip the skip off in one step? Lean: yes — a
 boolean `ready_to_attempt` per entry, defaulting false, lets
 the audit row read "shipped — pending unskip" before flipping
 the feature flag.
+
+### Phase 1 — divergence audit (2026-05-26)
+
+Walked the **3093 hardened-only failures** from a full sweep at
+`f48b7b0` (`./zig-out/bin/cynic-test262 --quiet --phase=main
+--list-failures=5000`). Canonicalised each failure message
+(stripped fixture paths, `Testing with X` typed-array sub-test
+suffixes, `'<KEY>'` property-name interpolations) and grouped
+by unique pattern.
+
+The 3093 failures break down across **five buckets**:
+
+#### Bucket A — propertyHelper descriptor assertions (1453 fixtures, divergent)
+
+The test262 `propertyHelper.js` assertion library compares an
+own descriptor against an expectation table. Under SES the
+descriptors are locked (`writable: false`, `configurable: false`
+on all intrinsic methods) so these assertions fail wholesale.
+
+| Pattern | Count | Treatment |
+|---|---:|---|
+| `obj['<KEY>'] descriptor should be configurable` | 857 | divergent |
+| `obj['<KEY>'] descriptor should be writable; obj['<KEY>'] descriptor should be configurable` | 396 | divergent |
+| `desc.writable Expected SameValue(«false», «true») to be true` | 109 | divergent |
+| `desc.value Expected SameValue(«undefined», «[object Function]») to be true` | 54 | divergent (synthetic accessor demoted what the fixture expected as a data slot) |
+| `obj['<KEY>'] descriptor should not be writable; obj['<KEY>'] descriptor should be configurable` | 13 | divergent |
+| `Expected true but got false` | 10 | divergent (small set; pattern matches a `propertyHelper.isWritable(…)` true-expected check) |
+| `Expected obj[constructor] to have writable:true.` | 9 | divergent (the back-edge constructor on each prototype is frozen-data) |
+| `desc.configurable Expected SameValue(«false», «true») to be true` | 5 | divergent |
+
+Treatment: **all 1453 → divergent.** Detect via path-glob — every
+`built-ins/<X>/{name,length,prop-desc,*-desc}.js` fixture and the
+generic `built-ins/<X>/prototype/<method>/length.js` /
+`name.js` / `prop-desc.js` family.
+
+#### Bucket B — engine TypeErrors from SES enforcement (~1300 fixtures, divergent)
+
+The engine correctly threw on a frozen-primordial mutation
+attempt; the fixture expected the mutation to succeed.
+
+| Pattern | Count | Treatment |
+|---|---:|---|
+| `Cannot add property, object is not extensible` (with trailing-space variants) | 336 | divergent |
+| `Cannot assign to read-only property` (with trailing-space variants) | 306 | divergent |
+| `Object.defineProperty: object is not extensible` (with trailing-space variants) | 228 | divergent |
+| `Cannot extend non-writable array length` | 107 | divergent |
+| `Cannot delete non-configurable property` | 107 | divergent |
+| `Cannot redefine non-configurable property on frozen prototype` | 105 | divergent |
+| `Cannot define index past the length of a non-writable-length array` | 91 | divergent |
+| `Object.defineProperty: cannot redefine non-configurable property` (with trailing-space variants) | 28 | divergent |
+| `Built-in objects must be extensible. Expected SameValue(«false», «true») to be true` | 7 | divergent (the assertion *literally* says built-ins must be extensible, which SES contradicts on purpose) |
+
+Treatment: **all → divergent.** Detect via engine-error-class
+match (Cynic stamps a known TypeError message string from one
+of a small set of `throwTypeError(…)` call sites in the SES
+freeze enforcement path; bucket-by-substring is robust).
+
+A subset of these (~50–100, candidates: the freeze-rejection
+`Cannot add property` + `Cannot assign to read-only property`
+ones whose body is short and whose sole assertion is the
+SES-divergent invariant) make natural **SES witnesses** —
+invert the expectation, expect-the-TypeError, count them as
+positive proof SES is enforcing. Phase 3 selects the curated
+subset.
+
+#### Bucket C — Synthetic-accessor side effects (133 fixtures, divergent)
+
+Phase 3 of SES demotes prototype data slots to synthetic
+accessor pairs. Tests that introspect via `Function.prototype.
+toString` or ToPrimitive on the prototype method object see the
+accessor instead of the data slot.
+
+| Pattern | Count | Treatment |
+|---|---:|---|
+| `Cannot convert function to primitive value` | 123 | divergent (ToPrimitive on a synthetic-accessor-wrapped function via the prototype chain) |
+| `Conforms to NativeFunction Syntax: "undefined"` | 10 | divergent (`Function.prototype.toString` on the synthetic accessor returns `"undefined"` instead of native-code syntax) |
+
+Treatment: **all → divergent.** Detect via the two distinctive
+error-message patterns above.
+
+#### Bucket D — Engine-bug candidates (~80 fixtures, needs investigation)
+
+Failures that do NOT match the SES divergence pattern. Each
+is a candidate engine bug or a subtle SES-Phase-3 interaction
+that should NOT happen.
+
+| Pattern | Count | Likely cause | Treatment |
+|---|---:|---|---|
+| `iterator.next is not callable` | 65 | All cluster on `Set.prototype.{intersection,union,difference,…}` (set-method proposal) + `Iterator.{concat,zip}` (iterator-sequencing). Under hardened mode the `[Symbol.iterator]` getter dispatch + custom `.next` install via the receiver appears to drop the function. **Likely synthetic-accessor regression** — needs root-cause investigation. | **engine bug** |
+| `Expected a Test262Error but got a TypeError` | 9 | The fixture's `Test262Error.thrower` setup doesn't fire because some earlier SES TypeError already kicked in (often `throw new Test262Error(…)` where the Test262Error constructor was mutated by the test prelude — SES-frozen `Test262Error.prototype` likely the cause). | divergent (assertion library side effect) |
+| `Expected a TypeError to be thrown but no exception was thrown at all` | 3 | Two `language/global-code/script-decl-{var,func}-err.js` test that `var X` / `function X` declaration throws when `X` is already a non-configurable own property of globalThis. Under SES, Cynic's `canDeclareGlobalVar` / `canDeclareGlobalFunction` deliberately skip the extensibility check (per `commit 3a4be3c` — "Top-level `var x = 1` keeps working under the SES posture"). | divergent (intentional SES design — top-level declarations carve-out) |
+
+Treatment: **65 engine bugs go on a triage list** (Phase 2
+investigates the synthetic-accessor + iterator interaction);
+the rest are divergent with specific carve-out rationales.
+
+#### Bucket E — Generic assertion failures (~80 fixtures, mixed)
+
+Catch-all patterns that need per-fixture inspection. Most are
+likely divergent (assertion-library side effects of SES
+TypeError leakage), but each needs a single-fixture look to
+confirm.
+
+| Pattern | Count | Lean |
+|---|---:|---|
+| `b Expected SameValue(«true», «false») to be true` | 44 | likely divergent |
+| `e Expected SameValue(«false», «true») to be true` | 18 | likely divergent |
+| `arr[0] Expected SameValue(«undefined», «12») to be true` | 4 | needs inspection |
+| `value is not callable` | 7 | needs inspection |
+
+Treatment: **case-by-case in Phase 2.** Expected outcome:
+~75 divergent, ~5 engine bugs (small).
+
+#### Headline numbers
+
+- **Total hardened-only failures**: 3093.
+- **Divergent (clearly intentional SES enforcement)**: ~2960 (96%).
+- **Engine-bug candidates** (`iterator.next is not callable`
+  cluster): **65** (2%).
+- **Needs case-by-case inspection**: ~68 (2%).
+
+The 65 `iterator.next` failures are the **headline finding**.
+They cluster on Set-method-proposal and Iterator-helpers
+fixtures — both of which Cynic ships natively and which pass
+under unhardened mode. The hardened-mode regression points
+at a Phase-3 synthetic-accessor interaction with iterator
+dispatch. Phase 2's first concrete action: reproduce one of
+these fixtures under `cynic run --debug-globals` and trace.
+
+#### Implications for Phase 2 / Phase 3
+
+- The divergence list (Phase 2) needs **at minimum 4 categories**:
+  - `descriptor_assertion` — propertyHelper descriptor mismatches.
+  - `frozen_intrinsic_typeerror` — engine TypeError from SES.
+  - `synthetic_accessor_introspection` — ToPrimitive / toString
+    on accessor-demoted methods.
+  - `intentional_design_carveout` — Cynic's deliberate SES
+    relaxations (top-level `var`, etc.).
+- The witness inversion candidates (Phase 3) come predominantly
+  from `frozen_intrinsic_typeerror` — shortest fixtures whose
+  sole assertion is "mutation succeeded".
+- The 65 iterator-bug investigation is a **Phase 2 prerequisite** —
+  shipping the divergence-list infrastructure with a known engine
+  bug masked inside it is the failure mode the whole policy is
+  designed to prevent.
