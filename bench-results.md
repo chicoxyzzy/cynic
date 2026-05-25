@@ -14,6 +14,52 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-05-25 — cynic `aed6a66` + counter-loop specialization, host `Darwin 25.5.0 arm64`
+
+`loop_inc_lt` opcode fuses the seven-opcode canonical for-loop
+tail (`add 1; star; ldar; lt; jmp_if_true`) into a single
+dispatch. Compiler pattern-matches `for (let i = INT; i < INT;
+i++) BODY` on the `ForStmt` AST, promotes `i` to a register
+(off-env, via the new `is_register` Binding flag), and emits the
+fused tail when the body has no closure and doesn't reassign the
+counter. ROADMAP item 6 under interpreter-tier optimizations.
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 31.55 | 31.23 | 34.84 | 3552 |
+| prop_access | 10.91 | 10.54 | 11.48 | 3584 |
+| prop_write | 13.74 | 12.92 | 20.95 | 3648 |
+| array_iter | 22.08 | 21.30 | 23.12 | 4832 |
+| string_concat | 41.77 | 41.23 | 44.08 | 13024 |
+| promise_chain | 13.34 | 12.40 | 14.63 | 26752 |
+| object_alloc | 55.38 | 54.33 | 55.87 | 12352 |
+| method_call | 30.67 | 30.00 | 31.13 | 4240 |
+| class_instantiate | 121.26 | 120.20 | 123.39 | 8464 |
+| json_stringify | 38.80 | 38.02 | 41.87 | 9104 |
+| tail_recursion | 85.69 | 83.90 | 88.92 | 60672 |
+
+Δ vs the `28ef99c` row below (same host):
+- **`arith_loop` −61 %** (80.10 → 31.55) — primary effect. The
+  fused opcode collapses seven dispatches to one on the hot
+  iteration tail; the bench fixture's 5M-iteration counter loop
+  now runs at one third the prior wall time.
+
+Other movements (`prop_access`, `prop_write`, `object_alloc`)
+land outside the noise band but trace back to commits between
+`28ef99c` and `aed6a66` (Promise tightening, `harden()`
+descriptor work) — not the counter-loop change. `array_iter`
+slipped slightly (19.99 → 22.08, +10 %); the `array_iter`
+fixture uses `for (let i = 0; i < arr.length; ++i)` which the
+pattern matcher rejects (member-access bound, not an integer
+literal), so the result there is noise + intervening commits.
+
+Cross-engine context (interpreter tier, `tools/bench-cross.sh`):
+cynic `arith_loop` 31.55 ms vs QuickJS-NG 77 ms — cynic now
+**~2.4× faster than QuickJS-NG** on the tight numeric loop.
+
+Verified: `zig build test` green, runtime sweep 37241 / 9
+(unchanged from baseline), `--top-rss` healthy band.
+
 ### 2026-05-24 — cynic `28ef99c` (post numberToString fast-path + write-barrier closure merge), host `Darwin 25.5.0 arm64`
 
 Two perf-shaped wins since `9871171`:

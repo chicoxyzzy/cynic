@@ -866,14 +866,21 @@ not measurements.
    two old opcodes inlined. Estimated ~10-20 % on synthetic
    benches.
 
-6. **Counter-loop specialization.** Detect
-   `for (let i = 0; i < N; i++)` at compile time, emit a
-   specialized `loop_inc_lt` opcode that fuses
-   `add 1 + lt + jmp_if_true`. Closes most of the remaining
-   `arith_loop` gap to QuickJS-NG. Compile-time pattern match
-   over the `ForStmt` AST; runtime keeps the loop counter in a
-   register and reads the bound from another. Hermes / Ignition
-   both ship this.
+6. **Counter-loop specialization — shipped.** `loop_inc_lt`
+   opcode fuses the seven-opcode `add 1 + star + ldar + lt +
+   jmp_if_true` tail of a canonical for-loop into one dispatch.
+   The compiler pattern-matches `for (let i = INT; i < INT; i++)
+   BODY` on the `ForStmt` AST and emits the fused form when the
+   body has no closure (per-iter env elision precondition) and
+   doesn't reassign `i`. The counter and bound live in plain
+   registers — `i` is promoted off the env via a one-shot
+   `is_register` binding flag, so body reads compile to `ldar
+   r_counter`. Int32 fast path + slow fallback through
+   `arith.incOrDec` / `relational` for non-int32 operands.
+   Hermes calls the same shape `JLessNLong`; V8 Ignition has a
+   `Jump…IncIfTrue` family. `arith_loop` measured at **−61 %**
+   (80.10 → 31.55 ms) — overtakes QuickJS-NG (77 ms) on the
+   cross-engine bench.
 
 7. **Peephole pass at bytecode emit.** Pattern-match short
    sequences in the emitted bytecode and rewrite:
