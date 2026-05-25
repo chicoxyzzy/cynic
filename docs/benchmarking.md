@@ -100,10 +100,38 @@ automatically (`tools/bench-cross.sh` globs `bench/micros/*.js`).
 For every (suite, subtest, engine) cell:
 
 1. **Warmup pass** — one full run, results discarded.
-2. **5 runs** — record each.
-3. **Report median** of the 5; flag if max-min spread > 10%.
+2. **10 runs** — record each. Single-engine (`tools/bench.zig`)
+   and cross-engine (`tools/bench-cross.sh`) use the same sample
+   budget so deltas in one artifact are directly relatable to
+   deltas in the other.
+3. **Report median** — the average of the two middle samples for
+   the even sample count. Flag if max-min spread > 10%. (The
+   shell median in `bench-cross.sh` picks the upper of the two
+   middles — a ≤1-sample bias accepted to keep the script
+   pure-shell; well within the 10% noise floor.)
 4. **Subprocess isolation** — each run is a fresh shell invocation,
    so cold-start cost is included but doesn't leak across runs.
+
+The 10-sample budget replaced an earlier 5-sample policy after
+parallel-agent runs on the dev hardware showed too much
+sensitivity to one-off OS-scheduling jitter at N=5 — see the
+comment in `tools/bench.zig` at `RUNS_PER_FIXTURE` for the
+rationale.
+
+## Cadence — when to update each results file
+
+The two on-disk artifacts answer different questions and update
+at different rhythms:
+
+| File | Question answered | Update trigger |
+|---|---|---|
+| [`bench-results.md`](../bench-results.md) | "How does Cynic's perf and RSS look right now?" | After every perf-shaped commit (or batch). `/perf` re-runs the suite; append a new row when something moved ≥5%. |
+| [`bench-cross-results.md`](../bench-cross-results.md) | "Where does Cynic sit vs production engines?" | After meaningful relative-position changes — when Cynic moves past (or behind) a peer on a fixture, or after a multi-commit perf batch. Not per-commit. |
+
+Skip cross-engine on a routine `/perf` run unless you've changed
+something likely to shift the position-vs-peers ranking.
+`/checkpoint` runs the cross-engine sweep gated on bench
+movement (skipped when nothing moved ≥5%).
 
 ### Metrics captured per run
 

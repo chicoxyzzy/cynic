@@ -762,7 +762,7 @@ sampling by `/profile`.
   `/profile`.
 - **`/perf` micro-bench harness** — `zig build bench` builds a
   dedicated ReleaseFast `cynic-bench` binary and times the fixed
-  micro-bench suite in `bench/micros/`, median of 5, diffing
+  micro-bench suite in `bench/micros/`, median of 10, diffing
   per-fixture wall time + RSS against the prior `bench-results.md`
   baseline. Phase 1 of [docs/benchmarking.md](benchmarking.md).
 

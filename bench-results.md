@@ -2,8 +2,11 @@
 
 Per-fixture wall-time + peak RSS on the hand-picked micro-bench
 suite in `bench/micros/`. Produced by `zig build bench` — a
-dedicated ReleaseFast `cynic-bench` binary, median of 5 runs after
-a discarded warmup.
+dedicated ReleaseFast `cynic-bench` binary, median of 10 runs after
+a discarded warmup. Matched with `tools/bench-cross.sh` so
+single-engine and cross-engine numbers come out of the same sample
+budget — see [`docs/benchmarking.md`](docs/benchmarking.md)
+§Measurement protocol.
 
 **Numbers are only stable on a quiet machine, and only comparable
 within the same `host` line.** Cross-machine and cross-engine

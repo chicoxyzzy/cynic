@@ -1,7 +1,8 @@
 //! Micro-bench driver — spawns `zig-out/bin/cynic run` per fixture
 //! in `bench/micros/`, captures wall time + peak RSS via rusage on
-//! the child, runs each fixture 5× after a discarded warmup,
-//! reports the median.
+//! the child, runs each fixture 10× after a discarded warmup,
+//! reports the median (avg of the two middle samples for the
+//! even count).
 //!
 //! Phase 1 of docs/benchmarking.md — single-engine perf telemetry
 //! to surface regressions per commit. Cross-engine (jsvu /
@@ -18,12 +19,17 @@
 
 const std = @import("std");
 
-// 9 timed runs + 1 discarded warmup. Odd count gives a true
-// median sample (no average-of-middle-two distortion) and trims
-// the worst-case spike when a parallel agent's bench / GC pulse
-// lands during one iteration. 5-run medians were too sensitive
-// to one-off OS scheduling jitter on a shared machine.
-const RUNS_PER_FIXTURE = 9;
+// 10 timed runs + 1 discarded warmup. Matched with the cross-
+// engine harness in `tools/bench-cross.sh` so single-engine
+// and cross-engine numbers come out of the same sample budget.
+// 5-run medians were too sensitive to one-off OS scheduling
+// jitter on a shared machine (parallel agent's bench / GC pulse
+// landing during one iteration); 10 samples halve the
+// per-fixture variance without doubling the wall-time. Even
+// count means `medianStats` returns the average of the two
+// middle samples — a true statistical median, not the upper-
+// middle pick used by simpler implementations.
+const RUNS_PER_FIXTURE = 10;
 const WARMUP_RUNS = 1;
 
 const Bench = struct {
@@ -106,10 +112,22 @@ fn medianStats(samples: []Sample) Stats {
             return a.wall_us < b.wall_us;
         }
     }.lt);
-    const mid = samples.len / 2;
+    // True median: for odd N return the middle sample, for even
+    // N return the average of the two middle samples. Avoids the
+    // upward bias of the simpler `samples[len/2]` shortcut when
+    // the sample count is even (the shortcut picks the higher of
+    // the two middles).
+    const wall_us_median: i64 = if (samples.len & 1 == 1)
+        samples[samples.len / 2].wall_us
+    else
+        @divTrunc(samples[samples.len / 2 - 1].wall_us + samples[samples.len / 2].wall_us, 2);
+    const rss_bytes_median: usize = if (samples.len & 1 == 1)
+        samples[samples.len / 2].rss_bytes
+    else
+        (samples[samples.len / 2 - 1].rss_bytes + samples[samples.len / 2].rss_bytes) / 2;
     return .{
-        .median_wall_ms = @as(f64, @floatFromInt(samples[mid].wall_us)) / 1000.0,
-        .median_rss_kb = samples[mid].rss_bytes / 1024,
+        .median_wall_ms = @as(f64, @floatFromInt(wall_us_median)) / 1000.0,
+        .median_rss_kb = rss_bytes_median / 1024,
         .min_wall_ms = @as(f64, @floatFromInt(samples[0].wall_us)) / 1000.0,
         .max_wall_ms = @as(f64, @floatFromInt(samples[samples.len - 1].wall_us)) / 1000.0,
     };

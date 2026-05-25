@@ -21,8 +21,10 @@
 # fairest comparison (Cynic already vendors its libregexp).
 #
 # Measurement protocol (docs/benchmarking.md §Measurement protocol):
-#   1 discarded warmup run, then 5 timed runs, report the median,
+#   1 discarded warmup run, then 10 timed runs, report the median,
 #   flag any fixture whose (max-min)/median spread exceeds 10%.
+#   Matched with the single-engine `tools/bench.zig` harness so
+#   the two artefacts come out of the same sample budget.
 #
 # Graceful degradation: any engine whose binary is absent is skipped
 # with a note rather than failing the whole run. With zero external
@@ -32,7 +34,7 @@
 # Usage:
 #   tools/bench-cross.sh                 # all engines, table to stdout
 #   tools/bench-cross.sh -o results.md   # also write table to a file
-#   tools/bench-cross.sh --runs 7        # override timed-run count
+#   tools/bench-cross.sh --runs 5        # override timed-run count
 #
 # Does NOT touch bench-results.md (that file is the single-engine
 # `zig build bench` artifact). Output goes to stdout / the -o file.
@@ -44,7 +46,15 @@ JSVU_BIN="${JSVU_BIN:-$HOME/.jsvu/bin}"
 MICROS_DIR="$REPO_ROOT/bench/micros"
 CYNIC_BIN="$REPO_ROOT/zig-out/bin/cynic"
 
-RUNS=5
+# Timed-run count + warmup. Matched with tools/bench.zig's
+# RUNS_PER_FIXTURE so single-engine and cross-engine numbers come
+# out of the same sample budget. The shell median pick below
+# (sed-indexed at `mid+1`) returns the upper-middle sample for
+# even N — a ≤1-sample bias above the true average-of-middles
+# median. At ms-resolution timing on a noisy machine the bias
+# sits well inside the existing spread-flagging threshold (10%);
+# accepting it keeps the script pure-shell.
+RUNS=10
 WARMUP=1
 SPREAD_LIMIT=10   # percent
 OUT_FILE=""
