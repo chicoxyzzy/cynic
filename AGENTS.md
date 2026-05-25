@@ -326,7 +326,14 @@ RSS but obvious here. Forces `--threads=1`),
 `--top-gc-time=<n>` (top-N fixtures by accumulated GC pause
 time ≥ 1 ms. Different signal from `--top-alloc` — surfaces
 fixtures whose wall-time is dominated by GC even when bytes
-look moderate. Forces `--threads=1`). The harness
+look moderate. Forces `--threads=1`),
+`--min-spec-pct=<f>` / `--min-hardened-spec-pct=<f>` (per-row
+spec% floors — the unhardened legacy baseline and the
+SES-posture row respectively. Exit 2 when either phase's
+pass-percentage drops below the floor. Skipped under
+`--filter=`. CI wires both at the published baselines so a
+regression in either posture fails the build — see
+`.github/workflows/ci.yml`). The harness
 scores against the **Cynic-targeted scope**: paths under
 `harness/`, `staging/`, `intl402/`, Annex B language extensions,
 and the browser-era built-ins Cynic doesn't ship are dropped from

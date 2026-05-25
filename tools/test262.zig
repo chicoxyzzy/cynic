@@ -45,6 +45,19 @@
 //!                           Implies running every phase.
 //!   --list-failures=<n>     After the tally, print up to N failing test paths
 //!                           (main phase only).
+//!   --min-spec-pct=<f>      Floor on the **unhardened** phase (legacy
+//!                           ECMAScript baseline — the `runtime` row in
+//!                           `test262-results.md`). Exit 2 if that phase's
+//!                           pass-percentage falls below <f>. Ignored when
+//!                           `--filter=` narrows the corpus. Used by CI to
+//!                           gate on test262 regressions — see
+//!                           `.github/workflows/ci.yml`.
+//!   --min-hardened-spec-pct=<f>
+//!                           Companion floor on the **main (hardened)** phase
+//!                           — the SES-posture sweep, scored as the
+//!                           `runtime_hardened` row. Independent of
+//!                           `--min-spec-pct` so a hardened regression fails
+//!                           CI even when the legacy baseline is intact.
 //!
 //! Iteration / parallelism:
 //!   --only-failing          Skip-as-pass any fixture listed in
@@ -574,6 +587,29 @@ const Options = struct {
     /// phase regardless of `--write-results`. Accepted spellings:
     /// `--phase=main`, `--phase=feature:<flag>` (e.g. `feature:joint-iteration`).
     phase: ?Phase = null,
+    /// Minimum acceptable `spec%` for the **unhardened** phase
+    /// (the legacy ECMAScript baseline that `test262-results.md`'s
+    /// `runtime` row tracks). When >0 and the unhardened phase
+    /// runs, a pass-percentage below this threshold prints a
+    /// diagnostic and exits 2. `0.0` (default) disables.
+    ///
+    /// Scoped to the unhardened phase so CI can gate on the
+    /// historical baseline without false-positiving on the
+    /// hardened phase (which scores ~8 pp lower today and is
+    /// guarded by `min_hardened_spec_pct` separately). Filtered
+    /// runs and runs that don't include the phase skip the check.
+    min_spec_pct: f64 = 0.0,
+    /// Minimum acceptable `spec%` for the **main (hardened)**
+    /// phase — the SES-posture sweep that
+    /// `test262-results.md`'s `runtime_hardened` row tracks.
+    /// Same enforcement shape as `min_spec_pct` but scoped to
+    /// the hardened phase. Distinct flag because the hardened
+    /// floor sits ~8 pp lower than the legacy baseline (SES
+    /// freeze locks `.name` / `.length` descriptors that test262
+    /// expects to be `configurable: true`), and we want both
+    /// floors enforced independently so a regression in either
+    /// posture fails CI.
+    min_hardened_spec_pct: f64 = 0.0,
 };
 
 /// Path of the pass-cache, written at the repo root after every
@@ -1056,6 +1092,39 @@ pub fn main(init: std.process.Init) !void {
     if (main_result) |*mr| {
         const is_full = opts.filter == null and !opts.only_failing;
         if (is_full) try writePassCache(gpa, io, cwd, mr.pass_paths.items);
+    }
+
+    // `--min-spec-pct{,-hardened}` — gate the run on per-row
+    // spec% floors. Flips the previously-advisory test262 job to
+    // gating: a regression below either floor exits non-zero. The
+    // two flags map cleanly onto the two `runtime` rows in
+    // `test262-results.md`: `--min-spec-pct` floors the legacy
+    // (unhardened) baseline, `--min-hardened-spec-pct` floors the
+    // SES-posture mode. Filtered runs leave both floors wide-open
+    // because a `--filter=` narrows the corpus to a sliver whose
+    // spec% has no meaningful relation to the published row.
+    if (opts.filter == null) {
+        var below_floor = false;
+        const evalPhase = struct {
+            fn f(below: *bool, pr: *const PhaseResult, floor: f64, flag_name: []const u8) void {
+                if (pr.stats.total == 0) return;
+                const pct = 100.0 * @as(f64, @floatFromInt(pr.stats.pass())) / @as(f64, @floatFromInt(pr.stats.total));
+                if (pct < floor) {
+                    std.debug.print(
+                        "test262: phase '{s}' spec% {d:.2} below {s} floor {d:.2} (pass {d} / total {d})\n",
+                        .{ pr.phase.label(), pct, flag_name, floor, pr.stats.pass(), pr.stats.total },
+                    );
+                    below.* = true;
+                }
+            }
+        }.f;
+        if (opts.min_spec_pct > 0.0) {
+            if (unhardened_result) |*ur| evalPhase(&below_floor, ur, opts.min_spec_pct, "--min-spec-pct");
+        }
+        if (opts.min_hardened_spec_pct > 0.0) {
+            if (main_result) |*mr| evalPhase(&below_floor, mr, opts.min_hardened_spec_pct, "--min-hardened-spec-pct");
+        }
+        if (below_floor) std.process.exit(2);
     }
 }
 
@@ -3476,6 +3545,22 @@ fn ymdFromEpochDays(epoch_days: i64) YMD {
     return .{ .year = year, .month = m, .day = d };
 }
 
+/// Parse a `--<name>=<float>` percent value (range `[0, 100]`)
+/// or exit with a diagnostic. Shared between the unhardened and
+/// hardened spec% floor flags so the two stay in lockstep on
+/// validation + error wording.
+fn parsePctOrExit(arg: []const u8, flag_prefix: []const u8, raw: []const u8) f64 {
+    const v = std.fmt.parseFloat(f64, raw) catch {
+        std.debug.print("error: {s} expects a float, got '{s}'\n", .{ flag_prefix, raw });
+        std.process.exit(1);
+    };
+    if (v < 0.0 or v > 100.0) {
+        std.debug.print("error: {s} must be in [0, 100], got {d} (full arg '{s}')\n", .{ flag_prefix, v, arg });
+        std.process.exit(1);
+    }
+    return v;
+}
+
 fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
     var opts: Options = .{};
     var iter = args.iterate();
@@ -3525,6 +3610,10 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.top_alloc = std.fmt.parseInt(u32, arg["--top-alloc=".len..], 10) catch 0;
         } else if (std.mem.startsWith(u8, arg, "--top-gc-time=")) {
             opts.top_gc_time = std.fmt.parseInt(u32, arg["--top-gc-time=".len..], 10) catch 0;
+        } else if (std.mem.startsWith(u8, arg, "--min-spec-pct=")) {
+            opts.min_spec_pct = parsePctOrExit(arg, "--min-spec-pct=", arg["--min-spec-pct=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--min-hardened-spec-pct=")) {
+            opts.min_hardened_spec_pct = parsePctOrExit(arg, "--min-hardened-spec-pct=", arg["--min-hardened-spec-pct=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--phase=")) {
             const spec = arg["--phase=".len..];
             if (std.mem.eql(u8, spec, "main")) {
