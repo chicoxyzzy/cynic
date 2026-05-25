@@ -6,7 +6,7 @@
 |---|---|---|---|---|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 |
 | **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 |
-| **runtime_hardened** | 84.77 % | 91.22 % | 34044 / 40161 | 34044 / 37321 |
+| **runtime_hardened** | 85.49 % | 91.99 % | 34332 / 40161 | 34332 / 37321 |
 
 
 ## Where the runtime stands, by area
@@ -157,17 +157,12 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-25 — cynic `f48b7b0`, test262 `d0c1b455`
+### 2026-05-25 — cynic `8e311c3`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|
-| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | +72 | 55.8 s |
-| **runtime_hardened** | 84.77 % | 91.22 % | 34044 / 40161 | 34044 / 37321 | n/a |  |
-
-Biggest movers (runtime):
-
-- `built-ins/WeakMap` +39
-- `built-ins/Map` +33
+| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | +72 | 1m 10s |
+| **runtime_hardened** | 85.49 % | 91.99 % | 34332 / 40161 | 34332 / 37321 | n/a |  |
 
 ### 2026-05-24 — cynic `b49572e`, test262 `d0c1b455`
 
