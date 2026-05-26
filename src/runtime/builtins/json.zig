@@ -820,6 +820,40 @@ fn formatDoubleForJson(scratch: *[64]u8, d: f64) []const u8 {
     return std.fmt.bufPrint(scratch, "{d}", .{d}) catch unreachable;
 }
 
+/// §16.2.1.8.x ParseJSONModule — used by `loadModuleInner`'s
+/// synthetic-module pipeline to parse a JSON source into the
+/// `default` export of a JSON module. Equivalent to step 1 of
+/// ParseJSONModule (`%JSON.parse%(source)`) followed by step 2
+/// (`CreateDefaultExportSyntheticModule(json)`), minus the
+/// reviver wiring (a JSON module has none).
+///
+/// Returns `error.Malformed` on syntax errors so the caller can
+/// fold them into a link-time SyntaxError on the importing
+/// module's record. `error.OutOfMemory` propagates as the engine
+/// hard error.
+pub fn parseDefaultExport(realm: *Realm, source: []const u8) error{ OutOfMemory, Malformed }!Value {
+    var source_arena = std.heap.ArenaAllocator.init(realm.allocator);
+    defer source_arena.deinit();
+    var parser = JsonParser{
+        .input = source,
+        .pos = 0,
+        .realm = realm,
+        .source_arena = source_arena.allocator(),
+    };
+    parser.skipWs();
+    const parsed = parser.parseValue() catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // The synthetic-module path doesn't run user code during
+        // parse, so a NativeThrew can only mean a downstream
+        // allocator failed under the parse — surface as OOM.
+        error.NativeThrew => return error.OutOfMemory,
+        error.Malformed => return error.Malformed,
+    };
+    parser.skipWs();
+    if (parser.pos != source.len) return error.Malformed;
+    return parsed.value;
+}
+
 fn jsonParse(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     // §25.5.1 JSON.parse(text [, reviver]) step 1 — `text = ?

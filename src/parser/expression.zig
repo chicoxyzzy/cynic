@@ -1461,6 +1461,84 @@ fn parseClassExpression(p: *Parser) ParseError!Expression {
     } };
 }
 
+/// Best-effort extraction of the import-attributes `type` value
+/// from a literal import() options expression of the proposal
+/// shape `{ with: { type: "json" } }`. Returns `null` when the
+/// expression isn't that exact literal — including the case where
+/// it's a parenthesized wrapper, a non-object form, or carries a
+/// computed key. Decoding follows §16.2.1.4: the value must be a
+/// string-literal property and the decoded StringValue is what
+/// the host inspects. Other attributes are tolerated and
+/// preserved as `null` so the loader stays on the JavaScript path.
+fn extractWithTypeAttribute(p: *Parser, opts: Expression) ?[]const u8 {
+    var e = opts;
+    while (true) {
+        switch (e) {
+            .parenthesized => |pe| e = pe.expression.*,
+            else => break,
+        }
+    }
+    const obj = switch (e) {
+        .object_literal => |ol| ol,
+        else => return null,
+    };
+    for (obj.properties) |member| {
+        const prop = switch (member) {
+            .property => |pp| pp,
+            else => continue,
+        };
+        const key_text = switch (prop.key) {
+            .ident => |sp| p.source[sp.start..sp.end],
+            .string => |sp| sourceStringContents(p.source, sp),
+            else => continue,
+        };
+        if (!std.mem.eql(u8, key_text, "with")) continue;
+        var with_e = prop.value;
+        while (true) {
+            switch (with_e) {
+                .parenthesized => |pe| with_e = pe.expression.*,
+                else => break,
+            }
+        }
+        const with_obj = switch (with_e) {
+            .object_literal => |ol| ol,
+            else => return null,
+        };
+        for (with_obj.properties) |wm| {
+            const wp = switch (wm) {
+                .property => |pp| pp,
+                else => continue,
+            };
+            const wkey_text = switch (wp.key) {
+                .ident => |sp| p.source[sp.start..sp.end],
+                .string => |sp| sourceStringContents(p.source, sp),
+                else => continue,
+            };
+            if (!std.mem.eql(u8, wkey_text, "type")) continue;
+            // §16.2.1.4 — attribute values are StringLiteral; the
+            // loader only inspects string-literal values. Non-string
+            // values stay `null` here (the spec error path is
+            // host-defined; Cynic conservatively treats them as
+            // "no type attribute").
+            return switch (wp.value) {
+                .string_literal => |sl| sourceStringContents(p.source, sl.span),
+                else => null,
+            };
+        }
+    }
+    return null;
+}
+
+/// Strip the surrounding `"` or `'` from a StringLiteral span.
+/// No escape decoding — the import-attribute `type` values in the
+/// fixtures are bare ASCII identifiers (`"json"`, `"text"`); a
+/// full decode here would duplicate the runtime work and the
+/// loader compares against a small fixed set anyway.
+fn sourceStringContents(source: []const u8, span: Span) []const u8 {
+    if (span.end < span.start + 2) return "";
+    return source[span.start + 1 .. span.end - 1];
+}
+
 /// §13.3.10 dynamic `import(specifier)` and §13.3.12.1 `import.meta`.
 /// The lexer always tokenizes `import` as `kw_import`; the parser
 /// distinguishes the two forms by the token that follows.
@@ -1478,11 +1556,19 @@ fn parseImportExpression(p: *Parser) ParseError!Expression {
         const arg = try parseAssignment(p);
         // ImportCall takes an optional `options` argument (ES2025
         // import-attributes). Trailing commas are also grammar-legal.
-        // Parse-and-discard the options — the runtime loader hook
-        // doesn't consume them yet.
+        // When the options expression is the literal
+        // `{ with: { type: "..." } }`, peek the `type` value so the
+        // loader can dispatch to the JSON / text synthetic-module
+        // path. Non-literal shapes (a free variable, a computed
+        // key, …) decode to `null` here and the loader sees
+        // `attribute_type=null` — that's the conservative-default
+        // path; the runtime hook for evaluating the options
+        // expression itself is separate work.
+        var attr_type: ?[]const u8 = null;
         if (try p.eat(.comma)) {
             if (p.peek().kind != .rparen) {
-                _ = try parseAssignment(p);
+                const opts = try parseAssignment(p);
+                attr_type = extractWithTypeAttribute(p, opts);
                 _ = try p.eat(.comma);
             }
         }
@@ -1492,6 +1578,7 @@ fn parseImportExpression(p: *Parser) ParseError!Expression {
         return .{ .import_call = .{
             .span = .{ .start = import_tok.span.start, .end = rparen.span.end },
             .source = arg_ptr,
+            .attribute_type = attr_type,
         } };
     }
     if (p.peek().kind == .dot) {

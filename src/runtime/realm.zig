@@ -151,20 +151,57 @@ pub const Microtask = struct {
     /// (or `null` at the entry point). Points into chunk-pinned
     /// or realm-lifetime storage, so it needs no GC marking.
     module_import_base: ?[]const u8 = null,
+    /// For `.module_import` — §16.2.1.4 ImportAttributes `type`
+    /// value when the `import()` call carried a
+    /// `{ with: { type: "..." } }` literal in its second arg.
+    /// `null` for a plain `import(spec)`. Borrowed from the
+    /// importing chunk's constants (lifetime ties to the realm),
+    /// so no marking needed.
+    module_import_attribute_type: ?[]const u8 = null,
+};
+
+/// §16.2.1.8.x — Cynic's three module shapes. `javascript` is the
+/// default ParseModule path; `json` and `text` are the synthetic
+/// Synthetic Module Records the proposals
+/// [json-modules](https://tc39.es/proposal-json-modules/) and
+/// [import-text](https://tc39.es/ecma262/#sec-create-text-module)
+/// gate behind a `with { type: "..." }` import attribute. A
+/// synthetic record skips parse / compile / body-run entirely —
+/// the loader returns a fully-populated namespace with a single
+/// `default` export.
+pub const ModuleType = enum {
+    javascript,
+    json,
+    text,
 };
 
 /// Host-supplied module loader. Given a specifier (string from
-/// the import declaration, e.g. `"./foo.js"`) and the importing
-/// module's base URL (or `null` at the entry point), returns
-/// the resolved canonical URL plus the source bytes. Both
+/// the import declaration, e.g. `"./foo.js"`), the importing
+/// module's base URL (or `null` at the entry point), and the
+/// decoded `type` import attribute (or `null` when the import has
+/// no `with { type: "..." }` clause), returns the resolved
+/// canonical URL plus the source bytes and the module shape. Both
 /// slices must be valid for the realm's lifetime — typical
 /// loaders allocate them off the realm's allocator.
+///
+/// §16.2.1.4 ImportAttributes: an unknown `type` value (anything
+/// other than the host-recognised set — `json` and `text` for
+/// Cynic) is a host-defined error. Loaders return
+/// `error.ModuleLoadError` for unrecognised type values; the
+/// caller translates that into a TypeError at the import site.
 pub const ModuleLoadResult = struct {
     /// Canonical URL — used as the cache key. Two specifiers
     /// resolving to the same source must produce identical
     /// `url` strings.
     url: []const u8,
     source: []const u8,
+    /// §16.2.1.8.x — selects ParseModule vs the JSON / text
+    /// synthetic-module pipeline. `javascript` is the default;
+    /// `json` / `text` mean the loader's `source` bytes are fed
+    /// directly into the synthetic-record builder (JSON.parse for
+    /// `json`, identity for `text`). The loader picks this from
+    /// the `attribute_type` arg, the file extension, or both.
+    module_type: ModuleType = .javascript,
 };
 pub const ModuleLoaderError = error{
     OutOfMemory,
@@ -175,6 +212,7 @@ pub const ModuleLoader = *const fn (
     realm: *Realm,
     specifier: []const u8,
     base_url: ?[]const u8,
+    attribute_type: ?[]const u8,
 ) ModuleLoaderError!ModuleLoadResult;
 
 /// §9.1.1.4 GlobalEnvironmentRecord — TWO inner records:
@@ -1154,12 +1192,14 @@ pub const Realm = struct {
         specifier: Value,
         result_promise: Value,
         base_url: ?[]const u8,
+        attribute_type: ?[]const u8,
     ) !void {
         try self.microtask_queue.append(self.allocator, .{
             .kind = .module_import,
             .callback = specifier,
             .reaction_result = result_promise,
             .module_import_base = base_url,
+            .module_import_attribute_type = attribute_type,
         });
     }
 

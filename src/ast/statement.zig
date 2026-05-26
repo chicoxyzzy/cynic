@@ -334,6 +334,14 @@ pub const ImportDecl = struct {
     named: []NamedSpecifier,
     /// Module specifier — span over the StringLiteral token (incl. quotes).
     source: Span,
+    /// §16.2.1.4 ImportAttributes — the `type` attribute, when the
+    /// optional `with { type: "json" }` clause is present. Decoded
+    /// to its StringValue (no surrounding quotes). Borrowed from
+    /// the parse arena. `null` when no clause is present or the
+    /// clause carries no `type` key. Drives the §16.2.1.8.x
+    /// CreateJSONModule / CreateTextModule synthetic-record path
+    /// in the host loader.
+    attribute_type: ?[]const u8 = null,
 };
 
 pub const NamedSpecifier = struct {
@@ -371,6 +379,11 @@ pub const NamedExportBody = struct {
     specifiers: []ExportSpecifier,
     /// Re-export source — a StringLiteral span when present.
     source: ?Span,
+    /// §16.2.1.4 ImportAttributes — `type` value for the optional
+    /// `with` clause on a re-export-from. Same semantics as
+    /// `ImportDecl.attribute_type`. Always `null` when `source`
+    /// is null.
+    attribute_type: ?[]const u8 = null,
 };
 
 pub const ExportSpecifier = struct {
@@ -385,6 +398,9 @@ pub const AllExportBody = struct {
     /// `export * as ns` — span of the `ns` IdentifierName, if any.
     namespace_local: ?Span,
     source: Span,
+    /// §16.2.1.4 ImportAttributes — `type` value for the optional
+    /// `with` clause. Same semantics as `ImportDecl.attribute_type`.
+    attribute_type: ?[]const u8 = null,
 };
 
 pub const FieldDef = struct {

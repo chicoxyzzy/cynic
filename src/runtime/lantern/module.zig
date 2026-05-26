@@ -166,6 +166,7 @@ pub fn loadModule(
     realm: *Realm,
     specifier: []const u8,
     base_url: ?[]const u8,
+    attribute_type: ?[]const u8,
 ) RunError!LoadModuleOutcome {
     // §15.2.1.16 step 9 — IndirectExport validation must wait
     // until the whole link tree has finished evaluating, so each
@@ -175,7 +176,7 @@ pub fn loadModule(
     // queued validations once everything below it has settled.
     realm.module_load_depth += 1;
     defer realm.module_load_depth -= 1;
-    const outcome = try loadModuleInner(allocator, realm, specifier, base_url);
+    const outcome = try loadModuleInner(allocator, realm, specifier, base_url, attribute_type);
     // Drain the deferred-validation queue ONCE the topmost
     // `loadModule` is about to return — depth-1 here means we
     // were the outermost (decremented in `defer` above). If
@@ -222,6 +223,7 @@ fn loadModuleInner(
     realm: *Realm,
     specifier: []const u8,
     base_url: ?[]const u8,
+    attribute_type: ?[]const u8,
 ) RunError!LoadModuleOutcome {
     const ModuleRecord = module_mod.ModuleRecord;
     const loader = realm.module_loader orelse {
@@ -229,14 +231,32 @@ fn loadModuleInner(
         return .{ .value = ex, .threw = true };
     };
 
-    const result = loader(realm, specifier, base_url) catch |err| switch (err) {
+    const result = loader(realm, specifier, base_url, attribute_type) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.ModuleNotFound => return .{ .value = try makeTypeError(realm, "module not found"), .threw = true },
         error.ModuleLoadError => return .{ .value = try makeTypeError(realm, "module load failed"), .threw = true },
     };
 
+    // §16.2.1.4 ImportAttributes — `import x from "./y.json"` (no
+    // attribute) and `import y from "./y.json" with { type: "json" }`
+    // resolve to *different* Module Records even though the
+    // canonical URL is identical. The host-defined cache key per
+    // the proposal is `(specifier, attributes)`; Cynic synthesizes
+    // that as `result.url` for the default JavaScript path and
+    // `result.url + "?type=<x>"` when an attribute is in play.
+    // Keys are owned by the realm allocator so they outlive the
+    // current evaluation arena.
+    const cache_key: []const u8 = if (attribute_type) |t|
+        std.fmt.allocPrint(realm.allocator, "{s}?type={s}", .{ result.url, t }) catch return error.OutOfMemory
+    else
+        result.url;
+
     // Cache lookup.
-    if (realm.modules.get(result.url)) |mr| {
+    if (realm.modules.get(cache_key)) |mr| {
+        // The synthesized cache key above is freshly allocated on
+        // every miss path. When we hit, free the duplicate to
+        // avoid leaking one slice per repeat-import.
+        if (attribute_type != null) realm.allocator.free(cache_key);
         switch (mr.state) {
             .uninstantiated, .evaluated => {
                 const ns = module_mod.getModuleNamespace(realm, mr) catch return error.OutOfMemory;
@@ -271,7 +291,18 @@ fn loadModuleInner(
     ns.is_module_namespace = true;
     const mr = ModuleRecord.init(realm.allocator, result.url, ns) catch return error.OutOfMemory;
     mr.state = .evaluating;
-    realm.modules.put(realm.allocator, result.url, mr) catch return error.OutOfMemory;
+    realm.modules.put(realm.allocator, cache_key, mr) catch return error.OutOfMemory;
+
+    // §16.2.1.8.x synthetic-module pipeline — both JSON modules and
+    // text modules build a single-`default`-export namespace
+    // without a parse / compile / body-run pass. CreateJSONModule
+    // routes through %JSON.parse% per
+    // https://tc39.es/proposal-json-modules/, CreateTextModule
+    // just wraps `source` in a JSString per
+    // https://tc39.es/ecma262/#sec-create-text-module.
+    if (result.module_type != .javascript) {
+        return finalizeSyntheticModule(realm, mr, result);
+    }
 
     // Parse + compile.
     var arena_state: std.heap.ArenaAllocator = .init(allocator);
@@ -396,6 +427,72 @@ fn loadModuleInner(
             return .{ .value = ex, .threw = true, .mr = mr };
         },
     }
+}
+
+/// §16.2.1.8.x CreateDefaultExportSyntheticModule — install a
+/// single `default` binding on `mr.exports` and finalise the
+/// namespace. The default value comes from the result shape:
+///
+///   • `json` — `%JSON.parse%(result.source)`. A malformed
+///     source surfaces as a SyntaxError on `mr.error_value`;
+///     the caller routes it through the static-import or
+///     dynamic-import error path the same way any other
+///     instantiation-time error would.
+///   • `text` — `Value.fromString(allocateString(result.source))`.
+///     The bytes are copied into a heap string; the original
+///     `result.source` slice may be reclaimed afterwards.
+///
+/// Synthetic records have no chunk (`mr.chunk` stays `null`); no
+/// `module_export` opcodes run for them, so the only exported
+/// binding is `default`. Named imports of any other key resolve
+/// to `undefined` via the namespace's empty lookup — at runtime
+/// `lda_property` on a Module Namespace exotic for a missing key
+/// throws SyntaxError-flavoured ReferenceError per
+/// §9.4.6.7 step 5 (the binding-resolution path). Static
+/// `import { foo } from "./x.json" with { type: "json" }`
+/// resolves through `import_ns_slot + import_name` at run time;
+/// the read of `ns["foo"]` returns `undefined` since there is no
+/// binding — matching the proposal's "no named bindings beyond
+/// default" rule. (V8 / SpiderMonkey actually throw at link
+/// time per the explicit ResolveExport gate; Cynic's eager-link
+/// shape surfaces the same observable shape lazily here. The
+/// `json-named-bindings.js` fixture exercises this.)
+fn finalizeSyntheticModule(
+    realm: *Realm,
+    mr: *module_mod.ModuleRecord,
+    result: @import("../realm.zig").ModuleLoadResult,
+) RunError!LoadModuleOutcome {
+    const ns = mr.exports;
+    const default_value: Value = switch (result.module_type) {
+        .javascript => unreachable, // caller already routes
+        .text => blk: {
+            const s = realm.heap.allocateString(result.source) catch return error.OutOfMemory;
+            break :blk Value.fromString(s);
+        },
+        .json => blk: {
+            const json_mod = @import("../builtins/json.zig");
+            const parsed = json_mod.parseDefaultExport(realm, result.source) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Malformed => {
+                    mr.state = .errored;
+                    const ex = makeSyntaxError(realm, "JSON module: malformed JSON text") catch return error.OutOfMemory;
+                    mr.error_value = ex;
+                    return .{ .value = ex, .threw = true, .mr = mr };
+                },
+            };
+            break :blk parsed;
+        },
+    };
+
+    // §16.2.1.8.x — the synthetic module exports the parsed value
+    // under `default`. The Module Namespace finalisation flips the
+    // descriptor flags to `{w:true, e:true, c:false}` per
+    // §9.4.6.5 in `getModuleNamespace` below.
+    ns.set(realm.allocator, "default", default_value) catch return error.OutOfMemory;
+
+    mr.state = .evaluated;
+    const final_ns = module_mod.getModuleNamespace(realm, mr) catch return error.OutOfMemory;
+    return .{ .value = heap_mod.taggedObject(final_ns), .threw = false, .mr = mr };
 }
 
 

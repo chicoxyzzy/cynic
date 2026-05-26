@@ -312,6 +312,17 @@ pub const AwaitExpr = struct {
 pub const ImportCallExpr = struct {
     span: Span,
     source: *Expression,
+    /// §13.3.10 import() second argument — when the options
+    /// expression is the literal `{ with: { type: "json" } }` (per
+    /// the import-attributes proposal), the parser extracts the
+    /// `type` StringLiteral here. Other shapes (a non-literal
+    /// expression, a missing `with` / `type` key) decode to `null`
+    /// and the loader treats the import as `module_type =
+    /// javascript`. The non-literal case is a runtime-only spec
+    /// corner Cynic doesn't yet evaluate (see
+    /// `dynamic-import 2nd-param-*` cluster in test262 — separate
+    /// follow-up).
+    attribute_type: ?[]const u8 = null,
 };
 
 pub const ArrowFunction = struct {

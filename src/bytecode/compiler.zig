@@ -815,6 +815,22 @@ pub const Compiler = struct {
         try self.builder.emitOp(.import_meta, span);
     }
 
+    /// Sentinel in the `k_attr` operand of `module_load` /
+    /// `dynamic_import` for "no `with { type: "..." }` attribute" —
+    /// i.e. plain JavaScript import path. Matches the interpreter's
+    /// decode in `lantern/interpreter.zig`.
+    pub const MODULE_NO_ATTRIBUTE: u16 = 0xFFFF;
+
+    /// Encode an `attribute_type` (from the AST) as a constant-pool
+    /// index for the `module_load` / `dynamic_import` opcode's
+    /// `k_attr` slot. `null` becomes the no-attribute sentinel; a
+    /// non-null slice gets interned and the resulting index
+    /// returned.
+    fn moduleAttributeConstant(self: *Compiler, attribute_type: ?[]const u8) CompileError!u16 {
+        const t = attribute_type orelse return MODULE_NO_ATTRIBUTE;
+        return self.internString(t);
+    }
+
     /// `import(specifier)` — §13.3.10 dynamic import.
     /// Compiles the argument expression into acc, then dispatches
     /// the `dynamic_import` opcode which builds the Promise. The
@@ -823,7 +839,9 @@ pub const Compiler = struct {
     /// on failure it rejects with the loader's TypeError.
     fn compileImportCall(self: *Compiler, ic: ast.expression.ImportCallExpr) CompileError!void {
         try self.compileExpression(ic.source);
+        const k_attr = try self.moduleAttributeConstant(ic.attribute_type);
         try self.builder.emitOp(.dynamic_import, ic.span);
+        try self.builder.emitU16(k_attr);
     }
 
     /// `/pat/flags` literal — emit as `new RegExp("pat", "flags")`.
@@ -4833,8 +4851,10 @@ pub const Compiler = struct {
         if (raw.len < 2) return error.UnsupportedStatement;
         const spec_text = raw[1 .. raw.len - 1];
         const k_spec = try self.internString(spec_text);
+        const k_attr = try self.moduleAttributeConstant(id.attribute_type);
         try self.builder.emitOp(.module_load, id.span);
         try self.builder.emitU16(k_spec);
+        try self.builder.emitU16(k_attr);
 
         // Reserve a persistent env slot for the namespace — one per
         // import-decl. All indirect bindings declared by this decl
@@ -4968,8 +4988,10 @@ pub const Compiler = struct {
                     if (raw.len < 2) return error.UnsupportedStatement;
                     const spec_text = raw[1 .. raw.len - 1];
                     const k_spec = try self.internString(spec_text);
+                    const k_attr = try self.moduleAttributeConstant(body.attribute_type);
                     try self.builder.emitOp(.module_load, ed.span);
                     try self.builder.emitU16(k_spec);
+                    try self.builder.emitU16(k_attr);
                     for (body.specifiers) |spec| {
                         // §12.7 IdentifierName escape-decoding: both
                         // sides are IdentifierName productions when
@@ -5086,9 +5108,11 @@ pub const Compiler = struct {
                 if (raw.len < 2) return;
                 const spec_text = raw[1 .. raw.len - 1];
                 const k_spec = try self.internString(spec_text);
+                const k_attr = try self.moduleAttributeConstant(all_body.attribute_type);
                 if (all_body.namespace_local) |ns_span| {
                     try self.builder.emitOp(.module_load, ed.span);
                     try self.builder.emitU16(k_spec);
+                    try self.builder.emitU16(k_attr);
                     const ns_text = self.source[ns_span.start..ns_span.end];
                     const ns_name = if (ns_text.len >= 2 and (ns_text[0] == '"' or ns_text[0] == '\''))
                         ns_text[1 .. ns_text.len - 1]
@@ -5100,6 +5124,7 @@ pub const Compiler = struct {
                 } else {
                     try self.builder.emitOp(.module_load, ed.span);
                     try self.builder.emitU16(k_spec);
+                    try self.builder.emitU16(k_attr);
                     try self.builder.emitOp(.module_reexport_star, ed.span);
                 }
             },

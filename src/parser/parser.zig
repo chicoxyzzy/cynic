@@ -3158,7 +3158,7 @@ pub const Parser = struct {
         if (self.current.kind == .string_literal) {
             // Side-effect import: `import "x";` — no clause.
             const source_tok = try self.bump();
-            try self.parseOptionalWithClause();
+            const attr_type = try self.parseOptionalWithClause();
             const stmt_end = try self.consumeSemicolon(source_tok.span.end);
             return .{ .import_decl = .{
                 .span = .{ .start = start, .end = stmt_end },
@@ -3166,6 +3166,7 @@ pub const Parser = struct {
                 .namespace = null,
                 .named = &.{},
                 .source = source_tok.span,
+                .attribute_type = attr_type,
             } };
         }
 
@@ -3197,7 +3198,7 @@ pub const Parser = struct {
             return error.ParseError;
         }
         const source_tok = try self.bump();
-        try self.parseOptionalWithClause();
+        const attr_type = try self.parseOptionalWithClause();
         const stmt_end = try self.consumeSemicolon(source_tok.span.end);
 
         return .{ .import_decl = .{
@@ -3206,6 +3207,7 @@ pub const Parser = struct {
             .namespace = namespace,
             .named = named,
             .source = source_tok.span,
+            .attribute_type = attr_type,
         } };
     }
 
@@ -3214,12 +3216,14 @@ pub const Parser = struct {
     /// is a trailing comma. Keys are `IdentifierName | StringLiteral`;
     /// values are `StringLiteral`.
     ///
-    /// Cynic currently parses-and-discards: the module loader hook
-    /// doesn't consume attributes yet, but accepting the syntax
-    /// unblocks fixtures whose subject is something else
-    /// (parse-pass-then-runtime).
-    fn parseOptionalWithClause(self: *Parser) ParseError!void {
-        if (self.current.kind != .kw_with) return;
+    /// Returns the decoded StringValue of the `type` attribute when
+    /// the clause includes one (drives §16.2.1.8.x synthetic-module
+    /// dispatch in the loader); `null` when no clause is present
+    /// or no `type` key appears. Other attribute keys are
+    /// parsed-and-discarded for forward compatibility — the host
+    /// only consumes `type` today.
+    fn parseOptionalWithClause(self: *Parser) ParseError!?[]const u8 {
+        if (self.current.kind != .kw_with) return null;
         _ = try self.bump(); // `with`
         _ = try self.expect(.lbrace);
         // §16.2.1.4 ImportAttributes — `It is a Syntax Error if
@@ -3229,6 +3233,7 @@ pub const Parser = struct {
         // decode too). Track decoded keys we've seen.
         var seen: std.ArrayListUnmanaged([]const u8) = .empty;
         defer seen.deinit(self.arena);
+        var type_value: ?[]const u8 = null;
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
             // AttributeKey — IdentifierName or StringLiteral. The
             // lexer surfaces reserved words as their `kw_*` kinds;
@@ -3261,10 +3266,14 @@ pub const Parser = struct {
                 try self.report(.unexpected_token, self.current.span);
                 return error.ParseError;
             }
-            _ = try self.bump(); // value
+            const val_tok = try self.bump(); // value
+            if (std.mem.eql(u8, key_text, "type")) {
+                type_value = try self.decodeAttributeStringKey(val_tok.span);
+            }
             if (!try self.eat(.comma)) break;
         }
         _ = try self.expect(.rbrace);
+        return type_value;
     }
 
     /// §11.1.4 — true iff `span` covers a StringLiteral whose
@@ -3537,13 +3546,14 @@ pub const Parser = struct {
             return error.ParseError;
         }
         const source_tok = try self.bump();
-        try self.parseOptionalWithClause();
+        const attr_type = try self.parseOptionalWithClause();
         const stmt_end = try self.consumeSemicolon(source_tok.span.end);
         return .{ .export_decl = .{
             .span = .{ .start = start, .end = stmt_end },
             .body = .{ .all = .{
                 .namespace_local = namespace_local,
                 .source = source_tok.span,
+                .attribute_type = attr_type,
             } },
         } };
     }
@@ -3593,6 +3603,7 @@ pub const Parser = struct {
         }
         _ = try self.expect(.rbrace);
         var source: ?Span = null;
+        var attr_type: ?[]const u8 = null;
         if (self.current.kind == .identifier and
             std.mem.eql(u8, self.current.slice(self.source), "from"))
         {
@@ -3603,7 +3614,7 @@ pub const Parser = struct {
             }
             const source_tok = try self.bump();
             source = source_tok.span;
-            try self.parseOptionalWithClause();
+            attr_type = try self.parseOptionalWithClause();
         }
         const last_end: u32 = if (source) |s| s.end else self.current.span.start;
         const stmt_end = try self.consumeSemicolon(last_end);
@@ -3612,6 +3623,7 @@ pub const Parser = struct {
             .body = .{ .named = .{
                 .specifiers = try specs.toOwnedSlice(self.arena),
                 .source = source,
+                .attribute_type = attr_type,
             } },
         } };
     }

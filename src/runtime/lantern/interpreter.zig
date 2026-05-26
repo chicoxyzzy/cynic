@@ -5328,11 +5328,24 @@ pub fn runFrames(
             .module_load => {
                 const k = readU16(code, ip);
                 ip += 2;
+                const k_attr = readU16(code, ip);
+                ip += 2;
                 if (k >= local_chunk.constants.len) return error.InvalidOpcode;
                 const spec_v = local_chunk.constants[k];
                 if (!spec_v.isString()) return error.InvalidOpcode;
                 const spec_s: *JSString = @ptrCast(@alignCast(spec_v.asString()));
-                const outcome = loadModule(allocator, realm, spec_s.flatBytes(), local_chunk.base_url) catch |err| switch (err) {
+                // §16.2.1.4 — `0xFFFF` is the compiler's "no
+                // `with { type: "..." }`" sentinel (see
+                // `Compiler.MODULE_NO_ATTRIBUTE` in
+                // `src/bytecode/compiler.zig`).
+                const attribute_type: ?[]const u8 = if (k_attr == 0xFFFF) null else blk: {
+                    if (k_attr >= local_chunk.constants.len) return error.InvalidOpcode;
+                    const a_v = local_chunk.constants[k_attr];
+                    if (!a_v.isString()) return error.InvalidOpcode;
+                    const a_s: *JSString = @ptrCast(@alignCast(a_v.asString()));
+                    break :blk a_s.flatBytes();
+                };
+                const outcome = loadModule(allocator, realm, spec_s.flatBytes(), local_chunk.base_url, attribute_type) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.InvalidOpcode,
                 };
@@ -5367,6 +5380,16 @@ pub fn runFrames(
                 //   8. Perform HostImportModuleDynamically(...).
                 //   9. Return promiseCapability.[[Promise]].
                 const promise_mod = @import("../builtins/promise.zig");
+
+                const k_attr = readU16(code, ip);
+                ip += 2;
+                const attribute_type: ?[]const u8 = if (k_attr == 0xFFFF) null else blk: {
+                    if (k_attr >= local_chunk.constants.len) return error.InvalidOpcode;
+                    const a_v = local_chunk.constants[k_attr];
+                    if (!a_v.isString()) return error.InvalidOpcode;
+                    const a_s: *JSString = @ptrCast(@alignCast(a_v.asString()));
+                    break :blk a_s.flatBytes();
+                };
 
                 // §13.3.10.1 step 6 — ToString(specifier). For
                 // primitives this is the trivial branch; for objects
@@ -5404,6 +5427,7 @@ pub fn runFrames(
                         Value.fromString(spec_string),
                         pending,
                         local_chunk.base_url,
+                        attribute_type,
                     );
                     acc = pending;
                 }

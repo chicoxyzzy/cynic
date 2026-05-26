@@ -126,10 +126,18 @@ const LoaderState = struct {
 /// Resolve `./foo.js` against the importing module's directory
 /// (extracted from `loader_state.test_path`) and read the
 /// matching file from the corpus dir.
+///
+/// `attribute_type` carries the §16.2.1.4 `with { type: "..." }`
+/// value from the importing module's import statement (or `null`
+/// when the import omits the attribute). Cynic recognises `json`
+/// and `text` per the corresponding Stage-4 proposals. Anything
+/// else surfaces as `error.ModuleLoadError` — the spec wants an
+/// unknown type to be a host-defined error.
 fn test262ModuleLoader(
     realm: *cynic.runtime.Realm,
     specifier: []const u8,
     base_url: ?[]const u8,
+    attribute_type: ?[]const u8,
 ) cynic.runtime.realm.ModuleLoaderError!cynic.runtime.realm.ModuleLoadResult {
     _ = base_url; // we always resolve against `loader_state.test_path`
     const state = loader_state orelse return error.ModuleNotFound;
@@ -143,7 +151,15 @@ fn test262ModuleLoader(
     const source = state.corpus.readFileAlloc(state.io, resolved, realm.allocator, .limited(8 * 1024 * 1024)) catch {
         return error.ModuleNotFound;
     };
-    return .{ .url = resolved, .source = source };
+
+    const module_type: cynic.runtime.realm.ModuleType = blk: {
+        const t = attribute_type orelse break :blk .javascript;
+        if (std.mem.eql(u8, t, "json")) break :blk .json;
+        if (std.mem.eql(u8, t, "text")) break :blk .text;
+        // Unknown attribute type — host-defined error per §16.2.1.4.
+        return error.ModuleLoadError;
+    };
+    return .{ .url = resolved, .source = source, .module_type = module_type };
 }
 
 /// `$DONE([err])` — test262 host hook for async-flagged tests.
@@ -3472,12 +3488,12 @@ fn writeFileBody(
                 "- **{d} real engine failures** — all libregexp Annex B / `/v` grammar " ++
                 "carve-outs documented in [AGENTS.md](../AGENTS.md).\n" ++
                 "- **{d} skipped** — **tech debt + vendor gaps**. Features Cynic " ++
-                "should eventually ship (Temporal, `explicit-resource-management`, " ++
-                "`json-modules`, `import-text`) or fixtures blocked on vendored " ++
-                "libregexp (`/v` set-difference, `\\q{{…}}`, property-of-strings) and " ++
-                "single-realm Cynic (`$262.createRealm()` cross-realm fixtures). " ++
-                "Permanent out-of-scope (Annex B, `intl402/`, `staging/`, browser-era " ++
-                "built-ins) is filtered before corpus — those are not counted here.\n\n",
+                "should eventually ship (Temporal, `explicit-resource-management`) or " ++
+                "fixtures blocked on vendored libregexp (`/v` set-difference, " ++
+                "`\\q{{…}}`, property-of-strings) and single-realm Cynic " ++
+                "(`$262.createRealm()` cross-realm fixtures). Permanent out-of-scope " ++
+                "(Annex B, `intl402/`, `staging/`, browser-era built-ins) is filtered " ++
+                "before corpus — those are not counted here.\n\n",
             .{ r.spec_pct, r.total, engine_pass, r.attempted_pct, r.divergent, real_fails, skip },
         );
         try out.appendSlice(gpa, tldr);
@@ -3639,13 +3655,13 @@ fn writeFileBody(
         \\  `## Pre-Stage-4 proposals shipped` below).
         \\- **In `corpus` as `skip`** — *tech debt*, should
         \\  eventually pass: Stage-4 features Cynic hasn't shipped
-        \\  yet (Temporal, `explicit-resource-management`,
-        \\  `json-modules`, `import-text`), libregexp `/v` grammar
-        \\  gaps (vendored matcher), cross-realm fixtures
-        \\  (`$262.createRealm()` — single-realm Cynic doesn't
-        \\  expose multi-realm to user JS yet). These count
-        \\  toward `corpus` so `pass%` reflects the actual work
-        \\  left instead of a trimmed-denominator headline.
+        \\  yet (Temporal, `explicit-resource-management`),
+        \\  libregexp `/v` grammar gaps (vendored matcher),
+        \\  cross-realm fixtures (`$262.createRealm()` —
+        \\  single-realm Cynic doesn't expose multi-realm to user
+        \\  JS yet). These count toward `corpus` so `pass%`
+        \\  reflects the actual work left instead of a trimmed-
+        \\  denominator headline.
         \\
         \\Today: test262 ships ~52k fixtures; `corpus` is ~45k.
         \\

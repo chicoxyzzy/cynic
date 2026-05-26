@@ -335,6 +335,7 @@ pub fn drainMicrotasks(allocator: std.mem.Allocator, realm: *Realm) RunError!voi
                     task.callback,
                     task.reaction_result,
                     task.module_import_base,
+                    task.module_import_attribute_type,
                 );
             },
         }
@@ -355,6 +356,7 @@ fn runModuleImportJob(
     specifier_v: Value,
     result_promise: Value,
     base_url: ?[]const u8,
+    attribute_type: ?[]const u8,
 ) RunError!void {
     const promise_obj = heap_mod.valueAsPlainObject(result_promise) orelse return;
     if (!specifier_v.isString()) {
@@ -371,7 +373,7 @@ fn runModuleImportJob(
     scope.push(specifier_v) catch return error.OutOfMemory;
     scope.push(result_promise) catch return error.OutOfMemory;
 
-    const outcome = loadModule(allocator, realm, spec_str.flatBytes(), base_url) catch |err| switch (err) {
+    const outcome = loadModule(allocator, realm, spec_str.flatBytes(), base_url, attribute_type) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
             const ex = try makeTypeError(realm, "module load failed");

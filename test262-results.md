@@ -1,18 +1,18 @@
 # test262 conformance — Cynic
 
-**Cynic passes 83.16 % of its 45096-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
+**Cynic passes 83.22 % of its 45096-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
 
-- **34478 pass** at the engine-true level (engine% = 99.97 % — see Legend).
-- **3025 SES-policy divergences** — Cynic's hardened posture throws by design where test262 expects the spec-literal success (frozen primordials, locked descriptors, override-mistake fix). Counted as engine-correct in the headline `pass%` per Layout A; see `docs/handbook/ses-test262-policy.md`.
+- **34503 pass** at the engine-true level (engine% = 99.97 % — see Legend).
+- **3026 SES-policy divergences** — Cynic's hardened posture throws by design where test262 expects the spec-literal success (frozen primordials, locked descriptors, override-mistake fix). Counted as engine-correct in the headline `pass%` per Layout A; see `docs/handbook/ses-test262-policy.md`.
 - **9 real engine failures** — all libregexp Annex B / `/v` grammar carve-outs documented in [AGENTS.md](../AGENTS.md).
-- **7584 skipped** — **tech debt + vendor gaps**. Features Cynic should eventually ship (Temporal, `explicit-resource-management`, `json-modules`, `import-text`) or fixtures blocked on vendored libregexp (`/v` set-difference, `\q{…}`, property-of-strings) and single-realm Cynic (`$262.createRealm()` cross-realm fixtures). Permanent out-of-scope (Annex B, `intl402/`, `staging/`, browser-era built-ins) is filtered before corpus — those are not counted here.
+- **7558 skipped** — **tech debt + vendor gaps**. Features Cynic should eventually ship (Temporal, `explicit-resource-management`) or fixtures blocked on vendored libregexp (`/v` set-difference, `\q{…}`, property-of-strings) and single-realm Cynic (`$262.createRealm()` cross-realm fixtures). Permanent out-of-scope (Annex B, `intl402/`, `staging/`, browser-era built-ins) is filtered before corpus — those are not counted here.
 
 ## Current scores
 
 | posture | pass% | engine% | passes / corpus | divergent |
 |---|---:|---:|---:|---:|
-| **hardened** (default — `cynic run`) | 83.16 % | 99.97 % | 37503 / 45096 | 3025 |
-| **unhardened** (`cynic --unhardened`) | 83.16 % | 99.98 % | 37503 / 45096 | — |
+| **hardened** (default — `cynic run`) | 83.22 % | 99.97 % | 37529 / 45096 | 3026 |
+| **unhardened** (`cynic --unhardened`) | 83.22 % | 99.98 % | 37529 / 45096 | — |
 
 > **pass%** is the headline — `pass / corpus` (a fixture
 > Cynic doesn't ship counts as a `skip`, lowering this).
@@ -118,13 +118,13 @@ Two-tier skiplist in
   `## Pre-Stage-4 proposals shipped` below).
 - **In `corpus` as `skip`** — *tech debt*, should
   eventually pass: Stage-4 features Cynic hasn't shipped
-  yet (Temporal, `explicit-resource-management`,
-  `json-modules`, `import-text`), libregexp `/v` grammar
-  gaps (vendored matcher), cross-realm fixtures
-  (`$262.createRealm()` — single-realm Cynic doesn't
-  expose multi-realm to user JS yet). These count
-  toward `corpus` so `pass%` reflects the actual work
-  left instead of a trimmed-denominator headline.
+  yet (Temporal, `explicit-resource-management`),
+  libregexp `/v` grammar gaps (vendored matcher),
+  cross-realm fixtures (`$262.createRealm()` —
+  single-realm Cynic doesn't expose multi-realm to user
+  JS yet). These count toward `corpus` so `pass%`
+  reflects the actual work left instead of a trimmed-
+  denominator headline.
 
 Today: test262 ships ~52k fixtures; `corpus` is ~45k.
 ## Where the engine fails (and where SES diverges), by area
@@ -169,7 +169,7 @@ first two path components (`built-ins/Set`,
 | `built-ins/Date` | 431 | 0 | 11 | 152 | 98 % | 100 % |
 | `built-ins/Math` | 214 | 0 | 0 | 113 | 100 % | 100 % |
 | `built-ins/Promise` | 526 | 0 | 39 | 101 | 94 % | 100 % |
-| `language/expressions` | 9721 | 0 | 926 | 99 | 91 % | 100 % |
+| `language/expressions` | 9730 | 0 | 917 | 99 | 91 % | 100 % |
 | `built-ins/TypedArrayConstructors` | 562 | 0 | 26 | 93 | 96 % | 100 % |
 | `language/statements` | 8346 | 0 | 662 | 81 | 93 % | 100 % |
 | `built-ins/Set` | 312 | 0 | 2 | 69 | 99 % | 100 % |
@@ -219,6 +219,7 @@ first two path components (`built-ins/Set`,
 | `built-ins/isNaN` | 14 | 0 | 0 | 1 | 100 % | 100 % |
 | `built-ins/parseFloat` | 53 | 0 | 0 | 1 | 100 % | 100 % |
 | `built-ins/parseInt` | 54 | 0 | 0 | 1 | 100 % | 100 % |
+| `language/import` | 20 | 0 | 106 | 1 | 17 % | 100 % |
 | `language/punctuators` | 10 | 0 | 0 | 1 | 100 % | 100 % |
 | ~~`built-ins/AbstractModuleSource`~~ | ~~0~~ | ~~0~~ | ~~8~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
 | ~~`built-ins/AsyncDisposableStack`~~ | ~~0~~ | ~~0~~ | ~~104~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
@@ -240,7 +241,6 @@ first two path components (`built-ins/Set`,
 | `language/export` | 3 | 0 | 0 | 0 | 100 % | 100 % |
 | `language/future-reserved-words` | 48 | 0 | 7 | 0 | 87 % | 100 % |
 | `language/identifiers` | 268 | 0 | 0 | 0 | 100 % | 100 % |
-| `language/import` | 4 | 0 | 123 | 0 | 3 % | 100 % |
 | `language/keywords` | 25 | 0 | 0 | 0 | 100 % | 100 % |
 | `language/line-terminators` | 32 | 0 | 0 | 0 | 100 % | 100 % |
 | `language/literals` | 384 | 0 | 97 | 0 | 80 % | 100 % |
@@ -270,17 +270,17 @@ until its features ship in mainline ECMA-262.
 
 | feature | pass | fail | skip | pass% | engine% |
 |---|---:|---:|---:|---:|---:|
-| `joint-iteration` | 68 | 10 | 4888 | 1 % | 87 % |
+| `joint-iteration` | 68 | 10 | 4878 | 1 % | 87 % |
 
 
 ## History
 
-### 2026-05-26 — cynic `c6ec603`, test262 `d0c1b455`
+### 2026-05-26 — cynic `7a18529`, test262 `d0c1b455`
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **runtime** | 83.16 % | 99.98 % | 37503 / 45096 | 37503 / 37512 | — | +190 | 40.5 s |
-| **runtime_hardened** | 83.16 % | 99.97 % | 37503 / 45096 | 34478 / 34487 | 3025 | +3171 | 40.5 s |
+| **runtime** | 83.22 % | 99.98 % | 37529 / 45096 | 37529 / 37538 | — | +216 | 35.5 s |
+| **runtime_hardened** | 83.22 % | 99.97 % | 37529 / 45096 | 34503 / 34512 | 3026 | +3197 | 40.4 s |
 
 ### 2026-05-25 — cynic `8e311c3`, test262 `d0c1b455`
 

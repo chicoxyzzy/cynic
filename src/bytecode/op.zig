@@ -537,26 +537,35 @@ pub const Op = enum(u8) {
     /// keep their reference to the popped env — the GC walks
     /// them through `JSFunction.captured_env`.
     pop_env,
-    /// `[op] [k:u16]` — §16.2.1.5 module load. The constant at
-    /// `k` holds the import specifier string. The runtime asks
-    /// `realm.module_loader` to resolve the specifier against
-    /// the executing chunk's `base_url`, parses + compiles +
-    /// runs the loaded module if not cached, and writes the
-    /// module's exports namespace object into acc. Subsequent
-    /// `lda_property` ops read individual named imports off
-    /// that namespace. Throws `TypeError` when the loader is
-    /// unset or `error.ModuleNotFound` / similar from the
-    /// loader itself.
+    /// `[op] [k_spec:u16] [k_attr:u16]` — §16.2.1.5 module load.
+    /// The constant at `k_spec` holds the import specifier
+    /// string. The constant at `k_attr` holds the
+    /// `with { type: "..." }` attribute value (e.g. "json" or
+    /// "text") when present; `0xFFFF` is the sentinel for "no
+    /// attribute" (the conventional default JavaScript import
+    /// path). The runtime asks `realm.module_loader` to resolve
+    /// the specifier against the executing chunk's `base_url`,
+    /// parses + compiles + runs the loaded module if not cached,
+    /// and writes the module's exports namespace object into acc.
+    /// Subsequent `lda_property` ops read individual named imports
+    /// off that namespace. Throws `TypeError` when the loader is
+    /// unset or `error.ModuleNotFound` / similar from the loader
+    /// itself; the attribute_type drives §16.2.1.8.x synthetic
+    /// module dispatch (JSON / text modules) in the loader.
     module_load,
-    /// `[op]` — §13.3.10 dynamic `import(specifier)`. Reads the
-    /// specifier from `acc` (ToString'd at the call site), calls
-    /// the module loader synchronously, and writes the resulting
-    /// Promise into `acc`. The Promise is settled before the
-    /// opcode returns (loader is synchronous), but observation
-    /// still goes through the microtask queue — `.then(...)` /
-    /// `await` reactions are queued like any other Promise
-    /// reaction. TypeError on missing loader / failed load
-    /// becomes a rejected Promise; the call itself never throws.
+    /// `[op] [k_attr:u16]` — §13.3.10 dynamic `import(specifier)`.
+    /// Reads the specifier from `acc` (ToString'd at the call
+    /// site). The constant at `k_attr` is the `with { type: "..." }`
+    /// attribute value parsed off the import() second arg literal
+    /// (`{ with: { type: "..." } }`); `0xFFFF` means no attribute.
+    /// Writes the resulting Promise into `acc`. The Promise is
+    /// settled by a deferred microtask job (so the loader runs
+    /// after the importer's static-DFS finishes per
+    /// §16.2.1.10 EvaluateImportCall ordering); observation goes
+    /// through the microtask queue — `.then(...)` / `await`
+    /// reactions are queued like any other Promise reaction.
+    /// TypeError on missing loader / failed load becomes a
+    /// rejected Promise; the call itself never throws.
     dynamic_import,
     /// `[op]` — §16.2.1.7 ImportMeta runtime semantics. Lazy-
     /// initialise `realm.current_module.import_meta` (an
@@ -955,7 +964,6 @@ pub const Op = enum(u8) {
             .return_,
             .super_get_computed,
             .super_check_this,
-            .dynamic_import,
             .import_meta,
             .module_link_complete,
             .module_reexport_star,
@@ -1016,10 +1024,21 @@ pub const Op = enum(u8) {
             .sta_global,
             .sta_global_init,
             .sta_global_fn_decl,
-            .module_load,
             .module_export,
+            // §13.3.10 — `dynamic_import` carries the
+            // `with { type: "..." }` attribute as a u16 constant
+            // index (or `0xFFFF` for no attribute) so the deferred
+            // job picks the synthetic-module path. Specifier is in
+            // `acc`, not the operand stream.
+            .dynamic_import,
             => 2, // u16 / i16
-            .module_reexport_named => 4, // local_k:u16 + exported_k:u16
+            // §16.2.1.5 module_load — `k_spec:u16` selecting the
+            // specifier string, then `k_attr:u16` carrying the
+            // `with { type: "..." }` attribute value (or `0xFFFF`
+            // for no attribute). See compiler.MODULE_NO_ATTRIBUTE.
+            .module_load,
+            .module_reexport_named, // local_k:u16 + exported_k:u16
+            => 4,
             .capture_unresolved_global,
             .sta_global_strict,
             => 3, // k:u16 + r:u8

@@ -951,25 +951,11 @@ pub const skip_stage_maturity_paths = [_][]const u8{
 pub const skip_planned_features = [_][]const u8{
     "regexp-duplicate-named-groups", // ES2025 — libregexp gap.
     "regexp-modifiers", // ES2024 inline `(?i:…)` / `(?-i:…)`.
-    // ES2025 import-attributes — `import x from "./y.json" with
-    // { type: "json" }`. The **parser** side has shipped (the
-    // `WithClause` grammar in src/parser/parser.zig
-    // `parseOptionalWithClause` + `parseImportExpression`); the
-    // **runtime loader** still ignores the attributes. The bulk
-    // of import-attributes fixtures pass on the parser surface
-    // alone (no JSON / text resolution needed). Fixtures that
-    // depend on actual JSON-module loading stay skipped via the
-    // `json-modules` feature tag below; those depending on
-    // text-module loading via `import-text`; the dynamic-import
-    // 2nd-param-* validation cluster is path-skipped (needs
-    // options-arg threading through the dynamic_import opcode —
-    // separate runtime work).
-    "json-modules",
-    // Stage 4 — `import x from "./y.txt" with { type: "text" }`.
-    // Separate proposal from import-attributes; the synthetic-
-    // text-module record (§16.2.1.8.x CreateTextModule) isn't
-    // shipped. ~5 fixtures.
-    "import-text",
+    // (json-modules + import-text were shipped — synthetic
+    // module records in `src/runtime/lantern/module.zig` and
+    // the test262 harness loader's attribute-aware dispatch in
+    // `tools/test262.zig`. The fixtures live under
+    // `language/import/import-attributes/`.)
     // Stage 4 (expected publication 2027) — `using` / `await using`
     // grammar + `DisposableStack`, `AsyncDisposableStack`,
     // `SuppressedError`, `Symbol.dispose` / `Symbol.asyncDispose`.
@@ -995,17 +981,32 @@ pub const skip_planned_paths = [_][]const u8{
     // Temporal lands. ~7 fixtures.
     "built-ins/Date/prototype/toTemporalInstant/",
     // ES2025 import-attributes — dynamic-import 2nd-param
-    // validation. The §13.3.10.1 EvaluateImportCall steps 9-10
-    // demand options be either undefined or an Object; otherwise
-    // the returned promise rejects with TypeError. Cynic's
-    // `parseImportExpression` already parses both args
-    // (parses-and-discards options), but the `dynamic_import`
-    // opcode only threads the specifier through — extending it
-    // to validate the options arg is a separate runtime effort.
-    // Path-skip the cluster; the rest of import-attributes
-    // (parser surface, static `import x from "y" with {…}`)
-    // passes without the runtime work.
-    "language/expressions/dynamic-import/import-attributes/2nd-param-",
+    // **runtime** validation. The compiler extracts the `type`
+    // attribute at parse time when the options literal is the
+    // proposal-shaped `{ with: { type: "..." } }` (good enough for
+    // static imports + the literal-options dynamic cases:
+    // `2nd-param-with-type-text`, `2nd-param-trailing-comma-*`,
+    // `2nd-param-with-undefined`, `2nd-param-await-*`,
+    // `2nd-param-in`, `2nd-param-yield-ident-invalid`). The
+    // entries listed below need a real runtime walk of the
+    // options expression — §13.3.10.1 EvaluateImportCall steps
+    // 9-15: ToObject the options, Get `with`, ToObject `with`,
+    // EnumerableOwnPropertyNames it (so Proxy ownKeys / get /
+    // getOwnPropertyDescriptor traps fire), require each value to
+    // be a String, propagate every abrupt completion through
+    // IfAbruptRejectPromise. Lift these path-skips once the
+    // runtime walk lands.
+    "language/expressions/dynamic-import/import-attributes/2nd-param-evaluation-abrupt-return.js",
+    "language/expressions/dynamic-import/import-attributes/2nd-param-evaluation-abrupt-throw.js",
+    "language/expressions/dynamic-import/import-attributes/2nd-param-evaluation-sequence.js",
+    "language/expressions/dynamic-import/import-attributes/2nd-param-get-with-error.js",
+    "language/expressions/dynamic-import/import-attributes/2nd-param-non-object.js",
+    "language/expressions/dynamic-import/import-attributes/2nd-param-with-enumeration-abrupt.js",
+    "language/expressions/dynamic-import/import-attributes/2nd-param-with-enumeration-enumerable.js",
+    "language/expressions/dynamic-import/import-attributes/2nd-param-with-non-object.js",
+    "language/expressions/dynamic-import/import-attributes/2nd-param-with-value-abrupt.js",
+    "language/expressions/dynamic-import/import-attributes/2nd-param-with-value-non-string.js",
+    "language/expressions/dynamic-import/import-attributes/2nd-param-yield-expr.js",
 };
 
 pub const skip_planned_path_contains = [_][]const u8{
