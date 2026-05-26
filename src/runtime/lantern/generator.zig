@@ -27,6 +27,7 @@ const Environment = @import("../environment.zig").Environment;
 const heap_mod = @import("../heap.zig");
 const intrinsics_mod = @import("../intrinsics.zig");
 const Realm = @import("../realm.zig").Realm;
+const NativeError = @import("../function.zig").NativeError;
 
 // Circular back to interpreter.zig for the dispatch entry points,
 // shared types, and the promise-settlement / generator-resume
@@ -297,9 +298,118 @@ pub fn ensureAsyncIteratorPrototype(realm: *Realm) !*JSObject {
         .enumerable = false,
         .configurable = true,
     });
+    // §27.1.4.14 (ES2026 explicit-resource-management) —
+    // `%AsyncIteratorPrototype%[@@asyncDispose]` builds a Promise,
+    // calls `return()` if present, and unwraps the result to
+    // `undefined`. The `await using` declaration awaits this Promise
+    // when its bound async iterator goes out of scope.
+    const sym_disp_fn = try realm.heap.allocateFunctionNative(asyncIteratorSymbolAsyncDispose, 0, "[Symbol.asyncDispose]");
+    sym_disp_fn.proto = realm.intrinsics.function_prototype;
+    try proto.setWithFlags(realm.allocator, "@@asyncDispose", heap_mod.taggedFunction(sym_disp_fn), .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    });
     realm.intrinsics.async_iterator_prototype = proto;
     @import("../builtins/harden.zig").freezeLazyIntrinsic(realm, proto) catch return error.OutOfMemory;
     return proto;
+}
+
+/// §27.1.4.14 %AsyncIteratorPrototype% [ @@asyncDispose ] ( ).
+///
+///   1. Let O be the this value.
+///   2. Let promiseCapability be ! NewPromiseCapability(%Promise%).
+///   3. Let return be ? GetMethod(O, "return").
+///   4. If return is undefined, fulfil promise with undefined.
+///   5. Else,
+///       a. Let result be ? Call(return, O, « undefined »).
+///       b. Let resultWrapper be ? PromiseResolve(%Promise%, result).
+///       c. Perform PromiseThen with an `unwrap` fulfilment handler
+///          that returns undefined; pass-through on rejection.
+///   6. Return promiseCapability.[[Promise]].
+fn asyncIteratorSymbolAsyncDispose(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const promise_mod = @import("../builtins/promise.zig");
+    const interp = @import("interpreter.zig");
+    // Step 3 — GetMethod(O, "return"). Any abrupt completion
+    // surfaces as a rejected Promise per IfAbruptRejectPromise.
+    const return_v = blk: {
+        if (heap_mod.valueAsPlainObject(this_value)) |o| {
+            const r = intrinsics_mod.getPropertyChain(realm, o, "return") catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.NativeThrew => {
+                    const ex = realm.pending_exception orelse Value.undefined_;
+                    realm.pending_exception = null;
+                    return promise_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
+                },
+            };
+            break :blk r;
+        }
+        if (heap_mod.valueAsFunction(this_value)) |f| {
+            break :blk f.get("return");
+        }
+        // §27.1.4.14 step 3 / GetMethod step 1 — non-object
+        // receivers fail RequireObjectCoercible-shape. Rejected
+        // Promise with TypeError.
+        const ex = interp.makeTypeError(realm, "Symbol.asyncDispose requires an object receiver") catch return error.OutOfMemory;
+        return promise_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
+    };
+    // Step 4 — return is undefined → fulfil with undefined.
+    if (return_v.isUndefined() or return_v.isNull()) {
+        return promise_mod.allocatePromiseFor(realm, null, .fulfilled, Value.undefined_) catch return error.OutOfMemory;
+    }
+    // Step 5.a — Call(return, O, «»).
+    const result = interp.callValue(realm.allocator, realm, return_v, this_value, &.{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            const ex = realm.pending_exception orelse Value.undefined_;
+            realm.pending_exception = null;
+            return promise_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
+        },
+    };
+    const ret_val = switch (result) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| return promise_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory,
+    };
+    // Step 5.b-c — PromiseResolve(%Promise%, result) then
+    // `.then(unwrap)`. PromiseResolve adopts an existing Promise's
+    // settlement; otherwise wraps in a fulfilled Promise. The
+    // unwrap fulfilment handler returns undefined regardless of
+    // the resolved value; rejection passes through.
+    const builtin_promise = realm.globals.get("Promise") orelse Value.undefined_;
+    const wrapped = blk: {
+        const resolve_args = [_]Value{ret_val};
+        const r = promise_mod.promiseResolveExported(realm, builtin_promise, &resolve_args) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                const ex = realm.pending_exception orelse Value.undefined_;
+                realm.pending_exception = null;
+                return promise_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
+            },
+        };
+        break :blk r;
+    };
+    const unwrap_fn = try realm.heap.allocateFunctionNative(asyncDisposeUnwrap, 1, "");
+    unwrap_fn.proto = realm.intrinsics.function_prototype;
+    const then_args = [_]Value{ heap_mod.taggedFunction(unwrap_fn), Value.undefined_ };
+    return promise_mod.promiseThenExported(realm, wrapped, &then_args) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            const ex = realm.pending_exception orelse Value.undefined_;
+            realm.pending_exception = null;
+            return promise_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
+        },
+    };
+}
+
+/// §27.1.4.14 step 5.e — the `unwrap` abstract closure called by
+/// the PerformPromiseThen reaction. Returns undefined regardless
+/// of the resolved value.
+fn asyncDisposeUnwrap(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = this_value;
+    _ = args;
+    return Value.undefined_;
 }
 
 pub fn ensureAsyncGeneratorPrototype(realm: *Realm) !*JSObject {

@@ -91,6 +91,11 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, proto, "reduce", iteratorReduce, 1);
     // Iterators are themselves iterable.
     try installNativeMethodOnProto(realm, proto, "@@iterator", iteratorSymbolIterator, 0);
+    // §27.1.4.13 (ES2026 explicit-resource-management) —
+    // `%IteratorPrototype%[@@dispose]` calls `return()` if present
+    // and returns undefined. The `using` declaration invokes this
+    // when its bound iterator goes out of scope.
+    try installNativeMethodOnProto(realm, proto, "@@dispose", iteratorSymbolDispose, 0);
 
     // §27.1.4.1 %IteratorHelperPrototype% — the `[[Prototype]]` of
     // every Iterator Helper object: the results of
@@ -555,6 +560,36 @@ fn iteratorSymbolIterator(realm: *Realm, this_value: Value, args: []const Value)
     _ = realm;
     _ = args;
     return this_value;
+}
+
+/// §27.1.4.13 %IteratorPrototype% [ @@dispose ] ( ).
+///
+///   1. Let O be the this value.
+///   2. Let return be ? GetMethod(O, "return").
+///   3. If return is not undefined, then
+///       a. Perform ? Call(return, O, « »).
+///   4. Return undefined.
+fn iteratorSymbolDispose(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    // GetMethod returns null/undefined → no-op; otherwise call.
+    // `iterGet` honours `get return` accessors and routes Proxy
+    // traps. A throw from the lookup or the call propagates.
+    const return_v = try iterGet(realm, this_value, "return");
+    if (return_v.isUndefined() or return_v.isNull()) return Value.undefined_;
+    // GetMethod step 4 — the value must be callable; otherwise
+    // TypeError. `callValue` performs that check (returns
+    // `error.NativeThrew` with realm.pending_exception set).
+    const outcome = lantern.callValue(realm.allocator, realm, return_v, this_value, &.{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    switch (outcome) {
+        .value, .yielded => return Value.undefined_,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    }
 }
 
 // ── Iterator-close protocol (§7.4.10) ──────────────────────────────────────

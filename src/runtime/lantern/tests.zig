@@ -2405,6 +2405,55 @@ test "later: typeof of well-known symbols" {
     , "symbol");
 }
 
+// §20.4.2 — ES2026 explicit-resource-management well-known symbols.
+
+test "later: Symbol.dispose / Symbol.asyncDispose typeof + description" {
+    try expectScriptStringWithBuiltins(
+        \\typeof Symbol.dispose + ":" + String(Symbol.dispose) + "|" +
+        \\typeof Symbol.asyncDispose + ":" + String(Symbol.asyncDispose);
+    , "symbol:Symbol(Symbol.dispose)|symbol:Symbol(Symbol.asyncDispose)");
+}
+
+test "later: Symbol.dispose identity stable across reads" {
+    try expectScriptStringWithBuiltins(
+        \\(Symbol.dispose === Symbol.dispose) + ":" +
+        \\(Symbol.asyncDispose === Symbol.asyncDispose);
+    , "true:true");
+}
+
+// §27.1.4.13 — %IteratorPrototype%[@@dispose] calls `return()` and
+// returns undefined. The reference fixture lives at
+// `built-ins/Iterator/prototype/Symbol.dispose/return-val.js`.
+
+test "later: %IteratorPrototype%[@@dispose] returns undefined" {
+    try expectScriptStringWithBuiltins(
+        \\const ip = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+        \\typeof ip[Symbol.dispose]();
+    , "undefined");
+}
+
+test "later: %IteratorPrototype%[@@dispose] invokes own return()" {
+    try expectScriptStringWithBuiltins(
+        \\const ip = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+        \\let called = 0;
+        \\const o = { return() { called++; return { done: true }; } };
+        \\Object.setPrototypeOf(o, ip);
+        \\ip[Symbol.dispose].call(o);
+        \\String(called);
+    , "1");
+}
+
+// §27.1.4.14 — %AsyncIteratorPrototype%[@@asyncDispose] returns a
+// Promise that fulfils with undefined after `return()` settles.
+
+test "later: %AsyncIteratorPrototype%[@@asyncDispose] returns a Promise" {
+    try expectScriptStringWithBuiltins(
+        \\async function* g() {}
+        \\const aip = Object.getPrototypeOf(Object.getPrototypeOf(g.prototype));
+        \\(aip[Symbol.asyncDispose]() instanceof Promise) + "";
+    , "true");
+}
+
 test "later: tagged template passes cooked + raw arrays" {
     try expectScriptStringWithBuiltins(
         \\function tag(strs) {

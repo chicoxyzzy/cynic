@@ -77,6 +77,12 @@ pub fn install(realm: *Realm) !void {
     try installWellKnownSymbol(realm, fn_obj, "split", "Symbol.split", "@@split");
     try installWellKnownSymbol(realm, fn_obj, "matchAll", "Symbol.matchAll", "@@matchAll");
     try installWellKnownSymbol(realm, fn_obj, "unscopables", "Symbol.unscopables", "@@unscopables");
+    // §20.4.2 — ES2026 (Stage 4) explicit-resource-management.
+    // `Symbol.dispose` is invoked by `DisposeResources` for `using`
+    // bindings; `Symbol.asyncDispose` is the awaitable counterpart
+    // for `await using` bindings.
+    try installWellKnownSymbol(realm, fn_obj, "dispose", "Symbol.dispose", "@@dispose");
+    try installWellKnownSymbol(realm, fn_obj, "asyncDispose", "Symbol.asyncDispose", "@@asyncDispose");
 
     try installNativeMethod(realm, fn_obj, "for", symbolFor, 1);
     try installNativeMethod(realm, fn_obj, "keyFor", symbolKeyFor, 1);

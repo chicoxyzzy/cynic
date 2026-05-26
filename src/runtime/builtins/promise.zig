@@ -406,6 +406,12 @@ pub const boundResolveTrampolineExported = boundResolveTrampoline;
 /// `.then` (which would invalidate the chain-shortcut and require
 /// the spec PromiseResolveThenableJob path per §27.2.1.3.2 step 12).
 pub const promiseThenExported = promiseThen;
+/// `Promise.resolve` static — used by `%AsyncIteratorPrototype%
+/// [@@asyncDispose]` to wrap a `return()` result in a same-realm
+/// Promise before attaching the unwrap reaction. The receiver
+/// must be the built-in `Promise` constructor value (or a
+/// subclass) so `thisAsPromiseCtor` accepts it.
+pub const promiseResolveExported = promiseResolve;
 
 fn promiseResolveImpl(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const target = heap_mod.valueAsPlainObject(this_value) orelse return Value.undefined_;
