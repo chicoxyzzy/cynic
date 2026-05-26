@@ -989,8 +989,32 @@ pub const Parser = struct {
         } else if (self.current.kind == .kw_let or self.current.kind == .kw_const or self.current.kind == .kw_var) {
             // Lexical / var declaration. Single declarator if for-in/of
             // follows; otherwise full declaration without the trailing `;`.
-            const decl = try self.parseForLexicalDecl();
+            const decl = try self.parseForLexicalDecl(null);
             init_head = .{ .lexical = decl };
+        } else if (self.current.kind == .identifier and
+            std.mem.eql(u8, self.current.slice(self.source), "using"))
+        {
+            // §14.7.5.x ES2026 explicit-resource-management — `for
+            // (using x of …)`. `using` is contextual; it only opens
+            // a for-head when followed on the same line by an
+            // identifier AND that identifier is followed by `of`
+            // (so the trailing `using of …` C-init shape doesn't
+            // trigger it). The peek3 check below filters the
+            // shapes where `using` is just an ordinary identifier
+            // expression (`for (using; …)`, `for (using in …)`,
+            // `for (using.length; …)`, …).
+            const second = try self.peek2();
+            const third = try self.peek3();
+            const second_is_ident = isUsingBindingStart(second.kind);
+            const third_is_of = third.kind == .identifier and
+                std.mem.eql(u8, third.slice(self.source), "of");
+            if (!second.line_terminator_before and second_is_ident and third_is_of) {
+                const decl = try self.parseForLexicalDecl(.using_);
+                init_head = .{ .lexical = decl };
+            } else {
+                const e = try expr_mod.parseExpression(self);
+                init_head = .{ .expression = e };
+            }
         } else {
             const e = try expr_mod.parseExpression(self);
             init_head = .{ .expression = e };
@@ -1094,8 +1118,14 @@ pub const Parser = struct {
     /// for-loop init slot, where the surrounding header consumes the `;`.
     /// Initializer-required validation is deferred to the caller, since
     /// for-in/of loops bind via iteration rather than `=`.
-    fn parseForLexicalDecl(self: *Parser) ParseError!stmt_mod.LexicalDecl {
-        const kind: stmt_mod.LexicalDecl.Kind = switch (self.current.kind) {
+    ///
+    /// `explicit_kind` is non-null only for the §14.7.5.x ES2026
+    /// `for (using x of …)` head — the surrounding `parseForStatement`
+    /// has already classified the contextual `using` keyword and
+    /// the binding kind isn't readable from `self.current.kind`
+    /// (it's just `.identifier` at this point).
+    fn parseForLexicalDecl(self: *Parser, explicit_kind: ?stmt_mod.LexicalDecl.Kind) ParseError!stmt_mod.LexicalDecl {
+        const kind: stmt_mod.LexicalDecl.Kind = if (explicit_kind) |k| k else switch (self.current.kind) {
             .kw_let => .let_,
             .kw_const => .const_,
             .kw_var => .var_,

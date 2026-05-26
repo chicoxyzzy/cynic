@@ -313,9 +313,31 @@ fn disposableStackMove(realm: *Realm, this_value: Value, args: []const Value) Na
 //       - Otherwise set completion to a throw of thisThrow.
 // After the loop, clear the list. If completion is a throw,
 // re-throw; else return undefined.
-fn disposeResources(realm: *Realm, stack: *JSObject) NativeError!Value {
+/// Public entry into §9.5.4 DisposeResources — used both by
+/// `DisposableStack.prototype.dispose` and by the `dispose_stack`
+/// opcode the compiler emits at every exit edge of a `using`-
+/// bearing block (Phase 4b).
+pub fn disposeResources(realm: *Realm, stack: *JSObject) NativeError!Value {
+    return disposeResourcesWithCompletion(realm, stack, null);
+}
+
+/// §9.5.4 DisposeResources(disposeCapability, completion) — variant
+/// that lets the caller seed an in-flight throw. Used by the
+/// `dispose_stack_with_throw` opcode at the throw-handler arm of a
+/// `using`-bearing block: a disposer that itself throws while we're
+/// already unwinding wraps via SuppressedError per §9.5.4 step
+/// 2.b.iv-vi. On normal-completion arms, `existing_throw` is null
+/// and the behaviour matches the public `disposeResources`.
+///
+/// On a non-null `existing_throw`, this function ALWAYS returns
+/// `error.NativeThrew` with `realm.pending_exception` set — either
+/// the original throw (if no disposer threw), the disposer's throw
+/// (if one threw without a prior pending), or a fresh
+/// SuppressedError chain (if multiple threw or a disposer threw
+/// while an external throw was already in flight).
+pub fn disposeResourcesWithCompletion(realm: *Realm, stack: *JSObject, existing_throw: ?Value) NativeError!Value {
     const lantern = @import("../lantern/interpreter.zig");
-    var pending: ?Value = null;
+    var pending: ?Value = existing_throw;
     if (stack.disposableResourcesConst()) |list| {
         var i: usize = list.items.len;
         while (i > 0) {
@@ -386,18 +408,24 @@ fn makeSuppressedError(realm: *Realm, err_v: Value, suppressed_v: Value) !Value 
 //   §27.3.3.2 .adopt() flow — used by `disposableStackAdopt`
 //   inline since the wrapper construction is mostly bound-fn
 //   bookkeeping. The bare form below is the §27.3.3.7 .use()
-//   path: derive `method` from `GetDisposeMethod(V, hint)`.
-fn addDisposableResource(realm: *Realm, stack: *JSObject, value: Value, hint: DisposableHint) NativeError!void {
+//   path (and the `register_using` opcode emitted by the compiler
+//   for a `using` declarator): derive `method` from
+//   `GetDisposeMethod(V, hint)`.
+//
+// Public so the `register_using` opcode (§13.2.4 `using`-decl
+// initialisation) shares the GetDisposeMethod walk.
+pub fn addDisposableResource(realm: *Realm, stack: *JSObject, value: Value, hint: DisposableHint) NativeError!void {
     // §9.5.3 step 1 — if V is null / undefined, no record is
     // appended (the spec's "method is empty" branch). `.use(null)`
-    // / `.use(undefined)` return the input verbatim.
+    // / `using x = null;` return / proceed without a record.
     if (value.isUndefined() or value.isNull()) return;
 
     // §9.5.3 step 2 — GetDisposeMethod(V, hint). For sync, look up
-    // `Symbol.dispose` on V. The method is callable, or the spec
-    // throws TypeError at .use() time (not at dispose time).
+    // `Symbol.dispose` on V. The method must be callable, or the
+    // spec throws TypeError at the binding site (.use() / `using`-
+    // decl initialisation), NOT at dispose time.
     const resource_obj = heap_mod.valueAsPlainObject(value) orelse {
-        return throwTypeError(realm, "DisposableStack.prototype.use: value is not an object");
+        return throwTypeError(realm, "Disposable resource is not an object");
     };
     // Phase 1 of ERM registered `@@dispose` as the internal slot
     // key for `Symbol.dispose` (mirrors `@@iterator` /
@@ -409,10 +437,10 @@ fn addDisposableResource(realm: *Realm, stack: *JSObject, value: Value, hint: Di
     };
     const method_v = try intrinsics.getPropertyChain(realm, resource_obj, key);
     if (method_v.isUndefined() or method_v.isNull()) {
-        return throwTypeError(realm, "DisposableStack.prototype.use: value has no Symbol.dispose method");
+        return throwTypeError(realm, "Disposable resource has no Symbol.dispose method");
     }
     if (heap_mod.valueAsFunction(method_v) == null) {
-        return throwTypeError(realm, "DisposableStack.prototype.use: Symbol.dispose is not callable");
+        return throwTypeError(realm, "Disposable resource Symbol.dispose is not callable");
     }
     const ext_list = try stack.disposableResourcesPtr(realm.allocator);
     ext_list.append(realm.allocator, .{

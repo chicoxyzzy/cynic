@@ -929,6 +929,43 @@ pub const Op = enum(u8) {
     /// AssignmentExpression on the right-hand side).
     to_property_key,
 
+    // ── ES2026 explicit-resource-management — `using` ──────────────────
+    /// `[op] [r_dst:u8]` — allocate a fresh internal disposable
+    /// stack into `r_dst`. Faster than calling
+    /// `new DisposableStack()` from JS: skips constructor dispatch,
+    /// IC slots, and a property bag — the result is an engine-
+    /// internal record that never escapes to user JS and has only
+    /// the `[[DisposableState]]` + `[[DisposeCapability]]` slots set
+    /// per §27.3.1.1 steps 4-5. Emitted at the head of a block that
+    /// contains one or more `using` declarations.
+    alloc_dispose_stack,
+    /// `[op] [r_stack:u8] [r_value:u8]` — register the value in
+    /// `r_value` with the dispose stack in `r_stack`. Performs
+    /// §9.5.3 AddDisposableResource: if the value is null /
+    /// undefined, nothing is appended; otherwise GetDisposeMethod
+    /// reads `Symbol.dispose` (sync hint) and throws TypeError when
+    /// missing or non-callable (at the `using` decl site, not later
+    /// at dispose time). Emitted right after a `using x = expr;`
+    /// declarator stores its value into the binding slot.
+    register_using,
+    /// `[op] [r_stack:u8] [mode:u8]` — perform §9.5.4 DisposeResources
+    /// on the dispose stack in `r_stack`. Walks the resource list
+    /// in REVERSE (LIFO); a fresh throw inside a disposer while
+    /// another is pending wraps via SuppressedError (§9.5.4 step
+    /// 2.b.iv-vi).
+    ///
+    /// `mode`:
+    ///   0 — normal-completion arm. `acc` is preserved on exit
+    ///       (so a stashed return value survives the dispose
+    ///       walk). A disposer throw raises like `throw_`.
+    ///   1 — throw-completion arm. `acc` holds the in-flight
+    ///       throw. The dispose walk treats it as the pending
+    ///       completion and wraps subsequent disposer throws
+    ///       via SuppressedError. On exit `acc` holds the
+    ///       outgoing throw (the original or a SuppressedError
+    ///       chain); the surrounding bytecode rethrows.
+    dispose_stack,
+
     // ── Termination ──────────────────────────────────────────────────────
     /// Halt with `acc` as the program's value. Top-level only in
     /// later; later distinguishes return-from-function.
@@ -981,6 +1018,12 @@ pub const Op = enum(u8) {
             .module_link_complete,
             .module_reexport_star,
             => 0,
+            .alloc_dispose_stack,
+            => 1, // r_dst
+            .register_using,
+            .dispose_stack,
+            => 2, // register_using: r_stack + r_value;
+            //  dispose_stack: r_stack + mode
             .ldar,
             .star,
             .add,
@@ -1222,6 +1265,9 @@ pub const Op = enum(u8) {
             .throw_assign_const => "ThrowAssignConst",
             .throw_if_not_object => "ThrowIfNotObject",
             .to_property_key => "ToPropertyKey",
+            .alloc_dispose_stack => "AllocDisposeStack",
+            .register_using => "RegisterUsing",
+            .dispose_stack => "DisposeStack",
             .return_ => "Return",
         };
     }

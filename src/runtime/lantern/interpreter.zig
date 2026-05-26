@@ -8548,6 +8548,127 @@ pub fn runFrames(
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
+            // ── ES2026 explicit-resource-management — `using` ──────────
+            .alloc_dispose_stack => {
+                // §13.2.4.6 BlockStatement Runtime Semantics —
+                // allocate the engine-internal DisposableStack
+                // that backs a block's `using` decls.
+                // `[[DisposableState]] = pending`, empty
+                // `[[DisposeCapability]]`. The object is not a
+                // user-visible DisposableStack instance (no
+                // prototype, no `[[Symbol.dispose]]`); it lives
+                // only in this register and never reaches user JS.
+                const r_dst = code[ip];
+                ip += 1;
+                const stack = realm.heap.allocateObject() catch return error.OutOfMemory;
+                // No prototype — the runtime treats `null` proto
+                // as the engine-internal record.
+                stack.setDisposableState(realm.allocator, .sync_pending) catch return error.OutOfMemory;
+                registers[r_dst] = heap_mod.taggedObject(stack);
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            },
+
+            .register_using => {
+                // §13.2.4.6 + §9.5.3 AddDisposableResource — append
+                // the resource in `r_value` to the dispose stack
+                // in `r_stack`. `value` is null/undefined → no-op.
+                // Otherwise GetDisposeMethod(value, sync) is called;
+                // a missing or non-callable `Symbol.dispose` throws
+                // TypeError AT THIS SITE (matches the spec's
+                // §14.3.x early-error behaviour for `using` decls).
+                const r_stack = code[ip];
+                const r_value = code[ip + 1];
+                ip += 2;
+                const stack_v = registers[r_stack];
+                const value_v = registers[r_value];
+                const stack_obj = heap_mod.valueAsPlainObject(stack_v) orelse {
+                    // Should never happen — alloc_dispose_stack
+                    // wrote a fresh object.
+                    return error.InvalidOpcode;
+                };
+                const ds_mod = @import("../builtins/disposable_stack.zig");
+                ds_mod.addDisposableResource(realm, stack_obj, value_v, .sync_dispose) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NativeThrew => {
+                        const ex = consumePendingException(realm) orelse try makeTypeError(realm, "register_using failed");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                };
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            },
+
+            .dispose_stack => {
+                // §13.2.4.6 BlockStatement Runtime Semantics +
+                // §9.5.4 DisposeResources — walk the dispose stack
+                // in REVERSE (LIFO) and invoke each resource's
+                // `[[DisposeMethod]]` with `this = resource`. A
+                // mid-disposal throw while another throw is in
+                // flight wraps via SuppressedError per spec.
+                //
+                // mode:
+                //   0 — normal-completion arm. `acc` carries a
+                //       stashed value (return value, fall-through
+                //       expression-statement result); we preserve
+                //       it across the walk. A disposer throw
+                //       surfaces as an outgoing throw.
+                //   1 — throw-completion arm. `acc` holds the in-
+                //       flight throw; the walk uses it as the
+                //       pending completion. After the walk, `acc`
+                //       holds either the original throw (no
+                //       disposer raised) or a SuppressedError
+                //       chain. Surrounding bytecode then `throw_`s
+                //       (mode 1 doesn't surface the throw itself
+                //       so the compiler can also emit follow-up
+                //       cleanup like iter_close between dispose
+                //       and the rethrow).
+                const r_stack = code[ip];
+                const mode = code[ip + 1];
+                ip += 2;
+                const stack_v = registers[r_stack];
+                const stack_obj = heap_mod.valueAsPlainObject(stack_v) orelse {
+                    return error.InvalidOpcode;
+                };
+                const ds_mod = @import("../builtins/disposable_stack.zig");
+                const saved_acc = acc;
+                stack_obj.setDisposableState(realm.allocator, .sync_disposed) catch return error.OutOfMemory;
+                const existing: ?Value = if (mode == 1) acc else null;
+                _ = ds_mod.disposeResourcesWithCompletion(realm, stack_obj, existing) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NativeThrew => {
+                        // A throw surfaced from the walk. In mode
+                        // 1 we leak it back into `acc` (so the
+                        // surrounding `throw_` rethrows it); in
+                        // mode 0 we unwind through the dispatcher
+                        // so any enclosing handler picks it up.
+                        const ex = consumePendingException(realm) orelse try makeTypeError(realm, "dispose_stack: unexpected dispose throw");
+                        if (mode == 1) {
+                            acc = ex;
+                            continue :dispatch try decodeNext(code, &ip, &committed);
+                        }
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                };
+                // No disposer throw surfaced. In mode 0 restore
+                // the stashed acc. In mode 1 the throw was a
+                // no-op in disposers (none threw), so the original
+                // throw (still in `acc` from before the call) is
+                // re-emitted by the surrounding `throw_`.
+                acc = saved_acc;
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            },
+
             .return_ => {
                 // Pop the current frame, leaving its accumulator as
                 // the caller's accumulator. If we just popped the

@@ -2720,6 +2720,215 @@ test "later: DisposableStack.prototype.use fires Symbol.dispose" {
     , "disposed");
 }
 
+// ── ES2026 explicit-resource-management — `using` declarations.
+// Block-scoped resource binding (§14.3.x / §13.2.4.6).
+
+test "later: using disposes binding at normal block exit" {
+    try expectScriptStringWithBuiltins(
+        \\let log = "";
+        \\{
+        \\  using x = { [Symbol.dispose]() { log = "disposed"; } };
+        \\}
+        \\log;
+    , "disposed");
+}
+
+test "later: using disposes multiple bindings in LIFO order" {
+    try expectScriptStringWithBuiltins(
+        \\const log = [];
+        \\{
+        \\  using a = { [Symbol.dispose]() { log.push("A"); } };
+        \\  using b = { [Symbol.dispose]() { log.push("B"); } };
+        \\  using c = { [Symbol.dispose]() { log.push("C"); } };
+        \\}
+        \\log.join(",");
+    , "C,B,A");
+}
+
+test "later: using fires disposers on throw" {
+    try expectScriptStringWithBuiltins(
+        \\let log = "";
+        \\let msg = "";
+        \\try {
+        \\  using x = { [Symbol.dispose]() { log = "disposed"; } };
+        \\  throw new Error("boom");
+        \\} catch (e) { msg = e.message; }
+        \\log + ":" + msg;
+    , "disposed:boom");
+}
+
+test "later: using mid-disposal throw wraps with SuppressedError" {
+    try expectScriptStringWithBuiltins(
+        \\const e1 = new Error("one");
+        \\const e2 = new Error("two");
+        \\let kind = "", err = null, sup = null;
+        \\try {
+        \\  using a = { [Symbol.dispose]() { throw e1; } };
+        \\  using b = { [Symbol.dispose]() { throw e2; } };
+        \\} catch (e) { kind = e.constructor.name; err = e.error; sup = e.suppressed; }
+        \\// LIFO: e2 throws first (most-recent), e1 throws next and
+        \\// becomes the new error with e2 as suppressed (§9.5.4 step 2.b.iv-vi).
+        \\kind + ":" + err.message + ":" + sup.message;
+    , "SuppressedError:one:two");
+}
+
+test "later: using disposes before return propagates" {
+    try expectScriptStringWithBuiltins(
+        \\let log = "";
+        \\function f() {
+        \\  using x = { [Symbol.dispose]() { log = "disposed"; } };
+        \\  return "ret";
+        \\}
+        \\const r = f();
+        \\log + ":" + r;
+    , "disposed:ret");
+}
+
+test "later: using disposes on break out of block-labelled" {
+    try expectScriptStringWithBuiltins(
+        \\let log = "";
+        \\outer: {
+        \\  using x = { [Symbol.dispose]() { log = "disposed"; } };
+        \\  break outer;
+        \\}
+        \\log;
+    , "disposed");
+}
+
+test "later: using disposes on continue through loop" {
+    try expectScriptStringWithBuiltins(
+        \\const log = [];
+        \\for (let i = 0; i < 3; i++) {
+        \\  using x = { [Symbol.dispose]() { log.push("d" + i); } };
+        \\  if (i === 1) continue;
+        \\  log.push("body" + i);
+        \\}
+        \\log.join(",");
+    , "body0,d0,d1,body2,d2");
+}
+
+test "later: using null is a legal no-op" {
+    try expectScriptStringWithBuiltins(
+        \\let log = "ok";
+        \\{
+        \\  using x = null;
+        \\}
+        \\log;
+    , "ok");
+}
+
+test "later: using undefined is a legal no-op" {
+    try expectScriptStringWithBuiltins(
+        \\let log = "ok";
+        \\{
+        \\  using x = undefined;
+        \\}
+        \\log;
+    , "ok");
+}
+
+test "later: using non-disposable object throws TypeError at decl" {
+    try expectScriptStringWithBuiltins(
+        \\let kind = "", reached_after = false;
+        \\try {
+        \\  using x = {};
+        \\  reached_after = true;
+        \\} catch (e) { kind = e.constructor.name; }
+        \\kind + ":" + reached_after;
+    , "TypeError:false");
+}
+
+test "later: nested using scopes dispose inner before outer" {
+    try expectScriptStringWithBuiltins(
+        \\const log = [];
+        \\{
+        \\  using outer = { [Symbol.dispose]() { log.push("outer"); } };
+        \\  {
+        \\    using inner = { [Symbol.dispose]() { log.push("inner"); } };
+        \\  }
+        \\  log.push("between");
+        \\}
+        \\log.join(",");
+    , "inner,between,outer");
+}
+
+test "later: using value bound to const is visible inside block" {
+    try expectScriptStringWithBuiltins(
+        \\let observed = 0;
+        \\{
+        \\  using r = { value: 42, [Symbol.dispose]() {} };
+        \\  observed = r.value;
+        \\}
+        \\observed + "";
+    , "42");
+}
+
+test "later: using rebind from inner function throws TypeError" {
+    // §14.3.x — `using` bindings are immutable (const-like). A
+    // direct in-scope `x = …` is rejected at compile time
+    // (matching how Cynic treats `const x = 1; x = 2;` in the
+    // same scope). A cross-function rebind escapes the static
+    // check and surfaces as the spec-shaped runtime TypeError
+    // from SetMutableBinding step 9.b.
+    try expectScriptStringWithBuiltins(
+        \\let kind = "";
+        \\try {
+        \\  {
+        \\    using x = { [Symbol.dispose]() {} };
+        \\    (function () { x = null; })();
+        \\  }
+        \\} catch (e) { kind = e.constructor.name; }
+        \\kind;
+    , "TypeError");
+}
+
+test "later: for-of with using disposes per iteration" {
+    try expectScriptStringWithBuiltins(
+        \\const log = [];
+        \\const items = [
+        \\  { id: "a", [Symbol.dispose]() { log.push("d-a"); } },
+        \\  { id: "b", [Symbol.dispose]() { log.push("d-b"); } },
+        \\  { id: "c", [Symbol.dispose]() { log.push("d-c"); } },
+        \\];
+        \\for (using r of items) {
+        \\  log.push("body-" + r.id);
+        \\}
+        \\log.join(",");
+    , "body-a,d-a,body-b,d-b,body-c,d-c");
+}
+
+test "later: for-of using disposes on early break" {
+    try expectScriptStringWithBuiltins(
+        \\const log = [];
+        \\const items = [
+        \\  { id: "a", [Symbol.dispose]() { log.push("d-a"); } },
+        \\  { id: "b", [Symbol.dispose]() { log.push("d-b"); } },
+        \\  { id: "c", [Symbol.dispose]() { log.push("d-c"); } },
+        \\];
+        \\for (using r of items) {
+        \\  log.push("body-" + r.id);
+        \\  if (r.id === "b") break;
+        \\}
+        \\log.join(",");
+    , "body-a,d-a,body-b,d-b");
+}
+
+test "later: for-of using disposes on throw inside body" {
+    try expectScriptStringWithBuiltins(
+        \\const log = [];
+        \\const items = [
+        \\  { id: "a", [Symbol.dispose]() { log.push("d-a"); } },
+        \\  { id: "b", [Symbol.dispose]() { log.push("d-b"); } },
+        \\];
+        \\try {
+        \\  for (using r of items) {
+        \\    log.push("body-" + r.id);
+        \\    if (r.id === "a") throw new Error("stop");
+        \\  }
+        \\} catch (e) { log.push("caught:" + e.message); }
+        \\log.join(",");
+    , "body-a,d-a,caught:stop");
+}
 // §27.4 AsyncDisposableStack — ES2026 explicit-resource-management.
 // Asynchronous resource stack. `.use(v)` accepts either
 // `Symbol.asyncDispose` (preferred) or `Symbol.dispose`.

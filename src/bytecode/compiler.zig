@@ -252,6 +252,15 @@ pub const Compiler = struct {
     /// the stack to `null` so a `return` inside a function inside
     /// an outer try-finally doesn't run the outer finally.
     finally_chain: ?*FinallyContext = null,
+    /// §13.2.4 ES2026 explicit-resource-management — the dispose-
+    /// stack register associated with the INNERMOST block (or
+    /// for-of body) that has at least one `using` declaration.
+    /// `compileLexicalDecl` reads it when emitting `register_using`
+    /// for a `using`-kind declarator. `null` outside such a block.
+    /// The register is reserved at block entry and released at
+    /// block exit by `compileBlock`. See §13.2.4.6 BlockStatement
+    /// Runtime Semantics + §14.7.5 ForOfStatement.
+    current_dispose_stack: ?u8 = null,
     /// §14.13 LabelledStatement — accumulator of labels that
     /// `compileLabeled` has pushed for the *next* iteration /
     /// switch statement encountered. When a loop's compile
@@ -5474,9 +5483,24 @@ pub const Compiler = struct {
         // We hold the expression here and route through
         // `compileAssignmentPattern` at body emit.
         var assignment_pattern_target: ?ast.expression.Expression = null;
+        // §14.7.5.x ES2026 explicit-resource-management — when the
+        // for-of head is `for (using x of …)`, each iteration's `x`
+        // binding has its `Symbol.dispose` called at end-of-iteration.
+        // Cynic compiles this as a per-iteration `register_using` +
+        // `dispose_stack` pair (see body emission below).
+        var is_using = false;
         switch (s.left) {
             .lexical => |ld| {
-                if (ld.kind == .var_) bind_kind = .var_ else if (ld.kind == .let_) bind_kind = .let_ else bind_kind = .const_;
+                bind_kind = switch (ld.kind) {
+                    .var_ => .var_,
+                    .let_ => .let_,
+                    // §14.3.x — `using` / `await using` bind by const
+                    // semantics (no rebinding, TDZ on read before
+                    // init). Disposal is layered on top, not encoded
+                    // in BindingKind.
+                    .const_, .using_, .await_using_ => .const_,
+                };
+                is_using = ld.kind == .using_ or ld.kind == .await_using_;
                 if (ld.declarators.len != 1) return error.UnsupportedStatement;
                 const d = ld.declarators[0];
                 switch (d.name) {
@@ -5486,6 +5510,8 @@ pub const Compiler = struct {
                         bind_span = id.span;
                     },
                     .array, .object => {
+                        // §14.3.x — `using` rejects patterns at parse
+                        // time. Only let / const / var reach here.
                         pattern_target = d.name;
                         bind_target_kind = .pattern;
                         bind_span = d.span;
@@ -5843,6 +5869,54 @@ pub const Compiler = struct {
             try self.assignToBinding(bind_name, bind_span, for_of_is_init);
         }
 
+        // §14.7.5.x ES2026 explicit-resource-management — for
+        // (using r of …): each iteration registers `r` with a
+        // fresh per-iter dispose stack. The stack is allocated
+        // here (after the binding holds the iteration value), the
+        // value is registered via §9.5.3 AddDisposableResource,
+        // and the synthetic FinallyContext below carries the
+        // dispose walk so `break` / `continue` / `return` /
+        // throw all hit DisposeResources before any other
+        // teardown.
+        var r_dispose_stack: u8 = 0;
+        var pushed_dispose_finally = false;
+        var dispose_fctx: FinallyContext = undefined;
+        const saved_current_dispose = self.current_dispose_stack;
+        if (is_using) {
+            r_dispose_stack = try self.reserveTemp();
+            try self.builder.emitOp(.alloc_dispose_stack, s.span);
+            try self.builder.emitU8(r_dispose_stack);
+
+            // Read the freshly-assigned binding and register it.
+            // §9.5.3 throws TypeError here (not at dispose time)
+            // when the value is non-null/undefined and has no
+            // callable `Symbol.dispose`. A throw at register time
+            // is caught by the iter-close handler emitted below.
+            const r_val = try self.reserveTemp();
+            const binding = self.scope.?.resolve(bind_name) orelse return error.UnresolvedReference;
+            try self.emitLoadBinding(binding, bind_span);
+            try self.builder.emitOp(.star, bind_span);
+            try self.builder.emitU8(r_val);
+            try self.builder.emitOp(.register_using, bind_span);
+            try self.builder.emitU8(r_dispose_stack);
+            try self.builder.emitU8(r_val);
+            self.releaseTemp(); // release r_val
+
+            dispose_fctx = .{
+                .tag = .dispose_stack,
+                .span = s.span,
+                .parent = self.finally_chain,
+                .dispose_stack_register = r_dispose_stack,
+            };
+            self.finally_chain = &dispose_fctx;
+            self.current_dispose_stack = r_dispose_stack;
+            pushed_dispose_finally = true;
+        }
+        defer if (pushed_dispose_finally) {
+            self.current_dispose_stack = saved_current_dispose;
+            self.releaseTemp(); // release r_dispose_stack
+        };
+
         var ctx: LoopContext = .{
             .continue_target = 0,
             // Both the per-iteration env and the hoisted env are live
@@ -5853,7 +5927,13 @@ pub const Compiler = struct {
             // own keys directly and has no `.return()` contract.
             .iter_register = if (s.kind == .in_) null else r_iter,
             .parent = self.current_loop,
-            .entry_finally_chain = self.finally_chain,
+            // §13.2.4.6 — for `for (using x of …)`, snapshot the
+            // chain BEFORE our synthetic dispose so `break` /
+            // `continue` inline OUR dispose between body and loop
+            // transfer (the per-iter BlockEnvironment's exit runs
+            // DisposeResources). For plain for-of, snapshot the
+            // ambient chain.
+            .entry_finally_chain = if (pushed_dispose_finally) dispose_fctx.parent else self.finally_chain,
             .labels = labels,
         };
         defer ctx.deinit(self.allocator);
@@ -5869,6 +5949,20 @@ pub const Compiler = struct {
         // contract).
         try self.compileStatement(s.body);
         const body_end_pc = self.builder.here();
+        // §14.7.5.x — on normal completion of the iteration body,
+        // dispose the per-iter `using` bindings before looping
+        // back. The next iteration allocates a fresh dispose
+        // stack at the top of body emission, so this is the
+        // per-iter LIFO walk per §13.2.4.6 BlockStatement.
+        if (pushed_dispose_finally) {
+            // Pop our synthetic finally before emitting the
+            // dispose so the dispose itself isn't wrapped by
+            // its own context (matches `compileBlockWithUsing`).
+            self.finally_chain = dispose_fctx.parent;
+            try self.builder.emitOp(.dispose_stack, s.span);
+            try self.builder.emitU8(r_dispose_stack);
+            try self.builder.emitU8(0); // mode 0 — normal completion
+        }
         if (s.kind != .in_) {
             // Skip the synthetic handler on normal completion.
             try self.builder.emitOp(.jmp, s.span);
@@ -5882,6 +5976,24 @@ pub const Compiler = struct {
             defer self.releaseTemp();
             try self.builder.emitOp(.star, s.span);
             try self.builder.emitU8(r_caught);
+            // §13.2.4.6 — dispose any per-iter `using` resources
+            // BEFORE iter_close so SuppressedError-wrapping fires
+            // on the in-flight throw. `dispose_stack` in throw-mode
+            // takes the throw from acc, walks the dispose records,
+            // and writes the outgoing (possibly SuppressedError-
+            // wrapped) throw back to acc.
+            if (pushed_dispose_finally) {
+                try self.builder.emitOp(.ldar, s.span);
+                try self.builder.emitU8(r_caught);
+                try self.builder.emitOp(.dispose_stack, s.span);
+                try self.builder.emitU8(r_dispose_stack);
+                try self.builder.emitU8(1); // mode 1 — throw completion
+                // Update r_caught with whatever dispose_stack
+                // landed in acc (the original throw or a
+                // SuppressedError wrap).
+                try self.builder.emitOp(.star, s.span);
+                try self.builder.emitU8(r_caught);
+            }
             try self.builder.emitOp(.iter_close, s.span);
             try self.builder.emitU8(r_iter);
             // §7.4.6 step 7 — original throw wins; swallow any inner
@@ -7131,7 +7243,7 @@ pub const Compiler = struct {
         try self.hoistVarAndFunctions(body);
         try self.emitVarInits(span);
         for (body) |*s| if (s.* == .function_decl) try self.compileStatement(s);
-        for (body) |*s| if (s.* != .function_decl) try self.compileStatement(s);
+        try self.compileFunctionBodyTail(body, span);
         try self.builder.emitOp(.lda_undefined, span);
         try self.builder.emitOp(.return_, span);
 
@@ -7247,9 +7359,9 @@ pub const Compiler = struct {
         try self.emitVarInits(span);
         // Same two-pass order as the function path: function
         // declarations first (so later code can call them), then the
-        // remaining statements.
+        // remaining statements (using-aware).
         for (body_stmts) |*s| if (s.* == .function_decl) try self.compileStatement(s);
-        for (body_stmts) |*s| if (s.* != .function_decl) try self.compileStatement(s);
+        try self.compileFunctionBodyTail(body_stmts, span);
         try self.builder.emitOp(.lda_undefined, span);
         try self.builder.emitOp(.return_, span);
 
@@ -7368,7 +7480,7 @@ pub const Compiler = struct {
         try self.hoistVarAndFunctions(body_stmts);
         try self.emitVarInits(span);
         for (body_stmts) |*s| if (s.* == .function_decl) try self.compileStatement(s);
-        for (body_stmts) |*s| if (s.* != .function_decl) try self.compileStatement(s);
+        try self.compileFunctionBodyTail(body_stmts, span);
         try self.builder.emitOp(.lda_undefined, span);
         try self.builder.emitOp(.return_, span);
 
@@ -7454,7 +7566,6 @@ pub const Compiler = struct {
     }
 
     fn compileBlock(self: *Compiler, body: []ast.statement.Statement, span: Span) CompileError!void {
-        _ = span;
         var block_scope: Scope = .{ .parent = self.scope, .kind = .block };
         defer block_scope.deinit(self.allocator);
         const saved = self.scope;
@@ -7466,7 +7577,179 @@ pub const Compiler = struct {
         // sees the binding in the TDZ rather than as undeclared.
         try self.hoistLetConst(body);
 
+        // §13.2.4.6 BlockStatement Runtime Semantics — ES2026
+        // explicit-resource-management. If the block carries any
+        // `using` / `await using` declaration, wrap the entire
+        // body in an implicit try / finally that walks
+        // §9.5.4 DisposeResources at every scope-exit path.
+        const has_using = blockHasUsing(body);
+        if (!has_using) {
+            for (body) |*s| try self.compileStatement(s);
+            return;
+        }
+
+        try self.compileBlockWithUsing(body, span);
+    }
+
+    /// Walk `body` looking for a top-level `using` /
+    /// `await using` declaration. The declaration must be a
+    /// direct StatementListItem of this block — `using` inside a
+    /// nested if / loop / try opens its own dispose scope per
+    /// §13.2.4.6 step 1 (nested BlockStatement / control-flow
+    /// containers reach this routine on their own descent).
+    fn blockHasUsing(body: []const ast.statement.Statement) bool {
+        for (body) |s| switch (s) {
+            .lexical => |ld| if (ld.kind == .using_ or ld.kind == .await_using_) return true,
+            else => {},
+        };
+        return false;
+    }
+
+    /// Compile a function body's non-function-decl tail (function
+    /// declarations are emitted by the caller, before this helper,
+    /// because §10.2.1.5 FunctionDeclarationInstantiation makes
+    /// them visible to the rest of the body via hoisting).
+    /// Mirrors the §13.2.4.6 BlockStatement runtime semantics: if
+    /// the body declares any `using` / `await using` bindings,
+    /// wrap the tail in the dispose-stack try/finally so a
+    /// `return` (or throw, or break / continue out) triggers the
+    /// disposers on the way out.
+    ///
+    /// Used by every entry point that compiles a FunctionBody:
+    /// `compileScriptAsChunk`'s script body, the inner-function /
+    /// method paths, and the arrow / async paths.
+    fn compileFunctionBodyTail(
+        self: *Compiler,
+        body: []ast.statement.Statement,
+        span: Span,
+    ) CompileError!void {
+        if (!blockHasUsing(body)) {
+            for (body) |*s| if (s.* != .function_decl) try self.compileStatement(s);
+            return;
+        }
+        // §13.2.4.6 + §10.2.1.5 — wrap the non-function-decl tail
+        // in the same alloc_dispose_stack + try/finally that
+        // `compileBlockWithUsing` emits. Filter function-decls
+        // out of the body list passed to the wrapper; the caller
+        // already emitted them in the function-decl-first pass.
+        var filtered: std.ArrayListUnmanaged(ast.statement.Statement) = .empty;
+        defer filtered.deinit(self.allocator);
+        for (body) |s| if (s != .function_decl) try filtered.append(self.allocator, s);
+        try self.compileBlockWithUsing(filtered.items, span);
+    }
+
+    /// §13.2.4.6 BlockStatement Runtime Semantics — body compile
+    /// for a block carrying at least one `using` declaration. The
+    /// emitted shape is conceptually:
+    ///
+    ///     <r_stack> = alloc_dispose_stack
+    ///     try {
+    ///        // body, each `using x = expr;` ends with:
+    ///        //   register_using <r_stack>, <r_x>
+    ///     } finally {
+    ///        dispose_stack <r_stack>  // §9.5.4 walk
+    ///     }
+    ///
+    /// Routes through the existing exception-handler + finally
+    /// machinery (`addHandler`, `FinallyContext`) so abrupt
+    /// completions (throw / return / break / continue) thread
+    /// through the dispose walk automatically — `compileReturn` /
+    /// `compileBreak` / `compileContinue` already inline every
+    /// active finally before transferring control.
+    fn compileBlockWithUsing(
+        self: *Compiler,
+        body: []ast.statement.Statement,
+        span: Span,
+    ) CompileError!void {
+        // Allocate the dispose-stack temp. Held for the duration
+        // of the block; released at the end.
+        const r_stack = try self.reserveTemp();
+        defer self.releaseTemp();
+
+        // Emit `r_stack = alloc_dispose_stack;` at block entry.
+        try self.builder.emitOp(.alloc_dispose_stack, span);
+        try self.builder.emitU8(r_stack);
+
+        // Publish the register so each contained `using x = …;`
+        // can emit `register_using r_stack, r_x` after its
+        // initialisation. Save / restore so a nested using-block
+        // re-publishes its own register and we restore ours on
+        // exit (per §13.2.4.6 DisposeCapability records are
+        // scoped to their declaring BlockStatement).
+        const saved_dispose = self.current_dispose_stack;
+        self.current_dispose_stack = r_stack;
+        defer self.current_dispose_stack = saved_dispose;
+
+        // Push the synthetic FinallyContext — `compileReturn` /
+        // `compileBreak` / `compileContinue` walk this chain and
+        // emit the dispose-stack opcode before threading the
+        // completion outward (matches the AST `finally { F }`
+        // path in `compileTry`).
+        var fctx_storage: FinallyContext = .{
+            .tag = .dispose_stack,
+            .span = span,
+            .parent = self.finally_chain,
+            .dispose_stack_register = r_stack,
+        };
+        self.finally_chain = &fctx_storage;
+        const saved_finally = fctx_storage.parent;
+
+        // §14.15 try block — the user-body PC range. A throw
+        // here lands on the synthetic handler emitted after the
+        // body, which runs `dispose_stack` and rethrows.
+        // `try_with_handler_depth` is bumped around the body so
+        // calls inside don't compile as tail calls (the throw
+        // would otherwise skip the dispose).
+        const start_pc = self.builder.here();
+        self.try_with_handler_depth += 1;
         for (body) |*s| try self.compileStatement(s);
+        self.try_with_handler_depth -= 1;
+        const end_pc = self.builder.here();
+
+        // Normal-completion arm — pop the finally context so the
+        // dispose walk emitted here isn't itself wrapped by its
+        // own context, then emit the dispose-stack opcode and
+        // jump past the synthetic handler.
+        self.finally_chain = saved_finally;
+        try self.builder.emitOp(.dispose_stack, span);
+        try self.builder.emitU8(r_stack);
+        try self.builder.emitU8(0); // mode 0 — normal completion
+        try self.builder.emitOp(.jmp, span);
+        const skip_handler_patch = self.builder.here();
+        try self.builder.emitI16(0);
+
+        // Synthetic handler — runs on throw. The deposited
+        // exception lands in `acc` (catch_register = null); reload
+        // the throw, walk the dispose stack in throw-mode (which
+        // wraps any disposer's throw via SuppressedError per
+        // §9.5.4 step 2.b.iv-vi), then rethrow the outgoing
+        // (possibly chained) exception left in acc.
+        const handler_pc = self.builder.here();
+        const r_caught = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, span);
+        try self.builder.emitU8(r_caught);
+        try self.builder.emitOp(.ldar, span);
+        try self.builder.emitU8(r_caught);
+        try self.builder.emitOp(.dispose_stack, span);
+        try self.builder.emitU8(r_stack);
+        try self.builder.emitU8(1); // mode 1 — throw completion
+        // dispose_stack returns either the original throw (no
+        // disposer raised) or a SuppressedError chain (one or
+        // more did). In either case it leaves the propagated
+        // throw in `acc` and surfaces via the throw_ below.
+        try self.builder.emitOp(.throw_, span);
+
+        const after_handler_pc = self.builder.here();
+        try self.builder.patchI16(skip_handler_patch, after_handler_pc);
+
+        try self.builder.addHandler(.{
+            .start_pc = start_pc,
+            .end_pc = end_pc,
+            .handler_pc = handler_pc,
+            .catch_register = null,
+            .is_finally = true,
+        });
     }
 
     /// Walk `body` and pre-allocate env slots for every `let` /
@@ -8131,12 +8414,18 @@ pub const Compiler = struct {
             }
             return;
         }
-        // `let` / `const` slots were pre-allocated by hoistLetConst
-        // in the enclosing scope. Evaluate the initialiser and store.
+        // `let` / `const` / `using` / `await using` slots were
+        // pre-allocated by hoistLetConst in the enclosing scope.
+        // Evaluate the initialiser and store. For `using` decls
+        // (§14.3.x ES2026 explicit-resource-management) the bound
+        // value is also registered with the enclosing block's
+        // synthetic dispose stack via `register_using`.
+        const is_using = ld.kind == .using_ or ld.kind == .await_using_;
         for (ld.declarators) |d| {
             switch (d.name) {
                 .identifier => |id| {
-                    // §12.7 — `let`/`const` binding name is the StringValue.
+                    // §12.7 — `let`/`const`/`using` binding name is
+                    // the StringValue.
                     const name = try self.bindingName(id.span);
                     const binding = self.scope.?.lookupLocal(name) orelse return error.UnresolvedReference;
                     if (d.init) |*init_expr| {
@@ -8144,8 +8433,9 @@ pub const Compiler = struct {
                         // the binding identifier as their `.name`.
                         try self.compileNamedValue(init_expr, name);
                     } else {
-                        // §14.3.1 — `const x;` is a SyntaxError (already
-                        // rejected by the parser via `const_without_initializer`).
+                        // §14.3.1 — `const x;` and `using x;` are
+                        // SyntaxErrors (already rejected by the
+                        // parser via `const_without_initializer`).
                         // For `let x;` (no init), the binding becomes
                         // `undefined` once the declaration is reached.
                         try self.builder.emitOp(.lda_undefined, d.span);
@@ -8153,6 +8443,43 @@ pub const Compiler = struct {
                     // §9.1.1.4 InitializeBinding — initializer write,
                     // not assignment.
                     try self.emitStoreBindingInit(binding, d.span);
+                    if (is_using) {
+                        // §13.2.4.6 BlockStatement Runtime Semantics +
+                        // §9.5.3 AddDisposableResource — every `using`
+                        // binding's initialised value is appended to
+                        // the enclosing block's dispose stack. A
+                        // missing `Symbol.dispose` (non-null /
+                        // non-undefined value) throws TypeError AT
+                        // THIS SITE, not later.
+                        //
+                        // `current_dispose_stack` is null if a
+                        // `using` slipped past `compileBlock`'s
+                        // pre-scan — that would be a compiler bug,
+                        // not a user error. The hoist + scan in
+                        // `blockHasUsing` covers every direct
+                        // StatementListItem case; `using` inside a
+                        // child block / control-flow opens its own
+                        // dispose scope when that nested block is
+                        // compiled.
+                        const r_stack = self.current_dispose_stack orelse return error.UnsupportedStatement;
+                        // The binding value was just stored into the
+                        // env slot; `register_using` needs the value
+                        // in a register. Reuse the `acc → slot` flow:
+                        // re-read the binding into a fresh temp so a
+                        // poisoned setter on the env slot can't
+                        // observe a different value than what we
+                        // registered (matches the spec, which
+                        // captures the value before the dispose
+                        // record is appended — see §9.5.3 step 1).
+                        const r_value = try self.reserveTemp();
+                        defer self.releaseTemp();
+                        try self.emitLoadBinding(binding, d.span);
+                        try self.builder.emitOp(.star, d.span);
+                        try self.builder.emitU8(r_value);
+                        try self.builder.emitOp(.register_using, d.span);
+                        try self.builder.emitU8(r_stack);
+                        try self.builder.emitU8(r_value);
+                    }
                 },
                 else => {
                     if (d.init) |*init_expr| {
@@ -8167,6 +8494,10 @@ pub const Compiler = struct {
                     // is BindingInitialization; leaf writes go
                     // through InitializeBinding (§9.1.1.4) and may
                     // legitimately overwrite the TDZ Hole.
+                    //
+                    // `using` rejects patterns at parse time per
+                    // §14.3.x — single identifiers only — so this
+                    // arm is unreachable for `using` / `await using`.
                     try self.compileDestructure(d.name, true);
                 },
             }
@@ -9337,10 +9668,24 @@ pub const Compiler = struct {
     /// §14.15 active try-finally context. Linked list, innermost
     /// first. `compileReturn` walks it to emit each finally body
     /// before issuing `return_`.
+    ///
+    /// Two forms:
+    /// 1. **AST finally** (`.tag = .ast_block`): the body slice
+    ///    is the user-written `finally { … }` block, replayed
+    ///    inline by `emitFinalliesUntil`.
+    /// 2. **Synthetic dispose** (`.tag = .dispose_stack`): an
+    ///    implicit finally emitted by §13.2.4.6 BlockStatement for
+    ///    every block carrying one or more `using` declarations.
+    ///    Replay emits `dispose_stack r_stack` against the temp
+    ///    register that holds the synthetic DisposableStack.
     const FinallyContext = struct {
-        body: []ast.statement.Statement,
+        tag: enum { ast_block, dispose_stack } = .ast_block,
+        body: []ast.statement.Statement = &.{},
         span: Span,
         parent: ?*FinallyContext = null,
+        /// Set when `tag == .dispose_stack`: register holding the
+        /// engine-internal disposable stack to walk.
+        dispose_stack_register: u8 = 0,
     };
 
     const LoopContext = struct {
@@ -10911,7 +11256,23 @@ pub const Compiler = struct {
         while (fctx) |f| : (fctx = f.parent) {
             if (f == anchor) break;
             self.finally_chain = f.parent;
-            try self.compileBlock(f.body, span);
+            switch (f.tag) {
+                .ast_block => try self.compileBlock(f.body, span),
+                .dispose_stack => {
+                    // §13.2.4.6 BlockStatement Runtime Semantics +
+                    // §9.5.4 DisposeResources — synthetic finally
+                    // for a block containing `using` declarations.
+                    // `emitFinalliesUntil` is called from
+                    // `compileBreak` / `compileContinue` /
+                    // `compileReturn` — i.e. normal-completion arms
+                    // of an abrupt transfer. The walk preserves
+                    // `acc` so the caller's stashed value (return
+                    // value, in particular) survives.
+                    try self.builder.emitOp(.dispose_stack, span);
+                    try self.builder.emitU8(f.dispose_stack_register);
+                    try self.builder.emitU8(0); // mode 0 — normal completion
+                },
+            }
         }
     }
 
@@ -11050,7 +11411,10 @@ pub const Compiler = struct {
         }
         // §14.15 — run every finally block opened between this
         // `break` and the target loop entry before transferring
-        // control.
+        // control. (Includes synthetic `using`-dispose finallies
+        // per §13.2.4.6 — they act on the bound resource, not on
+        // the iterator, so ordering vs IteratorClose is
+        // independent for `for (using x of …)`.)
         try self.emitFinalliesUntil(target.entry_finally_chain, s.span);
         // `break` jumps past the natural `pop_env` site; emit one
         // `pop_env` for every per-iter-env loop we skip out of
@@ -11618,7 +11982,12 @@ fn compileFunctionTemplateExtNamed(
             try self.emitVarInits(span);
             // Function decls go first — see compileScriptAsChunk.
             for (stmts) |*s| if (s.* == .function_decl) try self.compileStatement(s);
-            for (stmts) |*s| if (s.* != .function_decl) try self.compileStatement(s);
+            // §13.2.4.6 — using-aware tail. Function-decl-bearing
+            // bodies with no `using` collapse to the prior loop;
+            // bodies with `using` declarations get the implicit
+            // try/finally so a `return` inside dispose-time fires
+            // disposers on the way out.
+            try self.compileFunctionBodyTail(stmts, span);
             try self.builder.emitOp(.lda_undefined, span);
             try self.builder.emitOp(.return_, span);
         },
@@ -11751,7 +12120,7 @@ pub fn compileScriptAsChunk(
         // function f(){}`) resolve. Block-nested function decls
         // (strict-mode lexical) stay where they are.
         for (program.body) |*s| if (s.* == .function_decl) try c.compileStatement(s);
-        for (program.body) |*s| if (s.* != .function_decl) try c.compileStatement(s);
+        try c.compileFunctionBodyTail(program.body, start_span);
     }
 
     const end_span: Span = .{
