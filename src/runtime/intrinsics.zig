@@ -70,6 +70,13 @@ pub const Intrinsics = struct {
     aggregate_error_constructor: ?*JSFunction = null,
     aggregate_error_prototype: ?*JSObject = null,
 
+    /// §20.5.x SuppressedError (ES2026 explicit-resource-management)
+    /// — Error subclass with `.error` and `.suppressed` own
+    /// properties. `DisposeResources` wraps in this when a
+    /// disposer throws while another throw is in flight.
+    suppressed_error_constructor: ?*JSFunction = null,
+    suppressed_error_prototype: ?*JSObject = null,
+
     /// `%GeneratorPrototype%` (§27.5.1). Lazily installed on the
     /// first `function*` call by `lantern.ensureGeneratorPrototype`;
     /// `null` until then. Carries `next` / `return` / `throw` and

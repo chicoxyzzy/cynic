@@ -2454,6 +2454,40 @@ test "later: %AsyncIteratorPrototype%[@@asyncDispose] returns a Promise" {
     , "true");
 }
 
+// §20.5.x SuppressedError — ES2026 explicit-resource-management.
+// DisposeResources wraps an in-flight throw + a disposer throw with
+// this Error subclass; the `error` slot is the new throw,
+// `suppressed` is the previous.
+
+test "later: SuppressedError(error, suppressed, message) populates slots" {
+    try expectScriptStringWithBuiltins(
+        \\const e = new SuppressedError("E", "S", "M");
+        \\e.error + ":" + e.suppressed + ":" + e.message;
+    , "E:S:M");
+}
+
+test "later: SuppressedError extends Error" {
+    try expectScriptStringWithBuiltins(
+        \\const e = new SuppressedError();
+        \\(e instanceof Error) + ":" + (e instanceof SuppressedError) + ":" +
+        \\(Object.getPrototypeOf(SuppressedError.prototype) === Error.prototype);
+    , "true:true:true");
+}
+
+test "later: SuppressedError omitted message stays on prototype" {
+    try expectScriptStringWithBuiltins(
+        \\const e = new SuppressedError(1, 2);
+        \\Object.prototype.hasOwnProperty.call(e, "message") + ":" +
+        \\e.message + ":" + SuppressedError.prototype.message;
+    , "false::");
+}
+
+test "later: SuppressedError default ctor arity" {
+    try expectScriptIntWithBuiltins(
+        \\SuppressedError.length;
+    , 3);
+}
+
 test "later: tagged template passes cooked + raw arrays" {
     try expectScriptStringWithBuiltins(
         \\function tag(strs) {

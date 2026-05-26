@@ -103,6 +103,14 @@ pub fn installAll(realm: *Realm, obj_proto: *JSObject) !void {
     realm.intrinsics.aggregate_error_constructor = try installAggregateError(realm, error_proto);
     realm.intrinsics.aggregate_error_prototype = realm.intrinsics.aggregate_error_constructor.?.prototype;
     realm.intrinsics.aggregate_error_constructor.?.static_parent = error_ctor;
+
+    // §20.5.x SuppressedError(error, suppressed, message) — ES2026
+    // explicit-resource-management. `DisposeResources` wraps an
+    // in-flight throw + a disposer throw with this Error subclass
+    // (`.error` is the new throw, `.suppressed` is the previous).
+    realm.intrinsics.suppressed_error_constructor = try installSuppressedError(realm, error_proto);
+    realm.intrinsics.suppressed_error_prototype = realm.intrinsics.suppressed_error_constructor.?.prototype;
+    realm.intrinsics.suppressed_error_constructor.?.static_parent = error_ctor;
 }
 
 /// §20.5.7.1.1 AggregateError(errors, message[, options]) — built
@@ -180,6 +188,97 @@ fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) N
     // Get (accessor-aware).
     if (args.len > 2) {
         if (heap_mod.valueAsPlainObject(args[2])) |opts| {
+            const has_cause = errorOptionsHasCause(realm, opts) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            if (has_cause) {
+                const cause_v = try intrinsics.getPropertyChain(realm, opts, "cause");
+                instance.setWithFlags(realm.allocator, "cause", cause_v, .{
+                    .writable = true,
+                    .enumerable = false,
+                    .configurable = true,
+                }) catch return error.OutOfMemory;
+            }
+        }
+    }
+    return heap_mod.taggedObject(instance);
+}
+
+/// §20.5.x.1 SuppressedError(error, suppressed[, message]) —
+/// ES2026 explicit-resource-management. Constructor arity 3.
+/// Same descriptor shape as the other NativeError prototypes
+/// (`prototype` is `{w:false, e:false, c:false}`); `error`,
+/// `suppressed`, and `message` are own data properties created
+/// with `CreateNonEnumerableDataPropertyOrThrow` (writable,
+/// configurable, non-enumerable). `cause` is honoured per
+/// §20.5.8.1 InstallErrorCause when the options object carries it.
+fn installSuppressedError(realm: *Realm, parent_proto: *JSObject) !*JSFunction {
+    const fn_obj = try realm.heap.allocateFunctionNative(suppressedErrorNative, 3, "SuppressedError");
+    const proto = try realm.heap.allocateObject();
+    realm.heap.setObjectPrototype(proto, parent_proto);
+    try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
+    const name_str = try realm.heap.allocateString("SuppressedError");
+    try setNonEnumerable(proto, realm.allocator, "name", Value.fromString(name_str));
+    const empty = try realm.heap.allocateString("");
+    try setNonEnumerable(proto, realm.allocator, "message", Value.fromString(empty));
+    realm.heap.setFunctionPrototype(fn_obj, proto);
+    try fn_obj.property_flags.put(realm.allocator, "prototype", .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = false,
+    });
+    try realm.globals.put(realm.allocator, "SuppressedError", heap_mod.taggedFunction(fn_obj));
+    return fn_obj;
+}
+
+fn suppressedErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const proto = realm.intrinsics.suppressed_error_prototype.?;
+    const instance = if (heap_mod.valueAsPlainObject(this_value)) |o| o else blk: {
+        const fresh = realm.heap.allocateObject() catch return error.OutOfMemory;
+        realm.heap.setObjectPrototype(fresh, proto);
+        break :blk fresh;
+    };
+    instance.has_error_data = true;
+
+    // §20.5.x.1 step 3 — if message ≠ undefined, ToString it
+    // and stamp BEFORE the error/suppressed slots. The fixture
+    // `built-ins/SuppressedError/message-property.js` checks the
+    // ToString side effect ordering.
+    if (args.len > 2 and !args[2].isUndefined()) {
+        const msg_str = try stringifyArg(realm, args[2]);
+        instance.setWithFlags(realm.allocator, "message", Value.fromString(msg_str), .{
+            .writable = true,
+            .enumerable = false,
+            .configurable = true,
+        }) catch return error.OutOfMemory;
+    }
+
+    // §20.5.x.1 step 4 / step 5 — `error` (the new throw) and
+    // `suppressed` (the previous throw). Created via
+    // `CreateNonEnumerableDataPropertyOrThrow` per spec:
+    // `{w:true, e:false, c:true}`. Spec order is suppressed then
+    // error in the spec text; the `prop-desc` fixture verifies
+    // both are non-enumerable / writable / configurable.
+    const err_v = if (args.len > 0) args[0] else Value.undefined_;
+    const suppressed_v = if (args.len > 1) args[1] else Value.undefined_;
+    instance.setWithFlags(realm.allocator, "error", err_v, .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    }) catch return error.OutOfMemory;
+    instance.setWithFlags(realm.allocator, "suppressed", suppressed_v, .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    }) catch return error.OutOfMemory;
+
+    // §20.5.8.1 InstallErrorCause — options is the fourth arg per
+    // spec, but the SuppressedError signature only takes three.
+    // The proposal text doesn't list options; keep parity with
+    // every other Error ctor in case future drafts add it.
+    if (args.len > 3) {
+        if (heap_mod.valueAsPlainObject(args[3])) |opts| {
             const has_cause = errorOptionsHasCause(realm, opts) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
