@@ -939,14 +939,18 @@ pub const Op = enum(u8) {
     /// per §27.3.1.1 steps 4-5. Emitted at the head of a block that
     /// contains one or more `using` declarations.
     alloc_dispose_stack,
-    /// `[op] [r_stack:u8] [r_value:u8]` — register the value in
-    /// `r_value` with the dispose stack in `r_stack`. Performs
-    /// §9.5.3 AddDisposableResource: if the value is null /
-    /// undefined, nothing is appended; otherwise GetDisposeMethod
-    /// reads `Symbol.dispose` (sync hint) and throws TypeError when
-    /// missing or non-callable (at the `using` decl site, not later
-    /// at dispose time). Emitted right after a `using x = expr;`
-    /// declarator stores its value into the binding slot.
+    /// `[op] [r_stack:u8] [r_value:u8] [hint:u8]` — register the
+    /// value in `r_value` with the dispose stack in `r_stack`.
+    /// Performs §9.5.3 AddDisposableResource. If the value is
+    /// null / undefined, nothing is appended; otherwise
+    /// GetDisposeMethod reads `Symbol.dispose` (hint=0,
+    /// sync_dispose, emitted for `using x = ...`) or
+    /// `Symbol.asyncDispose` then `Symbol.dispose` (hint=1,
+    /// async_dispose, emitted for `await using x = ...` per
+    /// §9.5.2 GetDisposeMethod step 1.a). Throws TypeError when
+    /// missing or non-callable at the binding site (not later at
+    /// dispose time). Emitted right after a `using` / `await
+    /// using` declarator stores its value into the binding slot.
     register_using,
     /// `[op] [r_stack:u8] [mode:u8]` — perform §9.5.4 DisposeResources
     /// on the dispose stack in `r_stack`. Walks the resource list
@@ -965,6 +969,24 @@ pub const Op = enum(u8) {
     ///       outgoing throw (the original or a SuppressedError
     ///       chain); the surrounding bytecode rethrows.
     dispose_stack,
+    /// `[op] [r_stack:u8] [mode:u8]` — async variant of
+    /// `dispose_stack`. Used by blocks that contain at least one
+    /// `await using` declaration. Returns a Promise in `acc` that
+    /// fulfils with `undefined` after the LIFO walk awaits every
+    /// async-hinted disposer; the caller emits an `await` opcode
+    /// immediately after to suspend. Same SuppressedError
+    /// chaining as the sync variant (§9.5.4 step 2.b.iv-vi).
+    ///
+    /// `mode`:
+    ///   0 — normal-completion arm. The result Promise rejects
+    ///       if a disposer throws (or settles a returned thenable
+    ///       with a rejection); the outer `await` re-throws.
+    ///   1 — throw-completion arm. `acc` holds the in-flight
+    ///       throw on entry. The Promise still resolves with
+    ///       undefined on a clean walk (the caller rethrows the
+    ///       saved throw); a disposer throw wraps via
+    ///       SuppressedError and rejects the result Promise.
+    dispose_stack_async,
 
     // ── Termination ──────────────────────────────────────────────────────
     /// Halt with `acc` as the program's value. Top-level only in
@@ -1020,10 +1042,11 @@ pub const Op = enum(u8) {
             => 0,
             .alloc_dispose_stack,
             => 1, // r_dst
-            .register_using,
             .dispose_stack,
-            => 2, // register_using: r_stack + r_value;
-            //  dispose_stack: r_stack + mode
+            .dispose_stack_async,
+            => 2, // r_stack + mode
+            .register_using,
+            => 3, // r_stack + r_value + hint
             .ldar,
             .star,
             .add,
@@ -1268,6 +1291,7 @@ pub const Op = enum(u8) {
             .alloc_dispose_stack => "AllocDisposeStack",
             .register_using => "RegisterUsing",
             .dispose_stack => "DisposeStack",
+            .dispose_stack_async => "DisposeStackAsync",
             .return_ => "Return",
         };
     }

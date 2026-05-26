@@ -441,16 +441,38 @@ pub const Parser = struct {
                     }
                 }
                 // §14.3.x UsingDeclaration (ES2026 explicit-resource-
-                // management). `using` is a contextual keyword: only a
-                // declaration when followed on the SAME line by an
-                // identifier (so `using` alone, `using;`, or `using\n
-                // x = …` keep their expression-statement semantics).
-                // `await using` is detected from the `await` arm above
-                // when we're inside an async context (Phase 6).
+                // management). `using` is a contextual keyword: only
+                // a declaration when followed on the SAME line by an
+                // identifier (so `using` alone, `using;`, or
+                // `using\n x = …` keep their expression-statement
+                // semantics).
                 if (kind == .identifier and std.mem.eql(u8, self.current.slice(self.source), "using")) {
                     const second = try self.peek2();
                     if (!second.line_terminator_before and isUsingBindingStart(second.kind)) {
                         return self.parseLexicalDeclaration(.using_);
+                    }
+                }
+                // §14.3.x AwaitUsingDeclaration. `await using` is
+                // valid in [+Await] contexts (async functions, async
+                // generator bodies, module top-level). The `await`
+                // token is then a reserved word (kw_await); we
+                // detect the `await using IDENT` triple via the
+                // identifier branch by peeking from `using` — when
+                // we're NOT [+Await], `await` is a regular
+                // identifier and the second peek (kw_using-or-not)
+                // determines the path.
+                if (self.in_async and kind == .kw_await) {
+                    const second = try self.peek2();
+                    if (!second.line_terminator_before and
+                        second.kind == .identifier and
+                        std.mem.eql(u8, second.slice(self.source), "using"))
+                    {
+                        const third = try self.peek3();
+                        if (!third.line_terminator_before and isUsingBindingStart(third.kind)) {
+                            const start = self.current.span.start;
+                            _ = try self.bump(); // `await`
+                            return self.parseLexicalDeclarationAt(.await_using_, start);
+                        }
                     }
                 }
                 if (expr_mod.canStartExpression(kind)) return self.parseExpressionStatement();
@@ -479,6 +501,21 @@ pub const Parser = struct {
     /// single-name bindings are recognised. For `using` / `await using`,
     /// destructuring patterns ARE rejected per spec (§14.3.x step 4)
     /// and an initializer is required — see `parseVariableDeclarator`.
+    /// Variant used by `await using` dispatch — the leading
+    /// `await` token has already been consumed by the caller, so
+    /// the statement span starts at the saved `start_pos` rather
+    /// than the (now-current) `using` keyword's position.
+    fn parseLexicalDeclarationAt(
+        self: *Parser,
+        kind: stmt_mod.LexicalDecl.Kind,
+        start_pos: u32,
+    ) ParseError!Statement {
+        const stmt = try self.parseLexicalDeclaration(kind);
+        var fixed = stmt;
+        fixed.lexical.span.start = start_pos;
+        return fixed;
+    }
+
     fn parseLexicalDeclaration(self: *Parser, kind: stmt_mod.LexicalDecl.Kind) ParseError!Statement {
         const keyword = try self.bump();
         var declarators: std.ArrayListUnmanaged(stmt_mod.VariableDeclarator) = .empty;

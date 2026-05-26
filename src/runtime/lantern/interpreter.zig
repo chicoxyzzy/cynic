@@ -8572,13 +8572,15 @@ pub fn runFrames(
                 // §13.2.4.6 + §9.5.3 AddDisposableResource — append
                 // the resource in `r_value` to the dispose stack
                 // in `r_stack`. `value` is null/undefined → no-op.
-                // Otherwise GetDisposeMethod(value, sync) is called;
-                // a missing or non-callable `Symbol.dispose` throws
-                // TypeError AT THIS SITE (matches the spec's
-                // §14.3.x early-error behaviour for `using` decls).
+                // Otherwise GetDisposeMethod(value, hint) reads
+                // Symbol.dispose (hint=0) or Symbol.asyncDispose
+                // (hint=1, with fallback to Symbol.dispose); a
+                // missing or non-callable method throws TypeError
+                // AT THIS SITE per §14.3.x early-error behaviour.
                 const r_stack = code[ip];
                 const r_value = code[ip + 1];
-                ip += 2;
+                const hint_byte = code[ip + 2];
+                ip += 3;
                 const stack_v = registers[r_stack];
                 const value_v = registers[r_value];
                 const stack_obj = heap_mod.valueAsPlainObject(stack_v) orelse {
@@ -8587,7 +8589,8 @@ pub fn runFrames(
                     return error.InvalidOpcode;
                 };
                 const ds_mod = @import("../builtins/disposable_stack.zig");
-                ds_mod.addDisposableResource(realm, stack_obj, value_v, .sync_dispose) catch |err| switch (err) {
+                const hint: object_mod.DisposableHint = if (hint_byte == 1) .async_dispose else .sync_dispose;
+                ds_mod.addDisposableResource(realm, stack_obj, value_v, hint) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.NativeThrew => {
                         const ex = consumePendingException(realm) orelse try makeTypeError(realm, "register_using failed");
@@ -8666,6 +8669,71 @@ pub fn runFrames(
                 // throw (still in `acc` from before the call) is
                 // re-emitted by the surrounding `throw_`.
                 acc = saved_acc;
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            },
+
+            .dispose_stack_async => {
+                // §13.2.4.6 + §9.5.4 — async sibling of
+                // `dispose_stack`, emitted by blocks that contain
+                // at least one `await using` declaration. Returns
+                // a Promise in `acc`; the compiler emits an
+                // `await` opcode immediately after to suspend.
+                //
+                // mode:
+                //   0 — normal completion. The Promise rejects
+                //       with the first disposer throw (or a
+                //       SuppressedError chain if multiple throw).
+                //   1 — throw completion. `acc` holds the
+                //       in-flight throw on entry; the walk seeds
+                //       its `pending_error` so a clean walk
+                //       preserves the original throw and a
+                //       disposer throw wraps via SuppressedError.
+                //       The Promise either resolves with undefined
+                //       (clean walk — surrounding bytecode re-
+                //       throws the saved `acc`) or rejects with
+                //       the SuppressedError chain.
+                const r_stack = code[ip];
+                const mode = code[ip + 1];
+                ip += 2;
+                const stack_v = registers[r_stack];
+                const stack_obj = heap_mod.valueAsPlainObject(stack_v) orelse {
+                    return error.InvalidOpcode;
+                };
+                const ads_mod = @import("../builtins/async_disposable_stack.zig");
+                stack_obj.setDisposableState(realm.allocator, .async_disposed) catch return error.OutOfMemory;
+                const promise_v: Value = if (mode == 1) blk: {
+                    const existing = acc;
+                    const p = ads_mod.startAsyncDisposeWalkWithExisting(realm, stack_obj, existing) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => {
+                            const ex = consumePendingException(realm) orelse try makeTypeError(realm, "dispose_stack_async: unexpected throw");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                    };
+                    break :blk p;
+                } else blk: {
+                    const p = ads_mod.startAsyncDisposeWalkPublic(realm, stack_obj) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => {
+                            const ex = consumePendingException(realm) orelse try makeTypeError(realm, "dispose_stack_async: unexpected throw");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                    };
+                    break :blk p;
+                };
+                acc = promise_v;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
 

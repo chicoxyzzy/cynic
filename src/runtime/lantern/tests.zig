@@ -2929,6 +2929,128 @@ test "later: for-of using disposes on throw inside body" {
         \\log.join(",");
     , "body-a,d-a,caught:stop");
 }
+
+// §14.3.x AwaitUsingDeclaration — ES2026 explicit-resource-management.
+// `await using x = expr;` registers with hint = async-dispose; the
+// scope-exit walk awaits each disposer (whether the disposer is sync
+// or returns a thenable). Only valid in async function bodies, async
+// generator bodies, and module top-level.
+
+test "later: await using awaits sync Symbol.asyncDispose at block exit" {
+    try expectScriptStringWithBuiltins(
+        \\const log = [];
+        \\async function f() {
+        \\  {
+        \\    await using a = { [Symbol.asyncDispose]() { log.push("a-async"); } };
+        \\    log.push("body");
+        \\  }
+        \\  log.push("after");
+        \\  return log.join(",");
+        \\}
+        \\let result = "?";
+        \\f().then(v => { result = v; });
+        \\globalThis.__drainMicrotasks();
+        \\result;
+    , "body,a-async,after");
+}
+
+test "later: await using disposes in LIFO across sync + async hints" {
+    try expectScriptStringWithBuiltins(
+        \\const log = [];
+        \\async function f() {
+        \\  {
+        \\    using c = { [Symbol.dispose]() { log.push("c-sync"); } };
+        \\    await using b = { async [Symbol.asyncDispose]() { log.push("b-async"); } };
+        \\    await using a = { [Symbol.asyncDispose]() { log.push("a-async"); } };
+        \\    log.push("body");
+        \\  }
+        \\  log.push("after");
+        \\  return log.join(",");
+        \\}
+        \\let result = "?";
+        \\f().then(v => { result = v; });
+        \\globalThis.__drainMicrotasks();
+        \\result;
+    , "body,a-async,b-async,c-sync,after");
+}
+
+test "later: await using disposes before return propagates" {
+    try expectScriptStringWithBuiltins(
+        \\const log = [];
+        \\async function f() {
+        \\  await using r = { [Symbol.asyncDispose]() { log.push("disposed"); } };
+        \\  return "ret";
+        \\}
+        \\let result = "?";
+        \\f().then(v => { log.push("got:" + v); result = log.join(","); });
+        \\globalThis.__drainMicrotasks();
+        \\result;
+    , "disposed,got:ret");
+}
+
+test "later: await using disposer throw rejects the function's Promise" {
+    try expectScriptStringWithBuiltins(
+        \\const log = [];
+        \\async function f() {
+        \\  await using r = { [Symbol.asyncDispose]() { throw new Error("disposer"); } };
+        \\  log.push("body");
+        \\}
+        \\let result = "?";
+        \\f().then(
+        \\  v => { result = "ok:" + v; },
+        \\  e => { result = "err:" + e.message + ":" + log.join(","); },
+        \\);
+        \\globalThis.__drainMicrotasks();
+        \\result;
+    , "err:disposer:body");
+}
+
+test "later: await using chains in-flight throw + disposer throw via SuppressedError" {
+    try expectScriptStringWithBuiltins(
+        \\async function f() {
+        \\  try {
+        \\    {
+        \\      await using a = { [Symbol.asyncDispose]() { throw new Error("dispose-a"); } };
+        \\      throw new Error("body");
+        \\    }
+        \\  } catch (e) {
+        \\    return e.constructor.name + ":err=" + e.error.message + ":sup=" + e.suppressed.message;
+        \\  }
+        \\}
+        \\let result = "?";
+        \\f().then(v => { result = v; });
+        \\globalThis.__drainMicrotasks();
+        \\result;
+    , "SuppressedError:err=dispose-a:sup=body");
+}
+
+test "later: await using async disposer awaits returned Promise" {
+    // §9.5.2 step 1.a + §9.5.4 — when the disposer returns a
+    // thenable, the walk awaits it before stepping to the next
+    // resource.
+    try expectScriptStringWithBuiltins(
+        \\const log = [];
+        \\async function f() {
+        \\  {
+        \\    await using b = { async [Symbol.asyncDispose]() {
+        \\      await Promise.resolve();
+        \\      log.push("b-resolved");
+        \\    } };
+        \\    await using a = { async [Symbol.asyncDispose]() {
+        \\      log.push("a-pre");
+        \\      await Promise.resolve();
+        \\      log.push("a-resolved");
+        \\    } };
+        \\    log.push("body");
+        \\  }
+        \\  log.push("done");
+        \\}
+        \\f().then(() => {});
+        \\globalThis.__drainMicrotasks();
+        \\log.join(",");
+    , "body,a-pre,a-resolved,b-resolved,done");
+}
+
 // §27.4 AsyncDisposableStack — ES2026 explicit-resource-management.
 // Asynchronous resource stack. `.use(v)` accepts either
 // `Symbol.asyncDispose` (preferred) or `Symbol.dispose`.

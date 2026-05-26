@@ -357,6 +357,33 @@ fn asyncDisposableStackDisposeAsync(realm: *Realm, this_value: Value, args: []co
 /// chain that pumps one disposer per microtask, and returns the
 /// outer Promise to the caller. The outer settles only after the
 /// last reaction in the chain runs (`finalizeImpl`).
+///
+/// Public so the `dispose_stack_async` opcode (emitted at the
+/// scope-exit of a block containing `await using` declarations)
+/// can share the chain machinery. The opcode passes the in-flight
+/// throw (mode 1) via `startAsyncDisposeWalkWithExisting`; the
+/// public bare entry forwards with no existing throw.
+pub fn startAsyncDisposeWalkPublic(realm: *Realm, stack: *JSObject) NativeError!Value {
+    return startAsyncDisposeWalk(realm, stack);
+}
+
+/// Variant that seeds the walk's `pending_error` with an
+/// in-flight throw (the `mode == 1` throw-completion arm of the
+/// `dispose_stack_async` opcode). A disposer's own throw wraps
+/// it via SuppressedError per §9.5.4 step 2.b.iv-vi; a clean
+/// walk lets the original throw surface (the caller re-throws
+/// it after the outer Promise settles).
+pub fn startAsyncDisposeWalkWithExisting(realm: *Realm, stack: *JSObject, existing_throw: Value) NativeError!Value {
+    const outer = try startAsyncDisposeWalk(realm, stack);
+    if (stack.extension) |ext| {
+        if (ext.async_dispose_walk) |walk| {
+            walk.pending_error = existing_throw;
+            walk.has_pending_error = true;
+        }
+    }
+    return outer;
+}
+
 fn startAsyncDisposeWalk(realm: *Realm, stack: *JSObject) NativeError!Value {
     // Allocate the outer result Promise (pending). `allocatePromiseFor`
     // with `ctor = null` falls through to %Promise.prototype% — the

@@ -5900,6 +5900,12 @@ pub const Compiler = struct {
             try self.builder.emitOp(.register_using, bind_span);
             try self.builder.emitU8(r_dispose_stack);
             try self.builder.emitU8(r_val);
+            // for (using x of …) is always sync_dispose; the
+            // proposal text doesn't yet ship `for (await using x of
+            // …)` in main grammar (a separate for-await-using
+            // production gates that on async iteration). Phase 6
+            // ships block + function-body `await using` only.
+            try self.builder.emitU8(0);
             self.releaseTemp(); // release r_val
 
             dispose_fctx = .{
@@ -7605,6 +7611,18 @@ pub const Compiler = struct {
         return false;
     }
 
+    /// Variant — true iff the block contains an `await using`
+    /// declaration specifically. Drives the choice between
+    /// `dispose_stack` (sync) and `dispose_stack_async` (Promise +
+    /// await) at every scope-exit edge.
+    fn blockHasAwaitUsing(body: []const ast.statement.Statement) bool {
+        for (body) |s| switch (s) {
+            .lexical => |ld| if (ld.kind == .await_using_) return true,
+            else => {},
+        };
+        return false;
+    }
+
     /// Compile a function body's non-function-decl tail (function
     /// declarations are emitted by the caller, before this helper,
     /// because §10.2.1.5 FunctionDeclarationInstantiation makes
@@ -7706,14 +7724,22 @@ pub const Compiler = struct {
         self.try_with_handler_depth -= 1;
         const end_pc = self.builder.here();
 
+        // §13.2.4.6 — pick sync vs async dispose. A block with
+        // any `await using` declaration uses the Promise-returning
+        // `dispose_stack_async` opcode followed by `await_`; pure-
+        // sync `using` blocks use `dispose_stack` directly.
+        const has_await_using = blockHasAwaitUsing(body);
+        const dispose_op: Op = if (has_await_using) .dispose_stack_async else .dispose_stack;
+
         // Normal-completion arm — pop the finally context so the
         // dispose walk emitted here isn't itself wrapped by its
-        // own context, then emit the dispose-stack opcode and
-        // jump past the synthetic handler.
+        // own context, then emit the dispose opcode and jump past
+        // the synthetic handler.
         self.finally_chain = saved_finally;
-        try self.builder.emitOp(.dispose_stack, span);
+        try self.builder.emitOp(dispose_op, span);
         try self.builder.emitU8(r_stack);
         try self.builder.emitU8(0); // mode 0 — normal completion
+        if (has_await_using) try self.builder.emitOp(.await_, span);
         try self.builder.emitOp(.jmp, span);
         const skip_handler_patch = self.builder.here();
         try self.builder.emitI16(0);
@@ -7731,13 +7757,24 @@ pub const Compiler = struct {
         try self.builder.emitU8(r_caught);
         try self.builder.emitOp(.ldar, span);
         try self.builder.emitU8(r_caught);
-        try self.builder.emitOp(.dispose_stack, span);
+        try self.builder.emitOp(dispose_op, span);
         try self.builder.emitU8(r_stack);
         try self.builder.emitU8(1); // mode 1 — throw completion
-        // dispose_stack returns either the original throw (no
-        // disposer raised) or a SuppressedError chain (one or
-        // more did). In either case it leaves the propagated
-        // throw in `acc` and surfaces via the throw_ below.
+        // dispose (sync) leaves the propagated throw in `acc`.
+        // dispose_stack_async returns a Promise that resolves
+        // with undefined on a clean walk (rethrow the saved
+        // caught value) OR rejects with SuppressedError(disposer
+        // throw, caught) — `await_` then re-throws appropriately.
+        if (has_await_using) {
+            try self.builder.emitOp(.await_, span);
+            // After `await`, acc holds the resolved value (clean
+            // walk → undefined). Restore the caught throw from
+            // r_caught so `throw_` re-emits the original. A
+            // disposer-thrown SuppressedError surfaced via
+            // await's reject path → already lives in `acc`.
+            try self.builder.emitOp(.ldar, span);
+            try self.builder.emitU8(r_caught);
+        }
         try self.builder.emitOp(.throw_, span);
 
         const after_handler_pc = self.builder.here();
@@ -8455,22 +8492,8 @@ pub const Compiler = struct {
                         // `current_dispose_stack` is null if a
                         // `using` slipped past `compileBlock`'s
                         // pre-scan — that would be a compiler bug,
-                        // not a user error. The hoist + scan in
-                        // `blockHasUsing` covers every direct
-                        // StatementListItem case; `using` inside a
-                        // child block / control-flow opens its own
-                        // dispose scope when that nested block is
-                        // compiled.
+                        // not a user error.
                         const r_stack = self.current_dispose_stack orelse return error.UnsupportedStatement;
-                        // The binding value was just stored into the
-                        // env slot; `register_using` needs the value
-                        // in a register. Reuse the `acc → slot` flow:
-                        // re-read the binding into a fresh temp so a
-                        // poisoned setter on the env slot can't
-                        // observe a different value than what we
-                        // registered (matches the spec, which
-                        // captures the value before the dispose
-                        // record is appended — see §9.5.3 step 1).
                         const r_value = try self.reserveTemp();
                         defer self.releaseTemp();
                         try self.emitLoadBinding(binding, d.span);
@@ -8479,6 +8502,12 @@ pub const Compiler = struct {
                         try self.builder.emitOp(.register_using, d.span);
                         try self.builder.emitU8(r_stack);
                         try self.builder.emitU8(r_value);
+                        // Hint — 0 = sync_dispose (Symbol.dispose),
+                        // 1 = async_dispose (Symbol.asyncDispose first,
+                        // falls back to Symbol.dispose). See §9.5.2
+                        // GetDisposeMethod step 1.a.
+                        const hint: u8 = if (ld.kind == .await_using_) 1 else 0;
+                        try self.builder.emitU8(hint);
                     }
                 },
                 else => {
