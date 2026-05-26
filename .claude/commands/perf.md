@@ -12,8 +12,10 @@ regression or speed-up.
    5-10× slower and gives misleading numbers) and runs the
    driver against the suite in `bench/micros/`.
 2. Capture the table the driver prints — one row per fixture with
-   `median_ms`, `min_ms`, `max_ms`, `rss_kb` (median of 5 runs
-   after a discarded warmup).
+   `median_ms`, `min_ms`, `max_ms`, `rss_kb` (median of 10 runs
+   after a discarded warmup; matched with `tools/bench-cross.sh`
+   per [`docs/benchmarking.md`](../../docs/benchmarking.md)
+   §Measurement protocol).
 3. If `bench-results.md` exists, look up the previous row for the
    same hostname / OS line, diff each fixture, and call out
    anything that moved ≥5% in either direction.

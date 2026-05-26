@@ -812,11 +812,17 @@ matching the JIT engines at full speed is a separate track (see
    **Bag-mirror skip on shape-stable writes — shipped**
    (`8b98ba0`). `sta_property`'s IC hot path skips the bag write
    on a shape-stable object. `JSObject.get` / `.hasOwn` were
-   already shape-first (`4133c7f`, `4b06eb4`). The more
-   aggressive variant — dropping the bag *allocation* entirely
-   for shape-mode objects — is still designed in
-   [docs/lazy-property-bag.md](lazy-property-bag.md) and would
-   close more `object_alloc` headroom.
+   already shape-first (`4133c7f`, `4b06eb4`).
+
+   **Lazy property bag — shipped** (`0cab149` + `6d96854`,
+   Phase 3 of [docs/lazy-property-bag.md](lazy-property-bag.md)).
+   Drops the per-property `properties.put` mirror on shape-stable
+   writes; the slot becomes the source of truth and the bag stays
+   unallocated for the fresh-object case. `object_alloc` ~ -16 %
+   (55.38 → 47 ms) — Cynic now leads QuickJS-NG on this fixture
+   (47 vs 54 ms). Trades a few % on hot reads (`prop_access`,
+   `arith_loop`) for the alloc win; recoverable via the IC
+   shape-gate work tracked separately.
 
    Remaining structural wins on `object_alloc`:
 
@@ -828,12 +834,6 @@ matching the JIT engines at full speed is a separate track (see
      single `u32` flags word. Saves ~10-16 bytes per `JSObject`
      after alignment — marginal; defer until measurement shows
      it matters.
-
-   - **Lazy property bag** — drop the bag allocation entirely
-     for shape-mode objects (the more aggressive complement to
-     the shape-stable-write skip). Full design + phase plan in
-     [docs/lazy-property-bag.md](lazy-property-bag.md). Closes
-     remaining `object_alloc` distance to QuickJS-NG.
 
 3. **Packed `JSArray` element-kinds.** V8 / JSC distinguish
    `PackedSmiElements` (i32-flat), `PackedDoubleElements`
