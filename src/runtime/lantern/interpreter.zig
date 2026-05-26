@@ -1584,7 +1584,7 @@ pub fn runFrames(
                         // panics under GC stress because the shape
                         // still claims `constructor` is at its slot
                         // while `properties` no longer has the entry.
-                        proto.demoteFromShape();
+                        try proto.demoteFromShape(allocator);
                         _ = proto.properties.swapRemove("constructor");
                         _ = proto.property_flags.swapRemove("constructor");
                         realm.heap.setObjectPrototype(proto, if (tmpl.is_async)
@@ -3532,7 +3532,7 @@ pub fn runFrames(
                     if (!found) {
                         var cursor: ?*JSObject = fn_in.proto;
                         while (cursor) |c| : (cursor = c.prototype) {
-                            if (c.properties.contains(key_slice) or c.hasAccessor(key_slice)) {
+                            if (c.ownDataContains(key_slice) or c.hasAccessor(key_slice)) {
                                 found = true;
                                 break;
                             }
@@ -5514,7 +5514,7 @@ pub fn runFrames(
                         // walk without an empty data slot getting
                         // in the way. Demote first: the shadow
                         // shape can't encode a removal.
-                        mr.exports.demoteFromShape();
+                        mr.exports.demoteFromShape(allocator) catch return error.OutOfMemory;
                         _ = mr.exports.properties.swapRemove(exp_s.flatBytes());
                     }
                 }
@@ -5748,7 +5748,7 @@ pub fn runFrames(
                 // The shadow shape only models data properties; an
                 // accessor install demotes to dictionary mode so the
                 // shape never claims the accessor key.
-                obj.demoteFromShape();
+                obj.demoteFromShape(allocator) catch return error.OutOfMemory;
                 const entry = obj.getOrPutAccessor(allocator, key_s.flatBytes()) catch return error.OutOfMemory;
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 if (is_setter) {
@@ -5786,7 +5786,7 @@ pub fn runFrames(
                 const fn_obj = heap_mod.valueAsFunction(acc) orelse return error.InvalidOpcode;
                 // Accessor install: the shadow shape only models data
                 // properties, so demote before recording the accessor.
-                obj.demoteFromShape();
+                obj.demoteFromShape(allocator) catch return error.OutOfMemory;
                 const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
                 const entry = obj.getOrPutAccessor(allocator, owned.flatBytes()) catch return error.OutOfMemory;
                 if (!entry.found_existing) {
@@ -7154,7 +7154,7 @@ pub fn runFrames(
                                 }
                                 // Dictionary-mode proto holding the
                                 // key — let the slow path resolve it.
-                                if (proto.properties.contains(key_s.flatBytes())) break;
+                                if (proto.ownDataContains(key_s.flatBytes())) break;
                             }
                         }
                     }
@@ -7615,7 +7615,7 @@ pub fn runFrames(
                     // Attrs would change — the append-only shape
                     // can't encode that, so demote and rebuild
                     // through `storePropertyWithFlags`.
-                    obj.demoteFromShape();
+                    obj.demoteFromShape(allocator) catch return error.OutOfMemory;
                     _ = obj.properties.swapRemove(key_s.flatBytes());
                     _ = obj.property_flags.swapRemove(key_s.flatBytes());
                 }
@@ -8027,7 +8027,7 @@ pub fn runFrames(
                     }
                     // Append-only shadow shape can't express a slot
                     // drop; demote so the next write rebuilds.
-                    obj.demoteFromShape();
+                    obj.demoteFromShape(allocator) catch return error.OutOfMemory;
                     _ = obj.properties.swapRemove(key_slice);
                     _ = obj.property_flags.swapRemove(key_slice);
                 }
@@ -8068,7 +8068,7 @@ pub fn runFrames(
                                 continue :dispatch try decodeNext(code, &ip, &committed);
                             },
                             .fallthrough => |t| {
-                                const outcome = deleteOwnProperty(realm, heap_mod.taggedObject(t), key_s.flatBytes());
+                                const outcome = try deleteOwnProperty(realm, heap_mod.taggedObject(t), key_s.flatBytes());
                                 switch (outcome) {
                                     .ok => |b| acc = Value.fromBool(b),
                                     .throw_typeerror => |msg| {
@@ -8092,7 +8092,7 @@ pub fn runFrames(
                         }
                     }
                 }
-                const outcome = deleteOwnProperty(realm, recv, key_s.flatBytes());
+                const outcome = try deleteOwnProperty(realm, recv, key_s.flatBytes());
                 switch (outcome) {
                     .ok => |b| acc = Value.fromBool(b),
                     .throw_typeerror => |msg| {
@@ -8145,7 +8145,7 @@ pub fn runFrames(
                                 continue :dispatch try decodeNext(code, &ip, &committed);
                             },
                             .fallthrough => |t| {
-                                const outcome = deleteOwnProperty(realm, heap_mod.taggedObject(t), key_slice);
+                                const outcome = try deleteOwnProperty(realm, heap_mod.taggedObject(t), key_slice);
                                 switch (outcome) {
                                     .ok => |b| acc = Value.fromBool(b),
                                     .throw_typeerror => |msg| {
@@ -8170,7 +8170,7 @@ pub fn runFrames(
                         }
                     }
                 }
-                const outcome = deleteOwnProperty(realm, recv, key_slice);
+                const outcome = try deleteOwnProperty(realm, recv, key_slice);
                 switch (outcome) {
                     .ok => |b| acc = Value.fromBool(b),
                     .throw_typeerror => |msg| {
@@ -8598,15 +8598,15 @@ const DeleteResult = union(enum) {
     throw_typeerror: []const u8,
 };
 
-fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
+fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) error{OutOfMemory}!DeleteResult {
     const obj_mod = @import("../object.zig");
     if (heap_mod.valueAsPlainObject(recv)) |obj| {
         // A property removal cannot be expressed as a shape
         // transition (the transition tree is append-only), so
         // demote the object to the dictionary representation —
-        // `properties` is unaffected and stays the source of
-        // truth, the shadow shape just stops describing it.
-        obj.demoteFromShape();
+        // back-fills `properties` from `slots` per Phase 3 of
+        // [docs/lazy-property-bag.md].
+        try obj.demoteFromShape(realm.allocator);
         // §9.4.6.6 Module Namespace [[Delete]]. Symbol keys
         // (Cynic's flattened `@@toStringTag` / `<sym:*>`) fall
         // through to OrdinaryDelete — `@@toStringTag` was
@@ -8651,7 +8651,7 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
             // unless the data half also exists (it shouldn't —
             // OrdinaryDefineOwnProperty wipes one when the other
             // is installed — but be defensive).
-            if (!obj.properties.contains(key)) obj.forgetKey(key);
+            if (!obj.ownDataContains(key)) obj.forgetKey(key);
             return .{ .ok = true };
         }
         // §10.4.2 Array exotic — integer-indexed keys live in
@@ -8662,17 +8662,17 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
         // non-configurable.
         if (obj.is_array_exotic) {
             if (obj_mod.JSObject.canonicalIntegerIndex(key)) |_| {
-                if (!obj.deleteOwn(key)) return .{ .throw_typeerror = "Cannot delete non-configurable property" };
+                if (!try obj.deleteOwn(realm.allocator, key)) return .{ .throw_typeerror = "Cannot delete non-configurable property" };
                 return .{ .ok = true };
             }
         }
         // Data property.
-        if (!obj.properties.contains(key)) return .{ .ok = true };
+        if (!obj.ownDataContains(key)) return .{ .ok = true };
         const flags = obj.flagsFor(key);
         if (!flags.configurable) return .{ .throw_typeerror = "Cannot delete non-configurable property" };
-        // Demote: the shadow shape can't encode a removal — leaving
-        // it would trip `verifyShapeInvariant` under GC stress.
-        obj.demoteFromShape();
+        // Demote: shape can't express a removal — back-fill the
+        // bag (Phase 3) so the swapRemove below has the entry.
+        try obj.demoteFromShape(realm.allocator);
         _ = obj.properties.swapRemove(key);
         _ = obj.property_flags.swapRemove(key);
         if (!obj.hasAccessor(key)) obj.forgetKey(key);
@@ -8693,7 +8693,7 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) DeleteResult {
         if (fn_obj.accessors.contains(key)) {
             _ = fn_obj.accessors.swapRemove(key);
             _ = fn_obj.property_flags.swapRemove(key);
-            if (!fn_obj.properties.contains(key)) fn_obj.forgetKey(key);
+            if (!fn_obj.ownDataContains(key)) fn_obj.forgetKey(key);
             return .{ .ok = true };
         }
         // Removing `name` clears the dedicated slot; removing
@@ -8924,7 +8924,7 @@ fn strictSetPropertyAnchored(
         if (receiver_is_proxy and obj != obj_in) {
             // `key` / `value` / `recv` are kept rooted by
             // `px_root_scope` above for the whole proxy path.
-            const has_own_data = obj.properties.contains(key);
+            const has_own_data = obj.ownDataContains(key);
             const has_own_acc = obj.hasAccessor(key);
             if (has_own_data and !has_own_acc) {
                 const flags = obj.flagsFor(key);
@@ -9098,7 +9098,7 @@ fn strictSetPropertyAnchored(
         // `length: { writable: false }` still applies.
         if (obj.is_array_exotic) {
             if (canonicalIntegerIndexInterp(key)) |idx| {
-                if (idx <= 0xFFFFFFFE and !obj.properties.contains(key)) {
+                if (idx <= 0xFFFFFFFE and !obj.ownDataContains(key)) {
                     if (obj.property_flags.get("length")) |flags| {
                         if (!flags.writable) {
                             const cur_len_v = obj.lookupOwn("length") orelse Value.fromInt32(0);
@@ -9127,7 +9127,7 @@ fn strictSetPropertyAnchored(
         // when the caller supplied one. Necessary because
         // `properties` stores `[]const u8` slices, not pointers,
         // so a heap-allocated key gets swept without the anchor.
-        const had_entry = obj.properties.contains(key);
+        const had_entry = obj.ownDataContains(key);
         const had_indexed = blk_idx: {
             if (obj.is_array_exotic) {
                 if (canonicalIntegerIndexInterp(key)) |idx| break :blk_idx obj.hasOwnIndexedSlot(idx);
@@ -9141,13 +9141,11 @@ fn strictSetPropertyAnchored(
                 return throwInSetter(realm, frames, f, ip, value, ex);
             }
             realm.heap.storeInternalSlot(.{ .object = obj }, value);
-            obj.properties.put(allocator, key, value) catch return error.OutOfMemory;
-            // Keep the shape-indexed `slots` vector in sync with the
-            // property bag so the IC fast-path read of
-            // `slots.items[cell.slot]` doesn't return the pre-write
-            // value. The bag write above bypasses `JSObject.set`, so
-            // we mirror it explicitly here.
-            obj.shadowSet(allocator, key, value, flags);
+            // Route through `setWithFlags` so shape-mode receivers
+            // keep their slot authoritative (Phase 3 of
+            // [docs/lazy-property-bag.md]); the bag is updated
+            // automatically when shadowSet can't absorb.
+            obj.setWithFlags(allocator, key, value, flags) catch return error.OutOfMemory;
         } else {
             // §10.1.9.2 OrdinarySetWithOwnDescriptor step 2 —
             // when no own descriptor exists, the spec walks
@@ -9162,7 +9160,7 @@ fn strictSetPropertyAnchored(
                 var cursor: ?*JSObject = obj.prototype;
                 while (cursor) |p| : (cursor = p.prototype) {
                     if (p.hasAccessor(key)) break; // accessor already handled above
-                    if (p.properties.contains(key)) {
+                    if (p.ownDataContains(key)) {
                         const p_flags = p.flagsFor(key);
                         if (!p_flags.writable) {
                             const ex = try makeTypeError(realm, "Cannot assign to read-only property");
@@ -9220,7 +9218,7 @@ fn strictSetPropertyAnchored(
         // carries its own `extensible` slot (flipped by
         // `Object.preventExtensions(fn)` in
         // `objectPreventExtensions`).
-        const had_fn_entry = fn_obj.properties.contains(key);
+        const had_fn_entry = fn_obj.ownDataContains(key);
         if (!had_fn_entry and !fn_obj.extensible) {
             const ex = try makeTypeError(realm, "Cannot add property, object is not extensible");
             return throwInSetter(realm, frames, f, ip, value, ex);
@@ -9552,7 +9550,7 @@ fn setThroughChain(
         }
         // Own data prop with writable: false — §10.1.9.2 step 3.a
         // short-circuits to "set returns false" / strict throws.
-        if (c.properties.contains(key)) {
+        if (c.ownDataContains(key)) {
             const flags = c.flagsFor(key);
             if (!flags.writable) {
                 const ex = try makeTypeError(realm, "Cannot assign to read-only property");
@@ -9689,16 +9687,18 @@ fn proxyGetTrap(
             },
         };
         // §10.5.5 step 10 — non-configurable non-writable data
-        // property must match.
-        if (target.property_flags.get(key)) |flags| {
-            if (target.lookupOwn(key)) |target_v| {
-                if (!flags.configurable and !flags.writable) {
-                    if (!intrinsics_mod.sameValue(target_v, v)) {
-                        const ex = try makeTypeError(realm, "proxy 'get' trap returned mismatched value for non-writable non-configurable data property");
-                        f.ip = ip;
-                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
-                        return .handled;
-                    }
+        // property must match. `flagsFor` is shape-aware under
+        // Phase 3 of [docs/lazy-property-bag.md]; the prior
+        // direct `property_flags.get` check missed shape-mode
+        // descriptors (attrs stored on the shape transition node).
+        if (target.lookupOwn(key)) |target_v| {
+            const flags = target.flagsFor(key);
+            if (!flags.configurable and !flags.writable) {
+                if (!intrinsics_mod.sameValue(target_v, v)) {
+                    const ex = try makeTypeError(realm, "proxy 'get' trap returned mismatched value for non-writable non-configurable data property");
+                    f.ip = ip;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                    return .handled;
                 }
             }
         }
@@ -9827,7 +9827,7 @@ fn proxyDeleteTrap(
             // and (proxy-missing-checks: §10.5.10 step 14) when
             // target is non-extensible and the property exists on
             // target.
-            const has_own = target.properties.contains(key) or target.hasAccessor(key);
+            const has_own = target.ownDataContains(key) or target.hasAccessor(key);
             if (has_own) {
                 const flags = target.flagsFor(key);
                 if (!flags.configurable) {
@@ -9908,7 +9908,7 @@ fn proxyHasTrap(
         // property doesn't exist, nor pretend an own property of a
         // non-extensible target doesn't exist.
         if (!b) {
-            const has_own = target.properties.contains(key) or target.hasAccessor(key);
+            const has_own = target.ownDataContains(key) or target.hasAccessor(key);
             if (has_own) {
                 const flags = target.flagsFor(key);
                 if (!flags.configurable) {
@@ -9992,16 +9992,17 @@ fn proxySetTrap(
                 // §10.5.6 steps 10–12 — the trap can't claim success on
                 // a non-configurable / non-writable own data descriptor
                 // unless the new value matches, nor on a non-configurable
-                // accessor whose [[Set]] is undefined.
-                if (target.property_flags.get(key)) |flags| {
-                    if (target.lookupOwn(key)) |target_v| {
-                        if (!flags.configurable and !flags.writable) {
-                            if (!intrinsics_mod.sameValue(target_v, value)) {
-                                const ex = try makeTypeError(realm, "proxy 'set' trap reported success for non-writable non-configurable data property");
-                                f.ip = ip;
-                                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
-                                return .handled;
-                            }
+                // accessor whose [[Set]] is undefined. Shape-aware via
+                // `flagsFor`; Phase 3 of [docs/lazy-property-bag.md]
+                // moved non-default attrs to the shape transition node.
+                if (target.lookupOwn(key)) |target_v| {
+                    const flags = target.flagsFor(key);
+                    if (!flags.configurable and !flags.writable) {
+                        if (!intrinsics_mod.sameValue(target_v, value)) {
+                            const ex = try makeTypeError(realm, "proxy 'set' trap reported success for non-writable non-configurable data property");
+                            f.ip = ip;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                            return .handled;
                         }
                     }
                 }

@@ -337,7 +337,7 @@ pub fn validateIndirectExports(mr: *ModuleRecord) ResolveError!void {
             // counts as a *bound* (but uninitialised) binding — it's
             // a ReferenceError at access time per §8.1.1.1.6, not a
             // SyntaxError at instantiation.
-            if (!resolved.ns.properties.contains(resolved.key) and
+            if (!resolved.ns.ownDataContains(resolved.key) and
                 !resolved.ns.hasNamespaceRedirect(resolved.key))
             {
                 return error.AmbiguousOrCircularExport;

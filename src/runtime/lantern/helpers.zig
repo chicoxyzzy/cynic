@@ -340,8 +340,12 @@ pub fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, targe
             // floor — delete it from the bag. The packed
             // `elements` slot at this index is already a hole
             // (`setWithFlags` calls `holeIndexed` when demoting).
-            // Demote: the shadow shape can't encode a removal.
-            obj.demoteFromShape();
+            // Demote: shape can't encode a removal. OOM during
+            // back-fill leaves shape on; the swapRemove that
+            // follows just no-ops and we lose the entry but
+            // don't corrupt. Caller's `final_length` still
+            // matches what the caller asked for.
+            obj.demoteFromShape(allocator) catch {};
             _ = obj.properties.swapRemove(key);
             _ = obj.removeAccessor(key);
             _ = obj.property_flags.swapRemove(key);
@@ -374,9 +378,11 @@ pub fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, targe
                 return .{ .final_length = idx + 1, .blocked = true };
             }
         }
-        // Demote: the shadow shape can't encode a removal — see the
-        // matching site above.
-        obj.demoteFromShape();
+        // Demote: shape can't encode a removal — see the matching
+        // site above. OOM during back-fill is swallowed; the
+        // post-swap behaviour stays consistent with the spec
+        // (delete succeeds, caller sees the configured length).
+        obj.demoteFromShape(allocator) catch {};
         _ = obj.properties.swapRemove(key);
         _ = obj.property_flags.swapRemove(key);
     }

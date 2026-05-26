@@ -465,7 +465,7 @@ pub fn stringIteratorMethod(realm: *Realm, this_value: Value, args: []const Valu
         // the shape claiming these keys at their slots while
         // `properties` no longer has them trips
         // `verifyShapeInvariant` under GC stress.
-        obj.demoteFromShape();
+        try obj.demoteFromShape(realm.allocator);
         _ = obj.properties.swapRemove("next");
         _ = obj.property_flags.swapRemove("next");
         _ = obj.properties.swapRemove("@@iterator");

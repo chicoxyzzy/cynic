@@ -307,7 +307,7 @@ pub fn ownPropertyKeysOrdered(
         // redundant, but a missed delete site would surface as
         // a phantom key here. Trust the maps as the source of
         // truth for liveness.
-        if (!obj.properties.contains(k) and !obj.hasAccessor(k)) continue;
+        if (!obj.ownDataContains(k) and !obj.hasAccessor(k)) continue;
         string_keys.append(realm.allocator, k) catch return error.OutOfMemory;
     }
     // Fallback: pick up any `properties` keys not already in the
@@ -334,7 +334,7 @@ pub fn ownPropertyKeysOrdered(
         while (ait.next()) |entry| {
             const k = entry.key_ptr.*;
             if (std.mem.startsWith(u8, k, "__cynic_")) continue;
-            if (obj.properties.contains(k)) continue; // already counted
+            if (obj.ownDataContains(k)) continue; // already counted
             if (obj.getTypedView() != null) {
                 if (canonicalIntegerIndex(k)) |_| continue;
             }
@@ -356,7 +356,7 @@ pub fn ownPropertyKeysOrdered(
             var rit = rit_outer;
             while (rit.next()) |entry| {
                 const k = entry.key_ptr.*;
-                if (obj.properties.contains(k)) continue;
+                if (obj.ownDataContains(k)) continue;
                 if (obj.hasAccessor(k)) continue;
                 if (obj.hasAmbiguousNamespaceKey(k)) continue;
                 if (canonicalIntegerIndex(k)) |i| {
@@ -1247,7 +1247,7 @@ fn moduleNamespaceDefineOwnProperty(
     // existing-property check below handles them. Redirect-only
     // entries (`namespace_redirects`) installed by re-exports
     // are also "own" per §15.2.1.16.3 ResolveExport.
-    const had_own = target.properties.contains(key) or target.hasNamespaceRedirect(key);
+    const had_own = target.ownDataContains(key) or target.hasNamespaceRedirect(key);
     if (!had_own) return false;
     if (target.hasAmbiguousNamespaceKey(key)) return false;
     // Accessor descriptor against a data slot → reject.
@@ -1722,7 +1722,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             // accessor install demotes — otherwise the property
             // removal below would leave the shape claiming a data
             // slot whose value the IC would still serve.
-            target.demoteFromShape();
+            try target.demoteFromShape(realm.allocator);
             // Replace any existing data slot — including the
             // Array exotic's packed `elements` slot for indexed
             // keys, otherwise reads via `JSObject.get` would
@@ -1782,7 +1782,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             // Anchor the heap key string when it landed in the
             // named-property bag (an array-exotic integer index goes
             // to `elements` and needs no anchor).
-            if (target.properties.contains(key)) {
+            if (target.ownDataContains(key)) {
                 if (dk.anchor) |ks| target.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
             }
             // §10.4.2.4 ArraySetLength step 16-17 — when the
@@ -1884,7 +1884,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             _ = target_fn.accessors.swapRemove(key);
             const value: Value = if (parsed.has_value) parsed.value else cur_value;
             target_fn.setWithFlags(realm.allocator, key, value, flags) catch return error.OutOfMemory;
-            if (target_fn.properties.contains(key)) {
+            if (target_fn.ownDataContains(key)) {
                 if (dk.anchor) |ks| target_fn.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
             }
             return target_v;
@@ -2331,7 +2331,7 @@ fn objectGetOwnPropertyDescriptors(realm: *Realm, this_value: Value, args: []con
         out.set(realm.allocator, k_str.flatBytes(), desc) catch return error.OutOfMemory;
         // `out` borrows the `k_str` slice as the property key; anchor
         // the heap string so a later sweep can't free it.
-        if (out.properties.contains(k_str.flatBytes())) {
+        if (out.ownDataContains(k_str.flatBytes())) {
             out.key_anchors.append(realm.allocator, k_str) catch return error.OutOfMemory;
         }
     }
@@ -2371,7 +2371,7 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
         // §10.1.11 OrdinaryOwnPropertyKeys partition still applies
         // to functions: integer-index keys first (ascending
         // numeric), then string keys in insertion order.
-        const has_dedicated_prototype = fn_obj.prototype != null and !fn_obj.properties.contains("prototype");
+        const has_dedicated_prototype = fn_obj.prototype != null and !fn_obj.ownDataContains("prototype");
 
         // Partition the bag's keys into integer / string sections.
         const FnKeyEntry = struct { idx: u32, key: []const u8 };
@@ -2634,7 +2634,7 @@ fn assignSetOrThrow(
         }
         return throwTypeError(realm, "Cannot set property which has only a getter");
     }
-    const had_entry = target.properties.contains(key);
+    const had_entry = target.ownDataContains(key);
     const had_indexed = blk_idx: {
         if (target.is_array_exotic) {
             if (JSObject.canonicalIntegerIndex(key)) |idx| break :blk_idx target.hasOwnIndexedSlot(idx);
@@ -2669,9 +2669,9 @@ fn assignSetOrThrow(
             }
             return;
         }
-        target.properties.put(allocator, key, value) catch return error.OutOfMemory;
-        // Mirror the write into the shadow shape's slot.
-        target.shadowSet(allocator, key, value, flags);
+        // Route through `setWithFlags` — shape and bag stay
+        // coherent under Phase 3 of [docs/lazy-property-bag.md].
+        target.setWithFlags(allocator, key, value, flags) catch return error.OutOfMemory;
         return;
     }
     if (!had_indexed and !target.extensible) {
@@ -2934,7 +2934,15 @@ fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     try freezeArrayIndexedSlots(realm, obj);
     // §10.1.4.1 SetIntegrityLevel(O, frozen) — mark every own
     // data property `{ writable: false, configurable: false }`
-    // and every accessor `{ configurable: false }`.
+    // and every accessor `{ configurable: false }`. The shape
+    // encodes per-key attrs on the transition node, so flipping
+    // them via `property_flags.put` alone wouldn't be observed
+    // by `flagsFor` (shape-first under Phase 3 of
+    // [docs/lazy-property-bag.md]). Demote to dictionary mode
+    // first so subsequent reads pick up the bag overrides —
+    // frozen objects don't take further writes, so losing the
+    // shape costs nothing.
+    obj.demoteFromShape(realm.allocator) catch return error.OutOfMemory;
     var it = obj.iterOwnNamedKeys();
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
@@ -3005,7 +3013,7 @@ fn lowerArrayIndexedFlags(realm: *Realm, obj: *JSObject, sealed_only: bool) Nati
         // The non-default descriptor demotes the slot into the
         // named-property bag, which borrows the `ks_owned` slice;
         // anchor the heap key string so a GC sweep can't dangle it.
-        if (obj.properties.contains(ks_owned.flatBytes())) {
+        if (obj.ownDataContains(ks_owned.flatBytes())) {
             obj.key_anchors.append(realm.allocator, ks_owned) catch return error.OutOfMemory;
         }
     }
@@ -3109,7 +3117,9 @@ fn objectSeal(realm: *Realm, this_value: Value, args: []const Value) NativeError
     try sealArrayIndexedSlots(realm, obj);
     // §10.1.4.1 SetIntegrityLevel(O, sealed) — every own property
     // (data + accessor) loses configurability; writable bits
-    // stay.
+    // stay. Demote shape first so the `property_flags` bag is
+    // authoritative — see the matching note in `objectFreeze`.
+    obj.demoteFromShape(realm.allocator) catch return error.OutOfMemory;
     var it = obj.iterOwnNamedKeys();
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
@@ -3192,7 +3202,7 @@ fn hasUnlockedIndexedElements(obj: *JSObject) bool {
             var ibuf: [16]u8 = undefined;
             const ks = std.fmt.bufPrint(&ibuf, "{d}", .{entry.key_ptr.*}) catch return true;
             // Slot present and not yet promoted into the bag.
-            if (!obj.properties.contains(ks)) return true;
+            if (!obj.ownDataContains(ks)) return true;
         }
         return false;
     }
@@ -3201,7 +3211,7 @@ fn hasUnlockedIndexedElements(obj: *JSObject) bool {
         if (JSObject.isElementHole(obj.elements.items[i])) continue;
         var ibuf: [16]u8 = undefined;
         const ks = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch return true;
-        if (!obj.properties.contains(ks)) return true;
+        if (!obj.ownDataContains(ks)) return true;
     }
     return false;
 }
@@ -3428,7 +3438,7 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
         out.set(realm.allocator, key_slot.key, v) catch return error.OutOfMemory;
         // Anchor the heap key string so the borrowed slice survives.
         if (key_slot.anchor) |ks| {
-            if (out.properties.contains(key_slot.key)) {
+            if (out.ownDataContains(key_slot.key)) {
                 out.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
             }
         }

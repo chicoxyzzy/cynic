@@ -519,6 +519,85 @@ pub const JSObjectExtension = struct {
     }
 };
 
+/// Iterator yielded by `JSObject.iterOwnNamedKeys`. Mirrors the
+/// `Entry` shape of `std.StringArrayHashMapUnmanaged(Value).Iterator`
+/// — `entry.key_ptr.*` / `entry.value_ptr.*` work identically — so
+/// existing call sites pick up shape-mode enumeration with no edit.
+/// Two modes:
+///   `.bag`   — dictionary-mode object, walks the bag iterator.
+///   `.order` — shape-mode object (bag empty), walks
+///              `own_key_order` and resolves each value through
+///              the shape's slot.
+pub const OwnNamedEntry = struct {
+    key_ptr: *const []const u8,
+    value_ptr: *const Value,
+};
+
+pub const OwnNamedIterator = struct {
+    mode: union(enum) {
+        bag: std.StringArrayHashMapUnmanaged(Value).Iterator,
+        shape: ShapeWalker,
+    },
+
+    pub const ShapeWalker = struct {
+        obj: *const JSObject,
+        /// Walks the transition chain leaf → root, but yields in
+        /// insertion order (root → leaf) by recursing first when
+        /// the caller's `next` strategy demands ordering. Stored
+        /// as the leaf shape; we walk from `obj.shape` upward and
+        /// emit slot-by-slot using the visit cursor below.
+        leaf: *const @import("shape.zig").Shape,
+        /// Visit cursor — the slot index we last returned. Walks
+        /// from `0` up to `leaf.property_count - 1`. For each, we
+        /// look up the corresponding key/attrs by walking the
+        /// chain. O(depth) per step ⇒ O(depth²) total, but the
+        /// chain depth is bounded by the object's named-property
+        /// count (typically small).
+        next_slot: u32 = 0,
+        /// Backing storage for the entry pointers returned from
+        /// `next` — the walker owns the key slice and value
+        /// snapshot it just yielded so callers can deref the
+        /// entry pointers without worrying about lifetime.
+        cur_key: []const u8 = "",
+        cur_value: Value = Value.undefined_,
+    };
+
+    pub fn next(self: *OwnNamedIterator) ?OwnNamedEntry {
+        switch (self.mode) {
+            .bag => |*it| {
+                if (it.next()) |e| return .{ .key_ptr = e.key_ptr, .value_ptr = e.value_ptr };
+                return null;
+            },
+            .shape => |*walk| {
+                const property_count = walk.leaf.property_count;
+                while (walk.next_slot < property_count) {
+                    const want_slot = walk.next_slot;
+                    walk.next_slot += 1;
+                    // Walk the chain to find the node that owns
+                    // `want_slot`. Append-only shapes have stable
+                    // slot indices: the node that added the key
+                    // also has `slot == want_slot`.
+                    var node: ?*const @import("shape.zig").Shape = walk.leaf;
+                    var found: ?*const @import("shape.zig").Shape = null;
+                    while (node) |n| : (node = n.parent) {
+                        if (n.parent == null) break;
+                        if (n.slot == want_slot and n.kind == .data) {
+                            found = n;
+                            break;
+                        }
+                    }
+                    const entry = found orelse continue;
+                    if (entry.slot >= walk.obj.slots.items.len) continue;
+                    walk.cur_key = entry.key;
+                    walk.cur_value = walk.obj.slots.items[entry.slot];
+                    return .{ .key_ptr = &walk.cur_key, .value_ptr = &walk.cur_value };
+                }
+                return null;
+            },
+        }
+    }
+};
+
 pub const JSObject = struct {
     /// Discriminator — must remain the first field. Mirrors the
     /// `kind` field on `JSFunction` so runtime dispatch on a
@@ -890,42 +969,63 @@ pub const JSObject = struct {
 
     /// §10.1.11 OrdinaryOwnPropertyKeys — iterator over the
     /// object's own named-data properties in insertion order.
-    /// Today wraps `properties.iterator()` directly. Phase 3 of
-    /// [docs/lazy-property-bag.md] flips this to a shape-chain
-    /// walk for shape-mode objects (bag is null then); the
-    /// single chokepoint here means every spec enumeration
-    /// surface (`Object.{keys, values, entries}`,
-    /// `Reflect.ownKeys`, `for-in`, `JSON.stringify`,
-    /// descriptor walks, `Object.assign`) picks up the new
-    /// path with no edit.
-    ///
-    /// Doesn't include accessor entries — those live in
-    /// `extension.accessors` and have their own iterator
-    /// (`accessorIterator`). `Object.getOwnPropertyNames` /
-    /// `Object.keys` consumers merge the two iterators with the
-    /// integer-index slot ordering ahead per §10.1.11.
-    pub fn iterOwnNamedKeys(self: *const JSObject) std.StringArrayHashMapUnmanaged(Value).Iterator {
-        return self.properties.iterator();
+    /// Phase 3 of [docs/lazy-property-bag.md]: a shape-mode
+    /// object's bag is empty, so the iterator walks
+    /// `own_key_order` (populated by `recordKey`) and resolves
+    /// each entry through the shape slot. Dictionary-mode
+    /// objects walk the bag iterator directly — preserves
+    /// deterministic insertion order for built-in installation
+    /// paths that didn't `recordKey`.
+    pub fn iterOwnNamedKeys(self: *const JSObject) OwnNamedIterator {
+        if (self.shape) |sh| {
+            return .{ .mode = .{ .shape = .{ .obj = self, .leaf = sh } } };
+        }
+        return .{ .mode = .{ .bag = self.properties.iterator() } };
     }
 
     /// §10.1.1 OrdinaryGetOwnProperty (data half) — return the
-    /// own data property's value, or `null` if absent. Phase 2
-    /// of [docs/lazy-property-bag.md] — the single chokepoint
-    /// for own-data reads, so Phase 3 can route shape-mode
-    /// objects through `slots[shape.lookup(key).slot]` here in
-    /// one place. Accessors / proxy traps / proto chain are
-    /// NOT consulted — callers that need the full §10.1.7
-    /// [[Get]] semantics route through `lda_property`'s helper
-    /// stack (or `lookupAccessor` for the accessor half).
-    ///
-    /// Phase 3 will widen the return to a `LookupResult`
-    /// (`{ value, flags }`) so callers that also want
-    /// `flagsFor(key)` can pick up the slot lookup once
-    /// instead of paying for two hashmap hits. Today every
-    /// caller takes just the value; widening is a backward-
-    /// compatible expansion when needed.
+    /// own data property's value, or `null` if absent. Shape-
+    /// first: `slots[shape.lookup(key).slot]` for a shape-mode
+    /// data entry, otherwise `properties.get`. Accessors /
+    /// proxy traps / proto chain are NOT consulted — callers
+    /// that need the full §10.1.7 [[Get]] semantics route
+    /// through `lda_property`'s helper stack (or
+    /// `lookupAccessor` for the accessor half).
     pub fn lookupOwn(self: *const JSObject, key: []const u8) ?Value {
+        if (self.shape) |sh| {
+            if (sh.lookup(key)) |entry| {
+                if (entry.kind == .data and entry.slot < self.slots.items.len) {
+                    return self.slots.items[entry.slot];
+                }
+            }
+        }
         return self.properties.get(key);
+    }
+
+    /// §10.1.1 OrdinaryGetOwnProperty presence test (data half) —
+    /// true iff the receiver holds an own DATA property at `key`.
+    /// Shape-first: shape slot wins for shape-mode objects, bag
+    /// fallback for dictionary mode. Does NOT consult accessors —
+    /// pair with `hasAccessor(key)` for the full §7.3.13
+    /// HasOwnProperty semantic, or call `hasOwn(key)` for the
+    /// combined check. Replaces the direct `obj.properties.contains`
+    /// callsites that were ambiguous about which representation
+    /// is authoritative under [docs/lazy-property-bag.md].
+    pub fn ownDataContains(self: *const JSObject, key: []const u8) bool {
+        if (self.shape) |sh| {
+            if (sh.lookup(key)) |entry| {
+                if (entry.kind == .data) return true;
+            }
+        }
+        return self.properties.contains(key);
+    }
+
+    /// Number of own named DATA properties — shape's
+    /// `property_count` when shape-mode, bag's `count()`
+    /// otherwise. Doesn't include accessors.
+    pub fn ownDataCount(self: *const JSObject) usize {
+        if (self.shape) |sh| return sh.property_count;
+        return self.properties.count();
     }
 
     /// Return the extension if already allocated, otherwise allocate
@@ -1403,16 +1503,32 @@ pub const JSObject = struct {
                 return self.setIndexed(allocator, idx, v);
             }
         }
-        try self.properties.put(allocator, key_str.flatBytes(), v);
+        const key = key_str.flatBytes();
+        const absorbed = try self.shadowSet(allocator, key, v, PropertyFlags.default);
+        try self.recordKey(allocator, key);
+        if (absorbed) {
+            // Shape's transition arena owns its own copy of the
+            // key — `Shape.transition` dupes the bytes. No JSString
+            // anchor needed for the shape-only path.
+            return;
+        }
+        try self.properties.put(allocator, key, v);
         try self.key_anchors.append(allocator, key_str);
-        try self.recordKey(allocator, key_str.flatBytes());
-        self.shadowSet(allocator, key_str.flatBytes(), v, PropertyFlags.default);
     }
 
     /// Read the (possibly defaulted) descriptor flags for
     /// `key`. Returns `PropertyFlags.default` (all-true) when no
-    /// override is recorded.
+    /// override is recorded. Phase 3 of
+    /// [docs/lazy-property-bag.md]: shape-mode entries encode
+    /// their attrs on the transition node, so we consult the
+    /// shape first and only fall back to `property_flags` for
+    /// dictionary-mode keys.
     pub fn flagsFor(self: *const JSObject, key: []const u8) PropertyFlags {
+        if (self.shape) |sh| {
+            if (sh.lookup(key)) |entry| {
+                if (entry.kind == .data) return entry.attrs;
+            }
+        }
         if (self.property_flags.get(key)) |f| return f;
         // §9.4.6.5 Module Namespace exotic — every exported binding
         // descriptor is `{writable: true, enumerable: true,
@@ -1479,16 +1595,26 @@ pub const JSObject = struct {
                 self.holeIndexed(idx);
             }
         }
-        try self.properties.put(allocator, key, v);
+        // Try the shape-first path. On success the slot is the
+        // source of truth and the bag write is skipped — the
+        // headline Phase 3 perf win (see
+        // [docs/lazy-property-bag.md]).
+        const absorbed = try self.shadowSet(allocator, key, v, flags);
         try self.recordKey(allocator, key);
-        // Skip the flags entry when the descriptor is the
-        // all-true default — keeps the parallel map sparse.
+        if (absorbed) {
+            // Shape encodes the attrs on the transition node —
+            // no `property_flags` entry needed. Clear any stale
+            // entry left behind by a prior dict-mode redefine.
+            _ = self.property_flags.swapRemove(key);
+            return;
+        }
+        // Dictionary-mode: bag is the source of truth.
+        try self.properties.put(allocator, key, v);
         if (is_default) {
             _ = self.property_flags.swapRemove(key);
         } else {
             try self.property_flags.put(allocator, key, flags);
         }
-        self.shadowSet(allocator, key, v, flags);
     }
 
     /// `[[Set]]` (§10.1.9) — assign a property by name. The
@@ -1553,36 +1679,55 @@ pub const JSObject = struct {
                 return;
             }
         }
-        try self.properties.put(allocator, key, v);
+        // Try the shape-first path. On absorption the slot is the
+        // source of truth and the bag write is skipped.
+        const absorbed = try self.shadowSet(allocator, key, v, PropertyFlags.default);
         try self.recordKey(allocator, key);
-        self.shadowSet(allocator, key, v, PropertyFlags.default);
+        if (absorbed) return;
+        try self.properties.put(allocator, key, v);
     }
 
-    /// Demote a shaped object back to dictionary mode. `properties`
-    /// already holds every value (the shadow co-maintains it), so
-    /// dropping the shape and slots loses nothing. Public so the
-    /// paths that mutate `properties` directly — `delete`,
-    /// `defineProperty`, accessor installs — can keep the shape
-    /// from going stale by giving up on it.
-    pub fn demoteFromShape(self: *JSObject) void {
+    /// Demote a shaped object back to dictionary mode. Phase 3 of
+    /// [docs/lazy-property-bag.md]: shape-mode objects no longer
+    /// mirror their slot values into the bag, so demoting must
+    /// back-fill `properties` (and `property_flags` for any
+    /// non-default attrs) from the shape chain before dropping
+    /// the shape. Idempotent for objects without a shape.
+    ///
+    /// Public so the paths that mutate `properties` directly —
+    /// `delete`, `defineProperty`, accessor installs — can pin
+    /// the bag as the source of truth before they touch it.
+    pub fn demoteFromShape(self: *JSObject, allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
+        const shape = self.shape orelse return;
+        // Walk leaf → root; the chain order is "last property
+        // added is the leaf." Back-fill the bag with each entry,
+        // including its descriptor attrs when they diverge from
+        // the all-true default.
+        var node: ?*const @import("shape.zig").Shape = shape;
+        while (node) |n| : (node = n.parent) {
+            if (n.parent == null) break; // root carries no key
+            if (n.kind != .data) continue;
+            if (n.slot >= self.slots.items.len) continue;
+            const v = self.slots.items[n.slot];
+            try self.properties.put(allocator, n.key, v);
+            const is_default = n.attrs.writable and n.attrs.enumerable and n.attrs.configurable;
+            if (!is_default) {
+                try self.property_flags.put(allocator, n.key, n.attrs);
+            }
+        }
         self.shape = null;
         self.slots.clearRetainingCapacity();
     }
 
-    /// Debug-only consistency check on the shadow shape: every
-    /// shape-claimed (key, slot) data entry must agree with the
-    /// `properties` dictionary by both presence and bit-identical
-    /// value. A divergence means a direct `properties` /
-    /// `property_flags` / `accessors` mutation bypassed `shadowSet`
-    /// or `demoteFromShape` and left the shape stale — which makes
-    /// the IC fast path serve wrong values.
-    ///
-    /// The GC mark walk (`heap.markValue`) runs this on every
-    /// reachable shaped object, so a bypass surfaces at the next
-    /// collection regardless of which call site introduced it.
-    /// Compiled out when `runtime_safety` is off (ReleaseFast).
-    /// V8 ships the equivalent under `--verify-heap`;
-    /// SpiderMonkey has `JSObject::checkShapeConsistency`.
+
+    /// Debug-only consistency check: under Phase 3 of
+    /// [docs/lazy-property-bag.md] a shape-mode object's bag
+    /// is empty — the shape owns the data. Verify that every
+    /// shape-claimed data slot points to a valid index in
+    /// `slots` and (when the bag also carries the key) that
+    /// the bag agrees with the slot. The empty-bag case is
+    /// the new normal; a divergence flags a code path that
+    /// mutated one representation without rebuilding the other.
     pub fn verifyShapeInvariant(self: *const JSObject) void {
         if (!std.debug.runtime_safety) return;
         const shape = self.shape orelse return;
@@ -1596,44 +1741,49 @@ pub const JSObject = struct {
                     .{ n.slot, self.slots.items.len, n.key },
                 );
             }
-            const slot_val = self.slots.items[n.slot];
-            const props_val = self.properties.get(n.key) orelse {
-                std.debug.panic(
-                    "shape invariant: key '{s}' in shape but absent from properties",
-                    .{n.key},
-                );
-            };
-            if (slot_val.bits != props_val.bits) {
-                std.debug.panic(
-                    "shape invariant: key '{s}' diverges — slot=0x{x} properties=0x{x}",
-                    .{ n.key, slot_val.bits, props_val.bits },
-                );
+            // Bag may legitimately not have the key (pure shape-
+            // mode object). Only check parity when the bag DOES
+            // carry it (a stragger from a partial demote, or a
+            // raw `properties.put` callsite we missed migrating).
+            if (self.properties.get(n.key)) |props_val| {
+                const slot_val = self.slots.items[n.slot];
+                if (slot_val.bits != props_val.bits) {
+                    std.debug.panic(
+                        "shape invariant: key '{s}' diverges — slot=0x{x} properties=0x{x}",
+                        .{ n.key, slot_val.bits, props_val.bits },
+                    );
+                }
             }
         }
     }
 
-    /// Maintain the shadow shape + `slots` alongside a named write
-    /// the caller has already applied to `properties`. Best-effort:
-    /// an object or property that does not map cleanly onto a shape
-    /// is left (or put back) in dictionary mode. Read behaviour
-    /// does not depend on the shadow — `get` consults `properties`
-    /// — so an absent or partial shape is harmless until the later
-    /// change that makes shapes the read path.
+    /// Try to absorb a named-data write into the shape chain.
+    /// Returns `true` iff the shape took the write — caller MUST
+    /// skip the `properties.put` mirror; the slot is now the
+    /// source of truth. Returns `false` for objects in
+    /// dictionary mode (exotic, accessor-bearing, or already
+    /// post-demote) — caller must perform the bag write. Demote
+    /// paths fall through to `false` after back-filling the bag.
+    ///
+    /// Phase 3 of [docs/lazy-property-bag.md] — the bag is no
+    /// longer a mirror; either the shape or the bag holds the
+    /// data, never both. Shape-eligible writes skip the bag
+    /// entirely (the headline `class_instantiate` perf win).
     pub fn shadowSet(
         self: *JSObject,
         allocator: std.mem.Allocator,
         key: []const u8,
         v: Value,
         flags: PropertyFlags,
-    ) void {
-        const heap = self.heap orelse return;
+    ) std.mem.Allocator.Error!bool {
+        const heap = self.heap orelse return false;
         // Exotics and engine-internal slots stay dictionary-mode.
         if (self.is_array_exotic or self.getTypedView() != null or
             self.is_module_namespace or self.proxy_target != null or
             std.mem.startsWith(u8, key, "__cynic_"))
         {
-            self.demoteFromShape();
-            return;
+            try self.demoteFromShape(allocator);
+            return false;
         }
         // Key already in the shape: a same-descriptor value update
         // keeps the shape; any other redefinition demotes.
@@ -1645,28 +1795,34 @@ pub const JSObject = struct {
                     e.attrs.configurable == flags.configurable)
                 {
                     self.slots.items[e.slot] = v;
-                } else {
-                    self.demoteFromShape();
+                    return true;
                 }
-                return;
+                try self.demoteFromShape(allocator);
+                return false;
             }
         }
-        // A key new to the shape. Begin shaping only from an empty
-        // object (`properties` holds just this write); otherwise
-        // the object already carries dictionary entries no shape
-        // would describe.
-        if (self.shape == null and self.properties.count() != 1) return;
+        // A key new to the shape. Begin shaping only from a clean
+        // object — no bag entries, no accessors, no `own_key_order`
+        // residue from a prior demote.
+        if (self.shape == null and
+            (self.properties.count() != 0 or
+                self.own_key_order.items.len != 0 or
+                self.accessorCount() != 0))
+        {
+            return false;
+        }
         const from = self.shape orelse heap.shapes.root;
-        const child = heap.shapes.transition(from, key, flags, .data) catch {
-            self.demoteFromShape();
-            return;
+        const child = heap.shapes.transition(from, key, flags, .data) catch |err| {
+            try self.demoteFromShape(allocator);
+            return err;
         };
-        self.slots.resize(allocator, child.property_count) catch {
-            self.demoteFromShape();
-            return;
+        self.slots.resize(allocator, child.property_count) catch |err| {
+            try self.demoteFromShape(allocator);
+            return err;
         };
         self.slots.items[child.slot] = v;
         self.shape = child;
+        return true;
     }
 
     /// `[[Set]]` honoring §10.1.9 writability. Returns:
@@ -1697,13 +1853,17 @@ pub const JSObject = struct {
                 return true;
             }
         }
-        if (self.properties.contains(key)) {
+        // §10.1.9 writability gate — shape-first via `flagsFor`
+        // + `ownDataContains` (slot in either representation).
+        if (self.ownDataContains(key)) {
             const flags = self.flagsFor(key);
             if (!flags.writable) return false;
         }
-        try self.properties.put(allocator, key, v);
+        const cur_flags = self.flagsFor(key);
+        const absorbed = try self.shadowSet(allocator, key, v, cur_flags);
         try self.recordKey(allocator, key);
-        self.shadowSet(allocator, key, v, self.flagsFor(key));
+        if (absorbed) return true;
+        try self.properties.put(allocator, key, v);
         return true;
     }
 
@@ -1862,7 +2022,7 @@ pub const JSObject = struct {
         // §15.2.1.16.3 / §15.2.1.18 — ambiguous star-export keys
         // are omitted from the namespace.
         if (self.is_module_namespace and self.hasAmbiguousNamespaceKey(key)) return false;
-        if (self.properties.contains(key)) return true;
+        if (self.ownDataContains(key)) return true;
         if (self.hasAccessor(key)) return true;
         // §15.2.1.16.3 ResolveExport — re-export redirects appear
         // as own properties on a Module Namespace exotic.
@@ -2197,23 +2357,22 @@ pub const JSObject = struct {
     /// whether the property is absent after the call (true on
     /// success / missing-already, false if a non-configurable
     /// own slot blocked the delete).
-    pub fn deleteOwn(self: *JSObject, key: []const u8) bool {
+    pub fn deleteOwn(self: *JSObject, allocator: std.mem.Allocator, key: []const u8) !bool {
         if (self.is_array_exotic) {
             if (canonicalIntegerIndex(key)) |idx| {
                 _ = self.removeIndexed(idx);
-                if (self.properties.contains(key)) {
-                    const flags = self.property_flags.get(key) orelse PropertyFlags.default;
+                if (self.ownDataContains(key)) {
+                    const flags = self.flagsFor(key);
                     if (!flags.configurable) return false;
-                    // Shape can't encode a removal — demote before
-                    // any `properties.swapRemove` so subsequent
-                    // shape-first reads / hasOwn checks don't
-                    // see a stale slot for the just-deleted key.
-                    // Same discipline as the `del_named_property`
-                    // opcode in the interpreter. Native callers
+                    // Shape can't encode a removal — back-fill the
+                    // bag from shape (so the swapRemove below has
+                    // an entry to drop) and clear the shape. Same
+                    // discipline as `del_named_property` in the
+                    // interpreter. Native callers
                     // (Array.prototype.pop / splice / shift /
-                    // reverse / copyWithin / unshift) come through
-                    // here for array-like generic-object receivers.
-                    self.demoteFromShape();
+                    // reverse / copyWithin / unshift) reach here
+                    // for array-like generic-object receivers.
+                    try self.demoteFromShape(allocator);
                     _ = self.properties.swapRemove(key);
                     _ = self.property_flags.swapRemove(key);
                 }
@@ -2221,14 +2380,14 @@ pub const JSObject = struct {
             }
         }
         if (self.hasAccessor(key)) {
-            self.demoteFromShape();
+            try self.demoteFromShape(allocator);
             _ = self.removeAccessor(key);
             _ = self.property_flags.swapRemove(key);
             if (!self.properties.contains(key)) self.forgetKey(key);
             return true;
         }
-        if (!self.properties.contains(key)) return true;
-        self.demoteFromShape();
+        if (!self.ownDataContains(key)) return true;
+        try self.demoteFromShape(allocator);
         _ = self.properties.swapRemove(key);
         _ = self.property_flags.swapRemove(key);
         if (!self.hasAccessor(key)) self.forgetKey(key);
@@ -2404,10 +2563,10 @@ test "JSObject: deleteOwn demotes the shape for shape-stable receivers" {
     try o.set(testing.allocator, "x", Value.fromInt32(42));
     try testing.expect(o.shape != null);
 
-    try testing.expect(o.deleteOwn("x"));
-    // Shape demoted — the IC + JSObject.get's shape-first
-    // branch must see no shape, fall through to the (now
-    // empty) bag, return undefined.
+    try testing.expect(try o.deleteOwn(testing.allocator, "x"));
+    // Shape demoted — JSObject.get's shape-first branch must
+    // see no shape, fall through to the (now-emptied) bag,
+    // return undefined.
     try testing.expect(o.shape == null);
     try testing.expect(!o.hasOwn("x"));
     try testing.expect(o.get("x").isUndefined());
@@ -2433,7 +2592,7 @@ test "JSObject: accessor install via deleteOwn-then-install demotes the shape" {
     // Simulate the cleanup path: install accessor (demote +
     // getOrPutAccessor in the actual code), then strip the
     // leftover data slot via deleteOwn.
-    try testing.expect(proto.deleteOwn("constructor"));
+    try testing.expect(try proto.deleteOwn(testing.allocator, "constructor"));
     try testing.expect(proto.shape == null);
     try testing.expect(!proto.hasOwn("constructor"));
 }

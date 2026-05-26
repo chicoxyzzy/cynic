@@ -636,6 +636,14 @@ pub const JSFunction = struct {
         return false;
     }
 
+    /// Mirror of `JSObject.ownDataContains` — JSFunction has no
+    /// shape mode, so this is a thin wrapper. Lets callers route
+    /// generic JSObject-or-JSFunction code through the same name
+    /// without branching on the receiver kind.
+    pub fn ownDataContains(self: *const JSFunction, key: []const u8) bool {
+        return self.properties.contains(key);
+    }
+
     /// Own-property accessor lookup. Distinct from `JSObject`'s
     /// chain-walking `lookupAccessor` — function `[[Prototype]]`
     /// chain is `static_parent` → `proto`, neither of which is

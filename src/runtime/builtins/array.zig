@@ -596,7 +596,7 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
     // applies when `length: {writable:false}`.
     if (o.is_array_exotic) {
         if (JSObject.canonicalIntegerIndex(key)) |idx| {
-            if (!o.properties.contains(key)) {
+            if (!o.ownDataContains(key)) {
                 if (o.property_flags.get("length")) |flags| {
                     if (!flags.writable) {
                         const cur_len_v = o.lookupOwn("length") orelse Value.fromInt32(0);
@@ -615,7 +615,7 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
     // §10.1.9.2 OrdinarySetWithOwnDescriptor — own data wins; if
     // absent, [[DefineOwnProperty]] fails (and so strict-mode
     // [[Set]] throws TypeError) when the receiver is non-extensible.
-    const had_entry = o.properties.contains(key);
+    const had_entry = o.ownDataContains(key);
     if (had_entry) {
         const flags = o.flagsFor(key);
         if (!flags.writable) {
@@ -623,9 +623,11 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
         }
         // §6.1.6.1 NumberValue — length is a Number; preserve the
         // value bit-pattern (don't down-cast a double to int32).
-        o.properties.put(realm.allocator, key, value) catch return error.OutOfMemory;
-        // Mirror the write into the shadow shape's slot.
-        o.shadowSet(realm.allocator, key, value, flags);
+        // Route through `setWithFlags` so the shape's slot stays
+        // authoritative for shape-mode receivers under Phase 3 of
+        // [docs/lazy-property-bag.md]; the bag stays in sync
+        // automatically when the shape demotes.
+        o.setWithFlags(realm.allocator, key, value, flags) catch return error.OutOfMemory;
         return;
     }
     if (!o.extensible) {
@@ -636,7 +638,7 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
     // heap key JSString so a GC sweep can't dangle it. (Array-exotic
     // integer writes route to `elements` above and never reach here.)
     if (key_anchor) |ks| {
-        if (o.properties.contains(key)) {
+        if (o.ownDataContains(key)) {
             o.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
         }
     }
@@ -679,7 +681,7 @@ pub fn deletePropertyOrThrow(realm: *Realm, obj: *JSObject, key: []const u8) Nat
             },
             .fallthrough => |t| {
                 if (t == cur) {
-                    if (!cur.deleteOwn(key)) return throwTypeError(realm, "Cannot delete property");
+                    if (!try cur.deleteOwn(realm.allocator, key)) return throwTypeError(realm, "Cannot delete property");
                     return;
                 }
                 cur = t;
@@ -691,12 +693,12 @@ pub fn deletePropertyOrThrow(realm: *Realm, obj: *JSObject, key: []const u8) Nat
     // `deleteOwn` already honors configurable on array-exotic
     // indexed slots, but unconditionally strips named bag entries,
     // so reject non-configurable here before calling it.
-    if (cur.hasAccessor(key) or cur.properties.contains(key)) {
+    if (cur.hasAccessor(key) or cur.ownDataContains(key)) {
         if (cur.property_flags.get(key)) |flags| {
             if (!flags.configurable) return throwTypeError(realm, "Cannot delete non-configurable property");
         }
     }
-    if (!cur.deleteOwn(key)) {
+    if (!try cur.deleteOwn(realm.allocator, key)) {
         return throwTypeError(realm, "Cannot delete property");
     }
 }
@@ -2451,7 +2453,7 @@ fn createDataPropertyOrThrowGeneric(realm: *Realm, obj: *JSObject, key_str: *JSS
         // subsequent `setWithFlags(default)` lands in `elements`
         // again rather than leaving the bag-promoted descriptor.
         // Demote first — the shadow shape can't encode a removal.
-        cur.demoteFromShape();
+        try cur.demoteFromShape(realm.allocator);
         _ = cur.properties.swapRemove(key);
         _ = cur.property_flags.swapRemove(key);
     }
@@ -2464,7 +2466,7 @@ fn createDataPropertyOrThrowGeneric(realm: *Realm, obj: *JSObject, key_str: *JSS
     // The key is a borrowed slice of a heap-allocated JSString. If it
     // landed in the named-property bag (rather than the array-exotic
     // `elements` vector), anchor the string so GC keeps the key alive.
-    if (cur.properties.contains(key)) {
+    if (cur.ownDataContains(key)) {
         cur.key_anchors.append(realm.allocator, key_str) catch return error.OutOfMemory;
     }
 }
@@ -4043,7 +4045,7 @@ fn createDataPropertyOrThrow(
     cur.setWithFlags(realm.allocator, key, value, ObjMod.PropertyFlags.default) catch return error.OutOfMemory;
     // Anchor the heap key string when the slice landed in the
     // named-property bag — see `createDataPropertyOrThrowGeneric`.
-    if (cur.properties.contains(key)) {
+    if (cur.ownDataContains(key)) {
         cur.key_anchors.append(realm.allocator, key_str) catch return error.OutOfMemory;
     }
 }

@@ -191,7 +191,7 @@ fn printValueToStream(io: std.Io, out: std.Io.File, v: Value) !void {
         if (obj.has_error_data) {
             const name_str = lookupChain(obj, "name");
             try out.writeStreamingAll(io, if (name_str.len > 0) name_str else "Error");
-            if (obj.properties.get("message")) |msg_v| {
+            if (obj.lookupOwn("message")) |msg_v| {
                 if (msg_v.isString()) {
                     const ms: *JSString = @ptrCast(@alignCast(msg_v.asString()));
                     const bytes = ms.flatBytes();
@@ -231,7 +231,7 @@ fn printValueToStream(io: std.Io, out: std.Io.File, v: Value) !void {
 fn lookupChain(start: anytype, key: []const u8) []const u8 {
     var cur = @as(?@TypeOf(start), start);
     while (cur) |o| : (cur = o.prototype) {
-        if (o.properties.get(key)) |v| {
+        if (o.lookupOwn(key)) |v| {
             if (v.isString()) {
                 const s: *JSString = @ptrCast(@alignCast(v.asString()));
                 return s.flatBytes();

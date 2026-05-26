@@ -1140,6 +1140,13 @@ pub const Heap = struct {
                 // introduced the divergence. Compiled out in
                 // ReleaseFast.
                 o.verifyShapeInvariant();
+                // Shape-mode objects keep their named-data values
+                // in `slots` (the bag is empty under Phase 3 of
+                // [docs/lazy-property-bag.md]); dictionary-mode
+                // objects keep them in `properties`. Walk both —
+                // for any individual object only one of the two
+                // is non-empty, so the cost is paid once.
+                for (o.slots.items) |slot_v| self.markValue(slot_v);
                 var it = o.iterOwnNamedKeys();
                 while (it.next()) |entry| self.markValue(entry.value_ptr.*);
                 if (o.privatePropertyIterator()) |pit_outer| {
@@ -2449,7 +2456,21 @@ pub const Heap = struct {
             @import("builtin").mode != .ReleaseSafe) return;
 
         for (self.objects_mature.items) |o| {
-            // Property bag.
+            // Shape slots — under Phase 3 of
+            // [docs/lazy-property-bag.md] these carry the
+            // values for shape-mode objects (the bag is empty).
+            for (o.slots.items, 0..) |slot_v, slot_idx| {
+                if (isYoungHeapValue(slot_v) and !o.in_remembered_set) {
+                    std.debug.print(
+                        "verifyRememberedSet: un-barriered mature\u{2192}young edge: " ++
+                            "JSObject {*} slot [{d}] -> young {*}\n",
+                        .{ o, slot_idx, valueHeapPtr(slot_v) },
+                    );
+                    std.debug.assert(false);
+                }
+            }
+            // Property bag — non-empty only for dictionary-mode
+            // objects.
             var it = o.iterOwnNamedKeys();
             while (it.next()) |entry| {
                 if (isYoungHeapValue(entry.value_ptr.*) and !o.in_remembered_set) {

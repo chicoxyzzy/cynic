@@ -505,14 +505,14 @@ fn appendThrownText(buf: *std.ArrayListUnmanaged(u8), v: Value) !void {
 /// prototype chain one hop for `name` (error names live on the
 /// prototype). Returns null if absent or non-string.
 fn lookupString(obj: *cynic.runtime.JSObject, key: []const u8) ?[]const u8 {
-    if (obj.properties.get(key)) |p| {
+    if (obj.lookupOwn(key)) |p| {
         if (p.isString()) {
             const s: *JSString = @ptrCast(@alignCast(p.asString()));
             return s.flatBytes();
         }
     }
     if (obj.prototype) |proto| {
-        if (proto.properties.get(key)) |p| {
+        if (proto.lookupOwn(key)) |p| {
             if (p.isString()) {
                 const s: *JSString = @ptrCast(@alignCast(p.asString()));
                 return s.flatBytes();

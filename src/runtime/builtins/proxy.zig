@@ -216,12 +216,15 @@ pub fn nativeProxyGet(realm: *Realm, proxy: *JSObject, key: []const u8, receiver
     // §10.5.5 invariants: non-configurable non-writable data prop
     // must match; non-configurable accessor with undefined get
     // requires trap to return undefined.
-    if (target.property_flags.get(key)) |flags| {
-        if (target.lookupOwn(key)) |target_v| {
-            if (!flags.configurable and !flags.writable) {
-                if (!intrinsics.sameValue(target_v, v)) {
-                    return throwTypeError(realm, "proxy 'get' trap returned mismatched value for non-writable non-configurable data property");
-                }
+    // §10.5.5 step 13 — non-config + non-writable data target slot
+    // forces SameValue. `flagsFor` is shape-aware under Phase 3 of
+    // [docs/lazy-property-bag.md]; the prior `property_flags.get`
+    // check missed shape-mode descriptors.
+    if (target.lookupOwn(key)) |target_v| {
+        const flags = target.flagsFor(key);
+        if (!flags.configurable and !flags.writable) {
+            if (!intrinsics.sameValue(target_v, v)) {
+                return throwTypeError(realm, "proxy 'get' trap returned mismatched value for non-writable non-configurable data property");
             }
         }
     }
@@ -257,13 +260,15 @@ pub fn nativeProxySet(realm: *Realm, proxy: *JSObject, key: []const u8, value: V
     const v = try callTrap(realm, trap_fn, handler, &args);
     const arith = @import("../lantern/arith.zig");
     if (!arith.toBoolean(v)) return .{ .boolean = false };
-    // §10.5.6 invariants.
-    if (target.property_flags.get(key)) |flags| {
-        if (target.lookupOwn(key)) |target_v| {
-            if (!flags.configurable and !flags.writable) {
-                if (!intrinsics.sameValue(target_v, value)) {
-                    return throwTypeError(realm, "proxy 'set' trap reported success for non-writable non-configurable data property");
-                }
+    // §10.5.6 invariants — non-config + non-writable data target
+    // slot forces SameValue between the trap result and target.
+    // `flagsFor` is shape-aware under Phase 3 of
+    // [docs/lazy-property-bag.md].
+    if (target.lookupOwn(key)) |target_v| {
+        const flags = target.flagsFor(key);
+        if (!flags.configurable and !flags.writable) {
+            if (!intrinsics.sameValue(target_v, value)) {
+                return throwTypeError(realm, "proxy 'set' trap reported success for non-writable non-configurable data property");
             }
         }
     }
@@ -293,7 +298,7 @@ pub fn nativeProxyHas(realm: *Realm, proxy: *JSObject, key: []const u8) NativeEr
     // property doesn't exist, nor an own property of a non-
     // extensible target.
     if (!b) {
-        const has_own = target.properties.contains(key) or target.hasAccessor(key);
+        const has_own = target.ownDataContains(key) or target.hasAccessor(key);
         if (has_own) {
             const flags = target.flagsFor(key);
             if (!flags.configurable) {
@@ -385,7 +390,7 @@ pub fn nativeProxyDelete(realm: *Realm, proxy: *JSObject, key: []const u8) Nativ
         // configurable own property, nor for an own property of a
         // non-extensible target (§10.5.10 step 14 added by the
         // `proxy-missing-checks` proposal).
-        const has_own = target.properties.contains(key) or target.hasAccessor(key);
+        const has_own = target.ownDataContains(key) or target.hasAccessor(key);
         if (has_own) {
             const flags = target.flagsFor(key);
             if (!flags.configurable) {

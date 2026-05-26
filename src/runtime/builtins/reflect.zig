@@ -174,13 +174,13 @@ fn reflectHas(realm: *Realm, this_value: Value, args: []const Value) NativeError
         return Value.fromBool(try hasPropertyProxyAware(realm, cur, key_slice));
     }
     if (heap_mod.valueAsFunction(arg)) |fn_obj| {
-        if (fn_obj.properties.contains(key_slice)) return Value.true_;
+        if (fn_obj.ownDataContains(key_slice)) return Value.true_;
         if (fn_obj.accessors.contains(key_slice)) return Value.true_;
         if (std.mem.eql(u8, key_slice, "prototype") and fn_obj.prototype != null) return Value.true_;
         if (std.mem.eql(u8, key_slice, "name") and fn_obj.name != null) return Value.true_;
         var cursor: ?*@import("../object.zig").JSObject = fn_obj.proto;
         while (cursor) |c| : (cursor = c.prototype) {
-            if (c.properties.contains(key_slice)) return Value.true_;
+            if (c.ownDataContains(key_slice)) return Value.true_;
             if (c.hasAccessor(key_slice)) return Value.true_;
         }
         return Value.false_;
@@ -188,7 +188,7 @@ fn reflectHas(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.has target must be an object");
     var cursor: ?*@import("../object.zig").JSObject = target;
     while (cursor) |c| : (cursor = c.prototype) {
-        if (c.properties.contains(key_slice)) return Value.true_;
+        if (c.ownDataContains(key_slice)) return Value.true_;
         if (c.hasAccessor(key_slice)) return Value.true_;
     }
     return Value.false_;
@@ -214,7 +214,7 @@ fn hasPropertyProxyAware(realm: *Realm, root: *JSObject, key: []const u8) Native
     var cur: ?*JSObject = root;
     while (cur) |c| {
         // §10.1.7.1 OrdinaryHasProperty step 2 — own property check.
-        if (c.properties.contains(key)) return true;
+        if (c.ownDataContains(key)) return true;
         if (c.hasAccessor(key)) return true;
         if (c.is_module_namespace and c.hasAmbiguousNamespaceKey(key)) return false;
         if (c.is_module_namespace and c.hasNamespaceRedirect(key)) return true;
@@ -648,7 +648,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
             return Value.false_;
         }
         const has_own_data = blk: {
-            if (o.properties.contains(key_slice)) break :blk true;
+            if (o.ownDataContains(key_slice)) break :blk true;
             if (o.is_array_exotic) {
                 if (@import("../object.zig").JSObject.canonicalIntegerIndex(key_slice)) |idx| {
                     if (o.tryGetIndexedOwn(idx) != null) break :blk true;
@@ -720,17 +720,16 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         // (different-property-descriptors.js).
         return Value.false_;
     }
-    if (receiver_obj.properties.contains(key_slice)) {
+    if (receiver_obj.ownDataContains(key_slice)) {
         // Existing data descriptor on Receiver — writability of
         // the receiver's slot gates the write (§10.1.9.2 step
         // 3.e.ii). On success the receiver's value is replaced;
         // its other flags stay put.
         const flags = receiver_obj.flagsFor(key_slice);
         if (!flags.writable) return Value.false_;
-        receiver_obj.properties.put(realm.allocator, key_slice, v) catch return error.OutOfMemory;
-        // Mirror the write into the shadow shape's slot so the IC
-        // doesn't serve a stale value on the next lda_property.
-        receiver_obj.shadowSet(realm.allocator, key_slice, v, flags);
+        // Route through `setWithFlags` so shape and bag stay
+        // coherent under Phase 3 of [docs/lazy-property-bag.md].
+        receiver_obj.setWithFlags(realm.allocator, key_slice, v, flags) catch return error.OutOfMemory;
         return Value.true_;
     }
     // §10.1.9.2 step 3.f — CreateDataProperty(Receiver, P, V).
@@ -789,12 +788,10 @@ fn reflectSetOnReceiver(realm: *Realm, receiver_v: Value, key_slice: []const u8,
     }
     // §10.1.9.2 step 3.c-e — existing accessor on Receiver: reject.
     if (receiver_obj.hasAccessor(key_slice)) return Value.false_;
-    if (receiver_obj.properties.contains(key_slice)) {
+    if (receiver_obj.ownDataContains(key_slice)) {
         const flags = receiver_obj.flagsFor(key_slice);
         if (!flags.writable) return Value.false_;
-        receiver_obj.properties.put(realm.allocator, key_slice, v) catch return error.OutOfMemory;
-        // Mirror the write into the shadow shape's slot.
-        receiver_obj.shadowSet(realm.allocator, key_slice, v, flags);
+        receiver_obj.setWithFlags(realm.allocator, key_slice, v, flags) catch return error.OutOfMemory;
         return Value.true_;
     }
     // §10.4.2.1 Array exotic [[DefineOwnProperty]] — for indexed
@@ -852,7 +849,7 @@ fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) 
     if (heap_mod.valueAsFunction(arg)) |fn_obj| {
         // §10.1.10.1 [[Delete]] step 4 — return false when the
         // own property is non-configurable.
-        if (fn_obj.flagsForOwn(key_slice).configurable == false and (fn_obj.properties.contains(key_slice) or fn_obj.accessors.contains(key_slice))) return Value.false_;
+        if (fn_obj.flagsForOwn(key_slice).configurable == false and (fn_obj.ownDataContains(key_slice) or fn_obj.accessors.contains(key_slice))) return Value.false_;
         _ = fn_obj.properties.swapRemove(key_slice);
         _ = fn_obj.accessors.swapRemove(key_slice);
         _ = fn_obj.property_flags.swapRemove(key_slice);
@@ -881,15 +878,15 @@ fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) 
     // non-configurable `@@toStringTag` install also rejects.
     // Includes the `namespace_redirects` entries (re-exports
     // installed by `module_reexport_named` / `module_reexport_star`).
-    if (target.is_module_namespace and !std.mem.startsWith(u8, key_slice, "@@") and !std.mem.startsWith(u8, key_slice, "<sym:") and (target.properties.contains(key_slice) or target.hasAccessor(key_slice) or target.hasNamespaceRedirect(key_slice))) {
+    if (target.is_module_namespace and !std.mem.startsWith(u8, key_slice, "@@") and !std.mem.startsWith(u8, key_slice, "<sym:") and (target.ownDataContains(key_slice) or target.hasAccessor(key_slice) or target.hasNamespaceRedirect(key_slice))) {
         return Value.false_;
     }
     // §10.1.10.1 — non-configurable own property → return false
     // (no mutation). Includes frozen / sealed objects.
-    if (target.flagsFor(key_slice).configurable == false and (target.properties.contains(key_slice) or target.hasAccessor(key_slice))) return Value.false_;
+    if (target.flagsFor(key_slice).configurable == false and (target.ownDataContains(key_slice) or target.hasAccessor(key_slice))) return Value.false_;
     // Demote: the shadow shape can't encode a removal — leaving it
     // would trip `verifyShapeInvariant` under GC stress.
-    target.demoteFromShape();
+    try target.demoteFromShape(realm.allocator);
     _ = target.properties.swapRemove(key_slice);
     _ = target.removeAccessor(key_slice);
     _ = target.property_flags.swapRemove(key_slice);

@@ -431,8 +431,16 @@ pub fn install(realm: *Realm) !void {
     // the frozen descriptors onto the live globalThis object now.
     if (realm.globals.target) |gt_for_flags| {
         for ([_][]const u8{ "undefined", "NaN", "Infinity" }) |k| {
-            if (gt_for_flags.properties.contains(k)) {
-                try gt_for_flags.property_flags.put(realm.allocator, k, .{
+            if (gt_for_flags.ownDataContains(k)) {
+                // Re-stamp the descriptor through `setWithFlags`
+                // so the attrs land on the right side under
+                // Phase 3 of [docs/lazy-property-bag.md] — for
+                // shape-mode globals the attrs are stored on the
+                // shape transition node, not the bag. The
+                // current value flows through; we're flipping
+                // flags, not the value.
+                const cur_v = gt_for_flags.lookupOwn(k) orelse Value.undefined_;
+                try gt_for_flags.setWithFlags(realm.allocator, k, cur_v, .{
                     .writable = false,
                     .enumerable = false,
                     .configurable = false,
@@ -714,7 +722,7 @@ fn installSyntheticAccessorPair(
     // The shape system only models data properties; an accessor
     // install MUST demote first or the IC's shape lookup would
     // still serve the removed slot's stale value.
-    proto.demoteFromShape();
+    try proto.demoteFromShape(realm.allocator);
     _ = proto.properties.swapRemove(key);
     const entry = try proto.getOrPutAccessor(realm.allocator, key);
     entry.value_ptr.* = .{ .getter = get_fn, .setter = set_fn };

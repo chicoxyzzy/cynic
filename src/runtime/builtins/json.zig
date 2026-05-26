@@ -1057,12 +1057,12 @@ fn jsonDelete(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!bool {
     // property → return false (no remove). `deleteOwn` honors
     // this for array-exotic indexed slots but unconditionally
     // strips named bag entries, so reject non-configurable here.
-    if (cur.hasAccessor(key) or cur.properties.contains(key)) {
+    if (cur.hasAccessor(key) or cur.ownDataContains(key)) {
         if (cur.property_flags.get(key)) |flags| {
             if (!flags.configurable) return false;
         }
     }
-    return cur.deleteOwn(key);
+    return cur.deleteOwn(realm.allocator, key);
 }
 
 /// §7.3.7 CreateDataProperty(O, P, V) wrapper. Dispatches through
@@ -1155,7 +1155,7 @@ fn jsonCreateDataProperty(realm: *Realm, obj: *JSObject, key: []const u8, value:
     // Demote the shadow shape first — it can't encode a removal,
     // and a subsequent write would otherwise leave shape and
     // properties out of sync.
-    obj.demoteFromShape();
+    obj.demoteFromShape(realm.allocator) catch return error.OutOfMemory;
     _ = obj.properties.swapRemove(key);
     _ = obj.property_flags.swapRemove(key);
     _ = obj.removeAccessor(key);

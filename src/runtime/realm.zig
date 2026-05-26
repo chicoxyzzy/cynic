@@ -262,10 +262,14 @@ pub const GlobalBindings = struct {
     /// §9.1.1.4 GetBindingValue — declarative record FIRST, then
     /// object record. Used by `lda_global` / `lda_global_or_undef`
     /// and by host code that just wants "whatever binding name
-    /// resolves to".
+    /// resolves to". The object-record path goes through
+    /// `JSObject.lookupOwn` so shape-mode keys (Phase 3 of
+    /// [docs/lazy-property-bag.md]) resolve via their slot rather
+    /// than the empty bag.
     pub fn get(self: *const GlobalBindings, key: []const u8) ?Value {
         if (self.decl_env.get(key)) |v| return v;
-        return self.mapConst().get(key);
+        if (self.target) |t| return t.lookupOwn(key);
+        return self.fallback.get(key);
     }
     /// Object env-record put (host-style). Hits the global
     /// object's property bag — does NOT touch the declarative
@@ -281,18 +285,22 @@ pub const GlobalBindings = struct {
     /// stamped).
     pub fn put(self: *GlobalBindings, allocator: std.mem.Allocator, key: []const u8, value: Value) !void {
         if (self.target) |t| {
-            const had_key = t.properties.contains(key);
-            // Generational write barrier — raw `properties.put`
-            // bypasses the routed `heap.storeProperty`.
+            const had_key = t.ownDataContains(key);
+            // Generational write barrier — `setWithFlags` bypasses
+            // the routed `heap.storeProperty` path.
             if (self.heap) |h| h.writeBarrier(.{ .object = t }, value);
-            try t.properties.put(allocator, key, value);
-            if (!had_key) {
-                try t.property_flags.put(allocator, key, .{
-                    .writable = true,
-                    .enumerable = false,
-                    .configurable = true,
-                });
-            }
+            // Host-installed bindings default to `{writable: true,
+            // enumerable: false, configurable: true}`; existing
+            // bindings keep their previously-installed flags so a
+            // frozen `NaN` / `Infinity` / `undefined` slot survives
+            // re-binding attempts. Routing through `setWithFlags`
+            // keeps shape and bag coherent under Phase 3 of
+            // [docs/lazy-property-bag.md].
+            const flags: @import("object.zig").PropertyFlags = if (had_key)
+                t.flagsFor(key)
+            else
+                .{ .writable = true, .enumerable = false, .configurable = true };
+            try t.setWithFlags(allocator, key, value, flags);
             return;
         }
         try self.fallback.put(allocator, key, value);
@@ -300,7 +308,8 @@ pub const GlobalBindings = struct {
     /// §9.1.1.4 HasBinding — true if EITHER record has the name.
     pub fn contains(self: *const GlobalBindings, key: []const u8) bool {
         if (self.decl_env.contains(key)) return true;
-        return self.mapConst().contains(key);
+        if (self.target) |t| return t.ownDataContains(key);
+        return self.fallback.contains(key);
     }
     pub fn iterator(self: *const GlobalBindings) std.StringArrayHashMapUnmanaged(Value).Iterator {
         return self.mapConst().iterator();
@@ -340,7 +349,7 @@ pub const GlobalBindings = struct {
     /// global property.
     pub fn hasRestrictedGlobalProperty(self: *const GlobalBindings, key: []const u8) bool {
         const t = self.target orelse return false;
-        if (!t.properties.contains(key)) return false;
+        if (!t.ownDataContains(key)) return false;
         const flags = t.property_flags.get(key) orelse return false;
         return !flags.configurable;
     }
@@ -376,7 +385,7 @@ pub const GlobalBindings = struct {
     /// frozen by the SES pass: non-writable + non-configurable).
     pub fn canDeclareGlobalFunction(self: *const GlobalBindings, key: []const u8, hardened: bool) bool {
         const t = self.target orelse return true;
-        const has_data = t.properties.contains(key);
+        const has_data = t.ownDataContains(key);
         const has_accessor = t.hasAccessor(key);
         if (!has_data and !has_accessor) {
             if (hardened) return true;
@@ -443,11 +452,11 @@ pub const GlobalBindings = struct {
     ) !void {
         try self.var_names.put(allocator, key, {});
         if (self.target) |t| {
-            const gop = try t.properties.getOrPut(allocator, key);
-            if (!gop.found_existing) {
+            if (!t.ownDataContains(key)) {
                 if (self.heap) |h| h.writeBarrier(.{ .object = t }, value);
-                gop.value_ptr.* = value;
-                try t.property_flags.put(allocator, key, .{
+                // Idempotent for an existing key — only install when
+                // missing so a pre-existing descriptor is preserved.
+                try t.setWithFlags(allocator, key, value, .{
                     .writable = true,
                     .enumerable = true,
                     .configurable = false,
@@ -481,11 +490,10 @@ pub const GlobalBindings = struct {
         try self.var_names.put(allocator, key, {});
         if (self.target) |t| {
             _ = t.removeAccessor(key);
-            // Generational write barrier — raw `properties.put`
-            // bypasses the routed `heap.storeProperty`.
+            // Generational write barrier — `setWithFlags` bypasses
+            // the routed `heap.storeProperty` path.
             if (self.heap) |h| h.writeBarrier(.{ .object = t }, value);
-            try t.properties.put(allocator, key, value);
-            try t.property_flags.put(allocator, key, .{
+            try t.setWithFlags(allocator, key, value, .{
                 .writable = true,
                 .enumerable = true,
                 .configurable = false,
@@ -545,7 +553,12 @@ pub const GlobalBindings = struct {
         if (self.target != null) return;
         var it = self.fallback.iterator();
         while (it.next()) |e| {
-            try gt.properties.put(allocator, e.key_ptr.*, e.value_ptr.*);
+            // Route through `setWithFlags` so the gt's shape / bag
+            // representation stays coherent with the rest of
+            // intrinsics installation. Default flags here — the
+            // fallback map carries pre-bootstrap host pushes that
+            // don't track descriptor metadata.
+            try gt.setWithFlags(allocator, e.key_ptr.*, e.value_ptr.*, .{});
         }
         self.fallback.deinit(allocator);
         self.fallback = .empty;
@@ -1223,8 +1236,19 @@ pub const Realm = struct {
         // Globals — both the object env-record (live target /
         // fallback) and the declarative env-record. Lex bindings
         // (`let x = someObject;`) are GC roots just like var.
-        var git = self.globals.iterator();
-        while (git.next()) |e| self.heap.markValue(e.value_ptr.*);
+        //
+        // The target object itself is the root: marking it picks
+        // up `slots[]` (shape-mode values under Phase 3 of
+        // [docs/lazy-property-bag.md]), `properties` (dict-mode
+        // values), accessors, and the prototype chain via
+        // `markObject`. The fallback map is host-bootstrap state
+        // before `bindToObject` runs.
+        if (self.globals.target) |gt| {
+            self.heap.markValue(heap_mod.taggedObject(gt));
+        } else {
+            var fit = self.globals.fallback.iterator();
+            while (fit.next()) |e| self.heap.markValue(e.value_ptr.*);
+        }
         var dit = self.globals.decl_env.iterator();
         while (dit.next()) |e| self.heap.markValue(e.value_ptr.*);
 

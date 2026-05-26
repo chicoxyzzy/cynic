@@ -171,7 +171,7 @@ fn installIteratorPrototypeConstructorAccessor(realm: *Realm, proto: *JSObject) 
     // first — without it, a shape-first read on this proto
     // would return the stale slot value instead of routing
     // through the accessor we just installed.
-    proto.demoteFromShape();
+    try proto.demoteFromShape(realm.allocator);
     _ = proto.properties.swapRemove("constructor");
     proto.forgetKey("constructor");
 }
@@ -194,7 +194,7 @@ fn installIteratorPrototypeToStringTagAccessor(realm: *Realm, proto: *JSObject) 
     });
     // Same shadow-shape hazard as the constructor cleanup above
     // — demote before stripping the data slot.
-    proto.demoteFromShape();
+    try proto.demoteFromShape(realm.allocator);
     _ = proto.properties.swapRemove("@@toStringTag");
     proto.forgetKey("@@toStringTag");
 }
@@ -2465,7 +2465,7 @@ fn iteratorZipKeyed(realm: *Realm, this_value: Value, args: []const Value) Nativ
         // the encoded key would be the only alternative.
         if (builtins_object.isSymbolKey(key)) {
             const flags = iterables_obj.flagsFor(key);
-            const has_data = iterables_obj.properties.contains(key);
+            const has_data = iterables_obj.ownDataContains(key);
             const has_acc = iterables_obj.hasAccessor(key);
             if (!has_data and !has_acc) continue;
             if (!flags.enumerable) continue;

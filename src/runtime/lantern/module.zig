@@ -111,7 +111,7 @@ pub fn mergeStarKey(
     src_ns: *JSObject,
     src_key: []const u8,
 ) !void {
-    if (dst_ns.properties.contains(key)) return;
+    if (dst_ns.ownDataContains(key)) return;
     if (dst_ns.hasAccessor(key)) return;
     if (dst_ns.hasAmbiguousNamespaceKey(key)) return;
 

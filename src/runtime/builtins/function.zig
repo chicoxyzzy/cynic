@@ -75,7 +75,7 @@ pub fn installPrototypeMethods(realm: *Realm) !void {
     // Demote before the removal — the shadow shape can't encode
     // a removal, so leaving it trips `verifyShapeInvariant` under
     // GC stress.
-    fn_proto.demoteFromShape();
+    try fn_proto.demoteFromShape(realm.allocator);
     _ = fn_proto.properties.swapRemove("name");
     _ = fn_proto.property_flags.swapRemove("name");
     const builtin_fn_flags: @import("../object.zig").PropertyFlags = .{

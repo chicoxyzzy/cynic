@@ -513,7 +513,7 @@ pub fn openForInIterator(
                 if (std.mem.startsWith(u8, key, "__cynic_")) continue;
                 // Liveness: skip if neither map carries the key
                 // anymore (a delete path could leave a phantom entry).
-                if (!cur.properties.contains(key) and !cur.hasAccessor(key)) continue;
+                if (!cur.ownDataContains(key) and !cur.hasAccessor(key)) continue;
                 if (!cur.flagsFor(key).enumerable) {
                     shadow_only.append(realm.allocator, key) catch return error.OutOfMemory;
                     continue;
@@ -550,7 +550,7 @@ pub fn openForInIterator(
                     const key = entry.key_ptr.*;
                     if (std.mem.startsWith(u8, key, "__cynic_")) continue;
                     if (emitted_str.contains(key)) continue;
-                    if (cur.properties.contains(key)) continue;
+                    if (cur.ownDataContains(key)) continue;
                     if (!cur.flagsFor(key).enumerable) {
                         shadow_only.append(realm.allocator, key) catch return error.OutOfMemory;
                         continue;
@@ -727,11 +727,11 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
                     // /15.2.3.6-4-595.js — for-in over a function
                     // surfacing a user-installed enumerable inherited
                     // `prop`).
-                    var fn_has = src_fn.properties.contains(key_str.flatBytes()) or src_fn.accessors.contains(key_str.flatBytes());
+                    var fn_has = src_fn.ownDataContains(key_str.flatBytes()) or src_fn.accessors.contains(key_str.flatBytes());
                     if (!fn_has) {
                         var ancestor: ?*JSObject = src_fn.proto;
                         while (ancestor) |a| {
-                            if (a.properties.contains(key_str.flatBytes()) or a.hasAccessor(key_str.flatBytes())) {
+                            if (a.ownDataContains(key_str.flatBytes()) or a.hasAccessor(key_str.flatBytes())) {
                                 fn_has = true;
                                 break;
                             }

@@ -90,7 +90,7 @@ fn syntheticSetterDispatch(
                 return .{ .thrown = ex };
             }
         }
-        if (!obj.extensible and !obj.properties.contains(sa.key)) {
+        if (!obj.extensible and !obj.ownDataContains(sa.key)) {
             const ex = try makeTypeError(realm, "Cannot add property; object is not extensible");
             return .{ .thrown = ex };
         }
@@ -105,7 +105,7 @@ fn syntheticSetterDispatch(
                 return .{ .thrown = ex };
             }
         }
-        if (!fn_obj.extensible and !fn_obj.properties.contains(sa.key)) {
+        if (!fn_obj.extensible and !fn_obj.ownDataContains(sa.key)) {
             const ex = try makeTypeError(realm, "Cannot add property; function is not extensible");
             return .{ .thrown = ex };
         }

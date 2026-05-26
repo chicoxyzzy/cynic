@@ -391,7 +391,7 @@ pub fn buildClass(
             // so the shape would otherwise still claim `constructor`
             // is at its slot while `properties` no longer has it
             // (`verifyShapeInvariant` panics under GC stress).
-            gp.demoteFromShape();
+            try gp.demoteFromShape(realm.allocator);
             _ = gp.properties.swapRemove("constructor");
             _ = gp.property_flags.swapRemove("constructor");
             const interp_mod = @import("lantern/interpreter.zig");
@@ -571,7 +571,7 @@ pub fn buildClass(
             // gen-method path so `C.gen()` wrappers find `.next` via
             // the inherited chain. Demote first (shadow shape can't
             // encode removals — see the matching site above).
-            gp.demoteFromShape();
+            try gp.demoteFromShape(realm.allocator);
             _ = gp.properties.swapRemove("constructor");
             _ = gp.property_flags.swapRemove("constructor");
             const interp_mod = @import("lantern/interpreter.zig");
