@@ -6,7 +6,7 @@
 |---|---|---|---|---|---:|
 | **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 | — |
 | **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | — |
-| **runtime_hardened** | 92.91 % | 99.97 % | 37312 / 40161 | 34332 / 37323 | 2980 |
+| **runtime_hardened** | 92.91 % | 99.97 % | 37313 / 40161 | 34332 / 37324 | 2981 |
 
 *SES witness fidelity*: **10 / 10** witnesses classify as `divergent` (100.00 %). Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. See `docs/handbook/ses-test262-policy.md`.
 
@@ -161,12 +161,12 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-26 — cynic `fbd1a57`, test262 `d0c1b455`
+### 2026-05-26 — cynic `b84ac9f`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | — | ±0 | 50.6 s |
-| **runtime_hardened** | 92.91 % | 99.97 % | 37312 / 40161 | 34332 / 37323 | 2980 | +2980 | 40.6 s |
+| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | — | ±0 | 35.6 s |
+| **runtime_hardened** | 92.91 % | 99.97 % | 37313 / 40161 | 34332 / 37324 | 2981 | +2981 | 40.6 s |
 
 ### 2026-05-25 — cynic `8e311c3`, test262 `d0c1b455`
 

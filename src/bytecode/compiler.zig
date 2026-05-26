@@ -7746,18 +7746,44 @@ pub const Compiler = struct {
     /// Function returned false during validation. The chunk
     /// otherwise contains no user code, so any reachable observation
     /// from script source is suppressed.
+    ///
+    /// The message names the rejected identifier — both for end-user
+    /// diagnostics (V8 / SpiderMonkey both name the binding in their
+    /// `Cannot redeclare …` errors) and so the test262 hardened-mode
+    /// divergence classifier can pattern-match the throw via
+    /// `ses_divergent.zig`. Without a message the harness saw only
+    /// `name = "TypeError"`, which is too broad to add as a
+    /// divergence pattern.
     fn emitGlobalDeclThrow(self: *Compiler, name: []const u8, span: Span) CompileError!void {
-        _ = name;
         const k_type_error = try self.internString("TypeError");
-        const r_callee = try self.reserveTemp();
-        defer self.releaseTemp();
         try self.builder.emitOp(.lda_global, span);
         try self.builder.emitU16(k_type_error);
+        const r_callee = try self.reserveTemp();
+        defer self.releaseTemp();
         try self.builder.emitOp(.star, span);
         try self.builder.emitU8(r_callee);
+
+        // Build "Cannot redeclare non-configurable global '<name>'".
+        // The phrasing pairs `Cannot redeclare` (V8 / SpiderMonkey
+        // consensus) with `non-configurable global` to disambiguate
+        // from the strict-mode duplicate-let SyntaxError shape —
+        // this is a runtime TypeError sourced from
+        // CanDeclareGlobalFunction / CanDeclareGlobalVar.
+        const prefix = "Cannot redeclare non-configurable global '";
+        const suffix = "'";
+        const msg = try std.fmt.allocPrint(self.allocator, "{s}{s}{s}", .{ prefix, name, suffix });
+        defer self.allocator.free(msg);
+        const k_msg = try self.builder.addConstant(Value.fromString(self.realm.heap.allocateString(msg) catch return error.OutOfMemory));
+        try self.builder.emitOp(.lda_constant, span);
+        try self.builder.emitU16(k_msg);
+        const r_msg = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, span);
+        try self.builder.emitU8(r_msg);
+
         try self.builder.emitOp(.new_call, span);
         try self.builder.emitU8(r_callee);
-        try self.builder.emitU8(0);
+        try self.builder.emitU8(1);
         try self.builder.emitOp(.throw_, span);
     }
 

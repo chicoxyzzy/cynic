@@ -153,6 +153,19 @@ pub const patterns = [_]Pattern{
     // got false` from outside the SES surface still surfaces
     // (other patterns catch the SES cases first).
     .{ .category = .descriptor_assertion, .needle = "Expected true but got false" },
+
+    // `Cannot redeclare non-configurable global '<name>'` —
+    // emitted by §9.1.1.4.16 CanDeclareGlobalFunction (and
+    // .15 CanDeclareGlobalVar) when a top-level `function`
+    // / `var` decl collides with a non-configurable global.
+    // Under SES, every primordial constructor lives on
+    // globalThis as a non-configurable slot, so a fixture
+    // like `function Array() {}` at script top level
+    // throws this TypeError. The message is specific to
+    // Cynic's compiler emit path (see
+    // `Compiler.emitGlobalDeclThrow`); no other code path
+    // produces this exact text.
+    .{ .category = .frozen_intrinsic_typeerror, .needle = "Cannot redeclare non-configurable global" },
 };
 
 /// Curated path list — fixtures whose thrown-error message
@@ -290,4 +303,11 @@ test "classifyByPath: known generic-message divergent path" {
 test "classifyByPath: unrelated path stays null" {
     try std.testing.expect(classifyByPath("built-ins/Math/abs/abs.js") == null);
     try std.testing.expect(classifyByPath("language/expressions/addition/order.js") == null);
+}
+
+test "classify: redeclare-global TypeError matches" {
+    try std.testing.expectEqual(
+        @as(?Category, .frozen_intrinsic_typeerror),
+        classify("TypeError", "Cannot redeclare non-configurable global 'Array'"),
+    );
 }
