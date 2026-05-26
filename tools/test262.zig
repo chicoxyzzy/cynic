@@ -2245,35 +2245,35 @@ fn classifyAndRun(
     // but we score it like a regular test, since strict-$DONE
     // enforcement loses tests where the body is implicitly
     // synchronous and just relies on assert() inside it.
-    if (fm.flags.async_flag) {
-        if (test_threw) return .{ .kind = .fail_false_reject };
-        if (realm.async_done_called) {
-            if (!realm.async_done_error.isUndefined()) return .{ .kind = .fail_false_reject };
-            return .{ .kind = .pass_positive };
+    // Pull a renderable `name` / `message` pair off the thrown
+    // value (sync throw) OR the async-done error (async-flagged
+    // test that completed with an argument). Either feeds both
+    // the SES divergence classifier and the FAIL log. The async
+    // path was previously a separate early-return that skipped
+    // the classifier; consolidating here so a Promise fixture
+    // that throws "Cannot assign to read-only property" (from
+    // `Promise.resolve = ...` rejecting under SES) reclassifies
+    // the same way a sync fixture would. See Phase 2 follow-up
+    // in `docs/handbook/ses-test262-policy.md`.
+    var msg_str: ?[]const u8 = null;
+    var name_str: ?[]const u8 = null;
+    const ex_value: cynic.runtime.Value = blk: {
+        if (test_threw) {
+            break :blk if (run_result == .thrown) run_result.thrown else (realm.pending_exception orelse cynic.runtime.Value.undefined_);
         }
-        // No $DONE called. Treat as pass — many fixtures rely on
-        // implicit success.
-        return .{ .kind = .pass_positive };
-    }
-
-    if (test_threw) {
-        const ex = if (run_result == .thrown) run_result.thrown else (realm.pending_exception orelse cynic.runtime.Value.undefined_);
-        // SES divergence classification — only meaningful in
-        // the hardened main phase. Pull `name` + `message` once
-        // here so the FAIL log AND the divergence classifier
-        // share a single render. See
-        // `docs/handbook/ses-test262-policy.md` for the design.
-        var msg_str: ?[]const u8 = null;
-        var name_str: ?[]const u8 = null;
-        if (cynic.runtime.heap.valueAsPlainObject(ex)) |o| {
+        if (fm.flags.async_flag and realm.async_done_called and !realm.async_done_error.isUndefined()) {
+            break :blk realm.async_done_error;
+        }
+        break :blk cynic.runtime.Value.undefined_;
+    };
+    const have_failure = test_threw or (fm.flags.async_flag and realm.async_done_called and !realm.async_done_error.isUndefined());
+    if (have_failure) {
+        if (cynic.runtime.heap.valueAsPlainObject(ex_value)) |o| {
             // §10.1.8 [[Get]] — Error instances under the SES
             // posture carry `message` and `name` on the prototype
-            // (synthetic accessors) when the construction didn't
-            // pass an explicit message string. Use the accessor-
-            // aware `JSObject.get` (which routes through the
-            // synthetic-accessor fast path) so the failure log
-            // shows the actual error class instead of just
-            // "object (no message)".
+            // (synthetic accessors). Use the accessor-aware
+            // `JSObject.get` so the failure log shows the actual
+            // error class instead of "object (no message)".
             const msg_v = o.get("message");
             const name_v = o.get("name");
             if (msg_v.isString()) {
@@ -2286,8 +2286,8 @@ fn classifyAndRun(
                 const bytes = s.flatBytes();
                 name_str = if (bytes.len > 0) bytes else null;
             }
-        } else if (ex.isString()) {
-            const s: *cynic.runtime.JSString = @ptrCast(@alignCast(ex.asString()));
+        } else if (ex_value.isString()) {
+            const s: *cynic.runtime.JSString = @ptrCast(@alignCast(ex_value.asString()));
             msg_str = s.flatBytes();
         }
 
@@ -2315,11 +2315,30 @@ fn classifyAndRun(
             }
         } else if (name_str) |n| {
             std.debug.print("\nFAIL {s}: {s} (no message)\n", .{ rel, n });
-        } else if (cynic.runtime.heap.valueAsPlainObject(ex) != null) {
+        } else if (cynic.runtime.heap.valueAsPlainObject(ex_value) != null) {
             std.debug.print("\nFAIL {s}: object (no message)\n", .{rel});
         } else {
             std.debug.print("\nFAIL {s}: non-object\n", .{rel});
         }
+    }
+
+    // §INTERPRETING.md async-flagged tests pass iff `$DONE()`
+    // was called with no arguments. Any argument signals
+    // failure. If `$DONE` was never called, fall back to the
+    // synchronous-throw check — a body that completes without
+    // throwing AND without calling `$DONE` is a buggy fixture
+    // but we score it like a regular test, since strict-$DONE
+    // enforcement loses tests where the body is implicitly
+    // synchronous and just relies on assert() inside it.
+    if (fm.flags.async_flag) {
+        if (test_threw) return .{ .kind = .fail_false_reject };
+        if (realm.async_done_called) {
+            if (!realm.async_done_error.isUndefined()) return .{ .kind = .fail_false_reject };
+            return .{ .kind = .pass_positive };
+        }
+        // No $DONE called. Treat as pass — many fixtures rely on
+        // implicit success.
+        return .{ .kind = .pass_positive };
     }
     return .{ .kind = if (test_threw) .fail_false_reject else .pass_positive };
 }

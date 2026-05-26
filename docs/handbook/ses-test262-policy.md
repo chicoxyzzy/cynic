@@ -915,3 +915,54 @@ engine bugs.
   shipping the divergence-list infrastructure with a known engine
   bug masked inside it is the failure mode the whole policy is
   designed to prevent.
+
+### Phase 2 — divergence-list infrastructure (2026-05-26)
+
+Shipped in commit `37b55f4` (initial cut) + a follow-up
+catching async-flagged failures + extended pattern coverage.
+Final post-Phase-2 numbers:
+
+| metric | pre-Phase 2 | post-Phase 2 |
+|---|---:|---:|
+| `runtime_hardened` headline `spec%` | 86.64 % (raw) | **92.90 % (adj)** |
+| Divergent reclassifications | 0 | **2515** |
+| Real engine fails | 2527 | **12** |
+| Gap vs `runtime` baseline | -6.27 pp | **-0.01 pp** |
+
+Within 0.01 pp of the unhardened headline. The 12 remaining
+real hardened-only failures break down:
+
+- **9 libregexp grammar gaps** — `built-ins/RegExp/property-
+  escapes/generated/strings/*Emoji*` (property-of-strings:
+  `RGI_Emoji`, `RGI_Emoji_Tag_Sequence`, `RGI_Emoji_ZWJ_Sequence`,
+  `RGI_Emoji_Modifier_Sequence`, `RGI_Emoji_Flag_Sequence`,
+  `Emoji_Keycap_Sequence`, `Basic_Emoji`) and the two
+  `Script_-_Unknown` / `Script_Extensions_-_Unknown`
+  fixtures. Already documented in AGENTS.md as the
+  "Acknowledged exception — regex Annex B (§B.1.4)" carve-out.
+  Patching vendored libregexp or switching matchers would
+  close these.
+- **2 SES-policy edge cases not yet pattern-matched** —
+  `language/global-code/decl-lex-configurable-global.js`
+  (top-level `let` shadowing a frozen primordial; descriptor
+  read-back differs) and `built-ins/DataView/extensibility.js`
+  (similar SES descriptor invariant). Both have generic
+  `Expected SameValue(«false», «true») to be true` messages
+  that the divergence list deliberately doesn't catch (too
+  broad — would mask real bugs).
+- **1 harness-display oddity** —
+  `built-ins/Object/keys/15.2.3.14-2-3.js` (the `function
+  Array() {}` redeclare-on-frozen-globalThis fixture from
+  the Bucket E followup). Cynic correctly throws TypeError
+  from §9.1.1.4.16 CanDeclareGlobalFunction; the error has
+  no own `message` so the divergence classifier sees only
+  `name = "TypeError"`, which is too broad to pattern-match.
+
+**Headline reading**: Phase 2 is substantially complete. The
+remaining 12 are documented carve-outs / known engine gaps
+(libregexp); none are real engine bugs requiring runtime
+fixes. CI floor `--min-hardened-spec-pct` bumped from 84.0
+to 92.0 to track the new adjusted headline.
+
+Phase 3 (witness inversion) and Phase 5 (per-area scoreboard
++ Planned-features block) sit on this foundation.

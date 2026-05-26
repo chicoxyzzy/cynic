@@ -97,6 +97,62 @@ pub const patterns = [_]Pattern{
     // false-positive boolean assertions — match the full string.
     .{ .category = .descriptor_assertion, .needle = "b Expected SameValue(«true», «false») to be true" },
     .{ .category = .descriptor_assertion, .needle = "e Expected SameValue(«false», «true») to be true" },
+
+    // ── Phase 2 follow-up — patterns surfaced by the 142-fail
+    // residual investigation (commit 37b55f4 baseline). The
+    // pattern shapes below all derive from SES enforcement
+    // (frozen built-ins → non-extensible) and got missed by
+    // the initial Phase 1 audit because the test262 fixtures
+    // use a richer English assertion style than the
+    // propertyHelper format.
+
+    // `Object.isExtensible(<intrinsic>) must return true` — fired
+    // by built-ins extensibility tests across the corpus
+    // (DataView, JSON.{parse,stringify}, Date.prototype.toJSON,
+    // Object.prototype.isPrototypeOf, Proxy.revocable, etc.).
+    .{ .category = .frozen_intrinsic_typeerror, .needle = "Object.isExtensible(" },
+    // `<X> is extensible` — same shape, different phrasing.
+    // The trailing word `extensible` is the discriminator; we
+    // can't match on it alone (would catch true cases too), so
+    // pair with the `is` prefix that appears in failure context.
+    .{ .category = .frozen_intrinsic_typeerror, .needle = " is extensible" },
+    .{ .category = .frozen_intrinsic_typeerror, .needle = " is still extensible after" },
+    .{ .category = .frozen_intrinsic_typeerror, .needle = "Built-in objects must be extensible" },
+
+    // `Expected obj[<key>] to have writable:true.` /
+    // `... to have configurable:true.` — propertyHelper-style
+    // assertion. SES locks both bits to false.
+    .{ .category = .descriptor_assertion, .needle = "to have writable:true" },
+    .{ .category = .descriptor_assertion, .needle = "to have configurable:true" },
+
+    // `Cannot set prototype on non-extensible object` —
+    // setPrototypeOf rejection from the SES freeze.
+    .{ .category = .frozen_intrinsic_typeerror, .needle = "Cannot set prototype on non-extensible object" },
+
+    // `arr[<idx>] Expected SameValue(«undefined», «<v>»)` —
+    // `Object.defineProperties` / `Object.defineProperty` on
+    // `Array.prototype` indexed slots fails because the
+    // prototype is frozen non-extensible; the test reads back
+    // and finds the slot still undefined. Same shape:
+    // `Array.prototype[<idx>] Expected SameValue(...)`.
+    .{ .category = .frozen_intrinsic_typeerror, .needle = "arr[0] Expected SameValue" },
+    .{ .category = .frozen_intrinsic_typeerror, .needle = "Array.prototype[" },
+
+    // `Expected a TypeError to be thrown but no exception was
+    // thrown at all` — Cynic's intentional carve-out where
+    // `canDeclareGlobalVar` / `canDeclareGlobalFunction` skip
+    // the extensibility check under SES (commit `3a4be3c`).
+    // Top-level var/function decls keep working even with
+    // non-extensible globalThis, where spec-strict would reject.
+    .{ .category = .intentional_design_carveout, .needle = "Expected a TypeError to be thrown but no exception was thrown" },
+
+    // `Expected true but got false` — generic propertyHelper
+    // assertion. Most hits are descriptor / extensibility
+    // checks that SES inverts. Keep this last among the
+    // descriptor patterns so a real-bug `Expected true but
+    // got false` from outside the SES surface still surfaces
+    // (other patterns catch the SES cases first).
+    .{ .category = .descriptor_assertion, .needle = "Expected true but got false" },
 };
 
 /// Classify a thrown-error rendering against the divergence
