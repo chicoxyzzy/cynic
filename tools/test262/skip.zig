@@ -942,16 +942,7 @@ pub const skip_stage_maturity_paths = [_][]const u8{
     "built-ins/ShadowRealm/",
 };
 
-// ── Group 4: Non-standard ───────────────────────────────────────────
-//
-// SpiderMonkey-only / browser-only behaviour. Currently empty:
-// previously-listed entries (`Reflect.parse`, `IsHTMLDDA`,
-// `legacy-regexp`, …) all parse cleanly and surface as honest
-// runtime-mode failures.
-
-pub const skip_non_standard_features = [_][]const u8{};
-
-// ── Group 5: Planned (vendor / infra gaps) ──────────────────────────
+// ── Group 4: Planned (vendor / infra gaps) ──────────────────────────
 //
 // Standardised features blocked on the vendored libregexp matcher
 // (QuickJS-NG) or on runtime glue we haven't wired yet. Reviewed
@@ -1230,7 +1221,6 @@ pub fn featureIsUnsupported(feature: []const u8) bool {
         skip_annex_b_features,
         skip_ses_features,
         skip_stage_maturity_features,
-        skip_non_standard_features,
         skip_planned_features,
     }) |group| {
         for (group) |unsup| {

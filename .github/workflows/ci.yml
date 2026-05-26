@@ -121,19 +121,23 @@ jobs:
         # Three floors gate the job — two per-phase score floors
         # plus the SES-witness floor.
         #
-        #   --min-spec-pct=92.5          legacy `runtime` baseline
-        #                                (unhardened phase). Today
-        #                                published at 92.91% so
-        #                                ~0.4pp headroom.
-        #   --min-hardened-spec-pct=92.0 SES-posture `runtime_hardened`
-        #                                row, gating the SES-adjusted
-        #                                `(pass + divergent) / total`
-        #                                per Layout A in
-        #                                `docs/handbook/ses-test262-policy.md`.
-        #                                Today 92.58% adjusted (was
-        #                                84.77% raw before Phase 2
-        #                                divergence classification);
-        #                                ~0.6pp headroom.
+        #   --min-spec-pct=82.5          unhardened `pass%` floor.
+        #                                Today 83.16 % under the
+        #                                tech-debt-honest corpus
+        #                                (planned-feature paths
+        #                                — Temporal, libregexp
+        #                                `/v` gaps, cross-realm,
+        #                                etc. — now register as
+        #                                `skip` instead of being
+        #                                excluded). ~0.6pp
+        #                                headroom.
+        #   --min-hardened-spec-pct=82.5 SES-posture `runtime_hardened`
+        #                                `pass%` (the row's
+        #                                `(pass + divergent) /
+        #                                corpus` per Layout A in
+        #                                `docs/handbook/ses-test262-policy.md`).
+        #                                Today 83.16 %, same as
+        #                                unhardened.
         #   --min-ses-witness-pct=100    Phase 3 witness inversion.
         #                                Every fixture in
         #                                `tools/test262/ses_witnesses.zig`
@@ -157,8 +161,8 @@ jobs:
         run: |
           zig build test262 -- \
             --mode=runtime --threads=4 --top-rss=20 \
-            --min-spec-pct=92.5 \
-            --min-hardened-spec-pct=92.0 \
+            --min-spec-pct=82.5 \
+            --min-hardened-spec-pct=82.5 \
             --min-ses-witness-pct=100
 
       - name: Filtered sweep with top-rss

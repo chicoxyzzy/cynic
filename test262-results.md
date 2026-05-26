@@ -1,103 +1,207 @@
-# test262 conformance score history
+# test262 conformance — Cynic
+
+**Cynic passes 83.16 % of its 45096-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
+
+- **34478 pass** at the engine-true level (engine% = 99.97 % — see Legend).
+- **3025 SES-policy divergences** — Cynic's hardened posture throws by design where test262 expects the spec-literal success (frozen primordials, locked descriptors, override-mistake fix). Counted as engine-correct in the headline `pass%` per Layout A; see `docs/handbook/ses-test262-policy.md`.
+- **9 real engine failures** — all libregexp Annex B / `/v` grammar carve-outs documented in [AGENTS.md](../AGENTS.md).
+- **7584 skipped** — **tech debt + vendor gaps**. Features Cynic should eventually ship (Temporal, `explicit-resource-management`, `json-modules`, `import-text`) or fixtures blocked on vendored libregexp (`/v` set-difference, `\q{…}`, property-of-strings) and single-realm Cynic (`$262.createRealm()` cross-realm fixtures). Permanent out-of-scope (Annex B, `intl402/`, `staging/`, browser-era built-ins) is filtered before corpus — those are not counted here.
 
 ## Current scores
 
-|         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent |
-|---|---|---|---|---|---:|
-| **runtime** | 93.27 % | 99.98 % | 37503 / 40208 | 37503 / 37512 | — |
-| **runtime_hardened** | 93.27 % | 99.97 % | 37503 / 40208 | 34478 / 37514 | 3025 |
+| posture | pass% | engine% | passes / corpus | divergent |
+|---|---:|---:|---:|---:|
+| **hardened** (default — `cynic run`) | 83.16 % | 99.97 % | 37503 / 45096 | 3025 |
+| **unhardened** (`cynic --unhardened`) | 83.16 % | 99.98 % | 37503 / 45096 | — |
+
+> **pass%** is the headline — `pass / corpus` (a fixture
+> Cynic doesn't ship counts as a `skip`, lowering this).
+> **engine%** = `pass / (pass + fail)` — of fixtures the
+> engine attempted, the fraction that passed at the
+> spec-literal level (skips and SES divergences drop
+> out). **The engine-quality gauge** — moves only when
+> a real fixture flips engine pass/fail, independent of
+> what's left unimplemented or how SES policy weighs in.
 
 *SES witness fidelity*: **10 / 10** witnesses classify as `divergent` (100.00 %). Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. See `docs/handbook/ses-test262-policy.md`.
 
-## Where the runtime stands, by area
+## Legend
 
-Bucketed on the first two path components (`built-ins/Set`,
-`language/expressions`, …) under the **hardened (default)**
-posture, so the numbers match what an embedder running
-`cynic run` sees. Grouped into fail-magnitude tiers
-(1000+, 100–999, 10–99, 1–9, 0) — heavy-hitter areas
-surface at the top, related siblings stay neighbours so
-the table is scannable. Within the 0-fails tier, rows
-are sorted by `divergent` descending so SES-hot buckets
-cluster at the front of the tail.
+### Rows (postures)
 
-Columns:
+Same engine path, different SES posture. Both numbers
+refer to the same parse → compile → run sweep.
 
-- `pass` / `fail` / `skip` are the engine-true outcomes.
-- `divergent` (Phase 2 of
-  `docs/handbook/ses-test262-policy.md`) is the count of
-  fixtures whose test262-written assertion conflicts with
-  Cynic's SES enforcement (frozen primordials, locked
-  descriptors, override-mistake fix). The fixture would
-  pass on a spec-literal engine (V8 / JSC / SpiderMonkey),
-  but Cynic's hardened posture throws by design — the
-  throw is correct, the fixture's expectation of success
-  is invalidated by Cynic's SES policy. So divergent is
-  **policy-accepted**, not spec-passing.
-- `pass%` for this hardened-sourced table is
-  `(pass + divergent) / (pass + fail + skip + divergent)`
-  per the Layout A math — the fraction the embedder
-  running `cynic run` sees succeed under Cynic's default
-  posture. **Not strict-spec conformance** (a spec-literal
-  engine wouldn't count `divergent` here); see the row-
-  level legend.
-- `engine%` is `pass / (pass + fail)` — the true
-  engine-conformance gauge, independent of SES policy.
-  Skips and divergent reclassifications drop out. Today
-  this is **>99.9 % across every bucket** that has any
-  attempted fixtures — the engine implements the spec
-  it does ship.
+- **hardened** — the default posture (`cynic run`).
+  Primordials frozen, override-mistake fix on, locked
+  descriptors on every built-in `.name` / `.length`.
+  Fixtures that check spec-mandated `configurable: true`
+  on those slots reclassify as **divergent** (the engine
+  throws correctly; the test's expectation is the part
+  invalidated by SES).
+- **unhardened** — `cynic --unhardened` opt-out. Same
+  engine, but `realm.hardened = false` — primordials
+  stay mutable, globalThis extensible, no
+  override-mistake fix. The pre-SES ECMAScript baseline.
+  No fixtures get divergent-reclassified here.
 
-Rows in ~~strikethrough~~ are buckets we skip wholesale
-(out of scope per the Cynic-targeted skiplist — Annex B
-language extensions, intl402, staging, Temporal,
-browser-era built-ins …).
+### Columns
+
+- **`pass%`** — `pass / corpus`. Under **hardened**, the
+  numerator is `(pass + divergent)` per Layout A: divergent
+  fixtures fail by the strict ECMA-262 letter (SES rejects
+  writes the spec allows) but Cynic's default posture
+  ships the SES policy, so they count as engine-correct.
+  **This is what an embedder running `cynic run` sees
+  succeed.** Under **unhardened**, the numerator is plain
+  `pass`.
+- **`engine%`** — `pass / (pass + fail)`. Of fixtures the
+  engine actually attempted, the fraction that passed at
+  the spec-literal engine level (no SES weighting). The
+  pass numerator excludes `divergent`, so a hardened
+  regression that flips a real fixture from pass to fail
+  moves this column even when the divergent count masks
+  the headline `pass%`. **This is the actual engine-
+  quality gauge** — today >99.9 % both rows.
+- **`passes / corpus`** — raw counts for `pass%`. Under
+  hardened, `passes` includes divergent.
+- **`divergent`** (hardened-only) — fixtures whose
+  test262-written assertion conflicts with SES enforcement
+  (frozen primordials, locked descriptors, override-mistake
+  fix). The engine throws on the offending operation; the
+  fixture's "expected pass" is invalidated by Cynic's SES
+  policy. **These are spec-failures by ECMA-262's letter**,
+  accepted as policy-correct under the hardened posture.
+  Counted separately from `fail`. See
+  `docs/handbook/ses-test262-policy.md`.
+- **SES witness fidelity** (the italic note above) —
+  Phase 3 positive-coverage signal. The curated witness
+  set in `tools/test262/ses_witnesses.zig` is a small
+  list of paths that MUST classify as `divergent` under
+  hardened runs. Drift either way (witness now passes —
+  SES enforcement weakened; or witness fails for a
+  non-divergence reason — pattern miss or engine
+  regression in the SES throw path) is a hard signal.
+  CI gates the floor at 100 %.
+- **`Δ pass`** (history) — change in `pass` versus the
+  previous row of the same posture.
+- **`elapsed`** (history) — wall-clock time of the run
+  that produced the row. Recorded only for full sweeps
+  (no `--filter`, no `--only-failing`); partial runs
+  leave it blank. Sub-minute as `12.3 s`, minute+ as
+  `2m 40s`.
+
+### Why we don't claim "spec%"
+
+The percentages here are **not** ECMA-262 spec
+conformance. Spec conformance would require running every
+normative requirement in the spec — there's no such
+enumerable set. test262 is one community attempt at
+covering the spec via concrete fixtures, and we run a
+**filtered subset** of that (the `corpus`). So `pass%`
+is right for "did anything regress?" tracking, but it's
+a lower bound on spec coverage — a fixture not in
+`corpus` doesn't get a verdict either way.
+
+### Scope (what's in `corpus`)
+
+Two-tier skiplist in
+[`tools/test262/skip.zig`](../tools/test262/skip.zig)
+(see the per-group comments there for the full list):
+
+- **Filtered out** (not in `corpus`, won't ever be):
+  Annex B language extensions + browser-era built-ins,
+  `intl402/`, `harness/`, `staging/`, SES carve-outs
+  (`eval()` until `--allow=eval` ships, SharedArrayBuffer
+  / Atomics), pre-Stage-4 proposals Cynic ships behind
+  `--enable=<name>` (each has its own phase sweep in
+  `## Pre-Stage-4 proposals shipped` below).
+- **In `corpus` as `skip`** — *tech debt*, should
+  eventually pass: Stage-4 features Cynic hasn't shipped
+  yet (Temporal, `explicit-resource-management`,
+  `json-modules`, `import-text`), libregexp `/v` grammar
+  gaps (vendored matcher), cross-realm fixtures
+  (`$262.createRealm()` — single-realm Cynic doesn't
+  expose multi-realm to user JS yet). These count
+  toward `corpus` so `pass%` reflects the actual work
+  left instead of a trimmed-denominator headline.
+
+Today: test262 ships ~52k fixtures; `corpus` is ~45k.
+## Where the engine fails (and where SES diverges), by area
+
+Per-bucket breakdown sourced from the **hardened (default)**
+sweep so the numbers match `cynic run`. Bucketed on the
+first two path components (`built-ins/Set`,
+`language/expressions`, …).
+
+**Reading guide:**
+
+- The **top tier** (`1+ fails`) is the engine-work list.
+  Today the only entry is `built-ins/RegExp` with 9
+  libregexp Annex B / `/v` grammar gaps — fixtures that
+  compile patterns the vendored libregexp matcher
+  (QuickJS-NG) doesn't accept. All 9 are documented
+  carve-outs in AGENTS.md ("Acknowledged exception —
+  regex Annex B §B.1.4"). Closing them means patching
+  vendored libregexp or switching matchers.
+- The **0-fails tier** is sorted by `divergent ↓` so
+  SES-hot buckets cluster at the top of the tail — that's
+  where Cynic's frozen primordials / locked descriptors /
+  override-mistake fix concentrate. `built-ins/Array`,
+  `Object`, `TypedArray`, `String`, `Date`, `Math` are
+  the heaviest — every primordial method's `.length` /
+  `.name` slot SES locks down trips fixtures that read
+  those descriptors back expecting `configurable: true`.
+- ~~Strikethrough~~ rows are buckets we skip wholesale
+  (out of scope per the Cynic-targeted skiplist — Annex B
+  language extensions, `intl402`, `staging`, Temporal,
+  browser-era built-ins, …).
 
 | area | pass | fail | skip | divergent | pass% | engine% |
 |---|---:|---:|---:|---:|---:|---:|
-| **_1–9 fails_** | | | | | | |
-| `built-ins/RegExp` | 1504 | 9 | 161 | 89 | 90 % | 99 % |
-| **_0 fails (passing or wholly OOS — sorted by divergent ↓)_** | | | | | | |
-| `built-ins/Array` | 2477 | 0 | 36 | 558 | 99 % | 100 % |
-| `built-ins/Object` | 2795 | 0 | 80 | 524 | 98 % | 100 % |
+| **_1–9 fails — engine-work tier (libregexp Annex B carve-outs today)_** | | | | | | |
+| `built-ins/RegExp` | 1504 | 9 | 269 | 89 | 85 % | 99 % |
+| **_0 fails — passing / wholly OOS (sorted by divergent ↓)_** | | | | | | |
+| `built-ins/Array` | 2477 | 0 | 41 | 558 | 99 % | 100 % |
+| `built-ins/Object` | 2795 | 0 | 81 | 524 | 98 % | 100 % |
 | `built-ins/TypedArray` | 1113 | 0 | 8 | 310 | 99 % | 100 % |
-| `built-ins/String` | 1027 | 0 | 5 | 176 | 100 % | 100 % |
-| `built-ins/Date` | 431 | 0 | 0 | 152 | 100 % | 100 % |
+| `built-ins/String` | 1027 | 0 | 6 | 176 | 100 % | 100 % |
+| `built-ins/Date` | 431 | 0 | 11 | 152 | 98 % | 100 % |
 | `built-ins/Math` | 214 | 0 | 0 | 113 | 100 % | 100 % |
-| `built-ins/Promise` | 526 | 0 | 38 | 101 | 94 % | 100 % |
-| `language/expressions` | 9721 | 0 | 899 | 99 | 92 % | 100 % |
-| `built-ins/TypedArrayConstructors` | 562 | 0 | 16 | 93 | 98 % | 100 % |
-| `language/statements` | 8346 | 0 | 654 | 81 | 93 % | 100 % |
-| `built-ins/Set` | 312 | 0 | 1 | 69 | 100 % | 100 % |
-| `built-ins/Iterator` | 366 | 0 | 6 | 59 | 99 % | 100 % |
-| `built-ins/DataView` | 457 | 0 | 11 | 53 | 98 % | 100 % |
-| `built-ins/Map` | 152 | 0 | 1 | 50 | 100 % | 100 % |
-| `built-ins/ArrayBuffer` | 137 | 0 | 4 | 45 | 98 % | 100 % |
+| `built-ins/Promise` | 526 | 0 | 39 | 101 | 94 % | 100 % |
+| `language/expressions` | 9721 | 0 | 926 | 99 | 91 % | 100 % |
+| `built-ins/TypedArrayConstructors` | 562 | 0 | 26 | 93 | 96 % | 100 % |
+| `language/statements` | 8346 | 0 | 662 | 81 | 93 % | 100 % |
+| `built-ins/Set` | 312 | 0 | 2 | 69 | 99 % | 100 % |
+| `built-ins/Iterator` | 366 | 0 | 7 | 59 | 98 % | 100 % |
+| `built-ins/DataView` | 457 | 0 | 12 | 53 | 98 % | 100 % |
+| `built-ins/Map` | 152 | 0 | 2 | 50 | 99 % | 100 % |
+| `built-ins/ArrayBuffer` | 137 | 0 | 5 | 45 | 97 % | 100 % |
 | `built-ins/Reflect` | 111 | 0 | 0 | 41 | 100 % | 100 % |
-| `built-ins/Number` | 301 | 0 | 0 | 38 | 100 % | 100 % |
-| `built-ins/NativeErrors` | 52 | 0 | 0 | 36 | 100 % | 100 % |
-| `built-ins/Function` | 221 | 0 | 10 | 29 | 96 % | 100 % |
+| `built-ins/Number` | 301 | 0 | 1 | 38 | 100 % | 100 % |
+| `built-ins/NativeErrors` | 52 | 0 | 6 | 36 | 94 % | 100 % |
+| `built-ins/Function` | 221 | 0 | 24 | 29 | 91 % | 100 % |
 | `built-ins/JSON` | 136 | 0 | 0 | 28 | 100 % | 100 % |
-| `built-ins/WeakMap` | 113 | 0 | 0 | 27 | 100 % | 100 % |
-| `built-ins/Symbol` | 53 | 0 | 6 | 22 | 93 % | 100 % |
-| `built-ins/WeakSet` | 64 | 0 | 0 | 20 | 100 % | 100 % |
-| `built-ins/BigInt` | 58 | 0 | 0 | 18 | 100 % | 100 % |
+| `built-ins/WeakMap` | 113 | 0 | 1 | 27 | 99 % | 100 % |
+| `built-ins/Symbol` | 53 | 0 | 23 | 22 | 77 % | 100 % |
+| `built-ins/WeakSet` | 64 | 0 | 1 | 20 | 99 % | 100 % |
+| `built-ins/BigInt` | 58 | 0 | 1 | 18 | 99 % | 100 % |
 | `built-ins/Uint8Array` | 50 | 0 | 0 | 18 | 100 % | 100 % |
-| `built-ins/Error` | 41 | 0 | 0 | 14 | 100 % | 100 % |
+| `built-ins/Error` | 41 | 0 | 1 | 14 | 98 % | 100 % |
 | `language/module-code` | 574 | 0 | 2 | 13 | 100 % | 100 % |
 | `built-ins/RegExpStringIteratorPrototype` | 5 | 0 | 0 | 12 | 100 % | 100 % |
 | `built-ins/AsyncGeneratorPrototype` | 37 | 0 | 0 | 11 | 100 % | 100 % |
-| `built-ins/FinalizationRegistry` | 35 | 0 | 0 | 11 | 100 % | 100 % |
+| `built-ins/FinalizationRegistry` | 35 | 0 | 1 | 11 | 98 % | 100 % |
 | `built-ins/GeneratorPrototype` | 50 | 0 | 0 | 11 | 100 % | 100 % |
-| `built-ins/WeakRef` | 20 | 0 | 0 | 8 | 100 % | 100 % |
+| `built-ins/WeakRef` | 20 | 0 | 1 | 8 | 97 % | 100 % |
 | `language/global-code` | 28 | 0 | 5 | 8 | 88 % | 100 % |
-| `built-ins/AsyncGeneratorFunction` | 2 | 0 | 0 | 7 | 100 % | 100 % |
-| `built-ins/Boolean` | 42 | 0 | 0 | 7 | 100 % | 100 % |
-| `built-ins/GeneratorFunction` | 2 | 0 | 0 | 7 | 100 % | 100 % |
-| `language/types` | 90 | 0 | 9 | 7 | 92 % | 100 % |
-| `built-ins/AggregateError` | 17 | 0 | 0 | 6 | 100 % | 100 % |
-| `built-ins/Proxy` | 287 | 0 | 12 | 6 | 96 % | 100 % |
-| `built-ins/AsyncFunction` | 9 | 0 | 0 | 5 | 100 % | 100 % |
+| `built-ins/AsyncGeneratorFunction` | 2 | 0 | 2 | 7 | 82 % | 100 % |
+| `built-ins/Boolean` | 42 | 0 | 1 | 7 | 98 % | 100 % |
+| `built-ins/GeneratorFunction` | 2 | 0 | 2 | 7 | 82 % | 100 % |
+| `language/types` | 90 | 0 | 13 | 7 | 88 % | 100 % |
+| `built-ins/AggregateError` | 17 | 0 | 1 | 6 | 96 % | 100 % |
+| `built-ins/Proxy` | 287 | 0 | 13 | 6 | 96 % | 100 % |
+| `built-ins/AsyncFunction` | 9 | 0 | 1 | 5 | 93 % | 100 % |
 | `built-ins/ArrayIteratorPrototype` | 15 | 0 | 8 | 4 | 70 % | 100 % |
 | `built-ins/AsyncIteratorPrototype` | 1 | 0 | 9 | 3 | 31 % | 100 % |
 | `built-ins/MapIteratorPrototype` | 8 | 0 | 0 | 3 | 100 % | 100 % |
@@ -117,12 +221,14 @@ browser-era built-ins …).
 | `built-ins/parseInt` | 54 | 0 | 0 | 1 | 100 % | 100 % |
 | `language/punctuators` | 10 | 0 | 0 | 1 | 100 % | 100 % |
 | ~~`built-ins/AbstractModuleSource`~~ | ~~0~~ | ~~0~~ | ~~8~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
-| ~~`built-ins/AsyncDisposableStack`~~ | ~~0~~ | ~~0~~ | ~~103~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
+| ~~`built-ins/AsyncDisposableStack`~~ | ~~0~~ | ~~0~~ | ~~104~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 38 | 0 | 0 | 0 | 100 % | 100 % |
-| ~~`built-ins/DisposableStack`~~ | ~~0~~ | ~~0~~ | ~~92~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
+| ~~`built-ins/DisposableStack`~~ | ~~0~~ | ~~0~~ | ~~93~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
 | `built-ins/Infinity` | 4 | 0 | 2 | 0 | 67 % | 100 % |
 | `built-ins/NaN` | 4 | 0 | 2 | 0 | 67 % | 100 % |
-| ~~`built-ins/SuppressedError`~~ | ~~0~~ | ~~0~~ | ~~21~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
+| ~~`built-ins/ShadowRealm`~~ | ~~0~~ | ~~0~~ | ~~64~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
+| ~~`built-ins/SuppressedError`~~ | ~~0~~ | ~~0~~ | ~~22~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
+| ~~`built-ins/Temporal`~~ | ~~0~~ | ~~0~~ | ~~4588~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
 | `built-ins/ThrowTypeError` | 13 | 0 | 0 | 0 | 100 % | 100 % |
 | `built-ins/undefined` | 4 | 0 | 3 | 0 | 57 % | 100 % |
 | `language/asi` | 102 | 0 | 0 | 0 | 100 % | 100 % |
@@ -164,142 +270,17 @@ until its features ship in mainline ECMA-262.
 
 | feature | pass | fail | skip | pass% | engine% |
 |---|---:|---:|---:|---:|---:|
-| `joint-iteration` | 70 | 8 | 0 | 90 % | 90 % |
+| `joint-iteration` | 68 | 10 | 4888 | 1 % | 87 % |
 
-
-## Legend
-
-### What "spec%" would mean (and why we don't claim it)
-
-The percentages here are **not** ECMA-262 spec conformance.
-Spec conformance would require running every normative
-requirement in the spec — there's no such enumerable set.
-test262 is one community attempt at covering the spec via
-concrete fixtures, and we run a **filtered subset** of
-that (the "corpus" below).
-
-So **`pass%` here means `pass / corpus`** — how many
-fixtures we actually run pass. It's the right number for
-"did anything regress?" tracking, but it's a lower bound
-on spec coverage (a fixture not in `corpus` doesn't get a
-verdict either way).
-
-### Rows
-
-- **`runtime`** — parses, compiles, and executes against
-  an *unhardened* realm (primordials mutable, globalThis
-  extensible — the legacy ECMAScript baseline). Same
-  engine path as `runtime_hardened`; the difference is
-  the SES posture, not the spec.
-- **`runtime_hardened`** — same as `runtime` but with the
-  SES posture active (`realm.hardened = true`, the default
-  for `cynic` / `cynic run`). Primordials are frozen; the
-  override-mistake fix lets user code shadow on its own
-  receivers. Fixtures that check spec-mandated
-  `configurable: true` on built-in `.name` / `.length`
-  reclassify as **divergent** (see column) — see
-  `docs/handbook/ses-test262-policy.md`.
-
-### Columns
-
-- **`pass%`** — `pass / corpus`. For `parser` and `runtime`,
-  the numerator is plain `pass`. For `runtime_hardened`,
-  the numerator is `(pass + divergent)` per the Layout A
-  math: divergent fixtures fail by the strict ECMA-262
-  letter (SES rejects writes the spec allows), but Cynic's
-  default posture ships the SES policy, so they're
-  policy-accepted as engine-correct. **This is what an
-  embedder running `cynic run` sees succeed.**
-- **`engine%`** — `pass / (pass + fail)`. Of fixtures the
-  engine actually attempted, the fraction that passed at
-  the engine-true level (no SES weighting). The pass
-  numerator excludes `divergent`, so a hardened regression
-  that flips a real fixture from pass to fail moves this
-  column even when the divergent count masks the headline
-  `pass%`. **This is the actual engine-quality gauge.**
-  Today >99.9 % across every row — Cynic implements the
-  spec it does ship.
-- **`pass / corpus`** — raw counts for `pass%`. `corpus` is
-  the Cynic-targeted test262 subset (see Scope below);
-  `skip = corpus - attempted - divergent`.
-- **`pass / engine-attempt`** — raw counts for `engine%`.
-  Numerator excludes divergent reclassifications, so an
-  attentive reader can see at a glance how much of the
-  hardened `pass%` is policy-accepted vs engine-true.
-- **`divergent`** (`runtime_hardened` only) — fixtures
-  whose test262-written assertion conflicts with SES
-  enforcement (frozen primordials, locked descriptors,
-  override-mistake fix). The engine throws on the
-  offending operation; the fixture's "expected pass" is
-  invalidated by Cynic's SES policy. **These are
-  spec-failures by ECMA-262's letter**, accepted as
-  policy-correct under the hardened posture. Counted
-  separately from `fail`. See
-  `docs/handbook/ses-test262-policy.md`. Other rows
-  render `—`.
-- **SES witness fidelity** (note under `## Current scores`)
-  — Phase 3 positive-coverage signal. The curated witness
-  set in `tools/test262/ses_witnesses.zig` is a small list
-  of paths that MUST classify as `divergent` under
-  hardened runs. Drift either way (a witness now passes
-  — SES enforcement weakened; or a witness fails for a
-  non-divergence reason — pattern miss or engine
-  regression in the SES throw path) is a hard signal. CI
-  gates the floor at 100 %.
-- **`Δ pass`** (history) — change in `pass` versus the row
-  immediately above (chronologically previous run of the
-  same row identity).
-- **`elapsed`** (history) — wall-clock time of the run
-  that produced the row. Recorded only for full sweeps
-  (no `--filter`, no `--only-failing`); partial runs
-  leave it blank to keep the regression signal clean.
-  Sub-minute as `12.3 s`, minute+ as `2m 40s`.
-
-### Scope (what's in `corpus`)
-
-`corpus` is the test262 fixture count *after* the
-Cynic-targeted skiplist (`tools/test262/skip.zig`) filters
-out:
-
-- **Universally OOS**: `harness/`, `staging/`, `intl402/`
-  (internationalization — Cynic doesn't ship Intl).
-- **Annex B language extensions**: HTML-like comments,
-  labelled function decls in sloppy mode, legacy octals,
-  Annex B regex grammar (mostly — see the acknowledged
-  `/u`-less leak in AGENTS.md). Cynic targets edge
-  runtimes, not browsers.
-- **Annex B built-ins**: `escape` / `unescape`,
-  `String.prototype` HTML wrappers (`.bold` / `.fontsize`
-  / etc.), `Date.{getYear, setYear, toGMTString}`,
-  `String.prototype.{substr, trimLeft, trimRight}`,
-  `Object.prototype.__proto__` accessor,
-  `Object.prototype.__defineGetter__` /
-  `__defineSetter__` / `__lookupGetter__` /
-  `__lookupSetter__`, `RegExp.{$1, input, …}` legacy
-  globals.
-- **Planned features** Cynic doesn't ship yet: Temporal,
-  explicit-resource-management (`using` / `await using` +
-  `DisposableStack` / `AsyncDisposableStack` /
-  `SuppressedError`), import-attributes + json-modules,
-  Uint8Array `{from,to}{Base64,Hex}`, Float16Array,
-  json-parse-with-source.
-- **Pre-Stage-4 proposals** Cynic ships behind
-  `--enable=<name>`: tracked in the per-feature scoreboard
-  below, not in `corpus`. Each proposal's fixtures run
-  in a dedicated phase sweep with only that one flag
-  enabled, so the row reflects the proposal in honest
-  isolation.
-
-Today: test262 ships ~52k fixtures; `corpus` is 40161.
 
 ## History
 
-### 2026-05-26 — cynic `b85112e`, test262 `d0c1b455`
+### 2026-05-26 — cynic `c6ec603`, test262 `d0c1b455`
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **runtime** | 93.27 % | 99.98 % | 37503 / 40208 | 37503 / 37512 | — | +190 | 40.6 s |
-| **runtime_hardened** | 93.27 % | 99.97 % | 37503 / 40208 | 34478 / 37514 | 3025 | +3171 | 40.6 s |
+| **runtime** | 83.16 % | 99.98 % | 37503 / 45096 | 37503 / 37512 | — | +190 | 40.5 s |
+| **runtime_hardened** | 83.16 % | 99.97 % | 37503 / 45096 | 34478 / 34487 | 3025 | +3171 | 40.5 s |
 
 ### 2026-05-25 — cynic `8e311c3`, test262 `d0c1b455`
 
