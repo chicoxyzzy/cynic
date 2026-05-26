@@ -1934,6 +1934,27 @@ fn mergeBuckets(dst: *BucketMap, src: *const BucketMap) !void {
     }
 }
 
+/// Outcome for a failure in the test SOURCE evaluation path
+/// (compile error or runtime throw at script eval). When the
+/// hardened `.main` phase is running and the path is in the
+/// curated `ses_divergent.divergent_paths` list, return
+/// `.fail_divergent` so the fixture lands in the divergent
+/// bucket instead of being scored as a real engine bug.
+///
+/// Only applied to the test source itself — harness preamble
+/// failures (sta.js, assert.js, $DONE setup, installBuiltins)
+/// stay as `.fail_false_reject` because a divergent-list hit
+/// there would mask a real engine regression in the SES
+/// preamble path.
+fn testSourceFailureOutcome(phase: Phase, rel: []const u8) RunResult {
+    if (phase == .main) {
+        if (ses_divergent.classifyByPath(rel) != null) {
+            return .{ .kind = .fail_divergent };
+        }
+    }
+    return .{ .kind = .fail_false_reject };
+}
+
 fn classifyAndRun(
     arena: std.mem.Allocator,
     /// Page-returning allocator for large heap-owned byte payloads
@@ -2209,7 +2230,7 @@ fn classifyAndRun(
                 std.debug.print("\nCOMPILE-FAIL {s}: {t}\n", .{ rel, err });
                 realm.allocator.destroy(chunk_ptr);
                 if (expected_negative) |_| return .{ .kind = .pass_negative };
-                return .{ .kind = .fail_false_reject };
+                return testSourceFailureOutcome(phase, rel);
             };
             entry_chunk_async = chunk_ptr.is_async_module;
             try realm.script_chunks.append(realm.allocator, chunk_ptr);
@@ -2236,7 +2257,7 @@ fn classifyAndRun(
             const mod_outcome = cynic.runtime.run(arena, &realm, chunk_ptr) catch {
                 entry_mod.state = .errored;
                 if (expected_negative) |_| return .{ .kind = .pass_negative };
-                return .{ .kind = .fail_false_reject };
+                return testSourceFailureOutcome(phase, rel);
             };
             entry_mod.state = switch (mod_outcome) {
                 .value, .yielded => .evaluated,
@@ -2255,7 +2276,7 @@ fn classifyAndRun(
         // here outlives this call.
         break :blk cynic.runtime.evaluateScript(arena, &realm, test_source) catch {
             if (expected_negative) |_| return .{ .kind = .pass_negative };
-            return .{ .kind = .fail_false_reject };
+            return testSourceFailureOutcome(phase, rel);
         };
     };
 
@@ -2357,8 +2378,18 @@ fn classifyAndRun(
         // ≥80% per Phase 2 of the policy doc; the remainder is
         // either category-misses (add a pattern on next bump)
         // or genuine engine bugs surfaced by SES enforcement.
+        //
+        // Two-layer lookup: the message-based `classify` catches
+        // the bulk (~99.5 % of divergent fixtures); a smaller
+        // curated `classifyByPath` escape hatch covers fixtures
+        // whose generic message (e.g. bare `Expected SameValue(
+        // «false», «true») to be true` from non-propertyHelper
+        // asserts) is too broad to add as a pattern without
+        // over-firing on real engine bugs.
         if (phase == .main) {
-            if (ses_divergent.classify(name_str, msg_str)) |_| {
+            const cat = ses_divergent.classify(name_str, msg_str) orelse
+                ses_divergent.classifyByPath(rel);
+            if (cat != null) {
                 // Skip the FAIL log line for the divergent
                 // case — it's not a real failure, and printing
                 // ~2500 of these per sweep is noise.

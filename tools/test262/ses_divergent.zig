@@ -155,6 +155,59 @@ pub const patterns = [_]Pattern{
     .{ .category = .descriptor_assertion, .needle = "Expected true but got false" },
 };
 
+/// Curated path list — fixtures whose thrown-error message
+/// is too generic to pattern-match safely (e.g. a bare
+/// `Expected SameValue(«false», «true») to be true` from a
+/// non-propertyHelper `assert.sameValue` call) but which are
+/// unambiguously SES-divergent on inspection. Each entry
+/// needs an inline comment citing the SES surface it tests.
+///
+/// Use sparingly. The pattern-based classifier covers ~99.5 %
+/// of divergent fixtures; this list catches the long-tail
+/// cases where extending the patterns would over-fire on
+/// real engine bugs. Keep entries verified by hand — a path
+/// here bypasses the message-shape sanity check entirely.
+pub const divergent_paths = [_]struct { path: []const u8, category: Category }{
+    .{
+        // `assert.sameValue(Object.isExtensible(DataView),
+        // true)` against a frozen primordial. Same shape as
+        // the `built-ins/Object/prototype/extensibility.js`
+        // witness, but the assert is direct (no
+        // propertyHelper prefix), so the thrown error is
+        // just `Expected SameValue(«false», «true») to be
+        // true` — too generic for a pattern. SES enforces
+        // §17 "built-in objects must be extensible" the
+        // opposite way; the divergence is by design.
+        .path = "built-ins/DataView/extensibility.js",
+        .category = .frozen_intrinsic_typeerror,
+    },
+    .{
+        // `let Array;` at top level + `assert.sameValue(
+        // descriptor.configurable, true)` on the globalThis
+        // `Array` slot. Spec §15.1.8 step 5.c demands
+        // `configurable: true` on a configurable global
+        // property a lex decl shadows; SES locks every
+        // intrinsic on globalThis to `{w:f, e:f, c:f}`, so
+        // the descriptor read-back fails the equality. The
+        // thrown message is the bare `Expected SameValue(
+        // «false», «true») to be true` — same generic shape
+        // as the `DataView/extensibility.js` entry above.
+        .path = "language/global-code/decl-lex-configurable-global.js",
+        .category = .frozen_intrinsic_typeerror,
+    },
+};
+
+/// Path-based divergence lookup — the escape hatch for
+/// fixtures whose message is too generic to pattern-match.
+/// Returns `null` for paths not on the curated list; the
+/// caller still tries `classify` on the message.
+pub fn classifyByPath(rel: []const u8) ?Category {
+    for (divergent_paths) |entry| {
+        if (std.mem.eql(u8, entry.path, rel)) return entry.category;
+    }
+    return null;
+}
+
 /// Classify a thrown-error rendering against the divergence
 /// patterns. The input is the same `name: message` string the
 /// harness builds for the FAIL log, plus an optional fallback
@@ -221,4 +274,20 @@ test "classify: Object.isFrozen-style assertion" {
         @as(?Category, .descriptor_assertion),
         classify("Test262Error", "b Expected SameValue(«true», «false») to be true"),
     );
+}
+
+test "classifyByPath: known generic-message divergent path" {
+    try std.testing.expectEqual(
+        @as(?Category, .frozen_intrinsic_typeerror),
+        classifyByPath("built-ins/DataView/extensibility.js"),
+    );
+    try std.testing.expectEqual(
+        @as(?Category, .frozen_intrinsic_typeerror),
+        classifyByPath("language/global-code/decl-lex-configurable-global.js"),
+    );
+}
+
+test "classifyByPath: unrelated path stays null" {
+    try std.testing.expect(classifyByPath("built-ins/Math/abs/abs.js") == null);
+    try std.testing.expect(classifyByPath("language/expressions/addition/order.js") == null);
 }
