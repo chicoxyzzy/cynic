@@ -5,8 +5,8 @@
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent |
 |---|---|---|---|---|---:|
 | **parser** | 73.22 % | 100.00 % | 29406 / 40161 | 29406 / 29406 | — |
-| **runtime** | 93.03 % | 99.98 % | 37362 / 40161 | 37362 / 37371 | — |
-| **runtime_hardened** | 93.03 % | 99.97 % | 37362 / 40161 | 34363 / 37373 | 2999 |
+| **runtime** | 93.04 % | 99.98 % | 37430 / 40229 | 37430 / 37439 | — |
+| **runtime_hardened** | 93.04 % | 99.97 % | 37430 / 40229 | 34413 / 37441 | 3017 |
 
 *SES witness fidelity*: **10 / 10** witnesses classify as `divergent` (100.00 %). Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. See `docs/handbook/ses-test262-policy.md`.
 
@@ -83,6 +83,7 @@ browser-era built-ins …).
 | `built-ins/JSON` | 123 | 0 | 21 | 20 | 87 % | 100 % |
 | `built-ins/WeakSet` | 64 | 0 | 0 | 20 | 100 % | 100 % |
 | `built-ins/BigInt` | 58 | 0 | 0 | 18 | 100 % | 100 % |
+| `built-ins/Uint8Array` | 50 | 0 | 0 | 18 | 100 % | 100 % |
 | `built-ins/Error` | 41 | 0 | 0 | 14 | 100 % | 100 % |
 | `language/module-code` | 562 | 0 | 14 | 13 | 98 % | 100 % |
 | `built-ins/RegExpStringIteratorPrototype` | 5 | 0 | 0 | 12 | 100 % | 100 % |
@@ -164,7 +165,7 @@ until its features ship in mainline ECMA-262.
 
 | feature | pass | fail | skip | pass% | engine% |
 |---|---:|---:|---:|---:|---:|
-| `joint-iteration` | 69 | 9 | 0 | 88 % | 88 % |
+| `joint-iteration` | 68 | 10 | 0 | 87 % | 87 % |
 
 
 ## Legend
@@ -302,8 +303,8 @@ Today: test262 ships ~52k fixtures; `corpus` is 40161.
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
 | **parser** | 73.22 % | 100.00 % | 29406 / 40161 | 29406 / 29406 | — | -905 | 5.6 s |
-| **runtime** | 93.03 % | 99.98 % | 37362 / 40161 | 37362 / 37371 | — | +49 | 35.6 s |
-| **runtime_hardened** | 93.03 % | 99.97 % | 37362 / 40161 | 34363 / 37373 | 2999 | +3030 | 40.6 s |
+| **runtime** | 93.04 % | 99.98 % | 37430 / 40229 | 37430 / 37439 | — | +117 | 40.6 s |
+| **runtime_hardened** | 93.04 % | 99.97 % | 37430 / 40229 | 34413 / 37441 | 3017 | +3098 | 40.6 s |
 
 ### 2026-05-25 — cynic `8e311c3`, test262 `d0c1b455`
 

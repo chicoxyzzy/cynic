@@ -358,6 +358,16 @@ pub fn install(realm: *Realm) !void {
         try ctor.setWithFlags(realm.allocator, "BYTES_PER_ELEMENT", Value.fromInt32(variant.kind.elementSize()), frozen);
 
         try realm.globals.put(realm.allocator, variant.name, heap_mod.taggedFunction(ctor));
+
+        // Stage 4 ArrayBuffer ↔ base64/hex — Uint8Array gains
+        // `fromBase64` / `fromHex` statics and `setFromBase64` /
+        // `setFromHex` / `toBase64` / `toHex` prototype methods.
+        // Brand-keyed on `[[TypedArrayName]] === "Uint8Array"`, so
+        // Uint8ClampedArray (which shares `kind = .uint8`) does
+        // NOT get these methods.
+        if (variant.kind == .uint8 and std.mem.eql(u8, variant.name, "Uint8Array")) {
+            try @import("uint8_base64_hex.zig").installOnUint8Array(realm, ctor, proto);
+        }
     }
 }
 

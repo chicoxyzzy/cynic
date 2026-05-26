@@ -966,13 +966,6 @@ pub const skip_planned_features = [_][]const u8{
     // attribute syntax + the JSON / text resolution back-ends yet.
     "import-attributes",
     "json-modules",
-    // ES2024 — `Float16Array` + `Math.f16round` + `DataView` half
-    // float accessors all SHIPPED. Binary16 conversion is provided
-    // by Zig's `@floatCast f64 → f16` (round-half-to-even
-    // built-in), used by the array-store path in `typed_array.zig`
-    // and by `Math.f16round` in `math.zig`. Was skipped pre-2026-05;
-    // remove this comment block once the entry stays out for a few
-    // corpus bumps.
     // ES2025 `JSON.parse` source-text context — the reviver's
     // second argument carries `{ source }` for the original
     // JSON span of the value being revived. Stage 4 but Cynic's
@@ -1005,12 +998,6 @@ pub const skip_planned_paths = [_][]const u8{
     // so this whole subtree fails brand checks. Path-skip until
     // Temporal lands. ~7 fixtures.
     "built-ins/Date/prototype/toTemporalInstant/",
-    // `Uint8Array.{fromBase64, fromHex, prototype.{setFromBase64,
-    // setFromHex, toBase64, toHex}}` — Stage 4 (ES2025 ArrayBuffer
-    // ↔ base64/hex). The whole `built-ins/Uint8Array/` tree
-    // tests this single proposal; Cynic's TypedArray surface ships
-    // every other method, so no risk of over-skipping.
-    "built-ins/Uint8Array/",
 };
 
 pub const skip_planned_path_contains = [_][]const u8{
@@ -1189,14 +1176,15 @@ pub fn pathIsPermanentlyOutOfScope(rel_path: []const u8) bool {
     return false;
 }
 
-/// Fixtures Cynic skips **today** but should eventually attempt —
-/// either pre-Stage-4 proposals (ShadowRealm) or Stage-4-shipped
-/// surfaces blocked on vendor / runtime-glue gaps (Temporal,
-/// Uint8Array base64/hex, libregexp `/v` escapes). These move to
-/// the `attempted` column once the proposal advances or the
+/// Fixtures Cynic skips **today** but should eventually attempt
+/// — either pre-Stage-4 proposals (ShadowRealm) or Stage-4-
+/// shipped surfaces blocked on vendor / runtime-glue gaps
+/// (Temporal, libregexp `/v` escapes). These move to the
+/// `attempted` column once the proposal advances or the
 /// blocking infra lands. Separated from
 /// `pathIsPermanentlyOutOfScope` so the "what work is left"
-/// signal stays distinct from the "what we refuse to do" signal.
+/// signal stays distinct from the "what we refuse to do"
+/// signal.
 pub fn pathIsCurrentlySkipped(rel_path: []const u8) bool {
     inline for (.{ skip_stage_maturity_paths, skip_planned_paths }) |group| {
         for (group) |prefix| {
@@ -1322,11 +1310,6 @@ test "skip: Temporal out of scope" {
 test "skip: ShadowRealm out of scope" {
     try testing.expect(pathIsCynicOutOfScope("built-ins/ShadowRealm/constructor.js"));
     try testing.expect(pathIsCynicOutOfScope("built-ins/ShadowRealm/prototype/evaluate/this.js"));
-}
-
-test "skip: Uint8Array base64/hex (ES2025) out of scope" {
-    try testing.expect(pathIsCynicOutOfScope("built-ins/Uint8Array/fromBase64/null.js"));
-    try testing.expect(pathIsCynicOutOfScope("built-ins/Uint8Array/prototype/toHex/length.js"));
 }
 
 test "skip: /v unicodeSets generated — libregexp parse-time gaps" {
