@@ -1004,3 +1004,94 @@ Risk realised: zero. Witness fixtures are still counted in
 `witness_pass` / `witness_fail` counters are an additional
 positive-coverage side channel, not an alternative
 classification.
+
+### Phase 4 — Cynic-authored SES tests (2026-05-26)
+
+MVP shipped. 13 hand-written tests under `tests/ses/` cover
+the four SES enforcement surfaces:
+
+- `override_*` — override-mistake fix corners (shadowing a
+  frozen method, `defineProperty` through a synthetic
+  accessor pair, subclass method install).
+- `harden_*` — `harden()` deep-freeze, cyclic-graph
+  termination, function + `.prototype` walk, return-input.
+- `primordials_*` — every prototype + constructor frozen at
+  init, monkey-patch throws.
+- `globalthis_*` — top-level `var` / `function` decls allowed
+  per the SES carve-out, intrinsic re-bind rejected.
+
+Runner: `tools/test-ses.sh` invokes `cynic run <fixture>`
+per file; exit 1 on uncaught throw → fail. Wired as
+`zig build test-ses`; CI gates as a step under `build-and-test`.
+
+**Engine bug surfaced + fixed.** `harden_basic` and
+`harden_function_and_prototype` initially failed because
+`builtins/harden.zig` stamped non-writable / non-configurable
+into `property_flags` only — Phase 3 of the lazy property
+bag introduced shape-mode storage where the live attrs come
+from the shape entry, not the bag. Shapes are immutable
+transition nodes (flipping a slot in place would corrupt
+every other object sharing the shape), so `harden` now
+calls `JSObject.demoteFromShape` first to flatten the
+object into bag mode before stamping the locked attrs.
+This is exactly the kind of gap Phase 4 was designed to
+surface — test262 doesn't exercise `harden()` because it's
+a Cynic addition, so the bug was invisible until a
+positive-coverage test asserted the post-`harden` descriptor
+flags directly.
+
+Note: the policy doc targets ~30 tests; 13 is the MVP
+baseline. Phase 4b (deferred) extends coverage into more
+override-mistake corners (accessor demotion, redefinition
+over a synthetic accessor pair) plus the `--unhardened`
+round-trip (needs harness-side work to launch a sub-process
+with the flag and check the inverse behaviour). Also
+deferred: routing through the test262 harness as
+`--phase=ses-positive` with a dedicated `ses-cynic-witness`
+score row — Phase 3 already gave the scoreboard a witness
+signal, so the marginal value of a second row is small.
+
+### Phase 5 — re-baseline + CI + scoreboard reshape (2026-05-26)
+
+Partial. The CI floor work (Phase 5 line items 4-7 above)
+landed during Phase 2 + Phase 3:
+`--min-hardened-spec-pct` moved to 92.0, `--min-ses-witness-pct=100`
+wired in CI, `AGENTS.md` flag table updated, legend kept in
+sync with each new column.
+
+**Phase 5a (this session)** — witness fidelity note under
+`## Current scores` in `test262-results.md`. The latest
+hardened sweep's witness counters render as
+`*SES witness fidelity*: <P> / <T> witnesses classify as
+divergent (<pct> %)`. New Row fields `witness_pass` /
+`witness_total` carry the data through `makeRow`;
+`writeFileBody` emits the note fresh on hardened runs and
+preserves it verbatim on non-hardened refreshes (same
+pattern as `preserved_scoreboard` + `preserved_pre_stage4`).
+
+**Phase 5b — Planned features block** (deferred). Static
+markdown sketch lives in Phase 0c above (Temporal / EREM /
+Float16Array / etc., counts from the current corpus). Not
+yet emitted into `test262-results.md`. Hand-maintained on
+corpus bumps when shipped.
+
+**Phase 5c — per-area scoreboard reshape** (deferred). The
+current per-area table is single-mode (the most recent
+runtime sweep). Dual-mode tiering per Phase 5 spec needs
+per-bucket counters under both `runtime` and
+`runtime_hardened`, which `BucketMap` doesn't separate
+today. Substantial harness surgery; ships standalone.
+
+### Phase 6 — corpus-update protocol (2026-05-26)
+
+Shipped. `docs/handbook/agent-checks.md` grew a
+"Corpus bumps (after `/bump-test262`)" section calling out
+three new review signals beyond the standard `Δ pass`:
+divergent-count delta (a new fixture family unrecognised by
+`ses_divergent.zig`), witness-path integrity (an upstream
+rename silently shrinks the witness set), and skip-list
+bit-rot (new top-level directories slipping under an
+existing path-skip).
+
+Pure docs; no code changes. The protocol activates the next
+time the test262 submodule moves.

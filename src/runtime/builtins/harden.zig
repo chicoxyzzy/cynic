@@ -94,6 +94,22 @@ pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void
         // already non-configurable by construction.
         if (obj.is_module_namespace) return;
         obj.extensible = false;
+        // Shape-mode write fast path (Phase 3 of
+        // [docs/lazy-property-bag.md]) stores the live descriptor
+        // attrs in the shape entry, NOT in `property_flags`. Shapes
+        // are immutable transition nodes — flipping a slot to
+        // non-writable in place would corrupt every other object
+        // sharing the shape. The cheap, correct fix is to demote
+        // out of shape mode before stamping: `demoteFromShape`
+        // back-fills `properties` + `property_flags` from the
+        // shape chain and clears the shape pointer, so subsequent
+        // `flagsFor` lookups consult `property_flags` (the source
+        // of truth in dict mode) and see the locked attrs harden
+        // is about to install. The object now reads + writes
+        // through the dictionary-mode path, which is fine: a
+        // hardened object can never gain new properties so it
+        // won't benefit from further shape transitions anyway.
+        obj.demoteFromShape(realm.allocator) catch return error.OutOfMemory;
         var it = obj.iterOwnNamedKeys();
         while (it.next()) |e| {
             const k = e.key_ptr.*;

@@ -40,6 +40,18 @@ jobs:
       - name: Unit tests
         run: zig build test --summary all
 
+      - name: SES positive-coverage tests
+        # Phase 4 of `docs/handbook/ses-test262-policy.md`. Runs
+        # the hand-written tests under `tests/ses/` against the
+        # installed cynic CLI (hardened by default). Each fixture
+        # asserts a piece of SES behaviour the engine is supposed
+        # to enable (override-mistake shadowing, `harden()`
+        # traversal, frozen-globalThis carve-outs) — the dual of
+        # the witness-inversion set in
+        # `tools/test262/ses_witnesses.zig`. Gating: any failure
+        # exits 1.
+        run: zig build test-ses
+
   fmt-check:
     name: zig fmt (advisory)
     runs-on: ubuntu-latest

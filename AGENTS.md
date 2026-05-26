@@ -237,6 +237,7 @@ Common commands:
 
     zig build                                       # build cynic into zig-out/bin/
     zig build test                                  # all unit tests
+    zig build test-ses                              # hand-written SES positive-coverage tests
     zig build test262                               # full conformance run (runtime mode)
     zig build run -- parse <file>                   # script-mode parse
     zig build run -- parse --module <file>          # module-mode parse (alias: -m)
