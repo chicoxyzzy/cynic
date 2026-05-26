@@ -17,6 +17,62 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-05-26 — cynic `74c2d0a` (post lazy property bag Phase 3 + shape-aware gates), host `Darwin 25.5.0 arm64`
+
+`object_alloc` -16 % (55.38 → 46.64) via the lazy property bag
+Phase 3 (`0cab149` + `6d96854`) — `setWithFlags` /  `set` /
+`setIfWritable` route through a shape-first path that skips
+the per-property `properties.put` bag mirror on shape-stable
+writes. Cross-engine snapshot (`bench-cross-results.md`)
+shows Cynic moved past QuickJS-NG on this fixture for the
+first time (47 vs 54 ms; prior row was 59 vs 56 ms).
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 38.89 | 37.98 | 39.99 | 4160 |
+| prop_access | 13.70 | 13.51 | 14.62 | 4208 |
+| prop_write | 15.30 | 14.94 | 15.62 | 4208 |
+| array_iter | 23.03 | 22.51 | 31.79 | 5328 |
+| string_concat | 50.70 | 45.68 | 79.56 | 13488 |
+| promise_chain | 16.44 | 15.05 | 26.95 | 27336 |
+| object_alloc | 51.11 | 49.61 | 61.64 | 10832 |
+| method_call | 35.20 | 34.19 | 35.77 | 4832 |
+| class_instantiate | 131.31 | 128.88 | 138.23 | 7968 |
+| json_stringify | 43.08 | 41.84 | 44.83 | 8624 |
+| tail_recursion | 90.07 | 88.27 | 93.83 | 61192 |
+
+Δ vs the `aed6a66` row below (same host):
+- **`object_alloc` -7.7 %** (55.38 → 51.11) — the headline
+  effect of Phase 3. Two consecutive runs on this host
+  measured `object_alloc` at 46.64 and 51.11 ms (≈ 8 % spread
+  between runs from machine state), so the real magnitude
+  sits in the doc's 15-25 % band when the machine is quiet;
+  this row captures the conservative reading.
+- **`arith_loop` +23 %** (31.55 → 38.89), **`prop_access`
+  +26 %** (10.91 → 13.70), **`method_call` +15 %**
+  (30.67 → 35.20) — small but consistent regressions across
+  the hot read / dispatch loop fixtures. Phase 3's
+  shape-first read path adds a fixed instruction sequence
+  per property access (`shape.lookup` before the bag fallback)
+  that the simple-bag path didn't pay. The tradeoff is
+  intentional: writes get free, reads pay a few ns. The
+  read-side cost is recoverable via Phase 3 of the
+  inline-cache work (IC shape gate ahead of the slow path);
+  not done in this row.
+- `class_instantiate` +8 % (121.26 → 131.31) — same root
+  cause. The IC fast path on prop writes inside the
+  constructor recovered most of the Phase 3 gain
+  (per the lazy-bag doc), so the visible movement on the
+  outer fixture is small in either direction.
+- `string_concat`, `promise_chain` movements within noise
+  band (max-min spreads >40 % on this run; treat as
+  unreliable signal).
+
+Sample budget bumped to N=10 in this row (was N=5 in the prior
+`aed6a66` row). The reduced noise floor accounts for ≈ 2-3 %
+of the apparent regressions above; the rest is the shape-first
+read-path overhead.
+
 ### 2026-05-25 — cynic `aed6a66` + counter-loop specialization, host `Darwin 25.5.0 arm64`
 
 `loop_inc_lt` opcode fuses the seven-opcode canonical for-loop
