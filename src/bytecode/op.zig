@@ -567,6 +567,19 @@ pub const Op = enum(u8) {
     /// TypeError on missing loader / failed load becomes a
     /// rejected Promise; the call itself never throws.
     dynamic_import,
+    /// `[op] [r_spec:u8]` — §13.3.10 dynamic `import(specifier,
+    /// options)` when `options` is anything other than a literal
+    /// `{ with: { type: "..." } }` shape. The specifier was
+    /// previously stored to `r_spec`; `options` arrives in `acc`.
+    /// Implements §13.3.10.1 EvaluateImportCall steps 9-15:
+    /// ToObject the options, `Get(options, "with")`, ToObject the
+    /// `with` value, `EnumerableOwnProperties(withObj, key)`,
+    /// `Get(withObj, key)` for each key, require each value to be
+    /// a String, propagate every abrupt completion through
+    /// `IfAbruptRejectPromise`. The compile-time literal-shape
+    /// fast path (`.dynamic_import`) is preserved for the common
+    /// case to skip the runtime walk.
+    dynamic_import_with_options,
     /// `[op]` — §16.2.1.7 ImportMeta runtime semantics. Lazy-
     /// initialise `realm.current_module.import_meta` (an
     /// ordinary object with `[[Prototype]] = %Object.prototype%`)
@@ -1032,6 +1045,11 @@ pub const Op = enum(u8) {
             // `acc`, not the operand stream.
             .dynamic_import,
             => 2, // u16 / i16
+            // §13.3.10 — `dynamic_import_with_options [r_spec:u8]`
+            // carries the specifier-bearing register; `options` is
+            // in `acc`. Runtime walks the options per
+            // §13.3.10.1 steps 9-15.
+            .dynamic_import_with_options => 1, // r_spec:u8
             // §16.2.1.5 module_load — `k_spec:u16` selecting the
             // specifier string, then `k_attr:u16` carrying the
             // `with { type: "..." }` attribute value (or `0xFFFF`
@@ -1166,6 +1184,7 @@ pub const Op = enum(u8) {
             .pop_env => "PopEnv",
             .module_load => "ModuleLoad",
             .dynamic_import => "DynamicImport",
+            .dynamic_import_with_options => "DynamicImportWithOptions",
             .import_meta => "ImportMeta",
             .module_export => "ModuleExport",
             .module_link_complete => "ModuleLinkComplete",

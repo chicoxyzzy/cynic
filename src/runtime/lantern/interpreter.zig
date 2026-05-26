@@ -5470,6 +5470,159 @@ pub fn runFrames(
                 continue :dispatch try decodeNext(code, &ip, &committed);
             },
 
+            .dynamic_import_with_options => {
+                // §13.3.10 dynamic `import(specifier, options)` with
+                // a non-literal `options` expression. The compiler
+                // pre-stored the specifier into `r_spec`; `options`
+                // arrives in `acc`. Implements §13.3.10.1
+                // EvaluateImportCall steps 9-15:
+                //   9.  Let attributes be a new empty List.
+                //   10. If options is not undefined, then
+                //       a. If Type(options) is not Object → reject
+                //          promise with TypeError.
+                //       b. Let attributesObj be ? Get(options, "with").
+                //       c. IfAbruptRejectPromise(attributesObj).
+                //       d. If attributesObj is not undefined:
+                //          i.   If Type(attributesObj) is not Object
+                //               → reject.
+                //          ii.  Let keys be ? EnumerableOwnNames(
+                //               attributesObj).
+                //          iii. For each String key of keys:
+                //               - Let value be ? Get(attributesObj,
+                //                 key).
+                //               - If Type(value) is not String →
+                //                 reject TypeError.
+                //               - Otherwise add to attributes.
+                //   11-15. Resolve specifier + perform host import.
+                //
+                // The only attribute Cynic's loader inspects today
+                // is `"type"`; other keys are still observed through
+                // their `Get` (so Proxy traps fire) but discarded.
+                const promise_mod = @import("../builtins/promise.zig");
+                const object_helpers = @import("../builtins/object.zig");
+
+                const r_spec = code[ip];
+                ip += 1;
+                const options_v = acc;
+                const specifier_v = registers[r_spec];
+
+                // §13.3.10.1 step 7 — ToString(specifier). Any abrupt
+                // completion goes to a rejected Promise.
+                const dio_spec_string: ?*JSString = intrinsics_mod.stringifyArg(realm, specifier_v) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NativeThrew => spec_blk: {
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "import specifier coercion failed");
+                        realm.pending_exception = null;
+                        acc = try promise_mod.allocatePromiseFor(realm, null, .rejected, ex);
+                        break :spec_blk null;
+                    },
+                };
+                if (dio_spec_string == null) {
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+                const spec_string = dio_spec_string.?;
+
+                // §13.3.10.1 step 9-10 — walk the options object,
+                // gathering `type` if present. Track abrupt
+                // completions and the failure reason value so the
+                // caller can construct the right rejection.
+                var attribute_type: ?[]const u8 = null;
+                var attr_owned: ?[]u8 = null;
+                defer if (attr_owned) |o| realm.allocator.free(o);
+                var reject_reason: ?Value = null;
+
+                if (!options_v.isUndefined()) {
+                    if (heap_mod.valueAsPlainObject(options_v)) |opts_obj| {
+                        // step 10.b — `attributesObj = Get(options,
+                        // "with")`. Use the accessor-aware getter so a
+                        // user-installed getter / Proxy `get` trap
+                        // fires; an abrupt completion routes to the
+                        // rejected-Promise path through `realm.
+                        // pending_exception`.
+                        const with_v = blk: {
+                            const v = intrinsics_mod.getPropertyChain(realm, opts_obj, "with") catch |err| switch (err) {
+                                error.OutOfMemory => return error.OutOfMemory,
+                                error.NativeThrew => {
+                                    const ex = realm.pending_exception orelse try makeTypeError(realm, "Get(options, \"with\") threw");
+                                    realm.pending_exception = null;
+                                    reject_reason = ex;
+                                    break :blk Value.undefined_;
+                                },
+                            };
+                            break :blk v;
+                        };
+                        if (reject_reason == null and !with_v.isUndefined()) {
+                            if (heap_mod.valueAsPlainObject(with_v)) |with_obj| {
+                                // step 10.d.ii — EnumerableOwnPropertyNames.
+                                // `enumerableOwnPropertyKeyValues` fires
+                                // Proxy `ownKeys` / `getOwnPropertyDescriptor`
+                                // / `get` traps per spec, and roots each
+                                // gathered key/value across the loop's
+                                // JS re-entries.
+                                const enum_scope = realm.heap.openScope() catch return error.OutOfMemory;
+                                defer enum_scope.close();
+                                const entries = object_helpers.enumerableOwnPropertyKeyValues(realm, with_obj, enum_scope) catch |err| switch (err) {
+                                    error.OutOfMemory => return error.OutOfMemory,
+                                    error.NativeThrew => en_blk: {
+                                        const ex = realm.pending_exception orelse try makeTypeError(realm, "options.with enumeration threw");
+                                        realm.pending_exception = null;
+                                        reject_reason = ex;
+                                        break :en_blk &.{};
+                                    },
+                                };
+                                defer realm.allocator.free(entries);
+                                if (reject_reason == null) {
+                                    for (entries) |entry| {
+                                        // step 10.d.iii.2 — value must be a
+                                        // String. Numbers, Symbols, etc.
+                                        // surface as TypeError.
+                                        if (!entry.value.isString()) {
+                                            reject_reason = try makeTypeError(realm, "Import attribute value must be a string");
+                                            break;
+                                        }
+                                        const key_bytes = entry.key_str.flatBytes();
+                                        if (std.mem.eql(u8, key_bytes, "type")) {
+                                            const val_str: *JSString = @ptrCast(@alignCast(entry.value.asString()));
+                                            const val_bytes = val_str.flatBytes();
+                                            // Copy now — `entries` and the
+                                            // gathered strings live on the
+                                            // enum scope, which goes out of
+                                            // scope at the `defer close` above.
+                                            attr_owned = realm.allocator.dupe(u8, val_bytes) catch return error.OutOfMemory;
+                                            attribute_type = attr_owned.?;
+                                        }
+                                    }
+                                }
+                            } else {
+                                // step 10.d.i — non-Object `with` → TypeError.
+                                reject_reason = try makeTypeError(realm, "Import attributes 'with' must be an Object");
+                            }
+                        }
+                    } else {
+                        // step 10.a — non-Object options → TypeError.
+                        reject_reason = try makeTypeError(realm, "import() options must be an Object");
+                    }
+                }
+
+                if (reject_reason) |ex| {
+                    acc = try promise_mod.allocatePromiseFor(realm, null, .rejected, ex);
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+
+                // Happy path — enqueue the deferred load with the
+                // resolved attribute. Mirrors the static `.dynamic_import`
+                // tail; see the spec ordering rationale there.
+                const pending = try promise_mod.allocatePromiseFor(realm, null, .pending, Value.undefined_);
+                try realm.enqueueModuleImport(
+                    Value.fromString(spec_string),
+                    pending,
+                    local_chunk.base_url,
+                    attribute_type,
+                );
+                acc = pending;
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            },
+
             .module_export => {
                 const k = readU16(code, ip);
                 ip += 2;

@@ -315,14 +315,25 @@ pub const ImportCallExpr = struct {
     /// §13.3.10 import() second argument — when the options
     /// expression is the literal `{ with: { type: "json" } }` (per
     /// the import-attributes proposal), the parser extracts the
-    /// `type` StringLiteral here. Other shapes (a non-literal
-    /// expression, a missing `with` / `type` key) decode to `null`
-    /// and the loader treats the import as `module_type =
-    /// javascript`. The non-literal case is a runtime-only spec
-    /// corner Cynic doesn't yet evaluate (see
-    /// `dynamic-import 2nd-param-*` cluster in test262 — separate
-    /// follow-up).
+    /// `type` StringLiteral here so the compiler can emit a fast
+    /// path that skips the runtime options walk entirely. Other
+    /// shapes (a non-literal expression, a missing `with` / `type`
+    /// key) leave this null; in that case `options` below carries
+    /// the full expression and the compiler emits
+    /// `dynamic_import_with_options` to perform the §13.3.10.1
+    /// step-9-15 runtime walk.
     attribute_type: ?[]const u8 = null,
+    /// The full options AssignmentExpression. Non-null whenever
+    /// the source has a second argument at all (whether literal or
+    /// dynamic); the compiler uses this to decide between the
+    /// fast-path `dynamic_import` opcode (literal-shaped options
+    /// with `attribute_type` already extracted) and the
+    /// `dynamic_import_with_options` opcode (everything else).
+    /// Kept separate from `attribute_type` so the two pieces of
+    /// information can be inspected independently — the parser
+    /// always fills `options` when present; literal-shape
+    /// recognition is the optimization on top of it.
+    options: ?*Expression = null,
 };
 
 pub const ArrowFunction = struct {

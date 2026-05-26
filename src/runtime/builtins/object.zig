@@ -808,12 +808,12 @@ fn enumerableOwnPropertyHelperToObject(realm: *Realm, raw: Value, name: []const 
 /// Caller owns the returned slice (allocated via
 /// `realm.allocator`). Each entry's `key_str` is a heap-allocated
 /// JSString. `value` is the result of `[[Get]]` on the source key.
-const KeyValuePair = struct {
+pub const KeyValuePair = struct {
     key_str: *JSString,
     value: Value,
 };
 
-fn enumerableOwnPropertyKeyValues(
+pub fn enumerableOwnPropertyKeyValues(
     realm: *Realm,
     obj: *JSObject,
     scope: *@import("../heap.zig").HandleScope,

@@ -1558,17 +1558,21 @@ fn parseImportExpression(p: *Parser) ParseError!Expression {
         // import-attributes). Trailing commas are also grammar-legal.
         // When the options expression is the literal
         // `{ with: { type: "..." } }`, peek the `type` value so the
-        // loader can dispatch to the JSON / text synthetic-module
-        // path. Non-literal shapes (a free variable, a computed
-        // key, …) decode to `null` here and the loader sees
-        // `attribute_type=null` — that's the conservative-default
-        // path; the runtime hook for evaluating the options
-        // expression itself is separate work.
+        // loader's compile-time fast path can dispatch to the JSON /
+        // text synthetic-module path without a runtime walk. The
+        // full options expression is also captured in `opts_ptr` so
+        // non-literal shapes (a free variable, a computed key, …)
+        // route through the `dynamic_import_with_options` opcode at
+        // runtime per §13.3.10.1 steps 9-15.
         var attr_type: ?[]const u8 = null;
+        var opts_ptr: ?*Expression = null;
         if (try p.eat(.comma)) {
             if (p.peek().kind != .rparen) {
                 const opts = try parseAssignment(p);
                 attr_type = extractWithTypeAttribute(p, opts);
+                const opt_p = try p.arena.create(Expression);
+                opt_p.* = opts;
+                opts_ptr = opt_p;
                 _ = try p.eat(.comma);
             }
         }
@@ -1579,6 +1583,7 @@ fn parseImportExpression(p: *Parser) ParseError!Expression {
             .span = .{ .start = import_tok.span.start, .end = rparen.span.end },
             .source = arg_ptr,
             .attribute_type = attr_type,
+            .options = opts_ptr,
         } };
     }
     if (p.peek().kind == .dot) {

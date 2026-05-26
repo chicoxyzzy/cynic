@@ -831,17 +831,61 @@ pub const Compiler = struct {
         return self.internString(t);
     }
 
-    /// `import(specifier)` — §13.3.10 dynamic import.
-    /// Compiles the argument expression into acc, then dispatches
-    /// the `dynamic_import` opcode which builds the Promise. The
-    /// host's `realm.module_loader` does the actual fetch; on
-    /// success the returned Promise fulfils with the namespace,
-    /// on failure it rejects with the loader's TypeError.
+    /// `import(specifier [, options])` — §13.3.10 dynamic import.
+    /// Three lowerings:
+    ///
+    ///   1. No `options` argument → `compileExpression(source)`
+    ///      drops the specifier into `acc`, then `.dynamic_import
+    ///      [k_attr=MODULE_NO_ATTRIBUTE]`. Cheapest path.
+    ///
+    ///   2. `options` is the literal `{ with: { type: "..." } }`
+    ///      shape (string-keyed, string-literal value) — the
+    ///      parser pre-extracts the `type` value into
+    ///      `attribute_type`. The full options expression has no
+    ///      observable side effects beyond constructing the
+    ///      throwaway object, so we emit the same `.dynamic_import`
+    ///      opcode with the resolved attribute as a constant. This
+    ///      keeps the static-import-style fast path intact for the
+    ///      proposal-shaped invocations.
+    ///
+    ///   3. Anything else (`import("x", computeOpts())`,
+    ///      `import("x", null)`, `import("x", {with: getter()})`,
+    ///      …) — emit BOTH the specifier and options expressions
+    ///      and dispatch `.dynamic_import_with_options [r_spec:u8]`.
+    ///      The interpreter performs §13.3.10.1 step-9-15 runtime
+    ///      walk (ToObject, Get "with", EnumerableOwnProperties,
+    ///      string-value check, IfAbruptRejectPromise on every
+    ///      abrupt completion).
     fn compileImportCall(self: *Compiler, ic: ast.expression.ImportCallExpr) CompileError!void {
+        // Fast path: no options argument OR a literal-shaped
+        // options expression whose `with.type` the parser already
+        // resolved. The literal-shape recognition is identified
+        // by `attribute_type != null` — extractWithTypeAttribute
+        // only returns non-null on pure object-literal shapes.
+        const has_options = ic.options != null;
+        const literal_shape = ic.attribute_type != null;
+        if (!has_options or literal_shape) {
+            try self.compileExpression(ic.source);
+            const k_attr = try self.moduleAttributeConstant(ic.attribute_type);
+            try self.builder.emitOp(.dynamic_import, ic.span);
+            try self.builder.emitU16(k_attr);
+            return;
+        }
+
+        // Runtime walk path: stash specifier in a temp register,
+        // compile options into `acc`, dispatch the walking opcode.
+        // §13.3.10.1 step 2-3 evaluate `specifierExpression` BEFORE
+        // step 4's `optionsExpression`; mirroring that order is
+        // what the `2nd-param-evaluation-sequence.js` fixture
+        // checks.
         try self.compileExpression(ic.source);
-        const k_attr = try self.moduleAttributeConstant(ic.attribute_type);
-        try self.builder.emitOp(.dynamic_import, ic.span);
-        try self.builder.emitU16(k_attr);
+        const r_spec = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, ic.source.span());
+        try self.builder.emitU8(r_spec);
+        try self.compileExpression(ic.options.?);
+        try self.builder.emitOp(.dynamic_import_with_options, ic.span);
+        try self.builder.emitU8(r_spec);
     }
 
     /// `/pat/flags` literal — emit as `new RegExp("pat", "flags")`.

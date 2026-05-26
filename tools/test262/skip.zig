@@ -980,33 +980,18 @@ pub const skip_planned_paths = [_][]const u8{
     // so this whole subtree fails brand checks. Path-skip until
     // Temporal lands. ~7 fixtures.
     "built-ins/Date/prototype/toTemporalInstant/",
-    // ES2025 import-attributes — dynamic-import 2nd-param
-    // **runtime** validation. The compiler extracts the `type`
-    // attribute at parse time when the options literal is the
-    // proposal-shaped `{ with: { type: "..." } }` (good enough for
-    // static imports + the literal-options dynamic cases:
-    // `2nd-param-with-type-text`, `2nd-param-trailing-comma-*`,
-    // `2nd-param-with-undefined`, `2nd-param-await-*`,
-    // `2nd-param-in`, `2nd-param-yield-ident-invalid`). The
-    // entries listed below need a real runtime walk of the
-    // options expression — §13.3.10.1 EvaluateImportCall steps
-    // 9-15: ToObject the options, Get `with`, ToObject `with`,
-    // EnumerableOwnPropertyNames it (so Proxy ownKeys / get /
-    // getOwnPropertyDescriptor traps fire), require each value to
-    // be a String, propagate every abrupt completion through
-    // IfAbruptRejectPromise. Lift these path-skips once the
-    // runtime walk lands.
-    "language/expressions/dynamic-import/import-attributes/2nd-param-evaluation-abrupt-return.js",
-    "language/expressions/dynamic-import/import-attributes/2nd-param-evaluation-abrupt-throw.js",
-    "language/expressions/dynamic-import/import-attributes/2nd-param-evaluation-sequence.js",
-    "language/expressions/dynamic-import/import-attributes/2nd-param-get-with-error.js",
-    "language/expressions/dynamic-import/import-attributes/2nd-param-non-object.js",
-    "language/expressions/dynamic-import/import-attributes/2nd-param-with-enumeration-abrupt.js",
-    "language/expressions/dynamic-import/import-attributes/2nd-param-with-enumeration-enumerable.js",
-    "language/expressions/dynamic-import/import-attributes/2nd-param-with-non-object.js",
-    "language/expressions/dynamic-import/import-attributes/2nd-param-with-value-abrupt.js",
-    "language/expressions/dynamic-import/import-attributes/2nd-param-with-value-non-string.js",
-    "language/expressions/dynamic-import/import-attributes/2nd-param-yield-expr.js",
+    // (ES2025 import-attributes — dynamic-import 2nd-param fixtures
+    // used to be skipped here. The runtime walk now ships in the
+    // `.dynamic_import_with_options` opcode — see
+    // `src/runtime/lantern/interpreter.zig` and the compiler
+    // dispatch in `src/bytecode/compiler.zig`. All 11 fixtures —
+    // `2nd-param-non-object`, `2nd-param-with-non-object`,
+    // `2nd-param-with-value-non-string`, `2nd-param-with-value-abrupt`,
+    // `2nd-param-with-enumeration-abrupt`,
+    // `2nd-param-with-enumeration-enumerable`,
+    // `2nd-param-get-with-error`,
+    // `2nd-param-evaluation-{abrupt-return, abrupt-throw, sequence}`,
+    // `2nd-param-yield-expr` — should attempt now.)
 };
 
 pub const skip_planned_path_contains = [_][]const u8{
