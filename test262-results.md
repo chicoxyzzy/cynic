@@ -4,8 +4,8 @@
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent |
 |---|---|---|---|---|---:|
-| **runtime** | 93.09 % | 99.98 % | 37451 / 40229 | 37451 / 37460 | — |
-| **runtime_hardened** | 93.09 % | 99.97 % | 37451 / 40229 | 34426 / 37462 | 3025 |
+| **runtime** | 93.27 % | 99.98 % | 37503 / 40208 | 37503 / 37512 | — |
+| **runtime_hardened** | 93.27 % | 99.97 % | 37503 / 40208 | 34478 / 37514 | 3025 |
 
 *SES witness fidelity*: **10 / 10** witnesses classify as `divergent` (100.00 %). Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. See `docs/handbook/ses-test262-policy.md`.
 
@@ -65,7 +65,7 @@ browser-era built-ins …).
 | `built-ins/Date` | 431 | 0 | 0 | 152 | 100 % | 100 % |
 | `built-ins/Math` | 214 | 0 | 0 | 113 | 100 % | 100 % |
 | `built-ins/Promise` | 526 | 0 | 38 | 101 | 94 % | 100 % |
-| `language/expressions` | 9681 | 0 | 960 | 99 | 91 % | 100 % |
+| `language/expressions` | 9721 | 0 | 899 | 99 | 92 % | 100 % |
 | `built-ins/TypedArrayConstructors` | 562 | 0 | 16 | 93 | 98 % | 100 % |
 | `language/statements` | 8346 | 0 | 654 | 81 | 93 % | 100 % |
 | `built-ins/Set` | 312 | 0 | 1 | 69 | 100 % | 100 % |
@@ -84,7 +84,7 @@ browser-era built-ins …).
 | `built-ins/BigInt` | 58 | 0 | 0 | 18 | 100 % | 100 % |
 | `built-ins/Uint8Array` | 50 | 0 | 0 | 18 | 100 % | 100 % |
 | `built-ins/Error` | 41 | 0 | 0 | 14 | 100 % | 100 % |
-| `language/module-code` | 562 | 0 | 14 | 13 | 98 % | 100 % |
+| `language/module-code` | 574 | 0 | 2 | 13 | 100 % | 100 % |
 | `built-ins/RegExpStringIteratorPrototype` | 5 | 0 | 0 | 12 | 100 % | 100 % |
 | `built-ins/AsyncGeneratorPrototype` | 37 | 0 | 0 | 11 | 100 % | 100 % |
 | `built-ins/FinalizationRegistry` | 35 | 0 | 0 | 11 | 100 % | 100 % |
@@ -294,12 +294,12 @@ Today: test262 ships ~52k fixtures; `corpus` is 40161.
 
 ## History
 
-### 2026-05-26 — cynic `d77fb4f`, test262 `d0c1b455`
+### 2026-05-26 — cynic `b85112e`, test262 `d0c1b455`
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **runtime** | 93.09 % | 99.98 % | 37451 / 40229 | 37451 / 37460 | — | +138 | 40.6 s |
-| **runtime_hardened** | 93.09 % | 99.97 % | 37451 / 40229 | 34426 / 37462 | 3025 | +3119 | 40.6 s |
+| **runtime** | 93.27 % | 99.98 % | 37503 / 40208 | 37503 / 37512 | — | +190 | 40.6 s |
+| **runtime_hardened** | 93.27 % | 99.97 % | 37503 / 40208 | 34478 / 37514 | 3025 | +3171 | 40.6 s |
 
 ### 2026-05-25 — cynic `8e311c3`, test262 `d0c1b455`
 

@@ -960,12 +960,25 @@ pub const skip_non_standard_features = [_][]const u8{};
 pub const skip_planned_features = [_][]const u8{
     "regexp-duplicate-named-groups", // ES2025 — libregexp gap.
     "regexp-modifiers", // ES2024 inline `(?i:…)` / `(?-i:…)`.
-    // ES2025 import-attributes (`import x from "./y.json" with {
-    // type: "json" }`) + the JSON-module integration. Stage 4 /
-    // shipped in spec; Cynic's module loader hasn't grown the
-    // attribute syntax + the JSON / text resolution back-ends yet.
-    "import-attributes",
+    // ES2025 import-attributes — `import x from "./y.json" with
+    // { type: "json" }`. The **parser** side has shipped (the
+    // `WithClause` grammar in src/parser/parser.zig
+    // `parseOptionalWithClause` + `parseImportExpression`); the
+    // **runtime loader** still ignores the attributes. The bulk
+    // of import-attributes fixtures pass on the parser surface
+    // alone (no JSON / text resolution needed). Fixtures that
+    // depend on actual JSON-module loading stay skipped via the
+    // `json-modules` feature tag below; those depending on
+    // text-module loading via `import-text`; the dynamic-import
+    // 2nd-param-* validation cluster is path-skipped (needs
+    // options-arg threading through the dynamic_import opcode —
+    // separate runtime work).
     "json-modules",
+    // Stage 4 — `import x from "./y.txt" with { type: "text" }`.
+    // Separate proposal from import-attributes; the synthetic-
+    // text-module record (§16.2.1.8.x CreateTextModule) isn't
+    // shipped. ~5 fixtures.
+    "import-text",
     // Stage 4 (expected publication 2027) — `using` / `await using`
     // grammar + `DisposableStack`, `AsyncDisposableStack`,
     // `SuppressedError`, `Symbol.dispose` / `Symbol.asyncDispose`.
@@ -990,6 +1003,18 @@ pub const skip_planned_paths = [_][]const u8{
     // so this whole subtree fails brand checks. Path-skip until
     // Temporal lands. ~7 fixtures.
     "built-ins/Date/prototype/toTemporalInstant/",
+    // ES2025 import-attributes — dynamic-import 2nd-param
+    // validation. The §13.3.10.1 EvaluateImportCall steps 9-10
+    // demand options be either undefined or an Object; otherwise
+    // the returned promise rejects with TypeError. Cynic's
+    // `parseImportExpression` already parses both args
+    // (parses-and-discards options), but the `dynamic_import`
+    // opcode only threads the specifier through — extending it
+    // to validate the options arg is a separate runtime effort.
+    // Path-skip the cluster; the rest of import-attributes
+    // (parser surface, static `import x from "y" with {…}`)
+    // passes without the runtime work.
+    "language/expressions/dynamic-import/import-attributes/2nd-param-",
 };
 
 pub const skip_planned_path_contains = [_][]const u8{
