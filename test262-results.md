@@ -5,8 +5,8 @@
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent |
 |---|---|---|---|---|---:|
 | **parser** | 73.22 % | 100.00 % | 29406 / 40161 | 29406 / 29406 | — |
-| **runtime** | 93.04 % | 99.98 % | 37430 / 40229 | 37430 / 37439 | — |
-| **runtime_hardened** | 93.04 % | 99.97 % | 37430 / 40229 | 34413 / 37441 | 3017 |
+| **runtime** | 93.09 % | 99.98 % | 37451 / 40229 | 37451 / 37460 | — |
+| **runtime_hardened** | 93.09 % | 99.97 % | 37451 / 40229 | 34426 / 37462 | 3025 |
 
 *SES witness fidelity*: **10 / 10** witnesses classify as `divergent` (100.00 %). Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. See `docs/handbook/ses-test262-policy.md`.
 
@@ -78,9 +78,9 @@ browser-era built-ins …).
 | `built-ins/Number` | 301 | 0 | 0 | 38 | 100 % | 100 % |
 | `built-ins/NativeErrors` | 52 | 0 | 0 | 36 | 100 % | 100 % |
 | `built-ins/Function` | 221 | 0 | 10 | 29 | 96 % | 100 % |
+| `built-ins/JSON` | 136 | 0 | 0 | 28 | 100 % | 100 % |
 | `built-ins/WeakMap` | 113 | 0 | 0 | 27 | 100 % | 100 % |
 | `built-ins/Symbol` | 53 | 0 | 6 | 22 | 93 % | 100 % |
-| `built-ins/JSON` | 123 | 0 | 21 | 20 | 87 % | 100 % |
 | `built-ins/WeakSet` | 64 | 0 | 0 | 20 | 100 % | 100 % |
 | `built-ins/BigInt` | 58 | 0 | 0 | 18 | 100 % | 100 % |
 | `built-ins/Uint8Array` | 50 | 0 | 0 | 18 | 100 % | 100 % |
@@ -165,7 +165,7 @@ until its features ship in mainline ECMA-262.
 
 | feature | pass | fail | skip | pass% | engine% |
 |---|---:|---:|---:|---:|---:|
-| `joint-iteration` | 68 | 10 | 0 | 87 % | 87 % |
+| `joint-iteration` | 70 | 8 | 0 | 90 % | 90 % |
 
 
 ## Legend
@@ -303,8 +303,8 @@ Today: test262 ships ~52k fixtures; `corpus` is 40161.
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
 | **parser** | 73.22 % | 100.00 % | 29406 / 40161 | 29406 / 29406 | — | -905 | 5.6 s |
-| **runtime** | 93.04 % | 99.98 % | 37430 / 40229 | 37430 / 37439 | — | +117 | 40.6 s |
-| **runtime_hardened** | 93.04 % | 99.97 % | 37430 / 40229 | 34413 / 37441 | 3017 | +3098 | 40.6 s |
+| **runtime** | 93.09 % | 99.98 % | 37451 / 40229 | 37451 / 37460 | — | +138 | 40.7 s |
+| **runtime_hardened** | 93.09 % | 99.97 % | 37451 / 40229 | 34426 / 37462 | 3025 | +3119 | 40.7 s |
 
 ### 2026-05-25 — cynic `8e311c3`, test262 `d0c1b455`
 

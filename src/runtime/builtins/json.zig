@@ -833,9 +833,22 @@ fn jsonParse(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     else
         try stringifyArg(realm, v);
 
-    var parser = JsonParser{ .input = src.flatBytes(), .pos = 0, .realm = realm };
+    // Source-tracking arena — owns the `SourceNode` tree built
+    // during parsing. Lives until the reviver walk completes
+    // (or until jsonParse returns when there's no reviver).
+    // Allocations are bump-style — cheap even when no reviver
+    // ends up consuming the tree.
+    var source_arena = std.heap.ArenaAllocator.init(realm.allocator);
+    defer source_arena.deinit();
+
+    var parser = JsonParser{
+        .input = src.flatBytes(),
+        .pos = 0,
+        .realm = realm,
+        .source_arena = source_arena.allocator(),
+    };
     parser.skipWs();
-    const result = parser.parseValue() catch |err| switch (err) {
+    const parsed = parser.parseValue() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NativeThrew => return error.NativeThrew,
         error.Malformed => {
@@ -857,18 +870,21 @@ fn jsonParse(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     // §25.5.1 step 7 — when reviver IsCallable, wrap the unfiltered
     // value in `{ "": value }` and run InternalizeJSONProperty.
     const reviver_v = argOr(args, 1, Value.undefined_);
-    const reviver_fn = heap_mod.valueAsFunction(reviver_v) orelse return result;
+    const reviver_fn = heap_mod.valueAsFunction(reviver_v) orelse return parsed.value;
     const root = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(root, realm.intrinsics.object_prototype);
-    root.set(realm.allocator, "", result) catch return error.OutOfMemory;
+    root.set(realm.allocator, "", parsed.value) catch return error.OutOfMemory;
     // §25.5.1.1 InternalizeJSONProperty walks the whole parsed tree
     // calling the reviver at each node — every call re-enters JS and
     // can GC. `root` is the only handle on the tree; without a root
-    // here a mid-walk collection frees it.
+    // here a mid-walk collection frees it. Also anchor `src` because
+    // the SourceNode tree borrows slices out of its bytes — a GC
+    // mid-walk would dangle those slices.
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
     scope.push(heap_mod.taggedObject(root)) catch return error.OutOfMemory;
-    return internalizeJsonProperty(realm, root, "", reviver_fn);
+    scope.push(Value.fromString(src)) catch return error.OutOfMemory;
+    return internalizeJsonProperty(realm, root, "", parsed.source, reviver_fn);
 }
 
 /// §25.5.1.1 InternalizeJSONProperty — recursive reviver walk.
@@ -896,6 +912,7 @@ fn internalizeJsonProperty(
     realm: *Realm,
     holder: *JSObject,
     name: []const u8,
+    source_node: ?*const SourceNode,
     reviver: *JSFunction,
 ) NativeError!Value {
     // §25.5.1.1 step 1 — `? Get(holder, name)`. The reviver runs
@@ -922,7 +939,18 @@ fn internalizeJsonProperty(
             while (i < len) : (i += 1) {
                 var ibuf: [24]u8 = undefined;
                 const key = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-                const new_el = try internalizeJsonProperty(realm, obj, key, reviver);
+                // Source for this index — null if the original
+                // source tree doesn't go this deep (reviver may
+                // have grown the array). Per spec, the context
+                // for such added indices carries no source.
+                const child_src: ?*const SourceNode = blk: {
+                    const sn = source_node orelse break :blk null;
+                    if (sn.kind != .array_) break :blk null;
+                    const idx_usize: usize = @intCast(i);
+                    if (idx_usize >= sn.by_index.items.len) break :blk null;
+                    break :blk sn.by_index.items[idx_usize];
+                };
+                const new_el = try internalizeJsonProperty(realm, obj, key, child_src, reviver);
                 if (new_el.isUndefined()) {
                     // §25.5.1.1 step 2.b.iii.2.a — `? val.[[Delete]](P)`.
                     // Proxy deleteProperty trap throws propagate;
@@ -968,7 +996,17 @@ fn internalizeJsonProperty(
                 if (proxy_keys == null) {
                     if (!obj.flagsFor(key).enumerable) continue;
                 }
-                const new_el = try internalizeJsonProperty(realm, obj, key, reviver);
+                // Source for this key — null if it's not in the
+                // original parsed tree (the reviver may have
+                // added new keys via `holder[k] = ...` during a
+                // prior step). Such added keys' contexts carry
+                // no source per spec.
+                const child_src: ?*const SourceNode = blk: {
+                    const sn = source_node orelse break :blk null;
+                    if (sn.kind != .object_) break :blk null;
+                    break :blk sn.by_key.get(key);
+                };
+                const new_el = try internalizeJsonProperty(realm, obj, key, child_src, reviver);
                 if (new_el.isUndefined()) {
                     _ = try jsonDelete(realm, obj, key);
                 } else {
@@ -977,9 +1015,36 @@ fn internalizeJsonProperty(
             }
         }
     }
-    // §25.5.1.1 step 3 — `? Call(reviver, holder, « name, val »)`.
+    // §25.5.1.1 step 3 — `? Call(reviver, holder, « name, val, context »)`
+    // with the json-parse-with-source extension. `context` is a
+    // fresh plain Object with [[Prototype]] = %Object.prototype%.
+    // For a primitive value (Number / String / Boolean / Null /
+    // BigInt — though JSON.parse never produces BigInt without
+    // rawJSON), it carries a `source` data property with the
+    // original JSON span. For arrays / objects, the context is
+    // `{}` (no source). When the parsed source tree doesn't cover
+    // this slot (reviver added a key mid-walk), the context is
+    // also `{}` regardless of val's current type — there's no
+    // source to surface.
     const name_js = realm.heap.allocateString(name) catch return error.OutOfMemory;
-    const call_args = [_]Value{ Value.fromString(name_js), val };
+    const context = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(context, realm.intrinsics.object_prototype);
+    if (source_node) |sn| {
+        // Spec — only attach `source` when (a) the parsed slot
+        // was a primitive AND (b) val SameValue the originally
+        // parsed primitive. The latter check is what makes
+        // `reviver-forward-modifies-object.js` pass: when an
+        // earlier reviver call wrote to a sibling slot
+        // (`this[1] = 42`), recursion reaches that slot with the
+        // replacement value, which is NOT SameValue to the
+        // originally parsed primitive — so `source` must be
+        // suppressed.
+        if (sn.kind == .primitive and intrinsics.sameValue(val, sn.parsed_value)) {
+            const src_js = realm.heap.allocateString(sn.source) catch return error.OutOfMemory;
+            context.set(realm.allocator, "source", Value.fromString(src_js)) catch return error.OutOfMemory;
+        }
+    }
+    const call_args = [_]Value{ Value.fromString(name_js), val, heap_mod.taggedObject(context) };
     const outcome = lantern.callJSFunction(
         realm.allocator,
         realm,
@@ -1172,10 +1237,76 @@ fn jsonCreateDataProperty(realm: *Realm, obj: *JSObject, key: []const u8, value:
 }
 
 const JsonError = error{ Malformed, OutOfMemory, NativeThrew };
+
+/// Per-parsed-value source-tracking tree built alongside the
+/// `Value` tree during JSON.parse. Used by §25.5.1.1
+/// InternalizeJSONProperty (json-parse-with-source extension,
+/// ES2025 Stage 4) to surface the original JSON text span as
+/// `context.source` to the reviver — needed for BigInt
+/// round-trips (`BigInt(context.source)` preserves precision
+/// past Number.MAX_SAFE_INTEGER) and any other use case where
+/// the canonical literal form matters more than the parsed
+/// Number.
+///
+/// All nodes are allocated from a parse-scoped arena
+/// (`source_arena` on JsonParser); the arena is freed after
+/// the reviver walk completes. Holds slices into the input
+/// string — the caller must keep the input JSString alive
+/// across the walk (the reviver can re-enter JS and GC).
+const SourceNode = struct {
+    /// For primitives (Number / String / Boolean / null), the
+    /// source-text span exactly as it appeared in the input
+    /// — e.g. `"foo"` (with quotes) for a string, `1.1e-1`
+    /// for a number, `null` for the null literal. Per
+    /// `reviver-context-source-primitive-literal.js`. Empty
+    /// for arrays / objects: the spec only carries `source`
+    /// for primitives (the array/object context is `{}`).
+    source: []const u8,
+    /// The PRIMITIVE value as originally parsed. Used by the
+    /// spec's `val SameValue valRecord.[[Value]]` check at
+    /// context-building time — when the reviver mutates a
+    /// slot via the holder before recursion reaches it, the
+    /// parsed primitive no longer equals the current val and
+    /// `source` must be suppressed (reviver-forward-modifies-
+    /// object.js). Unused for arrays / objects.
+    parsed_value: Value = Value.undefined_,
+    kind: enum { primitive, array_, object_ },
+    /// For arrays: child source nodes by index. Empty for the
+    /// other two kinds.
+    by_index: std.ArrayListUnmanaged(*SourceNode) = .empty,
+    /// For objects: child source nodes by key. Empty for the
+    /// other two kinds. Keys borrow into the input.
+    by_key: std.StringHashMapUnmanaged(*SourceNode) = .empty,
+};
+
+const ParseResult = struct { value: Value, source: *SourceNode };
+
 const JsonParser = struct {
     input: []const u8,
     pos: usize,
     realm: *Realm,
+    /// Arena for `SourceNode` allocations. Always non-null; when
+    /// the caller doesn't need source tracking (e.g. `jsonRawJSON`
+    /// just validating syntax), they discard `ParseResult.source`
+    /// and the arena is freed without any reviver walk observing
+    /// the tree.
+    source_arena: std.mem.Allocator,
+
+    fn allocSource(self: *JsonParser, source: []const u8, kind: anytype) JsonError!*SourceNode {
+        const node = self.source_arena.create(SourceNode) catch return error.OutOfMemory;
+        node.* = .{ .source = source, .kind = kind };
+        return node;
+    }
+
+    /// Wrap a fresh primitive parse into a `ParseResult` carrying
+    /// both the source span AND the parsed value (the value goes
+    /// into the SourceNode too, for the spec's SameValue check
+    /// at reviver-context build time — see SourceNode.parsed_value).
+    fn primitiveResult(self: *JsonParser, val: Value, source: []const u8) JsonError!ParseResult {
+        const node = self.source_arena.create(SourceNode) catch return error.OutOfMemory;
+        node.* = .{ .source = source, .kind = .primitive, .parsed_value = val };
+        return .{ .value = val, .source = node };
+    }
 
     fn peek(self: *JsonParser) ?u8 {
         if (self.pos >= self.input.len) return null;
@@ -1199,7 +1330,7 @@ const JsonParser = struct {
         return true;
     }
 
-    fn parseValue(self: *JsonParser) JsonError!Value {
+    fn parseValue(self: *JsonParser) JsonError!ParseResult {
         self.skipWs();
         const c = self.peek() orelse return error.Malformed;
         switch (c) {
@@ -1207,71 +1338,88 @@ const JsonParser = struct {
             '[' => return self.parseArray(),
             '"' => return self.parseString(),
             't' => {
+                const start = self.pos;
                 if (!self.match("true")) return error.Malformed;
-                return Value.true_;
+                return self.primitiveResult(Value.true_, self.input[start..self.pos]);
             },
             'f' => {
+                const start = self.pos;
                 if (!self.match("false")) return error.Malformed;
-                return Value.false_;
+                return self.primitiveResult(Value.false_, self.input[start..self.pos]);
             },
             'n' => {
+                const start = self.pos;
                 if (!self.match("null")) return error.Malformed;
-                return Value.null_;
+                return self.primitiveResult(Value.null_, self.input[start..self.pos]);
             },
             else => return self.parseNumber(),
         }
     }
-    fn parseObject(self: *JsonParser) JsonError!Value {
+    fn parseObject(self: *JsonParser) JsonError!ParseResult {
+        const start = self.pos;
         self.advance(); // {
         const obj = self.realm.heap.allocateObject() catch return error.OutOfMemory;
         self.realm.heap.setObjectPrototype(obj, self.realm.intrinsics.object_prototype);
+        const src_node = try self.allocSource("", .object_);
         self.skipWs();
         if (self.peek() == @as(u8, '}')) {
             self.advance();
-            return heap_mod.taggedObject(obj);
+            // Source span is "{}"; not used (object context is `{}`)
+            // but set for completeness.
+            src_node.source = self.input[start..self.pos];
+            return .{ .value = heap_mod.taggedObject(obj), .source = src_node };
         }
         while (true) {
             self.skipWs();
-            const key_v = try self.parseString();
-            const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+            const key_pr = try self.parseString();
+            const key_s: *JSString = @ptrCast(@alignCast(key_pr.value.asString()));
             self.skipWs();
             if (self.peek() != @as(u8, ':')) return error.Malformed;
             self.advance();
-            const val = try self.parseValue();
+            const child = try self.parseValue();
             // Anchor the key JSString on the object — plain `set`
             // borrows the byte slice, leaving the string otherwise
             // unreferenced for the GC to reclaim (the reviver walk
             // would then see a dangling key).
-            obj.setComputedOwned(self.realm.allocator, key_s, val) catch return error.OutOfMemory;
+            obj.setComputedOwned(self.realm.allocator, key_s, child.value) catch return error.OutOfMemory;
+            // Record the source for this key. The map borrows the
+            // key bytes from the JSString (which the object now
+            // anchors), so the lookup later won't dangle.
+            src_node.by_key.put(self.source_arena, key_s.flatBytes(), child.source) catch return error.OutOfMemory;
             self.skipWs();
             switch (self.peek() orelse return error.Malformed) {
                 ',' => self.advance(),
                 '}' => {
                     self.advance();
-                    return heap_mod.taggedObject(obj);
+                    src_node.source = self.input[start..self.pos];
+                    return .{ .value = heap_mod.taggedObject(obj), .source = src_node };
                 },
                 else => return error.Malformed,
             }
         }
     }
-    fn parseArray(self: *JsonParser) JsonError!Value {
+    fn parseArray(self: *JsonParser) JsonError!ParseResult {
+        const start = self.pos;
         self.advance(); // [
         const arr = self.realm.heap.allocateObject() catch return error.OutOfMemory;
         self.realm.heap.setObjectPrototype(arr, self.realm.intrinsics.array_prototype);
         arr.markAsArrayExotic(self.realm.allocator) catch return error.OutOfMemory;
+        const src_node = try self.allocSource("", .array_);
         self.skipWs();
         if (self.peek() == @as(u8, ']')) {
             self.advance();
             arr.set(self.realm.allocator, "length", Value.fromInt32(0)) catch return error.OutOfMemory;
-            return heap_mod.taggedObject(arr);
+            src_node.source = self.input[start..self.pos];
+            return .{ .value = heap_mod.taggedObject(arr), .source = src_node };
         }
         var idx: i64 = 0;
         while (true) {
-            const val = try self.parseValue();
+            const child = try self.parseValue();
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
             const owned = self.realm.heap.allocateString(islice) catch return error.OutOfMemory;
-            arr.set(self.realm.allocator, owned.flatBytes(), val) catch return error.OutOfMemory;
+            arr.set(self.realm.allocator, owned.flatBytes(), child.value) catch return error.OutOfMemory;
+            src_node.by_index.append(self.source_arena, child.source) catch return error.OutOfMemory;
             idx += 1;
             self.skipWs();
             switch (self.peek() orelse return error.Malformed) {
@@ -1279,13 +1427,15 @@ const JsonParser = struct {
                 ']' => {
                     self.advance();
                     setLength(self.realm, arr, idx) catch return error.OutOfMemory;
-                    return heap_mod.taggedObject(arr);
+                    src_node.source = self.input[start..self.pos];
+                    return .{ .value = heap_mod.taggedObject(arr), .source = src_node };
                 },
                 else => return error.Malformed,
             }
         }
     }
-    fn parseString(self: *JsonParser) JsonError!Value {
+    fn parseString(self: *JsonParser) JsonError!ParseResult {
+        const start = self.pos;
         if (self.peek() != @as(u8, '"')) return error.Malformed;
         self.advance();
         var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -1295,7 +1445,7 @@ const JsonParser = struct {
             self.pos += 1;
             if (c == '"') {
                 const s = self.realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
-                return Value.fromString(s);
+                return self.primitiveResult(Value.fromString(s), self.input[start..self.pos]);
             }
             if (c == '\\') {
                 if (self.pos >= self.input.len) return error.Malformed;
@@ -1338,7 +1488,7 @@ const JsonParser = struct {
         }
         return error.Malformed;
     }
-    fn parseNumber(self: *JsonParser) JsonError!Value {
+    fn parseNumber(self: *JsonParser) JsonError!ParseResult {
         const start = self.pos;
         if (self.peek() == @as(u8, '-')) self.advance();
         while (self.pos < self.input.len) {
@@ -1356,10 +1506,11 @@ const JsonParser = struct {
         // keep the double when the source actually wrote a
         // signed zero.
         const is_negative_zero = d == 0 and slice.len > 0 and slice[0] == '-';
-        if (!is_negative_zero and d == @trunc(d) and d >= std.math.minInt(i32) and d <= std.math.maxInt(i32)) {
-            return Value.fromInt32(@intFromFloat(d));
-        }
-        return Value.fromDouble(d);
+        const val = if (!is_negative_zero and d == @trunc(d) and d >= std.math.minInt(i32) and d <= std.math.maxInt(i32))
+            Value.fromInt32(@intFromFloat(d))
+        else
+            Value.fromDouble(d);
+        return self.primitiveResult(val, slice);
     }
 };
 
@@ -1406,7 +1557,18 @@ fn jsonRawJSON(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     // and array literals are rejected because the proposal's whole
     // point is one-shot text inlining of a primitive (the
     // `invalid-JSON-text` fixture asserts `{}` and `[]` reject).
-    var parser = JsonParser{ .input = bytes, .pos = 0, .realm = realm };
+    // Source-tracking arena — rawJSON only validates syntax, so
+    // the SourceNode tree is built but discarded on return.
+    // Arena allocation is bump-style, cheap enough that we don't
+    // bother gating it.
+    var source_arena = std.heap.ArenaAllocator.init(realm.allocator);
+    defer source_arena.deinit();
+    var parser = JsonParser{
+        .input = bytes,
+        .pos = 0,
+        .realm = realm,
+        .source_arena = source_arena.allocator(),
+    };
     parser.skipWs();
     const parsed = parser.parseValue() catch {
         return throwSyntaxError(realm, "JSON.rawJSON: text is not a valid JSON value");
@@ -1419,7 +1581,7 @@ fn jsonRawJSON(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     // the parsed `Value`: a JSON object surfaces as a plain Object,
     // a JSON array as an array-exotic object. Both have a non-null
     // `valueAsPlainObject` result.
-    if (heap_mod.valueAsPlainObject(parsed) != null) {
+    if (heap_mod.valueAsPlainObject(parsed.value) != null) {
         return throwSyntaxError(realm, "JSON.rawJSON: text must be a single JSON primitive (number, string, boolean, or null)");
     }
 

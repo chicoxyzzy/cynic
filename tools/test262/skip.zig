@@ -966,14 +966,6 @@ pub const skip_planned_features = [_][]const u8{
     // attribute syntax + the JSON / text resolution back-ends yet.
     "import-attributes",
     "json-modules",
-    // ES2025 `JSON.parse` source-text context — the reviver's
-    // second argument carries `{ source }` for the original
-    // JSON span of the value being revived. Stage 4 but Cynic's
-    // `JSON.parse` doesn't yet track per-value source spans
-    // through the parse tree. ~5 fixtures under
-    // `built-ins/JSON/parse/reviver-context-*` +
-    // `reviver-{forward,call-args}-*`.
-    "json-parse-with-source",
     // Stage 4 (expected publication 2027) — `using` / `await using`
     // grammar + `DisposableStack`, `AsyncDisposableStack`,
     // `SuppressedError`, `Symbol.dispose` / `Symbol.asyncDispose`.
