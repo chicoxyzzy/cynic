@@ -2488,6 +2488,238 @@ test "later: SuppressedError default ctor arity" {
     , 3);
 }
 
+// §27.3 DisposableStack — ES2026 explicit-resource-management.
+// Synchronous resource stack. `.use(v)` / `.adopt(v, fn)` /
+// `.defer(fn)` register resources; `.dispose()` walks them in
+// LIFO order and wraps mid-disposal throws with SuppressedError.
+
+test "later: DisposableStack is a function with length 0" {
+    try expectScriptStringWithBuiltins(
+        \\typeof DisposableStack + ":" + DisposableStack.length;
+    , "function:0");
+}
+
+test "later: new DisposableStack() shape — .disposed is false" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new DisposableStack();
+        \\s.disposed + ":" + (s instanceof DisposableStack) + ":" +
+        \\(Object.getPrototypeOf(s) === DisposableStack.prototype);
+    , "false:true:true");
+}
+
+test "later: DisposableStack.prototype[Symbol.toStringTag]" {
+    try expectScriptStringWithBuiltins(
+        \\Object.prototype.toString.call(new DisposableStack());
+    , "[object DisposableStack]");
+}
+
+test "later: DisposableStack.prototype[Symbol.dispose] === .dispose" {
+    try expectScriptStringWithBuiltins(
+        \\(DisposableStack.prototype[Symbol.dispose] ===
+        \\  DisposableStack.prototype.dispose) + "";
+    , "true");
+}
+
+test "later: DisposableStack.prototype.use(value) returns value" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new DisposableStack();
+        \\const r = { [Symbol.dispose]() {} };
+        \\(s.use(r) === r) + "";
+    , "true");
+}
+
+test "later: DisposableStack.prototype.use null/undefined no-op" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new DisposableStack();
+        \\(s.use(null) === null) + ":" + (s.use(undefined) === undefined);
+    , "true:true");
+}
+
+test "later: DisposableStack.prototype.use({}) throws TypeError" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new DisposableStack();
+        \\let kind = "";
+        \\try { s.use({}); } catch (e) { kind = e.constructor.name; }
+        \\kind;
+    , "TypeError");
+}
+
+test "later: DisposableStack.prototype.use after dispose throws ReferenceError" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new DisposableStack();
+        \\s.dispose();
+        \\let kind = "";
+        \\try { s.use({ [Symbol.dispose]() {} }); }
+        \\catch (e) { kind = e.constructor.name; }
+        \\kind;
+    , "ReferenceError");
+}
+
+test "later: DisposableStack.prototype.adopt calls fn(value) at dispose" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new DisposableStack();
+        \\let seen = "";
+        \\const ret = s.adopt(42, (v) => { seen = "v=" + v; });
+        \\seen + "|" + ret;
+        \\s.dispose();
+        \\seen + "|" + ret;
+    , "v=42|42");
+}
+
+test "later: DisposableStack.prototype.adopt non-callable throws TypeError" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new DisposableStack();
+        \\let kind = "";
+        \\try { s.adopt(1, "not a fn"); } catch (e) { kind = e.constructor.name; }
+        \\kind;
+    , "TypeError");
+}
+
+test "later: DisposableStack.prototype.defer fires at dispose with no args" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new DisposableStack();
+        \\let log = "";
+        \\const ret = s.defer(() => { log = "fired"; });
+        \\(ret === undefined) + ":" + log + ":";
+        \\s.dispose();
+        \\(ret === undefined) + ":" + log;
+    , "true:fired");
+}
+
+test "later: DisposableStack disposal order is LIFO" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new DisposableStack();
+        \\const log = [];
+        \\s.defer(() => log.push("A"));
+        \\s.defer(() => log.push("B"));
+        \\s.defer(() => log.push("C"));
+        \\s.dispose();
+        \\log.join(",");
+    , "C,B,A");
+}
+
+test "later: DisposableStack.prototype.dispose is idempotent" {
+    try expectScriptIntWithBuiltins(
+        \\const s = new DisposableStack();
+        \\let calls = 0;
+        \\s.defer(() => { calls += 1; });
+        \\s.dispose();
+        \\s.dispose();
+        \\s.dispose();
+        \\calls;
+    , 1);
+}
+
+test "later: DisposableStack .disposed flips after dispose" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new DisposableStack();
+        \\const before = s.disposed;
+        \\s.dispose();
+        \\before + ":" + s.disposed;
+    , "false:true");
+}
+
+test "later: DisposableStack single throwing disposer propagates" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new DisposableStack();
+        \\s.defer(() => { throw new Error("boom"); });
+        \\let msg = "";
+        \\try { s.dispose(); } catch (e) { msg = e.message; }
+        \\msg;
+    , "boom");
+}
+
+test "later: DisposableStack two throwing disposers wrap in SuppressedError" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new DisposableStack();
+        \\const e1 = new Error("one");
+        \\const e2 = new Error("two");
+        \\s.defer(() => { throw e1; });
+        \\s.defer(() => { throw e2; });
+        \\let kind = "", err = null, sup = null;
+        \\try { s.dispose(); } catch (e) { kind = e.constructor.name; err = e.error; sup = e.suppressed; }
+        \\// Disposal is LIFO: e2 throws first (most-recent disposer),
+        \\// e1 throws next and becomes the new "error" with e2 as
+        \\// suppressed (§9.5.4 step 2.b.iv-vi).
+        \\kind + ":" + err.message + ":" + sup.message;
+    , "SuppressedError:one:two");
+}
+
+test "later: DisposableStack.prototype.move transfers resources" {
+    try expectScriptStringWithBuiltins(
+        \\const s1 = new DisposableStack();
+        \\const log = [];
+        \\s1.defer(() => log.push("A"));
+        \\s1.defer(() => log.push("B"));
+        \\const s2 = s1.move();
+        \\(s2 instanceof DisposableStack) + ":" +
+        \\s1.disposed + ":" + s2.disposed;
+    , "true:true:false");
+}
+
+test "later: DisposableStack.prototype.move source can't add resources" {
+    try expectScriptStringWithBuiltins(
+        \\const s1 = new DisposableStack();
+        \\s1.defer(() => {});
+        \\const s2 = s1.move();
+        \\let kind = "";
+        \\try { s1.defer(() => {}); } catch (e) { kind = e.constructor.name; }
+        \\kind;
+    , "ReferenceError");
+}
+
+test "later: DisposableStack.prototype.move target disposes moved resources" {
+    try expectScriptStringWithBuiltins(
+        \\const s1 = new DisposableStack();
+        \\const log = [];
+        \\s1.defer(() => log.push("A"));
+        \\s1.defer(() => log.push("B"));
+        \\const s2 = s1.move();
+        \\s1.dispose();
+        \\log.join(",") + "|";
+        \\s2.dispose();
+        \\log.join(",");
+    , "B,A");
+}
+
+test "later: DisposableStack.prototype.move after dispose throws" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new DisposableStack();
+        \\s.dispose();
+        \\let kind = "";
+        \\try { s.move(); } catch (e) { kind = e.constructor.name; }
+        \\kind;
+    , "ReferenceError");
+}
+
+test "later: DisposableStack called without new throws TypeError" {
+    try expectScriptStringWithBuiltins(
+        \\let kind = "";
+        \\try { DisposableStack(); } catch (e) { kind = e.constructor.name; }
+        \\kind;
+    , "TypeError");
+}
+
+test "later: DisposableStack brand check on prototype methods" {
+    try expectScriptStringWithBuiltins(
+        \\let kinds = [];
+        \\const m = DisposableStack.prototype.use;
+        \\try { m.call({}, null); } catch (e) { kinds.push(e.constructor.name); }
+        \\try { DisposableStack.prototype.dispose.call({}); } catch (e) { kinds.push(e.constructor.name); }
+        \\kinds.join(",");
+    , "TypeError,TypeError");
+}
+
+test "later: DisposableStack.prototype.use fires Symbol.dispose" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new DisposableStack();
+        \\let log = "";
+        \\s.use({ [Symbol.dispose]() { log = "disposed"; } });
+        \\s.dispose();
+        \\log;
+    , "disposed");
+}
+
 test "later: tagged template passes cooked + raw arrays" {
     try expectScriptStringWithBuiltins(
         \\function tag(strs) {

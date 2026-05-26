@@ -1334,6 +1334,20 @@ pub const Heap = struct {
                 if (o.promiseWaitersConst()) |waiters| {
                     for (waiters.items) |w| self.markGenerator(w);
                 }
+                // ES2026 explicit-resource-management — the
+                // `[[DisposeCapability]]` list on a DisposableStack
+                // / AsyncDisposableStack. Each record holds the
+                // captured resource value and the dispose-method
+                // (a callable, or undefined when the resource was
+                // null / undefined at `.use()` time). The records
+                // live in a typed slot, not the property bag, so
+                // the regular property walk above misses them.
+                if (o.disposableResourcesConst()) |resources| {
+                    for (resources.items) |r| {
+                        self.markValue(r.resource);
+                        self.markValue(r.dispose_method);
+                    }
+                }
                 // §27.2 `[[PromiseResult]]` — the settled value on
                 // a fulfilled / rejected Promise. Held in the typed
                 // `promise_value` slot rather than a property bag,

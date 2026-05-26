@@ -117,6 +117,31 @@ pub const PropertyFlags = packed struct {
     pub const default: PropertyFlags = .{};
 };
 
+/// ES2026 explicit-resource-management §27.3 / §27.4 —
+/// `[[DisposableState]]` slot on a DisposableStack /
+/// AsyncDisposableStack instance. `pending` means resources
+/// may still be appended and `.dispose()` / `.disposeAsync()`
+/// will fire them; `disposed` means the stack has been
+/// disposed (or moved-from) and further mutation throws
+/// ReferenceError.
+pub const DisposableState = enum(u8) { pending, disposed };
+
+/// ES2026 explicit-resource-management — the `[[Hint]]` field
+/// on a `DisposableResource` record (§27.3.2.1 step 4 /
+/// §27.4.2.1 step 4). DisposableStack only ever appends
+/// `sync_dispose`; AsyncDisposableStack appends either.
+pub const DisposableHint = enum(u8) { sync_dispose, async_dispose };
+
+/// ES2026 explicit-resource-management `DisposableResource`
+/// record (§9.5.3 AddDisposableResource step 4). One per
+/// `using` binding / `.use()` / `.adopt()` / `.defer()` call.
+/// Iterated in REVERSE inside DisposeResources (LIFO).
+pub const DisposableResource = struct {
+    resource: Value,
+    hint: DisposableHint,
+    dispose_method: Value,
+};
+
 /// `[[MapData]]` storage (§24.1.4). Keeps insertion order so
 /// `forEach` / `for-of` walks pairs in the order they were
 /// added. later uses linear-scan lookup; revisit with a real
@@ -502,6 +527,22 @@ pub const JSObjectExtension = struct {
     /// by `$262.createRealm()`. Not GC-traced; the harness keeps
     /// the child Realm rooted in `parent.child_realms` separately.
     host_data: ?*anyopaque = null,
+    /// ES2026 explicit-resource-management — `[[DisposableState]]`
+    /// (§27.3.2 / §27.4.2). `null` means "not a DisposableStack /
+    /// AsyncDisposableStack instance". `.pending` is the freshly-
+    /// constructed state; `.disposed` is set once `.dispose()` /
+    /// `.disposeAsync()` walks the resource list (or `.move()`
+    /// transfers it out). The brand for `requireDisposableStack`
+    /// is `!= null`; once kind discrimination matters (Phase 5
+    /// AsyncDisposableStack), add a sibling brand bool.
+    disposable_state: ?DisposableState = null,
+    /// ES2026 explicit-resource-management — `[[DisposeCapability]]`
+    /// (§9.5.3 AddDisposableResource). Disposable resource records
+    /// appended in source order; iterated in REVERSE during
+    /// `DisposeResources` so the most-recently-added resource is
+    /// disposed first (LIFO, matches §9.5.4 DisposeResources step 2).
+    /// Empty for non-stack objects.
+    disposable_resources: std.ArrayListUnmanaged(DisposableResource) = .empty,
 
     pub fn deinit(self: *JSObjectExtension, allocator: std.mem.Allocator) void {
         self.accessors.deinit(allocator);
@@ -516,6 +557,7 @@ pub const JSObjectExtension = struct {
         self.promise_reactions.deinit(allocator);
         if (self.finalization_cells) |fc| fc.deinit(allocator);
         if (self.array_buffer) |ab| allocator.free(ab);
+        self.disposable_resources.deinit(allocator);
     }
 };
 
@@ -1311,6 +1353,34 @@ pub const JSObject = struct {
     pub fn setFinalizationCells(self: *JSObject, allocator: std.mem.Allocator, fc: ?*FinalizationData) !void {
         const ext = try self.getOrCreateExtension(allocator);
         ext.finalization_cells = fc;
+    }
+
+    // ── ES2026 explicit-resource-management — DisposableStack ──
+    //
+    // §27.3 DisposableStack / §27.4 AsyncDisposableStack. The
+    // `[[DisposableState]]` slot brands an instance ("pending" /
+    // "disposed"); `[[DisposeCapability]]` is a LIFO list of
+    // disposable resource records. Both live on the extension —
+    // plain objects pay the null-extension fast path.
+
+    pub fn getDisposableState(self: *const JSObject) ?DisposableState {
+        if (self.extension) |ext| return ext.disposable_state;
+        return null;
+    }
+
+    pub fn setDisposableState(self: *JSObject, allocator: std.mem.Allocator, state: ?DisposableState) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        ext.disposable_state = state;
+    }
+
+    pub fn disposableResourcesPtr(self: *JSObject, allocator: std.mem.Allocator) !*std.ArrayListUnmanaged(DisposableResource) {
+        const ext = try self.getOrCreateExtension(allocator);
+        return &ext.disposable_resources;
+    }
+
+    pub fn disposableResourcesConst(self: *const JSObject) ?*const std.ArrayListUnmanaged(DisposableResource) {
+        if (self.extension) |ext| return &ext.disposable_resources;
+        return null;
     }
 
     // ── §25 / §23 ArrayBuffer + TypedArray + DataView state ────

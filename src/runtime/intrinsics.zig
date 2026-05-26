@@ -77,6 +77,15 @@ pub const Intrinsics = struct {
     suppressed_error_constructor: ?*JSFunction = null,
     suppressed_error_prototype: ?*JSObject = null,
 
+    /// §27.3 DisposableStack (ES2026 explicit-resource-management)
+    /// — the synchronous resource-stack global. `.use(v)` /
+    /// `.adopt(v, onDispose)` / `.defer(onDispose)` register
+    /// resources; `.dispose()` walks them in LIFO order and
+    /// wraps mid-disposal throws via SuppressedError. Sibling
+    /// %AsyncDisposableStack% lands later (Phase 5).
+    disposable_stack_constructor: ?*JSFunction = null,
+    disposable_stack_prototype: ?*JSObject = null,
+
     /// `%GeneratorPrototype%` (§27.5.1). Lazily installed on the
     /// first `function*` call by `lantern.ensureGeneratorPrototype`;
     /// `null` until then. Carries `next` / `return` / `throw` and
@@ -517,6 +526,13 @@ pub fn install(realm: *Realm) !void {
     try @import("builtins/regexp.zig").install(realm);
     try @import("builtins/json.zig").install(realm);
     try @import("builtins/iterator.zig").install(realm);
+    // §27.3 DisposableStack (ES2026 explicit-resource-management).
+    // Installed AFTER `error.installAll` (so the SuppressedError
+    // constructor `.dispose()` wraps with is reachable) and AFTER
+    // `symbol.install` (so `Symbol.dispose` is registered and
+    // `.use(v)`'s `GetMethod(v, @@dispose)` can find it on a
+    // user-supplied resource).
+    try @import("builtins/disposable_stack.zig").install(realm);
     // Iterator.prototype is now live — wire
     // %GeneratorFunction.prototype.prototype% and %AsyncGeneratorFunction.prototype.prototype%
     // so `Object.getPrototypeOf(function*(){}).prototype` lands
