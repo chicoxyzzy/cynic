@@ -71,7 +71,19 @@ pub fn parse(arena: std.mem.Allocator, source: []const u8) Error!Frontmatter {
     var features: std.ArrayListUnmanaged([]const u8) = .empty;
     var includes: std.ArrayListUnmanaged([]const u8) = .empty;
 
-    var line_iter = std.mem.splitScalar(u8, block, '\n');
+    // Per ECMA-262 §11.3 LineTerminator (and YAML's own line-folding
+    // rules), CR / CRLF / LF are all valid line separators. The CR-only
+    // `built-ins/Function/prototype/toString/line-terminator-normalisation-CR.js`
+    // fixture embeds U+000D throughout including in its `/*---…---*/`
+    // block, and a LF-only splitter collapses the whole frontmatter
+    // into a single "line" with embedded CRs — `includes:` never
+    // registers, the harness skips the include load, and the test
+    // throws ReferenceError at runtime. `tokenizeAny` treats any run
+    // of `\r` / `\n` (mixed or homogeneous, CRLF included) as a single
+    // delimiter and skips empty tokens — matching how the parser
+    // already short-circuits on empty / whitespace-only lines, so the
+    // change is semantically transparent for LF-only fixtures.
+    var line_iter = std.mem.tokenizeAny(u8, block, "\r\n");
 
     // The "scope" tracks what indented lines below the most recent
     // top-level key contribute to. `none` discards them (e.g. lines
@@ -407,4 +419,38 @@ test "frontmatter: unterminated returns error" {
         \\flags: [module]
         \\
     ));
+}
+
+test "frontmatter: CR-only line terminators (built-ins/Function/prototype/toString/line-terminator-normalisation-CR.js)" {
+    // The CR-only fixture under `built-ins/Function/prototype/toString/`
+    // embeds CR (U+000D) as its sole line terminator throughout the
+    // frontmatter block. Per ECMA-262 §11.3 LineTerminator and YAML's
+    // own line-folding rules, CR / CRLF / LF are all valid line
+    // separators — and a frontmatter parser that only splits on LF
+    // collapses the whole block to one "line", drops `includes:`,
+    // and the fixture later throws ReferenceError at runtime for an
+    // undefined helper. Regression caught by §13.3.1 / §16.1.7.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const cr_block = "/*---\resid: sec-fn\rdescription: CR fixture\rincludes: [nativeFunctionMatcher.js]\rfeatures: [class]\r---*/";
+    const fm = try parseStr(arena.allocator(), cr_block);
+    try testing.expectEqual(@as(usize, 1), fm.includes.len);
+    try testing.expectEqualStrings("nativeFunctionMatcher.js", fm.includes[0]);
+    try testing.expectEqual(@as(usize, 1), fm.features.len);
+    try testing.expectEqualStrings("class", fm.features[0]);
+}
+
+test "frontmatter: CRLF line terminators" {
+    // CRLF is the dominant line ending on Windows and shows up in
+    // checked-out files that crossed `core.autocrlf=true`. The parser
+    // must treat `\r\n` as ONE separator (not two), otherwise the
+    // intervening empty token confuses the scope tracker.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const crlf_block = "/*---\r\nincludes: [tcoHelper.js, propertyHelper.js]\r\nflags: [module]\r\n---*/";
+    const fm = try parseStr(arena.allocator(), crlf_block);
+    try testing.expectEqual(@as(usize, 2), fm.includes.len);
+    try testing.expectEqualStrings("tcoHelper.js", fm.includes[0]);
+    try testing.expectEqualStrings("propertyHelper.js", fm.includes[1]);
+    try testing.expect(fm.flags.module);
 }

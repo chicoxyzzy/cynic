@@ -1137,13 +1137,13 @@ pub const skip_planned_path_contains = [_][]const u8{
     "Function/prototype/S15.3.4_A2_T3.",
     "Function/prototype/S15.3.5.2_A1_T2.",
 
-    // `built-ins/Function/prototype/toString/line-terminator-
-    // normalisation-CR.js` — embeds a literal CR in the source
-    // and reads `f.toString()` to verify the engine normalises
-    // CR / CRLF / LF to LF (§13.2.6.5 / §22.2.5.1). Cynic's
-    // Function.prototype.toString returns the source slice
-    // verbatim; this normalisation is a separate task.
-    "Function/prototype/toString/line-terminator-normalisation-CR.",
+    // (`Function/prototype/toString/line-terminator-normalisation-CR.js`
+    // and `…-CR-LF.js` used to skip here. The CR-only fixture surfaced
+    // an unrelated bug in the test262 *frontmatter* parser — it split
+    // on `\n` only, so a CR-only `/*---…---*/` block collapsed into a
+    // single "line" with embedded CRs and `includes:` never registered.
+    // Fixed by switching the iterator to `tokenizeAny("\r\n")`; both
+    // variants now pass. See `tools/test262/frontmatter.zig`.)
 
     // `language/expressions/object/__proto__-permitted-dup-
     // shorthand.js` — relies on Annex B §B.3.1 special-casing of
