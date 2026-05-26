@@ -5,20 +5,18 @@
 //!
 //! Groups:
 //!
-//!   1. Annex B      — browser-era / sloppy-mode legacy Cynic doesn't
-//!                     ship. Path-skipped wholesale.
-//!   2. SES          — no `eval`, no shared memory. Policy. Path-
-//!                     skipped at the directory level.
-//!   3. Stage maturity — TC39 proposals not yet in a published edition
-//!                       whose grammar would break the parser if we
-//!                       attempted to handle the fixture.
-//!   4. Non-standard — SpiderMonkey-only / browser-only. Currently
-//!                     empty: previous entries parse fine and surface
-//!                     as honest runtime-mode failures rather than
-//!                     being hidden here.
-//!   5. Planned      — standardised features we don't ship yet,
-//!                     blocked on libregexp (the vendored matcher)
-//!                     or other infra work. Reviewed each vendor bump.
+//!   1. Annex B        — browser-era / sloppy-mode legacy Cynic
+//!                       doesn't ship. Path-skipped wholesale.
+//!   2. SES            — no `eval`, no shared memory. Policy. Path-
+//!                       skipped at the directory level.
+//!   3. Stage maturity — TC39 proposals not yet in a published
+//!                       edition whose grammar would break the
+//!                       parser if we attempted to handle the
+//!                       fixture.
+//!   4. Planned        — standardised features we don't ship yet,
+//!                       blocked on libregexp (the vendored matcher)
+//!                       or other infra work. Reviewed each vendor
+//!                       bump.
 
 const std = @import("std");
 
@@ -123,18 +121,13 @@ pub const skip_ses_substrings = [_][]const u8{
     "built-ins/Function/15.3.5.4_2-",
     // `built-ins/Function/prototype/{apply,call}/S15.3.4.[34]_A8_T[45].js`
     // — Sputnik fixtures that build a callable via
-    // `Function("src").apply` (or `…call`) and then verify
-    // `new FACTORY()` throws a TypeError because apply / call
-    // aren't constructors. They were lucky-passing before
-    // §16.2.1.7 ImportMeta alignment (when Cynic threw
-    // TypeError eagerly from the `Function(string)` constructor
-    // — and the `instanceof TypeError` assertion happened to
-    // hold even though execution never reached the
-    // `.apply`-isn't-constructable check). Switching the
-    // constructor's error class to SyntaxError (spec-faithful
-    // for a failed CreateDynamicFunction parse) flips the
-    // assertion. Same permanent SES carve-out as the rest of
-    // the `Function(string)` family.
+    // `Function("src").apply` (or `…call`) and assert `new
+    // FACTORY()` throws TypeError. Construction routes through
+    // §15.3.2 CreateDynamicFunction (string-source Function
+    // constructor) — the permanent SES carve-out — and surfaces
+    // SyntaxError before the apply/call-isn't-constructable
+    // assertion runs. Same family as the rest of the
+    // `Function(string)` skips.
     "built-ins/Function/prototype/apply/S15.3.4.3_A8_T4",
     "built-ins/Function/prototype/apply/S15.3.4.3_A8_T5",
     "built-ins/Function/prototype/call/S15.3.4.4_A7_T4",
@@ -951,19 +944,10 @@ pub const skip_stage_maturity_paths = [_][]const u8{
 pub const skip_planned_features = [_][]const u8{
     "regexp-duplicate-named-groups", // ES2025 — libregexp gap.
     "regexp-modifiers", // ES2024 inline `(?i:…)` / `(?-i:…)`.
-    // (json-modules + import-text were shipped — synthetic
-    // module records in `src/runtime/lantern/module.zig` and
-    // the test262 harness loader's attribute-aware dispatch in
-    // `tools/test262.zig`. The fixtures live under
-    // `language/import/import-attributes/`.)
-    // Stage 4 (expected publication 2027) — `using` / `await using`
-    // grammar + `DisposableStack`, `AsyncDisposableStack`,
-    // `SuppressedError`, `Symbol.dispose` / `Symbol.asyncDispose`.
-    // Cynic ships none of it yet — large surface, separate effort.
-    // ~478 fixtures. Downgraded from `skip_stage_maturity_features`
-    // on 2026-05-26 per `docs/handbook/ses-test262-policy.md`
-    // Phase 0a audit; the proposal advanced to Stage 4 in early
-    // 2025 but Cynic's classification hadn't caught up.
+    // Stage 4 — `using` / `await using` grammar +
+    // `DisposableStack`, `AsyncDisposableStack`, `SuppressedError`,
+    // `Symbol.dispose` / `Symbol.asyncDispose`. Cynic ships none
+    // of it yet — large surface, separate effort. ~478 fixtures.
     "explicit-resource-management",
 };
 
@@ -980,18 +964,6 @@ pub const skip_planned_paths = [_][]const u8{
     // so this whole subtree fails brand checks. Path-skip until
     // Temporal lands. ~7 fixtures.
     "built-ins/Date/prototype/toTemporalInstant/",
-    // (ES2025 import-attributes — dynamic-import 2nd-param fixtures
-    // used to be skipped here. The runtime walk now ships in the
-    // `.dynamic_import_with_options` opcode — see
-    // `src/runtime/lantern/interpreter.zig` and the compiler
-    // dispatch in `src/bytecode/compiler.zig`. All 11 fixtures —
-    // `2nd-param-non-object`, `2nd-param-with-non-object`,
-    // `2nd-param-with-value-non-string`, `2nd-param-with-value-abrupt`,
-    // `2nd-param-with-enumeration-abrupt`,
-    // `2nd-param-with-enumeration-enumerable`,
-    // `2nd-param-get-with-error`,
-    // `2nd-param-evaluation-{abrupt-return, abrupt-throw, sequence}`,
-    // `2nd-param-yield-expr` — should attempt now.)
 };
 
 pub const skip_planned_path_contains = [_][]const u8{
@@ -1101,44 +1073,9 @@ pub const skip_planned_path_contains = [_][]const u8{
     // the SES `--allow=eval` carve-out per AGENTS.md. The fixture
     // verifies the `prototype` slot's `DontDelete` on a function
     // built from a source string; without the eval-policy opt-in
-    // there's no way to construct the function in the first place,
-    // so the test is a false-reject for an engine-shape reason
-    // distinct from %Function.prototype% callability. Stays skipped
-    // until `--allow=eval` ships.
-    //
-    // The companion `S15.3.{3.1,4}_A*.js` fixtures (which used to
-    // be skipped here for the same "%Function.prototype% isn't a
-    // real callable") now pass: §20.2.3's "Function prototype
-    // object is itself a built-in function that returns undefined"
-    // is handled in the call / call_method / tail_call /
-    // tail_call_method dispatchers by an identity check against
-    // `realm.intrinsics.function_prototype`. See
-    // `src/runtime/lantern/interpreter.zig`.
+    // there's no way to construct the function in the first place.
+    // Stays skipped until `--allow=eval` ships.
     "Function/prototype/S15.3.5.2_A1_T2.",
-
-    // (`Function/prototype/toString/line-terminator-normalisation-CR.js`
-    // and `…-CR-LF.js` used to skip here. The CR-only fixture surfaced
-    // an unrelated bug in the test262 *frontmatter* parser — it split
-    // on `\n` only, so a CR-only `/*---…---*/` block collapsed into a
-    // single "line" with embedded CRs and `includes:` never registered.
-    // Fixed by switching the iterator to `tokenizeAny("\r\n")`; both
-    // variants now pass. See `tools/test262/frontmatter.zig`.)
-
-    // (`language/expressions/object/__proto__-permitted-dup-
-    // shorthand.js` used to skip here. The fixture tests
-    // *normative* §13.2.5.5 PropertyDefinitionEvaluation: the
-    // CoverInitializedName shorthand `{__proto__}` and the
-    // ComputedPropertyName `{[k]: v}` forms create a regular own
-    // data property even when the key is `"__proto__"`. Only the
-    // bare `__proto__: v` colon form triggers Annex B §B.3.6's
-    // prototype-mutation magic. Fixed in
-    // `src/bytecode/compiler.zig` by gating the magic path on
-    // `!p.shorthand` (and `p.key != .computed`). Annex B §B.3.1's
-    // *duplicate-PropertyName early error* is what Cynic
-    // genuinely doesn't ship, but the fixture's whole point is
-    // that the early error doesn't apply to the shorthand
-    // production — so the fixture passes once the property is
-    // actually created.)
 };
 
 // ── Lookup ──────────────────────────────────────────────────────────
