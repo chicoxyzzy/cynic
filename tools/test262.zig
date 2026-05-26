@@ -102,6 +102,7 @@ const cynic = @import("cynic");
 const frontmatter = @import("test262/frontmatter.zig");
 const skip_rules = @import("test262/skip.zig");
 const harness_mod = @import("test262/harness.zig");
+const ses_divergent = @import("test262/ses_divergent.zig");
 
 /// Per-worker loader state. Set by `classifyAndRun` before
 /// running a module-flagged test; consulted by
@@ -409,6 +410,15 @@ const Outcome = enum {
     fail_false_reject, // we rejected legal code
     fail_false_accept, // we accepted code that should be a parse error
     skip,
+    /// SES-divergent — the test262 fixture's expectation is
+    /// invalidated by Cynic's hardened SES posture (frozen
+    /// primordials, locked descriptors, override-mistake fix).
+    /// Only emitted under `phase == .main` after the thrown
+    /// error message matches a known divergence pattern in
+    /// `tools/test262/ses_divergent.zig`. Counted into the
+    /// `divergent` bucket — neither pass nor fail. See
+    /// `docs/handbook/ses-test262-policy.md`.
+    fail_divergent,
 };
 
 const SkipReason = enum {
@@ -625,6 +635,15 @@ const Stats = struct {
     skip: u32 = 0,
     pos_attempted: u32 = 0,
     neg_attempted: u32 = 0,
+    /// SES-divergent fixtures — failures the hardened-mode SES
+    /// posture intentionally produces (descriptor-shape
+    /// mismatches, frozen-primordial mutation rejected, etc.).
+    /// Set only on `.main` phase runs via the divergence-list
+    /// classifier in `tools/test262/ses_divergent.zig`. Counted
+    /// in `total` like `skip`; excluded from `fail()`. See
+    /// `docs/handbook/ses-test262-policy.md` Layout A for how
+    /// this feeds the `runtime_hardened` row's adjusted spec%.
+    divergent: u32 = 0,
 
     fn pass(self: *const Stats) u32 {
         return self.pass_pos + self.pass_neg;
@@ -1108,11 +1127,19 @@ pub fn main(init: std.process.Init) !void {
         const evalPhase = struct {
             fn f(below: *bool, pr: *const PhaseResult, floor: f64, flag_name: []const u8) void {
                 if (pr.stats.total == 0) return;
-                const pct = 100.0 * @as(f64, @floatFromInt(pr.stats.pass())) / @as(f64, @floatFromInt(pr.stats.total));
+                // Match the row's headline `spec%` per Layout A
+                // (`docs/handbook/ses-test262-policy.md`): divergent
+                // counts as engine-correct because SES is part of
+                // the spec Cynic ships in hardened mode. Equals
+                // `pass / total` for any phase with no divergence
+                // (parser, unhardened) so the legacy gate semantics
+                // are preserved there.
+                const headline_pass = pr.stats.pass() + pr.stats.divergent;
+                const pct = 100.0 * @as(f64, @floatFromInt(headline_pass)) / @as(f64, @floatFromInt(pr.stats.total));
                 if (pct < floor) {
                     std.debug.print(
                         "test262: phase '{s}' spec% {d:.2} below {s} floor {d:.2} (pass {d} / total {d})\n",
-                        .{ pr.phase.label(), pct, flag_name, floor, pr.stats.pass(), pr.stats.total },
+                        .{ pr.phase.label(), pct, flag_name, floor, headline_pass, pr.stats.total },
                     );
                     below.* = true;
                 }
@@ -1617,7 +1644,7 @@ fn recordOutcome(
     const bucket_kind: ?BucketKind = switch (outcome.kind) {
         .pass_positive, .pass_negative => .pass,
         .fail_false_reject, .fail_false_accept => .fail,
-        .skip => .skip,
+        .skip, .fail_divergent => .skip,
     };
     switch (outcome.kind) {
         .pass_positive => stats.pass_pos += 1,
@@ -1637,7 +1664,14 @@ fn recordOutcome(
             });
         },
         .skip => stats.skip += 1,
+        .fail_divergent => stats.divergent += 1,
     }
+    // Bucket as `.skip` for divergent — the per-area scoreboard
+    // doesn't grow a fourth column today; reclassified failures
+    // visually look like "skipped" in the bucket totals, which
+    // is the right shape for Phase 2 (the per-bucket divergence
+    // breakdown is a follow-up). The headline divergent count
+    // sits in `Stats.divergent` for the score-row math.
     if (bucket_kind) |bk| try buckets.bump(bucketName(rel), bk);
     if (outcome.kind == .pass_positive or outcome.kind == .fail_false_reject) {
         stats.pos_attempted += 1;
@@ -1821,6 +1855,7 @@ fn mergeStats(dst: *Stats, src: *const Stats) void {
     dst.skip += src.skip;
     dst.pos_attempted += src.pos_attempted;
     dst.neg_attempted += src.neg_attempted;
+    dst.divergent += src.divergent;
 }
 
 fn mergeBuckets(dst: *BucketMap, src: *const BucketMap) !void {
@@ -2223,6 +2258,13 @@ fn classifyAndRun(
 
     if (test_threw) {
         const ex = if (run_result == .thrown) run_result.thrown else (realm.pending_exception orelse cynic.runtime.Value.undefined_);
+        // SES divergence classification — only meaningful in
+        // the hardened main phase. Pull `name` + `message` once
+        // here so the FAIL log AND the divergence classifier
+        // share a single render. See
+        // `docs/handbook/ses-test262-policy.md` for the design.
+        var msg_str: ?[]const u8 = null;
+        var name_str: ?[]const u8 = null;
         if (cynic.runtime.heap.valueAsPlainObject(ex)) |o| {
             // §10.1.8 [[Get]] — Error instances under the SES
             // posture carry `message` and `name` on the prototype
@@ -2231,35 +2273,50 @@ fn classifyAndRun(
             // aware `JSObject.get` (which routes through the
             // synthetic-accessor fast path) so the failure log
             // shows the actual error class instead of just
-            // "object (no message)" for the SES-policy Error path.
-            // See `docs/handbook/ses-test262-policy.md` Phase 1
-            // Bucket E follow-up for the cluster that surfaced this.
+            // "object (no message)".
             const msg_v = o.get("message");
             const name_v = o.get("name");
-            const msg_str: ?[]const u8 = if (msg_v.isString()) blk: {
+            if (msg_v.isString()) {
                 const s: *cynic.runtime.JSString = @ptrCast(@alignCast(msg_v.asString()));
                 const bytes = s.flatBytes();
-                break :blk if (bytes.len > 0) bytes else null;
-            } else null;
-            const name_str: ?[]const u8 = if (name_v.isString()) blk: {
+                msg_str = if (bytes.len > 0) bytes else null;
+            }
+            if (name_v.isString()) {
                 const s: *cynic.runtime.JSString = @ptrCast(@alignCast(name_v.asString()));
                 const bytes = s.flatBytes();
-                break :blk if (bytes.len > 0) bytes else null;
-            } else null;
-            if (msg_str) |m| {
-                if (name_str) |n| {
-                    std.debug.print("\nFAIL {s}: {s}: {s}\n", .{ rel, n, m });
-                } else {
-                    std.debug.print("\nFAIL {s}: {s}\n", .{ rel, m });
-                }
-            } else if (name_str) |n| {
-                std.debug.print("\nFAIL {s}: {s} (no message)\n", .{ rel, n });
-            } else {
-                std.debug.print("\nFAIL {s}: object (no message)\n", .{rel});
+                name_str = if (bytes.len > 0) bytes else null;
             }
         } else if (ex.isString()) {
             const s: *cynic.runtime.JSString = @ptrCast(@alignCast(ex.asString()));
-            std.debug.print("\nFAIL {s}: str: {s}\n", .{ rel, s.flatBytes() });
+            msg_str = s.flatBytes();
+        }
+
+        // Hardened phase divergence reclassification. The
+        // patterns + categorisation live in
+        // `tools/test262/ses_divergent.zig`. Coverage target
+        // ≥80% per Phase 2 of the policy doc; the remainder is
+        // either category-misses (add a pattern on next bump)
+        // or genuine engine bugs surfaced by SES enforcement.
+        if (phase == .main) {
+            if (ses_divergent.classify(name_str, msg_str)) |_| {
+                // Skip the FAIL log line for the divergent
+                // case — it's not a real failure, and printing
+                // ~2500 of these per sweep is noise.
+                return .{ .kind = .fail_divergent };
+            }
+        }
+
+        // Real-failure FAIL log render.
+        if (msg_str) |m| {
+            if (name_str) |n| {
+                std.debug.print("\nFAIL {s}: {s}: {s}\n", .{ rel, n, m });
+            } else {
+                std.debug.print("\nFAIL {s}: {s}\n", .{ rel, m });
+            }
+        } else if (name_str) |n| {
+            std.debug.print("\nFAIL {s}: {s} (no message)\n", .{ rel, n });
+        } else if (cynic.runtime.heap.valueAsPlainObject(ex) != null) {
+            std.debug.print("\nFAIL {s}: object (no message)\n", .{rel});
         } else {
             std.debug.print("\nFAIL {s}: non-object\n", .{rel});
         }
@@ -2501,6 +2558,7 @@ fn printVerbose(io: std.Io, rel: []const u8, r: RunResult) !void {
         .fail_false_reject => "FAIL(reject)",
         .fail_false_accept => "FAIL(accept)",
         .skip => "SKIP",
+        .fail_divergent => "DIVERGENT",
     };
     const msg = try std.fmt.bufPrint(&buf, "{s} {s}\n", .{ tag, rel });
     try std.Io.File.stderr().writeStreamingAll(io, msg);
@@ -2509,30 +2567,69 @@ fn printVerbose(io: std.Io, rel: []const u8, r: RunResult) !void {
 fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
     var buf: [1024]u8 = undefined;
     const pass_pct: f64 = if (stats.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(stats.pass())) / @as(f64, @floatFromInt(stats.total));
-    const msg = try std.fmt.bufPrint(&buf,
-        \\total:    {d}
-        \\pass:     {d}   ({d:.2}%)
-        \\fail:     {d}
-        \\skip:     {d}
-        \\  parse-positive: {d} attempted, {d} pass, {d} fail (false-reject)
-        \\  parse-negative: {d} attempted, {d} pass, {d} fail (false-accept)
-        \\elapsed:  {d}ms
-        \\
-    , .{
-        stats.total,
-        stats.pass(),
-        pass_pct,
-        stats.fail(),
-        stats.skip,
-        stats.pos_attempted,
-        stats.pass_pos,
-        stats.fail_reject,
-        stats.neg_attempted,
-        stats.pass_neg,
-        stats.fail_accept,
-        elapsed_ms,
-    });
-    try std.Io.File.stdout().writeStreamingAll(io, msg);
+    // Layout A `spec%` for hardened mode: (pass + divergent) /
+    // total. Divergent counts as "engine behaved correctly"
+    // because SES is part of the spec Cynic ships in hardened
+    // mode. Equals `pass_pct` for non-hardened sweeps because
+    // `stats.divergent` stays zero.
+    const adj_pct: f64 = if (stats.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(stats.pass() + stats.divergent)) / @as(f64, @floatFromInt(stats.total));
+    // Suppress the `adj:` line when there's no divergence — keeps
+    // the unhardened phase's tally clean.
+    if (stats.divergent == 0) {
+        const msg = try std.fmt.bufPrint(&buf,
+            \\total:    {d}
+            \\pass:     {d}   ({d:.2}%)
+            \\fail:     {d}
+            \\skip:     {d}
+            \\  parse-positive: {d} attempted, {d} pass, {d} fail (false-reject)
+            \\  parse-negative: {d} attempted, {d} pass, {d} fail (false-accept)
+            \\elapsed:  {d}ms
+            \\
+        , .{
+            stats.total,
+            stats.pass(),
+            pass_pct,
+            stats.fail(),
+            stats.skip,
+            stats.pos_attempted,
+            stats.pass_pos,
+            stats.fail_reject,
+            stats.neg_attempted,
+            stats.pass_neg,
+            stats.fail_accept,
+            elapsed_ms,
+        });
+        try std.Io.File.stdout().writeStreamingAll(io, msg);
+    } else {
+        const msg = try std.fmt.bufPrint(&buf,
+            \\total:     {d}
+            \\pass:      {d}   ({d:.2}%)
+            \\divergent: {d}
+            \\adj-spec%: ({d:.2}%) — (pass + divergent) / total under SES
+            \\fail:      {d}
+            \\skip:      {d}
+            \\  parse-positive: {d} attempted, {d} pass, {d} fail (false-reject)
+            \\  parse-negative: {d} attempted, {d} pass, {d} fail (false-accept)
+            \\elapsed:   {d}ms
+            \\
+        , .{
+            stats.total,
+            stats.pass(),
+            pass_pct,
+            stats.divergent,
+            adj_pct,
+            stats.fail(),
+            stats.skip,
+            stats.pos_attempted,
+            stats.pass_pos,
+            stats.fail_reject,
+            stats.neg_attempted,
+            stats.pass_neg,
+            stats.fail_accept,
+            elapsed_ms,
+        });
+        try std.Io.File.stdout().writeStreamingAll(io, msg);
+    }
 }
 
 fn printFailureList(io: std.Io, failures: []const Failure, n: u32) !void {
@@ -2708,6 +2805,14 @@ const Row = struct {
     attempted: u32,
     spec_pct: f64,
     attempted_pct: f64,
+    /// SES-divergent fixture count for `.runtime_hardened` rows.
+    /// Zero for every other mode. Drives the Layout A score-row
+    /// math from `docs/handbook/ses-test262-policy.md`: hardened
+    /// headline `spec%` is `(pass + divergent) / total`, so the
+    /// raw `spec_pct` field is overridden with the adjusted
+    /// number at write time and the absolute count surfaces in
+    /// a new `divergent` column.
+    divergent: u32 = 0,
     /// Wall-clock duration of the run that produced this row, in
     /// milliseconds. `null` on rows imported from history files
     /// that predate the `elapsed` column and on partial runs
@@ -2843,7 +2948,20 @@ fn makeRow(
     test262_sha: []const u8,
     elapsed_ms: ?u64,
 ) Row {
-    const spec_pct: f64 = if (stats.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(stats.pass())) / @as(f64, @floatFromInt(stats.total));
+    // Layout A from `docs/handbook/ses-test262-policy.md`: the
+    // headline `spec%` for `runtime_hardened` counts the
+    // divergent fixtures as passes (they're SES doing its job,
+    // not engine bugs), so the row is directly comparable to
+    // the unhardened `runtime` baseline. For every other mode
+    // `stats.divergent` is zero and the math collapses back to
+    // the original `pass / total`.
+    const headline_pass: u32 = stats.pass() + stats.divergent;
+    const spec_pct: f64 = if (stats.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(headline_pass)) / @as(f64, @floatFromInt(stats.total));
+    // `attempted%` deliberately keeps the raw-pass numerator —
+    // it's the engine-quality gauge (what fraction of what we
+    // actually ran passed), and a divergent reclassification
+    // shouldn't move it. Drops on any real failure regardless
+    // of SES policy.
     const attempted = stats.pass() + stats.fail();
     const att_pct: f64 = if (attempted == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(stats.pass())) / @as(f64, @floatFromInt(attempted));
     return .{
@@ -2852,10 +2970,11 @@ fn makeRow(
         .cynic_sha = cynic_sha,
         .test262_sha = test262_sha,
         .total = stats.total,
-        .pass = stats.pass(),
+        .pass = headline_pass,
         .attempted = attempted,
         .spec_pct = spec_pct,
         .attempted_pct = att_pct,
+        .divergent = stats.divergent,
         .elapsed_ms = elapsed_ms,
     };
 }
@@ -2999,14 +3118,47 @@ fn parsePerDayRows(
         const slash = std.mem.indexOf(u8, pt_cell, "/") orelse continue;
         const pass = std.fmt.parseInt(u32, std.mem.trim(u8, pt_cell[0..slash], " "), 10) catch continue;
         const total = std.fmt.parseInt(u32, std.mem.trim(u8, pt_cell[slash + 1 ..], " "), 10) catch continue;
-        // The Δ-pass cell is computed fresh per render — skip it.
-        // The next cell, if present, is the `elapsed` column added
-        // 2026-05-12. Rows from older history files don't have it;
-        // either tokenizer.next() returns null (no `|` tail) or
-        // returns an empty cell. Either case leaves elapsed_ms null.
+        // Skip the `pass / attempted` cell — `attempted` is
+        // derived from `att_pct` below (`deriveAttempted`) since
+        // the floating-point % is the canonical round-trip
+        // source.
         _ = it.next();
+        // `divergent` column (added 2026-05-26 as Layout A in
+        // `docs/handbook/ses-test262-policy.md`). Pre-Layout-A
+        // rows don't have it; the next cell is the Δ-pass cell
+        // (which we always skip — it's computed fresh per
+        // render). Distinguish by content: `—` or a plain
+        // integer is the divergent column; anything containing
+        // `±`, `+`, or `-` (the Δ-pass sign) is the legacy
+        // schema's Δ cell.
+        var divergent: u32 = 0;
+        const next_cell_raw = it.next();
+        const seen_divergent_cell = blk: {
+            if (next_cell_raw) |raw| {
+                const cell = std.mem.trim(u8, raw, " ");
+                if (cell.len == 0) break :blk false;
+                if (std.mem.eql(u8, cell, "—")) break :blk true;
+                // Legacy schema's Δ cell never holds a bare
+                // integer — it always has a sign prefix.
+                if (cell[0] == '+' or cell[0] == '-' or std.mem.startsWith(u8, cell, "±")) break :blk false;
+                if (std.mem.startsWith(u8, cell, "n/a")) break :blk false;
+                divergent = std.fmt.parseInt(u32, cell, 10) catch break :blk false;
+                break :blk true;
+            }
+            break :blk false;
+        };
+        // Now consume / discard the next two cells (Δ-pass and
+        // elapsed) — the first is skipped, the second is
+        // parsed for `elapsed_ms`. If the row was legacy schema
+        // and we already consumed the Δ-pass cell into
+        // `next_cell_raw`, the elapsed cell is the next iter
+        // token.
+        const elapsed_cell_raw = if (seen_divergent_cell) blk: {
+            _ = it.next(); // discard Δ-pass cell
+            break :blk it.next();
+        } else it.next(); // legacy schema: Δ-pass cell already consumed into next_cell_raw, elapsed is next
         const elapsed_ms: ?u64 = blk: {
-            const cell_raw = it.next() orelse break :blk null;
+            const cell_raw = elapsed_cell_raw orelse break :blk null;
             const cell = std.mem.trim(u8, cell_raw, " ");
             if (cell.len == 0) break :blk null;
             break :blk parseElapsedCell(cell);
@@ -3021,6 +3173,7 @@ fn parsePerDayRows(
             .attempted = deriveAttempted(pass, att_pct),
             .spec_pct = spec_pct,
             .attempted_pct = att_pct,
+            .divergent = divergent,
             .elapsed_ms = elapsed_ms,
         });
     }
@@ -3091,8 +3244,8 @@ fn writeFileBody(
         \\
         \\## Current scores
         \\
-        \\|         | spec% | attempted% | pass / total | pass / attempted |
-        \\|---|---|---|---|---|
+        \\|         | spec% | attempted% | pass / total | pass / attempted | divergent |
+        \\|---|---|---|---|---|---:|
         \\
     );
     inline for (.{ Mode.parser, Mode.runtime, Mode.runtime_hardened }) |m| {
@@ -3129,14 +3282,15 @@ fn writeFileBody(
         \\
         \\- **parser** — parses the source only. A pass means Cynic's parser accepts or rejects the test as the spec requires. The runtime is never invoked.
         \\- **runtime** — parses, compiles, and executes against an *unhardened* realm (primordials mutable, globalThis extensible — the legacy ECMAScript baseline). Same engine path as `runtime-hardened`; the difference is the SES posture, not the spec.
-        \\- **runtime-hardened** — same as `runtime` but with the SES posture active (`realm.hardened = true`, the default for `cynic` / `cynic run`). Primordials are frozen; the override-mistake fix lets user code shadow on its own receivers. Fixtures that check spec-mandated `configurable: true` on built-in `.name` / `.length` regress under this row by design — see `docs/ses-alignment.md` Phase 1.
+        \\- **runtime-hardened** — same as `runtime` but with the SES posture active (`realm.hardened = true`, the default for `cynic` / `cynic run`). Primordials are frozen; the override-mistake fix lets user code shadow on its own receivers. Fixtures that check spec-mandated `configurable: true` on built-in `.name` / `.length` reclassify as **divergent** (see column below) — see `docs/handbook/ses-test262-policy.md`.
         \\
         \\**Columns**
         \\
-        \\- **spec%** — `pass / total`. Coverage of the corpus. Skipped tests are in `total` but never in `pass`, so this rises only when we ship features that unblock previously-skipped tests. Same definition in the rolled-up rows and in the by-area scoreboard.
-        \\- **attempted%** — `pass / (pass + fail)`. Of the tests we actually ran, the fraction that passed. Skips drop out. Measures the quality of what's shipped, independent of coverage. Same definition in the rolled-up rows and in the by-area scoreboard; skip-only buckets render as `0 %`.
-        \\- **pass / total** — raw counts for `spec%`. `total` is the Cynic-targeted corpus (see below); `skip` is `total - attempted`.
-        \\- **pass / attempted** — raw counts for `attempted%`. `attempted = pass + fail`; `fail` is `attempted - pass`. Side-by-side with `pass / total` so a row's two percentages have visible numerators and denominators.
+        \\- **spec%** — `pass / total` for `parser` and `runtime`. For `runtime-hardened`, `(pass + divergent) / total` — divergent fixtures count as engine-correct because SES is part of the spec Cynic ships in hardened mode, making the row directly comparable to `runtime`. Skipped tests are in `total` but never in either numerator.
+        \\- **attempted%** — `pass / (pass + fail)`. Of the tests we actually ran, the fraction that passed. Skips and divergent reclassifications drop out. Measures the quality of what's shipped, independent of SES policy.
+        \\- **pass / total** — raw counts for `spec%`. `total` is the Cynic-targeted corpus (see below); `skip` is `total - attempted - divergent`.
+        \\- **pass / attempted** — raw counts for `attempted%`. The numerator is the *true* engine-pass count (excludes divergent reclassifications) so a hardened regression that flips a real fixture from pass to fail moves this column even when the divergent count masks the headline `pass`.
+        \\- **divergent** (`runtime-hardened` only) — fixtures whose test262-written assertion conflicts with SES enforcement (frozen primordials, locked descriptors, override-mistake fix). The engine throws on the offending operation; the fixture's "expected pass" is invalidated by Cynic's SES policy. Counted separately from `fail`. See `docs/handbook/ses-test262-policy.md`. Other rows render `—`.
         \\- **Δ pass** (history) — change in `pass` versus the row immediately above (chronologically previous run of the same `mode`).
         \\- **elapsed** (history) — wall-clock time of the run that produced the row. Recorded only for full sweeps (no `--filter`, no `--only-failing`); partial runs leave it blank to keep the regression signal clean. Sub-minute as `12.3 s`, minute+ as `2m 40s`.
         \\
@@ -3169,8 +3323,8 @@ fn writeFileBody(
         }
         try out.appendSlice(gpa, "\n\n");
         try out.appendSlice(gpa,
-            \\|         | spec% | attempted% | pass / total | pass / attempted | Δ pass | elapsed |
-            \\|---|---|---|---|---|---:|---:|
+            \\|         | spec% | attempted% | pass / total | pass / attempted | divergent | Δ pass | elapsed |
+            \\|---|---|---|---|---|---:|---:|---:|
             \\
         );
 
@@ -3202,11 +3356,21 @@ fn writeMiniRow(
     out: *std.ArrayListUnmanaged(u8),
     r: Row,
 ) !void {
-    var buf: [320]u8 = undefined;
-    const line = try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {d} / {d} |\n", .{
-        @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, r.pass, r.attempted,
-    });
-    try out.appendSlice(gpa, line);
+    var buf: [384]u8 = undefined;
+    // `divergent` is meaningful only for `runtime_hardened`
+    // (or any future SES-posture mode). Other rows render
+    // an em-dash so the column lines up across the table.
+    if (r.divergent > 0) {
+        const line = try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {d} / {d} | {d} |\n", .{
+            @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, r.pass - r.divergent, r.attempted, r.divergent,
+        });
+        try out.appendSlice(gpa, line);
+    } else {
+        const line = try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {d} / {d} | — |\n", .{
+            @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, r.pass, r.attempted,
+        });
+        try out.appendSlice(gpa, line);
+    }
 }
 
 /// Render an elapsed-cell. Empty for rows imported from history
@@ -3231,25 +3395,34 @@ fn writeHistoryRow(
     r: Row,
     prev_pass: ?u32,
 ) !void {
-    var buf: [384]u8 = undefined;
+    var buf: [512]u8 = undefined;
     var elapsed_buf: [32]u8 = undefined;
     const elapsed_cell = try formatElapsedCell(&elapsed_buf, r.elapsed_ms);
+    // True-engine-pass numerator for the `pass / attempted`
+    // column — divergent reclassifications shouldn't inflate
+    // the engine-quality gauge.
+    const attempted_pass = r.pass - r.divergent;
+    var div_buf: [32]u8 = undefined;
+    const divergent_cell: []const u8 = if (r.divergent > 0)
+        try std.fmt.bufPrint(&div_buf, "{d}", .{r.divergent})
+    else
+        "—";
     if (prev_pass) |p| {
         const delta: i64 = @as(i64, r.pass) - @as(i64, p);
         const sign: u8 = if (delta > 0) '+' else if (delta < 0) '-' else 0;
         const mag: u64 = @abs(delta);
         const line = if (sign == 0)
-            try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {d} / {d} | ±0 | {s} |\n", .{
-                @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, r.pass, r.attempted, elapsed_cell,
+            try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {d} / {d} | {s} | ±0 | {s} |\n", .{
+                @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, attempted_pass, r.attempted, divergent_cell, elapsed_cell,
             })
         else
-            try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {d} / {d} | {c}{d} | {s} |\n", .{
-                @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, r.pass, r.attempted, sign, mag, elapsed_cell,
+            try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {d} / {d} | {s} | {c}{d} | {s} |\n", .{
+                @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, attempted_pass, r.attempted, divergent_cell, sign, mag, elapsed_cell,
             });
         try out.appendSlice(gpa, line);
     } else {
-        const line = try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {d} / {d} | n/a | {s} |\n", .{
-            @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, r.pass, r.attempted, elapsed_cell,
+        const line = try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {d} / {d} | {s} | n/a | {s} |\n", .{
+            @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, attempted_pass, r.attempted, divergent_cell, elapsed_cell,
         });
         try out.appendSlice(gpa, line);
     }

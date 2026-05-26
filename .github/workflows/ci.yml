@@ -107,17 +107,22 @@ jobs:
         # log. Step timeout caps it in case the harness wedges.
         #
         # Two floors gate the job — one per `test262-results.md`
-        # runtime row:
+        # runtime row. Both gate the row's **headline `spec%`**
+        # (which for hardened is the SES-adjusted `(pass +
+        # divergent) / total` per Layout A in
+        # `docs/handbook/ses-test262-policy.md`).
         #
         #   --min-spec-pct=92.5          legacy `runtime` baseline
         #                                (unhardened phase). Today
-        #                                published at 92.90% so
-        #                                ~0.4pp headroom; tighten
-        #                                when the baseline stabilises.
-        #   --min-hardened-spec-pct=84.0 SES-posture `runtime_hardened`
-        #                                row. Today 84.77% so ~0.8pp
-        #                                headroom; lazy-bag Phase 3
-        #                                shouldn't move this.
+        #                                published at 92.91% so
+        #                                ~0.4pp headroom.
+        #   --min-hardened-spec-pct=92.0 SES-posture `runtime_hardened`
+        #                                row. Today 92.58% adjusted
+        #                                (was 84.77% raw before
+        #                                Phase 2 divergence
+        #                                classification); ~0.6pp
+        #                                headroom on the adjusted
+        #                                number.
         #
         # Either floor tripping exits 2 — see the per-phase
         # diagnostic block in `tools/test262.zig` for the failure
@@ -131,7 +136,7 @@ jobs:
           zig build test262 -- \
             --mode=runtime --threads=4 --top-rss=20 \
             --min-spec-pct=92.5 \
-            --min-hardened-spec-pct=84.0
+            --min-hardened-spec-pct=92.0
 
       - name: Filtered sweep with top-rss
         # Advisory leak guard: a filtered runtime sweep reports the

@@ -332,11 +332,14 @@ fixtures whose wall-time is dominated by GC even when bytes
 look moderate. Forces `--threads=1`),
 `--min-spec-pct=<f>` / `--min-hardened-spec-pct=<f>` (per-row
 spec% floors — the unhardened legacy baseline and the
-SES-posture row respectively. Exit 2 when either phase's
-pass-percentage drops below the floor. Skipped under
-`--filter=`. CI wires both at the published baselines so a
-regression in either posture fails the build — see
-`.github/workflows/ci.yml`). The harness
+SES-posture row respectively. Both gate the row's headline
+`spec%` (for hardened that's the SES-adjusted
+`(pass + divergent) / total` per Layout A in
+`docs/handbook/ses-test262-policy.md`). Exit 2 when either
+phase's pass-percentage drops below the floor. Skipped under
+`--filter=`. CI wires both at the published baselines (92.5 /
+92.0) so a regression in either posture fails the build —
+see `.github/workflows/ci.yml`). The harness
 scores against the **Cynic-targeted scope**: paths under
 `harness/`, `staging/`, `intl402/`, Annex B language extensions,
 and the browser-era built-ins Cynic doesn't ship are dropped from
