@@ -598,28 +598,34 @@ const Options = struct {
     /// phase regardless of `--write-results`. Accepted spellings:
     /// `--phase=main`, `--phase=feature:<flag>` (e.g. `feature:joint-iteration`).
     phase: ?Phase = null,
-    /// Minimum acceptable `spec%` for the **unhardened** phase
-    /// (the legacy ECMAScript baseline that `test262-results.md`'s
-    /// `runtime` row tracks). When >0 and the unhardened phase
-    /// runs, a pass-percentage below this threshold prints a
-    /// diagnostic and exits 2. `0.0` (default) disables.
+    /// Minimum acceptable `pass%` (= `pass / corpus`) for the
+    /// **unhardened** phase — the legacy ECMAScript baseline that
+    /// `test262-results.md`'s `runtime` row tracks. When >0 and
+    /// the unhardened phase runs, a pass-percentage below this
+    /// threshold prints a diagnostic and exits 2. `0.0` (default)
+    /// disables.
     ///
     /// Scoped to the unhardened phase so CI can gate on the
     /// historical baseline without false-positiving on the
-    /// hardened phase (which scores ~8 pp lower today and is
-    /// guarded by `min_hardened_spec_pct` separately). Filtered
-    /// runs and runs that don't include the phase skip the check.
+    /// hardened phase (separately guarded by
+    /// `min_hardened_spec_pct`). Filtered runs and runs that don't
+    /// include the phase skip the check.
+    ///
+    /// Flag name is `--min-spec-pct` for backwards-compat with
+    /// existing CI configs; the column it gates is now labelled
+    /// `pass%` in `test262-results.md` (it isn't actual ECMA-262
+    /// spec conformance — see the Legend in that file).
     min_spec_pct: f64 = 0.0,
-    /// Minimum acceptable `spec%` for the **main (hardened)**
-    /// phase — the SES-posture sweep that
-    /// `test262-results.md`'s `runtime_hardened` row tracks.
-    /// Same enforcement shape as `min_spec_pct` but scoped to
-    /// the hardened phase. Distinct flag because the hardened
-    /// floor sits ~8 pp lower than the legacy baseline (SES
-    /// freeze locks `.name` / `.length` descriptors that test262
-    /// expects to be `configurable: true`), and we want both
-    /// floors enforced independently so a regression in either
-    /// posture fails CI.
+    /// Minimum acceptable `pass%` for the **main (hardened)** phase
+    /// — the SES-posture sweep that `test262-results.md`'s
+    /// `runtime_hardened` row tracks. Same enforcement shape as
+    /// `min_spec_pct`, distinct flag so both postures gate
+    /// independently. For hardened, `pass%` includes divergent
+    /// reclassifications per Layout A — the math is
+    /// `(pass + divergent) / corpus`.
+    ///
+    /// Flag name is `--min-hardened-spec-pct` for backwards-compat
+    /// with existing CI configs.
     min_hardened_spec_pct: f64 = 0.0,
     /// Minimum acceptable pass rate on the **SES witness set**
     /// (`tools/test262/ses_witnesses.zig`). Default 0 disables;
@@ -1183,7 +1189,7 @@ pub fn main(init: std.process.Init) !void {
                 const pct = 100.0 * @as(f64, @floatFromInt(headline_pass)) / @as(f64, @floatFromInt(pr.stats.total));
                 if (pct < floor) {
                     std.debug.print(
-                        "test262: phase '{s}' spec% {d:.2} below {s} floor {d:.2} (pass {d} / total {d})\n",
+                        "test262: phase '{s}' pass% {d:.2} below {s} floor {d:.2} (pass {d} / corpus {d})\n",
                         .{ pr.phase.label(), pct, flag_name, floor, headline_pass, pr.stats.total },
                     );
                     below.* = true;
@@ -2720,8 +2726,8 @@ fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
     // the unhardened phase's tally clean.
     if (stats.divergent == 0) {
         const msg = try std.fmt.bufPrint(&buf,
-            \\total:    {d}
-            \\pass:     {d}   ({d:.2}%)
+            \\corpus:   {d}
+            \\pass:     {d}   ({d:.2}% — pass / corpus)
             \\fail:     {d}
             \\skip:     {d}
             \\  parse-positive: {d} attempted, {d} pass, {d} fail (false-reject)
@@ -2745,10 +2751,10 @@ fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
         try std.Io.File.stdout().writeStreamingAll(io, msg);
     } else {
         const msg = try std.fmt.bufPrint(&buf,
-            \\total:     {d}
-            \\pass:      {d}   ({d:.2}%)
+            \\corpus:    {d}
+            \\pass:      {d}   ({d:.2}% engine-true)
             \\divergent: {d}
-            \\adj-spec%: ({d:.2}%) — (pass + divergent) / total under SES
+            \\pass%:     {d:.2}% — (pass + divergent) / corpus under SES policy
             \\fail:      {d}
             \\skip:      {d}
             \\  parse-positive: {d} attempted, {d} pass, {d} fail (false-reject)
@@ -3451,7 +3457,7 @@ fn writeFileBody(
         \\
         \\## Current scores
         \\
-        \\|         | spec% | attempted% | pass / total | pass / attempted | divergent |
+        \\|         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent |
         \\|---|---|---|---|---|---:|
         \\
     );
@@ -3515,24 +3521,131 @@ fn writeFileBody(
         \\
         \\## Legend
         \\
-        \\**Rows**
+        \\### What "spec%" would mean (and why we don't claim it)
         \\
-        \\- **parser** — parses the source only. A pass means Cynic's parser accepts or rejects the test as the spec requires. The runtime is never invoked.
-        \\- **runtime** — parses, compiles, and executes against an *unhardened* realm (primordials mutable, globalThis extensible — the legacy ECMAScript baseline). Same engine path as `runtime-hardened`; the difference is the SES posture, not the spec.
-        \\- **runtime-hardened** — same as `runtime` but with the SES posture active (`realm.hardened = true`, the default for `cynic` / `cynic run`). Primordials are frozen; the override-mistake fix lets user code shadow on its own receivers. Fixtures that check spec-mandated `configurable: true` on built-in `.name` / `.length` reclassify as **divergent** (see column below) — see `docs/handbook/ses-test262-policy.md`.
+        \\The percentages here are **not** ECMA-262 spec conformance.
+        \\Spec conformance would require running every normative
+        \\requirement in the spec — there's no such enumerable set.
+        \\test262 is one community attempt at covering the spec via
+        \\concrete fixtures, and we run a **filtered subset** of
+        \\that (the "corpus" below).
         \\
-        \\**Columns**
+        \\So **`pass%` here means `pass / corpus`** — how many
+        \\fixtures we actually run pass. It's the right number for
+        \\"did anything regress?" tracking, but it's a lower bound
+        \\on spec coverage (a fixture not in `corpus` doesn't get a
+        \\verdict either way).
         \\
-        \\- **spec%** — `pass / total` for `parser` and `runtime`. For `runtime-hardened`, `(pass + divergent) / total` — divergent fixtures count as engine-correct because SES is part of the spec Cynic ships in hardened mode, making the row directly comparable to `runtime`. Skipped tests are in `total` but never in either numerator.
-        \\- **attempted%** — `pass / (pass + fail)`. Of the tests we actually ran, the fraction that passed. Skips and divergent reclassifications drop out. Measures the quality of what's shipped, independent of SES policy.
-        \\- **pass / total** — raw counts for `spec%`. `total` is the Cynic-targeted corpus (see below); `skip` is `total - attempted - divergent`.
-        \\- **pass / attempted** — raw counts for `attempted%`. The numerator is the *true* engine-pass count (excludes divergent reclassifications) so a hardened regression that flips a real fixture from pass to fail moves this column even when the divergent count masks the headline `pass`.
-        \\- **divergent** (`runtime-hardened` only) — fixtures whose test262-written assertion conflicts with SES enforcement (frozen primordials, locked descriptors, override-mistake fix). The engine throws on the offending operation; the fixture's "expected pass" is invalidated by Cynic's SES policy. Counted separately from `fail`. See `docs/handbook/ses-test262-policy.md`. Other rows render `—`.
-        \\- **SES witness fidelity** (note under `## Current scores`) — Phase 3 positive-coverage signal. The witness set in `tools/test262/ses_witnesses.zig` is a curated subset of paths that MUST classify as `divergent` under hardened-mode runs. Drift either way (a witness now passes — SES enforcement weakened; or a witness fails for a non-divergence reason — pattern miss or engine regression in the SES throw path) is a hard signal. CI gates the floor at 100 %.
-        \\- **Δ pass** (history) — change in `pass` versus the row immediately above (chronologically previous run of the same `mode`).
-        \\- **elapsed** (history) — wall-clock time of the run that produced the row. Recorded only for full sweeps (no `--filter`, no `--only-failing`); partial runs leave it blank to keep the regression signal clean. Sub-minute as `12.3 s`, minute+ as `2m 40s`.
+        \\### Rows
         \\
-        \\**Scope.** `total` excludes paths universally out of scope (`harness/`, `staging/`, `intl402/`), Annex B language extensions, and browser-era built-ins Cynic doesn't ship (`escape` / `unescape`, `String.prototype` HTML wrappers, `Date.{getYear, setYear}`). Fixtures referencing a pre-Stage-4 proposal (see the per-feature table) are *also* excluded from `total` — they don't appear in the rolled-up rows or the per-area scoreboard at all. Each proposal's row in `## Pre-Stage-4 proposals shipped` is sourced from a dedicated phase sweep that runs only the matching fixtures, in a realm where only that one proposal's flag is enabled.
+        \\- **`parser`** — parses the source only. A pass means
+        \\  Cynic's parser accepts or rejects the test as test262
+        \\  expects. The runtime is never invoked.
+        \\- **`runtime`** — parses, compiles, and executes against
+        \\  an *unhardened* realm (primordials mutable, globalThis
+        \\  extensible — the legacy ECMAScript baseline). Same
+        \\  engine path as `runtime_hardened`; the difference is
+        \\  the SES posture, not the spec.
+        \\- **`runtime_hardened`** — same as `runtime` but with the
+        \\  SES posture active (`realm.hardened = true`, the default
+        \\  for `cynic` / `cynic run`). Primordials are frozen; the
+        \\  override-mistake fix lets user code shadow on its own
+        \\  receivers. Fixtures that check spec-mandated
+        \\  `configurable: true` on built-in `.name` / `.length`
+        \\  reclassify as **divergent** (see column) — see
+        \\  `docs/handbook/ses-test262-policy.md`.
+        \\
+        \\### Columns
+        \\
+        \\- **`pass%`** — `pass / corpus`. For `parser` and `runtime`,
+        \\  the numerator is plain `pass`. For `runtime_hardened`,
+        \\  the numerator is `(pass + divergent)` per the Layout A
+        \\  math: divergent fixtures fail by the strict ECMA-262
+        \\  letter (SES rejects writes the spec allows), but Cynic's
+        \\  default posture ships the SES policy, so they're
+        \\  policy-accepted as engine-correct. **This is what an
+        \\  embedder running `cynic run` sees succeed.**
+        \\- **`engine%`** — `pass / (pass + fail)`. Of fixtures the
+        \\  engine actually attempted, the fraction that passed at
+        \\  the engine-true level (no SES weighting). The pass
+        \\  numerator excludes `divergent`, so a hardened regression
+        \\  that flips a real fixture from pass to fail moves this
+        \\  column even when the divergent count masks the headline
+        \\  `pass%`. **This is the actual engine-quality gauge.**
+        \\  Today >99.9 % across every row — Cynic implements the
+        \\  spec it does ship.
+        \\- **`pass / corpus`** — raw counts for `pass%`. `corpus` is
+        \\  the Cynic-targeted test262 subset (see Scope below);
+        \\  `skip = corpus - attempted - divergent`.
+        \\- **`pass / engine-attempt`** — raw counts for `engine%`.
+        \\  Numerator excludes divergent reclassifications, so an
+        \\  attentive reader can see at a glance how much of the
+        \\  hardened `pass%` is policy-accepted vs engine-true.
+        \\- **`divergent`** (`runtime_hardened` only) — fixtures
+        \\  whose test262-written assertion conflicts with SES
+        \\  enforcement (frozen primordials, locked descriptors,
+        \\  override-mistake fix). The engine throws on the
+        \\  offending operation; the fixture's "expected pass" is
+        \\  invalidated by Cynic's SES policy. **These are
+        \\  spec-failures by ECMA-262's letter**, accepted as
+        \\  policy-correct under the hardened posture. Counted
+        \\  separately from `fail`. See
+        \\  `docs/handbook/ses-test262-policy.md`. Other rows
+        \\  render `—`.
+        \\- **SES witness fidelity** (note under `## Current scores`)
+        \\  — Phase 3 positive-coverage signal. The curated witness
+        \\  set in `tools/test262/ses_witnesses.zig` is a small list
+        \\  of paths that MUST classify as `divergent` under
+        \\  hardened runs. Drift either way (a witness now passes
+        \\  — SES enforcement weakened; or a witness fails for a
+        \\  non-divergence reason — pattern miss or engine
+        \\  regression in the SES throw path) is a hard signal. CI
+        \\  gates the floor at 100 %.
+        \\- **`Δ pass`** (history) — change in `pass` versus the row
+        \\  immediately above (chronologically previous run of the
+        \\  same row identity).
+        \\- **`elapsed`** (history) — wall-clock time of the run
+        \\  that produced the row. Recorded only for full sweeps
+        \\  (no `--filter`, no `--only-failing`); partial runs
+        \\  leave it blank to keep the regression signal clean.
+        \\  Sub-minute as `12.3 s`, minute+ as `2m 40s`.
+        \\
+        \\### Scope (what's in `corpus`)
+        \\
+        \\`corpus` is the test262 fixture count *after* the
+        \\Cynic-targeted skiplist (`tools/test262/skip.zig`) filters
+        \\out:
+        \\
+        \\- **Universally OOS**: `harness/`, `staging/`, `intl402/`
+        \\  (internationalization — Cynic doesn't ship Intl).
+        \\- **Annex B language extensions**: HTML-like comments,
+        \\  labelled function decls in sloppy mode, legacy octals,
+        \\  Annex B regex grammar (mostly — see the acknowledged
+        \\  `/u`-less leak in AGENTS.md). Cynic targets edge
+        \\  runtimes, not browsers.
+        \\- **Annex B built-ins**: `escape` / `unescape`,
+        \\  `String.prototype` HTML wrappers (`.bold` / `.fontsize`
+        \\  / etc.), `Date.{getYear, setYear, toGMTString}`,
+        \\  `String.prototype.{substr, trimLeft, trimRight}`,
+        \\  `Object.prototype.__proto__` accessor,
+        \\  `Object.prototype.__defineGetter__` /
+        \\  `__defineSetter__` / `__lookupGetter__` /
+        \\  `__lookupSetter__`, `RegExp.{$1, input, …}` legacy
+        \\  globals.
+        \\- **Planned features** Cynic doesn't ship yet: Temporal,
+        \\  explicit-resource-management (`using` / `await using` +
+        \\  `DisposableStack` / `AsyncDisposableStack` /
+        \\  `SuppressedError`), import-attributes + json-modules,
+        \\  Uint8Array `{from,to}{Base64,Hex}`, Float16Array,
+        \\  json-parse-with-source.
+        \\- **Pre-Stage-4 proposals** Cynic ships behind
+        \\  `--enable=<name>`: tracked in the per-feature scoreboard
+        \\  below, not in `corpus`. Each proposal's fixtures run
+        \\  in a dedicated phase sweep with only that one flag
+        \\  enabled, so the row reflects the proposal in honest
+        \\  isolation.
+        \\
+        \\Today: test262 ships ~52k fixtures; `corpus` is 40161.
         \\
         \\## History
         \\
@@ -3561,7 +3674,7 @@ fn writeFileBody(
         }
         try out.appendSlice(gpa, "\n\n");
         try out.appendSlice(gpa,
-            \\|         | spec% | attempted% | pass / total | pass / attempted | divergent | Δ pass | elapsed |
+            \\|         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
             \\|---|---|---|---|---|---:|---:|---:|
             \\
         );
@@ -3713,22 +3826,32 @@ fn writeScoreboard(
         \\  `docs/handbook/ses-test262-policy.md`) is the count of
         \\  fixtures whose test262-written assertion conflicts with
         \\  Cynic's SES enforcement (frozen primordials, locked
-        \\  descriptors, override-mistake fix). They're not real
-        \\  engine failures — the throw is correct; the fixture's
-        \\  expectation of success is invalidated by SES — so they
-        \\  count toward `spec%` per the Layout A scoring math
-        \\  `(pass + divergent) / total`.
-        \\- `spec%` is `(pass + divergent) / total`.
-        \\- `attempted%` is `pass / (pass + fail)` — the engine-true
-        \\  conformance gauge, independent of SES policy. Skips and
-        \\  divergent reclassifications drop out.
+        \\  descriptors, override-mistake fix). The fixture would
+        \\  pass on a spec-literal engine (V8 / JSC / SpiderMonkey),
+        \\  but Cynic's hardened posture throws by design — the
+        \\  throw is correct, the fixture's expectation of success
+        \\  is invalidated by Cynic's SES policy. So divergent is
+        \\  **policy-accepted**, not spec-passing.
+        \\- `pass%` for this hardened-sourced table is
+        \\  `(pass + divergent) / (pass + fail + skip + divergent)`
+        \\  per the Layout A math — the fraction the embedder
+        \\  running `cynic run` sees succeed under Cynic's default
+        \\  posture. **Not strict-spec conformance** (a spec-literal
+        \\  engine wouldn't count `divergent` here); see the row-
+        \\  level legend.
+        \\- `engine%` is `pass / (pass + fail)` — the true
+        \\  engine-conformance gauge, independent of SES policy.
+        \\  Skips and divergent reclassifications drop out. Today
+        \\  this is **>99.9 % across every bucket** that has any
+        \\  attempted fixtures — the engine implements the spec
+        \\  it does ship.
         \\
         \\Rows in ~~strikethrough~~ are buckets we skip wholesale
         \\(out of scope per the Cynic-targeted skiplist — Annex B
         \\language extensions, intl402, staging, Temporal,
         \\browser-era built-ins …).
         \\
-        \\| area | pass | fail | skip | divergent | spec% | attempted% |
+        \\| area | pass | fail | skip | divergent | pass% | engine% |
         \\|---|---:|---:|---:|---:|---:|---:|
         \\
     );
@@ -3816,12 +3939,12 @@ fn writePreStage4Scoreboard(
         \\so each row reflects the proposal in honest isolation.
         \\**These fixtures are excluded entirely from the top-line
         \\`## Current scores` and the per-area scoreboard** — they
-        \\are not in `total` and not in any bucket, so the headline
-        \\number tracks stable ECMA-262 conformance only. When a
-        \\proposal advances to Stage 4 the row stays here until its
-        \\features ship in mainline ECMA-262.
+        \\are not in the Cynic corpus and not in any bucket, so the
+        \\headline number tracks stable ECMA-262 conformance only.
+        \\When a proposal advances to Stage 4 the row stays here
+        \\until its features ship in mainline ECMA-262.
         \\
-        \\| feature | pass | fail | skip | spec% | attempted% |
+        \\| feature | pass | fail | skip | pass% | engine% |
         \\|---|---:|---:|---:|---:|---:|
         \\
     );
