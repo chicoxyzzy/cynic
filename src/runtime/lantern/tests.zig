@@ -2720,6 +2720,349 @@ test "later: DisposableStack.prototype.use fires Symbol.dispose" {
     , "disposed");
 }
 
+// §27.4 AsyncDisposableStack — ES2026 explicit-resource-management.
+// Asynchronous resource stack. `.use(v)` accepts either
+// `Symbol.asyncDispose` (preferred) or `Symbol.dispose`.
+// `.disposeAsync()` returns a Promise that fulfils once the LIFO
+// walk awaits every disposer; rejections compose via SuppressedError
+// across multiple in-flight throws (§9.5.4 step 2.b.iv-vi).
+
+test "later: AsyncDisposableStack is a function with length 0" {
+    try expectScriptStringWithBuiltins(
+        \\typeof AsyncDisposableStack + ":" + AsyncDisposableStack.length;
+    , "function:0");
+}
+
+test "later: new AsyncDisposableStack() shape — .disposed is false" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\s.disposed + ":" + (s instanceof AsyncDisposableStack) + ":" +
+        \\(Object.getPrototypeOf(s) === AsyncDisposableStack.prototype);
+    , "false:true:true");
+}
+
+test "later: AsyncDisposableStack.prototype[Symbol.toStringTag]" {
+    try expectScriptStringWithBuiltins(
+        \\Object.prototype.toString.call(new AsyncDisposableStack());
+    , "[object AsyncDisposableStack]");
+}
+
+test "later: AsyncDisposableStack.prototype[Symbol.asyncDispose] === .disposeAsync" {
+    try expectScriptStringWithBuiltins(
+        \\(AsyncDisposableStack.prototype[Symbol.asyncDispose] ===
+        \\  AsyncDisposableStack.prototype.disposeAsync) + "";
+    , "true");
+}
+
+test "later: AsyncDisposableStack.prototype has no Symbol.dispose" {
+    // §27.4.3 — the async stack only carries [@@asyncDispose].
+    // A user who tries to wire it into a sync `using` binding
+    // gets a TypeError from `GetDisposeMethod(V, sync-dispose)`.
+    try expectScriptStringWithBuiltins(
+        \\(Symbol.dispose in AsyncDisposableStack.prototype) + "";
+    , "false");
+}
+
+test "later: AsyncDisposableStack.prototype.use(value) returns value" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\const r = { [Symbol.asyncDispose]() {} };
+        \\(s.use(r) === r) + "";
+    , "true");
+}
+
+test "later: AsyncDisposableStack.prototype.use null/undefined no-op" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\(s.use(null) === null) + ":" + (s.use(undefined) === undefined);
+    , "true:true");
+}
+
+test "later: AsyncDisposableStack.prototype.use({}) throws TypeError" {
+    // §9.5.2 GetDisposeMethod(V, async-dispose): step 1.a checks
+    // @@asyncDispose; step 1.b falls back to @@dispose. Neither
+    // is present here, so TypeError.
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\let kind = "";
+        \\try { s.use({}); } catch (e) { kind = e.constructor.name; }
+        \\kind;
+    , "TypeError");
+}
+
+test "later: AsyncDisposableStack.use accepts Symbol.dispose fallback" {
+    // §9.5.2 step 1.b — when V has no @@asyncDispose, the sync
+    // @@dispose method is adopted. The async walk awaits its
+    // (synchronous) return value anyway.
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\let log = "";
+        \\s.use({ [Symbol.dispose]() { log = "sync-fallback"; } });
+        \\let final = "";
+        \\s.disposeAsync().then(v => { final = (v === undefined) + ":" + log; });
+        \\globalThis.__drainMicrotasks();
+        \\final;
+    , "true:sync-fallback");
+}
+
+test "later: AsyncDisposableStack.use prefers Symbol.asyncDispose over Symbol.dispose" {
+    // §9.5.2 step 1.a — when both methods are present, the async
+    // hint picks @@asyncDispose first and never consults @@dispose.
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\let picked = "";
+        \\s.use({
+        \\  [Symbol.asyncDispose]() { picked = "async"; },
+        \\  [Symbol.dispose]() { picked = "sync"; },
+        \\});
+        \\s.disposeAsync();
+        \\globalThis.__drainMicrotasks();
+        \\picked;
+    , "async");
+}
+
+test "later: AsyncDisposableStack.prototype.use after dispose throws ReferenceError" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\s.disposeAsync();
+        \\globalThis.__drainMicrotasks();
+        \\let kind = "";
+        \\try { s.use({ [Symbol.asyncDispose]() {} }); }
+        \\catch (e) { kind = e.constructor.name; }
+        \\kind;
+    , "ReferenceError");
+}
+
+test "later: AsyncDisposableStack.prototype.disposeAsync returns a Promise" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\const p = s.disposeAsync();
+        \\(p instanceof Promise) + "";
+    , "true");
+}
+
+test "later: AsyncDisposableStack.disposeAsync fulfils with undefined after sync disposer" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\let log = "";
+        \\s.defer(() => { log = "fired"; });
+        \\let result = "?";
+        \\s.disposeAsync().then(v => { result = log + ":" + (v === undefined); });
+        \\globalThis.__drainMicrotasks();
+        \\result;
+    , "fired:true");
+}
+
+test "later: AsyncDisposableStack awaits an async disposer" {
+    // The disposer returns a Promise; the next step doesn't fire
+    // until that Promise settles. We assert ordering: the sentinel
+    // string is built up across two microtask turns.
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\const log = [];
+        \\s.defer(() => Promise.resolve().then(() => { log.push("A-done"); }));
+        \\s.defer(() => { log.push("B-sync"); });
+        \\let final = "";
+        \\s.disposeAsync().then(() => { log.push("settled"); final = log.join(","); });
+        \\globalThis.__drainMicrotasks();
+        \\final;
+    , "B-sync,A-done,settled");
+}
+
+test "later: AsyncDisposableStack.disposeAsync disposal order is LIFO" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\const log = [];
+        \\s.defer(() => log.push("A"));
+        \\s.defer(() => log.push("B"));
+        \\s.defer(() => log.push("C"));
+        \\let out = "";
+        \\s.disposeAsync().then(() => { out = log.join(","); });
+        \\globalThis.__drainMicrotasks();
+        \\out;
+    , "C,B,A");
+}
+
+test "later: AsyncDisposableStack single throwing disposer rejects Promise" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\s.defer(() => { throw new Error("boom"); });
+        \\let msg = "";
+        \\s.disposeAsync().then(
+        \\  () => { msg = "fulfilled"; },
+        \\  e => { msg = e.message; },
+        \\);
+        \\globalThis.__drainMicrotasks();
+        \\msg;
+    , "boom");
+}
+
+test "later: AsyncDisposableStack two throwing disposers wrap in SuppressedError" {
+    // Disposal is LIFO: the second-added disposer (B) fires first;
+    // when the first-added (A) then throws, A becomes [[Error]]
+    // and B becomes [[Suppressed]] per §9.5.4 step 2.b.iv-vi.
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\const eA = new Error("A");
+        \\const eB = new Error("B");
+        \\s.defer(() => { throw eA; });
+        \\s.defer(() => { throw eB; });
+        \\let kind = "", err = null, sup = null;
+        \\s.disposeAsync().then(
+        \\  () => {},
+        \\  e => { kind = e.constructor.name; err = e.error; sup = e.suppressed; },
+        \\);
+        \\globalThis.__drainMicrotasks();
+        \\kind + ":" + err.message + ":" + sup.message;
+    , "SuppressedError:A:B");
+}
+
+test "later: AsyncDisposableStack rejected async disposer composes via SuppressedError" {
+    // A disposer that returns Promise.reject(...) is observably
+    // the same as a sync-throwing disposer once awaited.
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\s.defer(() => Promise.reject(new Error("A")));
+        \\s.defer(() => { throw new Error("B"); });
+        \\let kind = "", err = "", sup = "";
+        \\s.disposeAsync().then(
+        \\  () => {},
+        \\  e => { kind = e.constructor.name; err = e.error.message; sup = e.suppressed.message; },
+        \\);
+        \\globalThis.__drainMicrotasks();
+        \\kind + ":" + err + ":" + sup;
+    , "SuppressedError:A:B");
+}
+
+test "later: AsyncDisposableStack.disposeAsync is idempotent" {
+    // Second call must NOT walk the (now-empty) resource list
+    // again; it returns a fulfilled-with-undefined Promise.
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\let calls = 0;
+        \\s.defer(() => { calls += 1; });
+        \\s.disposeAsync();
+        \\s.disposeAsync();
+        \\s.disposeAsync();
+        \\globalThis.__drainMicrotasks();
+        \\calls + ":" + s.disposed;
+    , "1:true");
+}
+
+test "later: AsyncDisposableStack second disposeAsync returns fulfilled Promise" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\s.disposeAsync();
+        \\globalThis.__drainMicrotasks();
+        \\let v = "?";
+        \\s.disposeAsync().then(r => { v = (r === undefined) + ""; });
+        \\globalThis.__drainMicrotasks();
+        \\v;
+    , "true");
+}
+
+test "later: AsyncDisposableStack.prototype.adopt awaits a thenable onDispose" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\const log = [];
+        \\const ret = s.adopt("payload", (v) => Promise.resolve().then(() => log.push("got:" + v)));
+        \\let out = "";
+        \\s.disposeAsync().then(() => { log.push("settled"); out = log.join(","); });
+        \\globalThis.__drainMicrotasks();
+        \\ret + "|" + out;
+    , "payload|got:payload,settled");
+}
+
+test "later: AsyncDisposableStack.prototype.defer fires at disposeAsync with no args" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\let log = "";
+        \\const ret = s.defer((...args) => { log = "fired:" + args.length; });
+        \\let after = "";
+        \\s.disposeAsync().then(() => { after = (ret === undefined) + ":" + log; });
+        \\globalThis.__drainMicrotasks();
+        \\after;
+    , "true:fired:0");
+}
+
+test "later: AsyncDisposableStack.prototype.move returns a fresh AsyncDisposableStack" {
+    try expectScriptStringWithBuiltins(
+        \\const s1 = new AsyncDisposableStack();
+        \\s1.defer(() => {});
+        \\const s2 = s1.move();
+        \\(s2 instanceof AsyncDisposableStack) + ":" +
+        \\(s2 instanceof DisposableStack) + ":" +
+        \\s1.disposed + ":" + s2.disposed;
+    , "true:false:true:false");
+}
+
+test "later: AsyncDisposableStack.prototype.move transfers resources" {
+    try expectScriptStringWithBuiltins(
+        \\const s1 = new AsyncDisposableStack();
+        \\const log = [];
+        \\s1.defer(() => log.push("A"));
+        \\s1.defer(() => log.push("B"));
+        \\const s2 = s1.move();
+        \\let out = "";
+        \\s1.disposeAsync().then(() => {
+        \\  log.push("s1-done");
+        \\  s2.disposeAsync().then(() => { log.push("s2-done"); out = log.join(","); });
+        \\});
+        \\globalThis.__drainMicrotasks();
+        \\out;
+    , "s1-done,B,A,s2-done");
+}
+
+test "later: AsyncDisposableStack.prototype.move after dispose throws" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\s.disposeAsync();
+        \\globalThis.__drainMicrotasks();
+        \\let kind = "";
+        \\try { s.move(); } catch (e) { kind = e.constructor.name; }
+        \\kind;
+    , "ReferenceError");
+}
+
+test "later: AsyncDisposableStack called without new throws TypeError" {
+    try expectScriptStringWithBuiltins(
+        \\let kind = "";
+        \\try { AsyncDisposableStack(); } catch (e) { kind = e.constructor.name; }
+        \\kind;
+    , "TypeError");
+}
+
+test "later: AsyncDisposableStack brand check on prototype methods" {
+    // §27.4.3 RequireInternalSlot(O, [[AsyncDisposableState]]):
+    // a sync DisposableStack must NOT pass either, and a plain
+    // object must NOT pass.
+    try expectScriptStringWithBuiltins(
+        \\const kinds = [];
+        \\try { AsyncDisposableStack.prototype.use.call({}, null); }
+        \\catch (e) { kinds.push(e.constructor.name); }
+        \\try { AsyncDisposableStack.prototype.use.call(new DisposableStack(), null); }
+        \\catch (e) { kinds.push(e.constructor.name); }
+        \\try { DisposableStack.prototype.dispose.call(new AsyncDisposableStack()); }
+        \\catch (e) { kinds.push(e.constructor.name); }
+        \\kinds.join(",");
+    , "TypeError,TypeError,TypeError");
+}
+
+test "later: AsyncDisposableStack.use fires Symbol.asyncDispose with correct this" {
+    try expectScriptStringWithBuiltins(
+        \\const s = new AsyncDisposableStack();
+        \\const r = {
+        \\  tag: "r1",
+        \\  [Symbol.asyncDispose]() { return Promise.resolve(this.tag); },
+        \\};
+        \\let log = "";
+        \\s.use(r);
+        \\s.disposeAsync().then(() => { log = "done"; });
+        \\globalThis.__drainMicrotasks();
+        \\log;
+    , "done");
+}
+
 test "later: tagged template passes cooked + raw arrays" {
     try expectScriptStringWithBuiltins(
         \\function tag(strs) {

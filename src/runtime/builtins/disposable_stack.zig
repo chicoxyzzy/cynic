@@ -19,7 +19,10 @@
 //!
 //! The async sibling (§27.4 AsyncDisposableStack) ships in
 //! Phase 5 — same data shape, different prototype + dispose
-//! discipline.
+//! discipline. Brand discrimination rides on the
+//! `disposable_state` enum's `.sync_*` vs `.async_*` variants
+//! (one slot doubles as kind + lifecycle tag) so a
+//! `Object.setPrototypeOf` can't flip the brand.
 
 const std = @import("std");
 
@@ -106,19 +109,25 @@ fn disposableStackConstructor(realm: *Realm, this_value: Value, args: []const Va
     // Record. Both live on the JSObjectExtension typed slots; the
     // extension's resource list is already `.empty` from
     // getOrCreateExtension's zero-init.
-    try instance.setDisposableState(realm.allocator, .pending);
+    try instance.setDisposableState(realm.allocator, .sync_pending);
     return heap_mod.taggedObject(instance);
 }
 
 /// §27.3.3.x `RequireInternalSlot(O, [[DisposableState]])` — the
 /// brand check shared by every prototype method. Throws TypeError
-/// when the receiver isn't a DisposableStack (i.e. its extension
-/// never had `disposable_state` set, so the slot reads `null`).
+/// when the receiver isn't a DisposableStack — either its extension
+/// never had `disposable_state` set (plain object) OR the slot
+/// carries an AsyncDisposableStack brand (§27.4) instead. Both
+/// must reject so a §27.3 method can't observe §27.4 internal
+/// state and vice versa.
 fn requireDisposableStack(realm: *Realm, this_value: Value) NativeError!*JSObject {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse {
         return throwTypeError(realm, "DisposableStack method called on non-object");
     };
-    if (obj.getDisposableState() == null) {
+    const state = obj.getDisposableState() orelse {
+        return throwTypeError(realm, "DisposableStack method called on incompatible receiver");
+    };
+    if (state.isAsync()) {
         return throwTypeError(realm, "DisposableStack method called on incompatible receiver");
     }
     return obj;
@@ -132,7 +141,7 @@ fn requireDisposableStack(realm: *Realm, this_value: Value) NativeError!*JSObjec
 //   5. Return value.
 fn disposableStackUse(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const stack = try requireDisposableStack(realm, this_value);
-    if (stack.getDisposableState().? == .disposed) {
+    if (stack.getDisposableState().?.isDisposed()) {
         return throwReferenceError(realm, "DisposableStack.prototype.use: stack is disposed");
     }
     const value = if (args.len > 0) args[0] else Value.undefined_;
@@ -157,7 +166,7 @@ fn disposableStackUse(realm: *Realm, this_value: Value, args: []const Value) Nat
 // `onDispose.call(undefined, value)`, matching the spec closure.
 fn disposableStackAdopt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const stack = try requireDisposableStack(realm, this_value);
-    if (stack.getDisposableState().? == .disposed) {
+    if (stack.getDisposableState().?.isDisposed()) {
         return throwReferenceError(realm, "DisposableStack.prototype.adopt: stack is disposed");
     }
     const value = if (args.len > 0) args[0] else Value.undefined_;
@@ -210,7 +219,7 @@ fn boundAdoptTrampoline(realm: *Realm, this_value: Value, args: []const Value) N
 //   6. Return undefined.
 fn disposableStackDefer(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const stack = try requireDisposableStack(realm, this_value);
-    if (stack.getDisposableState().? == .disposed) {
+    if (stack.getDisposableState().?.isDisposed()) {
         return throwReferenceError(realm, "DisposableStack.prototype.defer: stack is disposed");
     }
     const on_dispose_v = if (args.len > 0) args[0] else Value.undefined_;
@@ -234,8 +243,8 @@ fn disposableStackDefer(realm: *Realm, this_value: Value, args: []const Value) N
 fn disposableStackDispose(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const stack = try requireDisposableStack(realm, this_value);
-    if (stack.getDisposableState().? == .disposed) return Value.undefined_;
-    try stack.setDisposableState(realm.allocator, .disposed);
+    if (stack.getDisposableState().?.isDisposed()) return Value.undefined_;
+    try stack.setDisposableState(realm.allocator, .sync_disposed);
     return disposeResources(realm, stack);
 }
 
@@ -245,7 +254,7 @@ fn disposableStackDispose(realm: *Realm, this_value: Value, args: []const Value)
 fn disposableStackDisposedGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const stack = try requireDisposableStack(realm, this_value);
-    return Value.fromBool(stack.getDisposableState().? == .disposed);
+    return Value.fromBool(stack.getDisposableState().?.isDisposed());
 }
 
 // §27.3.3.5 DisposableStack.prototype.move ( ).
@@ -262,7 +271,7 @@ fn disposableStackDisposedGetter(realm: *Realm, this_value: Value, args: []const
 fn disposableStackMove(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const stack = try requireDisposableStack(realm, this_value);
-    if (stack.getDisposableState().? == .disposed) {
+    if (stack.getDisposableState().?.isDisposed()) {
         return throwReferenceError(realm, "DisposableStack.prototype.move: stack is disposed");
     }
     // §27.3.3.5 step 4 — allocate a fresh instance with our
@@ -273,7 +282,7 @@ fn disposableStackMove(realm: *Realm, this_value: Value, args: []const Value) Na
     const new_stack = realm.heap.allocateObject() catch return error.OutOfMemory;
     const proto = realm.intrinsics.disposable_stack_prototype.?;
     realm.heap.setObjectPrototype(new_stack, proto);
-    try new_stack.setDisposableState(realm.allocator, .pending);
+    try new_stack.setDisposableState(realm.allocator, .sync_pending);
 
     // Move (don't copy) the resource list. Walk the source list
     // and append into the destination; then clear the source.
@@ -284,7 +293,7 @@ fn disposableStackMove(realm: *Realm, this_value: Value, args: []const Value) Na
     }
     // Clear the source list and flip the source to "disposed".
     if (stack.extension) |ext| ext.disposable_resources.clearRetainingCapacity();
-    try stack.setDisposableState(realm.allocator, .disposed);
+    try stack.setDisposableState(realm.allocator, .sync_disposed);
     return heap_mod.taggedObject(new_stack);
 }
 

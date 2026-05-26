@@ -119,12 +119,45 @@ pub const PropertyFlags = packed struct {
 
 /// ES2026 explicit-resource-management §27.3 / §27.4 —
 /// `[[DisposableState]]` slot on a DisposableStack /
-/// AsyncDisposableStack instance. `pending` means resources
-/// may still be appended and `.dispose()` / `.disposeAsync()`
-/// will fire them; `disposed` means the stack has been
-/// disposed (or moved-from) and further mutation throws
-/// ReferenceError.
-pub const DisposableState = enum(u8) { pending, disposed };
+/// AsyncDisposableStack instance.
+///
+/// The four variants encode BOTH the stack kind (sync vs async)
+/// and the lifecycle state ("pending" vs "disposed"). The kind
+/// discriminator is needed so `requireDisposableStack` rejects
+/// an `AsyncDisposableStack` receiver (and vice versa) without
+/// a prototype-identity check — a user `Object.setPrototypeOf`
+/// must not flip the brand. The encoding keeps the brand in one
+/// 8-bit enum so the existing `disposable_state` slot doubles as
+/// the kind tag.
+///
+///   - `.sync_pending` / `.sync_disposed` — DisposableStack §27.3
+///   - `.async_pending` / `.async_disposed` — AsyncDisposableStack §27.4
+pub const DisposableState = enum(u8) {
+    sync_pending,
+    sync_disposed,
+    async_pending,
+    async_disposed,
+
+    /// Whether this brand is the AsyncDisposableStack §27.4 family.
+    pub fn isAsync(self: DisposableState) bool {
+        return self == .async_pending or self == .async_disposed;
+    }
+
+    /// Whether the stack has been disposed (or moved-from). Once
+    /// disposed, `.use()` / `.adopt()` / `.defer()` / `.move()`
+    /// throw ReferenceError; `.dispose()` / `.disposeAsync()` no-op.
+    pub fn isDisposed(self: DisposableState) bool {
+        return self == .sync_disposed or self == .async_disposed;
+    }
+
+    /// The "pending → disposed" transition for the same kind.
+    pub fn toDisposed(self: DisposableState) DisposableState {
+        return switch (self) {
+            .sync_pending, .sync_disposed => .sync_disposed,
+            .async_pending, .async_disposed => .async_disposed,
+        };
+    }
+};
 
 /// ES2026 explicit-resource-management — the `[[Hint]]` field
 /// on a `DisposableResource` record (§27.3.2.1 step 4 /
@@ -140,6 +173,39 @@ pub const DisposableResource = struct {
     resource: Value,
     hint: DisposableHint,
     dispose_method: Value,
+};
+
+/// ES2026 explicit-resource-management — per-disposal walk state
+/// for an `AsyncDisposableStack` (§27.4.3.4 + §9.5.4 with
+/// hint = async-dispose). One instance per outstanding
+/// `.disposeAsync()` call; freed once the chain settles the
+/// outer Promise.
+///
+/// The async DisposeResources walk is driven by a `.then` chain
+/// across the snapshotted resource records — each step's onFulfilled
+/// / onRejected reads `cursor`, invokes the disposer at
+/// `resources[cursor-1]`, and decrements. The rejected handler
+/// merges its `reason` into `pending_error` (wrapping via
+/// SuppressedError per §9.5.4 step 2.b.iv-vi when one is already
+/// in flight). The final reaction settles `outer` — fulfilled if
+/// `has_pending_error` is false, rejected with `pending_error`
+/// otherwise.
+///
+/// All three reachable values (`resources` records, `pending_error`,
+/// `outer`) are marked by `Heap.markRoots`; without that the
+/// disposal walk would dangle across a minor cycle that ran
+/// between two of its microtask steps.
+pub const AsyncDisposeWalk = struct {
+    resources: std.ArrayListUnmanaged(DisposableResource) = .empty,
+    cursor: u32 = 0,
+    pending_error: Value = Value.undefined_,
+    has_pending_error: bool = false,
+    outer: Value = Value.undefined_,
+
+    pub fn deinit(self: *AsyncDisposeWalk, allocator: std.mem.Allocator) void {
+        self.resources.deinit(allocator);
+        allocator.destroy(self);
+    }
 };
 
 /// `[[MapData]]` storage (§24.1.4). Keeps insertion order so
@@ -529,12 +595,12 @@ pub const JSObjectExtension = struct {
     host_data: ?*anyopaque = null,
     /// ES2026 explicit-resource-management — `[[DisposableState]]`
     /// (§27.3.2 / §27.4.2). `null` means "not a DisposableStack /
-    /// AsyncDisposableStack instance". `.pending` is the freshly-
-    /// constructed state; `.disposed` is set once `.dispose()` /
-    /// `.disposeAsync()` walks the resource list (or `.move()`
-    /// transfers it out). The brand for `requireDisposableStack`
-    /// is `!= null`; once kind discrimination matters (Phase 5
-    /// AsyncDisposableStack), add a sibling brand bool.
+    /// AsyncDisposableStack instance". The four enum variants
+    /// encode BOTH the kind (sync vs async) and the lifecycle
+    /// state — so `requireDisposableStack` rejects an
+    /// AsyncDisposableStack receiver (and vice versa) on a
+    /// single-value comparison, without a prototype-identity
+    /// check that a user `Object.setPrototypeOf` could defeat.
     disposable_state: ?DisposableState = null,
     /// ES2026 explicit-resource-management — `[[DisposeCapability]]`
     /// (§9.5.3 AddDisposableResource). Disposable resource records
@@ -543,6 +609,15 @@ pub const JSObjectExtension = struct {
     /// disposed first (LIFO, matches §9.5.4 DisposeResources step 2).
     /// Empty for non-stack objects.
     disposable_resources: std.ArrayListUnmanaged(DisposableResource) = .empty,
+    /// ES2026 explicit-resource-management — `AsyncDisposableStack`
+    /// disposal walk state (§27.4.3.4 + §9.5.4 with hint =
+    /// async-dispose). Allocated when `.disposeAsync()` starts;
+    /// retained until the chain settles the outer Promise. The
+    /// snapshot keeps the resource records reachable from GC
+    /// (the source `disposable_resources` is cleared at walk
+    /// start so re-entry during disposal sees an empty source).
+    /// `null` for sync DisposableStack / non-stack objects.
+    async_dispose_walk: ?*AsyncDisposeWalk = null,
 
     pub fn deinit(self: *JSObjectExtension, allocator: std.mem.Allocator) void {
         self.accessors.deinit(allocator);
@@ -558,6 +633,7 @@ pub const JSObjectExtension = struct {
         if (self.finalization_cells) |fc| fc.deinit(allocator);
         if (self.array_buffer) |ab| allocator.free(ab);
         self.disposable_resources.deinit(allocator);
+        if (self.async_dispose_walk) |w| w.deinit(allocator);
     }
 };
 

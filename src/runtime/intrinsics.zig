@@ -81,10 +81,17 @@ pub const Intrinsics = struct {
     /// — the synchronous resource-stack global. `.use(v)` /
     /// `.adopt(v, onDispose)` / `.defer(onDispose)` register
     /// resources; `.dispose()` walks them in LIFO order and
-    /// wraps mid-disposal throws via SuppressedError. Sibling
-    /// %AsyncDisposableStack% lands later (Phase 5).
+    /// wraps mid-disposal throws via SuppressedError.
     disposable_stack_constructor: ?*JSFunction = null,
     disposable_stack_prototype: ?*JSObject = null,
+
+    /// §27.4 AsyncDisposableStack (ES2026 explicit-resource-management)
+    /// — the asynchronous sibling. `.use()` accepts
+    /// `Symbol.asyncDispose` (or `Symbol.dispose` as fallback per
+    /// §9.5.2 step 1.b) and `.disposeAsync()` returns a Promise
+    /// that fulfils after the LIFO walk has awaited every disposer.
+    async_disposable_stack_constructor: ?*JSFunction = null,
+    async_disposable_stack_prototype: ?*JSObject = null,
 
     /// `%GeneratorPrototype%` (§27.5.1). Lazily installed on the
     /// first `function*` call by `lantern.ensureGeneratorPrototype`;
@@ -533,6 +540,11 @@ pub fn install(realm: *Realm) !void {
     // `.use(v)`'s `GetMethod(v, @@dispose)` can find it on a
     // user-supplied resource).
     try @import("builtins/disposable_stack.zig").install(realm);
+    // §27.4 AsyncDisposableStack — async sibling. Installed AFTER
+    // %DisposableStack% (same SuppressedError + Symbol.asyncDispose
+    // prerequisites; the order doesn't matter beyond that, but
+    // mirrors the sync-first wiring in the spec ordering).
+    try @import("builtins/async_disposable_stack.zig").install(realm);
     // Iterator.prototype is now live — wire
     // %GeneratorFunction.prototype.prototype% and %AsyncGeneratorFunction.prototype.prototype%
     // so `Object.getPrototypeOf(function*(){}).prototype` lands

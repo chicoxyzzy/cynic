@@ -1348,6 +1348,26 @@ pub const Heap = struct {
                         self.markValue(r.dispose_method);
                     }
                 }
+                // ES2026 explicit-resource-management — the
+                // `AsyncDisposeWalk` carried by an
+                // AsyncDisposableStack mid-`.disposeAsync()`. The
+                // walk snapshot owns the resource records (the
+                // source `disposable_resources` is cleared at walk
+                // start), the in-flight pending throw, and the
+                // outer result Promise. All three are reachable
+                // only through this typed slot — a minor cycle
+                // between two of the chain's microtask steps would
+                // dangle them without an explicit mark here.
+                if (o.extension) |ext| {
+                    if (ext.async_dispose_walk) |w| {
+                        for (w.resources.items) |r| {
+                            self.markValue(r.resource);
+                            self.markValue(r.dispose_method);
+                        }
+                        if (w.has_pending_error) self.markValue(w.pending_error);
+                        self.markValue(w.outer);
+                    }
+                }
                 // §27.2 `[[PromiseResult]]` — the settled value on
                 // a fulfilled / rejected Promise. Held in the typed
                 // `promise_value` slot rather than a property bag,
