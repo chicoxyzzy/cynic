@@ -1120,15 +1120,22 @@ pub const skip_planned_path_contains = [_][]const u8{
     // %Function.prototype% as a JSObject), but Cynic still
     // stashes %Function.prototype% as a JSObject rather than a
     // truly-callable JSFunction; the call-as-function fixtures
-    // (`S15.3.4_A2_T*.js`, `S15.3.3.1_A1.js`) and the property-
-    // delete fixture `S15.3.5.2_A1_T2.js` (which routes through
-    // `Function(void 0, "")` = SES carve-out) false-reject for
-    // that engine-shape gap. Skip until %Function.prototype%
-    // becomes a real built-in function.
-    "Function/prototype/S15.3.4_A1.",
-    "Function/prototype/S15.3.4_A2_T",
+    // (`S15.3.4_A2_T1.js` / `T2` / `T3`, `S15.3.3.1_A1.js`) and
+    // the property-delete fixture `S15.3.5.2_A1_T2.js` (which
+    // routes through `Function(void 0, "")` = SES carve-out)
+    // false-reject for that engine-shape gap. Skip until
+    // %Function.prototype% becomes a real built-in function.
+    //
+    // Note on narrowing: the previously-broader prefixes
+    // (`S15.3.4_A1.` / `S15.3.5.2_A1_T`) caught two stale
+    // siblings that actually pass today (`S15.3.4_A1.js`,
+    // `S15.3.5.2_A1_T1.js`) — replaced with per-fixture
+    // entries below.
     "Function/prototype/S15.3.3.1_A1.",
-    "Function/prototype/S15.3.5.2_A1_T",
+    "Function/prototype/S15.3.4_A2_T1.",
+    "Function/prototype/S15.3.4_A2_T2.",
+    "Function/prototype/S15.3.4_A2_T3.",
+    "Function/prototype/S15.3.5.2_A1_T2.",
 
     // `built-ins/Function/prototype/toString/line-terminator-
     // normalisation-CR.js` — embeds a literal CR in the source

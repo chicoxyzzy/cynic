@@ -2,17 +2,17 @@
 
 **Cynic passes 83.22 % of its 45096-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
 
-- **34503 pass** at the engine-true level (engine% = 99.97 % — see Legend).
+- **34504 pass** at the engine-true level (engine% = 99.97 % — see Legend).
 - **3026 SES-policy divergences** — Cynic's hardened posture throws by design where test262 expects the spec-literal success (frozen primordials, locked descriptors, override-mistake fix). Counted as engine-correct in the headline `pass%` per Layout A; see `docs/handbook/ses-test262-policy.md`.
 - **9 real engine failures** — all libregexp Annex B / `/v` grammar carve-outs documented in [AGENTS.md](../AGENTS.md).
-- **7558 skipped** — **tech debt + vendor gaps**. Features Cynic should eventually ship (Temporal, `explicit-resource-management`) or fixtures blocked on vendored libregexp (`/v` set-difference, `\q{…}`, property-of-strings) and single-realm Cynic (`$262.createRealm()` cross-realm fixtures). Permanent out-of-scope (Annex B, `intl402/`, `staging/`, browser-era built-ins) is filtered before corpus — those are not counted here.
+- **7557 skipped** — **tech debt + vendor gaps**. Features Cynic should eventually ship (Temporal, `explicit-resource-management`) or fixtures blocked on vendored libregexp (`/v` set-difference, `\q{…}`, property-of-strings) and single-realm Cynic (`$262.createRealm()` cross-realm fixtures). Permanent out-of-scope (Annex B, `intl402/`, `staging/`, browser-era built-ins) is filtered before corpus — those are not counted here.
 
 ## Current scores
 
 | posture | pass% | engine% | passes / corpus | divergent |
 |---|---:|---:|---:|---:|
-| **hardened** (default — `cynic run`) | 83.22 % | 99.97 % | 37529 / 45096 | 3026 |
-| **unhardened** (`cynic --unhardened`) | 83.22 % | 99.98 % | 37529 / 45096 | — |
+| **hardened** (default — `cynic run`) | 83.22 % | 99.97 % | 37530 / 45096 | 3026 |
+| **unhardened** (`cynic --unhardened`) | 83.22 % | 99.98 % | 37530 / 45096 | — |
 
 > **pass%** is the headline — `pass / corpus` (a fixture
 > Cynic doesn't ship counts as a `skip`, lowering this).
@@ -180,7 +180,7 @@ first two path components (`built-ins/Set`,
 | `built-ins/Reflect` | 111 | 0 | 0 | 41 | 100 % | 100 % |
 | `built-ins/Number` | 301 | 0 | 1 | 38 | 100 % | 100 % |
 | `built-ins/NativeErrors` | 52 | 0 | 6 | 36 | 94 % | 100 % |
-| `built-ins/Function` | 221 | 0 | 24 | 29 | 91 % | 100 % |
+| `built-ins/Function` | 222 | 0 | 23 | 29 | 92 % | 100 % |
 | `built-ins/JSON` | 136 | 0 | 0 | 28 | 100 % | 100 % |
 | `built-ins/WeakMap` | 113 | 0 | 1 | 27 | 99 % | 100 % |
 | `built-ins/Symbol` | 53 | 0 | 23 | 22 | 77 % | 100 % |
@@ -270,17 +270,17 @@ until its features ship in mainline ECMA-262.
 
 | feature | pass | fail | skip | pass% | engine% |
 |---|---:|---:|---:|---:|---:|
-| `joint-iteration` | 68 | 10 | 4878 | 1 % | 87 % |
+| `joint-iteration` | 69 | 9 | 4877 | 1 % | 88 % |
 
 
 ## History
 
-### 2026-05-26 — cynic `7a18529`, test262 `d0c1b455`
+### 2026-05-26 — cynic `01a4ffb`, test262 `d0c1b455`
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **runtime** | 83.22 % | 99.98 % | 37529 / 45096 | 37529 / 37538 | — | +216 | 35.5 s |
-| **runtime_hardened** | 83.22 % | 99.97 % | 37529 / 45096 | 34503 / 34512 | 3026 | +3197 | 40.4 s |
+| **runtime** | 83.22 % | 99.98 % | 37530 / 45096 | 37530 / 37539 | — | +217 | 40.5 s |
+| **runtime_hardened** | 83.22 % | 99.97 % | 37530 / 45096 | 34504 / 34513 | 3026 | +3198 | 50.5 s |
 
 ### 2026-05-25 — cynic `8e311c3`, test262 `d0c1b455`
 
