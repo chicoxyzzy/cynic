@@ -4,12 +4,11 @@
 
 |         | spec% | attempted% | pass / total | pass / attempted | divergent |
 |---|---|---|---|---|---:|
-| **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 | — |
-| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | — |
+| **parser** | 73.22 % | 100.00 % | 29406 / 40161 | 29406 / 29406 | — |
+| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37320 | — |
 | **runtime_hardened** | 92.91 % | 99.97 % | 37313 / 40161 | 34332 / 37324 | 2981 |
 
 *SES witness fidelity*: **10 / 10** witnesses classify as `divergent` (100.00 %). Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. See `docs/handbook/ses-test262-policy.md`.
-
 
 ## Where the runtime stands, by area
 
@@ -113,8 +112,6 @@ browser-era built-ins …).
 | `language/statements` | 8427 | 0 | 654 | 93 % | 100 % |
 | `language/types` | 97 | 0 | 9 | 92 % | 100 % |
 | `language/white-space` | 51 | 0 | 0 | 100 % | 100 % |
-
-
 ## Pre-Stage-4 proposals shipped
 
 Per-feature scores for the TC39 proposals Cynic ships at
@@ -136,7 +133,6 @@ features ship in mainline ECMA-262.
 | feature | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | `joint-iteration` | 70 | 8 | 0 | 90 % | 90 % |
-
 
 ## Legend
 
@@ -161,11 +157,12 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-26 — cynic `b84ac9f`, test262 `d0c1b455`
+### 2026-05-26 — cynic `023f094`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | — | ±0 | 35.6 s |
+| **parser** | 73.22 % | 100.00 % | 29406 / 40161 | 29406 / 29406 | — | -905 | 5.6 s |
+| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37320 | — | ±0 | 35.6 s |
 | **runtime_hardened** | 92.91 % | 99.97 % | 37313 / 40161 | 34332 / 37324 | 2981 | +2981 | 40.6 s |
 
 ### 2026-05-25 — cynic `8e311c3`, test262 `d0c1b455`

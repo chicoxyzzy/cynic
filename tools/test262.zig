@@ -1117,9 +1117,17 @@ pub fn main(init: std.process.Init) !void {
             try writeResults(gpa, io, &mr.stats, &mr.buckets, &empty_pre_stage4, now_ts.toSeconds(), row_mode, elapsed_for_row);
         }
         // Unhardened (legacy) row + the per-feature scoreboard.
-        if (unhardened_result) |*ur| {
-            const elapsed_for_row: ?u64 = if (is_full and ur.elapsed_ms > 0) @intCast(ur.elapsed_ms) else null;
-            try writeResults(gpa, io, &ur.stats, &ur.buckets, &pre_stage4, now_ts.toSeconds(), .runtime, elapsed_for_row);
+        // Parser-mode skips this write entirely: the SES posture
+        // is a runtime concept, so .main and .unhardened produce
+        // identical parser numbers, and writing them to the
+        // `runtime` row would clobber that row with parser-only
+        // counts. The `.parser` row already landed above from the
+        // .main phase write.
+        if (opts.mode != .parser) {
+            if (unhardened_result) |*ur| {
+                const elapsed_for_row: ?u64 = if (is_full and ur.elapsed_ms > 0) @intCast(ur.elapsed_ms) else null;
+                try writeResults(gpa, io, &ur.stats, &ur.buckets, &pre_stage4, now_ts.toSeconds(), .runtime, elapsed_for_row);
+            }
         }
     }
 
