@@ -377,8 +377,19 @@ pub fn startAsyncDisposeWalkWithExisting(realm: *Realm, stack: *JSObject, existi
     const outer = try startAsyncDisposeWalk(realm, stack);
     if (stack.extension) |ext| {
         if (ext.async_dispose_walk) |walk| {
+            // Seed pending_error for SuppressedError wrapping, but
+            // mark it as externally provided. The walk uses
+            // pending_error as the "suppressed" half when a
+            // disposer throws; if NO disposer throws, the outer
+            // Promise must fulfil with undefined (the caller's
+            // throw-handler arm re-throws the original — settling
+            // the Promise as rejected would re-throw twice). The
+            // `external_seed` flag tells `finalizeSettle` to
+            // clear pending_error before settling iff no disposer
+            // contributed.
             walk.pending_error = existing_throw;
             walk.has_pending_error = true;
+            walk.external_seed_only = true;
         }
     }
     return outer;
@@ -537,6 +548,9 @@ fn asyncStepRejectedImpl(realm: *Realm, this_value: Value, args: []const Value) 
         walk.pending_error = reason;
         walk.has_pending_error = true;
     }
+    // A disposer contributed — clear the external-seed marker so
+    // `finalizeSettle` propagates the (possibly wrapped) throw.
+    walk.external_seed_only = false;
     return runNextDisposer(realm, stack);
 }
 
@@ -602,6 +616,8 @@ fn asyncFinalizeRejectedImpl(realm: *Realm, this_value: Value, args: []const Val
         walk.pending_error = reason;
         walk.has_pending_error = true;
     }
+    // Same as step_rejected — a disposer contributed.
+    walk.external_seed_only = false;
     return finalizeSettle(realm, this_value);
 }
 
@@ -621,7 +637,14 @@ fn finalizeSettle(realm: *Realm, this_value: Value) NativeError!Value {
     // but user code can `disposeAsync().then(...)` between the
     // synchronous return and the first microtask drain).
     const lpromise = @import("../lantern/promise.zig");
-    if (walk.has_pending_error) {
+    // When `external_seed_only` is still set, `pending_error`
+    // was provided by the caller (mode 1 of `dispose_stack_async`)
+    // and NO disposer threw. The outer Promise must fulfil with
+    // undefined — the surrounding bytecode re-throws the original.
+    // A disposer throw clears `external_seed_only` so the (possibly
+    // wrapped) pending_error becomes the rejection.
+    const propagate_pending = walk.has_pending_error and !walk.external_seed_only;
+    if (propagate_pending) {
         lpromise.settlePromiseInternal(realm, outer_obj, .rejected, walk.pending_error) catch return error.OutOfMemory;
     } else {
         lpromise.settlePromiseInternal(realm, outer_obj, .fulfilled, Value.undefined_) catch return error.OutOfMemory;

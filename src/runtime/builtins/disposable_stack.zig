@@ -424,18 +424,43 @@ pub fn addDisposableResource(realm: *Realm, stack: *JSObject, value: Value, hint
     // `Symbol.dispose` on V. The method must be callable, or the
     // spec throws TypeError at the binding site (.use() / `using`-
     // decl initialisation), NOT at dispose time.
-    const resource_obj = heap_mod.valueAsPlainObject(value) orelse {
-        return throwTypeError(realm, "Disposable resource is not an object");
+    //
+    // V is "any value" per spec; under Cynic's heap model the
+    // property-lookup helper accepts either a JSObject OR a
+    // JSFunction (functions carry their own property bag for
+    // user assignments like `Function.prototype[Symbol.dispose] =
+    // …`). Primitives (string / number / bigint / symbol /
+    // boolean) ToObject-coerce up the wrapper prototype chain
+    // when read — but `using "x" = …` is uncommon and the spec
+    // treats them via the same coercion. Reject only when we
+    // truly can't extract a Symbol.dispose method.
+    // §9.5.2 GetDisposeMethod(V, hint) — for async-dispose, look
+    // up @@asyncDispose first; if missing, fall back to @@dispose.
+    // For sync-dispose, only @@dispose. The async fallback path
+    // means a `await using x = { [Symbol.dispose]() {…} }` binding
+    // is legal — the sync method is invoked and the engine awaits
+    // its (possibly undefined) result during the async walk.
+    const lookup = struct {
+        fn read(r: *Realm, v: Value, k: []const u8) NativeError!Value {
+            if (heap_mod.valueAsPlainObject(v)) |obj| {
+                return try intrinsics.getPropertyChain(r, obj, k);
+            }
+            if (heap_mod.valueAsFunction(v)) |fn_obj| {
+                return fn_obj.get(k);
+            }
+            return Value.undefined_;
+        }
     };
-    // Phase 1 of ERM registered `@@dispose` as the internal slot
-    // key for `Symbol.dispose` (mirrors `@@iterator` /
-    // `@@asyncIterator`). `getPropertyChain` fires accessor
-    // descriptors and walks proxy traps.
-    const key = switch (hint) {
+    if (heap_mod.valueAsPlainObject(value) == null and heap_mod.valueAsFunction(value) == null) {
+        return throwTypeError(realm, "Disposable resource is not an object");
+    }
+    var method_v = try lookup.read(realm, value, switch (hint) {
         .sync_dispose => "@@dispose",
         .async_dispose => "@@asyncDispose",
-    };
-    const method_v = try intrinsics.getPropertyChain(realm, resource_obj, key);
+    });
+    if ((method_v.isUndefined() or method_v.isNull()) and hint == .async_dispose) {
+        method_v = try lookup.read(realm, value, "@@dispose");
+    }
     if (method_v.isUndefined() or method_v.isNull()) {
         return throwTypeError(realm, "Disposable resource has no Symbol.dispose method");
     }

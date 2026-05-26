@@ -944,11 +944,13 @@ pub const skip_stage_maturity_paths = [_][]const u8{
 pub const skip_planned_features = [_][]const u8{
     "regexp-duplicate-named-groups", // ES2025 — libregexp gap.
     "regexp-modifiers", // ES2024 inline `(?i:…)` / `(?-i:…)`.
-    // Stage 4 — `using` / `await using` grammar +
-    // `DisposableStack`, `AsyncDisposableStack`, `SuppressedError`,
-    // `Symbol.dispose` / `Symbol.asyncDispose`. Cynic ships none
-    // of it yet — large surface, separate effort. ~478 fixtures.
-    "explicit-resource-management",
+    // (Stage 4 explicit-resource-management used to skip here.
+    // Phases 1-6 of the ERM rollout shipped the full surface:
+    // `Symbol.dispose` / `Symbol.asyncDispose` well-known symbols,
+    // `SuppressedError`, `DisposableStack` / `AsyncDisposableStack`,
+    // `using` / `await using` declarations + the §9.5.4
+    // DisposeResources runtime walk. Feature-tagged fixtures now
+    // attempt as normal corpus.)
 };
 
 pub const skip_planned_paths = [_][]const u8{
@@ -1350,12 +1352,14 @@ test "skip: planned vendor gaps" {
 test "skip: unsupported features — stage maturity + planned" {
     // Stage 3 syntax — parser would choke.
     try testing.expect(featureIsUnsupported("decorators"));
-    try testing.expect(featureIsUnsupported("explicit-resource-management"));
     try testing.expect(featureIsUnsupported("import-defer"));
     try testing.expect(featureIsUnsupported("source-phase-imports"));
     // Planned — libregexp.
     try testing.expect(featureIsUnsupported("regexp-modifiers"));
     try testing.expect(featureIsUnsupported("regexp-duplicate-named-groups"));
+    // explicit-resource-management is supported (Phases 1-6
+    // shipped); it must NOT be flagged unsupported.
+    try testing.expect(!featureIsUnsupported("explicit-resource-management"));
 }
 
 test "skip: Annex B feature flags are hidden via feature filter" {

@@ -200,6 +200,16 @@ pub const AsyncDisposeWalk = struct {
     cursor: u32 = 0,
     pending_error: Value = Value.undefined_,
     has_pending_error: bool = false,
+    /// True when `pending_error` was seeded by an external caller
+    /// (the `dispose_stack_async` opcode in mode 1) rather than by
+    /// a disposer's throw. The terminal `finalizeSettle` clears
+    /// pending_error before settling if THIS is still set —
+    /// meaning no disposer contributed, so the outer Promise
+    /// fulfils with undefined and the caller re-throws the
+    /// original. A disposer throw clears the flag (its
+    /// `pending_error` value carries the suppressed external on
+    /// the [[Suppressed]] side of a fresh SuppressedError).
+    external_seed_only: bool = false,
     outer: Value = Value.undefined_,
 
     pub fn deinit(self: *AsyncDisposeWalk, allocator: std.mem.Allocator) void {
