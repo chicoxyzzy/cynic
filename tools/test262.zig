@@ -2224,11 +2224,36 @@ fn classifyAndRun(
     if (test_threw) {
         const ex = if (run_result == .thrown) run_result.thrown else (realm.pending_exception orelse cynic.runtime.Value.undefined_);
         if (cynic.runtime.heap.valueAsPlainObject(ex)) |o| {
-            if (o.properties.get("message")) |m| {
-                if (m.isString()) {
-                    const s: *cynic.runtime.JSString = @ptrCast(@alignCast(m.asString()));
-                    std.debug.print("\nFAIL {s}: {s}\n", .{ rel, s.flatBytes() });
+            // §10.1.8 [[Get]] — Error instances under the SES
+            // posture carry `message` and `name` on the prototype
+            // (synthetic accessors) when the construction didn't
+            // pass an explicit message string. Use the accessor-
+            // aware `JSObject.get` (which routes through the
+            // synthetic-accessor fast path) so the failure log
+            // shows the actual error class instead of just
+            // "object (no message)" for the SES-policy Error path.
+            // See `docs/handbook/ses-test262-policy.md` Phase 1
+            // Bucket E follow-up for the cluster that surfaced this.
+            const msg_v = o.get("message");
+            const name_v = o.get("name");
+            const msg_str: ?[]const u8 = if (msg_v.isString()) blk: {
+                const s: *cynic.runtime.JSString = @ptrCast(@alignCast(msg_v.asString()));
+                const bytes = s.flatBytes();
+                break :blk if (bytes.len > 0) bytes else null;
+            } else null;
+            const name_str: ?[]const u8 = if (name_v.isString()) blk: {
+                const s: *cynic.runtime.JSString = @ptrCast(@alignCast(name_v.asString()));
+                const bytes = s.flatBytes();
+                break :blk if (bytes.len > 0) bytes else null;
+            } else null;
+            if (msg_str) |m| {
+                if (name_str) |n| {
+                    std.debug.print("\nFAIL {s}: {s}: {s}\n", .{ rel, n, m });
+                } else {
+                    std.debug.print("\nFAIL {s}: {s}\n", .{ rel, m });
                 }
+            } else if (name_str) |n| {
+                std.debug.print("\nFAIL {s}: {s} (no message)\n", .{ rel, n });
             } else {
                 std.debug.print("\nFAIL {s}: object (no message)\n", .{rel});
             }

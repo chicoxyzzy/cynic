@@ -846,21 +846,58 @@ confirm.
 Treatment: **case-by-case in Phase 2.** Expected outcome:
 ~75 divergent, ~5 engine bugs (small).
 
+##### Phase 1 Bucket E follow-up (2026-05-26)
+
+Walked every Bucket E pattern after the iterator-fix commit
+(`8e311c3`) refreshed the failure list. **Zero engine bugs
+hiding.** All ~80 fixtures cleanly classify as divergent:
+
+| Pattern | Count | Treatment | Notes |
+|---|---:|---|---|
+| `b Expected SameValue(«true», «false»)` | 44 | divergent | All under `built-ins/Object/{isFrozen,isSealed}/...`. Test asserts `Object.isFrozen(<builtin>) === false`; SES freezes built-ins so the assertion inverts. |
+| `arr[0] / Array.prototype[N] Expected SameValue(«undefined», «N»)` | 8 | divergent | `Object.defineProperties` / `defineProperty` on `Array.prototype` indexed slots. SES locks the prototype non-extensible. |
+| `Cannot assign to read-only property on globalThis` | 3 | divergent | Frozen globalThis intrinsic re-assign. SES policy. |
+| `Expected a TypeError to be thrown but no exception` | 2 | divergent | `language/global-code/script-decl-{var,func}-err-non-extensible.js` — Cynic's intentional carve-out where `canDeclareGlobalVar` / `canDeclareGlobalFunction` skip the extensibility check under SES (per commit `3a4be3c`). Top-level var/function decls keep working even when globalThis is frozen. |
+| `object (no message)` | 1 | divergent + harness display issue | `built-ins/Object/keys/15.2.3.14-2-3.js` — declares `function Array() {}` at script top, expecting to redeclare the global. SES freezes globalThis.Array, so `CanDeclareGlobalFunction` rejects per §9.1.1.4.16 step 5 — Cynic correctly throws TypeError. The harness debug print at `tools/test262.zig:2227` reads `properties.get("message")` which doesn't walk the prototype chain — Error instances without an own `message` (just the prototype's empty default) render as `"object (no message)"`. A purely cosmetic issue in the failure log, not an engine bug. |
+| Misc descriptor-value mismatches (`desc.value Expected SameValue(«undefined», «function X() {...}»)`) | 18 | divergent | Same shape as Bucket A descriptor-shape assertions — SES freezes the descriptor to non-writable, the test reads it back and expects writable. |
+
+**Net: 0 engine bugs in Bucket E.** The 65-fixture iterator
+cluster from Bucket D remains the only real engine bug found
+in Phase 1 (closed by `8e311c3`).
+
+Minor follow-up surfaced (cosmetic, not gating):
+
+- **Harness `properties.get("message")` should be accessor-
+  aware** — Replace `o.properties.get("message")` at
+  `tools/test262.zig:2227` with `o.lookupOwn("message")` plus a
+  prototype-chain walk, so Error instances under SES (whose
+  `message` lives on the prototype as a synthetic accessor)
+  render with their actual message in the failure log instead
+  of `"object (no message)"`. Pure debug-output improvement —
+  doesn't move the score.
+
 #### Headline numbers
 
-- **Total hardened-only failures**: 3093.
-- **Divergent (clearly intentional SES enforcement)**: ~2960 (96%).
-- **Engine-bug candidates** (`iterator.next is not callable`
-  cluster): **65** (2%).
-- **Needs case-by-case inspection**: ~68 (2%).
+- **Total hardened-only failures (initial)**: 3093.
+- **Total hardened-only failures (after `8e311c3`)**: 2878.
+- **Divergent (clearly intentional SES enforcement)**: 100% of
+  remaining failures.
+- **Engine-bug candidates found**: **1 cluster, closed.**
 
-The 65 `iterator.next` failures are the **headline finding**.
-They cluster on Set-method-proposal and Iterator-helpers
-fixtures — both of which Cynic ships natively and which pass
-under unhardened mode. The hardened-mode regression points
-at a Phase-3 synthetic-accessor interaction with iterator
-dispatch. Phase 2's first concrete action: reproduce one of
-these fixtures under `cynic run --debug-globals` and trace.
+The 65 `iterator.next` failures were the **headline finding**
+of the initial audit and the **only real engine bug found in
+Phase 1**. They clustered on Set-method-proposal and
+Iterator-helpers fixtures — both of which Cynic ships natively
+and which pass under unhardened mode. Root cause: SES Phase 3
+synthetic-accessor demotion silently returned `undefined` from
+`JSObject.get` (which walked the prototype chain data-only).
+Closed by commit `8e311c3` — `JSObject.get` now reads
+`synth_accessor.value` directly, recovering +288 hardened
+pass.
+
+The Bucket E follow-up walked every remaining suspicious
+cluster (subsection above) and confirmed zero additional
+engine bugs.
 
 #### Implications for Phase 2 / Phase 3
 
