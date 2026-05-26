@@ -692,11 +692,14 @@ pub fn deletePropertyOrThrow(realm: *Realm, obj: *JSObject, key: []const u8) Nat
     // property returns false; §7.3.5 lifts that to TypeError.
     // `deleteOwn` already honors configurable on array-exotic
     // indexed slots, but unconditionally strips named bag entries,
-    // so reject non-configurable here before calling it.
+    // so reject non-configurable here before calling it. `flagsFor`
+    // is shape-aware (Phase 3 of [docs/lazy-property-bag.md]) —
+    // a `defineProperty(o, "42", {configurable: false})` on a
+    // plain object lands in the shape transition node's attrs,
+    // not the bag, so a bag-only read would miss the gate.
     if (cur.hasAccessor(key) or cur.ownDataContains(key)) {
-        if (cur.property_flags.get(key)) |flags| {
-            if (!flags.configurable) return throwTypeError(realm, "Cannot delete non-configurable property");
-        }
+        const flags = cur.flagsFor(key);
+        if (!flags.configurable) return throwTypeError(realm, "Cannot delete non-configurable property");
     }
     if (!try cur.deleteOwn(realm.allocator, key)) {
         return throwTypeError(realm, "Cannot delete property");

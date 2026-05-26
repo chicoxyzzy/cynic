@@ -1057,10 +1057,12 @@ fn jsonDelete(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!bool {
     // property → return false (no remove). `deleteOwn` honors
     // this for array-exotic indexed slots but unconditionally
     // strips named bag entries, so reject non-configurable here.
+    // `flagsFor` is shape-aware (Phase 3 of
+    // [docs/lazy-property-bag.md]) so a defineProperty-installed
+    // non-configurable slot in the shape's attrs is honoured.
     if (cur.hasAccessor(key) or cur.ownDataContains(key)) {
-        if (cur.property_flags.get(key)) |flags| {
-            if (!flags.configurable) return false;
-        }
+        const flags = cur.flagsFor(key);
+        if (!flags.configurable) return false;
     }
     return cur.deleteOwn(realm.allocator, key);
 }

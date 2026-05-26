@@ -31,6 +31,88 @@ pick up the next sub-step from here without re-deriving the design.
 Sister doc to [inline-caches.md](inline-caches.md), which built the
 shape substrate this refactor exploits.
 
+## Status — what landed, what's deferred
+
+**Phase 1 (`cbf1402`)**, **Phase 2 (`6e07ab7`)**, **Phase 3
+(`8b8c605`)** have shipped. Phase 4+ remain open.
+
+What Phase 3 delivered:
+
+- `setWithFlags` / `set` / `setIfWritable` / `setComputedOwned`
+  call `shadowSet` first; on a successful shape transition the
+  slot becomes the source of truth and the bag mirror write is
+  skipped.
+- Read helpers (`lookupOwn`, `hasProperty`, `flagsFor`,
+  `ownDataContains`, `iterOwnNamedKeys`) are shape-first; ~85
+  direct `obj.properties.contains` callsites migrated to
+  `ownDataContains`; the §10.5.5 / §10.5.6 Proxy invariants
+  and `Object.freeze` / `Object.seal` route through `flagsFor`
+  so non-default attrs land on the right side of the split.
+- GC marker walks `slots[0..shape.property_count]` for
+  shape-mode objects (Phase 4 work absorbed into Phase 3 —
+  splitting would have left an inconsistent transient).
+- `demoteFromShape(allocator)` back-fills the bag from
+  `slots` + shape attrs before clearing, so the
+  `deleteOwn` / accessor-install / freeze-stamp call sites
+  that follow demote with `properties.swapRemove(key)` still
+  find an entry to drop.
+
+What Phase 3 deliberately did NOT do (vs the original design
+below):
+
+- **The field is still `.empty`-defaulted, not `?…` optional.**
+  The empty default doesn't allocate (capacity = 0); for a
+  shape-mode object the bag stays unallocated, same memory
+  outcome as the optional design. What we lose is the
+  type-system guarantee that "bag null ⟹ shape mode" — it's a
+  runtime convention enforced by every write going through
+  `setWithFlags`. A future direct `obj.properties.put(...)`
+  callsite would silently break shape coherence, where the
+  optional flip would surface it as a compile error. Worth
+  tightening if a regression ever traces back here.
+
+- **Mixed mode is tolerated, not illegal.** The design said
+  "any write path that needs the bag must `demoteFromShape`
+  first." In practice some callsites still write directly to
+  the bag after a `demoteFromShape` call — that's how
+  `Object.freeze` / `Object.seal` stamp their flags. The
+  invariant is "either the shape OR the bag is authoritative
+  for a given key, never both with diverging values" — weaker
+  than the doc's stricter formulation but sufficient for
+  conformance.
+
+What Phase 3 measured:
+
+- test262 runtime row Δ pass = **±0** vs the pre-Phase-3
+  baseline (37241 / 40089 — exact match). One transient
+  regression in `built-ins/Array/prototype/copyWithin` got
+  fixed in the same series: `deletePropertyOrThrow` was
+  reading `property_flags.get` directly, which missed
+  defineProperty-installed non-configurable attrs that now
+  live on the shape transition node.
+- test262 runtime_hardened row Δ pass = **+461**. The
+  shape-aware `flagsFor` exposes attrs the bag-only path was
+  silently dropping, so the SES override-mistake fix and the
+  Proxy invariant checks agree with the spec on more
+  fixtures.
+- `object_alloc` median: 59 ms → **47 ms (-20%)**, inside
+  the doc's 15-25% projected band.
+- `class_instantiate` median: 131 ms → **~125 ms (-5%)**,
+  far below the projected 38%. The IC fast path
+  (`sta_property`) already wrote slots directly without
+  touching the bag, so the headline `this.x = x; this.y = y`
+  writes weren't paying the slow-path cost the doc modelled.
+  Slow-path / first-write savings landed in `object_alloc`;
+  Phase 4+ should target the IC slot-write path and GC
+  sweep cost (the original samply's other big bars) rather
+  than more shape work.
+
+Phase 4+ remain as written: GC marker's `deinitFields` skip
+the bag, then the bench cleanup pass. Both bench numbers
+above were taken WITHOUT a `deinitFields` shortcut — the
+deinit walks the (empty) bag's `.empty` header per sweep
+cycle, which is ~free but not zero.
+
 ## Motivation — what the profile says
 
 A samply run on a 6 M-iteration `{ a: i, b: i + 1 }` loop

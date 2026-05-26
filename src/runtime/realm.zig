@@ -350,8 +350,12 @@ pub const GlobalBindings = struct {
     pub fn hasRestrictedGlobalProperty(self: *const GlobalBindings, key: []const u8) bool {
         const t = self.target orelse return false;
         if (!t.ownDataContains(key)) return false;
-        const flags = t.property_flags.get(key) orelse return false;
-        return !flags.configurable;
+        // `flagsFor` is shape-aware (Phase 3 of
+        // [docs/lazy-property-bag.md]); attrs from a
+        // `Object.defineProperty(globalThis, key, {configurable:false})`
+        // call land in the shape transition node for shape-mode
+        // globals, not the bag.
+        return !t.flagsFor(key).configurable;
     }
 
     /// §9.1.1.4.15 CanDeclareGlobalVar — true if `name` can be
@@ -391,18 +395,15 @@ pub const GlobalBindings = struct {
             if (hardened) return true;
             return t.extensible;
         }
+        // `flagsFor` is shape-aware (Phase 3 of
+        // [docs/lazy-property-bag.md]) so a defineProperty-
+        // installed descriptor stored on the shape transition
+        // node is honoured for the configurable / writable
+        // gates below.
+        const flags = t.flagsFor(key);
         if (has_accessor) {
-            const flags = t.property_flags.get(key) orelse @import("object.zig").PropertyFlags.default;
             return flags.configurable;
         }
-        const flags = t.property_flags.get(key) orelse {
-            // Default-flagged entry — writable + enumerable +
-            // configurable, so the configurable branch above
-            // already would've returned true. This path is
-            // reached when the property exists with default
-            // flags; permit.
-            return true;
-        };
         if (flags.configurable) return true;
         return flags.writable and flags.enumerable;
     }
