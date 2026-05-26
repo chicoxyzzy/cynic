@@ -356,6 +356,9 @@ fn ensureWrapForValidIteratorPrototype(realm: *Realm) !*JSObject {
     });
 
     realm.intrinsics.wrap_for_valid_iterator_prototype = proto;
+    // SES: lock the lazy proto so user JS can't monkey-patch its
+    // `next` / `return`.
+    @import("harden.zig").freezeLazyIntrinsic(realm, proto) catch return error.OutOfMemory;
     return proto;
 }
 

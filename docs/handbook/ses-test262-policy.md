@@ -1041,15 +1041,62 @@ positive-coverage test asserted the post-`harden` descriptor
 flags directly.
 
 Note: the policy doc targets ~30 tests; 13 is the MVP
-baseline. Phase 4b (deferred) extends coverage into more
-override-mistake corners (accessor demotion, redefinition
-over a synthetic accessor pair) plus the `--unhardened`
-round-trip (needs harness-side work to launch a sub-process
-with the flag and check the inverse behaviour). Also
-deferred: routing through the test262 harness as
-`--phase=ses-positive` with a dedicated `ses-cynic-witness`
-score row — Phase 3 already gave the scoreboard a witness
-signal, so the marginal value of a second row is small.
+baseline. **Phase 4b (2026-05-26)** brought the count to **30**
+(27 hardened + 3 unhardened) covering the original Phase 4b
+scope:
+
+- Override-mistake corners: `override_redefine_over_shadow`,
+  `override_no_demotion_for_inherited_accessor` (the dual:
+  getter-only inherited slots correctly throw on assignment),
+  `override_through_deep_chain`, `override_class_static_shadow`,
+  `override_shadow_per_instance_isolation`.
+- More `harden()` invariants: `harden_mixed_graph`,
+  `harden_idempotent`, `harden_primitives_passthrough`,
+  `harden_array_indexed_gap` (pins the known gap from
+  `src/runtime/builtins/harden.zig`).
+- More `globalthis` edges: `globalthis_let_decl_lexical`,
+  `globalthis_class_decl_lexical`,
+  `globalthis_delete_intrinsic_throws`,
+  `globalthis_add_new_property_throws`.
+- Iterator-prototype coverage: `primordials_iterator_prototypes_frozen`.
+- `tests/ses/unhardened/` subdirectory + runner support — runs
+  fixtures through `cynic --unhardened`. Three tests:
+  `primordials_mutable`, `harden_not_installed`,
+  `globalthis_extensible`. The runner script
+  `tools/test-ses.sh` detects the subdir and passes the flag.
+
+**Engine bugs surfaced + fixed** by the Phase 4b additions:
+
+1. **`harden()` skipped array indexed values.** The plain-object
+   branch of `hardenWalk` only iterated `iterOwnNamedKeys`,
+   which skips array-exotic indexed slots (`obj.elements` /
+   `obj.sparse_elements`). A hardened array of user objects
+   would leave `arr[0]` extensible. Fix: walk `obj.elements`
+   + `obj.sparse_elements` in the array-exotic branch.
+   `harden_mixed_graph` catches it. The separate slot-flag
+   gap remains pinned by `harden_array_indexed_gap`.
+2. **Lazy iterator prototypes escaped the SES freeze pass.**
+   `%ArrayIteratorPrototype%`, `%StringIteratorPrototype%`, the
+   wrap-for-valid + async-from-sync variants, and the
+   generator + async-iterator prototypes are all allocated
+   on first use via `ensure*Prototype` functions. At
+   `freezePrimordials` time they're null, so the comptime
+   reflection walk skips them. First user call (`[][Symbol.iterator]()`)
+   then created a fresh extensible prototype, leaving a
+   supply-chain hole. Fix: new `harden.freezeLazyIntrinsic`
+   helper called by every `ensure*Prototype` after the slot
+   is filled; under hardened realms it runs `hardenWalk` on
+   the fresh prototype before returning. Seven call sites
+   updated. `primordials_iterator_prototypes_frozen` catches
+   it. Net effect on hardened-mode sweep: +11 divergent
+   reclassifications (fixtures that previously got away with
+   monkey-patching the prototypes now correctly throw).
+
+Deferred (out of scope for Phase 4b):
+- Routing through the test262 harness as `--phase=ses-positive`
+  with a dedicated `ses-cynic-witness` score row — Phase 3
+  already gave the scoreboard a witness signal, so the
+  marginal value of a second row is small.
 
 ### Phase 5 — re-baseline + CI + scoreboard reshape (2026-05-26)
 

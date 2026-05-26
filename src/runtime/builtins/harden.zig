@@ -48,6 +48,28 @@ const intrinsics = @import("../intrinsics.zig");
 
 const argOr = intrinsics.argOr;
 
+/// Freeze a single intrinsic prototype that's being lazily
+/// allocated AFTER the realm's initial `freezePrimordials` pass.
+/// Several iterator prototypes (`%ArrayIteratorPrototype%`,
+/// `%StringIteratorPrototype%`, the wrap-for-valid and
+/// async-from-sync variants) don't exist at init time — they're
+/// created the first time user code calls `[][Symbol.iterator]()`
+/// etc. The init freeze pass walks `realm.intrinsics.*` for them,
+/// finds null, and skips. Without this hook, lazy prototypes
+/// land as fresh `extensible: true` objects under a hardened
+/// realm, leaving a supply-chain hole (monkey-patch
+/// `%ArrayIteratorPrototype%.next`).
+///
+/// Idempotent: re-calling on a frozen prototype short-circuits
+/// via the visited set in `hardenWalk`. Cheap to call from
+/// every `ensure*Prototype` cold path.
+pub fn freezeLazyIntrinsic(realm: *Realm, obj: *@import("../object.zig").JSObject) NativeError!void {
+    if (!realm.hardened) return;
+    var visited: std.AutoHashMap(usize, void) = .init(realm.allocator);
+    defer visited.deinit();
+    try hardenWalk(realm, heap_mod.taggedObject(obj), &visited);
+}
+
 pub fn install(realm: *Realm) !void {
     const harden_fn = try realm.heap.allocateFunctionNative(hardenNative, 1, "harden");
     try realm.globals.put(realm.allocator, "harden", heap_mod.taggedFunction(harden_fn));
@@ -123,6 +145,22 @@ pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void
         // Recurse into own data values.
         var rit = obj.iterOwnNamedKeys();
         while (rit.next()) |e| try hardenWalk(realm, e.value_ptr.*, visited);
+        // Recurse into array indexed slots. `iterOwnNamedKeys`
+        // skips these — they live in `obj.elements` /
+        // `obj.sparse_elements` per the array-exotic layout, not
+        // in the named-property bag. The harden contract is
+        // "deep-freeze every reachable value," and an array of
+        // user-mutable objects would otherwise let a hardened
+        // `arr` still contain a writable `arr[0]`. The indexed
+        // SLOTS' flags are still not stamped (the known gap
+        // pinned in `tests/ses/harden_array_indexed_gap.js`);
+        // this only recurses into the VALUES so transitive
+        // freezing actually reaches them.
+        if (obj.is_array_exotic) {
+            for (obj.elements.items) |elem| try hardenWalk(realm, elem, visited);
+            var sit = obj.sparse_elements.iterator();
+            while (sit.next()) |e| try hardenWalk(realm, e.value_ptr.*, visited);
+        }
         // Recurse into accessor getters / setters.
         if (obj.accessorIterator()) |ait_outer| {
             var ait = ait_outer;

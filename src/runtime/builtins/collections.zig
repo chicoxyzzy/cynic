@@ -207,6 +207,10 @@ fn ensureArrayIteratorPrototype(realm: *Realm) !?*JSObject {
         .configurable = true,
     });
     realm.intrinsics.array_iterator_prototype = proto;
+    // Hardened-realm hook: the init freeze pass missed this
+    // proto (it was null then). Lock it now so user JS can't
+    // monkey-patch %ArrayIteratorPrototype%.next.
+    @import("harden.zig").freezeLazyIntrinsic(realm, proto) catch return error.OutOfMemory;
     return proto;
 }
 
@@ -292,6 +296,8 @@ fn ensureStringIteratorPrototype(realm: *Realm) !?*JSObject {
         .configurable = true,
     });
     realm.intrinsics.string_iterator_prototype = proto;
+    // See `ensureArrayIteratorPrototype` for the rationale.
+    @import("harden.zig").freezeLazyIntrinsic(realm, proto) catch return error.OutOfMemory;
     return proto;
 }
 

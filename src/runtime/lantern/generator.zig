@@ -264,6 +264,7 @@ pub fn ensureGeneratorPrototype(realm: *Realm) !*JSObject {
     });
 
     realm.intrinsics.generator_prototype = proto;
+    @import("../builtins/harden.zig").freezeLazyIntrinsic(realm, proto) catch return error.OutOfMemory;
     return proto;
 }
 
@@ -297,6 +298,7 @@ pub fn ensureAsyncIteratorPrototype(realm: *Realm) !*JSObject {
         .configurable = true,
     });
     realm.intrinsics.async_iterator_prototype = proto;
+    @import("../builtins/harden.zig").freezeLazyIntrinsic(realm, proto) catch return error.OutOfMemory;
     return proto;
 }
 
@@ -326,6 +328,7 @@ pub fn ensureAsyncGeneratorPrototype(realm: *Realm) !*JSObject {
     });
 
     realm.intrinsics.async_generator_prototype = proto;
+    @import("../builtins/harden.zig").freezeLazyIntrinsic(realm, proto) catch return error.OutOfMemory;
     return proto;
 }
 

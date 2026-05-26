@@ -6,7 +6,7 @@
 |---|---|---|---|---|---:|
 | **parser** | 73.22 % | 100.00 % | 29406 / 40161 | 29406 / 29406 | — |
 | **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | — |
-| **runtime_hardened** | 92.91 % | 99.97 % | 37313 / 40161 | 34332 / 37324 | 2981 |
+| **runtime_hardened** | 92.91 % | 99.97 % | 37313 / 40161 | 34321 / 37324 | 2992 |
 
 *SES witness fidelity*: **10 / 10** witnesses classify as `divergent` (100.00 %). Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. See `docs/handbook/ses-test262-policy.md`.
 
@@ -49,15 +49,15 @@ browser-era built-ins …).
 | **_1–9 fails_** | | | | | | |
 | `built-ins/RegExp` | 1504 | 9 | 161 | 89 | 90 % | 99 % |
 | **_0 fails (passing or wholly OOS — sorted by divergent ↓)_** | | | | | | |
-| `built-ins/Array` | 2478 | 0 | 36 | 557 | 99 % | 100 % |
-| `built-ins/Object` | 2797 | 0 | 80 | 522 | 98 % | 100 % |
+| `built-ins/Array` | 2477 | 0 | 36 | 558 | 99 % | 100 % |
+| `built-ins/Object` | 2795 | 0 | 80 | 524 | 98 % | 100 % |
 | `built-ins/TypedArray` | 1113 | 0 | 8 | 310 | 99 % | 100 % |
 | `built-ins/String` | 1027 | 0 | 5 | 176 | 100 % | 100 % |
 | `built-ins/Date` | 431 | 0 | 0 | 152 | 100 % | 100 % |
 | `built-ins/Math` | 212 | 0 | 5 | 110 | 98 % | 100 % |
 | `built-ins/Promise` | 526 | 0 | 38 | 101 | 94 % | 100 % |
 | `language/expressions` | 9681 | 0 | 960 | 99 | 91 % | 100 % |
-| `built-ins/TypedArrayConstructors` | 563 | 0 | 16 | 92 | 98 % | 100 % |
+| `built-ins/TypedArrayConstructors` | 562 | 0 | 16 | 93 | 98 % | 100 % |
 | `language/statements` | 8346 | 0 | 654 | 81 | 93 % | 100 % |
 | `built-ins/Set` | 312 | 0 | 1 | 69 | 100 % | 100 % |
 | `built-ins/Iterator` | 366 | 0 | 6 | 59 | 99 % | 100 % |
@@ -88,9 +88,11 @@ browser-era built-ins …).
 | `built-ins/AggregateError` | 17 | 0 | 0 | 6 | 100 % | 100 % |
 | `built-ins/Proxy` | 287 | 0 | 12 | 6 | 96 % | 100 % |
 | `built-ins/AsyncFunction` | 9 | 0 | 0 | 5 | 100 % | 100 % |
+| `built-ins/ArrayIteratorPrototype` | 15 | 0 | 8 | 4 | 70 % | 100 % |
 | `built-ins/AsyncIteratorPrototype` | 1 | 0 | 9 | 3 | 31 % | 100 % |
 | `built-ins/MapIteratorPrototype` | 8 | 0 | 0 | 3 | 100 % | 100 % |
 | `built-ins/SetIteratorPrototype` | 8 | 0 | 0 | 3 | 100 % | 100 % |
+| `built-ins/StringIteratorPrototype` | 4 | 0 | 0 | 3 | 100 % | 100 % |
 | `built-ins/decodeURI` | 52 | 0 | 0 | 3 | 100 % | 100 % |
 | `built-ins/decodeURIComponent` | 53 | 0 | 0 | 3 | 100 % | 100 % |
 | `built-ins/encodeURI` | 28 | 0 | 0 | 3 | 100 % | 100 % |
@@ -105,13 +107,11 @@ browser-era built-ins …).
 | `built-ins/parseInt` | 54 | 0 | 0 | 1 | 100 % | 100 % |
 | `language/punctuators` | 10 | 0 | 0 | 1 | 100 % | 100 % |
 | ~~`built-ins/AbstractModuleSource`~~ | ~~0~~ | ~~0~~ | ~~8~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
-| `built-ins/ArrayIteratorPrototype` | 19 | 0 | 8 | 0 | 70 % | 100 % |
 | ~~`built-ins/AsyncDisposableStack`~~ | ~~0~~ | ~~0~~ | ~~103~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 38 | 0 | 0 | 0 | 100 % | 100 % |
 | ~~`built-ins/DisposableStack`~~ | ~~0~~ | ~~0~~ | ~~92~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
 | `built-ins/Infinity` | 4 | 0 | 2 | 0 | 67 % | 100 % |
 | `built-ins/NaN` | 4 | 0 | 2 | 0 | 67 % | 100 % |
-| `built-ins/StringIteratorPrototype` | 7 | 0 | 0 | 0 | 100 % | 100 % |
 | ~~`built-ins/SuppressedError`~~ | ~~0~~ | ~~0~~ | ~~21~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
 | `built-ins/ThrowTypeError` | 13 | 0 | 0 | 0 | 100 % | 100 % |
 | `built-ins/undefined` | 4 | 0 | 3 | 0 | 57 % | 100 % |
@@ -185,8 +185,8 @@ features ship in mainline ECMA-262.
 |         | spec% | attempted% | pass / total | pass / attempted | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
 | **parser** | 73.22 % | 100.00 % | 29406 / 40161 | 29406 / 29406 | — | -905 | 5.6 s |
-| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | — | ±0 | 45.8 s |
-| **runtime_hardened** | 92.91 % | 99.97 % | 37313 / 40161 | 34332 / 37324 | 2981 | +2981 | 50.6 s |
+| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | — | ±0 | 35.7 s |
+| **runtime_hardened** | 92.91 % | 99.97 % | 37313 / 40161 | 34321 / 37324 | 2992 | +2981 | 40.6 s |
 
 ### 2026-05-25 — cynic `8e311c3`, test262 `d0c1b455`
 

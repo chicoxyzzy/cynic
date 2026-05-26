@@ -39,6 +39,7 @@ pub fn ensureAsyncFromSyncIteratorPrototype(realm: *Realm) !*JSObject {
     try installMethod(realm, proto, "throw", afsiThrow, 1);
 
     realm.intrinsics.async_from_sync_iterator_prototype = proto;
+    @import("harden.zig").freezeLazyIntrinsic(realm, proto) catch return error.OutOfMemory;
     return proto;
 }
 
