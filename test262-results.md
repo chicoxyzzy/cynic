@@ -8,6 +8,8 @@
 | **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | — |
 | **runtime_hardened** | 92.90 % | 99.97 % | 37310 / 40161 | 34795 / 37321 | 2515 |
 
+*SES witness fidelity*: **10 / 10** witnesses classify as `divergent` (100.00 %). Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. See `docs/handbook/ses-test262-policy.md`.
+
 
 ## Where the runtime stands, by area
 
@@ -133,7 +135,7 @@ features ship in mainline ECMA-262.
 
 | feature | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
-| `joint-iteration` | 69 | 9 | 0 | 88 % | 88 % |
+| `joint-iteration` | 70 | 8 | 0 | 90 % | 90 % |
 
 
 ## Legend
@@ -151,6 +153,7 @@ features ship in mainline ECMA-262.
 - **pass / total** — raw counts for `spec%`. `total` is the Cynic-targeted corpus (see below); `skip` is `total - attempted - divergent`.
 - **pass / attempted** — raw counts for `attempted%`. The numerator is the *true* engine-pass count (excludes divergent reclassifications) so a hardened regression that flips a real fixture from pass to fail moves this column even when the divergent count masks the headline `pass`.
 - **divergent** (`runtime-hardened` only) — fixtures whose test262-written assertion conflicts with SES enforcement (frozen primordials, locked descriptors, override-mistake fix). The engine throws on the offending operation; the fixture's "expected pass" is invalidated by Cynic's SES policy. Counted separately from `fail`. See `docs/handbook/ses-test262-policy.md`. Other rows render `—`.
+- **SES witness fidelity** (note under `## Current scores`) — Phase 3 positive-coverage signal. The witness set in `tools/test262/ses_witnesses.zig` is a curated subset of paths that MUST classify as `divergent` under hardened-mode runs. Drift either way (a witness now passes — SES enforcement weakened; or a witness fails for a non-divergence reason — pattern miss or engine regression in the SES throw path) is a hard signal. CI gates the floor at 100 %.
 - **Δ pass** (history) — change in `pass` versus the row immediately above (chronologically previous run of the same `mode`).
 - **elapsed** (history) — wall-clock time of the run that produced the row. Recorded only for full sweeps (no `--filter`, no `--only-failing`); partial runs leave it blank to keep the regression signal clean. Sub-minute as `12.3 s`, minute+ as `2m 40s`.
 
@@ -158,12 +161,12 @@ features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-26 — cynic `37b55f4`, test262 `d0c1b455`
+### 2026-05-26 — cynic `d88da56`, test262 `d0c1b455`
 
 |         | spec% | attempted% | pass / total | pass / attempted | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | — | ±0 | 50.6 s |
-| **runtime_hardened** | 92.90 % | 99.97 % | 37310 / 40161 | 34795 / 37321 | 2515 | +2978 | 40.6 s |
+| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | — | ±0 | 40.6 s |
+| **runtime_hardened** | 92.90 % | 99.97 % | 37310 / 40161 | 34795 / 37321 | 2515 | +2978 | 45.7 s |
 
 ### 2026-05-25 — cynic `8e311c3`, test262 `d0c1b455`
 

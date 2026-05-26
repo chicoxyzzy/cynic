@@ -2913,6 +2913,17 @@ const Row = struct {
     /// (filtered / `--only-failing`) where the number wouldn't be
     /// comparable to a full sweep.
     elapsed_ms: ?u64 = null,
+    /// SES-witness side-channel counters (Phase 3 of
+    /// `docs/handbook/ses-test262-policy.md`). Populated on
+    /// `.runtime_hardened` rows from the run that produced them.
+    /// Zero for parsed-from-history rows that predate the column,
+    /// for other modes, and for runs that didn't touch any
+    /// witness paths (`--filter` excluded them). Rendered as a
+    /// "SES witness fidelity" note under `## Current scores` —
+    /// not persisted to per-day history tables to keep their
+    /// column shape stable.
+    witness_pass: u32 = 0,
+    witness_total: u32 = 0,
 };
 
 /// Derive `attempted` from `pass` and `attempted_pct` for rows
@@ -3027,9 +3038,19 @@ fn writeResults(
     else
         extractPreStage4Section(existing);
 
+    // SES-witness fidelity note — produced only by hardened-mode
+    // runs (only they populate `stats.witness_*`). When the run
+    // that just finished is NOT hardened, preserve the previous
+    // note verbatim so a parser- or unhardened-mode refresh
+    // doesn't drop the line from the Current Scores section.
+    const preserved_witness_note: ?[]const u8 = if (mode == .runtime_hardened)
+        null
+    else
+        extractWitnessNote(existing);
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(gpa);
-    try writeFileBody(gpa, &buf, rows.items, buckets, pre_stage4, &prev_bucket_pass, mode, preserved_scoreboard, preserved_pre_stage4);
+    try writeFileBody(gpa, &buf, rows.items, buckets, pre_stage4, &prev_bucket_pass, mode, preserved_scoreboard, preserved_pre_stage4, preserved_witness_note);
 
     try cwd.writeFile(io, .{ .sub_path = path, .data = buf.items });
 }
@@ -3070,6 +3091,8 @@ fn makeRow(
         .attempted_pct = att_pct,
         .divergent = stats.divergent,
         .elapsed_ms = elapsed_ms,
+        .witness_pass = stats.witness_pass,
+        .witness_total = stats.witness_pass + stats.witness_fail,
     };
 }
 
@@ -3332,6 +3355,13 @@ fn writeFileBody(
     /// for the per-feature table that tracks Cynic's shipped
     /// pre-Stage-4 proposals.
     preserved_pre_stage4: ?[]const u8,
+    /// Same preservation contract as `preserved_scoreboard`, but
+    /// for the one-line `*SES witness fidelity*: …` note that
+    /// only hardened sweeps regenerate. `null` when the run that
+    /// just finished was hardened (the fresh value is rendered
+    /// from the latest hardened row's `witness_*` fields
+    /// instead) or when no prior note exists in the file.
+    preserved_witness_note: ?[]const u8,
 ) !void {
     try out.appendSlice(gpa,
         \\# test262 conformance score history
@@ -3346,6 +3376,34 @@ fn writeFileBody(
         if (latestRow(rows, m)) |r| try writeMiniRow(gpa, out, r);
     }
     try out.append(gpa, '\n');
+
+    // SES-witness fidelity note — Phase 3 of
+    // `docs/handbook/ses-test262-policy.md`. Surfaces the latest
+    // hardened sweep's witness counters as a one-line signal
+    // beneath the Current Scores table. The data flow has two
+    // paths because the markdown row format doesn't carry
+    // witness counters (would bloat history mini-tables): fresh
+    // hardened runs render from the latest hardened Row; non-
+    // hardened runs (parser / unhardened refreshes) preserve the
+    // previous note verbatim via `preserved_witness_note` so the
+    // line survives across writes.
+    if (mode_just_run == .runtime_hardened) {
+        if (latestRow(rows, .runtime_hardened)) |r| {
+            if (r.witness_total > 0) {
+                const pct: f64 = 100.0 * @as(f64, @floatFromInt(r.witness_pass)) / @as(f64, @floatFromInt(r.witness_total));
+                var wb: [256]u8 = undefined;
+                const wn = try std.fmt.bufPrint(&wb,
+                    "*SES witness fidelity*: **{d} / {d}** witnesses classify as `divergent` ({d:.2} %). " ++
+                        "Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. " ++
+                        "See `docs/handbook/ses-test262-policy.md`.\n\n",
+                    .{ r.witness_pass, r.witness_total, pct },
+                );
+                try out.appendSlice(gpa, wn);
+            }
+        }
+    } else if (preserved_witness_note) |note| {
+        try out.appendSlice(gpa, note);
+    }
 
     // Per-area scoreboard. When THIS run was a runtime run,
     // generate fresh from `buckets`. Otherwise (parser run)
@@ -3385,6 +3443,7 @@ fn writeFileBody(
         \\- **pass / total** — raw counts for `spec%`. `total` is the Cynic-targeted corpus (see below); `skip` is `total - attempted - divergent`.
         \\- **pass / attempted** — raw counts for `attempted%`. The numerator is the *true* engine-pass count (excludes divergent reclassifications) so a hardened regression that flips a real fixture from pass to fail moves this column even when the divergent count masks the headline `pass`.
         \\- **divergent** (`runtime-hardened` only) — fixtures whose test262-written assertion conflicts with SES enforcement (frozen primordials, locked descriptors, override-mistake fix). The engine throws on the offending operation; the fixture's "expected pass" is invalidated by Cynic's SES policy. Counted separately from `fail`. See `docs/handbook/ses-test262-policy.md`. Other rows render `—`.
+        \\- **SES witness fidelity** (note under `## Current scores`) — Phase 3 positive-coverage signal. The witness set in `tools/test262/ses_witnesses.zig` is a curated subset of paths that MUST classify as `divergent` under hardened-mode runs. Drift either way (a witness now passes — SES enforcement weakened; or a witness fails for a non-divergence reason — pattern miss or engine regression in the SES throw path) is a hard signal. CI gates the floor at 100 %.
         \\- **Δ pass** (history) — change in `pass` versus the row immediately above (chronologically previous run of the same `mode`).
         \\- **elapsed** (history) — wall-clock time of the run that produced the row. Recorded only for full sweeps (no `--filter`, no `--only-failing`); partial runs leave it blank to keep the regression signal clean. Sub-minute as `12.3 s`, minute+ as `2m 40s`.
         \\
@@ -3727,6 +3786,26 @@ fn writeBiggestMovers(
         try out.appendSlice(gpa, line);
     }
     try out.appendSlice(gpa, "\n");
+}
+
+/// Return the raw text of the `*SES witness fidelity*: …` note
+/// (the one-line italic callout under `## Current scores`). Used
+/// to preserve the line verbatim across writes from non-hardened
+/// modes (parser / runtime), which would otherwise re-render the
+/// Current Scores section without the witness data because the
+/// markdown row format doesn't carry witness counters and
+/// `parsePerDayRows` recovers them as zero. Returns `null` when
+/// the file doesn't have the note yet (first-ever write, or
+/// the latest hardened sweep predated Phase 3).
+fn extractWitnessNote(existing: []const u8) ?[]const u8 {
+    const marker = "*SES witness fidelity*:";
+    const start = std.mem.indexOf(u8, existing, marker) orelse return null;
+    const line_end = std.mem.indexOfScalarPos(u8, existing, start, '\n') orelse existing.len;
+    // Include the trailing blank line so the spacing matches a
+    // fresh render. Look one char past the newline.
+    var end = line_end + 1;
+    if (end < existing.len and existing[end] == '\n') end += 1;
+    return existing[start..end];
 }
 
 /// Return the raw text of the `## Where the runtime stands,
