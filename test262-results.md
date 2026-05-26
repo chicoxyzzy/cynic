@@ -5,8 +5,8 @@
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent |
 |---|---|---|---|---|---:|
 | **parser** | 73.22 % | 100.00 % | 29406 / 40161 | 29406 / 29406 | — |
-| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | — |
-| **runtime_hardened** | 92.91 % | 99.97 % | 37313 / 40161 | 34321 / 37324 | 2992 |
+| **runtime** | 93.03 % | 99.98 % | 37362 / 40161 | 37362 / 37371 | — |
+| **runtime_hardened** | 93.03 % | 99.97 % | 37362 / 40161 | 34363 / 37373 | 2999 |
 
 *SES witness fidelity*: **10 / 10** witnesses classify as `divergent` (100.00 %). Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. See `docs/handbook/ses-test262-policy.md`.
 
@@ -64,15 +64,15 @@ browser-era built-ins …).
 | `built-ins/TypedArray` | 1113 | 0 | 8 | 310 | 99 % | 100 % |
 | `built-ins/String` | 1027 | 0 | 5 | 176 | 100 % | 100 % |
 | `built-ins/Date` | 431 | 0 | 0 | 152 | 100 % | 100 % |
-| `built-ins/Math` | 212 | 0 | 5 | 110 | 98 % | 100 % |
+| `built-ins/Math` | 214 | 0 | 0 | 113 | 100 % | 100 % |
 | `built-ins/Promise` | 526 | 0 | 38 | 101 | 94 % | 100 % |
 | `language/expressions` | 9681 | 0 | 960 | 99 | 91 % | 100 % |
 | `built-ins/TypedArrayConstructors` | 562 | 0 | 16 | 93 | 98 % | 100 % |
 | `language/statements` | 8346 | 0 | 654 | 81 | 93 % | 100 % |
 | `built-ins/Set` | 312 | 0 | 1 | 69 | 100 % | 100 % |
 | `built-ins/Iterator` | 366 | 0 | 6 | 59 | 99 % | 100 % |
+| `built-ins/DataView` | 457 | 0 | 11 | 53 | 98 % | 100 % |
 | `built-ins/Map` | 152 | 0 | 1 | 50 | 100 % | 100 % |
-| `built-ins/DataView` | 417 | 0 | 55 | 49 | 89 % | 100 % |
 | `built-ins/ArrayBuffer` | 137 | 0 | 4 | 45 | 98 % | 100 % |
 | `built-ins/Reflect` | 111 | 0 | 0 | 41 | 100 % | 100 % |
 | `built-ins/Number` | 301 | 0 | 0 | 38 | 100 % | 100 % |
@@ -302,8 +302,8 @@ Today: test262 ships ~52k fixtures; `corpus` is 40161.
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
 | **parser** | 73.22 % | 100.00 % | 29406 / 40161 | 29406 / 29406 | — | -905 | 5.6 s |
-| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | — | ±0 | 40.6 s |
-| **runtime_hardened** | 92.91 % | 99.97 % | 37313 / 40161 | 34321 / 37324 | 2992 | +2981 | 40.6 s |
+| **runtime** | 93.03 % | 99.98 % | 37362 / 40161 | 37362 / 37371 | — | +49 | 35.6 s |
+| **runtime_hardened** | 93.03 % | 99.97 % | 37362 / 40161 | 34363 / 37373 | 2999 | +3030 | 40.6 s |
 
 ### 2026-05-25 — cynic `8e311c3`, test262 `d0c1b455`
 

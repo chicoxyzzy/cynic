@@ -967,11 +967,12 @@ pub const skip_planned_features = [_][]const u8{
     "import-attributes",
     "json-modules",
     // ES2024 — `Float16Array` + `Math.f16round` + `DataView` half
-    // float accessors. Cynic doesn't ship the f16 numeric path
-    // yet (would need IEEE 754 binary16 conversion alongside the
-    // existing f32 / f64 helpers); path-skip the dedicated
-    // `Float16Array` corpus and tag the f16round bucket.
-    "Float16Array",
+    // float accessors all SHIPPED. Binary16 conversion is provided
+    // by Zig's `@floatCast f64 → f16` (round-half-to-even
+    // built-in), used by the array-store path in `typed_array.zig`
+    // and by `Math.f16round` in `math.zig`. Was skipped pre-2026-05;
+    // remove this comment block once the entry stays out for a few
+    // corpus bumps.
     // ES2025 `JSON.parse` source-text context — the reviver's
     // second argument carries `{ source }` for the original
     // JSON span of the value being revived. Stage 4 but Cynic's

@@ -83,6 +83,11 @@ pub fn install(realm: *Realm) !void {
         .{ .name = "atanh", .fn_ptr = mathAtanh, .params = 1 },
         .{ .name = "clz32", .fn_ptr = mathClz32, .params = 1 },
         .{ .name = "fround", .fn_ptr = mathFround, .params = 1 },
+        // §21.3.2 Math.f16round — round to IEEE 754 binary16 then
+        // back to f64. Ships paired with `Float16Array` /
+        // `DataView.{get,set}Float16` (ES2024 Stage 4). Same shape
+        // as `fround`, just `f16` instead of `f32`.
+        .{ .name = "f16round", .fn_ptr = mathF16round, .params = 1 },
         .{ .name = "imul", .fn_ptr = mathImul, .params = 2 },
         // §21.3.2.21 Math.sumPrecise — reproducible Shewchuk
         // summation over an iterable of Numbers.
@@ -393,6 +398,20 @@ fn mathFround(realm: *Realm, this_value: Value, args: []const Value) NativeError
     _ = this_value;
     const x = toF64(argOr(args, 0, Value.fromDouble(std.math.nan(f64))));
     const f: f32 = @floatCast(x);
+    return mathDouble(@floatCast(f));
+}
+fn mathF16round(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = realm;
+    _ = this_value;
+    const x = toF64(argOr(args, 0, Value.fromDouble(std.math.nan(f64))));
+    // §21.3.2 Math.f16round: ToNumber → round to nearest binary16
+    // → return as Number (f64). IEEE 754 round-half-to-even falls
+    // out of Zig's `@floatCast f64 → f16` lowering, same as the
+    // f32 path above. Same shape as `Float16Array` indexed writes
+    // (see `typed_array.zig` value-conversion path), so binary16
+    // semantics stay in lockstep between the array-store path and
+    // this rounding helper.
+    const f: f16 = @floatCast(x);
     return mathDouble(@floatCast(f));
 }
 fn mathImul(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
