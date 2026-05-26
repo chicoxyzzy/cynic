@@ -1124,12 +1124,21 @@ pub const skip_planned_path_contains = [_][]const u8{
     // Fixed by switching the iterator to `tokenizeAny("\r\n")`; both
     // variants now pass. See `tools/test262/frontmatter.zig`.)
 
-    // `language/expressions/object/__proto__-permitted-dup-
-    // shorthand.js` — relies on Annex B §B.3.1 special-casing of
-    // the `__proto__` shorthand property. Cynic doesn't ship the
-    // `__proto__` accessor per AGENTS.md "Annex B in its
-    // entirety — out".
-    "language/expressions/object/__proto__-permitted-dup-shorthand.",
+    // (`language/expressions/object/__proto__-permitted-dup-
+    // shorthand.js` used to skip here. The fixture tests
+    // *normative* §13.2.5.5 PropertyDefinitionEvaluation: the
+    // CoverInitializedName shorthand `{__proto__}` and the
+    // ComputedPropertyName `{[k]: v}` forms create a regular own
+    // data property even when the key is `"__proto__"`. Only the
+    // bare `__proto__: v` colon form triggers Annex B §B.3.6's
+    // prototype-mutation magic. Fixed in
+    // `src/bytecode/compiler.zig` by gating the magic path on
+    // `!p.shorthand` (and `p.key != .computed`). Annex B §B.3.1's
+    // *duplicate-PropertyName early error* is what Cynic
+    // genuinely doesn't ship, but the fixture's whole point is
+    // that the early error doesn't apply to the shorthand
+    // production — so the fixture passes once the property is
+    // actually created.)
 };
 
 // ── Lookup ──────────────────────────────────────────────────────────

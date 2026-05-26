@@ -6483,6 +6483,52 @@ test "literal shape: __proto__ literal key bails out of templatization" {
     , 43);
 }
 
+// §13.2.5.5 PropertyDefinitionEvaluation — the `__proto__:` magic
+// (Annex B §B.3.6) only applies to the
+//   `PropertyDefinition : PropertyName : AssignmentExpression`
+// production with a non-computed `__proto__` key. The CoverInitialized-
+// Name shorthand `{__proto__}` and ComputedPropertyName `{[k]: v}`
+// productions are normative and create a regular own data property.
+// test262 fixture: `language/expressions/object/__proto__-permitted-
+// dup-shorthand.js`.
+
+test "later: shorthand {__proto__} creates an own data property" {
+    try expectScriptStringWithBuiltins(
+        \\var __proto__ = 2;
+        \\var obj = { __proto__ };
+        \\obj.hasOwnProperty("__proto__") + ":" + obj.__proto__;
+    , "true:2");
+}
+
+test "later: duplicate shorthand __proto__ is legal and writes own" {
+    try expectScriptStringWithBuiltins(
+        \\var __proto__ = 2;
+        \\var obj = { __proto__, __proto__ };
+        \\obj.hasOwnProperty("__proto__") + ":" + obj.__proto__;
+    , "true:2");
+}
+
+test "later: computed __proto__ key creates own data property" {
+    // §13.2.5.5 — ComputedPropertyName bypasses §B.3.6. Even when
+    // the key happens to be the string "__proto__", the result is
+    // a regular own property, not a [[Prototype]] mutation.
+    try expectScriptStringWithBuiltins(
+        \\var k = "__proto__";
+        \\var obj = { [k]: 5 };
+        \\obj.hasOwnProperty("__proto__") + ":" + obj.__proto__;
+    , "true:5");
+}
+
+test "later: __proto__: literal still sets prototype (Annex B §B.3.6 retained)" {
+    // The non-shorthand colon form keeps its Annex B prototype-
+    // setting semantics. `obj.x` falls through the prototype chain.
+    try expectScriptIntWithBuiltins(
+        \\const parent = { greet: 7 };
+        \\const obj = { __proto__: parent, own: 3 };
+        \\obj.greet + obj.own;
+    , 10);
+}
+
 test "literal shape: computed key bails out of templatization" {
     // `[expr]: value` keys are runtime-known. Template build
     // detects `.computed` and bails; compiler falls back to

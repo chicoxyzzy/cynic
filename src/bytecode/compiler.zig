@@ -2448,9 +2448,16 @@ pub const Compiler = struct {
                     if (p.key == .computed) break :blk null;
                     if (p.key == .private) break :blk null;
                     const key_slice = self.decodePropertyKeyName(p.key) catch break :blk null;
-                    // `__proto__` is the §B.3.1 prototype-mutation
-                    // syntax — handled separately, not a data slot.
-                    if (std.mem.eql(u8, key_slice, "__proto__")) break :blk null;
+                    // §B.3.6 — `{ __proto__: v }` (colon form, non-
+                    // computed, non-shorthand) is the prototype-
+                    // mutation production, handled by
+                    // `set_proto_literal` rather than as a data slot.
+                    // The shorthand `{ __proto__ }` (CoverInitializ-
+                    // edName) and the computed `{ [k]: v }` forms
+                    // create a regular own property per §13.2.5.5
+                    // and CAN be templatized — they fall through to
+                    // the regular `def_property` emit path below.
+                    if (std.mem.eql(u8, key_slice, "__proto__") and !p.shorthand) break :blk null;
                     // `__cynic_*` keys would demote on shadowSet —
                     // don't templatize them.
                     if (std.mem.startsWith(u8, key_slice, "__cynic_")) break :blk null;
@@ -2539,11 +2546,20 @@ pub const Compiler = struct {
                     return error.UnsupportedExpression
                 else
                     try self.decodePropertyKeyName(p.key);
-                // §B.3.1 — `{ __proto__: v }` (with a non-computed
-                // `__proto__` key, no shorthand): if `v` is Object
-                // or Null, set [[Prototype]]; otherwise no-op. Do
+                // §B.3.6 — `{ __proto__: v }` (colon form, non-
+                // computed, non-shorthand): if `v` is Object or
+                // Null, set [[Prototype]]; otherwise no-op. Do
                 // *not* create a property named `__proto__`.
-                if (std.mem.eql(u8, key_slice, "__proto__") and p.key != .computed) {
+                //
+                // §13.2.5.5 — the shorthand (CoverInitializedName)
+                // and computed forms are normative; they create a
+                // regular own property even when the key is
+                // `"__proto__"`. test262 covers the shorthand case
+                // via
+                // `language/expressions/object/__proto__-permitted-
+                // dup-shorthand.js`. Both forms fall through to
+                // the `def_property` emit below.
+                if (std.mem.eql(u8, key_slice, "__proto__") and p.key != .computed and !p.shorthand) {
                     try self.compileExpression(&p.value);
                     try self.builder.emitOp(.set_proto_literal, p.span);
                     try self.builder.emitU8(r_obj);
