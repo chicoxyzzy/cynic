@@ -2054,30 +2054,26 @@ fn classifyAndRun(
 
     if (fm.flags.no_strict) return .{ .kind = .skip, .skip_reason = .no_strict };
     if (fm.flags.raw) return .{ .kind = .skip, .skip_reason = .raw_flag };
-    // Includes are loaded from the harness directory and
-    // evaluated as additional Scripts before the test (see the
-    // runtime branch below). Parser mode doesn't need them, but
-    // tests that depend on harness helpers usually exercise
-    // runtime semantics anyway. If the test names an include
-    // we don't have on disk, that's the fallback skip.
-    if (mode == .parser and fm.includes.len > 0) return .{ .kind = .skip, .skip_reason = .has_includes };
+    // Parser mode used to also skip every fixture with a
+    // non-empty `includes:` list (~11k fixtures using
+    // `compareArray.js` / `propertyHelper.js` / etc.) on the
+    // grounds that "the meaningful check is at runtime anyway."
+    // That hid a lot of parser surface from regression tracking
+    // — a fixture using new syntax + `assert.compareArray(...)`
+    // would silently skip in parser mode, so a parser regression
+    // wouldn't surface. Now parser mode attempt-parses every
+    // fixture; runtime-only verifications still skip on the
+    // runtime side via the includes-not-found fallback. Net
+    // effect: parser `pass%` becomes a real "what fraction of
+    // the corpus does the parser handle" gauge instead of a
+    // heuristic-skipped underestimate.
     for (fm.features) |feat| {
         if (skip_rules.featureIsUnsupported(feat)) {
             return .{ .kind = .skip, .skip_reason = .unsupported_feature };
         }
     }
     const expected_negative: ?frontmatter.Negative = blk: {
-        if (fm.negative) |n| {
-            switch (n.phase) {
-                .resolution, .runtime => {
-                    if (mode == .parser) {
-                        return .{ .kind = .skip, .skip_reason = .runtime_phase };
-                    }
-                    break :blk n;
-                },
-                .parse, .early => break :blk n,
-            }
-        }
+        if (fm.negative) |n| break :blk n;
         break :blk null;
     };
 
@@ -2103,6 +2099,21 @@ fn classifyAndRun(
 
     if (mode == .parser) {
         if (expected_negative) |neg| {
+            // `runtime` / `resolution` phase negatives expect a
+            // throw at execution / module-resolution time. The
+            // fixture's source IS syntactically valid (otherwise
+            // the parse-phase check would be the failure mode the
+            // frontmatter declares). Parser-mode can verify only
+            // the prerequisite: "this source parses." Parser-
+            // accept therefore counts as `pass_positive` — we
+            // confirmed the part of the fixture parser mode can
+            // confirm. Parser-reject would be a real bug
+            // (`fail_false_reject`).
+            if (neg.phase == .runtime or neg.phase == .resolution) {
+                return .{ .kind = if (parse_failed) .fail_false_reject else .pass_positive };
+            }
+            // `parse` / `early` phase: parser MUST reject.
+            // Accept-when-should-reject = false_accept.
             if (!parse_failed) return .{ .kind = .fail_false_accept };
             if (neg.type_name.len > 0 and !diagnosticsMatchClass(diags.items, neg.type_name)) {
                 return .{ .kind = .fail_false_accept };
@@ -3027,6 +3038,22 @@ fn writeResults(
     mode: Mode,
     elapsed_ms: ?u64,
 ) !void {
+    // Parser-mode results aren't promoted to the published
+    // scoreboard — every parser verdict is the prerequisite for
+    // its runtime verdict, so the parser row is strictly
+    // redundant with runtime. Other engines (V8 / JSC /
+    // SpiderMonkey / engine262) don't publish a separate
+    // parser-only test262 row either. `--mode=parser` remains a
+    // dev-iteration tool; the tally prints to stdout but
+    // `test262-results.md` isn't touched.
+    if (mode == .parser) {
+        std.debug.print(
+            "test262: parser-mode results not published to `test262-results.md`. " ++
+                "Run `--mode=runtime --write-results` for the published scoreboard.\n",
+            .{},
+        );
+        return;
+    }
     const cwd = std.Io.Dir.cwd();
     const path = "test262-results.md";
 
@@ -3461,7 +3488,16 @@ fn writeFileBody(
         \\|---|---|---|---|---|---:|
         \\
     );
-    inline for (.{ Mode.parser, Mode.runtime, Mode.runtime_hardened }) |m| {
+    // Parser mode used to have its own scoreboard row but the
+    // number is strictly redundant with runtime — every test262
+    // fixture's parser-verdict is the prerequisite for its
+    // runtime-verdict, so a parser regression surfaces in runtime
+    // too. No major engine (V8 / JSC / SpiderMonkey / engine262)
+    // publishes a separate parser-only test262 row. `--mode=parser`
+    // remains a dev-iteration tool (it's ~8x faster than runtime
+    // for parser-only changes); the results just aren't promoted
+    // to the published scoreboard.
+    inline for (.{ Mode.runtime, Mode.runtime_hardened }) |m| {
         if (latestRow(rows, m)) |r| try writeMiniRow(gpa, out, r);
     }
     try out.append(gpa, '\n');
@@ -3538,9 +3574,6 @@ fn writeFileBody(
         \\
         \\### Rows
         \\
-        \\- **`parser`** — parses the source only. A pass means
-        \\  Cynic's parser accepts or rejects the test as test262
-        \\  expects. The runtime is never invoked.
         \\- **`runtime`** — parses, compiles, and executes against
         \\  an *unhardened* realm (primordials mutable, globalThis
         \\  extensible — the legacy ECMAScript baseline). Same
@@ -3681,6 +3714,11 @@ fn writeFileBody(
 
         var j = idx;
         while (j < rows.len and std.mem.eql(u8, rows[j].date, day_date)) : (j += 1) {
+            // Parser rows are no longer published (see comment at
+            // the Current Scores rendering above). Skip silently —
+            // any parser row still in the parsed `rows` slice from
+            // legacy history is just dropped on regeneration.
+            if (rows[j].mode == .parser) continue;
             const prev_pass: ?u32 = priorRowPass(rows, j);
             try writeHistoryRow(gpa, out, rows[j], prev_pass);
         }

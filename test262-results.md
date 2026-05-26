@@ -4,7 +4,6 @@
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent |
 |---|---|---|---|---|---:|
-| **parser** | 73.22 % | 100.00 % | 29406 / 40161 | 29406 / 29406 | — |
 | **runtime** | 93.09 % | 99.98 % | 37451 / 40229 | 37451 / 37460 | — |
 | **runtime_hardened** | 93.09 % | 99.97 % | 37451 / 40229 | 34426 / 37462 | 3025 |
 
@@ -187,9 +186,6 @@ verdict either way).
 
 ### Rows
 
-- **`parser`** — parses the source only. A pass means
-  Cynic's parser accepts or rejects the test as test262
-  expects. The runtime is never invoked.
 - **`runtime`** — parses, compiles, and executes against
   an *unhardened* realm (primordials mutable, globalThis
   extensible — the legacy ECMAScript baseline). Same
@@ -298,13 +294,12 @@ Today: test262 ships ~52k fixtures; `corpus` is 40161.
 
 ## History
 
-### 2026-05-26 — cynic `023f094`, test262 `d0c1b455`
+### 2026-05-26 — cynic `d77fb4f`, test262 `d0c1b455`
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **parser** | 73.22 % | 100.00 % | 29406 / 40161 | 29406 / 29406 | — | -905 | 5.6 s |
-| **runtime** | 93.09 % | 99.98 % | 37451 / 40229 | 37451 / 37460 | — | +138 | 40.7 s |
-| **runtime_hardened** | 93.09 % | 99.97 % | 37451 / 40229 | 34426 / 37462 | 3025 | +3119 | 40.7 s |
+| **runtime** | 93.09 % | 99.98 % | 37451 / 40229 | 37451 / 37460 | — | +138 | 40.6 s |
+| **runtime_hardened** | 93.09 % | 99.97 % | 37451 / 40229 | 34426 / 37462 | 3025 | +3119 | 40.6 s |
 
 ### 2026-05-25 — cynic `8e311c3`, test262 `d0c1b455`
 
@@ -371,55 +366,47 @@ Today: test262 ships ~52k fixtures; `corpus` is 40161.
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **parser** | 73.32 % | 100.00 % | 30311 / 41339 | 30311 / 30311 | — | -167 |  |
 | **runtime** | 85.12 % | 91.56 % | 34872 / 40969 | 34872 / 38087 | — | +1623 |  |
 
 ### 2026-05-14 — cynic `aca1903`, test262 `d0c1b455`
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **parser** | 73.44 % | 100.00 % | 30478 / 41501 | 30478 / 30478 | — | +108 |  |
 | **runtime** | 80.12 % | 85.56 % | 33249 / 41501 | 33249 / 38860 | — | +474 |  |
 
 ### 2026-05-13 — cynic `550a57e`, test262 `d0c1b455`
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **parser** | 65.76 % | 100.00 % | 30370 / 46183 | 30370 / 30370 | — | +964 |  |
 | **runtime** | 70.79 % | 85.00 % | 32775 / 46296 | 32775 / 38559 | — | +1007 |  |
 
 ### 2026-05-12 — cynic `6800720`, test262 `d0c1b455`
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **parser** | 63.52 % | 96.48 % | 29406 / 46296 | 29406 / 30479 | — | +148 |  |
 | **runtime** | 68.62 % | 82.38 % | 31768 / 46296 | 31768 / 38563 | — | +1877 |  |
 
 ### 2026-05-11 — cynic `feb8709`, test262 `d0c1b455`
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **parser** | 63.16 % | 96.48 % | 29258 / 46320 | 29258 / 30325 | — | ±0 |  |
 | **runtime** | 64.53 % | 78.37 % | 29891 / 46320 | 29891 / 38141 | — | +4713 |  |
 
 ### 2026-05-10 — cynic `c5c12a0`, test262 `d0c1b455`
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **parser** | 63.16 % | 96.48 % | 29258 / 46320 | 29258 / 30325 | — | +464 |  |
 | **runtime** | 54.36 % | 66.01 % | 25178 / 46320 | 25178 / 38143 | — | +1265 |  |
 
 ### 2026-05-09 — cynic `fcc5543`, test262 `d0c1b455`
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **parser** | 62.11 % | 94.89 % | 28794 / 46357 | 28794 / 30345 | — | +252 |  |
 | **runtime** | 51.58 % | 62.65 % | 23913 / 46357 | 23913 / 38169 | — | +6048 |  |
 
 ### 2026-05-08 — cynic `unknown`, test262 `d0c1b455`
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **parser** | 54.76 % | 95.61 % | 28542 / 52125 | 28542 / 29853 | — | n/a |  |
 | **runtime** | 34.60 % | 46.64 % | 17865 / 51639 | 17865 / 38304 | — | n/a |  |
 
