@@ -53,6 +53,18 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
+/// ES2026 explicit-resource-management — `using` is a contextual
+/// keyword and only starts a UsingDeclaration when followed on the
+/// same line by something that begins a BindingIdentifier. The
+/// proposal disallows destructuring patterns (`using { a } = …`) so
+/// `{` / `[` aren't valid here; we accept plain identifiers and the
+/// reserved-word-as-identifier shapes Cynic's lexer surfaces
+/// (notably `await` in non-async contexts, which the inner
+/// `parseBindingIdentifier` validates again).
+fn isUsingBindingStart(kind: TokenKind) bool {
+    return kind == .identifier or kind == .kw_yield or kind == .kw_await;
+}
+
 pub const Parser = struct {
     /// Arena-style allocator for all AST allocations.
     arena: std.mem.Allocator,
@@ -428,6 +440,19 @@ pub const Parser = struct {
                         return self.parseFunctionDeclarationAt(start, true);
                     }
                 }
+                // §14.3.x UsingDeclaration (ES2026 explicit-resource-
+                // management). `using` is a contextual keyword: only a
+                // declaration when followed on the SAME line by an
+                // identifier (so `using` alone, `using;`, or `using\n
+                // x = …` keep their expression-statement semantics).
+                // `await using` is detected from the `await` arm above
+                // when we're inside an async context (Phase 6).
+                if (kind == .identifier and std.mem.eql(u8, self.current.slice(self.source), "using")) {
+                    const second = try self.peek2();
+                    if (!second.line_terminator_before and isUsingBindingStart(second.kind)) {
+                        return self.parseLexicalDeclaration(.using_);
+                    }
+                }
                 if (expr_mod.canStartExpression(kind)) return self.parseExpressionStatement();
                 try self.report(.unexpected_token, self.current.span);
                 return error.ParseError;
@@ -447,10 +472,13 @@ pub const Parser = struct {
         return .{ .block = block };
     }
 
-    /// §14.3.1 LexicalDeclaration. `let` / `const` followed by one or more
-    /// `BindingIdentifier (= AssignmentExpression)?` separated by `,`. In
-    /// this slice destructuring patterns are deferred — only single-name
-    /// bindings are recognised.
+    /// §14.3.1 LexicalDeclaration. `let` / `const` (and ES2026
+    /// `using` / `await using`) followed by one or more
+    /// `BindingIdentifier (= AssignmentExpression)?` separated by `,`.
+    /// In this slice destructuring patterns are deferred — only
+    /// single-name bindings are recognised. For `using` / `await using`,
+    /// destructuring patterns ARE rejected per spec (§14.3.x step 4)
+    /// and an initializer is required — see `parseVariableDeclarator`.
     fn parseLexicalDeclaration(self: *Parser, kind: stmt_mod.LexicalDecl.Kind) ParseError!Statement {
         const keyword = try self.bump();
         var declarators: std.ArrayListUnmanaged(stmt_mod.VariableDeclarator) = .empty;
@@ -464,9 +492,8 @@ pub const Parser = struct {
         const last_end = slice[slice.len - 1].span.end;
         const stmt_end = try self.consumeSemicolon(last_end);
         // §14.3.1: BoundNames of LexicalDeclaration must contain no
-        // duplicates (let/const only — `var` follows §14.3.2 and may
-        // legally repeat names). Walk each declarator's target and
-        // accumulate via `collectBoundNames`, which reports duplicates.
+        // duplicates (let/const/using only — `var` follows §14.3.2
+        // and may legally repeat names).
         if (kind != .var_) try self.checkDeclaratorBoundNames(slice);
         return .{ .lexical = .{
             .span = .{ .start = keyword.span.start, .end = stmt_end },
@@ -501,15 +528,25 @@ pub const Parser = struct {
         var end = target_span.end;
         var init_expr: ?Expression = null;
         const target_is_pattern = target != .identifier;
+        // ES2026 explicit-resource-management — `using` and `await
+        // using` declarations only bind identifiers (per the
+        // proposal's static-semantics early error: BindingList
+        // contains no BindingPattern productions). Surface a
+        // syntax error on `using {x} = ...` / `using [a] = ...`.
+        if ((kind == .using_ or kind == .await_using_) and target_is_pattern) {
+            try self.report(.unexpected_token, target_span);
+            return error.ParseError;
+        }
         if (try self.eat(.eq)) {
             const value = try expr_mod.parseAssignmentEntry(self);
             end = value.span().end;
             init_expr = value;
-        } else if (require_initializer and (kind == .const_ or target_is_pattern)) {
-            // §14.3.1: `const` requires an initializer. Patterns also do
-            // (per §14.3.3 LexicalBinding production), since destructuring
-            // without a value to destructure is meaningless. Skipped when
-            // the declarator is the head of a for-in/of loop, where the
+        } else if (require_initializer and (kind == .const_ or kind == .using_ or kind == .await_using_ or target_is_pattern)) {
+            // §14.3.1: `const` (and ES2026 `using` / `await using`)
+            // require an initializer. Patterns also do (per §14.3.3
+            // LexicalBinding production), since destructuring without
+            // a value to destructure is meaningless. Skipped when the
+            // declarator is the head of a for-in/of loop, where the
             // iteration supplies the value.
             try self.report(.const_without_initializer, target_span);
         }

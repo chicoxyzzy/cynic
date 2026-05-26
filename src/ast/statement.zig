@@ -58,12 +58,19 @@ pub const BlockStmt = struct {
 /// them. `var` follows the same parser-time validation as `let` for
 /// pattern initializers (required); runtime hoisting/redeclaration
 /// semantics differ but those are not the parser's concern.
+///
+/// ES2026 explicit-resource-management adds two more block-scoped
+/// kinds — `using` and `await using`. Both share the same AST shape
+/// as `const` (an identifier-only initializer is required, no
+/// destructuring); the compiler desugars them into a const binding
+/// + an implicit try/finally that performs DisposeResources at
+/// every scope-exit path.
 pub const LexicalDecl = struct {
     span: Span,
     kind: Kind,
     declarators: []VariableDeclarator,
 
-    pub const Kind = enum { let_, const_, var_ };
+    pub const Kind = enum { let_, const_, var_, using_, await_using_ };
 };
 
 pub const VariableDeclarator = struct {
