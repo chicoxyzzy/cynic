@@ -966,3 +966,41 @@ to 92.0 to track the new adjusted headline.
 
 Phase 3 (witness inversion) and Phase 5 (per-area scoreboard
 + Planned-features block) sit on this foundation.
+
+### Phase 3 — witness inversion (2026-05-26)
+
+Shipped. The witness mechanism is now wired end-to-end:
+
+- `tools/test262/ses_witnesses.zig` — curated witness list,
+  10 paths covering the four SES enforcement surfaces (frozen
+  prototype data slots, non-extensible intrinsics, frozen
+  descriptor invariants, override-mistake accessor pairs).
+- Harness counters `witness_pass` / `witness_fail` and CLI
+  flag `--min-ses-witness-pct=<f>`. A witness "passes" iff
+  its outcome under `.main` is `fail_divergent`; anything
+  else (engine pass — SES weakened; or `fail_false_reject` —
+  the throw was unrecognised) is a `witness_fail`.
+- `printTally` emits `ses-witness: <pass> / <total> pass
+  (<pct>%)` whenever the run actually touched a witness path
+  (filtered runs that skipped them stay silent).
+- CI floor `--min-ses-witness-pct=100` in
+  `.github/workflows/ci.yml`. Any drift fails the build.
+
+Verification: hardened sweep of `built-ins` shows
+`ses-witness: 10 / 10 pass (100.00%)`. The 10 witnesses each
+classify as `fail_divergent` via the Phase 2 pattern list
+(`descriptor should be configurable`, `Cannot assign to
+read-only property`, `b Expected SameValue(«true», «false»)
+to be true`, etc.). Candidates trimmed during selection: a
+handful of `Math/<name>/prop-desc.js` and `DataView/
+extensibility.js` fixtures *don't* go divergent — Math is a
+namespace (no prototype-data demotion under the override-
+mistake fix), and the descriptor read-back happens to match
+the SES default — so they're not load-bearing as witnesses
+and were left out.
+
+Risk realised: zero. Witness fixtures are still counted in
+`total` / `divergent` like any other path; the
+`witness_pass` / `witness_fail` counters are an additional
+positive-coverage side channel, not an alternative
+classification.

@@ -330,16 +330,20 @@ RSS but obvious here. Forces `--threads=1`),
 time ≥ 1 ms. Different signal from `--top-alloc` — surfaces
 fixtures whose wall-time is dominated by GC even when bytes
 look moderate. Forces `--threads=1`),
-`--min-spec-pct=<f>` / `--min-hardened-spec-pct=<f>` (per-row
-spec% floors — the unhardened legacy baseline and the
-SES-posture row respectively. Both gate the row's headline
-`spec%` (for hardened that's the SES-adjusted
+`--min-spec-pct=<f>` / `--min-hardened-spec-pct=<f>` /
+`--min-ses-witness-pct=<f>` (per-row floors — the unhardened
+legacy baseline, the SES-posture row, and the SES-witness
+side channel respectively. The first two gate the row's
+headline `spec%` (for hardened that's the SES-adjusted
 `(pass + divergent) / total` per Layout A in
-`docs/handbook/ses-test262-policy.md`). Exit 2 when either
-phase's pass-percentage drops below the floor. Skipped under
-`--filter=`. CI wires both at the published baselines (92.5 /
-92.0) so a regression in either posture fails the build —
-see `.github/workflows/ci.yml`). The harness
+`docs/handbook/ses-test262-policy.md`); the witness floor
+gates `tools/test262/ses_witnesses.zig`'s curated set —
+every listed path MUST classify as `divergent` under
+`.main`. Exit 2 when any floor trips. Skipped under
+`--filter=`. CI wires all three at the published baselines
+(92.5 / 92.0 / 100) so a regression in any of: unhardened
+score, SES-adjusted score, or witness fidelity fails the
+build — see `.github/workflows/ci.yml`). The harness
 scores against the **Cynic-targeted scope**: paths under
 `harness/`, `staging/`, `intl402/`, Annex B language extensions,
 and the browser-era built-ins Cynic doesn't ship are dropped from

@@ -103,6 +103,7 @@ const frontmatter = @import("test262/frontmatter.zig");
 const skip_rules = @import("test262/skip.zig");
 const harness_mod = @import("test262/harness.zig");
 const ses_divergent = @import("test262/ses_divergent.zig");
+const ses_witnesses = @import("test262/ses_witnesses.zig");
 
 /// Per-worker loader state. Set by `classifyAndRun` before
 /// running a module-flagged test; consulted by
@@ -620,6 +621,13 @@ const Options = struct {
     /// floors enforced independently so a regression in either
     /// posture fails CI.
     min_hardened_spec_pct: f64 = 0.0,
+    /// Minimum acceptable pass rate on the **SES witness set**
+    /// (`tools/test262/ses_witnesses.zig`). Default 0 disables;
+    /// CI sets 100 so any drift in a curated witness fixture
+    /// (a previously-divergent witness now passing or failing
+    /// for a non-divergence reason) fails the build. Phase 3
+    /// of `docs/handbook/ses-test262-policy.md`.
+    min_ses_witness_pct: f64 = 0.0,
 };
 
 /// Path of the pass-cache, written at the repo root after every
@@ -644,6 +652,17 @@ const Stats = struct {
     /// `docs/handbook/ses-test262-policy.md` Layout A for how
     /// this feeds the `runtime_hardened` row's adjusted spec%.
     divergent: u32 = 0,
+    /// SES-witness fixture counters — curated subset of paths
+    /// (`tools/test262/ses_witnesses.zig`) that MUST classify as
+    /// `divergent` under hardened-mode runs. Drift either way
+    /// (pass / fail) signals an SES enforcement regression and
+    /// fails CI via `--min-ses-witness-pct=100`. The witness
+    /// fixtures are still part of the main `total` / `divergent`
+    /// counts — these are additional positive-coverage counters
+    /// on top, not an alternative classification. Phase 3 of
+    /// `docs/handbook/ses-test262-policy.md`.
+    witness_pass: u32 = 0,
+    witness_fail: u32 = 0,
 
     fn pass(self: *const Stats) u32 {
         return self.pass_pos + self.pass_neg;
@@ -1150,6 +1169,30 @@ pub fn main(init: std.process.Init) !void {
         }
         if (opts.min_hardened_spec_pct > 0.0) {
             if (main_result) |*mr| evalPhase(&below_floor, mr, opts.min_hardened_spec_pct, "--min-hardened-spec-pct");
+        }
+        // Witness floor — Phase 3 of the SES policy. The
+        // witness set's pass rate must stay above
+        // `--min-ses-witness-pct`. CI sets 100 % so any drift
+        // (a witness that stopped being divergent — either
+        // it's now passing, signalling SES enforcement
+        // weakened, or it's now failing for a non-divergence
+        // reason, signalling a pattern miss or engine
+        // regression) fails the build. Only meaningful for
+        // the hardened (`.main`) phase.
+        if (opts.min_ses_witness_pct > 0.0) {
+            if (main_result) |*mr| {
+                const total = mr.stats.witness_pass + mr.stats.witness_fail;
+                if (total > 0) {
+                    const pct = 100.0 * @as(f64, @floatFromInt(mr.stats.witness_pass)) / @as(f64, @floatFromInt(total));
+                    if (pct < opts.min_ses_witness_pct) {
+                        std.debug.print(
+                            "test262: ses-witness pct {d:.2} below --min-ses-witness-pct floor {d:.2} (pass {d} / total {d})\n",
+                            .{ pct, opts.min_ses_witness_pct, mr.stats.witness_pass, total },
+                        );
+                        below_floor = true;
+                    }
+                }
+            }
         }
         if (below_floor) std.process.exit(2);
     }
@@ -1666,6 +1709,21 @@ fn recordOutcome(
         .skip => stats.skip += 1,
         .fail_divergent => stats.divergent += 1,
     }
+    // SES witness side-channel — curated paths that MUST
+    // classify as `divergent` under hardened-mode runs. Drift
+    // (pass or non-divergent fail) is logged as
+    // `witness_fail`; staying divergent is `witness_pass`.
+    // Phase 3 of `docs/handbook/ses-test262-policy.md`.
+    if (ses_witnesses.isWitness(rel)) {
+        if (outcome.kind == .fail_divergent) {
+            stats.witness_pass += 1;
+        } else if (outcome.kind == .skip) {
+            // Witnessed-but-skipped (e.g. filtered out, or
+            // out-of-phase) doesn't move either counter.
+        } else {
+            stats.witness_fail += 1;
+        }
+    }
     // Bucket as `.skip` for divergent — the per-area scoreboard
     // doesn't grow a fourth column today; reclassified failures
     // visually look like "skipped" in the bucket totals, which
@@ -1856,6 +1914,8 @@ fn mergeStats(dst: *Stats, src: *const Stats) void {
     dst.pos_attempted += src.pos_attempted;
     dst.neg_attempted += src.neg_attempted;
     dst.divergent += src.divergent;
+    dst.witness_pass += src.witness_pass;
+    dst.witness_fail += src.witness_fail;
 }
 
 fn mergeBuckets(dst: *BucketMap, src: *const BucketMap) !void {
@@ -2648,6 +2708,21 @@ fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
             elapsed_ms,
         });
         try std.Io.File.stdout().writeStreamingAll(io, msg);
+    }
+    // Witness-set signal — Phase 3 of
+    // `docs/handbook/ses-test262-policy.md`. Only emitted when
+    // the run actually swept witnesses (counters > 0); a
+    // filtered run that didn't touch the witness paths stays
+    // silent.
+    const witness_total = stats.witness_pass + stats.witness_fail;
+    if (witness_total > 0) {
+        const witness_pct: f64 = 100.0 * @as(f64, @floatFromInt(stats.witness_pass)) / @as(f64, @floatFromInt(witness_total));
+        var wb: [256]u8 = undefined;
+        const wm = try std.fmt.bufPrint(&wb,
+            \\  ses-witness: {d} / {d} pass ({d:.2}%)
+            \\
+        , .{ stats.witness_pass, witness_total, witness_pct });
+        try std.Io.File.stdout().writeStreamingAll(io, wm);
     }
 }
 
@@ -3831,6 +3906,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.min_spec_pct = parsePctOrExit(arg, "--min-spec-pct=", arg["--min-spec-pct=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--min-hardened-spec-pct=")) {
             opts.min_hardened_spec_pct = parsePctOrExit(arg, "--min-hardened-spec-pct=", arg["--min-hardened-spec-pct=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--min-ses-witness-pct=")) {
+            opts.min_ses_witness_pct = parsePctOrExit(arg, "--min-ses-witness-pct=", arg["--min-ses-witness-pct=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--phase=")) {
             const spec = arg["--phase=".len..];
             if (std.mem.eql(u8, spec, "main")) {
