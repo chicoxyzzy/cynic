@@ -111,3 +111,59 @@ independent. As long as the harness keeps the "process
 globals are read-only" invariant, parallel produces the same
 counts as single-thread. The bug isn't in the policy, it's in
 breaches of the policy; surface and fix the breach.
+
+## Corpus bumps (after `/bump-test262`)
+
+A `vendor/test262/` submodule bump is a different shape of
+change from an engine edit: the engine is unchanged, but the
+corpus has new fixtures, renamed paths, and sometimes
+deleted ones. Three signals must be reviewed before landing
+the bump alongside the standard `Δ pass`:
+
+1. **Divergent-count delta.** A jump in the
+   `runtime_hardened` row's `divergent` column on a corpus
+   bump means a new bucket of fixtures is hitting SES rules
+   that nobody categorised. The Phase 2 divergence list in
+   `tools/test262/ses_divergent.zig` matches substrings of
+   thrown error messages; if upstream added a new fixture
+   family whose assertion text doesn't match an existing
+   pattern, those failures bucket as **real `fail`**, not
+   `divergent`. The hardened headline `spec%` drops, the
+   adjusted-vs-unhardened gap widens, and the
+   `--min-hardened-spec-pct` CI floor trips. Fix: add a
+   new pattern to `ses_divergent.zig` with an inline
+   comment naming the new fixture family and the SES
+   surface it touches. Land the pattern as part of the
+   bump PR, not after.
+
+2. **Witness-path integrity.** The Phase 3 witness set in
+   `tools/test262/ses_witnesses.zig` is path-keyed
+   (`built-ins/Math/abs/length.js`, …). A corpus rename or
+   delete that touches a witness path silently shrinks the
+   witness set — the `--min-ses-witness-pct=100` floor
+   still passes (`9 / 9` is 100 %) but the coverage is
+   weaker. Check: after the bump, run
+   `zig build test262 -- --quiet --filter=<the witness
+   root>` and confirm the `ses-witness:` tally still reads
+   `10 / 10` (or whatever the current size is per
+   `ses_witnesses.zig`). If the count went DOWN, either
+   restore the moved path (most likely an upstream rename)
+   or pick a replacement witness from the new divergent
+   set.
+
+3. **Skip-list bit-rot.** New fixtures may land in a path
+   currently path-skipped in `tools/test262/skip.zig` (e.g.
+   a new `built-ins/Temporal/` subdirectory). The skip
+   absorbs them silently — `total` doesn't grow. That's
+   *usually* what we want (Temporal is Planned, not
+   implemented), but a path-skip that's actually intended
+   to be narrow (a specific browser-era built-in) can drift
+   to cover too much. Check: scan the bump's `git log
+   vendor/test262` output for new top-level directories.
+   Anything new should either match an existing
+   intentional skip rule or land in the corpus as scored.
+
+Standard regression protocol (#1-4 above) still applies on
+top — the engine didn't change, but the harness's view of
+what counts as a pass might have moved if a frontmatter
+field or assertion helper changed shape.
