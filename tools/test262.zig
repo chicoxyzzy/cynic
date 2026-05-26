@@ -674,7 +674,7 @@ const Stats = struct {
 
 /// What kind of outcome to record for a bucket. Mirrors the
 /// three-way grouping the rolled-up `Stats` already uses.
-const BucketKind = enum { pass, fail, skip };
+const BucketKind = enum { pass, fail, skip, divergent };
 
 /// Per-area counters. The `name` is the first two path
 /// components of the test262 fixture (e.g. `built-ins/Set`,
@@ -685,6 +685,13 @@ const Bucket = struct {
     pass: u32 = 0,
     fail: u32 = 0,
     skip: u32 = 0,
+    /// SES-divergent count under the hardened phase (Phase 2 of
+    /// `docs/handbook/ses-test262-policy.md`). Always zero for
+    /// buckets sourced from non-hardened sweeps — only the
+    /// `.main` phase emits divergent classifications. Counted
+    /// separately from `pass`, `fail`, `skip`; the four together
+    /// sum to `total`.
+    divergent: u32 = 0,
     total: u32 = 0,
 };
 
@@ -724,6 +731,7 @@ const BucketMap = struct {
             .pass => gop.value_ptr.pass += 1,
             .fail => gop.value_ptr.fail += 1,
             .skip => gop.value_ptr.skip += 1,
+            .divergent => gop.value_ptr.divergent += 1,
         }
         gop.value_ptr.total += 1;
     }
@@ -759,6 +767,16 @@ const BucketMap = struct {
                 const ta = tier(a.fail);
                 const tb = tier(b.fail);
                 if (ta != tb) return ta < tb;
+                // Within the 0-fail tier, surface buckets with the
+                // most SES divergence at the top — this is where
+                // hardened-mode reclassification concentrates, so
+                // a reader scanning "what does SES enforce?" sees
+                // the hot buckets first. Other tiers stay
+                // alphabetical (engine-bug work follows raw fail
+                // count, not the divergent side-channel).
+                if (ta == 4 and a.divergent != b.divergent) {
+                    return a.divergent > b.divergent;
+                }
                 return std.mem.order(u8, a.name, b.name) == .lt;
             }
         }.lt);
@@ -1695,7 +1713,13 @@ fn recordOutcome(
     const bucket_kind: ?BucketKind = switch (outcome.kind) {
         .pass_positive, .pass_negative => .pass,
         .fail_false_reject, .fail_false_accept => .fail,
-        .skip, .fail_divergent => .skip,
+        .skip => .skip,
+        // Phase 5 (`docs/handbook/ses-test262-policy.md`) — divergent
+        // fixtures get their own bucket column instead of being lumped
+        // into `skip`. Visible in the per-area scoreboard as a fourth
+        // column so a reader can tell at a glance which buckets
+        // accumulate SES reclassification vs which are truly skipped.
+        .fail_divergent => .divergent,
     };
     switch (outcome.kind) {
         .pass_positive => stats.pass_pos += 1,
@@ -1938,6 +1962,7 @@ fn mergeBuckets(dst: *BucketMap, src: *const BucketMap) !void {
         gop.value_ptr.pass += v.pass;
         gop.value_ptr.fail += v.fail;
         gop.value_ptr.skip += v.skip;
+        gop.value_ptr.divergent += v.divergent;
         gop.value_ptr.total += v.total;
     }
 }
@@ -3060,18 +3085,22 @@ fn writeResults(
 
     try rows.append(gpa, makeRow(date, mode, stats, cynic_sha, test262_sha, elapsed_ms));
 
-    // When this run was parser mode, we don't have a fresh
-    // runtime per-area scoreboard. Preserve the one already in
-    // the file by extracting its raw text so a parser refresh
-    // doesn't wipe the per-bucket signal.
-    const preserved_scoreboard: ?[]const u8 = if (mode == .runtime)
+    // When this run was NOT the hardened-mode runtime sweep, we
+    // don't have fresh per-bucket data for the hardened
+    // scoreboard. Preserve the one already in the file by
+    // extracting its raw text so a parser refresh or unhardened-
+    // only refresh doesn't wipe the per-bucket signal. The
+    // scoreboard regen trigger in `writeFileBody` matches —
+    // `mode_just_run == .runtime_hardened` regenerates;
+    // everything else falls back to `preserved_scoreboard`.
+    const preserved_scoreboard: ?[]const u8 = if (mode == .runtime_hardened)
         null
     else
         extractScoreboardSection(existing);
-    // Same parser-refresh dance as `preserved_scoreboard`: when we
-    // didn't just run the runtime mode the per-feature table needs
-    // to come from the file's previous contents, not the empty
-    // `pre_stage4` we just initialised.
+    // The per-feature table tracks pre-Stage-4 proposals via
+    // dedicated phase sweeps, which run alongside the unhardened
+    // path. Preserve verbatim unless the run that just finished
+    // is the unhardened one (which feeds the per-feature stats).
     const preserved_pre_stage4: ?[]const u8 = if (mode == .runtime)
         null
     else
@@ -3087,9 +3116,15 @@ fn writeResults(
     else
         extractWitnessNote(existing);
 
+    // Detect the one-time pre→post Phase 5c transition (per-area
+    // pass column shifting from unhardened to hardened source).
+    // The biggest-movers callout in `writeFileBody` skips when
+    // the previous file's scoreboard had no `divergent` column.
+    const prev_scoreboard_phase5c = prevScoreboardHasDivergent(existing);
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(gpa);
-    try writeFileBody(gpa, &buf, rows.items, buckets, pre_stage4, &prev_bucket_pass, mode, preserved_scoreboard, preserved_pre_stage4, preserved_witness_note);
+    try writeFileBody(gpa, &buf, rows.items, buckets, pre_stage4, &prev_bucket_pass, mode, preserved_scoreboard, preserved_pre_stage4, preserved_witness_note, prev_scoreboard_phase5c);
 
     try cwd.writeFile(io, .{ .sub_path = path, .data = buf.items });
 }
@@ -3401,6 +3436,15 @@ fn writeFileBody(
     /// from the latest hardened row's `witness_*` fields
     /// instead) or when no prior note exists in the file.
     preserved_witness_note: ?[]const u8,
+    /// True if the existing file's per-area scoreboard already
+    /// has a `divergent` column (post-Phase-5c shape). Gates the
+    /// biggest-movers callout: on the one-time pre→post-5c
+    /// transition, every bucket's pass count legitimately drops
+    /// by its divergent count (source shifted from unhardened to
+    /// hardened), which would dominate the movers list with
+    /// synthetic "regressions." Suppressing the callout once
+    /// keeps the signal clean.
+    prev_scoreboard_phase5c: bool,
 ) !void {
     try out.appendSlice(gpa,
         \\# test262 conformance score history
@@ -3444,13 +3488,15 @@ fn writeFileBody(
         try out.appendSlice(gpa, note);
     }
 
-    // Per-area scoreboard. When THIS run was a runtime run,
-    // generate fresh from `buckets`. Otherwise (parser run)
-    // re-emit the verbatim scoreboard from the previous file
-    // contents so the per-bucket signal survives parser
-    // refreshes. Either way it's "as of the most recent
-    // runtime run."
-    if (mode_just_run == .runtime and buckets.map.count() > 0) {
+    // Per-area scoreboard. The scoreboard is sourced from the
+    // **hardened (default)** sweep so its numbers match what
+    // embedders see at `cynic run`, and so the `divergent`
+    // column carries actual SES-reclassification data — the
+    // unhardened path has no divergent classifications by
+    // construction. For non-hardened writes (parser refresh,
+    // unhardened-only refresh) re-emit the previous scoreboard
+    // verbatim so the per-bucket signal survives.
+    if (mode_just_run == .runtime_hardened and buckets.map.count() > 0) {
         try writeScoreboard(gpa, out, buckets);
     } else if (preserved_scoreboard) |s| {
         try out.appendSlice(gpa, s);
@@ -3529,12 +3575,18 @@ fn writeFileBody(
 
         // Biggest movers callout — only on the topmost (most
         // recent) day, AND only when the run that just finished
-        // was runtime mode. Parser-mode buckets aren't
-        // comparable to the stored runtime baseline (they count
+        // was the hardened sweep (the same source as the
+        // scoreboard regen above). Parser-mode buckets aren't
+        // comparable to the stored hardened baseline (they count
         // parse-positive/negative only) so the deltas would be
-        // misleading. Parser refreshes preserve the previous
-        // runtime scoreboard verbatim; the callout stays with it.
-        if (first_day and mode_just_run == .runtime and prev_bucket_pass.count() > 0) {
+        // misleading; unhardened-mode buckets have a slightly
+        // different `pass` total (no divergent reclassification)
+        // and would show synthetic moves on every alternation.
+        // Parser / unhardened refreshes preserve the previous
+        // scoreboard verbatim; the callout stays with it.
+        if (first_day and mode_just_run == .runtime_hardened and
+            prev_bucket_pass.count() > 0 and prev_scoreboard_phase5c)
+        {
             try writeBiggestMovers(gpa, out, buckets, prev_bucket_pass);
         }
 
@@ -3645,22 +3697,43 @@ fn writeScoreboard(
         \\## Where the runtime stands, by area
         \\
         \\Bucketed on the first two path components (`built-ins/Set`,
-        \\`language/expressions`, …). Grouped into fail-magnitude
-        \\tiers (1000+, 100–999, 10–99, 1–9, 0), alphabetical
-        \\within each tier — heavy-hitter areas surface at the top,
-        \\related siblings stay neighbours so the table is scannable.
-        \\Skipped tests are excluded from `pass` and `fail`. Rows
-        \\in ~~strikethrough~~ are buckets we skip wholesale (out
-        \\of scope per the Cynic-targeted skiplist — Annex B
+        \\`language/expressions`, …) under the **hardened (default)**
+        \\posture, so the numbers match what an embedder running
+        \\`cynic run` sees. Grouped into fail-magnitude tiers
+        \\(1000+, 100–999, 10–99, 1–9, 0) — heavy-hitter areas
+        \\surface at the top, related siblings stay neighbours so
+        \\the table is scannable. Within the 0-fails tier, rows
+        \\are sorted by `divergent` descending so SES-hot buckets
+        \\cluster at the front of the tail.
+        \\
+        \\Columns:
+        \\
+        \\- `pass` / `fail` / `skip` are the engine-true outcomes.
+        \\- `divergent` (Phase 2 of
+        \\  `docs/handbook/ses-test262-policy.md`) is the count of
+        \\  fixtures whose test262-written assertion conflicts with
+        \\  Cynic's SES enforcement (frozen primordials, locked
+        \\  descriptors, override-mistake fix). They're not real
+        \\  engine failures — the throw is correct; the fixture's
+        \\  expectation of success is invalidated by SES — so they
+        \\  count toward `spec%` per the Layout A scoring math
+        \\  `(pass + divergent) / total`.
+        \\- `spec%` is `(pass + divergent) / total`.
+        \\- `attempted%` is `pass / (pass + fail)` — the engine-true
+        \\  conformance gauge, independent of SES policy. Skips and
+        \\  divergent reclassifications drop out.
+        \\
+        \\Rows in ~~strikethrough~~ are buckets we skip wholesale
+        \\(out of scope per the Cynic-targeted skiplist — Annex B
         \\language extensions, intl402, staging, Temporal,
         \\browser-era built-ins …).
         \\
-        \\| area | pass | fail | skip | spec% | attempted% |
-        \\|---|---:|---:|---:|---:|---:|
+        \\| area | pass | fail | skip | divergent | spec% | attempted% |
+        \\|---|---:|---:|---:|---:|---:|---:|
         \\
     );
 
-    var buf: [320]u8 = undefined;
+    var buf: [384]u8 = undefined;
     var prev_tier: u8 = 255;
     for (sorted) |b| {
         const tier: u8 = if (b.fail == 0) 4 else if (b.fail < 10) 3 else if (b.fail < 100) 2 else if (b.fail < 1000) 1 else 0;
@@ -3676,28 +3749,34 @@ fn writeScoreboard(
                 1 => "100–999 fails",
                 2 => "10–99 fails",
                 3 => "1–9 fails",
-                else => "0 fails (passing or wholly OOS)",
+                else => "0 fails (passing or wholly OOS — sorted by divergent ↓)",
             };
-            const hdr = try std.fmt.bufPrint(&buf, "| **_{s}_** | | | | | |\n", .{label});
+            const hdr = try std.fmt.bufPrint(&buf, "| **_{s}_** | | | | | | |\n", .{label});
             try out.appendSlice(gpa, hdr);
             prev_tier = tier;
         }
-        const pct: f64 = if (b.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass)) / @as(f64, @floatFromInt(b.total));
+        // Layout A: hardened spec% counts divergent as
+        // engine-correct because the throw is SES doing its job.
+        // Matches the `runtime_hardened` headline in `## Current
+        // scores`. The unhardened scoreboard would collapse this
+        // to plain `pass / total`, but we always source from the
+        // hardened sweep.
+        const headline_pass: u32 = b.pass + b.divergent;
+        const pct: f64 = if (b.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(headline_pass)) / @as(f64, @floatFromInt(b.total));
         const attempted: u32 = b.pass + b.fail;
         const att_pct: f64 = if (attempted == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass)) / @as(f64, @floatFromInt(attempted));
         // Strikethrough buckets we skip wholesale (every test
         // filtered out as out-of-scope per the Cynic-targeted
-        // skiplist). They're kept in the table for visibility —
-        // crossing them out makes the rows we actually run easy
-        // to spot.
-        const strike: bool = (b.pass == 0 and b.fail == 0);
+        // skiplist). Now `pass + fail + divergent == 0` so they
+        // also show no SES enforcement signal.
+        const strike: bool = (b.pass == 0 and b.fail == 0 and b.divergent == 0);
         const line = if (strike)
-            try std.fmt.bufPrint(&buf, "| ~~`{s}`~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d:.0} %~~ | ~~{d:.0} %~~ |\n", .{
-                b.name, b.pass, b.fail, b.skip, pct, att_pct,
+            try std.fmt.bufPrint(&buf, "| ~~`{s}`~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d:.0} %~~ | ~~{d:.0} %~~ |\n", .{
+                b.name, b.pass, b.fail, b.skip, b.divergent, pct, att_pct,
             })
         else
-            try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d} | {d:.0} % | {d:.0} % |\n", .{
-                b.name, b.pass, b.fail, b.skip, pct, att_pct,
+            try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d} | {d} | {d:.0} % | {d:.0} % |\n", .{
+                b.name, b.pass, b.fail, b.skip, b.divergent, pct, att_pct,
             });
         try out.appendSlice(gpa, line);
     }
@@ -3845,6 +3924,35 @@ fn extractWitnessNote(existing: []const u8) ?[]const u8 {
     var end = line_end + 1;
     if (end < existing.len and existing[end] == '\n') end += 1;
     return existing[start..end];
+}
+
+/// True if the existing file's per-area scoreboard already
+/// carries a `divergent` column (i.e. post-Phase-5c shape).
+/// Used by `writeFileBody` to gate the "Biggest movers"
+/// callout: on the one-time transition from pre-5c (pass
+/// column sourced from unhardened) to post-5c (pass column
+/// sourced from hardened, slightly lower per-bucket), every
+/// row's `pass` legitimately drops by the per-bucket
+/// divergent count, which would dominate the movers list
+/// with synthetic "regressions." Suppressing the callout on
+/// that single sweep keeps the signal clean.
+fn prevScoreboardHasDivergent(existing: []const u8) bool {
+    const heading = "## Where the runtime stands, by area";
+    const start = std.mem.indexOf(u8, existing, heading) orelse return false;
+    // Find the column-header line (starts with `| area |`). The
+    // divergent column adds a `| divergent |` cell; pre-5c
+    // tables didn't have it.
+    var cursor = start;
+    const cap = @min(existing.len, start + 4096);
+    while (cursor < cap) {
+        const eol = std.mem.indexOfScalarPos(u8, existing, cursor, '\n') orelse cap;
+        const line = existing[cursor..eol];
+        if (std.mem.startsWith(u8, line, "| area |")) {
+            return std.mem.indexOf(u8, line, "| divergent |") != null;
+        }
+        cursor = eol + 1;
+    }
+    return false;
 }
 
 /// Return the raw text of the `## Where the runtime stands,

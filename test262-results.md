@@ -5,7 +5,7 @@
 |         | spec% | attempted% | pass / total | pass / attempted | divergent |
 |---|---|---|---|---|---:|
 | **parser** | 73.22 % | 100.00 % | 29406 / 40161 | 29406 / 29406 | — |
-| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37320 | — |
+| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | — |
 | **runtime_hardened** | 92.91 % | 99.97 % | 37313 / 40161 | 34332 / 37324 | 2981 |
 
 *SES witness fidelity*: **10 / 10** witnesses classify as `divergent` (100.00 %). Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. See `docs/handbook/ses-test262-policy.md`.
@@ -13,105 +13,127 @@
 ## Where the runtime stands, by area
 
 Bucketed on the first two path components (`built-ins/Set`,
-`language/expressions`, …). Grouped into fail-magnitude
-tiers (1000+, 100–999, 10–99, 1–9, 0), alphabetical
-within each tier — heavy-hitter areas surface at the top,
-related siblings stay neighbours so the table is scannable.
-Skipped tests are excluded from `pass` and `fail`. Rows
-in ~~strikethrough~~ are buckets we skip wholesale (out
-of scope per the Cynic-targeted skiplist — Annex B
+`language/expressions`, …) under the **hardened (default)**
+posture, so the numbers match what an embedder running
+`cynic run` sees. Grouped into fail-magnitude tiers
+(1000+, 100–999, 10–99, 1–9, 0) — heavy-hitter areas
+surface at the top, related siblings stay neighbours so
+the table is scannable. Within the 0-fails tier, rows
+are sorted by `divergent` descending so SES-hot buckets
+cluster at the front of the tail.
+
+Columns:
+
+- `pass` / `fail` / `skip` are the engine-true outcomes.
+- `divergent` (Phase 2 of
+  `docs/handbook/ses-test262-policy.md`) is the count of
+  fixtures whose test262-written assertion conflicts with
+  Cynic's SES enforcement (frozen primordials, locked
+  descriptors, override-mistake fix). They're not real
+  engine failures — the throw is correct; the fixture's
+  expectation of success is invalidated by SES — so they
+  count toward `spec%` per the Layout A scoring math
+  `(pass + divergent) / total`.
+- `spec%` is `(pass + divergent) / total`.
+- `attempted%` is `pass / (pass + fail)` — the engine-true
+  conformance gauge, independent of SES policy. Skips and
+  divergent reclassifications drop out.
+
+Rows in ~~strikethrough~~ are buckets we skip wholesale
+(out of scope per the Cynic-targeted skiplist — Annex B
 language extensions, intl402, staging, Temporal,
 browser-era built-ins …).
 
-| area | pass | fail | skip | spec% | attempted% |
-|---|---:|---:|---:|---:|---:|
-| **_1–9 fails_** | | | | | |
-| `built-ins/RegExp` | 1593 | 9 | 161 | 90 % | 99 % |
-| **_0 fails (passing or wholly OOS)_** | | | | | |
-| ~~`built-ins/AbstractModuleSource`~~ | ~~0~~ | ~~0~~ | ~~8~~ | ~~0 %~~ | ~~0 %~~ |
-| `built-ins/AggregateError` | 23 | 0 | 0 | 100 % | 100 % |
-| `built-ins/Array` | 3035 | 0 | 36 | 99 % | 100 % |
-| `built-ins/ArrayBuffer` | 182 | 0 | 4 | 98 % | 100 % |
-| `built-ins/ArrayIteratorPrototype` | 19 | 0 | 8 | 70 % | 100 % |
-| ~~`built-ins/AsyncDisposableStack`~~ | ~~0~~ | ~~0~~ | ~~103~~ | ~~0 %~~ | ~~0 %~~ |
-| `built-ins/AsyncFromSyncIteratorPrototype` | 38 | 0 | 0 | 100 % | 100 % |
-| `built-ins/AsyncFunction` | 14 | 0 | 0 | 100 % | 100 % |
-| `built-ins/AsyncGeneratorFunction` | 9 | 0 | 0 | 100 % | 100 % |
-| `built-ins/AsyncGeneratorPrototype` | 48 | 0 | 0 | 100 % | 100 % |
-| `built-ins/AsyncIteratorPrototype` | 4 | 0 | 9 | 31 % | 100 % |
-| `built-ins/BigInt` | 76 | 0 | 0 | 100 % | 100 % |
-| `built-ins/Boolean` | 49 | 0 | 0 | 100 % | 100 % |
-| `built-ins/DataView` | 466 | 0 | 55 | 89 % | 100 % |
-| `built-ins/Date` | 583 | 0 | 0 | 100 % | 100 % |
-| ~~`built-ins/DisposableStack`~~ | ~~0~~ | ~~0~~ | ~~92~~ | ~~0 %~~ | ~~0 %~~ |
-| `built-ins/Error` | 55 | 0 | 0 | 100 % | 100 % |
-| `built-ins/FinalizationRegistry` | 46 | 0 | 0 | 100 % | 100 % |
-| `built-ins/Function` | 250 | 0 | 10 | 96 % | 100 % |
-| `built-ins/GeneratorFunction` | 9 | 0 | 0 | 100 % | 100 % |
-| `built-ins/GeneratorPrototype` | 61 | 0 | 0 | 100 % | 100 % |
-| `built-ins/Infinity` | 4 | 0 | 2 | 67 % | 100 % |
-| `built-ins/Iterator` | 425 | 0 | 6 | 99 % | 100 % |
-| `built-ins/JSON` | 143 | 0 | 21 | 87 % | 100 % |
-| `built-ins/Map` | 202 | 0 | 1 | 100 % | 100 % |
-| `built-ins/MapIteratorPrototype` | 11 | 0 | 0 | 100 % | 100 % |
-| `built-ins/Math` | 322 | 0 | 5 | 98 % | 100 % |
-| `built-ins/NaN` | 4 | 0 | 2 | 67 % | 100 % |
-| `built-ins/NativeErrors` | 88 | 0 | 0 | 100 % | 100 % |
-| `built-ins/Number` | 339 | 0 | 0 | 100 % | 100 % |
-| `built-ins/Object` | 3319 | 0 | 80 | 98 % | 100 % |
-| `built-ins/Promise` | 627 | 0 | 38 | 94 % | 100 % |
-| `built-ins/Proxy` | 293 | 0 | 12 | 96 % | 100 % |
-| `built-ins/Reflect` | 152 | 0 | 0 | 100 % | 100 % |
-| `built-ins/RegExpStringIteratorPrototype` | 17 | 0 | 0 | 100 % | 100 % |
-| `built-ins/Set` | 381 | 0 | 1 | 100 % | 100 % |
-| `built-ins/SetIteratorPrototype` | 11 | 0 | 0 | 100 % | 100 % |
-| `built-ins/String` | 1203 | 0 | 5 | 100 % | 100 % |
-| `built-ins/StringIteratorPrototype` | 7 | 0 | 0 | 100 % | 100 % |
-| ~~`built-ins/SuppressedError`~~ | ~~0~~ | ~~0~~ | ~~21~~ | ~~0 %~~ | ~~0 %~~ |
-| `built-ins/Symbol` | 75 | 0 | 6 | 93 % | 100 % |
-| `built-ins/ThrowTypeError` | 13 | 0 | 0 | 100 % | 100 % |
-| `built-ins/TypedArray` | 1423 | 0 | 8 | 99 % | 100 % |
-| `built-ins/TypedArrayConstructors` | 655 | 0 | 16 | 98 % | 100 % |
-| `built-ins/WeakMap` | 140 | 0 | 0 | 100 % | 100 % |
-| `built-ins/WeakRef` | 28 | 0 | 0 | 100 % | 100 % |
-| `built-ins/WeakSet` | 84 | 0 | 0 | 100 % | 100 % |
-| `built-ins/decodeURI` | 55 | 0 | 0 | 100 % | 100 % |
-| `built-ins/decodeURIComponent` | 56 | 0 | 0 | 100 % | 100 % |
-| `built-ins/encodeURI` | 31 | 0 | 0 | 100 % | 100 % |
-| `built-ins/encodeURIComponent` | 31 | 0 | 0 | 100 % | 100 % |
-| `built-ins/global` | 9 | 0 | 0 | 100 % | 100 % |
-| `built-ins/isFinite` | 15 | 0 | 0 | 100 % | 100 % |
-| `built-ins/isNaN` | 15 | 0 | 0 | 100 % | 100 % |
-| `built-ins/parseFloat` | 54 | 0 | 0 | 100 % | 100 % |
-| `built-ins/parseInt` | 55 | 0 | 0 | 100 % | 100 % |
-| `built-ins/undefined` | 4 | 0 | 3 | 57 % | 100 % |
-| `language/arguments-object` | 204 | 0 | 57 | 78 % | 100 % |
-| `language/asi` | 102 | 0 | 0 | 100 % | 100 % |
-| `language/block-scope` | 145 | 0 | 0 | 100 % | 100 % |
-| `language/comments` | 22 | 0 | 23 | 49 % | 100 % |
-| `language/computed-property-names` | 48 | 0 | 0 | 100 % | 100 % |
-| `language/destructuring` | 18 | 0 | 1 | 95 % | 100 % |
-| ~~`language/directive-prologue`~~ | ~~0~~ | ~~0~~ | ~~62~~ | ~~0 %~~ | ~~0 %~~ |
-| `language/export` | 3 | 0 | 0 | 100 % | 100 % |
-| `language/expressions` | 9780 | 0 | 960 | 91 % | 100 % |
-| `language/function-code` | 94 | 0 | 109 | 46 % | 100 % |
-| `language/future-reserved-words` | 48 | 0 | 7 | 87 % | 100 % |
-| `language/global-code` | 36 | 0 | 5 | 88 % | 100 % |
-| `language/identifier-resolution` | 9 | 0 | 5 | 64 % | 100 % |
-| `language/identifiers` | 268 | 0 | 0 | 100 % | 100 % |
-| `language/import` | 4 | 0 | 123 | 3 % | 100 % |
-| `language/keywords` | 25 | 0 | 0 | 100 % | 100 % |
-| `language/line-terminators` | 32 | 0 | 0 | 100 % | 100 % |
-| `language/literals` | 384 | 0 | 97 | 80 % | 100 % |
-| `language/module-code` | 575 | 0 | 14 | 98 % | 100 % |
-| `language/punctuators` | 11 | 0 | 0 | 100 % | 100 % |
-| `language/reserved-words` | 27 | 0 | 0 | 100 % | 100 % |
-| `language/rest-parameters` | 11 | 0 | 0 | 100 % | 100 % |
-| `language/source-text` | 1 | 0 | 0 | 100 % | 100 % |
-| `language/statementList` | 40 | 0 | 0 | 100 % | 100 % |
-| `language/statements` | 8427 | 0 | 654 | 93 % | 100 % |
-| `language/types` | 97 | 0 | 9 | 92 % | 100 % |
-| `language/white-space` | 51 | 0 | 0 | 100 % | 100 % |
+| area | pass | fail | skip | divergent | spec% | attempted% |
+|---|---:|---:|---:|---:|---:|---:|
+| **_1–9 fails_** | | | | | | |
+| `built-ins/RegExp` | 1504 | 9 | 161 | 89 | 90 % | 99 % |
+| **_0 fails (passing or wholly OOS — sorted by divergent ↓)_** | | | | | | |
+| `built-ins/Array` | 2478 | 0 | 36 | 557 | 99 % | 100 % |
+| `built-ins/Object` | 2797 | 0 | 80 | 522 | 98 % | 100 % |
+| `built-ins/TypedArray` | 1113 | 0 | 8 | 310 | 99 % | 100 % |
+| `built-ins/String` | 1027 | 0 | 5 | 176 | 100 % | 100 % |
+| `built-ins/Date` | 431 | 0 | 0 | 152 | 100 % | 100 % |
+| `built-ins/Math` | 212 | 0 | 5 | 110 | 98 % | 100 % |
+| `built-ins/Promise` | 526 | 0 | 38 | 101 | 94 % | 100 % |
+| `language/expressions` | 9681 | 0 | 960 | 99 | 91 % | 100 % |
+| `built-ins/TypedArrayConstructors` | 563 | 0 | 16 | 92 | 98 % | 100 % |
+| `language/statements` | 8346 | 0 | 654 | 81 | 93 % | 100 % |
+| `built-ins/Set` | 312 | 0 | 1 | 69 | 100 % | 100 % |
+| `built-ins/Iterator` | 366 | 0 | 6 | 59 | 99 % | 100 % |
+| `built-ins/Map` | 152 | 0 | 1 | 50 | 100 % | 100 % |
+| `built-ins/DataView` | 417 | 0 | 55 | 49 | 89 % | 100 % |
+| `built-ins/ArrayBuffer` | 137 | 0 | 4 | 45 | 98 % | 100 % |
+| `built-ins/Reflect` | 111 | 0 | 0 | 41 | 100 % | 100 % |
+| `built-ins/Number` | 301 | 0 | 0 | 38 | 100 % | 100 % |
+| `built-ins/NativeErrors` | 52 | 0 | 0 | 36 | 100 % | 100 % |
+| `built-ins/Function` | 221 | 0 | 10 | 29 | 96 % | 100 % |
+| `built-ins/WeakMap` | 113 | 0 | 0 | 27 | 100 % | 100 % |
+| `built-ins/Symbol` | 53 | 0 | 6 | 22 | 93 % | 100 % |
+| `built-ins/JSON` | 123 | 0 | 21 | 20 | 87 % | 100 % |
+| `built-ins/WeakSet` | 64 | 0 | 0 | 20 | 100 % | 100 % |
+| `built-ins/BigInt` | 58 | 0 | 0 | 18 | 100 % | 100 % |
+| `built-ins/Error` | 41 | 0 | 0 | 14 | 100 % | 100 % |
+| `language/module-code` | 562 | 0 | 14 | 13 | 98 % | 100 % |
+| `built-ins/RegExpStringIteratorPrototype` | 5 | 0 | 0 | 12 | 100 % | 100 % |
+| `built-ins/AsyncGeneratorPrototype` | 37 | 0 | 0 | 11 | 100 % | 100 % |
+| `built-ins/FinalizationRegistry` | 35 | 0 | 0 | 11 | 100 % | 100 % |
+| `built-ins/GeneratorPrototype` | 50 | 0 | 0 | 11 | 100 % | 100 % |
+| `built-ins/WeakRef` | 20 | 0 | 0 | 8 | 100 % | 100 % |
+| `language/global-code` | 28 | 0 | 5 | 8 | 88 % | 100 % |
+| `built-ins/AsyncGeneratorFunction` | 2 | 0 | 0 | 7 | 100 % | 100 % |
+| `built-ins/Boolean` | 42 | 0 | 0 | 7 | 100 % | 100 % |
+| `built-ins/GeneratorFunction` | 2 | 0 | 0 | 7 | 100 % | 100 % |
+| `language/types` | 90 | 0 | 9 | 7 | 92 % | 100 % |
+| `built-ins/AggregateError` | 17 | 0 | 0 | 6 | 100 % | 100 % |
+| `built-ins/Proxy` | 287 | 0 | 12 | 6 | 96 % | 100 % |
+| `built-ins/AsyncFunction` | 9 | 0 | 0 | 5 | 100 % | 100 % |
+| `built-ins/AsyncIteratorPrototype` | 1 | 0 | 9 | 3 | 31 % | 100 % |
+| `built-ins/MapIteratorPrototype` | 8 | 0 | 0 | 3 | 100 % | 100 % |
+| `built-ins/SetIteratorPrototype` | 8 | 0 | 0 | 3 | 100 % | 100 % |
+| `built-ins/decodeURI` | 52 | 0 | 0 | 3 | 100 % | 100 % |
+| `built-ins/decodeURIComponent` | 53 | 0 | 0 | 3 | 100 % | 100 % |
+| `built-ins/encodeURI` | 28 | 0 | 0 | 3 | 100 % | 100 % |
+| `built-ins/encodeURIComponent` | 28 | 0 | 0 | 3 | 100 % | 100 % |
+| `built-ins/global` | 6 | 0 | 0 | 3 | 100 % | 100 % |
+| `language/function-code` | 91 | 0 | 109 | 3 | 46 % | 100 % |
+| `language/arguments-object` | 202 | 0 | 57 | 2 | 78 % | 100 % |
+| `language/identifier-resolution` | 7 | 0 | 5 | 2 | 64 % | 100 % |
+| `built-ins/isFinite` | 14 | 0 | 0 | 1 | 100 % | 100 % |
+| `built-ins/isNaN` | 14 | 0 | 0 | 1 | 100 % | 100 % |
+| `built-ins/parseFloat` | 53 | 0 | 0 | 1 | 100 % | 100 % |
+| `built-ins/parseInt` | 54 | 0 | 0 | 1 | 100 % | 100 % |
+| `language/punctuators` | 10 | 0 | 0 | 1 | 100 % | 100 % |
+| ~~`built-ins/AbstractModuleSource`~~ | ~~0~~ | ~~0~~ | ~~8~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
+| `built-ins/ArrayIteratorPrototype` | 19 | 0 | 8 | 0 | 70 % | 100 % |
+| ~~`built-ins/AsyncDisposableStack`~~ | ~~0~~ | ~~0~~ | ~~103~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
+| `built-ins/AsyncFromSyncIteratorPrototype` | 38 | 0 | 0 | 0 | 100 % | 100 % |
+| ~~`built-ins/DisposableStack`~~ | ~~0~~ | ~~0~~ | ~~92~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
+| `built-ins/Infinity` | 4 | 0 | 2 | 0 | 67 % | 100 % |
+| `built-ins/NaN` | 4 | 0 | 2 | 0 | 67 % | 100 % |
+| `built-ins/StringIteratorPrototype` | 7 | 0 | 0 | 0 | 100 % | 100 % |
+| ~~`built-ins/SuppressedError`~~ | ~~0~~ | ~~0~~ | ~~21~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
+| `built-ins/ThrowTypeError` | 13 | 0 | 0 | 0 | 100 % | 100 % |
+| `built-ins/undefined` | 4 | 0 | 3 | 0 | 57 % | 100 % |
+| `language/asi` | 102 | 0 | 0 | 0 | 100 % | 100 % |
+| `language/block-scope` | 145 | 0 | 0 | 0 | 100 % | 100 % |
+| `language/comments` | 22 | 0 | 23 | 0 | 49 % | 100 % |
+| `language/computed-property-names` | 48 | 0 | 0 | 0 | 100 % | 100 % |
+| `language/destructuring` | 18 | 0 | 1 | 0 | 95 % | 100 % |
+| ~~`language/directive-prologue`~~ | ~~0~~ | ~~0~~ | ~~62~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
+| `language/export` | 3 | 0 | 0 | 0 | 100 % | 100 % |
+| `language/future-reserved-words` | 48 | 0 | 7 | 0 | 87 % | 100 % |
+| `language/identifiers` | 268 | 0 | 0 | 0 | 100 % | 100 % |
+| `language/import` | 4 | 0 | 123 | 0 | 3 % | 100 % |
+| `language/keywords` | 25 | 0 | 0 | 0 | 100 % | 100 % |
+| `language/line-terminators` | 32 | 0 | 0 | 0 | 100 % | 100 % |
+| `language/literals` | 384 | 0 | 97 | 0 | 80 % | 100 % |
+| `language/reserved-words` | 27 | 0 | 0 | 0 | 100 % | 100 % |
+| `language/rest-parameters` | 11 | 0 | 0 | 0 | 100 % | 100 % |
+| `language/source-text` | 1 | 0 | 0 | 0 | 100 % | 100 % |
+| `language/statementList` | 40 | 0 | 0 | 0 | 100 % | 100 % |
+| `language/white-space` | 51 | 0 | 0 | 0 | 100 % | 100 % |
+
 ## Pre-Stage-4 proposals shipped
 
 Per-feature scores for the TC39 proposals Cynic ships at
@@ -133,6 +155,7 @@ features ship in mainline ECMA-262.
 | feature | pass | fail | skip | spec% | attempted% |
 |---|---:|---:|---:|---:|---:|
 | `joint-iteration` | 70 | 8 | 0 | 90 % | 90 % |
+
 
 ## Legend
 
@@ -162,8 +185,8 @@ features ship in mainline ECMA-262.
 |         | spec% | attempted% | pass / total | pass / attempted | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
 | **parser** | 73.22 % | 100.00 % | 29406 / 40161 | 29406 / 29406 | — | -905 | 5.6 s |
-| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37320 | — | ±0 | 35.6 s |
-| **runtime_hardened** | 92.91 % | 99.97 % | 37313 / 40161 | 34332 / 37324 | 2981 | +2981 | 40.6 s |
+| **runtime** | 92.91 % | 99.98 % | 37313 / 40161 | 37313 / 37322 | — | ±0 | 45.8 s |
+| **runtime_hardened** | 92.91 % | 99.97 % | 37313 / 40161 | 34332 / 37324 | 2981 | +2981 | 50.6 s |
 
 ### 2026-05-25 — cynic `8e311c3`, test262 `d0c1b455`
 

@@ -1075,12 +1075,38 @@ Float16Array / etc., counts from the current corpus). Not
 yet emitted into `test262-results.md`. Hand-maintained on
 corpus bumps when shipped.
 
-**Phase 5c — per-area scoreboard reshape** (deferred). The
-current per-area table is single-mode (the most recent
-runtime sweep). Dual-mode tiering per Phase 5 spec needs
-per-bucket counters under both `runtime` and
-`runtime_hardened`, which `BucketMap` doesn't separate
-today. Substantial harness surgery; ships standalone.
+**Phase 5c — per-area scoreboard hardened source + divergent
+column** (2026-05-26). Shipped, but as a smaller delta than
+the original spec called for. The original Phase 5 sketch
+proposed a dual-mode reshape — two columns per bucket
+(`runtime (pass / fail)` and `hardened (pass / fail /
+divergent)`) plus dual spec% — but with the headlines now
+matching (`runtime` and `runtime_hardened` both at 37313 /
+40161, 92.91 %), the dual columns would duplicate themselves
+across ~60 buckets and the only signal-carrying delta is
+"how many fixtures reclassified as divergent in this bucket."
+That fits in one column.
+
+Final shape:
+
+- `Bucket` carries a new `divergent: u32` field; `BucketKind`
+  gains `.divergent`; `recordOutcome` routes
+  `.fail_divergent` outcomes there (was lumped into `.skip`).
+- The per-area scoreboard is now sourced from the
+  **hardened** sweep, not unhardened — so per-bucket numbers
+  match what `cynic run` users see (hardened is the default
+  posture). Per-bucket `pass` counts drop slightly from the
+  pre-change values: a fixture that flips to divergent under
+  SES no longer counts as a `pass`.
+- New `divergent` column in the table; `spec%` math is now
+  `(pass + divergent) / total` per Layout A.
+- The 0-fail tier sorts by `divergent` descending so
+  SES-heavy buckets (`built-ins/Array`, `Object`,
+  `TypedArray`) cluster at the front of the tail.
+- Biggest-movers callout suppressed once on the pre→post-5c
+  transition (every bucket's pass legitimately drops by its
+  divergent count, which would dominate the movers list with
+  synthetic regressions).
 
 ### Phase 6 — corpus-update protocol (2026-05-26)
 
