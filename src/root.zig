@@ -73,6 +73,8 @@ test {
     _ = @import("runtime/lantern/arith.zig");
     _ = @import("runtime/lantern/tests.zig");
     _ = @import("runtime/surface_audit_test.zig");
+    _ = @import("runtime/annex_b_rejection_test.zig");
+    _ = @import("runtime/eval_policy_test.zig");
     _ = @import("runtime/builtins/iterator.zig");
     _ = @import("runtime/builtins/date.zig");
     _ = @import("runtime/builtins/typed_array.zig");
