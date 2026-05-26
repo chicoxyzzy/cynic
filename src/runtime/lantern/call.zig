@@ -232,6 +232,18 @@ pub fn callValue(
         }
         return callJSFunction(allocator, realm, fn_obj, this_value, args);
     }
+    // §20.2.3 %Function.prototype% [[Call]] — Cynic stores it as a
+    // JSObject (not a JSFunction), so reflective callers
+    // (`Function.prototype.{call, apply}`, `Reflect.apply`, host
+    // re-entry) end up here. The spec answer is "returns undefined
+    // regardless of arguments." Mirrors the identity-check guard in
+    // the bytecode dispatchers (`.call` / `.call_method` /
+    // `.tail_call` / `.tail_call_method` in `interpreter.zig`).
+    if (heap_mod.valueAsPlainObject(callee_v)) |po| {
+        if (realm.intrinsics.function_prototype == po) {
+            return .{ .value = Value.undefined_ };
+        }
+    }
     return .{ .thrown = try makeTypeError(realm, "value is not callable") };
 }
 

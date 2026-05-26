@@ -1666,6 +1666,16 @@ pub fn runFrames(
                             },
                         }
                     }
+                    // §20.2.3 %Function.prototype% [[Call]] — "the
+                    // Function prototype object is itself a built-in
+                    // function object that, when invoked, accepts any
+                    // arguments and returns undefined." Cynic stores
+                    // it as a JSObject (not a JSFunction) so the
+                    // identity check is the cheapest dispatch path.
+                    if (realm.intrinsics.function_prototype == po) {
+                        acc = Value.undefined_;
+                        continue :dispatch try decodeNext(code, &ip, &committed);
+                    }
                 }
                 const callee_fn = heap_mod.valueAsFunction(callee_v) orelse {
                     const ex = try makeTypeError(realm, "value is not callable");
@@ -1963,6 +1973,15 @@ pub fn runFrames(
                                 },
                             }
                         }
+                        // §20.2.3 %Function.prototype% [[Call]] — see
+                        // the matching path on `.call`. Method-call
+                        // shape doesn't change the spec answer: any
+                        // call into %Function.prototype% returns
+                        // undefined and ignores both `this` and args.
+                        if (realm.intrinsics.function_prototype == po) {
+                            acc = Value.undefined_;
+                            continue :dispatch try decodeNext(code, &ip, &committed);
+                        }
                     }
                     const fn_v = heap_mod.valueAsFunction(callee_v) orelse {
                         const ex = try makeTypeError(realm, "value is not callable");
@@ -2210,6 +2229,15 @@ pub fn runFrames(
                             },
                         }
                     }
+                    // §20.2.3 — tail-position call into
+                    // %Function.prototype% degrades to "return
+                    // undefined" too. The surrounding `return_`
+                    // emitted right after a tail-call observes the
+                    // accumulator directly.
+                    if (realm.intrinsics.function_prototype == po) {
+                        acc = Value.undefined_;
+                        continue :dispatch try decodeNext(code, &ip, &committed);
+                    }
                 }
                 const callee_fn = heap_mod.valueAsFunction(callee_v) orelse {
                     const ex = try makeTypeError(realm, "value is not callable");
@@ -2442,6 +2470,14 @@ pub fn runFrames(
                                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                             },
                         }
+                    }
+                    // §20.2.3 %Function.prototype% [[Call]] — see
+                    // the matching path on `.call`. Tail-method-call
+                    // shape into %Function.prototype% returns
+                    // undefined too.
+                    if (realm.intrinsics.function_prototype == po) {
+                        acc = Value.undefined_;
+                        continue :dispatch try decodeNext(code, &ip, &committed);
                     }
                 }
                 const callee_fn = heap_mod.valueAsFunction(callee_v) orelse {

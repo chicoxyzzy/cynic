@@ -4962,6 +4962,45 @@ test "later: Function.prototype[@@hasInstance] is a function" {
     , "function");
 }
 
+// §20.2.3 Properties of the Function Prototype Object — "the Function
+// prototype object is itself a built-in function object that, when
+// invoked, accepts any arguments and returns undefined." Cynic stores
+// %Function.prototype% as a plain JSObject (the call dispatchers
+// short-circuit on identity to return undefined), so any callable
+// behaviour must round-trip through the engine's actual call paths.
+// test262 fixtures: S15.3.3.1_A1.js, S15.3.4_A2_T1.js / T2.js / T3.js.
+
+test "later: %Function.prototype% called with no args returns undefined" {
+    try expectScriptStringWithBuiltins(
+        \\typeof Function.prototype();
+    , "undefined");
+}
+
+test "later: %Function.prototype% called with args returns undefined" {
+    try expectScriptStringWithBuiltins(
+        \\typeof Function.prototype(null, void 0, 42, "x");
+    , "undefined");
+}
+
+test "later: %Function.prototype% call via .call still returns undefined" {
+    // §20.2.3.3 Function.prototype.call routes the receiver as the
+    // call's `this`; the receiver here IS %Function.prototype%, and
+    // its [[Call]] returns undefined regardless of `this` or args.
+    try expectScriptStringWithBuiltins(
+        \\typeof Function.prototype.call({}, 1, 2);
+    , "undefined");
+}
+
+test "later: %Function.prototype% typeof is 'function'" {
+    // §13.5.3 typeof — the JSObject's proxy_callable flag flips
+    // typeof from "object" to "function" so the call path's identity
+    // check has the right precondition: typeof says callable, and a
+    // call actually goes through.
+    try expectScriptStringWithBuiltins(
+        \\typeof Function.prototype;
+    , "function");
+}
+
 test "later: Function.prototype[@@hasInstance] descriptor non-writable, non-configurable" {
     try expectScriptStringWithBuiltins(
         \\const d = Object.getOwnPropertyDescriptor(Function.prototype, Symbol.hasInstance);

@@ -1111,30 +1111,24 @@ pub const skip_planned_path_contains = [_][]const u8{
     "language/statements/variable/12.2.1-20-s.",
     "language/statements/variable/12.2.1-21-s.",
 
-    // `built-ins/Function/prototype/S15.3.{3.1,4}_A*.js` —
-    // Sputnik-era fixtures that exercise `Function.prototype()`
-    // (the spec's built-in [[Call]] that returns undefined) and
-    // `Object.prototype.toString.call(Function.prototype)`
-    // expecting `"[object Function]"`. The toString tag is
-    // honoured (see Object.prototype.toString recognising
-    // %Function.prototype% as a JSObject), but Cynic still
-    // stashes %Function.prototype% as a JSObject rather than a
-    // truly-callable JSFunction; the call-as-function fixtures
-    // (`S15.3.4_A2_T1.js` / `T2` / `T3`, `S15.3.3.1_A1.js`) and
-    // the property-delete fixture `S15.3.5.2_A1_T2.js` (which
-    // routes through `Function(void 0, "")` = SES carve-out)
-    // false-reject for that engine-shape gap. Skip until
-    // %Function.prototype% becomes a real built-in function.
+    // `built-ins/Function/prototype/S15.3.5.2_A1_T2.js` — uses
+    // `Function(void 0, "")` (string-body Function constructor),
+    // the SES `--allow=eval` carve-out per AGENTS.md. The fixture
+    // verifies the `prototype` slot's `DontDelete` on a function
+    // built from a source string; without the eval-policy opt-in
+    // there's no way to construct the function in the first place,
+    // so the test is a false-reject for an engine-shape reason
+    // distinct from %Function.prototype% callability. Stays skipped
+    // until `--allow=eval` ships.
     //
-    // Note on narrowing: the previously-broader prefixes
-    // (`S15.3.4_A1.` / `S15.3.5.2_A1_T`) caught two stale
-    // siblings that actually pass today (`S15.3.4_A1.js`,
-    // `S15.3.5.2_A1_T1.js`) — replaced with per-fixture
-    // entries below.
-    "Function/prototype/S15.3.3.1_A1.",
-    "Function/prototype/S15.3.4_A2_T1.",
-    "Function/prototype/S15.3.4_A2_T2.",
-    "Function/prototype/S15.3.4_A2_T3.",
+    // The companion `S15.3.{3.1,4}_A*.js` fixtures (which used to
+    // be skipped here for the same "%Function.prototype% isn't a
+    // real callable") now pass: §20.2.3's "Function prototype
+    // object is itself a built-in function that returns undefined"
+    // is handled in the call / call_method / tail_call /
+    // tail_call_method dispatchers by an identity check against
+    // `realm.intrinsics.function_prototype`. See
+    // `src/runtime/lantern/interpreter.zig`.
     "Function/prototype/S15.3.5.2_A1_T2.",
 
     // (`Function/prototype/toString/line-terminator-normalisation-CR.js`
