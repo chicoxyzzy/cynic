@@ -208,6 +208,28 @@ pub const divergent_paths = [_]struct { path: []const u8, category: Category }{
         .path = "language/global-code/decl-lex-configurable-global.js",
         .category = .frozen_intrinsic_typeerror,
     },
+    .{
+        // §27.1.2.x `Iterator.prototype[@@toStringTag]` — spec
+        // says the accessor is `{enumerable: false, configurable:
+        // true}`; the fixture asserts `desc.configurable === true`
+        // directly. SES (the Phase 1 freeze pass + the 2026-05-27
+        // accessor-flag stamp fix in `harden.zig`) demotes every
+        // intrinsic accessor descriptor to `configurable: false`,
+        // so the assertion fires `Expected SameValue(«false»,
+        // «true») to be true`. Generic-shape message — path-skip.
+        .path = "built-ins/Iterator/prototype/Symbol.toStringTag/prop-desc.js",
+        .category = .descriptor_assertion,
+    },
+    .{
+        // §27.1.2.x `Iterator.prototype.constructor` — accessor
+        // with `{enumerable: false, configurable: true}`. Same
+        // SES freeze pass demotes it; same generic message
+        // (`Expected SameValue(«false», «true») to be true`).
+        // Companion to the `Symbol.toStringTag/prop-desc.js`
+        // entry above.
+        .path = "built-ins/Iterator/prototype/constructor/prop-desc.js",
+        .category = .descriptor_assertion,
+    },
 };
 
 /// Path-based divergence lookup — the escape hatch for
