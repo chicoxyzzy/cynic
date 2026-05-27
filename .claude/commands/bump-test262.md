@@ -1,5 +1,5 @@
 ---
-description: Update vendor/test262 submodule to upstream HEAD, rerun parser + runtime, score, report (do not commit)
+description: Update vendor/test262 submodule to upstream HEAD, rerun, score, report (do not commit)
 ---
 
 Bump the test262 corpus to upstream HEAD and produce fresh score rows.
@@ -18,19 +18,17 @@ Bump the test262 corpus to upstream HEAD and produce fresh score rows.
    (see `.claude/commands/score.md` step 1). If per-fixture RSS
    deltas are unhealthy, STOP and report; do not proceed.
 
-5. Run both modes with `--write-results` (runtime is the default
-   mode — the runtime sweep includes the main + every pre-Stage-4
-   feature phase in one invocation):
-   - `tools/guarded-run.sh --timeout=1800 -- zig build test262
-     -- --quiet --write-results`
-   - `tools/guarded-run.sh --timeout=1800 -- zig build test262
-     -- --quiet --mode=parser --write-results`
+5. Run the sweep with `--write-results` — one invocation covers
+   `runtime` + `runtime_hardened` rows + every pre-Stage-4 feature
+   phase, and parse-negative fixtures resolve inline:
 
-6. Show the score delta vs the prior row for each mode (which is
-   now on the new corpus). Call out any per-bucket movers that
-   look like new-test arrivals vs real regressions — new fixtures
-   from upstream often show up as fresh failures even though
-   nothing in Cynic changed.
+       tools/guarded-run.sh --timeout=1800 -- \
+         zig build test262 -- --quiet --write-results
+
+6. Show the score delta vs the prior row (now on the new corpus).
+   Call out any per-bucket movers that look like new-test arrivals
+   vs real regressions — new fixtures from upstream often show up
+   as fresh failures even though nothing in Cynic changed.
 
 7. Run `git status` to confirm only `vendor/test262` and
    `test262-results.md` are modified. Do **not** commit.

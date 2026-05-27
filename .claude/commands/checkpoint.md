@@ -11,9 +11,10 @@ it runs in ~60 s instead of ~4 min.
 table, cross-engine snapshot) so deltas are visible at a glance —
 the user shouldn't have to `cat` files after the run.
 
-Parser sweep is **opt-in only** (`--parser` arg). Parser has been
-at 100% attempted for a while; the runtime sweep is the
-meaningful signal.
+The harness runs parse + compile + execute in one unified mode —
+parse-negative fixtures (`negative.phase: parse` in frontmatter)
+resolve inline at their parse phase, so there's no separate
+parser-only sweep to run.
 
 **Do not commit anything.** Print a summary; the user decides
 which deltas land.
@@ -86,20 +87,7 @@ awk '/^### .*— cynic `[^`]+`/{c++} c==1' test262-results.md | head -10
 (That's the most-recent `### date — cynic <sha> — …` block; print
 the header + the runtime row + the Δ pass column.)
 
-## 3. test262 parser (opt-in only — pass `--parser`)
-
-If the user invoked `/checkpoint --parser`:
-
-```sh
-tools/guarded-run.sh --timeout=1800 -- \
-    zig build test262 -- --quiet --mode=parser --write-results
-```
-
-Print the parser row the same way as step 2c.
-
-Default: **skip**, report "skipped (opt-in only)".
-
-## 4. Bench (gated, single-engine)
+## 3. Bench (gated, single-engine)
 
 Inputs: `src/`, `bench/`, `tools/bench.zig`
 Output: `bench-results.md`
@@ -120,7 +108,7 @@ summary suggests appending a new row (format mirrors prior rows:
 date + cynic SHA + host + per-fixture median/min/max/rss + prose
 diff). **Don't append yourself — let the user decide.**
 
-## 5. Cross-engine (gated)
+## 4. Cross-engine (gated)
 
 Inputs: `src/`, `bench/`, `tools/bench-cross.sh`
 Output: `bench-cross-results.md`
@@ -142,7 +130,7 @@ snapshot via `git diff bench-cross-results.md` and call out:
 - Newly noisy cells (`*` > 10 % spread).
 - Position changes (a previously-leading engine got passed).
 
-## 6. Audit docs (always; ~1 s)
+## 5. Audit docs (always; ~1 s)
 
 Grep each for stale references:
 
@@ -154,12 +142,12 @@ Grep each for stale references:
 
 Report ✓ or ⚠ with a specific edit suggestion per file.
 
-## 7. Audit `.claude/commands/` (always; ~1 s)
+## 6. Audit `.claude/commands/` (always; ~1 s)
 
 Grep each command file for stale flag / command / path references.
 Report ✓ or ⚠ per command.
 
-## 8. Summary
+## 7. Summary
 
 Print a compact summary with the actual numbers visible:
 
@@ -170,7 +158,6 @@ Print a compact summary with the actual numbers visible:
 |---|---|---|
 | leak-check  | ran / skipped (reason) | … s |
 | test262 runtime | ran (Δ pass = N) / skipped (smoke matched) | … s |
-| test262 parser | skipped (opt-in) | — |
 | bench | ran / skipped (inputs unchanged) | … s |
 | cross-engine | ran / skipped (no bench movement) | … s |
 
@@ -203,6 +190,5 @@ deltas land. Do not stage or commit yourself.
 
 | Arg | Effect |
 |---|---|
-| (none) | Default — gated leak/runtime/bench/cross-engine + always-on audit. Parser skipped. |
-| `--parser` | Include the parser sweep in step 3. |
+| (none) | Default — gated leak/runtime/bench/cross-engine + always-on audit. |
 | `--force` | Override gating — run every step regardless of input changes. Use after a tool/harness change that doesn't show up in input-paths grep. |

@@ -1,11 +1,13 @@
 ---
-description: Survey current test262 failures (runtime + parser), group by pattern, suggest fixes (analysis only)
+description: Survey current test262 failures, group by pattern, suggest fixes (analysis only)
 ---
 
 Run the test262 conformance suite and analyze remaining failures.
-Default to **runtime mode** — that's where today's failures live;
-parser is at 100 % attempted. Use parser mode only if the user
-asks for false-reject / false-accept triage specifically.
+The harness runs parse + compile + execute in one mode — parse-
+negative fixtures (`negative.phase: parse`) resolve inline at
+their parse phase and surface as `false-reject` / `false-accept`
+in the per-fixture output, so a single sweep covers both classes
+of failure.
 
 1. Capture the failure list — pair `--only-failing` with the
    harness so this run skip-as-passes the ~34 k cached pass-set

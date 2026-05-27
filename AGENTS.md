@@ -270,8 +270,6 @@ sweeps.
 
 `zig build test262` accepts forwarded flags after `--`:
 `--filter=<substring>`, `--list-failures=<n>`, `--quiet`, `--verbose`,
-`--mode={runtime,parser}` (default `runtime`; runs parse +
-compile + execute. Pass `--mode=parser` for parser-only iteration),
 `--phase=<spec>` (`main` runs the headline ECMA-262 sweep with
 pre-Stage-4 fixtures excluded; `feature:<name>` runs only that
 proposal's dedicated isolated sweep — only its realm flag on,
@@ -476,7 +474,10 @@ reviewed in PRs against `test262-results.md`.
                           Adding a JS-callable method? It goes here.
     tools/       gen_unicode_idents.zig (regenerates UCD tables);
                  test262/ (frontmatter + skip rules);
-                 test262.zig (conformance harness, parser + runtime modes)
+                 test262.zig (conformance harness — runs parse +
+                 compile + execute; parse-negative fixtures resolve
+                 inline at their parse-phase frontmatter, no separate
+                 parser-only mode)
     vendor/      pinned third-party data (UCD; test262 git submodule)
     docs/        ARCHITECTURE.md, ROADMAP.md, handbook/
 
