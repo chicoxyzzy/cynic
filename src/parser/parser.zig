@@ -415,6 +415,42 @@ pub const Parser = struct {
                 try self.report(.unexpected_token, self.current.span);
                 return error.ParseError;
             },
+            .kw_with => {
+                // §14.11 WithStatement is forbidden in strict mode
+                // (§16.1.1 ScriptBody early errors). Cynic is strict-
+                // only per AGENTS.md "Strict-only, non-browser-host
+                // target", so the construct is rejected at parse time
+                // with a dedicated diagnostic. Consume the whole form
+                // (`with ( Expression ) Statement`) before returning
+                // so the outer recovery loop lands past the body
+                // instead of cascading 3-4 `unexpected_token`s through
+                // the parenthesised expression and the discarded body.
+                try self.report(.with_statement_in_strict, self.current.span);
+                _ = try self.bump(); // `with`
+                if (self.current.kind == .lparen) {
+                    _ = try self.bump(); // `(`
+                    // Skip the parenthesised expression by paren-depth
+                    // matching. Calling parseExpression here would
+                    // produce a cascade of expression-level errors;
+                    // the diagnostic we care about (with_statement_in_
+                    // strict) already fired, so just walk past the
+                    // tokens of the condition body and let the next
+                    // top-level dispatch resume cleanly.
+                    var depth: usize = 1;
+                    while (depth > 0 and self.current.kind != .eof) {
+                        switch (self.current.kind) {
+                            .lparen => depth += 1,
+                            .rparen => depth -= 1,
+                            else => {},
+                        }
+                        _ = self.bump() catch break;
+                    }
+                }
+                // Body statement — discard whatever the recovery
+                // produces (or doesn't).
+                _ = self.parseStatement() catch {};
+                return error.ParseError;
+            },
             else => {
                 // §13.13 LabelledStatement — `IDENTIFIER : Statement`.
                 // Detected when the current token is an Identifier

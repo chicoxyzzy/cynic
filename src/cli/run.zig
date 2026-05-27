@@ -100,6 +100,34 @@ pub fn run(
     for (paths) |path| {
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, sa, .limited(64 * 1024 * 1024));
 
+        // Surface parser diagnostics. `cynic.runtime.evaluateScript`
+        // collects them internally then drops the arena, so the CLI
+        // would otherwise show just `error.ParseError` with no
+        // location or message. Pre-parse here with our own arena +
+        // diagnostic sink; if anything error-severity surfaced, render
+        // it and exit before the second parse+run pass runs. The
+        // double-parse cost is negligible vs. the run cost and keeps
+        // every other evaluateScript caller unchanged.
+        var pre_arena: std.heap.ArenaAllocator = .init(allocator);
+        defer pre_arena.deinit();
+        var diags: cynic.diagnostic.Diagnostics = .empty;
+        const parse_outcome = cynic.parser.parseScript(pre_arena.allocator(), bytes, &diags);
+        const hard_parse_err: ?anyerror = if (parse_outcome) |_| null else |err| err;
+        var had_err_severity = false;
+        for (diags.items) |d| if (d.severity == .err) {
+            had_err_severity = true;
+            break;
+        };
+        if (hard_parse_err != null or had_err_severity) {
+            try printParseDiagnostics(io, path, bytes, diags.items);
+            if (hard_parse_err) |err| {
+                var line_buf: [256]u8 = undefined;
+                const msg = try std.fmt.bufPrint(&line_buf, "{s}: parse error: {t}\n", .{ path, err });
+                try std.Io.File.stderr().writeStreamingAll(io, msg);
+            }
+            std.process.exit(1);
+        }
+
         last_outcome = cynic.runtime.evaluateScript(allocator, &realm, bytes) catch |err| {
             var line_buf: [256]u8 = undefined;
             const msg = try std.fmt.bufPrint(&line_buf, "{s}: {t}\n", .{ path, err });
@@ -134,12 +162,77 @@ pub fn run(
             if (!v.isUndefined() and !isPlainObject(v)) try printValue(io, v);
         },
         .thrown => |v| {
-            try std.Io.File.stderr().writeStreamingAll(io, "Uncaught: ");
-            try printValueStream(io, std.Io.File.stderr(), v);
+            try std.Io.File.stderr().writeStreamingAll(io, "Uncaught ");
+            try printThrownStream(io, std.Io.File.stderr(), v);
             try std.Io.File.stderr().writeStreamingAll(io, "\n");
             std.process.exit(1);
         },
     }
+}
+
+/// Render the parser diagnostics list (severity, location, code,
+/// message) as one line each, gutter-style. `bytes` is the original
+/// source slice so we can compute line / column from each diagnostic
+/// span. Output goes to stderr; the caller handles process exit.
+fn printParseDiagnostics(
+    io: std.Io,
+    path: []const u8,
+    bytes: []const u8,
+    diags: []const cynic.diagnostic.Diagnostic,
+) !void {
+    var line_buf: [512]u8 = undefined;
+    // `Source.init` walks the file once to build a line-start table.
+    // Allocating that table is cheap relative to a parse; the table
+    // lets `lineColAt` do an O(log n) lookup per diagnostic.
+    var src = try cynic.source.Source.init(std.heap.page_allocator, path, bytes);
+    defer src.deinit(std.heap.page_allocator);
+    for (diags) |d| {
+        const lc = src.lineColAt(d.span.start);
+        const sev: []const u8 = switch (d.severity) {
+            .err => "error",
+            .warning => "warning",
+            .note => "note",
+        };
+        const code_name = @tagName(d.code);
+        if (d.message.len > 0) {
+            const msg = try std.fmt.bufPrint(&line_buf, "{s}:{d}:{d}: {s}: {s}: {s}\n", .{ path, lc.line, lc.col, sev, code_name, d.message });
+            try std.Io.File.stderr().writeStreamingAll(io, msg);
+        } else {
+            const msg = try std.fmt.bufPrint(&line_buf, "{s}:{d}:{d}: {s}: {s}\n", .{ path, lc.line, lc.col, sev, code_name });
+            try std.Io.File.stderr().writeStreamingAll(io, msg);
+        }
+    }
+}
+
+/// Render a thrown value for the `Uncaught:` log. Mostly the same
+/// shape as `printValueStream` but treats Error objects (objects
+/// with [[ErrorData]] = true per §20.5.1.1) specially, rendering
+/// them as `Name: message` instead of the opaque `[object]` —
+/// otherwise a `ReferenceError: foo is not defined` shows up as
+/// `[object]` and the user has to wrap their script in try/catch
+/// to see what actually went wrong.
+fn printThrownStream(io: std.Io, out: std.Io.File, v: Value) !void {
+    if (v.isObject()) {
+        if (cynic.runtime.heap.valueAsPlainObject(v)) |obj| {
+            if (obj.has_error_data) {
+                const name_v = obj.get("name");
+                const message_v = obj.get("message");
+                if (name_v.isString()) {
+                    const name_s: *JSString = @ptrCast(@alignCast(name_v.asString()));
+                    try out.writeStreamingAll(io, name_s.flatBytes());
+                    if (message_v.isString()) {
+                        const msg_s: *JSString = @ptrCast(@alignCast(message_v.asString()));
+                        if (msg_s.flatBytes().len > 0) {
+                            try out.writeStreamingAll(io, ": ");
+                            try out.writeStreamingAll(io, msg_s.flatBytes());
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    }
+    try printValueStream(io, out, v);
 }
 
 fn isPlainObject(v: Value) bool {

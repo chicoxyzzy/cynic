@@ -109,6 +109,14 @@ pub const Code = enum {
     /// §14.15.1 — `continue LABEL;` whose LABEL labels a statement
     /// that is not an IterationStatement.
     continue_target_not_iteration,
+    /// §14.11 WithStatement. The construct is only legal in sloppy
+    /// mode (§16.1.1 ScriptBody early errors forbid it under strict).
+    /// Cynic is strict-only per `AGENTS.md` "Strict-only, non-browser-
+    /// host target", so every `with` is rejected at parse time.
+    /// Distinct from `unexpected_token` so the diagnostic surfaces
+    /// the policy ("Cynic doesn't ship sloppy mode") instead of a
+    /// generic "I didn't expect this here".
+    with_statement_in_strict,
 
     // ── Runtime (later+) ───────────────────────────────────────────────────
     /// `let` or `const` binding read before its initialiser ran —
@@ -148,6 +156,7 @@ pub const Code = enum {
             .break_outside_loop_or_switch,
             .continue_outside_loop,
             .continue_target_not_iteration,
+            .with_statement_in_strict,
             => .syntax_error,
             .let_in_tdz => .reference_error,
             .assignment_to_const => .type_error,
@@ -199,6 +208,7 @@ test "Code.errorClass: parser/lexer codes are SyntaxError" {
         .break_outside_loop_or_switch,
         .continue_outside_loop,
         .continue_target_not_iteration,
+        .with_statement_in_strict,
     };
     for (parser_codes) |c| {
         try testing.expectEqual(ErrorClass.syntax_error, c.errorClass());
