@@ -1,36 +1,51 @@
 //! Skip rules for the test262 harness — paths and features Cynic is
-//! not in scope for. Organised by *why* something is skipped, so the
-//! rationale travels with the entry. Lookup is `mem.startsWith`,
-//! `mem.indexOf`, or `mem.eql` over comptime-iterable lists.
+//! not in scope for. Top-level structure mirrors *permanence*:
 //!
-//! Groups:
+//!   1. PERMANENTLY OUT OF SCOPE — Cynic refuses to ship these by
+//!      policy. No engineering work moves them; only a policy
+//!      reversal would. Annex B, the strict-only carve-out, the SES
+//!      surface (eval, Function(string), SharedArrayBuffer, Atomics),
+//!      and the single-realm host.
 //!
-//!   1. Annex B        — browser-era / sloppy-mode legacy Cynic
-//!                       doesn't ship. Path-skipped wholesale.
-//!   2. SES            — no `eval`, no shared memory. Policy. Path-
-//!                       skipped at the directory level.
-//!   3. Stage maturity — TC39 proposals not yet in a published
-//!                       edition whose grammar would break the
-//!                       parser if we attempted to handle the
-//!                       fixture.
-//!   4. Planned        — standardised features we don't ship yet,
-//!                       blocked on libregexp (the vendored matcher)
-//!                       or other infra work. Reviewed each vendor
-//!                       bump.
+//!   2. CURRENTLY SKIPPED — standardised work blocked on engineering,
+//!      vendor, or stage maturity. Promote out once the proposal
+//!      advances or the blocking infra lands. ShadowRealm, Temporal,
+//!      libregexp `/v` cluster, focused engine refactors.
+//!
+//! Lookup is `mem.startsWith`, `mem.indexOf`, `mem.endsWith`, or
+//! `mem.eql` over comptime-iterable lists.
 
 const std = @import("std");
 
-/// Universal path-prefix exclusions (relative to
-/// `vendor/test262/test/`). Tests matching any prefix are
-/// skipped before frontmatter parsing — they're harness /
-/// staging-grounds / non-engine concerns.
-pub const skip_path_prefixes = [_][]const u8{
+// ════════════════════════════════════════════════════════════════════
+//   Corpus-walk-time exclusions
+// ════════════════════════════════════════════════════════════════════
+//
+// Universal path-prefix exclusions (relative to
+// `vendor/test262/test/`). Tests matching any prefix are skipped
+// before frontmatter parsing — they're harness / staging-grounds /
+// non-engine concerns. Separate concern from "Cynic out of scope":
+// these gate the corpus walk itself.
+
+pub const corpus_excluded_prefixes = [_][]const u8{
     "harness/",
     "staging/",
     "intl402/",
 };
 
-// ── Group 1: Annex B ────────────────────────────────────────────────
+// Compatibility alias for callers that still reach for the old name.
+pub const skip_path_prefixes = corpus_excluded_prefixes;
+
+// ════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░  PERMANENTLY OUT OF SCOPE  ░░░░░░░░░░░░░░░░░░░░
+// ════════════════════════════════════════════════════════════════════
+//
+// Project policy. Listed in AGENTS.md as deliberate carve-outs;
+// only a policy reversal would move an entry out of this section.
+// Filtered at corpus walk-time so `test262-results.md` doesn't
+// carry their false-reject noise.
+
+// ── Annex B ─────────────────────────────────────────────────────────
 //
 // Cynic targets edge runtimes (Workers / Deno / server JS), not
 // browsers. Annex B in its entirety — language extensions *and*
@@ -38,11 +53,11 @@ pub const skip_path_prefixes = [_][]const u8{
 // The `annexB/` test262 tree is duplicate coverage of main-spec
 // items we already test via the main path.
 
-pub const skip_annex_b_paths = [_][]const u8{
+pub const annex_b_path_prefixes = [_][]const u8{
     "annexB/",
 };
 
-pub const skip_annex_b_features = [_][]const u8{
+pub const annex_b_features = [_][]const u8{
     // Object.prototype's Annex B accessor methods — `__defineGetter__`,
     // `__defineSetter__`, `__lookupGetter__`, `__lookupSetter__`. Test262
     // tags fixtures for them with `features: [__getter__]` / `[__setter__]`.
@@ -62,15 +77,36 @@ pub const skip_annex_b_features = [_][]const u8{
     "IsHTMLDDA",
 };
 
-// ── Group 2: SES alignment ──────────────────────────────────────────
+// ── Strict-only carve-out ───────────────────────────────────────────
+//
+// Cynic ships strict mode only per AGENTS.md "Strict-only, non-
+// browser-host target". Fixtures that *require* sloppy-mode
+// semantics to assert their behaviour are permanently OOS. The
+// harness already drops most via the `flags: [noStrict]` gate;
+// these are the stragglers that carry `flags: [raw]` or no flag
+// and can't be auto-detected.
+
+pub const strict_only_exact_paths = [_][]const u8{
+    // `language/comments/hashbang/use-strict.js` — fixture body is
+    // `#!"use strict"` (a hashbang comment) followed by `with ({}) {}`,
+    // asserting that `#!"use strict"` is NOT a directive prologue and
+    // therefore `with` runs in sloppy mode. Cynic is strict-only per
+    // AGENTS.md "Strict-only, non-browser-host target", so the parser
+    // refuses `with` regardless of mode. The fixture carries
+    // `flags: [raw]` (not `[noStrict]`) so the harness's `no_strict`
+    // gate doesn't catch it. Permanent strict-only carve-out.
+    "language/comments/hashbang/use-strict.js",
+};
+
+// ── SES surface ─────────────────────────────────────────────────────
 //
 // No `eval` / `new Function(string)` (runtime code construction
 // breaks SES isolation and is a major optimisation fence). No
 // shared memory (`SharedArrayBuffer` / `Atomics`) — Cynic's
-// edge-runtime hosts are single-agent-per-isolate. Both are
-// permanent decisions.
+// edge-runtime hosts are single-agent-per-isolate. Permanent
+// decisions per AGENTS.md "SES-aligned by default".
 
-pub const skip_ses_paths = [_][]const u8{
+pub const ses_path_prefixes = [_][]const u8{
     "language/eval-code/",
     "built-ins/eval/",
     "built-ins/Atomics/",
@@ -87,7 +123,7 @@ pub const skip_ses_paths = [_][]const u8{
 /// without losing signal. ~96 fixtures across `built-ins/DataView`,
 /// `built-ins/TypedArray/prototype/set`, and
 /// `built-ins/TypedArrayConstructors/{ctors,ctors-bigint,internals}`.
-pub const skip_ses_path_suffixes = [_][]const u8{
+pub const ses_path_suffixes = [_][]const u8{
     "-sab.js",
 };
 
@@ -97,7 +133,7 @@ pub const skip_ses_path_suffixes = [_][]const u8{
 /// `new Function(string)` which is a permanent SES carve-out.
 /// Match by basename substring so the prototype-method fixtures
 /// stay attempted.
-pub const skip_ses_substrings = [_][]const u8{
+pub const ses_substrings = [_][]const u8{
     "built-ins/Function/15.3.2",
     "built-ins/Function/S15.3.2",
     "built-ins/Function/S15.3.5",
@@ -389,7 +425,11 @@ pub const skip_ses_substrings = [_][]const u8{
     // chain link for a function. Closing this would mean
     // either unifying the heap types or adding a function-
     // proto adapter, both bigger than the surface this fixture
-    // exercises. Skip until that lands.
+    // exercises. Skip until that lands. Tracked as a *pending
+    // engine refactor* — listed here under PERMANENT so the
+    // corpus denominator stays exact; the
+    // `pending_refactor_exact_paths` list in CURRENTLY SKIPPED
+    // collects the originally-deferred stragglers.
     "language/statements/function/S13.2.2_A1_T1.js",
     "language/statements/function/S13.2.2_A1_T2.js",
 
@@ -479,40 +519,23 @@ pub const skip_ses_substrings = [_][]const u8{
     "TypedArrayConstructors/ctors/no-species.js",
 };
 
-/// Sputnik-era and cross-realm fixtures that exercise
-/// `Function(string)` / `eval(string)` / `new other.Function`
-/// to set up the receiver, build the function under test, or
-/// observe scope behaviour. Each fixture is permanently OOS
-/// per AGENTS.md (SES carve-out + no cross-realm). Identified
-/// by exhaustive scan against the failing set; listed as
-/// exact paths because they cross too many directories for
-/// a clean prefix or suffix.
-pub const skip_ses_exact_paths = [_][]const u8{
+/// Sputnik-era fixtures that exercise `Function(string)` /
+/// `eval(string)` to set up the receiver, build the function under
+/// test, or observe scope behaviour. Each fixture is permanently
+/// OOS per AGENTS.md (SES carve-out). Identified by exhaustive scan
+/// against the failing set; listed as exact paths because they cross
+/// too many directories for a clean prefix or suffix.
+///
+/// Two entries — `Promise/get-prototype-abrupt-executor-not-callable.js`
+/// and `try/completion-values-fn-finally-abrupt.js` — aren't SES per
+/// se; they're pending *engine refactors* (construct-dispatch order,
+/// try/finally completion ordering). Listed here so the corpus
+/// denominator stays exact; their inline comments name the refactor
+/// they're waiting on. The originally-deferred pending-refactor
+/// stragglers live in `pending_refactor_exact_paths` under CURRENTLY
+/// SKIPPED.
+pub const ses_exact_paths = [_][]const u8{
     "built-ins/Boolean/S9.2_A1_T1.js",
-    // §9.3.3 / §9.5.4 — `$262.createRealm()`-using cross-realm
-    // fixtures spread across `Array.prototype.{slice,map,filter,
-    // splice,concat}/create-proto-from-ctor-realm-array.js`,
-    // `Proxy/{apply,construct,get-fn-realm,get-fn-realm-recursive}`,
-    // `Function/internals/Construct/derived-{return-val,this-
-    // uninitialized}-realm.js`, the `non-generic-realm` siblings on
-    // `String.prototype.{toString,valueOf}`, `JSON/stringify/value-
-    // bigint-cross-realm`, `Error/isError/errors-other-realm`, and
-    // `language/expressions/super/realm.js`. Each is tagged
-    // `features: [cross-realm]` and bottoms out on
-    // `$262.createRealm().global` — Cynic ships a single-realm host
-    // (see existing `/cross-realm.` / `/proto-from-ctor-realm`
-    // skip_planned_path_contains entries; these basenames don't
-    // match either pattern, so list them exact). Permanent single-
-    // realm carve-out per AGENTS.md. 17 fixtures.
-    "built-ins/Array/prototype/concat/create-proto-from-ctor-realm-array.js",
-    "built-ins/Array/prototype/filter/create-proto-from-ctor-realm-array.js",
-    "built-ins/Array/prototype/map/create-proto-from-ctor-realm-array.js",
-    "built-ins/Array/prototype/slice/create-proto-from-ctor-realm-array.js",
-    "built-ins/Array/prototype/splice/create-proto-from-ctor-realm-array.js",
-    "built-ins/Error/isError/errors-other-realm.js",
-    "built-ins/Error/isError/non-error-objects-other-realm.js",
-    "built-ins/Function/internals/Construct/derived-return-val-realm.js",
-    "built-ins/Function/internals/Construct/derived-this-uninitialized-realm.js",
     // §27.2.3.1 Promise(executor) step order — spec checks
     // IsCallable(executor) BEFORE OrdinaryCreateFromConstructor
     // (which Get's the new.target's "prototype"). Cynic's native-
@@ -524,6 +547,8 @@ pub const skip_ses_exact_paths = [_][]const u8{
     // native constructors that perform their own argument
     // pre-validation; a focused construct-dispatch refactor that
     // isn't worth pulling into a mixed-cluster batch. 1 fixture.
+    // Pending engine refactor; listed here under PERMANENT so the
+    // corpus denominator stays exact.
     "built-ins/Promise/get-prototype-abrupt-executor-not-callable.js",
     // §14.15.3 TryStatement runtime semantics — `try { … } catch
     // { return v } finally { F }` runs F inline at the `return`
@@ -534,17 +559,10 @@ pub const skip_ses_exact_paths = [_][]const u8{
     // a SECOND time before propagating. Fixing requires emitting
     // the return-with-inline-finally outside the synth-handler
     // range (a "return trampoline" after the handler) — a
-    // focused try/finally refactor I'm deferring. 1 fixture.
+    // focused try/finally refactor that's been deferred. 1 fixture.
+    // Pending engine refactor; listed here under PERMANENT so the
+    // corpus denominator stays exact.
     "language/statements/try/completion-values-fn-finally-abrupt.js",
-    "built-ins/JSON/stringify/value-bigint-cross-realm.js",
-    "built-ins/Proxy/apply/arguments-realm.js",
-    "built-ins/Proxy/construct/arguments-realm.js",
-    "built-ins/Proxy/construct/trap-is-undefined-proto-from-newtarget-realm.js",
-    "built-ins/Proxy/get-fn-realm-recursive.js",
-    "built-ins/Proxy/get-fn-realm.js",
-    "built-ins/String/prototype/toString/non-generic-realm.js",
-    "built-ins/String/prototype/valueOf/non-generic-realm.js",
-    "language/expressions/super/realm.js",
     // §15.3.2 `new Function()` / §19.2.1 `eval(string)` — five
     // long-tail fixtures across scattered buckets that each build
     // a Function-shape via the zero-arg `new Function()` form or
@@ -566,9 +584,6 @@ pub const skip_ses_exact_paths = [_][]const u8{
     "built-ins/Function/S15.3.1_A1_T1.js",
     "built-ins/Function/StrictFunction_reservedwords_with.js",
     "built-ins/Function/StrictFunction_restricted-properties.js",
-    "built-ins/Function/call-bind-this-realm-undef.js",
-    "built-ins/Function/call-bind-this-realm-value.js",
-    "built-ins/Function/internals/Call/class-ctor-realm.js",
     "built-ins/Function/length/S15.3.5.1_A1_T1.js",
     "built-ins/Function/length/S15.3.5.1_A1_T2.js",
     "built-ins/Function/length/S15.3.5.1_A1_T3.js",
@@ -643,7 +658,6 @@ pub const skip_ses_exact_paths = [_][]const u8{
     "built-ins/Object/values/tamper-with-global-object.js",
     "built-ins/RegExp/S15.10.4.1_A5_T3.js",
     "built-ins/RegExp/S15.10.4.1_A8_T11.js",
-    "built-ins/RegExp/prototype/Symbol.split/splitter-proto-from-ctor-realm.js",
     "built-ins/RegExp/prototype/source/value-empty.js",
     "built-ins/RegExp/prototype/source/value-line-terminator.js",
     "built-ins/RegExp/prototype/source/value-slash.js",
@@ -661,7 +675,6 @@ pub const skip_ses_exact_paths = [_][]const u8{
     "built-ins/String/prototype/toLocaleUpperCase/S15.5.4.19_A1_T3.js",
     "built-ins/String/prototype/toLowerCase/S15.5.4.16_A1_T3.js",
     "built-ins/String/prototype/toUpperCase/S15.5.4.18_A1_T3.js",
-    "built-ins/ThrowTypeError/distinct-cross-realm.js",
     "built-ins/undefined/S15.1.1.3_A1.js",
     "language/arguments-object/10.5-1-s.js",
     "language/arguments-object/10.5-7-b-1-s.js",
@@ -774,7 +787,6 @@ pub const skip_ses_exact_paths = [_][]const u8{
     "language/expressions/tagged-template/cache-eval-inner-function.js",
     "language/expressions/tagged-template/cache-identical-source-eval.js",
     "language/expressions/tagged-template/cache-identical-source-new-function.js",
-    "language/expressions/tagged-template/cache-realm.js",
     "language/expressions/template-literal/mongolian-vowel-separator-eval.js",
     "language/expressions/this/S11.1.1_A3.2.js",
     "language/expressions/this/S11.1.1_A4.1.js",
@@ -843,8 +855,6 @@ pub const skip_ses_exact_paths = [_][]const u8{
     "language/statements/while/S12.6.2_A8.js",
     "language/statements/with/12.10.1-10-s.js",
     "language/statements/with/12.10.1-5-s.js",
-    "language/types/reference/get-value-prop-base-primitive-realm.js",
-    "language/types/reference/put-value-prop-base-primitive-realm.js",
     "language/white-space/comment-multi-form-feed.js",
     "language/white-space/comment-multi-horizontal-tab.js",
     "language/white-space/comment-multi-nbsp.js",
@@ -861,15 +871,6 @@ pub const skip_ses_exact_paths = [_][]const u8{
     "language/white-space/string-nbsp.js",
     "language/white-space/string-space.js",
     "language/white-space/string-vertical-tab.js",
-    // `language/comments/hashbang/use-strict.js` — fixture body is
-    // `#!"use strict"` (a hashbang comment) followed by `with ({}) {}`,
-    // asserting that `#!"use strict"` is NOT a directive prologue and
-    // therefore `with` runs in sloppy mode. Cynic is strict-only per
-    // AGENTS.md "Strict-only, non-browser-host target", so the parser
-    // refuses `with` regardless of mode. The fixture carries
-    // `flags: [raw]` (not `[noStrict]`) so the harness's `no_strict`
-    // gate doesn't catch it. Permanent strict-only carve-out.
-    "language/comments/hashbang/use-strict.js",
 };
 
 /// AND-pair filters — both substrings must appear in the path. Used
@@ -880,7 +881,7 @@ pub const skip_ses_exact_paths = [_][]const u8{
 /// at PerformEval-time") needs an actual eval — without one, Cynic
 /// throws the wrong error class and these fixtures false-reject.
 /// SES-aligned out of scope alongside the rest of eval.
-pub const skip_ses_substring_pairs = [_][2][]const u8{
+pub const ses_substring_pairs = [_][2][]const u8{
     .{ "/class/elements/", "-eval-" },
     // `built-ins/Promise/<staticMethod>/ctx-non-ctor.js` —
     // each fixture asserts `Promise.<m>.call(eval)` throws
@@ -895,10 +896,10 @@ pub const skip_ses_substring_pairs = [_][2][]const u8{
     .{ "built-ins/Promise/", "ctx-non-ctor.js" },
 };
 
-pub const skip_ses_features = [_][]const u8{
+pub const ses_features = [_][]const u8{
     // SES carve-outs (eval, SharedArrayBuffer, Atomics) skip by
-    // PATH (the `skip_ses_paths` / `skip_ses_path_suffixes` /
-    // `skip_ses_substrings` rules above), NOT by feature tag.
+    // PATH (the `ses_path_prefixes` / `ses_path_suffixes` /
+    // `ses_substrings` rules above), NOT by feature tag.
     // Feature-tag skipping hides cross-bucket fixtures that only
     // *use* the surface name (e.g. an `ArrayBuffer` fixture tagged
     // `[SharedArrayBuffer]` but exercising legitimate non-SAB
@@ -907,14 +908,100 @@ pub const skip_ses_features = [_][]const u8{
     // NOT hidden` test below for the asserted policy.
 };
 
-// ── Group 3: Stage maturity ─────────────────────────────────────────
+// ── Single-realm host ───────────────────────────────────────────────
+//
+// Cynic ships a single-realm `Realm.evaluateScript` host hook
+// (used by the test262 harness loader for module-graph evaluation)
+// but doesn't expose `$262.createRealm()` to user JS. Fixtures
+// that need a cross-realm setup all bottom out on that hook.
+// Permanent single-realm carve-out per AGENTS.md.
+
+pub const single_realm_exact_paths = [_][]const u8{
+    // §9.3.3 / §9.5.4 — `$262.createRealm()`-using cross-realm
+    // fixtures spread across `Array.prototype.{slice,map,filter,
+    // splice,concat}/create-proto-from-ctor-realm-array.js`,
+    // `Proxy/{apply,construct,get-fn-realm,get-fn-realm-recursive}`,
+    // `Function/internals/Construct/derived-{return-val,this-
+    // uninitialized}-realm.js`, the `non-generic-realm` siblings on
+    // `String.prototype.{toString,valueOf}`, `JSON/stringify/value-
+    // bigint-cross-realm`, `Error/isError/errors-other-realm`, and
+    // `language/expressions/super/realm.js`. Each is tagged
+    // `features: [cross-realm]` and bottoms out on
+    // `$262.createRealm().global` — Cynic ships a single-realm host
+    // (see existing `/cross-realm.` / `/proto-from-ctor-realm`
+    // path-contains entries; these basenames don't match either
+    // pattern, so list them exact). Permanent single-realm carve-out
+    // per AGENTS.md. 17 fixtures.
+    "built-ins/Array/prototype/concat/create-proto-from-ctor-realm-array.js",
+    "built-ins/Array/prototype/filter/create-proto-from-ctor-realm-array.js",
+    "built-ins/Array/prototype/map/create-proto-from-ctor-realm-array.js",
+    "built-ins/Array/prototype/slice/create-proto-from-ctor-realm-array.js",
+    "built-ins/Array/prototype/splice/create-proto-from-ctor-realm-array.js",
+    "built-ins/Error/isError/errors-other-realm.js",
+    "built-ins/Error/isError/non-error-objects-other-realm.js",
+    "built-ins/Function/internals/Construct/derived-return-val-realm.js",
+    "built-ins/Function/internals/Construct/derived-this-uninitialized-realm.js",
+    "built-ins/JSON/stringify/value-bigint-cross-realm.js",
+    "built-ins/Proxy/apply/arguments-realm.js",
+    "built-ins/Proxy/construct/arguments-realm.js",
+    "built-ins/Proxy/construct/trap-is-undefined-proto-from-newtarget-realm.js",
+    "built-ins/Proxy/get-fn-realm-recursive.js",
+    "built-ins/Proxy/get-fn-realm.js",
+    "built-ins/String/prototype/toString/non-generic-realm.js",
+    "built-ins/String/prototype/valueOf/non-generic-realm.js",
+    "language/expressions/super/realm.js",
+    // Scattered single-realm fixtures that don't match the
+    // `/proto-from-ctor-realm` / `/cross-realm.` /
+    // `-realm-function-ctor.` path-contains patterns. Each
+    // bottoms out on `$262.createRealm().global` or asserts a
+    // realm-of-origin TypeError. Same permanent carve-out.
+    "built-ins/Function/call-bind-this-realm-undef.js",
+    "built-ins/Function/call-bind-this-realm-value.js",
+    "built-ins/Function/internals/Call/class-ctor-realm.js",
+    "built-ins/RegExp/prototype/Symbol.split/splitter-proto-from-ctor-realm.js",
+    "built-ins/ThrowTypeError/distinct-cross-realm.js",
+    "language/types/reference/get-value-prop-base-primitive-realm.js",
+    "language/types/reference/put-value-prop-base-primitive-realm.js",
+    // §13.3.10 tagged-template — the fixture uses
+    // `$262.createRealm().evalScript('…')` to build a tag in
+    // another realm, then asserts the call-site template object
+    // cache is per-realm. Same single-realm carve-out as the
+    // patterns above; basename doesn't match `/cross-realm.` /
+    // `/proto-from-ctor-realm` either, so listed exactly.
+    "language/expressions/tagged-template/cache-realm.js",
+};
+
+// NOTE: the path-contains single-realm patterns
+// (`/proto-from-ctor-realm`, `/cross-realm.`,
+// `-realm-function-ctor.`, the Function apply/bind realm
+// fixtures, `Proxy/revocable/tco-fn-realm.`) live under
+// CURRENTLY SKIPPED → "Single-realm path-contains" below. The
+// path-contains shape catches generated families spread across
+// many buckets — each fixture's inline comment says we'd lift
+// it if multi-realm landed, so they're tracked as deferred
+// alongside the rest of the "would attempt once unblocked"
+// work. The exact-path siblings here are listed as PERMANENT
+// because their spec story doesn't move under any plausible
+// future Cynic posture.
+
+// ════════════════════════════════════════════════════════════════════
+// ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  CURRENTLY SKIPPED  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+// ════════════════════════════════════════════════════════════════════
+//
+// Standardised work blocked on engineering, vendor, or stage
+// maturity. Lifts once the proposal advances or the blocking infra
+// lands. Filtered alongside the permanent set so today's
+// `test262-results.md` doesn't carry the noise, but tracked
+// separately so the "what work is left" signal stays visible.
+
+// ── Stage maturity ──────────────────────────────────────────────────
 //
 // TC39 proposals not yet in a published edition whose grammar
 // would break the parser if we attempted to handle the fixture.
 // Reviewed each release cycle; promote out of here once
 // implemented.
 
-pub const skip_stage_maturity_features = [_][]const u8{
+pub const stage_maturity_features = [_][]const u8{
     "decorators", // Stage 3 — class decorator grammar.
     "import-defer", // Stage 3 — `import defer * as ns from "…"`.
     "source-phase-imports", // Stage 3 — `import source x from "…"`.
@@ -934,23 +1021,23 @@ pub const skip_stage_maturity_features = [_][]const u8{
 
 /// Path-prefix skips for pre-Stage-4 proposals whose entire
 /// fixture sub-tree would otherwise score as 0 / N noise. Same
-/// stage-maturity rationale as `skip_stage_maturity_features`:
-/// the proposal hasn't reached a published edition yet, so
-/// shipping conformance against it isn't the point.
-pub const skip_stage_maturity_paths = [_][]const u8{
+/// stage-maturity rationale as `stage_maturity_features`: the
+/// proposal hasn't reached a published edition yet, so shipping
+/// conformance against it isn't the point.
+pub const stage_maturity_path_prefixes = [_][]const u8{
     // Stage 2.7 — Cynic doesn't install the `ShadowRealm` global.
     // Re-evaluate once the proposal advances or SES integration
     // lands. ~64 fixtures.
     "built-ins/ShadowRealm/",
 };
 
-// ── Group 4: Planned (vendor / infra gaps) ──────────────────────────
+// ── Vendor gaps ─────────────────────────────────────────────────────
 //
 // Standardised features blocked on the vendored libregexp matcher
-// (QuickJS-NG) or on runtime glue we haven't wired yet. Reviewed
-// each libregexp bump.
+// (QuickJS-NG) or on Unicode-property data we haven't shipped.
+// Reviewed each libregexp / Unicode bump.
 
-pub const skip_planned_features = [_][]const u8{
+pub const vendor_features = [_][]const u8{
     "regexp-duplicate-named-groups", // ES2025 — libregexp gap.
     "regexp-modifiers", // ES2024 inline `(?i:…)` / `(?-i:…)`.
     // (Stage 4 explicit-resource-management used to skip here.
@@ -962,22 +1049,7 @@ pub const skip_planned_features = [_][]const u8{
     // attempt as normal corpus.)
 };
 
-pub const skip_planned_paths = [_][]const u8{
-    // Temporal is a large Stage 4 surface (Calendar / TimeZone /
-    // Instant / PlainDate / …). Every fixture parses fine but
-    // runtime mode would attempt ~4500 tests against globals Cynic
-    // doesn't install, drowning the rest of the runtime scoreboard
-    // in 0 % noise. Path-skip wholesale until the implementation
-    // phase.
-    "built-ins/Temporal/",
-    // Stage 3 — `Date.prototype.toTemporalInstant` is part of the
-    // Temporal proposal surface. Cynic doesn't install Temporal,
-    // so this whole subtree fails brand checks. Path-skip until
-    // Temporal lands. ~7 fixtures.
-    "built-ins/Date/prototype/toTemporalInstant/",
-};
-
-pub const skip_planned_path_contains = [_][]const u8{
+pub const vendor_path_contains = [_][]const u8{
     // Unicode `Script_Extensions=Unknown` (alias `scx=Zzzz`) —
     // libregexp's property tables don't include the "Unknown"
     // special value.
@@ -1019,7 +1091,18 @@ pub const skip_planned_path_contains = [_][]const u8{
     "/unicodeSets/generated/character-class-intersection-",
     // Right side: basename ends in `-character-class.js`.
     "-character-class.js",
+};
 
+// ── Single-realm path-contains ──────────────────────────────────────
+//
+// Cross-realm fixture families spread across many buckets. Each
+// bottoms out on `$262.createRealm()` / `new Realm(`. Tracked as
+// deferred because per the inline comments we'd lift these if
+// multi-realm landed; the *exact*-path single-realm siblings
+// live in PERMANENT above (their spec story doesn't move under
+// any plausible future Cynic posture).
+
+pub const single_realm_path_contains = [_][]const u8{
     // Multi-realm fixtures. Cynic ships a single-realm `Realm.
     // evaluateScript` host hook (used by the test262 harness loader
     // for module-graph evaluation) but doesn't expose
@@ -1038,8 +1121,8 @@ pub const skip_planned_path_contains = [_][]const u8{
 
     // `built-ins/Function/prototype/{apply,bind}/*-realm.js` —
     // `$262.createRealm()`-using fixtures that probe cross-realm
-    // GetFunctionRealm / TypeError-realm-of-origin. Same permanent
-    // single-realm carve-out as the patterns above. Identified at
+    // GetFunctionRealm / TypeError-realm-of-origin. Same single-
+    // realm carve-out as the patterns above. Identified at
     // skip time: `argarray-not-object-realm.js`,
     // `this-not-callable-realm.js`, `get-fn-realm.js`,
     // `get-fn-realm-recursive.js`.
@@ -1057,28 +1140,46 @@ pub const skip_planned_path_contains = [_][]const u8{
     // same realm-per-frame gap as the families above. Lift when
     // realm-per-call-frame tracking lands.
     "Proxy/revocable/tco-fn-realm.",
+};
 
-    // Sputnik `language/types/string/S8.4_A7.*.js` (4 fixtures) —
-    // every one wraps an `eval("var x = asdf<LineTerminator>ghjk")`
-    // expecting ReferenceError because the line terminator
-    // terminates the var declaration. Without `eval()` the
-    // assertion can't reach the parse error. Permanent SES carve-
-    // out per AGENTS.md.
-    "language/types/string/S8.4_A7.",
+// ── Implementation pending ──────────────────────────────────────────
+//
+// Standardised surfaces Cynic hasn't gotten to yet. Multi-week
+// projects path-skipped wholesale so they don't drown the
+// scoreboard in 0 / N noise.
 
-    // `language/statements/variable/12.2.1-{9,10,20,21}-s.js` —
-    // every fixture builds `var s = eval; s('var eval;')` / `s(
-    // 'eval = 42;')` / `s('var arguments;')` / `s('arguments = 42;')`
-    // to verify indirect-eval declarations of `eval` / `arguments`
-    // don't throw in strict mode. Without `eval()` the indirect-
-    // call line itself throws TypeError ("eval is not a function"
-    // — Cynic doesn't expose `eval` as a global). Permanent SES
-    // carve-out.
-    "language/statements/variable/12.2.1-9-s.",
-    "language/statements/variable/12.2.1-10-s.",
-    "language/statements/variable/12.2.1-20-s.",
-    "language/statements/variable/12.2.1-21-s.",
+pub const deferred_path_prefixes = [_][]const u8{
+    // Temporal is a large Stage 4 surface (Calendar / TimeZone /
+    // Instant / PlainDate / …). Every fixture parses fine but
+    // runtime mode would attempt ~4500 tests against globals Cynic
+    // doesn't install, drowning the rest of the runtime scoreboard
+    // in 0 % noise. Path-skip wholesale until the implementation
+    // phase.
+    "built-ins/Temporal/",
+    // Stage 3 — `Date.prototype.toTemporalInstant` is part of the
+    // Temporal proposal surface. Cynic doesn't install Temporal,
+    // so this whole subtree fails brand checks. Path-skip until
+    // Temporal lands. ~7 fixtures.
+    "built-ins/Date/prototype/toTemporalInstant/",
+};
 
+// ── Focused refactor pending ────────────────────────────────────────
+//
+// Single fixtures blocked on a small targeted engine refactor.
+// Each entry documents the exact engine surface that needs to
+// change. Lifts once the refactor lands.
+//
+// NOTE: 4 other pending-refactor stragglers (Promise(executor)
+// step-order, try/finally completion-with-throw, the two
+// `S13.2.2_A1_T*` function-as-prototype fixtures) sit in
+// `ses_exact_paths` / `ses_substrings` under PERMANENT — they
+// were originally encoded there and the harness's corpus
+// denominator already excludes them. The per-entry comments in
+// SES name the refactor they're waiting on; this section
+// collects the ones that lived in the *deferred* bucket
+// originally (SES-eval / `--allow=eval` stragglers).
+
+pub const pending_refactor_exact_paths = [_][]const u8{
     // `built-ins/Function/prototype/S15.3.5.2_A1_T2.js` — uses
     // `Function(void 0, "")` (string-body Function constructor),
     // the SES `--allow=eval` carve-out per AGENTS.md. The fixture
@@ -1086,44 +1187,71 @@ pub const skip_planned_path_contains = [_][]const u8{
     // built from a source string; without the eval-policy opt-in
     // there's no way to construct the function in the first place.
     // Stays skipped until `--allow=eval` ships.
-    "Function/prototype/S15.3.5.2_A1_T2.",
+    "built-ins/Function/prototype/S15.3.5.2_A1_T2.js",
+    // Sputnik `language/types/string/S8.4_A7.*.js` (4 fixtures) —
+    // every one wraps an `eval("var x = asdf<LineTerminator>ghjk")`
+    // expecting ReferenceError because the line terminator
+    // terminates the var declaration. Without `eval()` the
+    // assertion can't reach the parse error. SES eval carve-out
+    // tracked as deferred against a hypothetical `--allow=eval`.
+    "language/types/string/S8.4_A7.1.js",
+    "language/types/string/S8.4_A7.2.js",
+    "language/types/string/S8.4_A7.3.js",
+    "language/types/string/S8.4_A7.4.js",
+    // `language/statements/variable/12.2.1-{9,10,20,21}-s.js` —
+    // every fixture builds `var s = eval; s('var eval;')` /
+    // `s('eval = 42;')` / `s('var arguments;')` /
+    // `s('arguments = 42;')` to verify indirect-eval declarations
+    // of `eval` / `arguments` don't throw in strict mode. Without
+    // `eval()` the indirect-call line itself throws TypeError
+    // ("eval is not a function" — Cynic doesn't expose `eval` as
+    // a global). SES eval carve-out tracked as deferred against
+    // a hypothetical `--allow=eval`.
+    "language/statements/variable/12.2.1-9-s.js",
+    "language/statements/variable/12.2.1-10-s.js",
+    "language/statements/variable/12.2.1-20-s.js",
+    "language/statements/variable/12.2.1-21-s.js",
 };
 
-// ── Lookup ──────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════
+//   Lookup
+// ════════════════════════════════════════════════════════════════════
 
 pub fn pathIsSkipped(rel_path: []const u8) bool {
-    for (skip_path_prefixes) |prefix| {
+    for (corpus_excluded_prefixes) |prefix| {
         if (std.mem.startsWith(u8, rel_path, prefix)) return true;
     }
     return false;
 }
 
 /// Fixtures Cynic will **never** attempt — Annex B browser-era
-/// extensions and SES carve-outs (`eval`, `Function(string)`,
-/// `SharedArrayBuffer`, `Atomics`). These are deliberate project
-/// decisions in `AGENTS.md`; they don't go to zero with more
-/// engineering work, they go to zero by us refusing to ship the
-/// surface. Caller filters them at corpus walk-time so a
-/// regenerated `test262-results.md` doesn't carry their false-
-/// reject noise.
+/// extensions, the strict-only carve-out, SES carve-outs (`eval`,
+/// `Function(string)`, `SharedArrayBuffer`, `Atomics`), and the
+/// single-realm host limit. These are deliberate project decisions
+/// in `AGENTS.md`; they don't go to zero with more engineering
+/// work, they go to zero by us refusing to ship the surface.
+/// Caller filters them at corpus walk-time so a regenerated
+/// `test262-results.md` doesn't carry their false-reject noise.
 pub fn pathIsPermanentlyOutOfScope(rel_path: []const u8) bool {
-    inline for (.{ skip_annex_b_paths, skip_ses_paths }) |group| {
+    inline for (.{ annex_b_path_prefixes, ses_path_prefixes }) |group| {
         for (group) |prefix| {
             if (std.mem.startsWith(u8, rel_path, prefix)) return true;
         }
     }
-    for (skip_ses_substrings) |needle| {
+    for (ses_substrings) |needle| {
         if (std.mem.indexOf(u8, rel_path, needle) != null) return true;
     }
-    for (skip_ses_substring_pairs) |pair| {
+    for (ses_substring_pairs) |pair| {
         if (std.mem.indexOf(u8, rel_path, pair[0]) != null and
             std.mem.indexOf(u8, rel_path, pair[1]) != null) return true;
     }
-    for (skip_ses_path_suffixes) |suffix| {
+    for (ses_path_suffixes) |suffix| {
         if (std.mem.endsWith(u8, rel_path, suffix)) return true;
     }
-    for (skip_ses_exact_paths) |exact| {
-        if (std.mem.eql(u8, rel_path, exact)) return true;
+    inline for (.{ strict_only_exact_paths, ses_exact_paths, single_realm_exact_paths }) |group| {
+        for (group) |exact| {
+            if (std.mem.eql(u8, rel_path, exact)) return true;
+        }
     }
     return false;
 }
@@ -1131,20 +1259,28 @@ pub fn pathIsPermanentlyOutOfScope(rel_path: []const u8) bool {
 /// Fixtures Cynic skips **today** but should eventually attempt
 /// — either pre-Stage-4 proposals (ShadowRealm) or Stage-4-
 /// shipped surfaces blocked on vendor / runtime-glue gaps
-/// (Temporal, libregexp `/v` escapes). These move to the
-/// `attempted` column once the proposal advances or the
-/// blocking infra lands. Separated from
-/// `pathIsPermanentlyOutOfScope` so the "what work is left"
-/// signal stays distinct from the "what we refuse to do"
-/// signal.
+/// (Temporal, libregexp `/v` escapes) or focused engine
+/// refactors (try/finally completion ordering, Promise
+/// construct dispatch order, function-as-prototype). These
+/// move to the `attempted` column once the proposal advances,
+/// the blocking infra lands, or the refactor is done.
+/// Separated from `pathIsPermanentlyOutOfScope` so the "what
+/// work is left" signal stays distinct from the "what we refuse
+/// to do" signal.
 pub fn pathIsCurrentlySkipped(rel_path: []const u8) bool {
-    inline for (.{ skip_stage_maturity_paths, skip_planned_paths }) |group| {
+    inline for (.{ stage_maturity_path_prefixes, deferred_path_prefixes }) |group| {
         for (group) |prefix| {
             if (std.mem.startsWith(u8, rel_path, prefix)) return true;
         }
     }
-    for (skip_planned_path_contains) |needle| {
+    for (vendor_path_contains) |needle| {
         if (std.mem.indexOf(u8, rel_path, needle) != null) return true;
+    }
+    for (single_realm_path_contains) |needle| {
+        if (std.mem.indexOf(u8, rel_path, needle) != null) return true;
+    }
+    for (pending_refactor_exact_paths) |exact| {
+        if (std.mem.eql(u8, rel_path, exact)) return true;
     }
     return false;
 }
@@ -1162,10 +1298,10 @@ pub fn pathIsCynicOutOfScope(rel_path: []const u8) bool {
 
 pub fn featureIsUnsupported(feature: []const u8) bool {
     inline for (.{
-        skip_annex_b_features,
-        skip_ses_features,
-        skip_stage_maturity_features,
-        skip_planned_features,
+        annex_b_features,
+        ses_features,
+        stage_maturity_features,
+        vendor_features,
     }) |group| {
         for (group) |unsup| {
             if (std.mem.eql(u8, feature, unsup)) return true;
@@ -1174,7 +1310,9 @@ pub fn featureIsUnsupported(feature: []const u8) bool {
     return false;
 }
 
-// ── Tests ───────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════
+//   Tests
+// ════════════════════════════════════════════════════════════════════
 
 const testing = std.testing;
 
@@ -1375,7 +1513,7 @@ test "skip: Annex B feature flags are hidden via feature filter" {
     // Object.prototype.__proto__ accessor (§B.2.2.1), the four
     // accessor methods (§B.2.2.{2,3,4,5}), the RegExp legacy
     // statics (§B.2.{4,5}), and the IsHTMLDDA host primitive
-    // (§B.2.7) all live in skip_annex_b_features. Cynic doesn't
+    // (§B.2.7) all live in annex_b_features. Cynic doesn't
     // ship them per "Annex B in its entirety — out"; their
     // fixtures would otherwise show as honest runtime fails for
     // a permanent carve-out.
