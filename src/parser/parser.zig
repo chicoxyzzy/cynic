@@ -1031,23 +1031,56 @@ pub const Parser = struct {
         } else if (self.current.kind == .identifier and
             std.mem.eql(u8, self.current.slice(self.source), "using"))
         {
-            // §14.7.5.x ES2026 explicit-resource-management — `for
-            // (using x of …)`. `using` is contextual; it only opens
-            // a for-head when followed on the same line by an
-            // identifier AND that identifier is followed by `of`
-            // (so the trailing `using of …` C-init shape doesn't
-            // trigger it). The peek3 check below filters the
-            // shapes where `using` is just an ordinary identifier
-            // expression (`for (using; …)`, `for (using in …)`,
-            // `for (using.length; …)`, …).
+            // §14.7.5.x / §14.7.4.x ES2026 explicit-resource-
+            // management — `for (using x of …)` (for-of head) AND
+            // `for (using x = init; …; …)` (C-style for head, per
+            // the proposal's LexicalDeclaration extension).
+            // `using` stays contextual: it opens a using-decl only
+            // when followed on the same line by an identifier
+            // (`isUsingBindingStart`). The third-token shape
+            // discriminates the for-of cover from the C-style
+            // cover; for the C-style case we additionally exclude
+            // `using of` followed by `of` to honour the
+            // `using-for-using-of-of.js` carve-out (`for (using of
+            // of […])` is always identifier).
             const second = try self.peek2();
             const third = try self.peek3();
             const second_is_ident = isUsingBindingStart(second.kind);
             const third_is_of = third.kind == .identifier and
                 std.mem.eql(u8, third.slice(self.source), "of");
-            if (!second.line_terminator_before and second_is_ident and third_is_of) {
+            const second_is_of = second.kind == .identifier and
+                std.mem.eql(u8, second.slice(self.source), "of");
+            const using_of_of = second_is_of and third_is_of;
+            if (!second.line_terminator_before and second_is_ident and !using_of_of) {
+                // Either for-of-using (third is `of`) or C-style
+                // for-using (third is `=` / `,` / `;`). The single
+                // `parseForLexicalDecl(.using_)` covers both — the
+                // outer for-statement parser picks the iteration
+                // shape by inspecting the token after the decl.
                 const decl = try self.parseForLexicalDecl(.using_);
                 init_head = .{ .lexical = decl };
+            } else {
+                const e = try expr_mod.parseExpression(self);
+                init_head = .{ .expression = e };
+            }
+        } else if (self.in_async and self.current.kind == .kw_await) {
+            // `for (await using x of iter)` — the async sibling.
+            // `await` is reserved in [+Await] (this branch); peek
+            // for `using IDENT of` to confirm.
+            const second = try self.peek2();
+            if (!second.line_terminator_before and
+                second.kind == .identifier and
+                std.mem.eql(u8, second.slice(self.source), "using"))
+            {
+                const third = try self.peek3();
+                if (!third.line_terminator_before and isUsingBindingStart(third.kind)) {
+                    _ = try self.bump(); // `await`
+                    const decl = try self.parseForLexicalDecl(.await_using_);
+                    init_head = .{ .lexical = decl };
+                } else {
+                    const e = try expr_mod.parseExpression(self);
+                    init_head = .{ .expression = e };
+                }
             } else {
                 const e = try expr_mod.parseExpression(self);
                 init_head = .{ .expression = e };

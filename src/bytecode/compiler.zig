@@ -5489,6 +5489,7 @@ pub const Compiler = struct {
         // Cynic compiles this as a per-iteration `register_using` +
         // `dispose_stack` pair (see body emission below).
         var is_using = false;
+        var is_await_using = false;
         switch (s.left) {
             .lexical => |ld| {
                 bind_kind = switch (ld.kind) {
@@ -5501,6 +5502,7 @@ pub const Compiler = struct {
                     .const_, .using_, .await_using_ => .const_,
                 };
                 is_using = ld.kind == .using_ or ld.kind == .await_using_;
+                is_await_using = ld.kind == .await_using_;
                 if (ld.declarators.len != 1) return error.UnsupportedStatement;
                 const d = ld.declarators[0];
                 switch (d.name) {
@@ -5900,12 +5902,12 @@ pub const Compiler = struct {
             try self.builder.emitOp(.register_using, bind_span);
             try self.builder.emitU8(r_dispose_stack);
             try self.builder.emitU8(r_val);
-            // for (using x of …) is always sync_dispose; the
-            // proposal text doesn't yet ship `for (await using x of
-            // …)` in main grammar (a separate for-await-using
-            // production gates that on async iteration). Phase 6
-            // ships block + function-body `await using` only.
-            try self.builder.emitU8(0);
+            // `for (using x of …)` — hint sync_dispose;
+            // `for (await using x of …)` — hint async_dispose
+            // (the spec adds this only inside `for await (…)` /
+            // async-context for-of heads but Cynic accepts it from
+            // any async for-head via the contextual-keyword path).
+            try self.builder.emitU8(if (is_await_using) 1 else 0);
             self.releaseTemp(); // release r_val
 
             dispose_fctx = .{
@@ -5965,9 +5967,11 @@ pub const Compiler = struct {
             // dispose so the dispose itself isn't wrapped by
             // its own context (matches `compileBlockWithUsing`).
             self.finally_chain = dispose_fctx.parent;
-            try self.builder.emitOp(.dispose_stack, s.span);
+            const dispose_op: Op = if (is_await_using) .dispose_stack_async else .dispose_stack;
+            try self.builder.emitOp(dispose_op, s.span);
             try self.builder.emitU8(r_dispose_stack);
             try self.builder.emitU8(0); // mode 0 — normal completion
+            if (is_await_using) try self.builder.emitOp(.await_, s.span);
         }
         if (s.kind != .in_) {
             // Skip the synthetic handler on normal completion.
@@ -5991,14 +5995,27 @@ pub const Compiler = struct {
             if (pushed_dispose_finally) {
                 try self.builder.emitOp(.ldar, s.span);
                 try self.builder.emitU8(r_caught);
-                try self.builder.emitOp(.dispose_stack, s.span);
+                const throw_dispose_op: Op = if (is_await_using) .dispose_stack_async else .dispose_stack;
+                try self.builder.emitOp(throw_dispose_op, s.span);
                 try self.builder.emitU8(r_dispose_stack);
                 try self.builder.emitU8(1); // mode 1 — throw completion
-                // Update r_caught with whatever dispose_stack
-                // landed in acc (the original throw or a
-                // SuppressedError wrap).
-                try self.builder.emitOp(.star, s.span);
-                try self.builder.emitU8(r_caught);
+                if (is_await_using) {
+                    try self.builder.emitOp(.await_, s.span);
+                    // Async dispose: a clean walk resolves with
+                    // undefined; restore the caught throw from
+                    // r_caught. A disposer throw rejected, so
+                    // `await_` already re-threw (we don't reach
+                    // here). Either way, after this point acc
+                    // holds either undefined (restore) or the
+                    // wrapped throw (already in flight).
+                    try self.builder.emitOp(.ldar, s.span);
+                    try self.builder.emitU8(r_caught);
+                } else {
+                    // Sync dispose returns the (possibly wrapped)
+                    // throw in acc; save back to r_caught.
+                    try self.builder.emitOp(.star, s.span);
+                    try self.builder.emitU8(r_caught);
+                }
             }
             try self.builder.emitOp(.iter_close, s.span);
             try self.builder.emitU8(r_iter);
@@ -12345,21 +12362,30 @@ pub fn compileModuleAsChunk(
         const link_span: Span = .{ .start = 0, .end = 0 };
         try c.builder.emitOp(.module_link_complete, link_span);
     }
-    for (program.body) |*s| {
-        switch (s.*) {
+    // §13.2.4.6 — module body's `using` / `await using`
+    // declarations register on a module-scoped dispose stack and
+    // dispose at module-evaluation completion. Build a filtered
+    // body list (skipping import_decls and the hoistable-default
+    // function bodies already emitted) and route through the same
+    // `compileFunctionBodyTail` helper script + function bodies
+    // use. The filtered list also drops top-level `function_decl`
+    // — phase-1 above already published their bodies via
+    // `module_export`/global init, so a second compile here
+    // would double-emit.
+    var filtered_module_body: std.ArrayListUnmanaged(ast.statement.Statement) = .empty;
+    defer filtered_module_body.deinit(c.allocator);
+    for (program.body) |s| {
+        switch (s) {
             .import_decl, .function_decl => {},
             .export_decl => |ed| switch (ed.body) {
-                .declaration => |inner| if (inner.* == .function_decl) {} else try c.compileStatement(s),
-                // §15.2.3.11 — Hoistable defaults already published
-                // in phase 1; skip the body-phase compile to avoid
-                // a double `module_export` (and a wasted
-                // template-build on each module evaluation).
-                .default_value => |dv| if (dv == .function_expr) {} else try c.compileStatement(s),
-                else => try c.compileStatement(s),
+                .declaration => |inner| if (inner.* == .function_decl) {} else try filtered_module_body.append(c.allocator, s),
+                .default_value => |dv| if (dv == .function_expr) {} else try filtered_module_body.append(c.allocator, s),
+                else => try filtered_module_body.append(c.allocator, s),
             },
-            else => try c.compileStatement(s),
+            else => try filtered_module_body.append(c.allocator, s),
         }
     }
+    try c.compileFunctionBodyTail(filtered_module_body.items, start_span);
 
     const end_span: Span = .{
         .start = if (program.body.len > 0) program.body[program.body.len - 1].span().end else 0,
