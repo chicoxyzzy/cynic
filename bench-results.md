@@ -17,6 +17,67 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-05-27 — cynic `618f795` (post ERM landing + SES accessor-flag stamp), host `Darwin 25.5.0 arm64`
+
+Every fixture moved against the `74c2d0a` baseline. Headline:
+the read-side regression the prior row called out
+(`arith_loop +23 %`, `prop_access +26 %`, `method_call +15 %`
+from the Phase 3 shape-first lookup) is **fully recovered** —
+this row's hot-path numbers sit at or below the pre-Phase-3
+floor. No new IC work landed against that recovery in this
+chain, but the 21-commit window between `74c2d0a` and `618f795`
+is the full ERM proposal (Phases 1-7 + cleanup) plus this
+session's SES accessor-flag fix. Best guess on the recovery:
+ERM's opcode + interpreter-table additions reshuffled the
+dispatch loop's cache locality favourably; the harden-walker
+fix is per-realm-init and shouldn't move bench numbers.
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 30.63 | 30.04 | 31.04 | 4400 |
+| prop_access | 10.59 | 10.45 | 10.85 | 4344 |
+| prop_write | 11.51 | 11.41 | 11.78 | 4424 |
+| array_iter | 20.71 | 20.27 | 21.18 | 5536 |
+| string_concat | 42.54 | 41.97 | 45.03 | 13552 |
+| promise_chain | 11.92 | 11.61 | 12.09 | 28008 |
+| object_alloc | 44.41 | 43.93 | 46.17 | 11072 |
+| method_call | 30.11 | 29.65 | 32.10 | 5008 |
+| class_instantiate | 116.28 | 114.02 | 139.41 | 8160 |
+| json_stringify | 39.41 | 38.54 | 42.75 | 8832 |
+| tail_recursion | 87.69 | 80.51 | 90.91 | 61384 |
+
+Δ vs the `74c2d0a` row below (same host):
+- **`promise_chain` −27.5 %** (16.44 → 11.92) — biggest mover.
+  Async-shaped fixture; the ERM async-dispose walk
+  (Phase 5 + 6) reworked how reaction records pair with
+  capability records, and the microtask drain inside
+  `Promise.{all,allSettled,…}` got a small `.then`-chain
+  hoist along the way. Either of those could have nudged
+  reaction-record allocation lighter; not bisected.
+- **`prop_write` −24.8 %** (15.30 → 11.51), **`prop_access`
+  −22.7 %** (13.70 → 10.59), **`arith_loop` −21.2 %**
+  (38.89 → 30.63) — the trio the `74c2d0a` row flagged as
+  read-side regressions. **Fully recovered.** Best guess at
+  the recovery is dispatch-loop cache locality from the
+  ERM-era opcode additions reshuffling the threaded-jump
+  table; not directly bisected.
+- **`object_alloc` −13.1 %** (51.11 → 44.41) — extends the
+  Phase 3 win from `74c2d0a`. The hot-object fast path
+  saw additional shape transitions get installed for
+  DisposableStack-style construction; could be a contributor.
+- **`method_call` −14.5 %** (35.20 → 30.11) — same as
+  `arith_loop`. Recovery of the Phase 3 read cost.
+- **`string_concat` −16.1 %** (50.70 → 42.54) — JSString
+  allocation churn fixture; the ERM error-message paths
+  exercised `JSString` allocation more (SuppressedError
+  message stringification), which may have surfaced a
+  small alloc-path win.
+- `class_instantiate` −11.4 %, `array_iter` −10.1 %,
+  `json_stringify` −8.5 %, `tail_recursion` −2.6 % — same
+  envelope.
+- RSS climbed slightly across the board (+0.3 % to +5.8 %),
+  well within noise.
+
 ### 2026-05-26 — cynic `74c2d0a` (post lazy property bag Phase 3 + shape-aware gates), host `Darwin 25.5.0 arm64`
 
 `object_alloc` -16 % (55.38 → 46.64) via the lazy property bag
