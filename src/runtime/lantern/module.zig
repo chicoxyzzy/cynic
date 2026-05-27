@@ -46,7 +46,6 @@ const makeTypeError = lantern.makeTypeError;
 const makeSyntaxError = lantern.makeSyntaxError;
 const run = lantern.run;
 
-
 /// §16.2.1.5 module load. Resolves `specifier` via the host
 /// loader, fetches+caches+evaluates the target module, and
 /// returns its exports namespace as a Value. Cycles return
@@ -494,5 +493,3 @@ fn finalizeSyntheticModule(
     const final_ns = module_mod.getModuleNamespace(realm, mr) catch return error.OutOfMemory;
     return .{ .value = heap_mod.taggedObject(final_ns), .threw = false, .mr = mr };
 }
-
-

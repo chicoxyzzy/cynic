@@ -7890,13 +7890,13 @@ test "frame pool: alternating callees with different register counts" {
         \\  r = big(r);
         \\}
         \\r;
-    // small adds 1; big computes 5*(x+1)+15 = 5x+20. Per loop
-    // iteration r' = 5*r + 20, closed-form r_n = 5*(5^n − 1).
-    // N=12 → r = 5*(5^12 − 1) = 5*244140624 = 1_220_703_120,
-    // still inside the i32 range expectScriptIntWithBuiltins
-    // takes. N=100 (the original intent) overflows i32 and
-    // produces a JS double — fold into the alternating-callees
-    // stress without needing string-assert plumbing.
+        // small adds 1; big computes 5*(x+1)+15 = 5x+20. Per loop
+        // iteration r' = 5*r + 20, closed-form r_n = 5*(5^n − 1).
+        // N=12 → r = 5*(5^12 − 1) = 5*244140624 = 1_220_703_120,
+        // still inside the i32 range expectScriptIntWithBuiltins
+        // takes. N=100 (the original intent) overflows i32 and
+        // produces a JS double — fold into the alternating-callees
+        // stress without needing string-assert plumbing.
     , 1220703120);
 }
 

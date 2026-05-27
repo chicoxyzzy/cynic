@@ -2053,7 +2053,6 @@ fn activeSetSize(d: *@import("../object.zig").SetData) usize {
     return n;
 }
 
-
 fn setDifference(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const this_d = setDataOf(this_value) orelse return throwTypeError(realm, "Set.prototype.difference called on non-Set");
     const sl = try validateSetLike(realm, "difference", argOr(args, 0, Value.undefined_));

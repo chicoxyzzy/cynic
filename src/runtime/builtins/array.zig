@@ -410,7 +410,7 @@ fn arrayPush(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         // Anchor the key — `setOrThrow` may land it in the
         // property bag if the receiver isn't an Array exotic.
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        try setOrThrow(realm, obj, owned.flatBytes(), owned,v);
+        try setOrThrow(realm, obj, owned.flatBytes(), owned, v);
         len += 1;
     }
     try setLengthOrThrow(realm, obj, len);
@@ -1632,7 +1632,7 @@ fn arrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
         // §23.1.3.7 step 11.b — Set(O, Pk, value, true). Honor
         // accessor setters / writable / extensible.
-        try setOrThrow(realm, obj, owned.flatBytes(), owned,value);
+        try setOrThrow(realm, obj, owned.flatBytes(), owned, value);
     }
     return heap_mod.taggedObject(obj);
 }
@@ -2386,7 +2386,7 @@ fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
             if (obj.hasProperty(sslice)) {
                 const v = try getPropertyChain(realm, obj, sslice);
                 const owned = realm.heap.allocateString(dslice) catch return error.OutOfMemory;
-                try setOrThrow(realm, obj, owned.flatBytes(), owned,v);
+                try setOrThrow(realm, obj, owned.flatBytes(), owned, v);
             } else {
                 try deletePropertyOrThrow(realm, obj, dslice);
             }
@@ -2415,7 +2415,7 @@ fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
             if (obj.hasProperty(sslice)) {
                 const v = try getPropertyChain(realm, obj, sslice);
                 const owned = realm.heap.allocateString(dslice) catch return error.OutOfMemory;
-                try setOrThrow(realm, obj, owned.flatBytes(), owned,v);
+                try setOrThrow(realm, obj, owned.flatBytes(), owned, v);
             } else {
                 try deletePropertyOrThrow(realm, obj, dslice);
             }
@@ -2428,7 +2428,7 @@ fn arraySplice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
         var b: [24]u8 = undefined;
         const slc = std.fmt.bufPrint(&b, "{d}", .{start + ins}) catch unreachable;
         const owned = realm.heap.allocateString(slc) catch return error.OutOfMemory;
-        try setOrThrow(realm, obj, owned.flatBytes(), owned,args[2 + @as(usize, @intCast(ins))]);
+        try setOrThrow(realm, obj, owned.flatBytes(), owned, args[2 + @as(usize, @intCast(ins))]);
     }
 
     // §23.1.3.29 step 19 — ? Set(O, "length", len - dc + ic, true).
@@ -2578,7 +2578,7 @@ fn copyWithinStep(realm: *Realm, obj: *JSObject, src: i64, dst: i64) NativeError
         // §23.1.3.4 step 15.b.iv — Set(O, toKey, fromVal, true).
         // Honor setter / writable / extensible.
         const owned = realm.heap.allocateString(dslice) catch return error.OutOfMemory;
-        try setOrThrow(realm, obj, owned.flatBytes(), owned,v);
+        try setOrThrow(realm, obj, owned.flatBytes(), owned, v);
     } else {
         try deletePropertyOrThrow(realm, obj, dslice);
     }
@@ -2668,7 +2668,7 @@ fn arraySort(realm: *Realm, this_value: Value, args: []const Value) NativeError!
         // property bag if no accessor / array-exotic path absorbs
         // the write.
         const owned = realm.heap.allocateString(wslice) catch return error.OutOfMemory;
-        try setOrThrow(realm, obj, owned.flatBytes(), owned,items.items[w]);
+        try setOrThrow(realm, obj, owned.flatBytes(), owned, items.items[w]);
     }
     // §23.1.3.30 step 8 — DeletePropertyOrThrow up to the *original*
     // len. A setter that shrunk the array doesn't shorten the
@@ -3137,7 +3137,7 @@ fn arrayShift(realm: *Realm, this_value: Value, args: []const Value) NativeError
         if (obj.hasProperty(fslice)) {
             const v = try getPropertyChain(realm, obj, fslice);
             const owned = realm.heap.allocateString(tslice) catch return error.OutOfMemory;
-            try setOrThrow(realm, obj, owned.flatBytes(), owned,v);
+            try setOrThrow(realm, obj, owned.flatBytes(), owned, v);
         } else {
             try deletePropertyOrThrow(realm, obj, tslice);
         }
@@ -3182,7 +3182,7 @@ fn arrayUnshift(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             if (obj.hasProperty(fslice)) {
                 const v = try getPropertyChain(realm, obj, fslice);
                 const owned = realm.heap.allocateString(tslice) catch return error.OutOfMemory;
-                try setOrThrow(realm, obj, owned.flatBytes(), owned,v);
+                try setOrThrow(realm, obj, owned.flatBytes(), owned, v);
             } else {
                 try deletePropertyOrThrow(realm, obj, tslice);
             }
@@ -3192,7 +3192,7 @@ fn arrayUnshift(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             var b: [24]u8 = undefined;
             const slc = std.fmt.bufPrint(&b, "{d}", .{idx}) catch unreachable;
             const owned = realm.heap.allocateString(slc) catch return error.OutOfMemory;
-            try setOrThrow(realm, obj, owned.flatBytes(), owned,a);
+            try setOrThrow(realm, obj, owned.flatBytes(), owned, a);
         }
     }
     const new_len = len + argc;

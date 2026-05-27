@@ -1875,7 +1875,6 @@ pub const JSObject = struct {
         self.slots.clearRetainingCapacity();
     }
 
-
     /// Debug-only consistency check: under Phase 3 of
     /// [docs/lazy-property-bag.md] a shape-mode object's bag
     /// is empty — the shape owns the data. Verify that every

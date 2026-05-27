@@ -69,8 +69,7 @@ pub fn run(
     const stdout = std.Io.File.stdout();
     const stderr = std.Io.File.stderr();
 
-    try stdout.writeStreamingAll(io,
-        "Cynic REPL. Type .exit / .quit or press Ctrl-D to leave.\n");
+    try stdout.writeStreamingAll(io, "Cynic REPL. Type .exit / .quit or press Ctrl-D to leave.\n");
 
     // Stdin reader — `takeDelimiter('\n')` returns the line minus
     // the newline, or `null` on EOF. Buffer sized to hold a typical
@@ -84,8 +83,7 @@ pub fn run(
 
         const line = reader.interface.takeDelimiter('\n') catch |err| switch (err) {
             error.StreamTooLong => {
-                try stderr.writeStreamingAll(io,
-                    "error: input exceeded REPL line buffer (16 KiB). Save to a file and use `cynic run`.\n");
+                try stderr.writeStreamingAll(io, "error: input exceeded REPL line buffer (16 KiB). Save to a file and use `cynic run`.\n");
                 continue;
             },
             error.ReadFailed => return err,

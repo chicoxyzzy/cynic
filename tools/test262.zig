@@ -3542,7 +3542,8 @@ fn writeFileBody(
         const real_fails = r.attempted - engine_pass; // r.attempted is engine-true
         const skip = r.total - r.pass - real_fails;
         var tb: [2048]u8 = undefined;
-        const tldr = try std.fmt.bufPrint(&tb,
+        const tldr = try std.fmt.bufPrint(
+            &tb,
             "**Cynic passes {d:.2} % of its {d}-fixture test262 corpus** under the " ++
                 "default (hardened SES) posture (`cynic run`). The breakdown:\n\n" ++
                 "- **{d} pass** at the engine-true level (engine% = {d:.2} % — see Legend).\n" ++
@@ -3607,7 +3608,8 @@ fn writeFileBody(
             if (r.witness_total > 0) {
                 const pct: f64 = 100.0 * @as(f64, @floatFromInt(r.witness_pass)) / @as(f64, @floatFromInt(r.witness_total));
                 var wb: [256]u8 = undefined;
-                const wn = try std.fmt.bufPrint(&wb,
+                const wn = try std.fmt.bufPrint(
+                    &wb,
                     "*SES witness fidelity*: **{d} / {d}** witnesses classify as `divergent` ({d:.2} %). " ++
                         "Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. " ++
                         "See `docs/handbook/ses-test262-policy.md`.\n\n",
